@@ -653,7 +653,7 @@ mod tests {
     fn assigned_worker_excludes_from_frontier() {
         let store = MemStore::default();
         let mut m = mk("task-20260414-aaaa", MoleculeStatus::Pending, Vec::new());
-        m.assigned_worker = Some(WorkerId::new("tenant_auditor").unwrap());
+        m.assigned_worker = Some(WorkerId::new("tenant-auditor").unwrap());
         store.save_molecule(&m.id, &m).unwrap();
 
         let f = compute(&store).unwrap();
