@@ -960,10 +960,11 @@ mod tests {
     #[test]
     fn path_rename_covers_common_client_tokens() {
         let r = test_rules();
-        assert!(
-            client_tokens_surviving_path_rename(&r, "deploy/state/nucleons/nuc-tenant-demo/x.toml")
-                .is_empty()
-        );
+        assert!(client_tokens_surviving_path_rename(
+            &r,
+            "deploy/state/nucleons/nuc-tenant-demo/x.toml"
+        )
+        .is_empty());
         assert!(client_tokens_surviving_path_rename(&r, "docs/install-widgetco.md").is_empty());
     }
 

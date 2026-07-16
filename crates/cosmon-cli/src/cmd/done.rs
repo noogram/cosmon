@@ -9494,7 +9494,10 @@ mod tests {
     fn confidential_empty_blocklist_admits_anything() {
         // Default (no substrings, no globs) → `is_empty()` short-circuits.
         let cfg = ConfidentialBlocklistConfig::default();
-        let files = vec![("README.md".to_owned(), "Built by Tenant-Demo Research".to_owned())];
+        let files = vec![(
+            "README.md".to_owned(),
+            "Built by Tenant-Demo Research".to_owned(),
+        )];
         let hits = collect_confidential_blocklist_violations(&files, &cfg);
         assert!(hits.is_empty(), "empty blocklist must never flag content");
     }
@@ -9569,7 +9572,10 @@ mod tests {
             ..Default::default()
         };
         let files = vec![
-            ("README.md".to_owned(), "Tenant-Demo Research, founder".to_owned()),
+            (
+                "README.md".to_owned(),
+                "Tenant-Demo Research, founder".to_owned(),
+            ),
             (
                 "site/index.html".to_owned(),
                 "contact: operator@example.org".to_owned(),

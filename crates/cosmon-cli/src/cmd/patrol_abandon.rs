@@ -16,7 +16,7 @@
 //! |---|---|
 //! | `nucleate-sans-tackle` | nucleate envelope(s), no tackle after, then silence (Casey) |
 //! | `pkce-start-sans-completed` | ≥2 auth sessions, zero `COMPLETED` (user-a) |
-//! | `incarne-sans-login` | incarnated instance, zero login, ≥N 503 reports multi-sub (Project_X) |
+//! | `incarne-sans-login` | incarnated instance, zero login, ≥N 503 reports multi-sub (`Project_X`) |
 //! | `rafale-4xx-puis-silence` | burst of write 4xx reports, then silence (user-b) |
 //! | `decroissance-de-signalement` | a sub that used to signal stopped signalling (Dave) |
 //!
@@ -48,10 +48,10 @@ const BURST_WINDOW_MIN: i64 = 10;
 /// before reintroducing the docker-exec honteux).
 const BURST_MIN_REPORTS: usize = 3;
 
-/// Minimum 503 reports for the Project_X motif.
+/// Minimum 503 reports for the `Project_X` motif.
 const PROJECT_X_MIN_503: usize = 3;
 
-/// Minimum distinct subs behind the 503s for the Project_X motif —
+/// Minimum distinct subs behind the 503s for the `Project_X` motif —
 /// the signature is *plural pilots*, one avatar, zero login.
 const PROJECT_X_MIN_SUBS: usize = 2;
 
@@ -130,7 +130,7 @@ pub(crate) enum AbandonMotif {
     NucleateSansTackle,
     /// user-a — PKCE `start` repeated, never `COMPLETED`.
     PkceStartSansCompleted,
-    /// Project_X — incarnated avatar, zero login, plural subs in 503.
+    /// `Project_X` — incarnated avatar, zero login, plural subs in 503.
     IncarneSansLogin,
     /// user-b — burst of write 4xx, then silence.
     Rafale4xxPuisSilence,

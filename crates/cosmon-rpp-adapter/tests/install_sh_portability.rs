@@ -48,7 +48,10 @@ fn derive(host: &str, path_prefix: Option<&std::path::Path>) -> String {
 
 const CASES: &[(&str, &str)] = &[
     // The Tenant-Demo Tailscale host — the live deployment shape.
-    ("https://tenant-demo.tailnet0.ts.net", "tenant-demo-tailnet0-ts-net"),
+    (
+        "https://tenant-demo.tailnet0.ts.net",
+        "tenant-demo-tailnet0-ts-net",
+    ),
     // Loopback with port + trailing slash (AWS VM internal endpoint).
     ("http://127.0.0.1:8443/", "127-0-0-1-8443"),
     // Scheme-free input must pass through un-mangled.

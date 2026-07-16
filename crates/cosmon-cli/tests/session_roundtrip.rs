@@ -207,9 +207,9 @@ fn note_with_cause_flags_writes_subline_backward_compatible() {
     assert!(content.contains(
         "cause: {kind: oracle-suggestion, agent: apfel-oracle-rococo, channel: keyboard}"
     ));
-    assert!(
-        content.contains("cause: {kind: transcription, agent: matrix:@tenant_auditor:hs, channel: voice}")
-    );
+    assert!(content.contains(
+        "cause: {kind: transcription, agent: matrix:@tenant_auditor:hs, channel: voice}"
+    ));
 
     assert!(content.contains("note_count: 3"));
 }

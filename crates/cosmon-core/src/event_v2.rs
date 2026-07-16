@@ -3657,8 +3657,7 @@ mod tests {
                 refused_molecule: Some("task-20260531-ceaf".to_owned()),
             },
             EventV2::RuntimeReadDecideWrite {
-                path: "/srv/cosmon/cosmon/.cosmon/state/fleets/default/index.json"
-                    .to_owned(),
+                path: "/srv/cosmon/cosmon/.cosmon/state/fleets/default/index.json".to_owned(),
                 pre_read_mtime_ns: 1_718_000_000_000_000_000_i64,
                 post_write_mtime_ns: 1_718_000_000_123_456_789_i64,
                 decision: "advance task-aaaa to step 2/3".to_owned(),

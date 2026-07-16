@@ -1175,7 +1175,10 @@ mod tests {
         write_handoff("new-cid");
         let report = converge_with(&state, &section, None, false).unwrap();
         assert!(report.wrote_allowlist);
-        assert_eq!(report.bindings_written, vec!["tenant-demo-sandbox".to_owned()]);
+        assert_eq!(
+            report.bindings_written,
+            vec!["tenant-demo-sandbox".to_owned()]
+        );
         let binding =
             std::fs::read_to_string(state.join("nucleons/tenant-demo-sandbox/oidc-identity.toml"))
                 .unwrap();
