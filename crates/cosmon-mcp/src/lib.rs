@@ -92,9 +92,19 @@ pub type CosmonHttpService = StreamableHttpService<CosmonService, LocalSessionMa
 /// host adapter's gate.
 #[must_use]
 pub fn streamable_http_service() -> CosmonHttpService {
+    // rmcp ≥1.4 validates the inbound `Host` header against an allowlist
+    // (loopback-only by default) to stop DNS-rebinding attacks on
+    // UNAUTHENTICATED local servers. This service is the opposite shape:
+    // it is always nested behind the host adapter's mandatory bearer/OIDC
+    // gate and is deployed on operator-chosen public hostnames unknowable
+    // at compile time. A rebinding page cannot attach the bearer, so Host
+    // pinning adds nothing here — an empty list disables the check
+    // (rmcp semantics) and keeps remote deployments working.
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts = Vec::new();
     StreamableHttpService::new(
         || Ok(CosmonService::new_remote()),
         Arc::new(LocalSessionManager::default()),
-        StreamableHttpServerConfig::default(),
+        config,
     )
 }
