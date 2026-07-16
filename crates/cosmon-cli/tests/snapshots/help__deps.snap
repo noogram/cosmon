@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Deps — show blocking dependencies for a molecule (upstream/downstream)
+
+Usage: cs deps [OPTIONS] <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID (exact or prefix) whose dependencies should be shown
+
+Options:
+      --config <PATH>  Path to configuration file
+      --transitive     Walk the full transitive closure instead of only direct edges
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs deps <mol>                       # upstream + downstream blockers
+  cs deps <mol> --upstream            # only predecessors
+  cs deps <mol> --json                # for scripting
+
+Reads the typed-link DAG (`Blocks` / `BlockedBy`).

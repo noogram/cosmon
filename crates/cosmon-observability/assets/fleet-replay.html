@@ -1,0 +1,753 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cosmon Fleet Replay — Run #1</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #0d1117;
+    color: #c9d1d9;
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+    overflow: hidden;
+  }
+  #header {
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid #21262d;
+    background: #0d1117;
+    z-index: 10;
+    position: relative;
+  }
+  #header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    color: #e6edf3;
+    white-space: nowrap;
+  }
+  #header .stats {
+    font-size: 12px;
+    color: #8b949e;
+  }
+  #legend {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-left: auto;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #8b949e;
+    cursor: pointer;
+    user-select: none;
+    transition: opacity 0.2s;
+  }
+  .legend-item:hover { opacity: 0.8; }
+  .legend-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+  }
+  #controls {
+    padding: 8px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    border-bottom: 1px solid #21262d;
+    background: #161b22;
+  }
+  #scrubber {
+    flex: 1;
+    -webkit-appearance: none;
+    appearance: none;
+    height: 4px;
+    background: #21262d;
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+  }
+  #scrubber::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px;
+    height: 14px;
+    background: #58a6ff;
+    border-radius: 50%;
+    cursor: pointer;
+  }
+  #time-label {
+    font-size: 12px;
+    color: #58a6ff;
+    min-width: 80px;
+    text-align: right;
+  }
+  #phase-label {
+    font-size: 11px;
+    color: #8b949e;
+    min-width: 120px;
+  }
+  #chart-container {
+    position: relative;
+    overflow: hidden;
+  }
+  #tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: #1c2128;
+    border: 1px solid #30363d;
+    border-radius: 6px;
+    padding: 10px 14px;
+    font-size: 12px;
+    line-height: 1.5;
+    z-index: 100;
+    display: none;
+    max-width: 380px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .tooltip-id { color: #e6edf3; font-weight: 600; }
+  .tooltip-role { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .tooltip-topic { color: #8b949e; font-size: 11px; margin-top: 4px; }
+  .tooltip-stat { color: #c9d1d9; }
+  .tooltip-stat span { color: #8b949e; }
+  svg text { font-family: inherit; }
+  .phase-label-bg {
+    fill: #0d1117;
+    opacity: 0.85;
+  }
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>Cosmon Fleet Replay</h1>
+  <span class="stats" id="stats-text"></span>
+  <div id="legend"></div>
+</div>
+
+<div id="controls">
+  <span id="phase-label">All phases</span>
+  <input type="range" id="scrubber" min="0" max="1000" value="1000">
+  <span id="time-label">--:--</span>
+</div>
+
+<div id="chart-container">
+  <svg id="chart"></svg>
+  <div id="tooltip"></div>
+</div>
+
+<script>
+const EMBEDDED_DATA = /* __COSMON_REPLAY_DATA__ */ null;
+const EVENTS_URL = /* __COSMON_REPLAY_EVENTS_URL__ */ 'events.json';
+
+const ROLES = {
+  'mission':           { color: '#F87171', label: 'Mission' },
+  'researcher-reader': { color: '#7C3AED', label: 'Researcher' },
+  'writer':            { color: '#4C9AFF', label: 'Writer' },
+  'reviewer':          { color: '#F5A623', label: 'Reviewer' },
+  'citation-arbiter':  { color: '#D946EF', label: 'Citation' },
+  'horizontal-editor': { color: '#10B981', label: 'H-Editor' },
+  'chief-editor':      { color: '#E8E1C4', label: 'Chief Ed.' },
+  'doi-check':         { color: '#94A3B8', label: 'DOI/Meta' },
+  'idea':              { color: '#FBBF24', label: 'Idea' },
+  'task':              { color: '#4C9AFF', label: 'Task' },
+  'decision':          { color: '#A78BFA', label: 'Decision' },
+  'issue':             { color: '#F87171', label: 'Issue' },
+  'signal':            { color: '#22D3EE', label: 'Signal' },
+  'deliberation':      { color: '#F472B6', label: 'Deliberation' }
+};
+const FALLBACK_PALETTE = [
+  '#7C3AED','#4C9AFF','#10B981','#F5A623','#F472B6','#22D3EE','#A78BFA','#FBBF24','#F87171','#E8E1C4','#94A3B8','#D946EF'
+];
+function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = ((h << 5) - h + s.charCodeAt(i)) | 0; } return Math.abs(h); }
+function getRoleInfo(role) {
+  if (ROLES[role]) return ROLES[role];
+  const r = role || 'unknown';
+  return { color: FALLBACK_PALETTE[hashStr(r) % FALLBACK_PALETTE.length], label: r };
+}
+
+const WAIT_OPACITY = 0.2;
+const ROW_HEIGHT = 22;
+const ROW_GAP = 3;
+const MARGIN = { top: 40, right: 30, bottom: 30, left: 220 };
+
+let data = [];
+let t0, tMax, xScale, yScale, svg, chartG, zoom;
+let selectedMol = null;
+let scrubTime = Infinity;
+
+async function init() {
+  // Try embedded data first (works from file://), fall back to fetch
+  if (EMBEDDED_DATA && EMBEDDED_DATA.length) {
+    data = EMBEDDED_DATA;
+  } else {
+    try { data = await d3.json(EVENTS_URL); } catch (e) { data = []; }
+  }
+  if (!data || !data.length) {
+    document.body.innerHTML = '<p style="padding:40px;color:#f85149">No replay data available</p>';
+    return;
+  }
+
+  // Parse dates
+  const parseT = d => d ? new Date(d) : null;
+  data.forEach(d => {
+    d._nucleated = parseT(d.nucleated_at);
+    d._spawned = parseT(d.spawned_at);
+    d._completed = parseT(d.completed_at);
+    d._steps = (d.steps || []).map(s => new Date(s));
+  });
+
+  // Sort by nucleation time
+  data.sort((a, b) => (a._nucleated || 0) - (b._nucleated || 0));
+
+  // Time domain
+  const allTimes = data.flatMap(d =>
+    [d._nucleated, d._spawned, d._completed, ...d._steps].filter(Boolean)
+  );
+  t0 = d3.min(allTimes);
+  tMax = d3.max(allTimes);
+
+  // Stats
+  const dur = (tMax - t0) / 60000;
+  document.getElementById('stats-text').textContent =
+    `Run #1 — ${data.length} molecules — ${dur.toFixed(1)} min`;
+
+  // Legend
+  const legend = document.getElementById('legend');
+  const seenRoles = new Set(data.map(d => d.role));
+  for (const [role, info] of Object.entries(ROLES)) {
+    if (!seenRoles.has(role)) continue;
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `<div class="legend-swatch" style="background:${info.color}"></div>${info.label}`;
+    legend.appendChild(item);
+  }
+
+  buildChart();
+  buildScrubber();
+
+  window.addEventListener('resize', () => {
+    buildChart();
+  });
+}
+
+function minutesSince(d) {
+  return (d - t0) / 60000;
+}
+
+function formatTime(d) {
+  const m = minutesSince(d);
+  return `${Math.floor(m)}:${String(Math.floor((m % 1) * 60)).padStart(2, '0')}`;
+}
+
+function computeCriticalPath() {
+  // Build adjacency from blocked_by relationships
+  const idMap = new Map(data.map(d => [d.id, d]));
+  const memo = new Map();
+
+  function longestPath(id) {
+    if (memo.has(id)) return memo.get(id);
+    const mol = idMap.get(id);
+    if (!mol) { memo.set(id, { len: 0, chain: [] }); return memo.get(id); }
+
+    const end = mol._completed || mol._spawned || mol._nucleated || t0;
+    const start = mol._nucleated || t0;
+    const ownDur = (end - start) / 60000;
+
+    let best = { len: ownDur, chain: [id] };
+    for (const dep of (mol.blocked_by || [])) {
+      const sub = longestPath(dep);
+      const total = sub.len + ownDur;
+      if (total > best.len) {
+        best = { len: total, chain: [...sub.chain, id] };
+      }
+    }
+    memo.set(id, best);
+    return best;
+  }
+
+  let critical = { len: 0, chain: [] };
+  for (const d of data) {
+    const p = longestPath(d.id);
+    if (p.len > critical.len) critical = p;
+  }
+  return new Set(critical.chain);
+}
+
+function buildChart() {
+  const container = document.getElementById('chart-container');
+  const W = window.innerWidth;
+  const H = window.innerHeight - container.getBoundingClientRect().top;
+  container.style.width = W + 'px';
+  container.style.height = H + 'px';
+
+  const chartW = W - MARGIN.left - MARGIN.right;
+  const chartH = data.length * (ROW_HEIGHT + ROW_GAP);
+
+  d3.select('#chart').remove();
+  svg = d3.select('#chart-container')
+    .insert('svg', '#tooltip')
+    .attr('id', 'chart')
+    .attr('width', W)
+    .attr('height', H);
+
+  // Clip path
+  svg.append('defs').append('clipPath').attr('id', 'clip')
+    .append('rect').attr('width', chartW).attr('height', H);
+
+  // X scale: minutes
+  xScale = d3.scaleLinear()
+    .domain([0, minutesSince(tMax) * 1.02])
+    .range([0, chartW]);
+
+  // Y scale
+  yScale = d3.scaleBand()
+    .domain(data.map((_, i) => i))
+    .range([0, chartH])
+    .padding(0.15);
+
+  // Zoom
+  zoom = d3.zoom()
+    .scaleExtent([1, 20])
+    .translateExtent([[0, 0], [W, Math.max(H, chartH + MARGIN.top + MARGIN.bottom)]])
+    .on('zoom', onZoom);
+
+  svg.call(zoom);
+
+  // Labels group (fixed X)
+  const labelsG = svg.append('g')
+    .attr('class', 'labels')
+    .attr('transform', `translate(0, ${MARGIN.top})`);
+
+  // Background for labels
+  labelsG.append('rect')
+    .attr('width', MARGIN.left)
+    .attr('height', chartH + MARGIN.bottom)
+    .attr('fill', '#0d1117');
+
+  // Chart group (scrollable)
+  chartG = svg.append('g')
+    .attr('class', 'chart-area')
+    .attr('transform', `translate(${MARGIN.left}, ${MARGIN.top})`)
+    .attr('clip-path', 'url(#clip)');
+
+  // X axis
+  const xAxisG = svg.append('g')
+    .attr('class', 'x-axis')
+    .attr('transform', `translate(${MARGIN.left}, ${MARGIN.top - 5})`);
+
+  const xAxis = d3.axisTop(xScale)
+    .ticks(10)
+    .tickFormat(d => `${d}m`);
+  xAxisG.call(xAxis)
+    .selectAll('text').attr('fill', '#8b949e').attr('font-size', 10);
+  xAxisG.selectAll('line').attr('stroke', '#21262d');
+  xAxisG.select('.domain').attr('stroke', '#21262d');
+
+  // Critical path
+  const criticalSet = computeCriticalPath();
+
+  // Draw molecules
+  const rows = chartG.selectAll('.mol-row')
+    .data(data)
+    .join('g')
+    .attr('class', 'mol-row')
+    .attr('transform', (_, i) => `translate(0, ${yScale(i)})`);
+
+  // Grid lines
+  rows.append('line')
+    .attr('x1', 0).attr('x2', chartW)
+    .attr('y1', yScale.bandwidth() / 2)
+    .attr('y2', yScale.bandwidth() / 2)
+    .attr('stroke', '#161b22')
+    .attr('stroke-width', 0.5);
+
+  // Wait bar (nucleated → spawned)
+  rows.each(function(d) {
+    const g = d3.select(this);
+    const roleColor = (getRoleInfo(d.role)).color;
+    const barH = yScale.bandwidth();
+
+    if (d._nucleated && d._spawned) {
+      g.append('rect')
+        .attr('class', 'wait-bar')
+        .attr('x', xScale(minutesSince(d._nucleated)))
+        .attr('width', Math.max(1, xScale(minutesSince(d._spawned)) - xScale(minutesSince(d._nucleated))))
+        .attr('y', 0)
+        .attr('height', barH)
+        .attr('fill', roleColor)
+        .attr('opacity', WAIT_OPACITY)
+        .attr('rx', 2);
+    }
+
+    // Work bar (spawned → completed)
+    const start = d._spawned || d._nucleated;
+    const end = d._completed || (d.status === 'running' ? tMax : start);
+    if (start && end) {
+      g.append('rect')
+        .attr('class', 'work-bar')
+        .attr('x', xScale(minutesSince(start)))
+        .attr('width', Math.max(2, xScale(minutesSince(end)) - xScale(minutesSince(start))))
+        .attr('y', 0)
+        .attr('height', barH)
+        .attr('fill', roleColor)
+        .attr('opacity', 0.85)
+        .attr('rx', 2);
+    }
+
+    // Step ticks
+    d._steps.forEach(s => {
+      g.append('line')
+        .attr('class', 'step-tick')
+        .attr('x1', xScale(minutesSince(s)))
+        .attr('x2', xScale(minutesSince(s)))
+        .attr('y1', 1)
+        .attr('y2', barH - 1)
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', 1.5)
+        .attr('opacity', 0.6);
+    });
+
+    // Critical path marker
+    if (criticalSet.has(d.id)) {
+      g.append('rect')
+        .attr('class', 'critical-marker')
+        .attr('x', xScale(minutesSince(d._nucleated || t0)))
+        .attr('width', Math.max(2, xScale(minutesSince(end || t0)) - xScale(minutesSince(d._nucleated || t0))))
+        .attr('y', barH - 2)
+        .attr('height', 2)
+        .attr('fill', '#f85149')
+        .attr('opacity', 0.9);
+    }
+
+    // Running indicator (pulsing right edge)
+    if (d.status === 'running') {
+      g.append('rect')
+        .attr('class', 'running-pulse')
+        .attr('x', xScale(minutesSince(end)) - 3)
+        .attr('width', 3)
+        .attr('y', 0)
+        .attr('height', barH)
+        .attr('fill', roleColor);
+    }
+  });
+
+  // Hover & click targets
+  rows.append('rect')
+    .attr('class', 'hit-target')
+    .attr('x', -MARGIN.left)
+    .attr('width', chartW + MARGIN.left)
+    .attr('y', 0)
+    .attr('height', yScale.bandwidth())
+    .attr('fill', 'transparent')
+    .attr('cursor', 'pointer')
+    .on('mouseover', onHover)
+    .on('mousemove', onHover)
+    .on('mouseout', onHoverOut)
+    .on('click', onClick);
+
+  // Labels
+  const labelRows = labelsG.selectAll('.mol-label')
+    .data(data)
+    .join('g')
+    .attr('class', 'mol-label')
+    .attr('transform', (_, i) => `translate(0, ${yScale(i)})`);
+
+  labelRows.append('text')
+    .attr('x', 8)
+    .attr('y', yScale.bandwidth() / 2)
+    .attr('dy', '0.35em')
+    .attr('font-size', 10)
+    .attr('fill', d => (getRoleInfo(d.role)).color)
+    .text(d => {
+      const short = d.id.replace('task-20260411-', 't-').replace('mission-20260411-', 'm-');
+      return short;
+    });
+
+  labelRows.append('text')
+    .attr('x', 58)
+    .attr('y', yScale.bandwidth() / 2)
+    .attr('dy', '0.35em')
+    .attr('font-size', 9)
+    .attr('fill', '#8b949e')
+    .text(d => {
+      const label = (getRoleInfo(d.role)).label;
+      return label;
+    });
+
+  // Phase labels on timeline
+  drawPhaseLabels(chartG, chartH);
+
+  // Store for zoom
+  svg._xAxisG = xAxisG;
+  svg._xAxis = xAxis;
+  svg._labelsG = labelsG;
+}
+
+function drawPhaseLabels(g, chartH) {
+  // Annotate major phases based on role clusters
+  const phases = [];
+  let lastRole = null, phaseStart = 0;
+  data.forEach((d, i) => {
+    if (d.role !== lastRole) {
+      if (lastRole) phases.push({ role: lastRole, start: phaseStart, end: i - 1 });
+      lastRole = d.role;
+      phaseStart = i;
+    }
+  });
+  if (lastRole) phases.push({ role: lastRole, start: phaseStart, end: data.length - 1 });
+
+  // Only label phases with 3+ molecules
+  phases.filter(p => (p.end - p.start) >= 2).forEach(p => {
+    const midY = (yScale(p.start) + yScale(p.end) + yScale.bandwidth()) / 2;
+    const info = getRoleInfo(p.role);
+    // Right-aligned phase label in the chart area
+    g.append('text')
+      .attr('class', 'phase-text')
+      .attr('x', -8)
+      .attr('y', midY)
+      .attr('text-anchor', 'end')
+      .attr('font-size', 9)
+      .attr('fill', info.color)
+      .attr('opacity', 0.3)
+      .text(info.label);
+  });
+}
+
+function onZoom(event) {
+  const t = event.transform;
+
+  // Update X scale
+  const newX = t.rescaleX(xScale);
+
+  // Update bars
+  chartG.selectAll('.mol-row').each(function(d) {
+    const g = d3.select(this);
+    const roleColor = (getRoleInfo(d.role)).color;
+    const barH = yScale.bandwidth();
+
+    // Re-translate Y for pan
+    const i = data.indexOf(d);
+    g.attr('transform', `translate(0, ${yScale(i) + t.y})`);
+
+    // Wait bar
+    g.select('.wait-bar')
+      .attr('x', newX(minutesSince(d._nucleated)))
+      .attr('width', d._spawned ? Math.max(1, newX(minutesSince(d._spawned)) - newX(minutesSince(d._nucleated))) : 0);
+
+    // Work bar
+    const start = d._spawned || d._nucleated;
+    const end = d._completed || (d.status === 'running' ? tMax : start);
+    if (start && end) {
+      g.select('.work-bar')
+        .attr('x', newX(minutesSince(start)))
+        .attr('width', Math.max(2, newX(minutesSince(end)) - newX(minutesSince(start))));
+    }
+
+    // Steps
+    g.selectAll('.step-tick')
+      .attr('x1', (_, j) => newX(minutesSince(d._steps[j])))
+      .attr('x2', (_, j) => newX(minutesSince(d._steps[j])));
+
+    // Critical
+    g.select('.critical-marker')
+      .attr('x', newX(minutesSince(d._nucleated || t0)))
+      .attr('width', Math.max(2, newX(minutesSince(end || t0)) - newX(minutesSince(d._nucleated || t0))));
+
+    // Running pulse
+    g.select('.running-pulse')
+      .attr('x', newX(minutesSince(end)) - 3);
+  });
+
+  // Update labels Y
+  svg._labelsG.selectAll('.mol-label')
+    .attr('transform', (_, i) => `translate(0, ${yScale(i) + t.y})`);
+
+  // Update X axis
+  svg._xAxisG.call(svg._xAxis.scale(newX))
+    .selectAll('text').attr('fill', '#8b949e').attr('font-size', 10);
+  svg._xAxisG.selectAll('line').attr('stroke', '#21262d');
+  svg._xAxisG.select('.domain').attr('stroke', '#21262d');
+
+  // Phase texts
+  chartG.selectAll('.phase-text')
+    .attr('y', function() {
+      return parseFloat(d3.select(this).attr('y')) + (t.y - (this._lastTy || 0));
+    })
+    .each(function() { this._lastTy = t.y; });
+}
+
+function onHover(event, d) {
+  const tip = document.getElementById('tooltip');
+  const roleInfo = getRoleInfo(d.role);
+
+  const waitMs = (d._spawned && d._nucleated) ? (d._spawned - d._nucleated) / 1000 : 0;
+  const workMs = d._completed && d._spawned ? (d._completed - d._spawned) / 1000 : 0;
+
+  tip.innerHTML = `
+    <div class="tooltip-id">${d.id}</div>
+    <div class="tooltip-role" style="color:${roleInfo.color}">${roleInfo.label}</div>
+    ${d.topic ? `<div class="tooltip-topic">${d.topic.substring(0, 100)}${d.topic.length > 100 ? '...' : ''}</div>` : ''}
+    <div class="tooltip-stat"><span>Wait:</span> ${waitMs.toFixed(0)}s</div>
+    <div class="tooltip-stat"><span>Work:</span> ${workMs > 0 ? workMs.toFixed(0) + 's' : (d.status === 'running' ? 'running...' : 'n/a')}</div>
+    <div class="tooltip-stat"><span>Steps:</span> ${d._steps.length} / ${d.total_steps}</div>
+    <div class="tooltip-stat"><span>Status:</span> ${d.status}</div>
+    ${d.blocked_by.length ? `<div class="tooltip-stat"><span>Blocked by:</span> ${d.blocked_by.map(b => b.replace('task-20260411-','t-').replace('mission-20260411-','m-')).join(', ')}</div>` : ''}
+  `;
+  tip.style.display = 'block';
+
+  const rect = document.getElementById('chart-container').getBoundingClientRect();
+  let x = event.clientX - rect.left + 12;
+  let y = event.clientY - rect.top - 10;
+  if (x + 380 > rect.width) x = event.clientX - rect.left - 390;
+  if (y + tip.offsetHeight > rect.height) y = rect.height - tip.offsetHeight - 10;
+  tip.style.left = x + 'px';
+  tip.style.top = y + 'px';
+
+  // Highlight row
+  chartG.selectAll('.mol-row').attr('opacity', dd => dd === d ? 1 : 0.3);
+  svg._labelsG.selectAll('.mol-label').attr('opacity', (_, i) => data[i] === d ? 1 : 0.3);
+}
+
+function onHoverOut() {
+  document.getElementById('tooltip').style.display = 'none';
+  if (!selectedMol) {
+    chartG.selectAll('.mol-row').attr('opacity', 1);
+    svg._labelsG.selectAll('.mol-label').attr('opacity', 1);
+  }
+}
+
+function onClick(event, d) {
+  if (selectedMol === d) {
+    // Deselect
+    selectedMol = null;
+    chartG.selectAll('.mol-row').attr('opacity', 1);
+    svg._labelsG.selectAll('.mol-label').attr('opacity', 1);
+    chartG.selectAll('.dag-edge').remove();
+    return;
+  }
+
+  selectedMol = d;
+
+  // Find connected molecules (blocked_by + blocks)
+  const connected = new Set([d.id]);
+  d.blocked_by.forEach(id => connected.add(id));
+  data.forEach(dd => {
+    if (dd.blocked_by.includes(d.id)) connected.add(dd.id);
+  });
+
+  chartG.selectAll('.mol-row').attr('opacity', dd => connected.has(dd.id) ? 1 : 0.15);
+  svg._labelsG.selectAll('.mol-label').attr('opacity', (_, i) => connected.has(data[i].id) ? 1 : 0.15);
+
+  // Draw DAG edges
+  chartG.selectAll('.dag-edge').remove();
+  const idxMap = new Map(data.map((dd, i) => [dd.id, i]));
+
+  d.blocked_by.forEach(depId => {
+    const srcIdx = idxMap.get(depId);
+    const dstIdx = idxMap.get(d.id);
+    if (srcIdx === undefined || dstIdx === undefined) return;
+    const srcMol = data[srcIdx];
+    const srcEnd = srcMol._completed || srcMol._spawned || srcMol._nucleated;
+    const dstStart = d._nucleated;
+    if (!srcEnd || !dstStart) return;
+
+    chartG.append('line')
+      .attr('class', 'dag-edge')
+      .attr('x1', xScale(minutesSince(srcEnd)))
+      .attr('y1', yScale(srcIdx) + yScale.bandwidth() / 2)
+      .attr('x2', xScale(minutesSince(dstStart)))
+      .attr('y2', yScale(dstIdx) + yScale.bandwidth() / 2)
+      .attr('stroke', '#58a6ff')
+      .attr('stroke-width', 1.5)
+      .attr('stroke-dasharray', '4,3')
+      .attr('opacity', 0.7);
+  });
+
+  // Also draw edges for molecules this blocks
+  data.forEach(dd => {
+    if (!dd.blocked_by.includes(d.id)) return;
+    const srcIdx = idxMap.get(d.id);
+    const dstIdx = idxMap.get(dd.id);
+    if (srcIdx === undefined || dstIdx === undefined) return;
+    const srcEnd = d._completed || d._spawned || d._nucleated;
+    const dstStart = dd._nucleated;
+    if (!srcEnd || !dstStart) return;
+
+    chartG.append('line')
+      .attr('class', 'dag-edge')
+      .attr('x1', xScale(minutesSince(srcEnd)))
+      .attr('y1', yScale(srcIdx) + yScale.bandwidth() / 2)
+      .attr('x2', xScale(minutesSince(dstStart)))
+      .attr('y2', yScale(dstIdx) + yScale.bandwidth() / 2)
+      .attr('stroke', '#58a6ff')
+      .attr('stroke-width', 1.5)
+      .attr('stroke-dasharray', '4,3')
+      .attr('opacity', 0.7);
+  });
+}
+
+function buildScrubber() {
+  const scrubber = document.getElementById('scrubber');
+  const timeLabel = document.getElementById('time-label');
+  const phaseLabel = document.getElementById('phase-label');
+
+  scrubber.addEventListener('input', () => {
+    const pct = scrubber.value / 1000;
+    const totalMin = minutesSince(tMax);
+    const curMin = pct * totalMin;
+    scrubTime = new Date(t0.getTime() + curMin * 60000);
+
+    const mins = Math.floor(curMin);
+    const secs = Math.floor((curMin - mins) * 60);
+    timeLabel.textContent = `${mins}:${String(secs).padStart(2, '0')}`;
+
+    // Count active at this time
+    let active = 0, completed = 0;
+    data.forEach(d => {
+      if (d._nucleated && d._nucleated <= scrubTime) {
+        if (d._completed && d._completed <= scrubTime) completed++;
+        else active++;
+      }
+    });
+    phaseLabel.textContent = `${active} active, ${completed} done`;
+
+    // Dim molecules not yet nucleated
+    chartG.selectAll('.mol-row').attr('opacity', d => {
+      if (!d._nucleated || d._nucleated > scrubTime) return 0.05;
+      return 1;
+    });
+    svg._labelsG.selectAll('.mol-label').attr('opacity', (_, i) => {
+      const d = data[i];
+      if (!d._nucleated || d._nucleated > scrubTime) return 0.05;
+      return 1;
+    });
+
+    // Scrub line
+    chartG.selectAll('.scrub-line').remove();
+    chartG.append('line')
+      .attr('class', 'scrub-line')
+      .attr('x1', xScale(curMin))
+      .attr('x2', xScale(curMin))
+      .attr('y1', 0)
+      .attr('y2', data.length * (ROW_HEIGHT + ROW_GAP))
+      .attr('stroke', '#58a6ff')
+      .attr('stroke-width', 1)
+      .attr('stroke-dasharray', '2,2')
+      .attr('opacity', 0.6);
+  });
+
+  // Reset on max
+  scrubber.value = 1000;
+  timeLabel.textContent = `${Math.floor(minutesSince(tMax))}:${String(Math.floor((minutesSince(tMax) % 1) * 60)).padStart(2, '0')}`;
+}
+
+init();
+</script>
+</body>
+</html>

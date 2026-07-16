@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-abcd\", \"running\", &i)"
+---
+row_kind=Healthy
+raw       = ♥ task-abcd [ ] running
+stripped  = â¥ task-abcd [ ] running

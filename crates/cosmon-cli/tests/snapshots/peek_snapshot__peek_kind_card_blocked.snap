@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Blocked)"
+---
+variant=Blocked
+label=blocked
+glyph=·
+ratatui_style=fg=LightRed mod=NONE
+needs_attention=false

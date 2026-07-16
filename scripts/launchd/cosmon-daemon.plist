@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cosmon-daemon — multi-galaxy HTTP-on-Tailscale daemon serving
+  cluster-side cosmon state to native cluster apps (Cosmon-app on
+  iPhone+iPad).
+
+  Bind: host.example:8790 (tailnet). Auto-discovers the
+  Tailscale IPv4 via `apps-transport-http` unless the operator pins
+  one with COSMON_DAEMON_HTTP_BIND.
+
+  Sibling LaunchAgents:
+    - com.cosmon.daemon-supervisor — supervises the meta-fleet.
+    - com.cosmon.scheduler — cron-like patrols.
+    - dev.noogram.mailroom.cockpit — verdict daemon (port 8789).
+    - dev.noogram.cosmon.cosmon-daemon — THIS plist (port 8790).
+
+  Placeholders use __HOME__; the install procedure substitutes them at
+  load time so this template stays portable across machines.
+
+  KeepAlive=true with a 5s throttle keeps a crashed daemon respawning
+  without hammering launchd. The daemon is read-only on every galaxy's
+  `.cosmon/state/`, so a crash carries no cleanup obligation.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.cosmon-daemon</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/cosmon-daemon</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-daemon.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-daemon.err</string>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info,cosmon_daemon=info,apps_transport_http=info</string>
+        <!-- Pin the bind address; remove to fall back to auto-discovery. -->
+        <key>COCKPIT_HTTP_HOSTNAME</key>
+        <string>host.example</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,52 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+
+Usage: cs session [OPTIONS] <COMMAND>
+
+Commands:
+  start    Start a new session
+  note     Append a timestamped note to the open session
+  end      Close the open session, optionally sealing it with BLAKE3
+  promote  Promote session notes into `spark` molecules (via session-to-spark tick)
+  route    Route session notes through the Tier-1 regex classifier (ADR-072)
+  review   Review router-staged molecules (verdict-door)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs session start                             # open a carnet
+  cs session start --galaxy example --root delib-example-0001
+  cs session note "Torvalds elected path a"
+  cs session note --tag insight "carnet is the primitive"
+  cs session note "!spark implémenter session-to-spark"  # prefix auto-promotes
+  cs session end                               # seal with BLAKE3 + auto-commit
+  cs session end --no-seal                     # ephemeral scratch close
+
+PROMOTE — turn session notes into spark molecules:
+  cs session promote 10:46:55                  # promote one note by timestamp
+  cs session promote 10:46:55 10:47:01         # promote several
+  cs session promote --all-spark-prefix        # promote every !spark-prefixed note
+  cs session promote --dry-run                 # show what would be promoted
+  cs session promote --session session-2026-04-22T10-31-31Z 10:46:55
+
+Notes beginning with `!spark ` are automatically promoted by the
+session-to-spark LaunchAgent (when installed, fires every 5 min).
+Explicit `cs session promote <ts>` works regardless of prefix and is
+idempotent — sidecar markers under .cosmon/state/sessions/.promoted/
+prevent duplicate sparks.
+
+Exit codes:
+  2    a session is already open (on `cs session start`)
+  3    no open session (on `cs session note` / `cs session end`)
+
+Sessions live under .cosmon/state/sessions/ as append-only markdown
+files. The seal is a BLAKE3 hash of the body between the frontmatter
+and footer — a trace, not a lock (architectural-invariants.md §8b).
+Promotion never mutates a sealed session — markers are sidecar-only.

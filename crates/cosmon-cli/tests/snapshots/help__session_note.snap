@@ -1,0 +1,20 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Append a timestamped note to the open session
+
+Usage: cs session note [OPTIONS] <TEXT>
+
+Arguments:
+  <TEXT>  Free-form note body
+
+Options:
+      --config <PATH>            Path to configuration file
+      --tag <TAG>                Optional tag rendered alongside the timestamp (e.g. `insight`, `todo`)
+      --cause-kind <KIND>        How the note was produced. One of `direct` (human typed), `transcription` (human spoke, agent transcribed), `oracle-suggestion` (agent proposed, human accepted), `autonomous` (agent authored alone). Omit to skip the `cause:` subline entirely — the note renders in the pre-schema format. Supplying any `--cause-*` flag enables the subline with defaults `kind=direct`, `agent=null`, `channel=keyboard`
+  -v, --verbose                  Enable verbose output
+      --cause-agent <AGENT>      Identity of the mediating agent (e.g. `apfel-oracle-<host>`, `matrix:@tenant_auditor:hs`). Leave unset when `--cause-kind direct`
+      --json                     Output in JSON format
+      --cause-channel <CHANNEL>  Physical channel the note arrived on. Known variants: `keyboard`, `voice`, `matrix`, `webhook`. Any other value is accepted verbatim and round-trips as `Other(<value>)`
+  -h, --help                     Print help

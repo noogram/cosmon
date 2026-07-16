@@ -1,0 +1,30 @@
+# architecture-waivers.toml — named, dated waivers for the audit script
+#
+# This file is read by scripts/architecture-audit.sh and is the structured
+# allowlist that turns specific FAIL rows into WARN rows with a "historical
+# waiver" tag. It is the substrate-tier discipline of named-waiver: every
+# violation is visible, dated, and time-boxed (or explicitly historical).
+#
+# Doctrine: ADR-082 — Architecture baseline.
+# Per-galaxy summary: docs/architecture-baseline.md.
+#
+# Adding a new waiver is a structural decision. File an ADR-grade molecule;
+# do not patch silently.
+
+# ---------------------------------------------------------------------------
+# INV-PRIVATE-FILE-RM-CACHED-NOT-RM
+# Historical commits that combine .gitignore-add with git rm (full rm)
+# ---------------------------------------------------------------------------
+[[private_file_rm_cached_not_rm]]
+commit = "21cf165da2cd81793b726ee49e2c4321c80dbfc3"
+short  = "21cf165"
+date   = "2026-04-10"
+why    = "Pre-baseline historical violation. The commit removed accidentally tracked .worktrees/ subdirs and added them to .gitignore in the same commit. Months later, the gridgame galaxy re-discovered the same trap (delib-20260503-81ac / 2f98), and that re-discovery is what motivated the doctrine. Rewriting history (filter-repo) costs more than its benefit; doctrine applies go-forward."
+remediation = "None. Historical waiver. Future privatisations must use git rm --cached."
+
+[[private_file_rm_cached_not_rm]]
+commit = "a99a3cd52e691eb76c6847650cd46decc5bad3de"
+short  = "a99a3cd"
+date   = "2026-04-04"
+why    = "Pre-baseline historical violation. The commit untracked Gas Town runtime state files (.runtime/agent.lock, .runtime/session_id, .beads/redirect) and added .runtime/ + .beads/redirect to .gitignore in the same commit. Same pattern as 21cf165, same rationale: rewriting history would break commit-hash citations across chronicles, ADRs, and deliberation hashes."
+remediation = "None. Historical waiver. Future privatisations must use git rm --cached."

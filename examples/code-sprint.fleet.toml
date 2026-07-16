@@ -1,0 +1,228 @@
+# Code Sprint Fleet — a fleet that writes code, not documentation.
+#
+# Proves cosmon is mission-agnostic: same fleet.toml format,
+# different agents, different artifacts, different quality gates.
+#
+# Deploy: cs deploy examples/code-sprint.fleet.toml
+# Output: code in the workdir (a Rust/Python/etc. project)
+
+# OPTIONAL — advisory operator self-classification (delib-20260509-18df §D-C).
+# Free-form string; cosmon emits a `FleetTyped` event when this field is set
+# but no code path branches on the value. Use it to mark how YOU think of
+# this fleet (e.g. "research-lab", "editorial-board", "code-shop"). Change
+# at will; nothing observable changes. The field exists so a future
+# re-evaluation can read events.jsonl and decide whether typing should
+# become structural — until then, write whatever phrase fits.
+# organization_type = "code-shop"
+
+fleet = "code-sprint"
+version = 1
+description = "Code development fleet — architect, coder, reviewer, tester"
+workdir = "<CHANGE_ME: absolute path to your project workdir>"
+
+[constitution]
+pillars = [
+    "Code compiles (cargo check / python -m py_compile)",
+    "Tests pass (cargo test / pytest)",
+    "Lint clean (clippy / ruff / eslint)",
+    "No unwrap() in library code — return Result",
+    "Every public function has a doc comment",
+]
+conflict_resolution = "lead decides, documents rationale in ADR"
+
+[[grades]]
+id = "draft"
+order = 0
+description = "Initial implementation, may not compile"
+
+[[grades]]
+id = "compiles"
+order = 1
+description = "Code compiles, no tests yet"
+[grades.promote_requires]
+role = "implementation"
+
+[[grades]]
+id = "tested"
+order = 2
+description = "Tests pass"
+[grades.promote_requires]
+role = "research"
+
+[[grades]]
+id = "reviewed"
+order = 3
+description = "Code reviewed and approved"
+[grades.promote_requires]
+role = "advisory"
+
+[[grades]]
+id = "shipped"
+order = 4
+description = "Merged and deployed"
+[grades.promote_requires]
+role = "orchestration"
+
+# --- Agents ---
+
+[[agents]]
+name = "lead"
+role = "orchestration"
+clearance = "execute"
+prompt = """You are the tech lead for a code sprint.
+
+RESPONSIBILITIES:
+1. Read the mission brief (check inbox or workdir for MISSION.md)
+2. Break it into tasks and assign to architect, coder, tester
+3. Review PRs and make architectural decisions
+4. Resolve disagreements between coder and reviewer
+5. Track progress: draft → compiles → tested → reviewed → shipped
+
+When assigning tasks, create a message in the agent's inbox:
+  echo '{"from":"lead","to":"coder","type":"task","title":"implement X","file":"src/x.rs"}' > .cosmon/state/mail/coder/inbox/$(date +%s)-task.jsonl
+
+AUTONOMY: Never block terminal. Make decisions and drive the sprint.
+COMMUNICATION: inbox .cosmon/state/mail/lead/inbox/"""
+
+[[agents]]
+name = "architect"
+role = "advisory"
+clearance = "read"
+prompt = """You are the software architect for a code sprint.
+
+RESPONSIBILITIES:
+1. When assigned a feature, design the approach
+2. Write an ADR (Architecture Decision Record) in the workdir
+3. Define the public API (types, traits, function signatures)
+4. Identify edge cases and failure modes
+5. Send the design to the coder via mailbox
+
+Write designs to the workdir as {feature}-design.md.
+You do NOT write implementation code — you design.
+
+AUTONOMY: Never block terminal. Design and document.
+COMMUNICATION: inbox .cosmon/state/mail/architect/inbox/"""
+
+[[agents]]
+name = "coder"
+role = "implementation"
+clearance = "write"
+prompt = """You are the coder for a code sprint.
+
+RESPONSIBILITIES:
+1. Read task assignments from inbox
+2. If an architect design exists, follow it
+3. Write clean, well-documented code
+4. Run cargo check / cargo clippy after every change
+5. Notify the tester when code is ready for testing
+6. Apply reviewer feedback (revision cycle)
+
+Save code to the workdir. Commit with conventional commits.
+When done, notify tester: create a message in tester's inbox.
+
+AUTONOMY: Never block terminal. Code, test locally, iterate.
+COMMUNICATION: inbox .cosmon/state/mail/coder/inbox/"""
+
+[[agents]]
+name = "reviewer"
+role = "advisory"
+clearance = "read"
+prompt = """You are the code reviewer for a code sprint.
+
+RESPONSIBILITIES:
+1. Read review requests from inbox
+2. Review code for: correctness, clarity, idiomatic patterns, error handling
+3. Check constitution compliance (no unwrap, doc comments, lint clean)
+4. Write review with specific line references
+5. Send revision requests to coder
+6. Re-review after revision, approve or request more changes
+
+Save reviews to the workdir as {feature}-review.md.
+Grade: draft / compiles / tested / reviewed (promote when satisfied).
+
+AUTONOMY: Never block terminal. Review thoroughly.
+COMMUNICATION: inbox .cosmon/state/mail/reviewer/inbox/"""
+
+[[agents]]
+name = "tester"
+role = "research"
+clearance = "write"
+prompt = """You are the tester for a code sprint.
+
+RESPONSIBILITIES:
+1. Read test requests from inbox
+2. Write comprehensive tests for the feature
+3. Run the test suite (cargo test / pytest)
+4. Report results: pass count, fail count, coverage
+5. If tests fail, send failure details to coder via mailbox
+6. If tests pass, notify lead for promotion to "tested" grade
+
+Write tests in the appropriate test directory.
+Test naming: test_{feature}_{scenario}.
+
+AUTONOMY: Never block terminal. Write tests, run them, report.
+COMMUNICATION: inbox .cosmon/state/mail/tester/inbox/"""
+
+# --- System ---
+
+[[agents]]
+name = "mail-courier"
+role = "infrastructure"
+clearance = "read"
+prompt = """Mail courier for the code sprint fleet.
+Watch mailboxes, notify agents via cosmon_nudge. Repeat every 5s.
+Use cosmon_nudge for ALL notifications. Never ask questions. Start immediately."""
+
+# --- Topology ---
+
+[[channels]]
+from = "lead"
+to = "architect"
+
+[[channels]]
+from = "lead"
+to = "coder"
+
+[[channels]]
+from = "lead"
+to = "reviewer"
+
+[[channels]]
+from = "lead"
+to = "tester"
+
+[[channels]]
+from = "architect"
+to = "coder"
+
+[[channels]]
+from = "architect"
+to = "lead"
+
+[[channels]]
+from = "coder"
+to = "tester"
+
+[[channels]]
+from = "coder"
+to = "reviewer"
+
+[[channels]]
+from = "coder"
+to = "lead"
+
+[[channels]]
+from = "reviewer"
+to = "coder"
+
+[[channels]]
+from = "reviewer"
+to = "lead"
+
+[[channels]]
+from = "tester"
+to = "coder"
+
+[[channels]]
+from = "tester"
+to = "lead"

@@ -1,0 +1,79 @@
+formula = "absorb"
+version = 1
+description = """
+Absorb reusable artifacts from a colony project back into cosmon templates. \
+The reverse of colonization: cosmon → colony (cs init) then colony → cosmon (absorb). \
+Horizontal gene transfer — useful mutations return to enrich the mothership genome.
+
+Required variables:
+  - colony: absolute path to the colony project (e.g., ~/dev/projects/foundry)
+  - template_name: name for the absorbed template (e.g., formal-research)
+"""
+id_prefix = "absorb"
+
+# Tier 0 — ingestion formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Scan colony for absorbable artifacts"
+description = """
+Read the colony project at {{colony}}. Identify artifacts that are \
+reusable and don't yet exist in cosmon/templates/: \
+  - .cosmon/fleets/*.fleet.toml (fleet configurations) \
+  - .cosmon/formulas/*.formula.toml (custom formulas beyond builtins) \
+  - Justfile (dev workflow recipes) \
+  - MISSION.md (mission template) \
+  - README.md (project description pattern) \
+  - docs/ structure (ADRs, vocabulary, chronicles) \
+  - Any shell scripts or tools (e.g., doi-check) \
+\
+Compare with existing cosmon/templates/ to identify what is NEW or MUTATED. \
+Produce MOLECULE_DIR/absorb-scan.md listing: \
+  - Each artifact found with path + size + description \
+  - Whether it exists in cosmon/templates/ already \
+  - Recommendation: absorb / skip / merge
+"""
+acceptance = "MOLECULE_DIR/absorb-scan.md exists with complete artifact inventory and recommendations."
+
+[[steps]]
+id = "absorb"
+title = "Copy, adapt, and templatize into cosmon/templates/"
+description = """
+Using the scan from step 1, create templates/{{template_name}}/ in cosmon repo: \
+  - Copy fleet.toml(s), replacing project-specific values with <CHANGE_ME_*> sentinels \
+  - Copy custom formulas (NOT builtins like task-work, deep-think — only colony-specific ones) \
+  - Create Justfile.tmpl with generic recipes (dev/check/status/peek/clean + any observation patterns) \
+  - Create MISSION.md.tmpl with TOML frontmatter skeleton \
+  - Create README.md.tmpl describing the template and its roles \
+  - Update docs/templates/README.md (or create it) documenting the new template \
+  - Add absorption/horizontal-gene-transfer vocabulary entries to docs/vocabulary.md \
+\
+Templatization rules: \
+  - Replace absolute paths with sentinels (<CHANGE_ME_WORKDIR>, <CHANGE_ME_TOPIC>) \
+  - Replace project-specific names with template parameters \
+  - Keep role prompts intact (they encode expertise dispositions) \
+  - Keep shell gates intact (they are mechanical, not project-specific) \
+  - Credit the source colony in a comment header
+"""
+needs = ["scan"]
+acceptance = "templates/{{template_name}}/ exists with fleet.toml, formulas, Justfile.tmpl, MISSION.md.tmpl, README.md.tmpl. docs/templates/README.md updated."
+
+[[steps]]
+id = "verify"
+title = "Verify absorbed template deploys cleanly"
+description = """
+Test the absorbed template by simulating a deployment: \
+  1. Create a temporary directory \
+  2. cs init in it \
+  3. Copy the absorbed template files \
+  4. Verify fleet.toml parses (cs ensemble should not error) \
+  5. Verify formulas parse (cs nucleate --dry-run if available, or just check TOML syntax) \
+  6. Clean up the temp directory \
+\
+Produce MOLECULE_DIR/absorb-verified.md with test results. \
+If any test fails, document the failure and fix the template.
+"""
+needs = ["absorb"]
+acceptance = "MOLECULE_DIR/absorb-verified.md confirms template deploys cleanly. All sentinel fields documented."

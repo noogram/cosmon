@@ -1,0 +1,43 @@
+name: DCO
+
+# Every commit in a pull request must carry a `Signed-off-by` trailer,
+# certifying the Developer Certificate of Origin (see DCO.md / CONTRIBUTING.md).
+# Self-contained bash check — no third-party action beyond the pinned checkout.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - name: Every commit is signed off (DCO)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          bad=0
+          for c in $(git rev-list "$BASE..$HEAD"); do
+            body=$(git show -s --format=%B "$c")
+            if ! printf '%s\n' "$body" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::commit $(git show -s --format='%h %s' "$c") is missing a Signed-off-by trailer"
+              bad=1
+            fi
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo ""
+            echo "The DCO requires a sign-off on every commit. Fix with:"
+            echo "  git commit --amend -s          # last commit"
+            echo "  git rebase --signoff $BASE     # a range"
+            echo "See DCO.md and CONTRIBUTING.md."
+            exit 1
+          fi
+          echo "All commits carry a DCO sign-off."

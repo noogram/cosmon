@@ -1,0 +1,67 @@
+# patrols.toml — intra-container liveness watchdog (C2, delib-20260614-98f2).
+#
+# The single non-negotiable rule this file encodes:
+#
+#   The watchdog lives where the watched state lives — INSIDE the tenant
+#   container, co-located with the tenant StateStore — never inside the
+#   watched worker process (it would die with its subject).
+#
+# Why it must run in-container, not on the host: `cs tackle` spawns the
+# worker `claude` as a detached grand-child via `tmux --no-attach` and
+# returns. The host patrol (`cosmon-fleet-propel`) sweeps the HOST state,
+# not the tenant state inside the container — so a dead/figé worker leaves
+# `MoleculeProcess.status` reading "active" ad vitam. This patrol sweeps
+# the tenant store from inside, where the worker actually lives.
+#
+# ── Two failure modes, one scale ──────────────────────────────────────
+#
+#   * hard death (exit / SIGKILL) → caught in real time by the tmux
+#     `pane-died` hook (armed at `cs tackle` time), which writes the Dead
+#     witness + `worker.exit` and projects MoleculeProcess.status → Stale.
+#   * figé-mais-vivant (process up, artefact `mtime` frozen — e.g. the
+#     claude CLI does NOT exit on model-unavailable, observed 2026-06-12)
+#     → caught by THIS patrol's `--propel` sweep.
+#
+# Both feed the same two-coup scale (cosmon-core `project_process_status`):
+#   1st missed sweep → Unresponsive (slow, we nudge — never kill)
+#   2nd consecutive  → Stale (presumed dead; route to `cs collapse` /
+#                      audit molecule, NEVER to completed).
+#
+# 300 s ≈ 7× the 40 s nominal observed 2026-06-12. Cadence 180 s so two
+# consecutive misses (Stale) cost ≥ 360 s — comfortably past the 300 s
+# stale threshold without flagging a worker that is still thinking.
+#
+# ── Deployment ────────────────────────────────────────────────────────
+#
+# The operator mounts this at /cosmon/.config/cosmon/patrols.toml and runs
+# the scheduler tick loop in-container co-located with the StateStore.
+# `working_dir` is the per-noyau galaxy root so walk-up discovery resolves
+# the tenant state (`/cosmon/galaxies/<noyau>/.cosmon/state`); substitute
+# the deployment's noyau, or template one `[[patrol]]` block per noyau in
+# a multi-tenant container.
+#
+# NOTE (cosmon-ward, surfaced by C2): the published adapter image ships no
+# `cs` binary and its entrypoint is the single-process `cs-rpp-adapter`.
+# Wiring a scheduler PROCESS into the container (adding `cs` to the image,
+# or a resident sweep loop inside `cs-rpp-adapter`) is a system-state
+# change left to the operator/infra decision — see result.md §"Remaining
+# wiring". This file is the config contract that change consumes.
+
+[scheduler]
+state_file            = "/cosmon/.cosmon/scheduler.state.json"
+log_file              = "/cosmon/.cosmon/scheduler.log"
+kill_switch           = "/cosmon/.cosmon/stand-down.lock"
+tick_interval_seconds = 60
+
+# Intra-container liveness sweep. `--propel` nudges figé-but-alive workers
+# AND (post-C2) projects MoleculeProcess.status onto the two-coup scale for
+# dead / frozen workers whose `pane-died` hook never fired (tmux restart,
+# brutal crash). Report-only: it never collapses a solitary stalled worker
+# — that is the operator's call (turing §8b, "report, do not auto-resolve").
+[[patrol]]
+name             = "tenant-liveness-propel"
+interval_seconds = 180
+command          = ["cs", "patrol", "--propel", "--stale-after", "300"]
+working_dir      = "/cosmon/galaxies/NOYAU"
+dispatch         = "detached"
+enabled          = true

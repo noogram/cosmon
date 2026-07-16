@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+`verify-graph` — Tarjan SCC check on the subgraph induced by a typed relation (substrate, ADR-016)
+
+Usage: cs verify-graph [OPTIONS]
+
+Options:
+      --config <PATH>    Path to configuration file
+      --relation <KIND>  Single relation to check (e.g. `blocks`, `decay-product`, `merged-from`, `refines`, `refutes`). Mutually exclusive with `--all`
+      --all              Check every registered relation kind in turn
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+  -h, --help             Print help
+
+EXAMPLES:
+  cs verify-graph --relation blocks         # check the Blocks subgraph for cycles
+  cs verify-graph --relation refines        # check Refines (cycles permitted, reported as WARN)
+  cs verify-graph --all                     # every registered relation
+  cs verify-graph --all --json              # NDJSON, one row per relation
+
+Tarjan SCC check on the subgraph induced by a typed MoleculeLink
+relation. Substrate primitive for the organization-twin programme.
+Read-only — does not mutate state.
+
+Exit code:
+  0  every DAG-required relation is acyclic
+  1  at least one DAG-required relation contained a cycle
+  Cycles in non-DAG-required relations (e.g. `refines`) are
+  reported but do not flip the exit code.

@@ -1,0 +1,42 @@
+[package]
+name = "cosmon-thin-cli"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "Apache-2.0"
+description = "Tenant-CLI engine library: #[verb] link-time registry, §8p coverage report, and the in-process dispatch the parity tests drive. The cs-thin binary was fused into cosmon-remote (avatar-surface A2) — delete a copy."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+toml = { workspace = true }
+cosmon-thin-macro = { path = "../cosmon-thin-macro" }
+linkme = "0.3"
+
+[build-dependencies]
+# One parser for the §8p surface canon, shared with
+# cosmon-rpp-adapter/build.rs (task-20260610-06a4).
+cosmon-surface-canon = { path = "../cosmon-surface-canon" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+axum = { workspace = true }
+tower = "0.5"
+serde_json = { workspace = true }
+chrono = { workspace = true }
+insta = { workspace = true }
+cosmon-rpp-adapter = { path = "../cosmon-rpp-adapter" }
+cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
+
+[lints]
+workspace = true

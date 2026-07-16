@@ -1,0 +1,155 @@
+# cosmon-daemon-supervisor — example configuration.
+#
+# Copy to ~/.config/cosmon/daemons.toml, then install the LaunchAgent with:
+#   scripts/install-daemon-supervisor.sh install
+#
+# The supervisor hot-reloads on edits via `notify` (debounce ≈ 200 ms), so
+# you never need to unload/reload the agent to change this file — just
+# save. The global kill-switch (`~/.cosmon/stand-down.lock`) SIGTERMs every
+# child; the per-daemon kill-switch SIGTERMs just that child.
+#
+# See the supervisor architecture at
+#   crates/cosmon-daemon-supervisor/src/lib.rs
+# and the binding decisions at
+#   docs/adr/053-cosmon-daemon-supervisor.md
+
+[supervisor]
+state_file = "~/.cosmon/daemon-supervisor.state.json"
+log_file = "~/.cosmon/daemon-supervisor.log"
+kill_switch = "~/.cosmon/stand-down.lock"
+
+# notification-bot — Telegram bot (teloxide, long-polling).
+#
+# Migrated from ~/Library/LaunchAgents/com.you.notification-bot.plist
+# on 2026-04-19 as T4/5 of the cosmon-daemon-supervisor plan.
+# Archive: scripts/launchd/archived/com.you.notification-bot.plist.
+[[daemon]]
+name = "notification-bot"
+binary = "/Users/you/.local/bin/notification-bot"
+args = []
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin", RUST_LOG = "info" }
+log_stdout = "/Users/you/.mailroom/logs/tg-bot.log"
+log_stderr = "/Users/you/.mailroom/logs/tg-bot.err"
+enabled = true
+kill_switch = "/Users/you/.mailroom/stand-down.lock"
+
+# notification-bot — Telegram broadcast bot (teloxide, long-polling).
+#
+# Same pattern as notification-bot. Migrated from
+# ~/Library/LaunchAgents/com.you.notification-bot.plist on 2026-04-19
+# as T5.1 of the cosmon-daemon-supervisor plan.
+# Archive: scripts/launchd/archived/com.you.notification-bot.plist.
+[[daemon]]
+name = "notification-bot"
+binary = "/Users/you/.local/bin/notification-bot"
+args = []
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin", RUST_LOG = "info" }
+log_stdout = "/Users/you/.showroom/logs/notification-bot.log"
+log_stderr = "/Users/you/.showroom/logs/notification-bot.err"
+enabled = true
+
+# emacs-daemon — background Emacs server for emacsclient.
+#
+# Fast restart, no network state. Migrated from
+# ~/Library/LaunchAgents/com.you.emacs-daemon.plist on 2026-04-19
+# as T5.2 of the cosmon-daemon-supervisor plan.
+# Archive: scripts/launchd/archived/com.you.emacs-daemon.plist.
+[[daemon]]
+name = "emacs-daemon"
+binary = "/Applications/Emacs.app/Contents/MacOS/Emacs"
+args = ["--daemon"]
+throttle_seconds = 10
+env = { HOME = "/Users/you", PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
+log_stdout = "/tmp/emacs-daemon.stdout.log"
+log_stderr = "/tmp/emacs-daemon.stderr.log"
+enabled = true
+
+# zotero-mcp — Zotero MCP server (SSE transport on 127.0.0.1:23120).
+#
+# Migrated from ~/Library/LaunchAgents/com.you.zotero-mcp.plist on
+# 2026-04-19 as T5.3. Archive:
+# scripts/launchd/archived/com.you.zotero-mcp.plist.
+[[daemon]]
+name = "zotero-mcp"
+binary = "/Users/you/.local/bin/zotero-mcp-rs"
+args = []
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/Users/you/.local/bin:/usr/local/bin:/usr/bin:/bin", ZOTERO_MCP_TRANSPORT = "sse", ZOTERO_MCP_HOST = "127.0.0.1", ZOTERO_MCP_PORT = "23120", ZOTERO_API_KEY = "<your-zotero-api-key>" }
+log_stdout = "/tmp/zotero-mcp.stdout.log"
+log_stderr = "/tmp/zotero-mcp.stderr.log"
+enabled = true
+
+# almanac — Zotero-backed MCP server with write support.
+#
+# Same SSE transport shape as zotero-mcp. Migrated from
+# ~/Library/LaunchAgents/com.you.almanac.plist on 2026-04-19 as T5.4.
+# Archive: scripts/launchd/archived/com.you.almanac.plist.
+[[daemon]]
+name = "almanac"
+binary = "/Users/you/.cargo/bin/almanac"
+args = []
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/Users/you/.cargo/bin:/Users/you/.local/bin:/usr/local/bin:/usr/bin:/bin", ZOTERO_MCP_TRANSPORT = "sse", ZOTERO_MCP_HOST = "127.0.0.1", ZOTERO_MCP_PORT = "23120", ZOTERO_API_KEY = "<your-zotero-api-key>", ZOTERO_MCP_ENABLE_WRITES = "true" }
+log_stdout = "/tmp/almanac.stdout.log"
+log_stderr = "/tmp/almanac.stderr.log"
+enabled = true
+
+# archive-service — archived-mail MCP server (SQLite-backed).
+#
+# Migrated from ~/Library/LaunchAgents/com.you.archive-service.plist on
+# 2026-04-19 as T5.5. Archive:
+# scripts/launchd/archived/com.you.archive-service.plist.
+[[daemon]]
+name = "archive-service"
+binary = "/Users/you/.local/bin/archive-service"
+args = ["serve"]
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin" }
+log_stdout = "/tmp/archive-service-serve.log"
+log_stderr = "/tmp/archive-service-serve.err"
+enabled = true
+
+# noogram-dashboard — Flask monitoring dashboard for the agent fleet.
+#
+# HTTP server on port 18790. Migrated from
+# ~/Library/LaunchAgents/com.noogram.dashboard.plist on 2026-04-19 as T5.6.
+# Archive: scripts/launchd/archived/com.noogram.dashboard.plist.
+[[daemon]]
+name = "noogram-dashboard"
+binary = "/Users/you/.pyenv/versions/3.10.15/bin/python"
+args = ["/Users/you/dev/projects/noogram-dashboard/dashboard.py", "--port", "18790"]
+throttle_seconds = 30
+env = { HOME = "/Users/you", PATH = "/Users/you/.pyenv/versions/3.10.15/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" }
+log_stdout = "/tmp/noogram-dashboard.stdout.log"
+log_stderr = "/tmp/noogram-dashboard.stderr.log"
+enabled = true
+
+# cosmon-runtime — ADR-095 Resident Runtime.
+#
+# Long-running `cs run --resident` loop. Reads .cosmon/state/, walks
+# the DAG, calls `cs tackle` / `cs evolve` / `cs done` on ready
+# molecules from a sibling shell (RR-1: client of the transactional
+# core; RR-2: owns no state). Trace at .cosmon/state/runtime-trace.jsonl
+# (RR-5). Install canal binding: ADR-095 §5 + ADR-053 §9. Operator
+# guide: docs/guides/install-resident-runtime.md.
+#
+# IFBDD opt-in pact: ships with enabled = false. The operator flips to
+# true to start the 90-day forensic measurement window (ADR-095 §4).
+# Flip back, or `touch` the kill_switch, to stand down.
+#
+# Note: `--config <state-dir>` pins the runtime to *this* state store
+# regardless of the supervisor's cwd. The runtime walks up two levels
+# from the state-dir to derive the project root for child `cs` calls
+# (see crates/cosmon-cli/src/cmd/run.rs::run_resident).
+[[daemon]]
+name = "cosmon-runtime"
+binary = "/Users/you/.local/bin/cs"
+args = ["--config", "/srv/cosmon/cosmon/.cosmon/state", "run", "--resident", "--poll-interval", "5"]
+env = { HOME = "/Users/you", PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin", RUST_LOG = "info" }
+log_stdout = "/Users/you/.cosmon/logs/runtime.log"
+log_stderr = "/Users/you/.cosmon/logs/runtime.err"
+enabled = false
+kill_switch = "/Users/you/.cosmon/runtime-stand-down.lock"
+throttle_seconds = 30

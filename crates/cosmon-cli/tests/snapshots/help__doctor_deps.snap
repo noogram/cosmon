@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Flag unpinned or mutable dependency declarations
+
+Usage: cs doctor deps [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --root <ROOT>    Override the workspace root
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

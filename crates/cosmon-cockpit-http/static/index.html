@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cosmon Cockpit</title>
+<link rel="stylesheet" href="/charter.css">
+<style>
+  /* Palette (--bg, --card, --green, …) is served by /charter.css, which is
+     generated from the Rust cosmon-style crate. Do not reintroduce a :root
+     block here — it would drift from `cs watch` and `cs help charter`. */
+  :root { --bg: #0d1117; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', monospace; background: var(--bg); color: var(--text); padding: 1rem; }
+  h1 { font-size: 1.4rem; margin-bottom: 0.5rem; color: var(--accent); }
+  .meta { color: var(--dim); font-size: 0.8rem; margin-bottom: 1rem; }
+  .fleet { display: flex; gap: 1rem; margin-bottom: 1rem; }
+  .fleet .stat { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 1rem; }
+  .fleet .stat .label { font-size: 0.7rem; color: var(--dim); text-transform: uppercase; }
+  .fleet .stat .value { font-size: 1.2rem; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; background: var(--card); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  th { text-align: left; padding: 0.5rem 0.75rem; font-size: 0.75rem; color: var(--dim); text-transform: uppercase; border-bottom: 1px solid var(--border); }
+  td { padding: 0.5rem 0.75rem; font-size: 0.85rem; border-bottom: 1px solid var(--border); }
+  tr:last-child td { border-bottom: none; }
+  tr:hover { background: rgba(88,166,255,0.05); }
+  .status { padding: 2px 8px; border-radius: 12px; font-size: 0.75rem; font-weight: 600; }
+  .status-running { background: rgba(63,185,80,0.15); color: var(--green); }
+  .status-pending { background: rgba(210,153,34,0.15); color: var(--yellow); }
+  .status-queued { background: rgba(88,166,255,0.15); color: var(--blue); }
+  .status-completed { background: rgba(139,148,158,0.15); color: var(--dim); }
+  .status-collapsed { background: rgba(248,81,73,0.15); color: var(--red); }
+  .status-frozen { background: rgba(188,140,255,0.15); color: var(--frozen); }
+  .progress { color: var(--dim); font-size: 0.8rem; }
+  .kind { font-size: 0.8rem; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  #error { color: var(--red); font-size: 0.8rem; margin-bottom: 0.5rem; display: none; }
+  .header-row { display: flex; align-items: center; gap: 0.8rem; margin-bottom: 0.5rem; flex-wrap: wrap; }
+  .header-row h1 { margin-bottom: 0; }
+  .header-controls { display: flex; align-items: center; gap: 0.8rem; margin-left: auto; }
+  .spark-box { display: flex; gap: 0.5rem; align-items: center; }
+  .spark-box input { background: var(--card); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 0.4rem 0.7rem; font-size: 0.85rem; width: 280px; outline: none; }
+  .spark-box input:focus { border-color: var(--accent); }
+  .spark-box input::placeholder { color: var(--dim); }
+  #spark-status { font-size: 0.75rem; color: var(--dim); }
+  @keyframes glow { 0% { background: rgba(88,166,255,0.2); } 100% { background: transparent; } }
+  .row-glow { animation: glow 1.5s ease-out; }
+  .liveness-zombie { background: rgba(248,81,73,0.12); }
+  .liveness-zombie td { color: var(--red); }
+  .liveness-zombie td:first-child { border-left: 3px solid var(--red); }
+  .liveness-mismatch { background: rgba(210,153,34,0.12); }
+  .liveness-mismatch td { color: var(--yellow); }
+  .liveness-badge { padding: 2px 6px; border-radius: 8px; font-size: 0.75rem; font-weight: 600; cursor: help; }
+  .liveness-badge.zombie { background: rgba(248,81,73,0.2); color: var(--red); }
+  .liveness-badge.mismatch { background: rgba(210,153,34,0.2); color: var(--yellow); }
+  .liveness-badge.healthy { background: rgba(63,185,80,0.15); color: var(--green); }
+  .liveness-badge.unknown { background: rgba(139,148,158,0.1); color: var(--dim); }
+  .voice-toggle { display: flex; align-items: center; gap: 6px; font-size: 0.8rem; color: var(--dim); cursor: pointer; user-select: none; background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.35rem 0.6rem; min-height: 44px; transition: border-color 0.2s, color 0.2s; }
+  .voice-toggle:hover { color: var(--text); border-color: var(--dim); }
+  .voice-toggle.active { color: var(--accent); border-color: var(--accent); }
+  .voice-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .voice-toggle .speaker-icon { font-size: 1rem; }
+  .calibration-led { display: flex; align-items: center; gap: 6px; font-size: 0.7rem; color: var(--dim); cursor: pointer; min-height: 44px; padding: 0.25rem 0.5rem; }
+  .calibration-led:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .calibration-led .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--dim); transition: background 0.3s; }
+  .calibration-led .dot.green { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .calibration-led .dot.red { background: var(--red); box-shadow: 0 0 6px var(--red); animation: pulse-red 1.5s infinite; }
+  .calibration-led .dot.gray { background: var(--dim); }
+  @keyframes pulse-red { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+  .selfcheck-panel { display: none; position: fixed; top: 36px; right: 12px; background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 0.8rem; font-size: 0.75rem; max-width: 380px; max-height: 400px; overflow-y: auto; z-index: 101; box-shadow: 0 4px 12px rgba(0,0,0,0.4); }
+  .selfcheck-panel.visible { display: block; }
+  .selfcheck-panel h3 { font-size: 0.85rem; margin-bottom: 0.5rem; color: var(--accent); }
+  .selfcheck-panel table { width: 100%; font-size: 0.7rem; }
+  .selfcheck-panel td { padding: 2px 6px; }
+  .selfcheck-panel .agree { color: var(--green); }
+  .selfcheck-panel .disagree { color: var(--red); font-weight: 600; }
+  .dashboard-layout { display: grid; grid-template-columns: 1fr 320px; gap: 1rem; }
+  .main-col { min-width: 0; }
+  .event-panel { background: var(--card); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem; height: fit-content; position: sticky; top: 1rem; }
+  .event-panel h2 { font-size: 0.85rem; color: var(--accent); margin-bottom: 0.6rem; text-transform: uppercase; letter-spacing: 0.5px; }
+  .event-list { list-style: none; }
+  .event-item { display: flex; gap: 0.5rem; align-items: flex-start; padding: 0.4rem 0; border-bottom: 1px solid var(--border); font-size: 0.8rem; }
+  .event-item:last-child { border-bottom: none; }
+  .event-icon { flex-shrink: 0; font-size: 1rem; width: 1.4rem; text-align: center; }
+  .event-body { flex: 1; min-width: 0; }
+  .event-summary { color: var(--text); word-break: break-word; }
+  .event-time { color: var(--dim); font-size: 0.7rem; }
+  .event-empty { color: var(--dim); font-size: 0.8rem; font-style: italic; }
+</style>
+</head>
+<body>
+<div class="selfcheck-panel" id="selfcheck-panel"></div>
+
+<div class="header-row">
+  <h1>Cosmon Cockpit</h1>
+  <div class="header-controls">
+    <div class="calibration-led" id="cal-led"
+         role="status" aria-live="polite" tabindex="0"
+         aria-label="System calibration status: calibrating"
+         onclick="toggleSelfcheckPanel()"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleSelfcheckPanel()}">
+      <div class="dot gray" id="cal-dot" aria-hidden="true"></div>
+      <span id="cal-label">calibrating...</span>
+    </div>
+    <div class="spark-box">
+      <input type="text" id="spark-input" aria-label="Spark an idea" placeholder="Spark an idea..." maxlength="1000" autocomplete="off">
+      <span id="spark-status"></span>
+    </div>
+    <div class="voice-toggle" id="voice-toggle"
+         role="button" tabindex="0" aria-pressed="false"
+         aria-label="Toggle voice notifications"
+         onclick="toggleVoice()"
+         onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleVoice()}">
+      <span class="speaker-icon" id="speaker-icon" aria-hidden="true">&#x1F507;</span>
+      <span id="voice-label">muted</span>
+    </div>
+  </div>
+</div>
+<div class="meta">Auto-refreshes every 2s &mdash; <span id="last-update">...</span></div>
+<div id="error"></div>
+<div class="fleet" id="fleet"></div>
+<div class="dashboard-layout">
+<div class="main-col">
+<table>
+  <thead>
+    <tr>
+      <th>ID</th>
+      <th>Kind</th>
+      <th>Status</th>
+      <th>Formula</th>
+      <th>Progress</th>
+      <th>Worker</th>
+      <th>Liveness</th>
+      <th>Updated</th>
+    </tr>
+  </thead>
+  <tbody id="molecules"></tbody>
+</table>
+</div>
+<div class="event-panel" id="event-panel">
+  <h2>Event Log</h2>
+  <ul class="event-list" id="event-list">
+    <li class="event-empty">Loading events...</li>
+  </ul>
+</div>
+</div>
+
+<script>
+const POLL_MS = 2000;
+
+function statusClass(s) { return 'status status-' + s; }
+
+function kindEmoji(k) {
+  if (!k) return '';
+  const m = { idea: '\u{1F4A1}', task: '\u{1F527}', decision: '\u{1F4D0}', issue: '\u{1F41B}', signal: '\u{26A1}', deliberation: '\u{1F9E0}' };
+  return (m[k] || '') + ' ' + k;
+}
+
+function livenessTooltip(m) {
+  return 'state.json: ' + m.status + '\nworker live: ' + (m.worker_live || 'n/a');
+}
+
+function livenessRowClass(l) {
+  if (l === 'zombie') return 'liveness-zombie';
+  if (l === 'mismatch') return 'liveness-mismatch';
+  return '';
+}
+
+function livenessBadge(m) {
+  var l = m.liveness || 'unknown';
+  var tip = livenessTooltip(m);
+  return '<span class="liveness-badge ' + l + '" title="' + tip + '">' + l + '</span>';
+}
+
+function relTime(iso) {
+  const d = new Date(iso);
+  const s = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+
+async function refresh() {
+  try {
+    const [molRes, fleetRes] = await Promise.all([
+      fetch('/api/molecules'),
+      fetch('/api/fleet'),
+    ]);
+    if (!molRes.ok || !fleetRes.ok) throw new Error('HTTP ' + molRes.status);
+    const mols = await molRes.json();
+    const fleet = await fleetRes.json();
+
+    document.getElementById('error').style.display = 'none';
+
+    // Fleet stats
+    const fl = document.getElementById('fleet');
+    fl.innerHTML =
+      '<div class="stat"><div class="label">Workers</div><div class="value">' + fleet.worker_count + '</div></div>' +
+      '<div class="stat"><div class="label">Repos</div><div class="value">' + fleet.repo_count + '</div></div>' +
+      '<div class="stat"><div class="label">Molecules</div><div class="value">' + mols.length + '</div></div>';
+
+    // Molecules table — sort by urgency: zombie > mismatch > running > rest
+    function urgencyRank(m) {
+      if (m.liveness === 'zombie') return 0;
+      if (m.liveness === 'mismatch') return 1;
+      if (m.status === 'running') return 2;
+      return 3;
+    }
+    mols.sort(function(a, b) {
+      var d = urgencyRank(a) - urgencyRank(b);
+      if (d !== 0) return d;
+      return (b.updated_at || '').localeCompare(a.updated_at || '');
+    });
+    const tbody = document.getElementById('molecules');
+    tbody.innerHTML = mols.map(function(m) {
+      return '<tr class="' + livenessRowClass(m.liveness) + '">' +
+        '<td><a href="/api/molecules/' + encodeURIComponent(m.id) + '">' + m.id + '</a></td>' +
+        '<td class="kind">' + kindEmoji(m.kind) + '</td>' +
+        '<td><span class="' + statusClass(m.status) + '">' + m.status + '</span></td>' +
+        '<td>' + m.formula + '</td>' +
+        '<td class="progress">' + m.current_step + '/' + m.total_steps + '</td>' +
+        '<td>' + (m.worker || '\u{2014}') + '</td>' +
+        '<td>' + livenessBadge(m) + '</td>' +
+        '<td>' + relTime(m.updated_at) + '</td>' +
+        '</tr>';
+    }).join('');
+
+    document.getElementById('last-update').textContent = new Date().toLocaleTimeString();
+  } catch (e) {
+    var el = document.getElementById('error');
+    el.textContent = 'Poll error: ' + e.message;
+    el.style.display = 'block';
+  }
+}
+
+refresh();
+setInterval(refresh, POLL_MS);
+
+// ── Selfcheck / calibration LED ─────────────────────────────────────
+var selfcheckVisible = false;
+
+function toggleSelfcheckPanel() {
+  selfcheckVisible = !selfcheckVisible;
+  document.getElementById('selfcheck-panel').className =
+    'selfcheck-panel' + (selfcheckVisible ? ' visible' : '');
+}
+
+async function refreshSelfcheck() {
+  try {
+    var res = await fetch('/api/selfcheck');
+    if (!res.ok) return;
+    var data = await res.json();
+    var dot = document.getElementById('cal-dot');
+    var label = document.getElementById('cal-label');
+    var led = document.getElementById('cal-led');
+
+    if (!data.latest) {
+      dot.className = 'dot gray';
+      label.textContent = 'calibrating...';
+      led.setAttribute('aria-label', 'System calibration status: calibrating');
+      return;
+    }
+
+    if (data.calibrated) {
+      dot.className = 'dot green';
+      label.textContent = 'calibrated';
+      led.setAttribute('aria-label', 'System calibration status: calibrated');
+    } else {
+      dot.className = 'dot red';
+      label.textContent = 'DRIFT';
+      led.setAttribute('aria-label', 'System calibration status: drift detected');
+    }
+
+    // Render panel
+    if (selfcheckVisible) {
+      var panel = document.getElementById('selfcheck-panel');
+      var obs = data.latest.observables || [];
+      var rows = obs.map(function(o) {
+        var cls = o.agrees ? 'agree' : 'disagree';
+        return '<tr><td>' + o.name + '</td><td class="' + cls + '">' +
+          o.dashboard + '</td><td class="' + cls + '">' + o.oracle +
+          '</td><td class="' + cls + '">' + (o.agrees ? 'OK' : 'DRIFT') + '</td></tr>';
+      }).join('');
+      panel.innerHTML = '<h3>Selfcheck</h3>' +
+        '<p>Checked: ' + new Date(data.latest.checked_at).toLocaleTimeString() +
+        ' | History: ' + data.drift_history_len + '/100</p>' +
+        '<table><tr><th>Observable</th><th>Dashboard</th><th>Oracle</th><th></th></tr>' +
+        rows + '</table>';
+    }
+  } catch (e) { /* selfcheck poll failure is non-fatal */ }
+}
+
+refreshSelfcheck();
+setInterval(refreshSelfcheck, 5000);
+
+// ── Event-log tail side panel ───────────────────────────────────────
+var EVENT_ICONS = {
+  molecule_nucleated: '\u{2728}',   // ✨ sparkles — birth
+  molecule_evolved: '\u{1F52C}',    // 🔬 microscope — step advance
+  molecule_completed: '\u{2705}',   // ✅ check — done
+  molecule_collapsed: '\u{1F4A5}',  // 💥 collision — failure
+  molecule_frozen: '\u{2744}\u{FE0F}', // ❄️ snowflake — frozen
+  molecule_thawed: '\u{2600}\u{FE0F}', // ☀️ sun — thawed
+  molecule_decayed: '\u{1F300}',    // 🌀 cyclone — decay
+  molecule_merged: '\u{1F517}',     // 🔗 link — merge
+  molecule_transformed: '\u{1F504}',// 🔄 arrows — transform
+  molecule_transitioned: '\u{27A1}\u{FE0F}', // ➡️ arrow — transition
+  molecule_dispatched: '\u{1F4E8}', // 📨 incoming envelope — dispatch
+  step_completed: '\u{1F4CB}',     // 📋 clipboard — step done
+  worker_spawned: '\u{1F680}',     // 🚀 rocket — spawn
+  worker_terminated: '\u{1F6D1}',  // 🛑 stop — terminated
+  worker_frozen: '\u{2744}\u{FE0F}', // ❄️ snowflake
+  worker_thawed: '\u{2600}\u{FE0F}', // ☀️ sun
+  worker_preempted: '\u{26A0}\u{FE0F}', // ⚠️ warning
+  worker_killed: '\u{1F480}',      // 💀 skull — killed
+  worker_respawned: '\u{1F501}',   // 🔁 repeat — respawned
+  task_dispatched: '\u{1F4E4}',    // 📤 outbox — task sent
+  intent_declared: '\u{1F441}\u{FE0F}', // 👁️ eye — intent
+  error_occurred: '\u{274C}'       // ❌ cross — error
+};
+
+function eventIcon(kind) {
+  return EVENT_ICONS[kind] || '\u{1F4AC}'; // 💬 default
+}
+
+async function refreshEvents() {
+  try {
+    var res = await fetch('/api/events?limit=5');
+    if (!res.ok) return;
+    var events = await res.json();
+    var list = document.getElementById('event-list');
+    if (!events.length) {
+      list.innerHTML = '<li class="event-empty">No events yet</li>';
+      return;
+    }
+    list.innerHTML = events.map(function(e) {
+      return '<li class="event-item">' +
+        '<span class="event-icon">' + eventIcon(e.kind) + '</span>' +
+        '<div class="event-body">' +
+          '<div class="event-summary">' + escapeHtml(e.summary) + '</div>' +
+          '<div class="event-time">' + relTime(e.timestamp) + '</div>' +
+        '</div>' +
+        '</li>';
+    }).join('');
+  } catch (e) { /* event poll failure is non-fatal */ }
+}
+
+function escapeHtml(s) {
+  var d = document.createElement('div');
+  d.appendChild(document.createTextNode(s));
+  return d.innerHTML;
+}
+
+refreshEvents();
+setInterval(refreshEvents, POLL_MS);
+
+// ── Spark input ──────────────────────────────────────────────────────
+document.getElementById('spark-input').addEventListener('keydown', async function(e) {
+  if (e.key !== 'Enter') return;
+  var text = this.value.trim();
+  if (!text) return;
+  var status = document.getElementById('spark-status');
+  status.textContent = 'Sparking...';
+  status.style.color = 'var(--dim)';
+  this.disabled = true;
+  try {
+    var res = await fetch('/api/spark', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: text})
+    });
+    var data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Unknown error');
+    status.textContent = 'Sparked!';
+    status.style.color = 'var(--green)';
+    this.value = '';
+    // Prepend row to table with glow animation
+    var m = data;
+    var tbody = document.getElementById('molecules');
+    var tr = document.createElement('tr');
+    tr.className = 'row-glow';
+    tr.innerHTML =
+      '<td><a href="/api/molecules/' + encodeURIComponent(m.id) + '">' + m.id + '</a></td>' +
+      '<td class="kind">' + kindEmoji(m.kind) + '</td>' +
+      '<td><span class="' + statusClass(m.status || 'pending') + '">' + (m.status || 'pending') + '</span></td>' +
+      '<td>' + (m.formula || '\u{2014}') + '</td>' +
+      '<td class="progress">' + (m.current_step || 0) + '/' + (m.total_steps || 0) + '</td>' +
+      '<td>\u{2014}</td>' +
+      '<td>' + livenessBadge(m) + '</td>' +
+      '<td>0s ago</td>';
+    tbody.insertBefore(tr, tbody.firstChild);
+    setTimeout(function() { status.textContent = ''; }, 2000);
+  } catch (err) {
+    status.textContent = err.message;
+    status.style.color = 'var(--red)';
+  } finally {
+    this.disabled = false;
+    this.focus();
+  }
+});
+
+// ── GridCo Voice Narration ─────────────────────────────────────────
+var voiceEnabled = false;
+var voiceQueue = [];
+var voiceSpeaking = false;
+var previousMolStates = {};
+
+function toggleVoice() {
+  voiceEnabled = !voiceEnabled;
+  var el = document.getElementById('voice-toggle');
+  var icon = document.getElementById('speaker-icon');
+  var label = document.getElementById('voice-label');
+  if (voiceEnabled) {
+    el.classList.add('active');
+    el.setAttribute('aria-pressed', 'true');
+    icon.innerHTML = '\u{1F50A}';
+    label.textContent = 'voice on';
+  } else {
+    el.classList.remove('active');
+    el.setAttribute('aria-pressed', 'false');
+    icon.innerHTML = '\u{1F507}';
+    label.textContent = 'muted';
+    voiceQueue = [];
+  }
+}
+
+function enqueueNarration(text) {
+  if (!voiceEnabled) return;
+  voiceQueue.push(text);
+  processVoiceQueue();
+}
+
+async function processVoiceQueue() {
+  if (voiceSpeaking || voiceQueue.length === 0) return;
+  voiceSpeaking = true;
+  var text = voiceQueue.shift();
+  try {
+    var res = await fetch('/api/voice/speak', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: text})
+    });
+    if (res.ok) {
+      var blob = await res.blob();
+      var url = URL.createObjectURL(blob);
+      var audio = new Audio(url);
+      audio.onended = function() {
+        URL.revokeObjectURL(url);
+        voiceSpeaking = false;
+        processVoiceQueue();
+      };
+      audio.onerror = function() {
+        URL.revokeObjectURL(url);
+        voiceSpeaking = false;
+        processVoiceQueue();
+      };
+      audio.play().catch(function() {
+        voiceSpeaking = false;
+        processVoiceQueue();
+      });
+    } else {
+      voiceSpeaking = false;
+      processVoiceQueue();
+    }
+  } catch (e) {
+    voiceSpeaking = false;
+    processVoiceQueue();
+  }
+}
+
+function detectStateChanges(mols) {
+  var narratives = [];
+  var currentStates = {};
+  mols.forEach(function(m) {
+    currentStates[m.id] = { status: m.status, step: m.current_step };
+    var prev = previousMolStates[m.id];
+    if (!prev) {
+      // New molecule appeared
+      narratives.push('New ' + (m.kind || 'molecule') + ' nucleated: ' + m.id.replace(/^task-/, ''));
+    } else if (prev.status !== m.status) {
+      narratives.push('Molecule ' + m.id.replace(/^task-/, '') + ' transitioned to ' + m.status);
+    } else if (prev.step !== m.current_step) {
+      narratives.push('Molecule ' + m.id.replace(/^task-/, '') + ' advanced to step ' + m.current_step);
+    }
+  });
+  previousMolStates = currentStates;
+  return narratives;
+}
+
+// Patch the refresh function to detect state changes
+var _originalRefresh = refresh;
+refresh = async function() {
+  var prevIds = Object.keys(previousMolStates);
+  await _originalRefresh();
+  // After refresh, re-fetch molecules to detect changes
+  try {
+    var res = await fetch('/api/molecules');
+    if (res.ok) {
+      var mols = await res.json();
+      // Only narrate after we have a baseline (skip first load)
+      if (prevIds.length > 0) {
+        var narratives = detectStateChanges(mols);
+        narratives.forEach(function(n) { enqueueNarration(n); });
+      } else {
+        // Initialize baseline without narrating
+        mols.forEach(function(m) {
+          previousMolStates[m.id] = { status: m.status, step: m.current_step };
+        });
+      }
+    }
+  } catch (e) { /* non-fatal */ }
+};
+</script>
+</body>
+</html>

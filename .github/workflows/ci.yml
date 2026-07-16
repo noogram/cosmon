@@ -1,0 +1,509 @@
+name: CI
+
+# All third-party Actions pinned by 40-char commit SHA (delib-20260425-39c1).
+# Tag-mutable references (@v4, @stable, @v2) are FORBIDDEN — re-pin via
+# `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` before bumping.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 4 * * *'
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  sovereignty:
+    name: Sovereignty gate (avatar-tenant-demo bundle)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # Post-merge backstop over the customer-traveling dist/avatar-tenant-demo/
+      # bundle (also wired into build.sh + handoff.sh, on the same git-tracked
+      # byte-set). Three mechanisms (spec: scripts/sovereignty-spec.md, authored
+      # by the rounds 3-5 review panel):
+      #  1. DENY-class (hard, fails CI) — shaped classes + known-identity
+      #     literals: molecule ids, branch/worktree names, tailnet hosts,
+      #     operator paths, emails, dates, IPv4, the known operator/fund/galaxy
+      #     names.
+      #  2. RESOLVABILITY (hard, fails CI) — the generative rule that replaced
+      #     the old per-shape citation classes (ADR/§ → source paths → bead
+      #     codes, each chased one round late): every path-like/citation-like
+      #     reference MUST resolve to a bundle file, a public URL, or a public
+      #     standard; a dangling pointer into cosmon's private corpus is denied
+      #     the moment it appears, whatever its next lexical shape.
+      #  3. WARN (advisory) — unknown vocabulary absent from
+      #     scripts/sovereignty-allowlist.txt, the net for the NEXT proper noun.
+      - run: ./scripts/sovereignty-gate.sh
+
+  confidentiality:
+    name: Confidentiality banlist (publishable surface)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # Operator/fund identity tripwire ([B1′: R5], B1′ doc-modernization plan
+      # §6-P0). Hard gate over the PUBLISHABLE surface only — the rendered mdBook
+      # source (docs/book/src/), README, LICENSE/NOTICE, i.e. exactly the byte-set
+      # that becomes the public docs.noogram.org site + the public repo front matter.
+      # Clean today; a RE-LEAK of an operator/fund term onto that surface fails CI.
+      # The whole-repo audit (`--whole-repo`) covering the INTERNAL corpus (ADRs,
+      # lore) is intentionally NOT wired here: it is the pre-public-flip gate the
+      # operator runs before the scrub (§6-P5), and would false-red the private
+      # repo's own legitimate internal history. Promote it to a hard gate only
+      # AFTER that scrub lands. Single source of the banlist: the script itself.
+      - run: ./scripts/confidentiality-banlist.sh
+      - run: ./scripts/confidentiality-banlist.test.sh
+
+  docs-one-gate:
+    name: Docs one-gate (tool surface = stranger-installable)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # The "one gate" docs-lint (ADR-149 §4 / ADR-126, delib-20260711-8d00 C4).
+      # A public doc surface for a tool — a nav title, a section heading, or a
+      # /<tool>/install.sh endpoint — exists IFF a stranger can install it
+      # (public repo + release artifact). One rule, two constraints: it fails on
+      # the confidential neurion PRODUCT surfacing as a section/nav/endpoint
+      # (anti-leak) AND on a premature tool acquiring an install endpoint before
+      # it ships (anti-vaporware). Complementary to the confidentiality banlist
+      # above (which bans operator/fund IDENTITY terms). Hard on every PR; pure
+      # bash + git grep over docs/book/src. Single source of the tool
+      # classification: the script itself.
+      - run: ./scripts/check-docs-one-gate.sh
+      - run: ./scripts/check-docs-one-gate.test.sh
+      # Local targets and heading fragments are a hard, offline review gate.
+      # Remote probes only warn: external availability is not reproducible CI
+      # state, but a dead URL or a specific path redirected to a site home is
+      # still surfaced for the reviewer.
+      - run: ./scripts/check-book-links.sh
+      - run: ./scripts/check-book-links.test.sh
+
+  fixture-independence:
+    name: Fixture independence (tautological-fixture tripwire)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      # Tautological-fixture tripwire (delib-20260710-95a7 §Q6, DoD gate a). A
+      # fixture that re-derives its expected value from size_of/align_of/offset_of
+      # of the type under test is a tautology — a layout bug flows into both sides
+      # of the assert, so reverting the bug cannot redden the test. Fast, pure
+      # bash+git grep over the tracked test surface; hard on every PR (reuses the
+      # B2 command-gate mechanism, no cosmon-core change). Single source of the
+      # rule + opt-out marker: the script itself.
+      - run: ./scripts/check-fixture-independence.sh
+      - run: ./scripts/check-fixture-independence.test.sh
+
+  mutation-falsifier:
+    name: Mutation falsifier (nightly, advisory)
+    # DoD gate b — the "reverting the fix must redden the test" gate
+    # (delib-20260710-95a7 §Q6). Mutation testing is SLOW (ADR-010:177): it
+    # rebuilds the workspace once per mutant. It therefore runs ONLY on the
+    # nightly cron, NEVER on the PR fast lane, and NEVER as a hard-abort
+    # (feynman) — `continue-on-error` makes a surviving mutant a reported test
+    # hole, not a red merge gate. Scoped to cosmon-core (the 90%-coverage,
+    # invariant-heavy crate) to stay bounded; widen via --package / --whole-tree
+    # as CI capacity allows.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+      - name: Falsifier preflight (cargo-mutants available)
+        run: ./scripts/mutation-falsifier.sh --check
+      - name: Mutate cosmon-core (advisory — surviving mutants are reported holes)
+        continue-on-error: true
+        run: ./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core --timeout 180
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - run: cargo clippy --workspace --locked -- -D warnings
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # T-CST-PARITY: the cs ↔ cs-thin parity test in
+      # `crates/cosmon-thin-cli/tests/parity_with_cs.rs` exec's the cs
+      # binary as a subprocess. `cargo test --workspace` does not build
+      # binaries by default, so we explicitly build cs first; the test's
+      # `find_cs_binary()` then resolves it from `target/debug/cs`.
+      # See docs/guides/cs-thin-parity.md §CI for the rationale.
+      - name: Build cs binary (parity gate prerequisite)
+        run: cargo build --bin cs -p cosmon-cli --locked
+      - run: cargo test --workspace --locked
+
+  # NOTE: the `llama-mock` job was removed in the pre-publication scope trim
+  # (delib-20260622-187a B1 / ADR-126). It tested the in-process llama.cpp
+  # wrapper (`cargo test -p cosmon-llama --features mock-ffi`), but the
+  # `cosmon-llama` / `cosmon-llama-sys` crates and the `mock-ffi` feature on
+  # `cosmon-provider` were all git-rm'd — the job could only fail on an
+  # unknown package / unknown feature. A Rust-native local-model path will be
+  # reconsidered separately (see crates/cosmon-provider/Cargo.toml NOTE).
+
+  cosmon-without-neurion:
+    # Mandatory blocking gate — delib-20260418-1f29 outcomes.md Child C.
+    # Runs the cosmon substrate tests with PATH stripped of any neurion
+    # binary so any drift back toward neurion-coupled discovery breaks
+    # the build. Mirrors `just test-without-neurion`. See
+    # docs/architectural-invariants.md §7c (Markov property /
+    # restart-fidelity) and docs/CONTRIBUTING.md.
+    name: cosmon-without-neurion (mandatory)
+    runs-on: ubuntu-latest
+    needs: test
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Install just
+        uses: taiki-e/install-action@e0475f5c1b710607c5f74c0e9f71a9d5f0b62aa5  # just
+      - name: Run gate (PATH-stripped)
+        run: just test-without-neurion
+
+  spec-conformance:
+    # Proptest refuter for docs/specs/CosmonRun.tla — ADR-052 / delib-ffc6
+    # Chantier 1. Runs on every PR with PROPTEST_CASES=256 (~20s budget).
+    # Nightly deep-suite (50 000 cases) lives in spec-conformance-deep.
+    name: Spec conformance (CosmonRun.tla / PR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Proptest against TLA+ action alphabet
+        env:
+          PROPTEST_CASES: "256"
+          PROPTEST_MAX_SHRINK_ITERS: "4096"
+        run: cargo test -p cosmon-core --release --test spec_conformance --locked
+      - name: Upload regressions on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: proptest-regressions
+          path: crates/cosmon-core/proptest-regressions/
+          retention-days: 30
+
+  spec-conformance-deep:
+    # Nightly deep-suite — only runs on the cron schedule. Uses
+    # PROPTEST_CASES=50000 and `-- --ignored` to pick up the large
+    # trace-length test in tests/spec_conformance.rs.
+    name: Spec conformance (nightly, 50k cases)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Deep proptest sweep (nightly)
+        env:
+          PROPTEST_CASES: "50000"
+        run: cargo test -p cosmon-core --release --test spec_conformance --locked -- --ignored
+      - name: Upload regressions on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: proptest-regressions-nightly
+          path: crates/cosmon-core/proptest-regressions/
+          retention-days: 30
+
+  typed-links-conformance:
+    # Proptest refuter for MoleculeLink structural invariants — task f214.
+    # Runs on every PR with PROPTEST_CASES=256. Covers S1..S5:
+    # symmetric Blocks / no cycle / decay monotonicity / entangled symmetry
+    # / decay chain finite. See crates/cosmon-core/tests/typed_links_conformance.rs.
+    name: Typed links conformance (MoleculeLink / PR)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Proptest over MoleculeLink invariants
+        env:
+          PROPTEST_CASES: "256"
+          PROPTEST_MAX_SHRINK_ITERS: "4096"
+        run: cargo test -p cosmon-core --release --test typed_links_conformance --locked
+      - name: Upload regressions on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: proptest-regressions-typed-links
+          path: crates/cosmon-core/proptest-regressions/
+          retention-days: 30
+
+  typed-links-conformance-deep:
+    # Nightly deep sweep for the MoleculeLink invariants — 50 000 cases,
+    # picks up the `#[ignore]` deep test in typed_links_conformance.rs.
+    name: Typed links conformance (nightly, 50k cases)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Deep proptest sweep (nightly)
+        env:
+          PROPTEST_CASES: "50000"
+        run: cargo test -p cosmon-core --release --test typed_links_conformance --locked -- --ignored
+      - name: Upload regressions on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: proptest-regressions-typed-links-nightly
+          path: crates/cosmon-core/proptest-regressions/
+          retention-days: 30
+
+  doc:
+    name: Documentation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - run: cargo doc --workspace --no-deps --locked
+
+  assert-guard:
+    name: Assert Guard
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+      - name: Check for removed test assertions
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+
+          # Match removed lines containing Rust test assertions
+          PATTERN='^\-.*\b(assert!|assert_eq!|assert_ne!|debug_assert!|debug_assert_eq!|debug_assert_ne!|#\[should_panic)'
+
+          REMOVED=$(git diff "$BASE".."$HEAD" -- '*.rs' | grep -P "$PATTERN" || true)
+
+          if [ -n "$REMOVED" ]; then
+            echo "::warning::Test assertions were removed in this PR. Review required."
+            echo ""
+            echo "The following assertion lines were removed:"
+            echo "$REMOVED"
+            echo ""
+            echo "If these removals are intentional, add 'assert-guard: reviewed' to the PR description."
+
+            # Check if PR description contains the override marker
+            PR_BODY="${{ github.event.pull_request.body }}"
+            if echo "$PR_BODY" | grep -q 'assert-guard: reviewed'; then
+              echo ""
+              echo "Override marker found in PR description. Proceeding."
+              exit 0
+            fi
+
+            exit 1
+          fi
+
+          echo "No test assertions removed. ✓"
+
+  spawn-matrix:
+    name: Spawn matrix (fake tmux + claude)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Build cs binary
+        run: cargo build --bin cs -p cosmon-cli --locked
+      - name: Run spawn matrix
+        env:
+          MATRIX_OUTDIR: matrix-artifacts
+        run: bash tests/harness/run_matrix.sh
+      - name: Upload matrix artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: spawn-matrix-artifacts
+          path: matrix-artifacts/
+          retention-days: 7
+
+  cross-adapter-smoke:
+    # Tier-2 cross-Adapter integration tests (ADR-098 / C8). Requires
+    # the real `claude` and `aider` binaries on PATH plus tmux; runs
+    # only on the nightly cron schedule and is non-blocking
+    # (continue-on-error: true). The 90-day forensic gate (C9) consumes
+    # the resulting events.jsonl, not the per-run pass/fail.
+    name: Cross-Adapter smoke (requires aider + claude binaries)
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Tier-2 smoke (real binaries; #[ignore]-gated)
+        run: cargo test -p cosmon-transport --locked -- --ignored cross_adapter
+
+  restart-fidelity-without-neurion:
+    # Mandatory gate against Universe D paradigm drift
+    # (delib-20260418-8166). Runs the integration test that exercises a
+    # multi-molecule DAG trajectory under a sandboxed HOME with no
+    # neurion service, no LaunchAgent, and no external scheduler — the
+    # operative version of the Markov property
+    # (docs/architectural-invariants.md §7c).
+    #
+    # If this job fails, do NOT merge to bypass it. Either fix the
+    # regression or raise a successor ADR explaining why cosmon should
+    # no longer be required to run standalone.
+    name: Restart fidelity without neurion
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Run the standalone restart-fidelity gate
+        # Strip every NEURION_* env that may leak from the runner image
+        # so the gate cannot pass for the wrong reason. The test re-
+        # exports a sandboxed NEURION_AUTO_REGISTER_FILE per-invocation.
+        env:
+          NEURION_SOCKET: ""
+          NEURION_DB_PATH: ""
+        run: cargo test -p cosmon-cli --test restart_fidelity_no_neurion --locked
+
+  smoke-lifecycle:
+    name: Lifecycle smoke (nucleate → done)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Build cs binary
+        run: cargo build --bin cs -p cosmon-cli --locked
+      - name: Run full-lifecycle smoke suite
+        env:
+          SMOKE_OUTDIR: smoke-artifacts
+        run: bash tests/harness/smoke/run_all.sh
+      - name: Upload smoke artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: smoke-lifecycle-artifacts
+          path: |
+            target/smoke-*/
+            smoke-artifacts/
+          retention-days: 7
+
+  provenance-gate:
+    name: Provenance gate (ADR-052 §I9)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+      - name: Validate merge commits against ledger
+        run: bash scripts/check-provenance.sh
+      - name: Self-test the gate against the c1cb pathology
+        run: bash tests/harness/provenance-gate-test.sh
+
+  license-partition:
+    # Living per-crate license table gate. The script in
+    # scripts/license-table.sh walks every crates/*/Cargo.toml,
+    # resolves the effective license, and:
+    #   - fails if a Cargo.toml declares anything other than
+    #     AGPL-3.0-only or Apache-2.0 (someone invented a third licence);
+    #   - fails if a crate has no row in scripts/license-rationales.tsv
+    #     (a new crate was added without applying the ADR-092 §3
+    #     placement test);
+    #   - fails if docs/license/INDEX.md is stale relative to the
+    #     workspace + mapping (drift between code and doc).
+    # Operator fix: bash scripts/license-table.sh --write.
+    # See ADR-092 + docs/license/INDEX.md.
+    name: License partition consistent
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Per-crate license partition (script + doc + Cargo.toml)
+        run: bash scripts/license-table.sh --check
+
+  # NOTE: the `matrix-bridge-isolation` job was removed in the pre-publication
+  # scope trim (delib-20260622-187a B1 / ADR-126). It guarded the read-only
+  # ingress discipline of `crates/cosmon-matrix-tick`, which was git-rm'd; the
+  # forbid-matrix-*.sh scripts only no-op'd over an absent crate. Restore the
+  # job together with the crate if the Matrix bridge is ever re-introduced.
+
+  # NOTE: README quickstart verification lives in its own workflow at
+  # .github/workflows/readme-quickstart.yml — it runs on both Ubuntu and
+  # macOS and executes the full bootstrap end-to-end.
+  #
+  # NOTE: cargo-deny + cargo-audit have been moved to
+  # .github/workflows/deny.yml (supply-chain gate, runs on push/PR/schedule).

@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Verify an existing seal — full Ed25519 + canonical commitment bytes
+
+Usage: cs notarize verify [OPTIONS] <PATH>
+
+Arguments:
+  <PATH>  Path to a seal JSON file (e.g. `<mol_dir>/mint.json` or `theater/pitch-*/notary/slides.notarization.json`)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

@@ -1,0 +1,88 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Scope: supply-chain hygiene for the cosmon workspace. Enforced in CI by
+# .github/workflows/deny.yml. Run locally via `cargo deny check`.
+
+[advisories]
+version = 2
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+# Each `ignore` entry is a *temporary* exception. The reason field carries
+# the rationale and the upstream crate that needs replacing. Removing an
+# entry without the upstream fix re-fails this gate, which is the desired
+# back-pressure: the gate should be loud about pending debt.
+ignore = [
+    # tui-markdown 0.3.7 → syntect 5.3 → bincode 1.3.3 (unmaintained).
+    # Track upstream syntect migration to bincode 2.x.
+    { id = "RUSTSEC-2025-0141", reason = "transitive via tui-markdown→syntect→bincode 1.x; awaiting syntect bump" },
+    # tui-markdown 0.3.7 → syntect 5.3 → yaml-rust (unmaintained, no upgrade path).
+    # syntect upstream tracks the migration to yaml-rust2.
+    { id = "RUSTSEC-2024-0320", reason = "transitive via tui-markdown→syntect→yaml-rust; upstream migration to yaml-rust2 pending" },
+    # paste (proc-macro, unmaintained) — now pulled via ratatui→paste (and
+    # ansi-to-tui→ratatui) in cosmon-cli. The old candle-core→gemm→paste path
+    # was git-rm'd with the voice bridge (ADR-126), but the advisory still fires
+    # through ratatui; track ratatui dropping the paste proc-macro. (Do NOT
+    # delete this entry: removing it re-surfaces the live advisory.)
+    { id = "RUSTSEC-2024-0436", reason = "transitive via ratatui→paste proc-macro (ex-candle path removed, ADR-126); awaiting ratatui bump" },
+    # rand 0.9 (unsound only under a custom logger) — now pulled via
+    # proptest→rand in cosmon-fuzz, not the removed candle stack. We never
+    # install a custom logger, so the unsoundness is not reachable from cosmon
+    # code paths. (Do NOT delete: proptest still pulls rand 0.9.)
+    { id = "RUSTSEC-2026-0097", reason = "transitive via proptest→rand 0.9 in cosmon-fuzz (ex-candle path removed, ADR-126); custom-logger unsoundness not reachable" },
+    # ratatui 0.29 → lru 0.12 (Stacked Borrows IterMut bug). We never iter_mut
+    # this LRU; track ratatui upgrade once a fixed lru lands upstream.
+    { id = "RUSTSEC-2026-0002", reason = "transitive via ratatui→lru 0.12; iter_mut not exercised in cosmon code paths" },
+]
+
+[licenses]
+version = 2
+# Open-core workspace (ADR-092 + operator decision delib-20260620-ca76):
+#   - cosmon core / persistence / runtime / agent-engine / cockpit /
+#     federation server: AGPL-3.0-only (the kernel is the moat).
+#   - cosmon pure network SDK (thin-cli, thin-macro, client) + vendored
+#     third-party / sibling-galaxy crates: Apache-2.0.
+# This allow-list is the FIRST license gate: `cargo deny check licenses`
+# fails on any crate whose license is not listed below. Two further gates
+# live alongside it (.github/workflows/deny.yml → license-gate job):
+#   - scripts/license-table.sh --check       (per-crate partition coherence)
+#   - scripts/license-network-boundary.py    (no Apache crate code-links AGPL)
+# Third-party transitive dependencies remain on permissive licences only.
+# AGPL-3.0-only is allowed *for our own first-party crates*; cargo-deny will
+# happily admit it because it is in the allow-list, but we never pull an
+# AGPL-3.0-only crate from crates.io into our dependency closure.
+allow = [
+    "AGPL-3.0-only",
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    # CDLA-Permissive-2.0 — permissive open-data license used by
+    # webpki-roots (Mozilla CA bundle). Distributable, no copyleft.
+    "CDLA-Permissive-2.0",
+]
+unused-allowed-license = "allow"
+confidence-threshold = 0.8
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+# Deny copyleft / viral licenses on runtime dependencies. Licenses
+# not in the `[licenses].allow` list above are already rejected, but
+# listing explicit deny here is defence-in-depth against accidental
+# allow-list expansion.
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

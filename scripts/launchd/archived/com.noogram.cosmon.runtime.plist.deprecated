@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  DEPRECATED — historical witness only. Do not install.
+
+  Origin: task-20260517-ee24 shipped this template at
+    packaging/launchd/com.noogram.cosmon.runtime.plist
+  as the install canal for the ADR-095 Resident Runtime. It bypassed
+  three established cosmon conventions:
+
+    (a) Namespace. cosmon uses `com.cosmon.*` (com.cosmon.scheduler,
+        com.cosmon.daemon-supervisor). The `com.noogram.*` namespace
+        is not registered on the operator's machine.
+
+    (b) Daemon canal. The established cosmon-orbit daemon-management
+        layer is `~/.config/cosmon/daemons.toml`, supervised by
+        cosmon-daemon-supervisor (ADR-053). Every long-running cosmon
+        peer (notification-bot, incredibles-bot, notification-bot,
+        emacs-daemon, zotero/almanac, archive-service, dashboard) is declared
+        there. The supervisor hot-reloads on file save, owns the
+        throttle / kill-switch / log discipline, and replaces N
+        per-daemon plists with one TOML.
+
+    (c) Install ritual. "Add a [[daemon]] block to daemons.toml + save"
+        is the established ritual. The launchctl bootstrap + sed
+        substitution flow this template encoded is the very pathology
+        ADR-053 was written to retire.
+
+  ADR-095 §5 (rewritten by task-20260518-b420) now points at the
+  daemon-supervisor canal. The canonical install template is in
+    docs/guides/install-resident-runtime.md
+  as a `[[daemon]]` block to paste into
+    ~/.config/cosmon/daemons.toml
+  with `enabled = false` until the operator flips it.
+
+  This file is retained only so a future archaeologist can trace why
+  the misroute happened (Layer 3 of the cosmon-runtime three-layer
+  bug — task-8429 / task-eb67 / task-b420).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.noogram.cosmon.runtime</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/cs</string>
+        <string>run</string>
+        <string>--resident</string>
+        <string>--poll-interval</string>
+        <string>2</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__WORKING_DIRECTORY__</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-runtime.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-runtime.err</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+        <key>COSMON_RUNTIME_ACTIVE</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

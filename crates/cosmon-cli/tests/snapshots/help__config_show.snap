@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show resolved configuration for a topic (currently: `adapters`)
+
+Usage: cs config show [OPTIONS] <COMMAND>
+
+Commands:
+  adapters  Print the effective `[adapters.*]` resolution for Direct-API adapters (`openai`, `anthropic`)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

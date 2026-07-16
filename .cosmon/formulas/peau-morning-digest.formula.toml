@@ -1,0 +1,719 @@
+formula = "peau-morning-digest"
+version = 1
+description = """
+PEAU — the morning ritual of cosmon-incarné v0.
+
+Reads the operator's overnight attention surface from mailroom \
+(`sec_today --json --since 24h` + `sec_attention --json`) and \
+cosmon's own overnight curation output (`curate-patrol`'s \
+`surfaced.md`), dedupes against an ever-growing seen-ledger, applies \
+operator-owned per-sender/per-keyword triage rules, and writes a \
+single dated brief at `~/.cosmon/state/morning/<YYYY-MM-DD>.md` with \
+**≤ 3 verdict-door tiles** for the operator's 07:15–07:35 kitchen \
+window. For each tile that asks for a reply, pre-drafts a candidate \
+response as `~/.cosmon/state/morning/<YYYY-MM-DD>.drafts/<tile_id>.md` \
+(operator-templated snippets in v0 — NOT LLM-generated; LLM drafts \
+defer until Rung 2 after `SOUL.md` ships, per delib-20260521-955f \
+synthesis §6 T3).
+
+WHY THE NAME — wheeler proposed `ingest`; the panel kept the \
+anatomical `peau` for spoken/prose register (karpathy's *two \
+registers, one mapping*, C-9) and `peau-morning-digest` as the \
+verb-named formula file. The morning brief is the *one ritual* \
+(§5.1) that makes v0 felt-as-alive without dragging four other \
+organs into the kitchen window.
+
+GENESIS — parent deliberation `delib-20260521-955f`, synthesis \
+§5.1–§5.2. *"Le matin, cosmon t'apporte ce qui t'attend — et il l'a \
+déjà rangé."* (jobs). See sibling tasks: `task-20260522-1f6b` \
+(v0-baseline ADR), `task-20260522-069b` (typed-provenance \
+invariants — §-causal-attribution + §8m), `task-20260522-34e4` \
+(`voix-reply` draft-only sibling formula), `task-20260522-55a8` \
+(jr's vital-strip render in `cs peek`).
+
+ARTIFACT PATHS — TWO DESTINATIONS by design:
+
+  (a) MOLECULE STATE DIRECTORY — resolved from \
+      `cs --json observe {this_mol_id}` (`molecule_dir` field). \
+      Receives audit artefacts: `raw/<date>.ndjson`, \
+      `dedupe-summary.md`, `triage-summary.md`, `write-summary.md`, \
+      `abort.log` (if kill-switch fired). These are the per-run trail \
+      and are destroyed by `cs done` ONLY if the molecule itself is \
+      torn down (the per-run molecule is ephemeral; the durable state \
+      lives at paths (b) and (c) below).
+
+  (b) USER-HOME DURABLE STATE — `~/.cosmon/state/peau/` (gitignored). \
+      Receives the ever-growing seen-ledger \
+      (`~/.cosmon/state/peau/seen.ndjson`) and the per-run raw mirror \
+      (`~/.cosmon/state/peau/raw/<date>.ndjson`). NEVER under the \
+      cosmon repo — this is operator-private attention substrate, \
+      symmetric to `~/.mailroom/state/`.
+
+  (c) MORNING BRIEF — `~/.cosmon/state/morning/<date>.md` (one file \
+      per day) + `~/.cosmon/state/morning/<date>.drafts/<tile_id>.md` \
+      (one file per tile that asks for a reply). This is the artefact \
+      the operator opens at 07:15. Idempotent by date: if the morning \
+      file for $PEAU_DATE already exists, every step short-circuits \
+      with `idempotent-skip` and exits 0.
+
+LOAD-BEARING INVARIANTS (every step honours these — restated per \
+step for crash-proof reading):
+
+  (a) KILL-SWITCH GENERALITY. Each step checks \
+      `~/.cosmon/autopilot.off` at start. If present, the step writes \
+      a one-line abort marker to `MOLECULE_DIR/abort.log` and exits \
+      cleanly without firing any side effect (no file writes outside \
+      that marker). This is the generalised kill-switch contract — \
+      same shape as `curate-patrol`.
+
+  (b) IDEMPOTENT BY DATE. If \
+      `~/.cosmon/state/morning/<PEAU_DATE>.md` exists at the start of \
+      ANY step, that step exits 0 with one line to \
+      `MOLECULE_DIR/idempotent-skip.log` (`step <id> skipped: morning \
+      file exists for <date>`). The whole formula re-runs are \
+      no-ops. Re-runs on the same date never overwrite the brief or \
+      re-emit events.
+
+  (c) FILESYSTEM-AS-CHANNEL. No FIFO, no event bus, no MCP push from \
+      mailroom to cosmon. Cosmon reads via existing MCP tools \
+      (`sec_today`, `sec_attention`) and writes only to its own state \
+      dirs (`MOLECULE_DIR/`, `~/.cosmon/state/peau/`, \
+      `~/.cosmon/state/morning/`). Symmetric: mailroom never \
+      writes into `~/.cosmon/state/` directly. This matches `CLAUDE.md` \
+      §Communication Model (control plane = DAG 1 bit, data plane = \
+      filesystem).
+
+  (d) WORKER-CHECKPOINT DISCIPLINE. Every append to \
+      `seen.ndjson` / `raw/<date>.ndjson` uses `O_APPEND` + `fsync` \
+      per row. A `kill -9` or machine-sleep mid-run leaves a usable \
+      partial ledger; the next run resumes from the durable seen-set. \
+      Substrate lesson from drain-worker 2026-05-21 (machine sleep \
+      silently killed an unflushed report).
+
+  (e) RUNG 2 NO AUTO-NUCLEATION. PEAU NEVER calls `cs nucleate`. \
+      Every tile is a verdict-door — the operator promotes by typing \
+      `1` / `2` / `3` / `later` (or the panel-tap equivalent in the \
+      menubar). The nucleation, if any, happens in the sibling \
+      `voix-reply` formula (`task-20260522-34e4`) when the operator \
+      picks a tile that needs a reply. **`cs nucleate` MUST NOT \
+      appear in this formula's action set.** This is the load-bearing \
+      kahneman counter against availability-cascade (delib-955f \
+      §1.5 — *children land `temp:warm` never `temp:hot`*; PEAU \
+      goes further by not landing children at all in v0).
+
+  (f) WORKER CANNOT PROMOTE TO `temp:hot`. Even if a future operator \
+      adds a triage rule mapping a signal to a tag, PEAU MUST NOT run \
+      `cs tag --add temp:hot`. Only the operator promotes warm → hot \
+      (delib-955f §5.4 policy). This formula does not call `cs tag` \
+      at all in v0.
+
+  (g) SURFACE CAP. ≤ N (default 3, configurable in \
+      `~/.config/cosmon/peau.toml` as `max_tiles_per_morning`) tiles \
+      land in the morning brief. Overflow goes into an \
+      `overflow-deferred.md` adjacent to the brief, NOT into the \
+      brief itself, and the brief carries a one-line tail \
+      "_N tiles deferred — see overflow-deferred.md_". The operator \
+      decides whether to widen N. The cap is the silence-budget \
+      (karpathy's cat).
+
+  (h) CAUSAL ATTRIBUTION (§-causal-attribution, wheeler). The `emit` \
+      step writes one typed event with `initiator: "Tick"` and \
+      `kind: "peau-morning-digest-written"`. This is the §1-bit: \
+      proves the morning brief was produced by the scheduler tick, \
+      not by an interactive operator command. **TODO: once \
+      `task-20260522-069b` lands the typed `initiator` field on \
+      `EventV2`, replace the best-effort jsonl append with the typed \
+      emit path.** Until then, append directly to \
+      `.cosmon/state/events.jsonl` with a serde-defaulted \
+      `initiator` field — log + swallow any failure (seal is a trace, \
+      not a lock; cosmon §8b).
+
+  (i) PRE-DRAFTS ARE OPERATOR-TEMPLATED, NOT LLM-GENERATED. v0 \
+      pre-drafts use simple per-channel / per-sender templates loaded \
+      from `~/.config/cosmon/peau.toml` (e.g. \
+      `[draft_templates.whatsapp.default]`). LLM-generated drafts \
+      defer until Rung 2 (after SOUL.md ships and the register is \
+      stable). This is the kahneman counter against narrative- \
+      coherence drift (delib-955f §1.5).
+
+  (j) MAIN IS SACRED. The formula writes to `~/.cosmon/state/...` \
+      (user home, not the cosmon repo) and to `MOLECULE_DIR/...` \
+      (per-run trail, gitignored per ADR-030). NO `git push`. NO \
+      `main` write. NO `cs done`. NO `cs purge`. NO `cs collapse`. \
+      NO `cs tackle`.
+
+INPUTS — read from the formula's variables block (resolved at \
+nucleate-time):
+
+  - date           Default = today UTC (YYYY-MM-DD). The morning the
+                   brief is for. Used for the idempotency key
+                   (`~/.cosmon/state/morning/<date>.md`).
+  - since_hours    Default `24`. Window passed to `sec_today --since`
+                   and used for `sec_attention` slicing.
+
+BUDGET / RULE KNOBS — read by the `triage` step from \
+`~/.config/cosmon/peau.toml` (operator-owned, not formula-owned). \
+Defaults when the file is absent:
+
+  max_tiles_per_morning = 3
+  default_priority      = "normal"
+  [senders.<id>] priority, surface_to_brief, default_draft_template
+  [keywords.<pattern>] priority, surface_to_brief, default_draft_template
+  [draft_templates.<channel>.<key>] body = "..."
+
+ROLLBACK — set `enabled = false` on the `peau-morning-digest` patrol \
+in `~/.config/cosmon/patrols.toml` (10-second reversal); or \
+`touch ~/.cosmon/autopilot.off` to silence every step on the next \
+fire. Removing the morning file for a date does NOT roll back the \
+event emit — the seal is a trace.
+
+CROSS-REFS — delib-20260521-955f (parent, synthesis §5.1–§5.2 + \
+§5.4 + §5.7); curate-patrol.formula.toml (existence proof for \
+kill-switch + fsync + idempotency conventions); jobs (one ritual, \
+four deletions); torvalds (five-line shape: formula + ledger + \
+adapter + LaunchAgent + kill-switch); godin (kitchen-window guard, \
+permission to listen); kahneman (availability-cascade counter via \
+no-auto-nucleate, narrative-coherence counter via template drafts); \
+wheeler (§-causal-attribution); jr (silence budget — N=3).
+"""
+id_prefix = "peau"
+freeze_on_last_step = false
+
+# Tier 0 — observes, dedupes, triages, writes the brief. Does NOT
+# nucleate children (the brief's tiles are verdict-doors for the
+# operator; the operator nucleates by tapping `1`, and the
+# nucleation itself happens in the sibling `voix-reply` formula).
+[tier]
+level = 0
+
+# ---------------------------------------------------------------------------
+# Inputs
+# ---------------------------------------------------------------------------
+
+[vars.date]
+description = "The morning date the brief is for (YYYY-MM-DD, UTC). Default = today. Used as idempotency key for `~/.cosmon/state/morning/<date>.md`."
+type = "string"
+required = false
+default = ""
+
+[vars.since_hours]
+description = "Window passed to `sec_today --since` (in hours). Default = 24."
+type = "string"
+required = false
+default = "24"
+
+# ---------------------------------------------------------------------------
+# Step 1 — read
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "read"
+title = "Read sec_today, sec_attention, and curate-patrol's surfaced.md"
+description = """
+Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
+`molecule_dir` field). NEVER write artefacts to the worktree — they \
+are destroyed by `cs done`.
+
+Resolve $PEAU_DATE: if the `date` variable is empty, use today UTC \
+(`date -u +%Y-%m-%d`). Resolve $SINCE_HOURS from the `since_hours` \
+variable (default 24).
+
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+line to `MOLECULE_DIR/abort.log` (`read aborted: autopilot.off`) and \
+exit 0.
+
+IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` \
+exists, write one line to `MOLECULE_DIR/idempotent-skip.log` \
+(`read skipped: morning file exists for $PEAU_DATE`) and exit 0. \
+Do NOT re-read, do NOT re-write the raw ledger.
+
+PREPARE PATHS. `mkdir -p ~/.cosmon/state/peau/raw \
+~/.cosmon/state/morning $MOLECULE_DIR` (idempotent).
+
+READ MAILROOM. Call the mailroom MCP tools (the worker has \
+them in its tool set; if not, fall back to `cs --json` shell calls \
+to whatever the operator has wired):
+
+  - `sec_today --json --since ${SINCE_HOURS}h` → the "what needs me
+    today" top-N priority list (Filter v0.2). Capture the full
+    response (JSON).
+  - `sec_attention --json` → the broader 7-day ranked daily queue
+    (Formulate v0.3). Capture the full response.
+
+If a tool call fails (transport error, mailroom not running), \
+log the failure to `MOLECULE_DIR/read-errors.log` and CONTINUE with \
+an empty result for that source. The morning brief degrades \
+gracefully (one source missing → fewer tiles, not a crash).
+
+READ CURATE-PATROL'S OVERNIGHT OUTPUT. Locate the most recent \
+`curate-*` molecule directory whose `report.md` is dated within the \
+last $SINCE_HOURS hours. The simplest path: run \
+`cs ensemble --json --formula curate-patrol` (or grep `cs ensemble \
+--json` for ids prefixed `curate-`), then read \
+`{molecule_dir}/surfaced.md` for each. If multiple, prefer the most \
+recent. If none, treat as empty.
+
+WRITE THE RAW LEDGER. For each signal returned by any source, write \
+ONE JSON line to `~/.cosmon/state/peau/raw/$PEAU_DATE.ndjson` \
+(append + fsync per row). Required fields per row:
+
+  {
+    "channel": "email" | "imessage" | "whatsapp" | "signal" |
+               "transcript" | "curate-surfaced" | <other>,
+    "msg_id": "<stable per-channel id>",
+    "source": "sec_today" | "sec_attention" | "curate-patrol",
+    "captured_at": "<RFC3339 UTC, the moment this row was written>",
+    "from": "<sender display name or address>",
+    "subject": "<subject or first 80 chars of body>",
+    "body_excerpt": "<≤ 240 chars>",
+    "priority_hint": "<source-provided priority if any, else null>",
+    "raw": { ... full original record from the source ... }
+  }
+
+Idempotency at the row level: if a `(channel, msg_id)` pair was \
+already written EARLIER in this same file (re-run within the same \
+date), skip the duplicate. (Cross-date dedup happens in step 2.)
+
+WRITE MOLECULE_DIR/read-summary.md with:
+  - Header: $PEAU_DATE, $SINCE_HOURS, MOLECULE_DIR.
+  - Per-source counts: sec_today=N, sec_attention=M, curate=K.
+  - Per-source error log (if any tool call failed).
+  - Total raw rows written (after intra-run dedup).
+"""
+acceptance = """
+Either (idempotent path): MOLECULE_DIR/idempotent-skip.log exists \
+with a single `read skipped` line and no raw rows were written; OR \
+(normal path): \
+~/.cosmon/state/peau/raw/$PEAU_DATE.ndjson exists with one JSON line \
+per signal seen across the three sources, each line is valid JSON, \
+and MOLECULE_DIR/read-summary.md exists with per-source counts. \
+If ~/.cosmon/autopilot.off was present at step start, \
+MOLECULE_DIR/abort.log exists and no raw rows were written beyond it.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 2 — dedupe
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "dedupe"
+title = "Dedupe raw rows against the ever-growing seen.ndjson ledger"
+description = """
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write \
+`dedupe aborted: autopilot.off` to `MOLECULE_DIR/abort.log` and \
+exit 0.
+
+IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` \
+exists, append `dedupe skipped: morning file exists for $PEAU_DATE` \
+to `MOLECULE_DIR/idempotent-skip.log` and exit 0.
+
+LOAD THE EVER-GROWING SEEN LEDGER. \
+`~/.cosmon/state/peau/seen.ndjson` is an append-only NDJSON file. \
+Each row: `{"channel": "...", "msg_id": "...", "first_seen_at": \
+"<RFC3339>"}`. If the file does not exist yet, treat as empty (and \
+ensure the parent dir is created in step 1).
+
+Build an in-memory set `SEEN_KEYS = { (channel, msg_id) | row in \
+seen.ndjson }`.
+
+WALK THE RAW LEDGER. Read \
+`~/.cosmon/state/peau/raw/$PEAU_DATE.ndjson` line by line. For each \
+raw row, compute `key = (row.channel, row.msg_id)`.
+
+  - If `key` ∈ SEEN_KEYS → mark as `duplicate`, do NOT append to
+    seen.ndjson, do NOT carry forward to triage.
+  - Else → APPEND one line to `~/.cosmon/state/peau/seen.ndjson`
+    `{"channel": row.channel, "msg_id": row.msg_id, "first_seen_at":
+    <now RFC3339 UTC>}` AND fsync per row before processing the next.
+    Then add the row to the surviving list for step 3.
+
+The surviving rows are written to a step-local working file \
+`MOLECULE_DIR/survivors.ndjson` (one JSON line per surviving raw row, \
+full row content carried through verbatim — step 3 reads this file, \
+not the raw ledger).
+
+WORKER-CHECKPOINT DISCIPLINE. The append + fsync on seen.ndjson \
+happens BEFORE the row is written to survivors.ndjson. A crash \
+mid-dedupe leaves a consistent ledger (some rows seen but not yet \
+triaged → next run will not re-surface them, which is correct: we \
+prefer false-negative-surface over double-surface).
+
+Write MOLECULE_DIR/dedupe-summary.md with:
+  - Header: $PEAU_DATE, raw rows = R, seen-ledger size before = S,
+    duplicates = D, new survivors = N, seen-ledger size after = S+N.
+  - One-line warning if `R == 0` (no new signals — write step will
+    still emit a tiles-empty brief).
+"""
+needs = ["read"]
+acceptance = """
+Either (idempotent path): MOLECULE_DIR/idempotent-skip.log carries a \
+`dedupe skipped` line and seen.ndjson was not appended to; OR \
+(normal path): every new (channel, msg_id) in raw/$PEAU_DATE.ndjson \
+appears exactly once in seen.ndjson (the union of pre-existing rows \
++ this run's appends), MOLECULE_DIR/survivors.ndjson exists, and \
+MOLECULE_DIR/dedupe-summary.md exists. NO row is appended to \
+seen.ndjson without a matching survivor row. seen.ndjson is \
+APPEND-ONLY (verifiable by `wc -l` strictly non-decreasing across \
+runs). If ~/.cosmon/autopilot.off was present, MOLECULE_DIR/abort.log \
+exists and seen.ndjson was not modified.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 3 — triage
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "triage"
+title = "Apply per-sender / per-keyword rules; emit ≤ N tiles"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+IDEMPOTENCY CHECK (morning file exists → skip).
+
+LOAD RULES. Read `~/.config/cosmon/peau.toml`. If the file does NOT \
+exist, treat as the default rule set:
+
+  max_tiles_per_morning = 3
+  default_priority      = "normal"
+  [senders] = {}      # no overrides
+  [keywords] = {}     # no overrides
+  [draft_templates] = {}
+
+The TOML schema (operator-owned, formula reads it):
+
+  max_tiles_per_morning = 3                # surface cap N
+  default_priority      = "normal"         # "high" | "normal" | "low" |
+                                           # "skip" — fallback when no
+                                           # sender/keyword rule matches
+  [senders.<sender_id>]                    # e.g. [senders.heidi]
+  match = ["+33...", "heidi@..."]          # patterns matching `from`
+  priority = "high"                        # overrides default
+  surface_to_brief = true                  # if false, never tile-ed
+  default_draft_template = "whatsapp.default"
+
+  [keywords.<rule_id>]                     # e.g. [keywords.skylight_call]
+  match = ["skylight", "creneau", "rdv"]    # case-insensitive substr
+  priority = "high"
+  surface_to_brief = true
+  default_draft_template = "imessage.suggest_slot"
+
+  [draft_templates.<channel>.<key>]
+  body = "Bonjour {{from}}, oui pour {{subject}}. Confirme par retour."
+
+APPLY RULES PER SURVIVING ROW. For each row in \
+MOLECULE_DIR/survivors.ndjson:
+
+  1. Match `row.from` against every `[senders.*]` rule (substring,
+     case-insensitive over any pattern in `match`). First match wins.
+  2. If no sender rule matched, match `row.subject || ' ' ||
+     row.body_excerpt` against every `[keywords.*]` rule (substring,
+     case-insensitive). First match wins.
+  3. If still no match, use `default_priority`.
+  4. If the chosen priority is `"skip"` OR the matching rule has
+     `surface_to_brief = false`, the row is filtered out.
+
+After filtering, RANK the survivors by:
+
+  (priority_rank DESC, source_rank ASC, captured_at DESC)
+
+  - priority_rank: high=3, normal=2, low=1.
+  - source_rank: sec_today=0, sec_attention=1, curate-surfaced=2.
+  - captured_at: most recent first.
+
+TAKE TOP N (N = max_tiles_per_morning from the config or its default \
+3). The remainder is the OVERFLOW set.
+
+For each tile, also resolve its `draft_template_key`:
+
+  1. If the matching sender/keyword rule has `default_draft_template`,
+     use it.
+  2. Else use `<channel>.default` (e.g. `whatsapp.default`); if that
+     template is not declared, no draft is staged (the tile carries
+     no `<!-- candidate draft: ... -->` line).
+
+EMIT MOLECULE_DIR/tiles.ndjson with one JSON line per top-N tile, \
+each line carrying:
+
+  {
+    "tile_id": "tile-<short-id>",    # short BLAKE3 (or sha256) prefix
+                                     # of (channel || ":" || msg_id),
+                                     # 8 hex chars
+    "channel": "<channel>",
+    "msg_id":  "<msg_id>",
+    "from":    "<from>",
+    "subject": "<subject>",
+    "body_excerpt": "<body_excerpt>",
+    "priority": "high" | "normal" | "low",
+    "matched_rule": "senders.heidi" | "keywords.skylight_call" |
+                    "default",
+    "draft_template_key": "<channel>.<key>" | null,
+    "asks_for_reply": <bool — heuristic: subject||body contains '?'>,
+    "verdict_door": ["accept", "later", "defer"]   # default labels
+  }
+
+EMIT MOLECULE_DIR/tiles-overflow.ndjson with the remaining rows in \
+the same shape (or an empty file if no overflow).
+
+`tile_id` MUST be stable across re-runs on the same (channel, \
+msg_id) so the draft files in step 4 are idempotent. Compute it as \
+the first 8 hex chars of BLAKE3 or sha256 of `channel || ':' || \
+msg_id`.
+
+Write MOLECULE_DIR/triage-summary.md with:
+  - Header: surviving rows = S, after-filter = F, top-N tile count =
+    T (≤ max_tiles_per_morning), overflow count = O.
+  - Per-priority counts after filter (high/normal/low).
+  - Per-rule match counts (senders.X = c1, keywords.Y = c2,
+    default = c3).
+  - Whether `~/.config/cosmon/peau.toml` was found (true/false).
+"""
+needs = ["dedupe"]
+acceptance = """
+Either (idempotent path): MOLECULE_DIR/idempotent-skip.log carries a \
+`triage skipped` line and tiles.ndjson was not written; OR (normal \
+path): MOLECULE_DIR/tiles.ndjson exists with AT MOST \
+max_tiles_per_morning rows (default 3), each row is valid JSON with \
+the required fields, every `tile_id` is exactly 8 hex chars and \
+stable across runs on the same (channel, msg_id), \
+MOLECULE_DIR/tiles-overflow.ndjson exists (possibly empty), and \
+MOLECULE_DIR/triage-summary.md exists with the per-priority and \
+per-rule counts. NO `cs nucleate` was invoked. NO `cs tag` was \
+invoked. NO outbound message was sent.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 4 — write
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "write"
+title = "Write the morning brief + pre-drafts to ~/.cosmon/state/morning/"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` \
+exists, append `write skipped: morning file exists for $PEAU_DATE` \
+to `MOLECULE_DIR/idempotent-skip.log` and exit 0. NEVER overwrite an \
+existing brief.
+
+PREPARE PATHS. `mkdir -p ~/.cosmon/state/morning/$PEAU_DATE.drafts` \
+(idempotent — fine if it already exists from a partial earlier run).
+
+LOAD PEAU.TOML DRAFT TEMPLATES (same path as step 3). If absent, no \
+templates; the formula still emits tiles with no draft line.
+
+RENDER THE BRIEF. Write \
+`~/.cosmon/state/morning/$PEAU_DATE.md` ATOMICALLY (write to a \
+sibling `.tmp` file, fsync, then rename — POSIX atomic-rename). The \
+format:
+
+```markdown
+---
+date: $PEAU_DATE
+tiles_count: <T>
+overflow_count: <O>
+generated_at: <RFC3339 UTC>
+generator: peau-morning-digest@v0
+molecule: <this_mol_id>
+seal: <BLAKE3 hex of the body below, computed before write>
+seal_algo: "blake3" | "sha256"
+---
+
+# Bonjour. $PEAU_DATE.
+
+<T> tile(s) pour ce matin.<optional: + O autres déferrés.>
+
+## tile-<short-id>
+
+**From.** <from> (<channel>)
+**Subject.** <subject>
+**Body.** <body_excerpt>
+**Priority.** <priority> (<matched_rule>)
+**Verdict.** 1 (accept) / 2 (later) / 3 (defer) / later
+
+<!-- candidate draft: see $PEAU_DATE.drafts/tile-<short-id>.md -->
+                                              ^ omitted if no draft
+
+## tile-<...>
+...
+
+---
+
+_<O> tiles déferrés — see overflow-deferred.md_   (omitted if O == 0)
+```
+
+The `seal` value is BLAKE3 (or sha256 fallback) of EVERYTHING after \
+the closing `---` of the frontmatter, computed BEFORE writing. The \
+seal is a trace, not a lock (cosmon §8b). If BLAKE3 (`b3sum`) is \
+not available, fall back to `openssl dgst -sha256` and record \
+`seal_algo: "sha256"`.
+
+PRE-DRAFT CANDIDATE REPLIES. For each tile that has \
+`asks_for_reply == true` AND a non-null `draft_template_key`:
+
+  - Resolve the template from peau.toml: \
+    `draft_templates.<channel>.<key>.body`.
+  - If absent, skip drafting (the brief carries no draft line for
+    this tile).
+  - Substitute placeholders: `{{from}}`, `{{subject}}`,
+    `{{body_excerpt}}`, `{{channel}}`, `{{msg_id}}`,
+    `{{date}}` ($PEAU_DATE).
+  - Write the result ATOMICALLY to \
+    `~/.cosmon/state/morning/$PEAU_DATE.drafts/<tile_id>.md` with \
+    a small frontmatter:
+
+      ---
+      tile_id: <tile_id>
+      channel: <channel>
+      to: <from>
+      subject: Re: <subject>          (if channel == "email")
+      template_key: <channel>.<key>
+      generated_at: <RFC3339 UTC>
+      molecule: <this_mol_id>
+      ---
+
+      <substituted template body>
+
+  - These drafts are OPERATOR-TEMPLATED (invariant (i)). NO LLM
+    call. The sibling `voix-reply` formula reads these files when
+    the operator picks the tile.
+
+RENDER OVERFLOW (if O > 0). Write \
+`~/.cosmon/state/morning/$PEAU_DATE.overflow-deferred.md` with one \
+line per overflow row:
+
+  - <from> (<channel>) — <subject> [<priority>, <matched_rule>]
+
+The overflow file is informational only — overflow tiles do NOT \
+get pre-drafts and do NOT appear in the main brief.
+
+Write MOLECULE_DIR/write-summary.md with:
+  - Header: brief path, T tiles, O overflow, D drafts written.
+  - List of every file written this step (with byte sizes).
+  - Any draft skipped (and why: template absent, asks_for_reply
+    false).
+
+MAIN IS SACRED. Every write goes to `~/.cosmon/state/...` or \
+`MOLECULE_DIR/...`. NO write to the cosmon repo. NO `git push`.
+"""
+needs = ["triage"]
+acceptance = """
+Either (idempotent path): MOLECULE_DIR/idempotent-skip.log carries a \
+`write skipped` line and ~/.cosmon/state/morning/$PEAU_DATE.md was \
+NOT modified; OR (normal path): \
+~/.cosmon/state/morning/$PEAU_DATE.md exists with valid YAML \
+frontmatter (date, tiles_count, generated_at, generator, molecule, \
+seal, seal_algo) AND one `## tile-<id>` section per row in \
+MOLECULE_DIR/tiles.ndjson AND a non-empty body. For each tile with \
+asks_for_reply=true AND a resolved draft template, a corresponding \
+file exists at \
+~/.cosmon/state/morning/$PEAU_DATE.drafts/<tile_id>.md with the \
+substituted template. If overflow_count > 0, \
+~/.cosmon/state/morning/$PEAU_DATE.overflow-deferred.md exists. \
+MOLECULE_DIR/write-summary.md exists. NO write occurred under the \
+cosmon repo (verifiable via `git status` — clean for this step's \
+work). If ~/.cosmon/autopilot.off was present at step start, \
+MOLECULE_DIR/abort.log exists and the morning file was not created \
+or modified.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 5 — emit
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "emit"
+title = "Emit a typed event with initiator=Tick (the §1-bit)"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+IDEMPOTENCY CHECK. If `~/.cosmon/state/morning/$PEAU_DATE.md` did \
+NOT exist at the start of step 1 AND the brief was just written in \
+step 4 by THIS run, emit. If the brief existed before this run \
+started (idempotent-skip path was taken in earlier steps), DO NOT \
+emit — the previous run already did. Detect this by checking \
+`MOLECULE_DIR/idempotent-skip.log` for any line; if non-empty, skip \
+the emit and write `emit skipped: idempotent re-run, prior run \
+already emitted` to MOLECULE_DIR/idempotent-skip.log.
+
+WRITE THE EVENT. Best-effort sequence (in this exact order):
+
+  1. PREFERRED PATH — if a `cs events emit` (or equivalent typed
+     emit verb) exists in the local `cs` CLI, invoke it:
+
+       cs --json events emit peau-morning-digest-written \\
+         --field date=$PEAU_DATE \\
+         --field tiles_count=<T> \\
+         --field overflow_count=<O> \\
+         --field morning_path=~/.cosmon/state/morning/$PEAU_DATE.md \\
+         --field initiator=Tick \\
+         --field generator=peau-morning-digest@v0 \\
+         --field molecule=<this_mol_id>
+
+     If this returns 0, append a one-line success entry to
+     MOLECULE_DIR/emit.log and exit 0.
+
+  2. FALLBACK PATH — if `cs events emit` does NOT exist (the verb
+     is not yet implemented; the CLI surfaces `events` with `tail /
+     query / stats / validate` subcommands but no `emit`), APPEND
+     ONE JSON line directly to `.cosmon/state/events.jsonl` (resolve
+     the path via `cs --json observe {this_mol_id}` →
+     `events_log_path` if present, else default to
+     `.cosmon/state/events.jsonl` under the cosmon root). The line:
+
+       {
+         "ts": "<RFC3339 UTC>",
+         "kind": "peau-morning-digest-written",
+         "version": 0,
+         "fields": {
+           "date": "$PEAU_DATE",
+           "tiles_count": <T>,
+           "overflow_count": <O>,
+           "morning_path": "~/.cosmon/state/morning/$PEAU_DATE.md",
+           "initiator": "Tick",
+           "generator": "peau-morning-digest@v0",
+           "molecule": "<this_mol_id>"
+         },
+         "schema_todo": "task-20260522-069b — typed initiator + variant"
+       }
+
+     Append + fsync. The `schema_todo` field is the explicit marker
+     that this row will be replaced by a typed `EventV2` variant
+     once `task-20260522-069b` lands the §-causal-attribution +
+     §8m invariants (delib-955f §5.4). Until then, the row is the
+     §1-bit (queryable via `jq` over events.jsonl).
+
+  3. IF BOTH PATHS FAIL — log to MOLECULE_DIR/emit.log with the
+     error, write `emit-failed.log` to MOLECULE_DIR, AND EXIT 0. The
+     seal is a trace, not a lock; the morning brief is the
+     load-bearing artefact, not the event. Defensive emit must
+     never block the hot path (cosmon §8b).
+
+CARRY THE `initiator: "Tick"` FIELD. This is non-negotiable — \
+without it, the §1-bit is inferred, not queryable (wheeler, \
+delib-955f §1.1). If the typed schema does not yet accept the field, \
+the fallback JSON line carries it as a plain field; once the schema \
+catches up (task-20260522-069b), the field migrates into the typed \
+position with serde-default backward compatibility.
+
+Write MOLECULE_DIR/emit-summary.md with:
+  - Header: which path was taken (preferred / fallback / failed).
+  - The emitted line (or the command + exit code for the preferred
+    path).
+  - A one-line note if `task-20260522-069b` has landed and the
+    typed path should be revisited (the operator decides; the
+    formula does not auto-detect ADR closure).
+"""
+needs = ["write"]
+acceptance = """
+Either (idempotent path): MOLECULE_DIR/idempotent-skip.log carries \
+an `emit skipped` line and no new events row was appended; OR \
+(normal path): exactly one new event row with \
+`kind == "peau-morning-digest-written"` AND \
+`initiator == "Tick"` (or `fields.initiator == "Tick"` in the \
+fallback JSON shape) appears in the events log (or in \
+MOLECULE_DIR/emit-failed.log if both emit paths failed — that \
+counts as accepted, the formula must not block on emit). \
+MOLECULE_DIR/emit-summary.md exists. NO panic, NO non-zero exit \
+from this step even on emit failure (defensive emit, cosmon §8b).
+"""

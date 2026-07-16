@@ -1,0 +1,33 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
+
+Usage: cs inbox [OPTIONS]
+
+Options:
+      --config <PATH>            Path to configuration file
+      --refresh-ms <REFRESH_MS>  Refresh cadence in milliseconds. Inbox reloads the stack on each tick or on `r`/`R`. Default: 2000ms (gentler than peek's 250ms — inbox is a decision surface, not a watchdog) [default: 2000]
+      --json                     Print the inbox contents as NDJSON and exit (agent-first). Skips the TUI entirely. One JSON object per actionable row plus one session envelope when an unsealed session exists
+  -v, --verbose                  Enable verbose output
+  -h, --help                     Print help
+
+EXAMPLES:
+  cs inbox                         # vertical pile of atomic actions
+  cs inbox --json                  # NDJSON: one row per actionable molecule
+
+The pile has four buckets, top to bottom:
+  ✓ completed (awaiting `cs done`)    🔥 temp:hot pending
+  ❓ frozen (question from a worker)   ⚡ signal molecules
+
+Keys: j/k move · Enter open briefing · d done · t tackle · w whisper
+      · c collapse · r reload · q quit. One panel, one stack — no graph
+viewer, no chat, no split, no editor, no dashboard, no search bar — the
+deliberate non-features.
+
+Success metric: 5 days out of 7 without opening Claude Code
+to pilot cosmon. See docs/guides/inbox-trial.md.
+
+SEE ALSO: cs ensemble (full backlog), cs peek (fractal TUI portal),
+cs session (operator carnet that inbox reads as its sticky top line).

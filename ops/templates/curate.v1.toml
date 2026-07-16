@@ -1,0 +1,102 @@
+# curate.v1.toml — v1 cross-galaxy roll-out of the nightly drain-patrol.
+#
+# Lives at ~/.config/cosmon/curate.toml. Read by
+# scripts/curate-all-galaxies.sh, fired by the LaunchAgent
+# dev.democorp.cosmon.curate (see ops/launchd/).
+#
+# Provenance:
+#   - delib-20260521-c3cd  (cross-galaxy drain patrol architecture v0).
+#   - task-20260521-62ab   (this v1 template + syzygie verification gate).
+#   - task-20260521-9ee1   (v0 template + LaunchAgent — sibling, shipped first).
+#
+# GRADUATION GATE — DO NOT install this v1 file unless BOTH hold:
+#   1. 14 consecutive nights of v0 (cosmon-only) running cleanly:
+#        - `cs resurrect` invocations for those 14 nights = 0
+#          (no operator rescue of a wrongly-collapsed molecule);
+#        - `patrol-regret` chronicle entries for those 14 nights = 0.
+#   2. Operator's explicit promotion gesture (a verdict-doored question
+#      from a curate-patrol surfaced.md, OR a manual
+#      `cs nucleate curate-promote-to-v1` molecule, OR equivalent).
+#   See report.md in task-20260521-62ab molecule dir for the live audit.
+#
+# Install gesture (operator only — system-state change):
+#   mkdir -p ~/.config/cosmon
+#   # back up the v0 file first (for rollback during soak):
+#   cp ~/.config/cosmon/curate.toml ~/.config/cosmon/curate.v0.toml.bak
+#   # install v1:
+#   cp ops/templates/curate.v1.toml ~/.config/cosmon/curate.toml
+#   chmod 600 ~/.config/cosmon/curate.toml
+#
+# Rollback gesture (if v1 misbehaves on first peer-galaxy night):
+#   cp ~/.config/cosmon/curate.v0.toml.bak ~/.config/cosmon/curate.toml
+#   # Then file a `patrol-regret` chronicle entry naming the failure.
+
+# ---------------------------------------------------------------------------
+# [drain] — which galaxies the nightly sweep visits.
+#
+# v1 ALLOWLIST: cosmon + the four primary peer galaxies in the syzygie.
+# Order matters for serial execution: cosmon first (proven), then mailroom
+# (heaviest cited graph), then accord/knowledge/showroom.
+#
+# v0 line kept commented for rollback reference:
+# galaxies = ["cosmon"]
+# ---------------------------------------------------------------------------
+[drain]
+galaxies = ["cosmon", "mailroom", "accord", "knowledge", "showroom"]
+
+# ---------------------------------------------------------------------------
+# [budget] — per-night caps (rate-limiters, not quotas).
+#
+# Unchanged from v0. Caps are per-galaxy, not total: a sweep of N galaxies
+# can surface up to N × max_surface_per_night atomic questions. Operator
+# read-bandwidth ceiling should scale with the allowlist.
+# ---------------------------------------------------------------------------
+[budget]
+max_collapse_per_night = 1500   # ceiling on auto-collapses (untagged stale, drift)
+max_classify_per_night = 200    # ceiling on retag operations (Rung 1)
+max_tackle_per_night = 0        # Rung 2 — surface candidates, NEVER auto-tackle
+max_surface_per_night = 20      # operator wake-up read-bandwidth ceiling
+
+# ---------------------------------------------------------------------------
+# [soak] — graveyard window before `cs purge` removes collapsed molecules.
+# Unchanged from v0.
+# ---------------------------------------------------------------------------
+[soak]
+collapse_purge_delay_hours = 24
+
+# ---------------------------------------------------------------------------
+# [firebreak] — guards against curate molecules curating themselves
+# (gödel) and against running on empty galaxies (kahneman D2).
+# Unchanged from v0.
+# ---------------------------------------------------------------------------
+[firebreak]
+formula_prefix = "curate-"        # curate-* formulas never auto-collapse each other
+min_non_patrol_molecules = 3      # skip galaxies with < N non-patrol pendings
+
+# ---------------------------------------------------------------------------
+# [syzygie] — v1-only. Load-bearing invariant for cross-galaxy patrol.
+#
+# Cross-galaxy means the patrol can break a peer chronicle's citation by
+# collapsing a cited molecule. The classifier's matrix row
+# `syzygie_cited == true → Surface (never Collapse)` is what prevents it.
+#
+# The classifier reads `cited_ids_cache_path` once per night (a sorted,
+# deduped list of every molecule ID cited in any galaxy's chronicles or
+# ADRs). `scripts/curate-syzygie-cache.sh` produces the cache;
+# `scripts/curate-syzygie-check.sh` is the operator-side audit that:
+#   - tags pending molecules in scope galaxies with `temp:syzygie-cited`,
+#   - reports orphan citations (referenced molecule no longer exists).
+#
+# The check MUST be run with `--apply` before each first v1 sweep of a
+# newly-added galaxy. After that, the patrol's per-night cache refresh
+# is sufficient — but the operator can re-run `--apply` any time the
+# citation graph shifts (new ADR, new chronicle entry citing a molecule).
+# ---------------------------------------------------------------------------
+[syzygie]
+cited_ids_cache_path = "~/.cosmon/syzygie-cited.txt"
+syzygie_cited_tag = "temp:syzygie-cited"
+# First-pass-per-galaxy: even when cosmon is on a pass-2 night, a newly
+# added peer galaxy gets its own pass-1 (retag-only) night first. Set
+# this to the date the peer galaxy was added to force pass-1 on day 1.
+# Format: ISO date "YYYY-MM-DD". Empty = no override.
+first_pass_override_until = "2026-06-05"  # ~14 days after v1 graduation target

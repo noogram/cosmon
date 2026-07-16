@@ -1,0 +1,29 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Observe a molecule's current state and history
+
+Usage: cs observe [OPTIONS] [MOLECULE_ID]
+
+Arguments:
+  [MOLECULE_ID]  Molecule ID (or prefix) to inspect. Omit to list all molecules
+
+Options:
+      --config <PATH>      Path to configuration file
+      --status <STATUS>    Filter by status (active, frozen, completed, collapsed)
+  -v, --verbose            Enable verbose output
+      --worker <WORKER>    Filter by assigned worker
+      --formula <FORMULA>  Filter by formula
+      --json               Output in JSON format
+      --search <SEARCH>    Free-text search across molecule fields
+      --all                Include completed and collapsed molecules (excluded by default in list mode)
+      --tag <GLOB>         Filter by tag glob pattern (repeatable, any-match)
+      --notes <N>          Number of trailing notes to show in detail mode (default: 3) [default: 3]
+  -h, --help               Print help
+
+EXAMPLES:
+  cs observe task-example-0001          # one-shot snapshot (never poll!)
+  cs observe task-example-0001 --json   # for scripts
+
+SEE ALSO: cs wait (block until terminal), cs peek (fractal TUI).

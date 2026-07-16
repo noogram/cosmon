@@ -1,0 +1,425 @@
+.ie \n(.g .ds Aq \(aq
+.el .ds Aq '
+.TH cs 1  "cs 0.1.0" 
+.SH NAME
+cs \- Cosmon — compose, pilot and audit long\-haul AI missions where the trace matters.
+.SH SYNOPSIS
+\fBcs\fR [\fB\-\-config\fR] [\fB\-v\fR|\fB\-\-verbose\fR] [\fB\-\-json\fR] [\fB\-h\fR|\fB\-\-help\fR] [\fB\-V\fR|\fB\-\-version\fR] <\fIsubcommands\fR>
+.SH DESCRIPTION
+Cosmon keeps a fleet of AI agents on track. Run several on one codebase and a session will crash, or fill its context window and forget what it was doing, and you lose track of which agent was on what — cosmon gives each a durable identity and writes every step to disk, so a dead session resumes where it stopped and you can always see who is doing what. More generally it runs missions you delegate to AI: it breaks a hard problem into typed, ordered steps, executes them, and records every step so the finished work carries an auditable trace — the reasoning matters as much as the result. Nothing in it is code\-specific; it aims just as well at research\-grade missions, where a technical lock demands long, decomposed, checkable work. It is model\-agnostic, sitting above any model, so your context and data stay with you and a mission can run entirely on local models. Cosmon is the kernel of noogram — the open\-source substrate for composing, piloting and auditing missions entrusted to AI systems.
+.PP
+PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
+  cs nucleate <formula> ...       create molecule
+  cs tackle <id>                  spawn ONE worker on this node — always
+                                  leaf, never walks the DAG. The verb is
+                                  picked by the operator: cs tackle = single
+                                  node; cs run = N≥1 nodes (resident runtime).
+  cs wait <id> &                  background wait, get notified on completion
+  cs done <id>                    merge branch to main + teardown (required!)
+.PP
+Pilots NEVER poll \*(Aqcs observe\*(Aq by hand — always use \*(Aqcs wait\*(Aq. Pilots NEVER skip \*(Aqcs done\*(Aq — without it the branch never merges. Pilots NEVER run \*(Aqcs run\*(Aq in the foreground — wrap it in a detached tmux session: tmux new \-d \-s runtime cs run <root> \-\-poll\-interval 5 (cs run calls cs done automatically on completion). The historical \*(Aq\-\-leaf\*(Aq and \*(Aq\-\-force\-runtime\*(Aq flags on \*(Aqcs tackle\*(Aq are deprecated no\-ops since the verb\-unification: pick the right verb instead.
+.PP
+ANTI\-PREEMPTION LEASE. A human \*(Aqcs tackle\*(Aq and a running \*(Aqcs run\*(Aq are two writers racing on the same Pending → Active flip, so every tackle records WHO dispatched it: \*(Aqcs tackle \-\-by human\*(Aq (the default) or \*(Aqcs tackle \-\-by runtime:<pid>\*(Aq (what \*(Aqcs run\*(Aq passes). The walker re\-reads each candidate fresh from disk right before dispatch and SKIPS anything no longer Pending, carrying a sticky \*(Aqhuman\*(Aq claim, or tagged \*(Aqhold:pilot\*(Aq. Use \*(Aqcs claim <id>\*(Aq before reaching for a pending molecule: it writes the durable pilot hold before \*(Aqcs tackle\*(Aq, and \*(Aqcs release <id>\*(Aq removes it. The runtime always defers to that hold. \*(Aqmanual always wins\*(Aq, the runtime never raffles a molecule you reached for. Binary owner field, no clock to calibrate. Operators do not normally type \*(Aq\-\-by\*(Aq; \*(Aqhuman\*(Aq is the default.
+.PP
+SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(Aq template, the way \*(Aqcs nucleate\*(Aq germinates one molecule. A spore is a parameterizable mission plan: a fleet, per\-node formulas, a ParamSchema, a DAG of typed edges, and an optional \*(Aq.tla\*(Aq seal. Three verbs, one role each:
+  cs spore validate <ref>         parse + expand as a dry run; prints
+                                  the ordered nucleate call list,
+                                  germinates nothing.
+  cs spore run <ref>              parse + expand + seal gate, then
+                                  germinate the polymer into the live
+                                  state store (every node tagged
+                                  temp:warm, wired to its blocked\-by).
+  cs spore export <ref>           content\-addressed bundle hash +
+                                  ASTRA descriptive layer (D6).
+.PP
+\*(Aq<ref>\*(Aq is a \*(Aqspore.toml\*(Aq file or a directory containing one. \*(Aq\-\-var k=v\*(Aq (repeatable) binds a parameter, coerced into its declared ParamSchema type before expansion. \*(Aq\-\-json\*(Aq on validate and run emits NDJSON (agent\-first invariant). A spore is a declarative front end over the existing \*(Aqcs nucleate\*(Aq verb, not a new scheduler and not a new molecule type.
+.PP
+SEAL GATE (ADR\-140 D4), stated honestly: a spore with no [spore.seal] germinates freely (\*(Aqseal: none\*(Aq). A sealed spore cannot be proven on a machine without the TLC verifier wired in, so \*(Aqcs spore run\*(Aq fails closed by default and refuses unless the operator opts into the risk with \*(Aq\-\-allow\-unchecked\-seal\*(Aq, in which case the status line reads \*(Aqseal: present, NOT verified\*(Aq. It never claims \*(Aqverified\*(Aq when TLC did not run. See docs/cs\-spore.md and docs/design/spore\-impl\-dag\-manifest.md.
+.PP
+MONITORING — the operator\*(Aqs toolkit (use these, not tmux/tail/cat):
+  cs peek                         watchdog TUI — every unfinished molecule
+                                  (running, pending, frozen, starved; the
+                                   archive is hidden by default; press A
+                                   to cycle or pass \-\-phase)
+  cs peek \-\-phase done,failed     + the archive (completed + collapsed)
+  cs peek \-\-all\-galaxies          same phases, every project
+  cs peek \-\-all                   sugar for \-\-all\-galaxies \-\-phase all:
+                                  everything, every project, archive
+                                  included (multi\-galaxy)
+  cs peek \-\-snapshot              byte\-deterministic 120\-col canonical view
+                                  (same bytes on any device; cf.
+                                   docs/guides/peek\-snapshot.md)
+  cs peek \-\-json                  machine view: one JSON document,
+                                  printed once, sorted by molecule id
+  cs ensemble \-\-tag temp:hot      actionable backlog snapshot
+  cs wait <id> &                  block on a worker without hanging the pilot
+.PP
+Observability is a fractal portal, not a dashboard: one tool (cs peek), recursive, from fleet overview down to per\-molecule artifact. Reach for \*(Aqcs peek\*(Aq before \*(Aqtmux attach\*(Aq, \*(Aqtail \-f\*(Aq, or \*(Aqcat briefing.md\*(Aq.
+.PP
+cs peek navigates three continuous scales via zoom keys: \*(Aq+\*(Aq steps in (ville → immeuble → peau), \*(Aq\-\*(Aq steps out, \*(Aq=\*(Aq resets to ville. Ville is the fleet table; immeuble is one molecule pleine\-page with adjacent neighbours wired by straight monospace DAG cables; peau is the raw artifact (briefing / synthesis / log / …) at full resolution. See docs/guides/peek\-zoom.md.
+.PP
+cs peek \-\-json — the machine projection. One JSON document, printed once: {"filter", "molecules": [{"id", "project", "status", "heartbeat", "last_activity", "updated_at"}]}, sorted by id so two captures of an unchanged fleet diff to nothing. \*(Aqstatus\*(Aq is the raw core status — the same word \*(Aqcs observe \-\-json\*(Aq reports for the same molecule, never re\-lettered, and an unrecognised future status serialises as its own snake_case name rather than being laundered into \*(Aqpending\*(Aq. \*(Aqheartbeat\*(Aq is the liveness tier (active|idle|quiet|stalled|orphaned); \*(Aqlast_activity\*(Aq is the timestamp it was classified from, but it folds in tmux\*(Aqs attach\-bumped session clock, so merely attaching moves it — \*(Aqupdated_at\*(Aq moves only on a state write and is what a stall or orphan patrol should read. \*(Aqfilter\*(Aq names the published slice, so absence is distinguishable from filtered\-by\-design. \*(Aqproject\*(Aq is a display label, not a join key. \*(Aq\-\-phase\*(Aq/\*(Aq\-\-all\*(Aq select the same molecules as on screen; \*(Aq\-\-json\*(Aq wins over \*(Aq\-\-snapshot\*(Aq. No bucket field: that taxonomy is under active redesign, and publishing it would freeze a machine contract to the one object with a demonstrated re\-cut cadence. Token counts live in \*(Aqcs ensemble \-\-json\*(Aq.
+.PP
+cs peek also drives the fleet from inside the TUI. Cockpit action keystrokes open a thin modal that fires one \*(Aqcs <verb>\*(Aq and waits: \*(Aqn\*(Aq nucleate (formula + topic), \*(Aqt\*(Aq tackle the selected row, \*(Aqm\*(Aq merge\-and\-done (cs done) with y/N confirmation, \*(Aqw\*(Aq whisper a body to the selected worker, \*(Aq.\*(Aq append a session note. Esc cancels any modal. Detail\-pane letters \*(Aqn\*(Aq and \*(Aqt\*(Aq moved to \*(AqN\*(Aq (notes) and \*(AqT\*(Aq (tree); the mouse\-capture toggle moved from \*(Aqm\*(Aq to \*(AqM\*(Aq.
+.PP
+cs peek — presence header strip. When \*(Aq.cosmon/state/presence/*.json\*(Aq files exist, a one\-line strip under the title lists every live Claude session (galaxy "headline"). Stale entries (heartbeat > 3 min) render greyed; files without a heartbeat are dropped. The strip is a read\-only wheat\-paste over the presence registry owned by C\-PRESENCE\-CORE (\*(Aqcs presence ping|ls|gc\*(Aq).
+.PP
+cs peek — ensemble tab (\*(AqE\*(Aq key). Hot\-swaps the molecule table for a fleet\-wide events view, newest\-first. Columns: ts | mol_id | kind | summary. \*(Aqj/k\*(Aq scrolls; Enter closes the tab and zooms on the selected molecule. Useful above N≈50 live molecules when the per\-row detail panes drown the signal.
+.PP
+cs peek — non\-interactive filter flags: \*(Aq\-\-filter <str>\*(Aq pre\-populates the TUI \*(Aq/\*(Aq field; \*(Aq\-\-tag <t>\*(Aq restricts to molecules carrying that tag; \*(Aq\-\-since <ts|dur>\*(Aq hides rows older than an RFC\-3339 timestamp or a duration suffix (\*(Aq30m\*(Aq, \*(Aq2h\*(Aq, \*(Aq3d\*(Aq); \*(Aq\-\-since\-event N\*(Aq keeps only the last N events per molecule in the ensemble view. Together they keep cs peek readable at large N.
+.PP
+cs peek — phases. Every molecule sits in exactly one phase, and the phase is a total function of its status: \*(Aqlive\*(Aq (running), \*(Aqwaiting\*(Aq (pending + queued), \*(Aqblocked\*(Aq (starved — an external authority refused service, ADR\-062), \*(Aqparked\*(Aq (frozen), \*(Aqfailed\*(Aq (collapsed) and \*(Aqdone\*(Aq (completed). The TUI table and the \*(Aq\-\-no\-tui\*(Aq baseline both default to the unfinished ones — every phase that is not \*(Aqfailed\*(Aq or \*(Aqdone\*(Aq. The archive is what drowns the daily signal; the frozen, starved and pending rows are the signal, and no other instrument reports them. One flag per axis widens the slice: \*(Aq\-\-phase\*(Aq selects the phases (\*(Aq\-\-phase done,failed\*(Aq adds the archive), \*(Aq\-\-all\-galaxies\*(Aq selects the projects, and neither touches the other\*(Aqs axis. \*(Aq\-\-all\*(Aq is sugar for \*(Aq\-\-all\-galaxies \-\-phase all\*(Aq and is the only flag that speaks to both. The interactive \*(AqA\*(Aq key cycles the phase filter (unfinished → all → unfinished) with a status\-line label; the lowercase \*(Aqa\*(Aq key still toggles the all\-projects scope independently. Live transition events (status change, step advance, worker reassignment) are always shown in \*(Aq\-\-no\-tui\*(Aq mode regardless of the filter — they are the signal the operator subscribed to. See docs/guides/peek\-temporalities.md.
+.PP
+REGISTERING A SERVICE — two métiers, two tools:
+  cosmon\-scheduler (patrols.toml)   the house\*(Aqs alarm clock. Periodic,
+                                    short\-lived gestures — cron/interval fires.
+                                    Example: executor\-pulse every 2h, chronicle\-
+                                    lint Sunday 09:00, WhatsApp sync every 15min.
+  cosmon\-daemon\-supervisor          the night watchman. Long\-running
+                                    (daemons.toml)                    processes that must stay alive —
+                                    Telegram bot, Emacs daemon, MCP servers.
+.PP
+Decision rule — does the command finish on its own?
+  Yes, re\-fire on a cadence               \-> cosmon\-scheduler
+  No, runs forever, restart if it dies    \-> cosmon\-daemon\-supervisor
+.PP
+Operator views: cs scheduler status / cs daemons list|status|logs|reload.
+Shared kill\-switch: \*(Aqtouch ~/.cosmon/stand\-down.lock\*(Aq silences both.
+.PP
+SCHEDULER DRY\-RUN OUTPUT — four row types, one per patrol:
+  FIRE     patrol is due; dispatch would spawn the command now
+  SKIP     gate rejected (disabled, kill\-switch, not\-due\-yet,
+           already\-sunsetted, missing require_env var, …)
+  SUNSET   a [patrol.sunset] convergence rule fired. Scheduler
+           records sunset_decided_at, emits patrol.sunsetted, runs
+           on_sunset hooks, then short\-circuits to SKIP on every
+           subsequent tick.
+  INVALID  schema or cadence error (cron parse failure, cadence
+           XOR violation). Exit code 3.
+.PP
+Auto\-sunset for probes: attach [patrol.sunset] to stop a measurement campaign on a statistical criterion (variance\-threshold / sample\-count / operator\-trigger\-only) instead of a calendar timer. TSV shape and hook flags (notify_telegram, write_chronicle_stub) are described in docs/probes/sample\-file\-convention.md.
+Canonical image: the chronicle 2026\-04\-19 \*(AqDeux métiers, deux outils\*(Aq (réveil vs. veilleur de nuit) and 2026\-04\-19 \*(AqLe gardien des chiens, et le gardien des portes\*(Aq (the supervisor\-of\-the\-supervisor is launchd — one plist for the watchman, N dogs under its care).
+Future: dynamic service registration (today both layers are TOML\-
+edited; a planned design will let a service register itself via 
+event/API/molecule — see the internal design notes for the design space).
+.PP
+ARCHIVE — durable proof\-of\-work trail (ADR\-030, see docs/archive.md):
+  cs archive list                 every archived molecule, all months
+  cs archive list \-\-year 2026     scoped to one year
+  cs archive show <mol>           manifest + artifact inventory (prefix ok)
+  cs archive verify <mol>         recompute SHA\-256 hashes (exit 1 if tampered)
+  cs archive prune \-\-dry\-run      what [archive.retention] would delete
+  cs archive prune                execute the retention policy
+.PP
+Terminal transitions (cs done / cs collapse / cs freeze / cs stuck) populate \*(Aq.cosmon/state/archive/YYYY/MM/<id>/\*(Aq when [archive] enabled = true in the project config. The archive outlives worktree teardown — a fresh clone sees every merged molecule\*(Aqs canonical snapshot without running cs.
+.PP
+Worked example — verify the current month\*(Aqs archive in CI:
+  cs archive list \-\-year "$(date +%Y)" \-\-month "$(date +%m)" \-\-json \\
+    | jq \-r \*(Aq.entries[].molecule_id\*(Aq \\
+    | xargs \-I{} cs archive verify {}
+.PP
+LOOPS — three places an agent loop can live (chronicle 2026\-05\-19 \*(AqTrois places, un nom différé\*(Aq):
+  L\-Ext         outside cosmon. The loop runs in an external binary cosmon spawns through a tmux pane;
+                cosmon owns spawn / supervision / pane\-signature / liveness, nothing of the loop itself.
+                Adapters today: claude, aider, codex, opencode. SupervisionMode = TmuxPane, LoopOwnership = External.
+  L\-Native      inside cosmon. The loop runs in\-process inside \*(Aqcs tackle\*(Aq (cosmon\-provider +
+                cosmon\-agent\-harness); cosmon owns the FSM, tool dispatch, message log, briefing seal.
+                Adapters today: openai, anthropic, llama\-cpp (with \*(Aqllama\*(Aq as legacy CLI alias).
+                SupervisionMode = InProcess, LoopOwnership = Cosmon.
+  L\-Composite   above cosmon. N typed roles share a typed state (RoleRoutingTable). Vocabulary, not a
+                Rust enum yet — a meta\-deliberation refused the three\-variant enum because
+                Composite is set\-level (a property of an aggregate) while External and Cosmon are atom\-level
+                (a property per Adapter). Lives today in academy\*(Aqs meta\-fleet, barely instantiated cosmon\-side.
+.PP
+A second axis, RuntimeOwnership, names *who runs the model server* the loop talks to (ADR\-104). It is orthogonal to LoopOwnership: a Cosmon loop can talk to a Vendor server (openai, anthropic via the Direct\-API path) or to an Operated server (llama\-cpp in\-process, vllm\-mlx sidecar). The 2×2 grid:
+  (Cosmon, Operated)    cosmon runs the loop, the operator can pull the model\-server\*(Aqs plug.
+                          llama\-cpp today (in\-process FFI), vllm\-mlx tomorrow (Path B sidecar).
+  (Cosmon, Vendor)      cosmon runs the loop, the model server is a vendor cosmon merely consumes.
+                          openai, anthropic today (Direct\-API).
+  (External, Vendor)    cosmon spawns an external CLI talking to its vendor cloud.
+                          claude, aider, codex, opencode today (tmux\-pane subprocess).
+  (External, Operated)  reserved — no shipped row yet (e.g. self\-hosted Codex driven by cosmon).
+.PP
+Per\-Adapter axes are read from BUILT_IN_AXES at crates/cosmon\-core/src/spawn_seam.rs and validated at every \*(Aqcs tackle\*(Aq. ADRs: ADR\-099 (ValidatedAdapterName), ADR\-101 (SupervisionMode), ADR\-103 (LoopOwnership), ADR\-104 (RuntimeOwnership).
+.PP
+ADAPTERS — canonical names and their per\-Adapter axes (registry projection, ADR\-106 D2/D4):
+  claude        (TmuxPane,  External, Vendor)    Claude Code CLI in a tmux pane — vendor cloud.
+  aider         (TmuxPane,  External, Vendor)    aider CLI in a tmux pane — non\-LLM coding agent.
+  codex         (TmuxPane,  External, Vendor)    OpenAI Codex CLI in a tmux pane — vendor cloud. Interactive steerable TUI by default (whisperable, parity with claude); [adapters.codex].mode = "exec" for the legacy fire\-and\-forget \*(Aqcodex exec\*(Aq batch path.
+  opencode      (TmuxPane,  External, Vendor)    opencode (sst/opencode) CLI in a tmux pane — vendor cloud.
+  openai        (InProcess, Cosmon,   Vendor)    OpenAI chat\-completions HTTP, in\-process loop (cosmon\-agent\-harness).
+  anthropic     (InProcess, Cosmon,   Vendor)    Anthropic messages HTTP, in\-process loop (cosmon\-agent\-harness).
+  llama\-cpp     (InProcess, Cosmon,   Operated)  llama.cpp FFI in\-process — operator\-run weights on operator hardware.
+  llama         (InProcess, Cosmon,   Operated)  legacy CLI alias of llama\-cpp (ADR\-106 D4) — emits the canonical name in events.
+  local         (InProcess, Cosmon,   Operated)  Ollama OpenAI\-compat /v1 in\-process loop — the built\-in default, no Claude Code.
+  ollama        (InProcess, Cosmon,   Operated)  canonical alias of \*(Aqlocal\*(Aq (task\-20260707\-7d27) — \*(Aq\-\-adapter ollama\*(Aq routes to the same floor and stamps \*(Aqollama\*(Aq in events.
+.PP
+Selection happens at \*(Aqcs tackle\*(Aq time. Resolution order:
+  \*(Aqcs tackle \-\-adapter <NAME>\*(Aq      → CLI flag wins.
+  formula step \*(Aqadapter = "<NAME>"\*(Aq  → per\-workflow override (e.g. a deep\-think panel pins claude).
+  $COSMON_DEFAULT_ADAPTER            → operator session hammer (one export, everywhere, no committed config).
+  \*(Aq.cosmon/config.toml::[adapters.default]\*(Aq  → per\-galaxy default for the project.
+  \*(Aq~/.config/cosmon/config.toml::[adapters.default]\*(Aq  → global machine\-wide default (only when the per\-galaxy config is silent).
+  built\-in \*(Aqlocal\*(Aq                  → config\-undeletable floor (Ollama\-backed, no Claude Code in the default path).
+.PP
+Every \*(Aqcs tackle\*(Aq invocation — with or without the flag — emits one \*(Aqadapter_selected\*(Aq envelope to events.jsonl carrying { adapter_name, selection_source (cli|formula_step|env_var|config|global_config|default), role_hint?, loop_ownership (cosmon|external) }. The cat\-test over the event log answers "which Adapter ran for this molecule?" without parsing shell history (jq \-c \*(Aqselect(.type == "adapter_selected")\*(Aq). The same envelope is what \*(Aqcs demo\*(Aq will reuse when its \-\-adapter pass\-through lands — the demo verb merely forwards the flag to \*(Aqcs tackle\*(Aq; the dispatch site is unchanged.
+.PP
+Discovery path: an unknown name on \*(Aqcs tackle \-\-adapter <UNKNOWN>\*(Aq aborts with a typed \*(AqAdapterNotFound\*(Aq carrying the available names — no silent fallback (godin\*(Aqs error\-path discoverability rule). The full registry projection is exposed read\-only via \*(Aqcs config adapters [\-\-json]\*(Aq (cs.adapters.list/v1 envelope, ADR\-106 D3).
+.PP
+Loud fallback: a local model hard\-failure (crash/oom/timeout/connection\-refused) reaches a remote oracle ONLY via \*(Aqcs tackle \-\-adapter <REMOTE> \-\-fallback\-from\-local <CAUSE>\*(Aq. That re\-tackle mints a \*(Aqlocal_fallback\*(Aq line in the same atom as the \*(Aqremote_egress_opt_in\*(Aq egress grant, so a fallback can never be silent. There is no automatic in\-loop fallback; soft \*(Aqis the output good?\*(Aq judgement is undecidable (Rice) and is not a valid cause.
+.PP
+MODEL SELECTION (per\-molecule, ADR\-097). A model pin is the sibling of the adapter axis, resolved fresh at every \*(Aqcs tackle\*(Aq — strong is NEVER inherited, silence resolves cheap. Resolution order:
+  \*(Aqcs tackle \-\-model <ID>\*(Aq          → CLI flag wins.
+  formula step \*(Aqmodel = "<ID>"\*(Aq     → per\-workflow pin (does NOT propagate across nucleation).
+  $COSMON_DEFAULT_MODEL (else legacy $ANTHROPIC_MODEL)  → operator session hammer.
+  \*(Aq.cosmon/config.toml::[adapters.<name>.default_model]\*(Aq  → per\-galaxy default, SCOPED to the adapter.
+  \*(Aq~/.config/cosmon/config.toml::[adapters.<name>.default_model]\*(Aq  → global default (only when the per\-galaxy config is silent).
+  floor \*(AqNone\*(Aq                      → cosmon pins NO model; the adapter\*(Aqs own default applies (byte\-identical to no pin — a strong model is unreachable from silence).
+.PP
+The id is carried opaquely: cosmon does not validate that <ID> is legal for the adapter — the backend rejects an invalid (adapter, model) pair at launch (composition validation is C5). The claude adapter carries the pin through the ANTHROPIC_MODEL per\-session closure\-shadow at spawn (no shared\-state mutation); the Direct\-API adapters take it above their config default_model.
+.PP
+MODEL BUDGET (fail\-closed strong\-dispatch ceiling, ADR\-097). Declare which ids are STRONG (expensive) per adapter and cap strong dispatches per window — both opt\-in:
+  \*(Aq[adapters.<name>].strong = ["<id>", ...]\*(Aq  → the strong cost\-class set. FAIL\-OPEN: an unlisted id is non\-strong (cheap); a cost\-class annotation, NOT a validity table.
+  \*(Aq[model_budget] strong_dispatch_cap = <K>\*(Aq  → at most K strong dispatches per \*(Aqwindow_hours\*(Aq (default 24); absent ⇒ no ceiling. \*(Aqon_overflow\*(Aq = "downgrade" (default — drop to the safe floor) or "abort" (refuse).
+  The count is a fold over \*(Aqevents.jsonl\*(Aq (never a counter file); the (K+1)th strong pin fails closed and mints a \*(Aqmodel_ceiling_hit\*(Aq event. SAFE\-DEFAULT GUARD: strong is reachable ONLY from \-\-model / a formula\-pin; a strong config/env default is dropped to the floor, and a strong \*(Aq[adapters.<name>].default_model\*(Aq FAILS \*(Aqcs reconcile \-\-check\*(Aq (config may only downgrade).
+.PP
+Name stability: \*(Aqllama\-cpp\*(Aq is the canonical CLI name for the in\-process llama.cpp FFI adapter; \*(Aqllama\*(Aq is a legacy alias kept at the CLI seam only (ADR\-106 D4) — the persisted ProviderId serialises as \*(Aqllama_cpp\*(Aq with serde(alias = "llama"), and AdapterSelected emits the canonical name even when the operator typed the alias. The KebabRenameBait set { openai, llama } is tolerated at input but excluded from the published ProtocolStableNames list the TLA+ invariant I3 RegistryTruth reads (docs/specs/CosmonDocHarness.tla).
+.SH OPTIONS
+.TP
+\fB\-\-config\fR \fI<PATH>\fR
+Path to configuration file
+.TP
+\fB\-v\fR, \fB\-\-verbose\fR
+Enable verbose output
+.TP
+\fB\-\-json\fR
+Output in JSON format
+.TP
+\fB\-h\fR, \fB\-\-help\fR
+Print help (see a summary with \*(Aq\-h\*(Aq)
+.TP
+\fB\-V\fR, \fB\-\-version\fR
+Print version
+.SH SUBCOMMANDS
+.TP
+cs\-ensemble(1)
+Display ensemble status — observe the fleet at a glance
+.TP
+cs\-nucleate(1)
+Nucleate a new molecule from a formula template
+.TP
+cs\-observe(1)
+Observe a molecule\*(Aqs current state and history
+.TP
+cs\-errors(1)
+Errors — aggregate molecule\-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
+.TP
+cs\-evolve(1)
+Evolve a molecule to its next lifecycle state
+.TP
+cs\-collapse(1)
+Collapse a molecule — terminate with final state recording
+.TP
+cs\-complete(1)
+Complete a molecule — idempotent Active→Completed transition (worker\-callable)
+.TP
+cs\-decay(1)
+Decay a molecule into child molecules (1 → N)
+.TP
+cs\-merge(1)
+Merge molecules into a synthesis (N → 1)
+.TP
+cs\-transform(1)
+Transform a molecule\*(Aqs kind (idea → task, etc.)
+.TP
+cs\-init(1)
+Bootstrap a project\-local .cosmon/ directory (creates the target dir if missing)
+.TP
+cs\-inbox(1)
+Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
+.TP
+cs\-spark(1)
+Spark — capture a one\-line operator intent into the Inbox (ADR\-061)
+.TP
+cs\-drop(1)
+Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
+.TP
+cs\-listen(1)
+Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
+.TP
+cs\-pilot(1)
+Pilot — interactive cognitive pilot REPL over a client\-side model (\-\-experimental). \-\-remote pilots an avatar over the §8p wire (ADR\-115)
+.TP
+cs\-kill(1)
+Kill a worker — immediate termination (no state flush)
+.TP
+cs\-quench(1)
+Quench a worker — graceful shutdown with state preservation
+.TP
+cs\-fleet(1)
+Fleet template discovery and initialization
+.TP
+cs\-galaxies(1)
+Galaxies — inspect the four\-family taxonomy
+.TP
+cs\-freeze(1)
+Freeze a worker — suspend with state preservation (preemption)
+.TP
+cs\-thaw(1)
+Thaw a worker — resume a frozen worker\*(Aqs Claude session
+.TP
+cs\-trust(1)
+Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo\-supplied shell until granted)
+.TP
+cs\-prime(1)
+Prime the system — load .cosmon/config.toml and self\-check gates
+.TP
+cs\-resume(1)
+Resume — convenience alias for `cs patrol \-\-propel \-\-molecule <id>`
+.TP
+cs\-teardown(1)
+Teardown a fleet — gracefully stop all fleet workers
+.TP
+cs\-purge(1)
+Purge dead workers from fleet state (Stopped, Error, Stale)
+.TP
+cs\-migrate(1)
+Migrate the galaxy\*(Aqs memory — legacy flat→fleet, or residence\-to\-residence
+.TP
+cs\-patrol(1)
+Patrol the fleet — health checks and anomaly detection
+.TP
+cs\-health(1)
+Health — read\-only molecule\-health anomaly catalog, federation\-wide (ADR\-137 §7)
+.TP
+cs\-pulse(1)
+Pulse — runtime\-vitality reading: RPM tachometer, six\-voyant strip (ADR\-138 P1)
+.TP
+cs\-project(1)
+Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
+.TP
+cs\-reconcile(1)
+Reconcile — **deprecated** alias for `cs project` (ADR\-052 §D3)
+.TP
+cs\-scheduler(1)
+Scheduler — read\-only view onto `cosmon\-scheduler`\*(Aqs state (patrols, last fires, log)
+.TP
+cs\-session(1)
+Session — operator carnet (start/note/end), append\-only, BLAKE3\-sealed
+.TP
+cs\-daemons(1)
+Daemons — operator view over `cosmon\-daemon\-supervisor` (list/status/reload/logs)
+.TP
+cs\-status(1)
+Project pulse — quick DAG overview like git status
+.TP
+cs\-tackle(1)
+Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+.TP
+cs\-claim(1)
+Claim a molecule for the pilot; the runtime defers until it is released
+.TP
+cs\-release(1)
+Release a pilot claim and return the molecule to the runtime frontier
+.TP
+cs\-tag(1)
+Tag — add or remove typed labels on a molecule
+.TP
+cs\-tail(1)
+Tail — live `notify`\-driven reader over `events.jsonl` (fleet or `\-\-all\-galaxies`)
+.TP
+cs\-paths(1)
+Paths — project the write\-path taxonomy (`\-\-writes`), a pure derived view
+.TP
+cs\-done(1)
+Done — terminal teardown for a molecule (merge + cleanup, human\-callable)
+.TP
+cs\-harvest(1)
+Harvest — close a completed\-but\-unmerged molecule by invoking `cs done`
+.TP
+cs\-stuck(1)
+Stuck — freeze a molecule and record the blocker
+.TP
+cs\-await\-operator(1)
+Await\-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR\-123). Routes on the molecule\*(Aqs `op\-block:*` capability: block\-and\-emit, or surface\-and\-continue
+.TP
+cs\-topology(1)
+Topology — structural maps of the workspace (wraps the `topon` CLI)
+.TP
+cs\-deps(1)
+Deps — show blocking dependencies for a molecule (upstream/downstream)
+.TP
+cs\-diverge(1)
+Diverge — structural agreement check between two sessions on a molecule (turing §5)
+.TP
+cs\-peek(1)
+Peek — canonical fleet observation command (TUI default; `\-\-no\-tui` for plaintext stream)
+.TP
+cs\-wait(1)
+Wait — block until a molecule reaches a terminal (or requested) status
+.TP
+cs\-run(1)
+Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR\-016 Layer B)
+.TP
+cs\-spore(1)
+Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR\-140)
+.TP
+cs\-help(1)
+Show help — all commands grouped, or detailed help for one command
+.TP
+cs\-verify(1)
+Verify — walk a molecule\*(Aqs event hash chain (plumbing v2)
+.TP
+cs\-validate(1)
+Validate — deliberate heavyweight project\-milestone gate
+.TP
+cs\-verify\-trace(1)
+`verify\-trace` — replay `events.jsonl` against the scheduler spec (Phase 3 CI gate)
+.TP
+cs\-verify\-graph(1)
+`verify\-graph` — Tarjan SCC check on the subgraph induced by a typed relation (substrate, ADR\-016)
+.TP
+cs\-spec\-audit(1)
+`spec\-audit` — ledger audit against the TLA+ spec (catches c1cb `bypass_merge`)
+.TP
+cs\-release\-audit(1)
+`release\-audit` — dry\-run drift detector for the public distribution (analogue of `reconcile \-\-check`)
+.TP
+cs\-doctor(1)
+Doctor — diagnostic probes (whisper channel, …)
+.TP
+cs\-demo(1)
+Demo — one\-command end\-to\-end chatbot surface (first\-contact experience)
+.TP
+cs\-whisper(1)
+Whisper — inject a perturbation payload into a live worker\*(Aqs tmux pane (v0)
+.TP
+cs\-archive(1)
+Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR\-030)
+.TP
+cs\-opt\-in\-share(1)
+Opt\-in\-share — first\-run consent prompt for encrypted developer bundles
+.TP
+cs\-notarize(1)
+Notarize — issue or verify an operator\-signed attestation for a molecule (ADR\-056)
+.TP
+cs\-panel(1)
+Panel — convene a hash\-pinned supermajority panel to gate a constitutional amendment
+.TP
+cs\-witness(1)
+Witness — Layer\-2 witness\-quorum seal for stress\-test molecules (ADR\-085 §3)
+.TP
+cs\-notify(1)
+Notify — push a one\-line message to every configured operator channel
+.TP
+cs\-key(1)
+Key — manage the operator\*(Aqs Ed25519 notary key (generate, show)
+.TP
+cs\-config(1)
+Config — inspect `.cosmon/config.toml` (`show adapters`, `adapters`)
+.SH EXTRA
+REFERENCES:
+  Operator handbook — run \*(Aqcs help guide\*(Aq or read docs/handbook.md for conceptual clarification on cosmon\*(Aqs lifecycle, DAG, tags, and monitoring model.
+  Help\-text audit — an internal note records the per\-command rationale for the examples rendered here.
+.SH VERSION
+v0.1.0

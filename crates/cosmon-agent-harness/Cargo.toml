@@ -1,0 +1,75 @@
+[package]
+name = "cosmon-agent-harness"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+# Frontier crate (ADR-092): the harness substrate sits above the
+# Worker-Spawn Port; a downstream Adapter author would `cargo add` this
+# without wanting AGPL — Apache-2.0 keeps the permissive boundary
+# consistent with `cosmon-provider` / `cosmon-transport`.
+license = "AGPL-3.0-only"
+rust-version.workspace = true
+description = "Provider-agnostic agent-loop spine for cosmon — the AgentLoop port (ADR-102). Carries the eight-state FSM, tool registry, budgets, and four loop invariants {I1, I2, I3, I4}; per-provider MessageLog impls live in the consuming Adapter crate."
+
+[dependencies]
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# Defensive structured logging across the harness:
+# - Bootstrap walk swallowed-Err arms (CLAUDE.md §Briefing seals:
+#   "must never block the hot path"). RUST_LOG=cosmon_agent_harness=debug
+#   surfaces a breadcrumb when a CLAUDE.md / AGENTS.md fails to read.
+# - W2 (delib-20260519-e6db) refuse-above-`.git/` warning when the
+#   bootstrap walk reaches the filesystem root without a git marker.
+# - Reserved for future SF-class instrumentation.
+# All emission is defensive and must never block the hot path.
+tracing = "0.1"
+# Transitional v0 dependency: AdapterTelemetry lives in cosmon-transport
+# today. ADR-102 §D-2 names cosmon-core as the load-bearing dep target;
+# the lift is a follow-up PR. Carrying the dep here keeps the v0 spine
+# behaviour-preserving against cosmon-provider::openai's existing
+# call site without touching the supervision-mode typestate.
+cosmon-transport = { workspace = true }
+# Autonomy-guard substrate (task-20260530-d8bc): the `EgressPolicy` /
+# `EgressJail` types that wrap `exec_command` subprocesses in an
+# egress-denied network namespace for strict-local workers. Apache-2.0,
+# matching this crate's permissive boundary. cosmon-core has no dependency
+# on the harness, so the edge is acyclic.
+cosmon-core = { workspace = true }
+
+# Local-research tools (task-20260521-a095): `list_dir`, `grep`,
+# `find_file`. `ignore` carries BurntSushi's parallel gitignore-aware
+# directory walker (the engine ripgrep uses) plus
+# `overrides::OverrideBuilder` for include/exclude glob filtering;
+# `regex` is the matching engine for the `grep` tool. Both are already
+# workspace deps consumed by other crates so the binary closure does not
+# grow beyond what cosmon already ships.
+ignore = { workspace = true }
+regex = { workspace = true }
+# `globset` (BurntSushi, ripgrep family) is the matcher for `find_file`'s
+# name-glob argument. It is the same crate `ignore` uses internally; we
+# bring it in directly because `find_file` matches user patterns AFTER
+# the walker filters via `.gitignore`, so the user glob is applied as a
+# post-walk filter, not as an `Override` (which would whitelist
+# gitignored files — see `find_file` module docs).
+globset = "0.4"
+
+# Unix-only — needed for setsid + kill(-pgid) in exec_command to reap
+# grandchild processes (delib-20260519-e6db W3 / adversary F1.4).
+# A 1-second timeout on `cargo build --release` used to leave rustc
+# workers reparented to init/launchd, holding target/ filelock; setsid
+# puts the bash child in its own process group so kill(-pgid) sweeps
+# the whole subtree.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+tokio = { workspace = true }
+# Captures `tracing` events synchronously for assertion in unit tests
+# without installing a global subscriber.
+tracing-test = "0.2"
+
+[lints]
+workspace = true

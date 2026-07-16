@@ -1,0 +1,21 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Tally ballots from the seated panel, emit verdict, inscribe role-log
+
+Usage: cs panel decide [OPTIONS]
+
+Options:
+      --config <PATH>                 Path to configuration file
+      --core <CORE>                   Comma-separated constitutional core (always seated)
+      --pool <POOL>                   Comma-separated rotation pool (hash-pinned seats drawn from here)
+  -v, --verbose                       Enable verbose output
+      --json                          Output in JSON format
+      --seats <SEATS>                 Number of rotating seats filled from the pool by the diff hash [default: 1]
+      --rule <RULE>                   Supermajority rule as `NUM/DEN` (default `4/5`) [default: 4/5]
+      --diff <PATH>                   Path to the artifact (e.g. PR diff). Reads stdin when omitted and no `--artifact-hash` is given
+      --artifact-hash <HEX>           Use a precomputed artifact hash (64-char hex) instead of hashing bytes
+      --vote <PERSONA=VOTE[:REASON]>  A ballot, repeatable: `persona=approve` / `persona=refuse[:reason]`
+      --out <PATH>                    Where to inscribe the role-log JSON. Defaults to stdout (with `--json`) or no file (human mode prints a summary). Use `-` for stdout
+  -h, --help                          Print help

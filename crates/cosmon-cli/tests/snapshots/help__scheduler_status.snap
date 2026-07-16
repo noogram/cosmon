@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show the last-known state of every patrol the scheduler has observed
+
+Usage: cs scheduler status [OPTIONS]
+
+Options:
+      --config <PATH>      Path to configuration file
+      --state-file <PATH>  Path to the scheduler state file
+      --log-file <PATH>    Path to the aggregate scheduler log
+  -v, --verbose            Enable verbose output
+      --json               Output in JSON format
+      --log-lines <N>      Tail the last N lines of the scheduler log after the status table. Omit the flag for no log output
+  -h, --help               Print help

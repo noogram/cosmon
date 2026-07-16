@@ -1,0 +1,454 @@
+formula = "deep-think"
+version = 3
+description = """
+Structured multi-perspective panel deliberation. Frames a question, \
+mobilizes a panel of expert personas (subagents) in parallel, and \
+synthesizes convergences/divergences into actionable outcomes. \
+
+⚠ ARTIFACT PATHS — CRITICAL: all artifacts (frame.md, responses/, \
+synthesis.md, outcomes.md) MUST be written to the MOLECULE STATE \
+DIRECTORY, NOT to the current working directory or the git worktree. \
+The molecule state directory is returned by `cs --json observe {mol_id}` \
+in the `molecule_dir` field. Typically: \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`. \
+Files written to the worktree (.worktrees/{mol_id}/) are DESTROYED \
+when `cs done` tears down the session. This caused data loss in \
+delib-20260410-b79f where the entire synthesis.md was lost. \
+
+Panel selection uses the `panel` variable:
+  - panel="auto" (or unset): worker chooses 3-5 personas from its available \
+    Claude Code subagents based on the topic (e.g. architecture question → \
+    architect+wheeler+jobs; first-principles → feynman+galileo; product → \
+    jobs+karpathy).
+  - panel="feynman,jobs,wheeler": explicit, comma-separated list of persona \
+    names — worker uses exactly those.
+
+Canonical persona source: `/srv/cosmon/workshop/personas/<name>/<name>.md`. \
+The `workshop` galaxy (syzygie peer) holds the authoritative persona \
+definitions as of 2026-04-19; Claude Code's `.claude/agents/` symlinks \
+resolve to the same files. When auto-selecting or explicitly naming a \
+persona, the short-name in `panel=...` matches the directory name under \
+`workshop/personas/`. The previous source (`~/dev/projects/agent-templates/`) \
+was archived on 2026-04-22 (moved to `~/dev/projects/.archived/`); \
+workshop is now the single canonical home (see workshop CHRONICLES \
+2026-04-22 — "Un seul workshop").
+
+The worker dispatches each panel member via the Agent() tool in parallel, \
+collects their responses, and synthesizes a structured output. The number \
+of panelists is bounded (3-5) and declared at frame time. Outcomes \
+decay into child task/idea molecules, materialize as an ADR, or produce a \
+recommendation document.
+"""
+id_prefix = "delib"
+
+# Tier 1 — nucleates panelists + child outcomes; bounded by panelists count and fanout.
+[tier]
+level = 1
+measure = "panelists"
+
+[[steps]]
+id = "frame"
+title = "Frame the question and select the panel"
+description = """
+Frame the question precisely. Identify the artifact under review (code, \
+design doc, ADR, product decision). Select 3-5 panel personas — either \
+from --var panel=<comma-separated list> or auto-selected from the worker's \
+available Claude Code subagents based on topic match. Draft a focused \
+prompt per persona that gives them the artifact, the question, and what \
+kind of answer is expected from their perspective.
+
+## Behavioural guards
+
+- **Guard ID:** `deep-think/frame/deliberation-only`.
+- **Mode / scope:** You deliberate: frame the question and panel only.
+- **Forbidden actions:** No build, test, Cargo, or code command.
+- **Bounded output:** Write only `MOLECULE_DIR/frame.md` and the per-persona prompts.
+- **Confidentiality:** Do not expose internal names, paths, credentials, or private operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+
+## Strate-count and substitution hypotheses (R2 — mandatory)
+
+Before drafting per-persona prompts, the frame MUST declare:
+
+1. **Strate-count** — how many distinct sub-questions (strates) the \
+   operator's prompt decomposes into. Number them Q1, Q2, … Qn. Each \
+   strate is a question that could in principle receive a different \
+   answer from a different persona. If the operator's single sentence \
+   contains two orthogonal properties (e.g. "stateless re-derivable" = \
+   direction-of-control + state-recovery), they are two strates, not one.
+
+2. **Per-persona substitution hypotheses** — for each selected panelist, \
+   state the most likely easier question they might answer instead of \
+   the hard one (based on the persona's known gravitational pull). \
+   Example: "karpathy may substitute Q3 (implement resume constructor) \
+   with 'write a tutorial about resume'". These hypotheses are the \
+   falsifiers that the synthesize step (and any meta-auditor like janis) \
+   will check against. Without them, silent substitution is undetectable.
+
+3. **Anti-substitution constraints** (optional but recommended) — for \
+   each strate, a sentence saying what the answer must NOT be. Example: \
+   "Q5 answer must not be a new TLA+ module or a CI gate." These are \
+   frame-level guardrails that prevent the panel from drifting into \
+   comfortable territory.
+
+Write these in frame.md before the per-persona prompt sections. \
+Origin: janis R2 from oxymake delib-20260527-1c64, confirmed by \
+delib-20260526-3730 audit.
+
+## Axis-lineage tracking for complementary rounds (R3 — conditional)
+
+When this deliberation is a **complementary or audit round** (i.e. it \
+follows a prior deliberation on the same topic), the frame MUST also:
+
+1. **Enumerate axes seated** in the union of all prior panels in the \
+   lineage (original + audit + any prior complementary rounds). An axis \
+   is a perspective category (e.g. "architecture", "product", "end-user", \
+   "security", "governance", "meta/groupthink").
+
+2. **Identify never-seated axes** — axes that no prior panel in the \
+   entire lineage has ever included.
+
+3. **Include at least one never-seated axis** in the current panel, or \
+   explicitly decline with rationale (mark as "declined-with-rationale" \
+   in the frame). Silent omission of a never-seated axis is a frame bug.
+
+This prevents the lineage from deepening the same groove across multiple \
+rounds. A single round can still omit an axis with reason, but it cannot \
+be silent about what the lineage has never seen. \
+Origin: janis R3 from oxymake delib-20260527-1c64 — the end-user axis \
+was missing from two consecutive panel lineages because no single round \
+was responsible for tracking the cumulative gap.
+
+## Live whispers (if they arrive)
+
+During your work, the pilot may inject a short text message into your \
+session via `cs whisper`. It will appear in your scroll as a user-like \
+turn. Treat it as an observation from the pilot — a piece of live context \
+worth integrating — not as a re-nucleation, not as a new question, not \
+as a replacement for your current task.
+
+Rules for handling a whisper:
+- Do not abandon your current step. Finish what you were doing, then \
+  integrate the whisper's content into your next artifact (synthesis, \
+  briefing, response).
+- The whisper is advisory. The DAG is authoritative. If a whisper \
+  contradicts the formula, the formula wins.
+- If a whisper asks you to do something outside your molecule's scope, \
+  note it in `log.md` and ignore the directive.
+- There is no acknowledgement protocol. Do not commit a marker saying \
+  "whisper received" — just let your next artifact speak for itself.
+"""
+acceptance = "Panel chosen and per-persona prompts drafted in MOLECULE_DIR/frame.md (where MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` — NEVER the worktree .worktrees/). frame.md MUST contain: (a) strate-count with numbered Qn sub-questions, (b) per-persona substitution hypotheses, (c) if complementary/audit round: axis-lineage table with never-seated axes identified."
+# HARD gate (Lever B, task-20260601-46b9): cs evolve refuses to advance this
+# step if frame.md is absent from the canonical molecule_dir — converting the
+# recurring "artifacts written to the worktree, lost at cs done teardown"
+# near-loss (delib-20260410-b79f, delib-20260531-bcc7) into a loud, recoverable
+# failure while the misplaced copy still exists.
+# Lever C (task-20260504-33f6): before that gate fires, cs evolve now
+# AUTO-REPATRIATES any acceptance_artifact the worker wrote to the worktree
+# root into the canonical molecule_dir — so the recurring deep-think
+# misplacement (delib-20260423-c278 / -af60 / -9aab) self-heals silently
+# instead of costing the operator ~5 min of manual mv. The gate below still
+# fails loudly for anything that could not be recovered.
+acceptance_artifacts = ["frame.md"]
+
+[[steps]]
+id = "dispatch"
+title = "Dispatch panel in parallel"
+description = """
+Invoke each panel member in parallel via the Agent tool with its per-persona \
+prompt. Collect raw responses into molecule_dir/responses/<persona>.md — one \
+file per persona, untouched.
+
+## Behavioural guards
+
+- **Guard ID:** `deep-think/dispatch/deliberation-only`.
+- **Mode / scope:** You deliberate through the declared panel only.
+- **Forbidden actions:** No build, test, Cargo, or code command.
+- **Bounded output:** Produce only the declared `MOLECULE_DIR/responses/<persona>.md` artifacts.
+- **Confidentiality:** Do not expose internal names, paths, credentials, or private operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+"""
+needs = ["frame"]
+acceptance = "N response files written to MOLECULE_DIR/responses/<persona>.md (MOLECULE_DIR from `cs --json observe {mol_id}`)"
+# HARD gate: responses/ must exist AND be non-empty under the canonical
+# molecule_dir (a trailing slash marks the directory contract). An empty
+# responses/ is as much a near-loss as a missing one — no panel output landed.
+acceptance_artifacts = ["responses/"]
+
+[[steps]]
+id = "synthesize"
+title = "Synthesize convergences and divergences"
+description = """
+Read all responses. Identify convergences (where the panel agrees), \
+divergences (where they disagree — and why), and surprising insights. \
+Structure the output as markdown with a per-persona summary followed by an \
+integrated synthesis that calls out the decision-relevant tension points.
+
+## Behavioural guards
+
+- **Guard ID:** `deep-think/synthesize/deliberation-only`.
+- **Mode / scope:** You deliberate and synthesize the collected responses only.
+- **Forbidden actions:** No build, test, Cargo, or code command.
+- **Bounded output:** Write only `MOLECULE_DIR/synthesis.md`.
+- **Confidentiality:** Do not expose internal names, paths, credentials, or private operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+
+## Frame-question coverage checklist (R1 — mandatory)
+
+The synthesis MUST include a **frame-question coverage table** that \
+accounts for every Qn sub-question declared in the frame (step 1). \
+Each question gets exactly one mark:
+
+| Q frame | Treated | Substituted | Declined-with-rationale | Silent |
+|---------|---------|-------------|-------------------------|--------|
+| Q1 ...  |    ✓    |      —      |            —            |   —    |
+| Q2 ...  |    —    |    ✓ (*)    |            —            |   —    |
+
+- **Treated**: the panel answered the actual question as framed.
+- **Substituted**: the panel answered an easier or adjacent question \
+  instead (mark with (*) and explain what was substituted and by whom).
+- **Declined-with-rationale**: the question was deliberately out-of-scope \
+  for this round, with explicit reason stated.
+- **Silent**: no panelist addressed the question and no rationale was \
+  given. **This is the alarm signal** — it means the panel forgot or \
+  dodged the question. Any `Silent` mark requires the synthesizer to \
+  flag it prominently and recommend either (a) a follow-up round that \
+  addresses the question, or (b) an explicit decline-with-rationale \
+  from the operator.
+
+Place this table near the end of synthesis.md, after the integrated \
+synthesis and before the verdict/auto-evaluation section. The table \
+cross-references the substitution hypotheses declared in the frame \
+(step 1) — if a hypothesis fired, the `Substituted` column names it. \
+Origin: janis R1 from oxymake delib-20260527-1c64, confirmed by \
+delib-20260526-3730 audit R5.
+"""
+needs = ["dispatch"]
+acceptance = "MOLECULE_DIR/synthesis.md complete with per-persona summaries, integrated synthesis, AND frame-question coverage table (every Qn from the frame accounted for as treated/substituted/declined/silent) (MOLECULE_DIR from `cs --json observe {mol_id}`)"
+# HARD gate: synthesis.md is the artifact whose loss motivated this whole
+# lever (delib-20260410-b79f lost the entire synthesis). cs evolve refuses to
+# advance off this step until synthesis.md sits in the canonical molecule_dir.
+acceptance_artifacts = ["synthesis.md"]
+
+[[steps]]
+id = "outcomes"
+title = "Produce actionable outcomes"
+description = """
+Convert the synthesis into concrete outcomes. Pick ONE of three paths:
+
+## Behavioural guards
+
+- **Guard ID:** `deep-think/outcomes/deliberation-only`.
+- **Mode / scope:** You deliberate from the synthesis and select one declared outcome path.
+- **Forbidden actions:** No build, test, Cargo, or code command.
+- **Bounded output:** Produce only the selected outcome artifact or the explicitly permitted child plan.
+- **Confidentiality:** Do not expose internal names, paths, credentials, or private operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+
+**DECOMPOSE MODE — auto-nucleation is OPT-IN (`decompose` variable).** \
+By default (`decompose=recommend`, the unset default) this step does NOT \
+call cosmon_nucleate. It writes the recommended decomposition — the full \
+list of proposed children, each with its topic, its synthesis-derived \
+briefing body, and its dependency edges — into molecule_dir/outcomes.md as \
+a *plan the pilot can execute*, and then stops. The pilot reads that plan \
+and decides whether to nucleate the children (owning their tackle/done \
+cycle). Only when the molecule was nucleated with `--var decompose=auto` \
+does this step actually call cosmon_nucleate per child, exactly as path (1) \
+describes. \
+\
+WHY OPT-IN (grace duplicate-children pathology, task-20260622-29e3): when \
+the step auto-nucleates AND the pilot also implements the recommended \
+decomposition by hand, every child exists twice — orphan pending \
+DUPLICATES the operator must collapse one by one (observed on grace: 6 \
+duplicates of C1–C4 + IA-Enfant1/2). Auto-nucleation is a power-user \
+shortcut, not the default; recommendation-only is the safe default that \
+never double-creates. \
+\
+So under the default `decompose=recommend`: follow path (1)'s \
+briefing-derivation discipline below (read synthesis, identify each \
+child's relevant section, compose its briefing body, infer the dependency \
+edges) but EMIT the result into a "## Recommended decomposition" section \
+of molecule_dir/outcomes.md instead of calling cosmon_nucleate. That is \
+path (3) carrying path (1)'s content. Under `decompose=auto`: path (1) \
+applies verbatim, cosmon_nucleate included.
+
+1. **Heterogeneous decomposition (`decompose=auto` only)** — when the synthesis \
+   enumerates \
+   N distinct child molecules with individual topics, scopes, and dependencies. \
+   DO NOT use cosmon_decay here: decay is a HOMOGENEOUS 1→N operation that \
+   creates N children sharing the parent's variables (same topic verbatim). \
+   Instead, call cosmon_nucleate N times — once per distinct child — with \
+   per-child topics extracted from the synthesis. \
+   \
+   **BRIEFING INJECTION (mandatory — synthesis section flows into the \
+   child).** A child born with only a topic slug stalls: its worker opens \
+   `cs tackle`, sees the generic formula step description (e.g. task-work's \
+   "Do the work") and nothing else, has no context, and stops. This is not \
+   a hypothetical — it is the delib-20260526-d969 S3 finding: "Auto-nucleated \
+   children with topic-only slugs stall because the worker has no context. \
+   The synthesis's relevant section should flow into the child's briefing.md \
+   — not just the topic slug." The fix is structural and lives in this step. \
+   \
+   The mechanism: `cs nucleate` writes a generic briefing.md from the \
+   formula step descriptions; `cs tackle` later reads that file and injects \
+   it into the worker's bootstrap prompt. So the lever is to OVERWRITE the \
+   child's briefing.md with a synthesis-derived briefing immediately after \
+   nucleation, before the child is ever tackled. \
+   \
+   For EACH child you nucleate, do all three: \
+   \
+   (a) **Read synthesis.md** (MOLECULE_DIR/synthesis.md of THIS deliberation, \
+       from `cs --json observe {this_deliberation_id}` → `molecule_dir`). \
+   \
+   (b) **Identify the relevant section** of the synthesis for this child. \
+       Heuristic, in order: (1) match the child's topic slug / key terms \
+       against synthesis section headings and the per-persona summaries; \
+       (2) if a "scope adjustments for <child> briefing" or equivalent \
+       per-child block exists in the synthesis, that block IS the relevant \
+       section verbatim; (3) otherwise extract the convergence/divergence \
+       items, decisions, and recommendations whose subject matches the \
+       child. Prefer over-inclusion to a thin briefing: a worker can skim \
+       extra context, but cannot invent missing context. If NO section of \
+       the synthesis maps to a child, that is a signal the child should not \
+       exist — reconsider the decomposition rather than ship an empty brief. \
+   \
+   (c) **Inject it into the child's briefing.md.** Resolve the child's state \
+       directory via `cs --json observe {child_id}` → `molecule_dir` field \
+       (the state dir, NEVER the worktree — worktree files are destroyed at \
+       `cs done`). Write MOLECULE_DIR/briefing.md with this structure: \
+       \
+         # Molecule: {child_id} \
+         \
+         **Formula:** {child_formula_id} \
+         **Parent deliberation:** {this_deliberation_id} \
+         \
+         ## Assignment \
+         \
+         {what to do, why, and the expected output path + format — concrete, \
+         relative paths only (see PORTABILITY guard below).} \
+         \
+         ## Context from the deliberation \
+         \
+         {the relevant synthesis section identified in (b), quoted or \
+         tightly paraphrased — the convergences, divergences, decisions, \
+         and scope adjustments that bear on THIS child. This is the body \
+         that replaces "du vent". Carry citekeys with any locator (see \
+         CITEKEY DISCIPLINE guard below).} \
+         \
+         ## Upstream / Downstream \
+         \
+         {if this child is wired to siblings via --blocks/--blocked-by, \
+         name who feeds it and who consumes its output, by molecule id.} \
+       \
+   A child whose briefing.md is byte-identical to the generic nucleate \
+   default (i.e. you skipped the overwrite) is a step bug — the d969 \
+   stall reproduces. \
+   \
+   **MANDATORY TEMPERATURE TAG.** Immediately after nucleating each child, \
+   run `cs tag <child_id> --add temp:warm`. Pending molecules without a \
+   `temp:*` tag are invisible to `cs ensemble --tag temp:hot` and to the \
+   temp-review curation sweep — they dormaient until someone notices. \
+   `temp:warm` is the safe default (valid design, not urgent); the operator \
+   promotes to `temp:hot` when actionable, or collapses if rejected. This \
+   is the convention captured by the `2026-04-12` convoy-cascade chronicle: \
+   NO pending molecule leaves a decomposition step without a temperature tag. \
+   \
+   **MANDATORY PARENT LINK.** Every child MUST be linked to this deliberation \
+   via a typed `--blocked-by {this_deliberation_id}` edge (CLI: \
+   `cs nucleate ... --blocked-by delib-YYYYMMDD-xxxx`; MCP: pass \
+   `blocked_by=["delib-YYYYMMDD-xxxx"]` to `cosmon_nucleate`). A textual \
+   mention of the parent id inside the child's topic is NOT sufficient — \
+   `cs deps --transitive` and the future DagPolicy walker follow only typed \
+   `Blocks`/`BlockedBy` edges, so textual references are invisible to the \
+   graph and break downstream tooling. This was the delib-20260409-b22c bug: \
+   three semantically distinct children were nucleated without \
+   `--blocked-by`, so `cs deps delib-20260409-b22c --transitive` returned \
+   zero downstream despite the lineage existing in free-text form. \
+   \
+   Additionally, use `--blocks` / `--blocked-by` between sibling children to \
+   wire any inter-child dependency graph the panel inferred. Reserve \
+   cosmon_decay strictly for genuinely homogeneous cases (e.g. "spawn 3 \
+   identical review slots"). \
+   \
+   **Verification (part of the exit criteria).** After nucleating the N \
+   children, run `cs deps {this_deliberation_id} --transitive` (or \
+   `--json`) and assert the downstream closure contains exactly the N child \
+   ids you just created. If the count mismatches, the `--blocked-by` flag \
+   was missed on at least one child — fix it before advancing the step. \
+   Then, for each child, read back MOLECULE_DIR/briefing.md and confirm it \
+   carries a "## Context from the deliberation" section sourced from the \
+   synthesis — not the generic nucleate default. An empty or default \
+   briefing reproduces the d969 stall.
+
+2. **Architectural decision** — when the synthesis converges on a single \
+   durable choice, write an ADR into docs/adr/ following the existing template.
+
+3. **Recommendation document** — when no follow-up work is warranted, produce \
+   a standalone recommendation in molecule_dir/outcomes.md.
+
+REGRESSION GUARDS:
+- NEVER auto-nucleate children under the default `decompose=recommend` — \
+  that produces the grace duplicate-children pathology (task-20260622-29e3): \
+  the step nucleates C1–C4 + IA-Enfant1/2 while the pilot, reading the same \
+  recommendation, nucleates them again, leaving orphan pending duplicates to \
+  collapse by hand. Auto-nucleation requires an explicit \
+  `--var decompose=auto`; otherwise write the recommendation into outcomes.md \
+  and stop.
+- NEVER call cosmon_decay with a formula whose variables are the verbatim \
+  parent topic and a --count > 1 — that was the delib-20260409-f4e1 bug \
+  (one topic cloned N times instead of N distinct children). If the \
+  synthesis named multiple children with distinct topics, you are in \
+  path (1) and cosmon_nucleate is the only correct tool.
+- NEVER nucleate a child without passing --blocked-by {this_deliberation_id} \
+  — that was the delib-20260409-b22c bug (three semantically distinct \
+  children with textual parent refs only; cs deps --transitive returned \
+  zero). The parent→child edge MUST be a typed MoleculeLink::BlockedBy.
+- NEVER leave a nucleated child untagged — that was the delib-7f4a / \
+  convoy-cascade anti-pattern (three task children dormaient invisibles \
+  until manually tagged). Always run `cs tag <child_id> --add temp:warm` \
+  immediately after nucleation.
+- NEVER ship a child with a topic-only slug and the generic nucleate \
+  briefing — that was the delib-20260526-d969 S3 stall (children born with \
+  a topic slug but no briefing body; their workers open `cs tackle`, see \
+  "du vent", and stop). The synthesis section relevant to each child MUST \
+  be injected into its briefing.md before the step advances. See the \
+  BRIEFING INJECTION block in path (1).
+- PORTABILITY: when referencing project files in artifacts (frame.md, \
+  synthesis.md, outcomes.md), always use paths RELATIVE to the project \
+  root (e.g. `src/lib.rs`, `docs/adr/001.md`), NEVER absolute paths \
+  (e.g. `/Users/tenant_auditor/dev/project/src/lib.rs`). Absolute paths break \
+  when a project is renamed, moved, or cloned.
+- **CITEKEY DISCIPLINE FOR CROSS-REFS (briefings and synthesis).** When a \
+  panelist's response or a child briefing cites a textual locator — \
+  `Prop. 4.1`, `Thm. 2.3`, `Lemma B.5`, `§3.2`, `Eq. (17)`, `line 281`, \
+  `p. 42` — the locator MUST be paired with the source's citekey (or a \
+  relative path + line/section when the source is a local markdown file). \
+  A locator-only reference is ambiguous: internal theorem numbers of the \
+  containing memo collide with proposition numbers of external papers. \
+  This was the task-20260417-74d3 audit false-positive (O-1): the briefing \
+  instructed a fact-checker to cross-check `[Bro86, Prop. 4.1]` against \
+  `q1a-algebraic-closure.md lines 281/390/402`, but those three \
+  occurrences were all self-references to the memo's own Prop. 4.1 \
+  (stated L127 of the same file) — not to Brown 1986. The matching-by- \
+  locator-alone produced a perfect false positive. Whenever the synthesis \
+  or an outcome briefing names a proposition, theorem, section, or line, \
+  attach the citekey (`[@brown1986, Prop. 4.1]`) or the relative path \
+  (`q1a-algebraic-closure.md §Prop. 4.1 (L127)`), never the bare locator.
+"""
+needs = ["synthesize"]
+acceptance = "Default (decompose=recommend): molecule_dir/outcomes.md written with a '## Recommended decomposition' section listing each proposed child (topic + synthesis-derived briefing body + dependency edges) and NO cosmon_nucleate calls (the pilot owns nucleation, so no orphan duplicates). Under decompose=auto, path (1): N distinct cosmon_nucleate children, every child linked via --blocked-by {delib_id} AND tagged with temp:warm (`cs tag <id> --add temp:warm`) AND carrying a synthesis-derived briefing.md (the relevant synthesis section injected into the child's MOLECULE_DIR/briefing.md under a '## Context from the deliberation' heading — NOT the generic nucleate default), verified by `cs deps {delib_id} --transitive` returning exactly those N children, `cs observe <child>` showing the tag, and each child briefing.md read back to confirm the injected context. Path (2): ADR written under docs/adr/. Path (3): molecule_dir/outcomes.md written."
+
+# Variable declarations
+[vars.decompose]
+description = """
+Controls whether the `outcomes` step auto-nucleates the recommended child \
+molecules. `recommend` (default) writes the proposed decomposition into \
+outcomes.md and lets the pilot own nucleation — the safe default that never \
+double-creates. `auto` makes the step call cosmon_nucleate per child \
+(path 1). Opt-in because auto-nucleation combined with a pilot implementing \
+the same recommendation by hand produces orphan pending duplicates \
+(task-20260622-29e3, cosmon-ward from grace).
+"""
+type = "string"
+default = "recommend"

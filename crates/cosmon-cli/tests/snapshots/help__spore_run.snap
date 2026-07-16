@@ -1,0 +1,38 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Germinate the polymer: parse + expand + seal gate, then replay the call list against the live state store
+
+Usage: cs spore run [OPTIONS] <REF>
+
+Arguments:
+  <REF>  Path to a `spore.toml` manifest (or a directory containing one)
+
+Options:
+      --config <PATH>         Path to configuration file
+      --var <KEY=VALUE>       Bind a parameter (repeatable: `--var key=value`)
+      --allow-unchecked-seal  Germinate a *sealed* spore even though its `.tla` proof was not verified this run (TLC unavailable). The status line stays honest: `seal: present, NOT verified` (ADR-140 D4). Without this flag a sealed spore fails closed
+  -v, --verbose               Enable verbose output
+      --fleet <FLEET>         Fleet to germinate the polymer into [default: default]
+      --json                  Output in JSON format
+      --store-dir <DIR>       State store root (default: walk-up `.cosmon`)
+  -h, --help                  Print help
+
+EXAMPLES:
+  cs spore run ./spore.toml --var subject="..." --var axes=a,b,c
+  cs spore run ./bundle/ --fleet default               # directory ref
+  cs spore run ./spore.toml --allow-unchecked-seal     # sealed, no TLC
+  cs spore run ./spore.toml --json                     # one NDJSON line/molecule
+
+Germinates the whole polymer: parse + expand + seal gate, then replays the
+call list against the live state store via the canonical 'cs nucleate'
+path. Every germinated molecule is tagged temp:warm and wired to its
+blocked-by predecessors. The seal status note goes to stderr so --json
+stdout stays clean NDJSON.
+
+SEAL (ADR-140 D4): a spore with no [spore.seal] germinates freely. A sealed
+spore fails closed unless --allow-unchecked-seal is passed, in which case
+the status line reads 'seal: present, NOT verified' and never 'verified'.
+
+SEE ALSO: cs spore validate (dry run), cs run (DAG of existing molecules).

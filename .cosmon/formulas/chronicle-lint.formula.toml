@@ -1,0 +1,296 @@
+formula = "chronicle-lint"
+version = 1
+description = """
+Syzygie self-healing lint — detects the three failure modes of the \
+inter-galaxy chronicle protocol without introducing any always-on \
+coupling. The formula is a one-shot sweep: it reads the chronicles in \
+every reachable galaxy, computes the shared-vocabulary signal, and \
+reports deviations. It is the automation that makes the syzygie \
+detectable at write time, so that silent ignore does not quietly \
+become the Nash equilibrium.
+
+Context — the three converging rules enforced here:
+
+  - von Neumann: *silent ignore is the poison; logged refusal the cure.*
+    When a chronicle in galaxy A names a shared term already defined in
+    galaxy B, galaxy A MUST issue one of three verdicts in its own
+    chronicle: `inherit`, `adapt(diff)`, or `refuse(reason)`.
+  - Wheeler: *vocabulary drift >1 clause triggers link-failure.* A term
+    defined by one sentence in galaxy A and an incompatible one sentence
+    in galaxy B is a bug — the citation arrow crosses a semantic gap.
+  - Godin: *per-event, pull-only, never automatic; cadence floor.* One
+    genuine cross-reference per quarter or the link is dead. The report
+    states this explicitly when the syzygie has gone silent.
+
+See the syzygie-protocol chronicle (the meta-protocol) for the
+canonical rules; this formula is their runtime
+counterpart.
+
+ARTIFACT PATHS — CRITICAL: all artifacts (scan.md, triage-report.md) \
+MUST be written to the MOLECULE STATE DIRECTORY, not to the worktree. \
+The molecule state directory is returned by `cs --json observe {mol_id}` \
+in the `molecule_dir` field (typically \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`). Files written to \
+the worktree (`.worktrees/{mol_id}/`) are DESTROYED when `cs done` \
+tears the session down.
+
+Galaxy discovery uses the relative paths declared by the syzygie
+protocol itself — `../mailroom/docs/lore/`, `../showroom/docs/lore/`
+(worktree-relative), alongside the current repo's `docs/lore/`. When a
+galaxy is absent, the formula degrades gracefully: it reports the
+missing galaxy in `scan.md` and continues with whatever it can see
+(Wheeler's reversible-disconnection invariant).
+
+Neurion integration — if the `chronicles` table is present (landed by
+`task-20260417-84e9`), the scan step queries it via
+`neurion.query_registry(sql)` for faster lookup. Otherwise the step
+falls back to a direct filesystem walk. The fallback is NOT a
+degradation — the filesystem is the source of truth; neurion is only
+a cache.
+
+No variables required — the sweep operates on the galaxy set visible
+from the worktree it runs in.
+"""
+id_prefix = "chronlint"
+freeze_on_last_step = false
+
+# Tier 1 — the detect step may nucleate `bug:vocabulary-drift` child
+# molecules (one per distinct drift). Count is bounded by the number of
+# shared terms with incompatible definitions across galaxies, which is
+# small in practice.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "federation-provenance"
+title = "Scan fleet-wide event log for cross-galaxy events missing federation provenance (ADR-105 / I9')"
+description = """
+Run `cs verify --federation` from the worktree root. The verb walks
+`.cosmon/state/events.jsonl`, classifies each `MergeDispatched` /
+`MergeCompleted` envelope, and reports as a hard failure any
+cross-galaxy event whose `federation_provenance` is `None` (ADR-105
+§D3 Oracle B''). Exit code 1 fails the formula step.
+
+Detection rule — an event is cross-galaxy when the `molecule_id`
+contains a `/` separator (the Oracle B'' import convention) OR the
+branch name carries a non-standard prefix (e.g. `smithy/...`,
+`mailroom/...`) outside the canonical set
+`feat / fix / refactor / chore / docs / test / ci / build / perf`.
+
+Why this lives in chronicle-lint:
+
+  - The chronicle-lint formula already projects the syzygie protocol
+    onto the runtime; adding the federation provenance machinery here
+    is the substrate-galaxy half of the same discipline (cosmon-ward
+    feedback flow, ADR-049 / ADR-105 §D8).
+  - The weekly LaunchAgent that runs chronicle-lint becomes the audit
+    cadence that catches `federation_provenance: None` drift before it
+    has time to ossify.
+
+Backfill discipline — if `cs verify --federation` reports failures on
+legitimate legacy events (pre-2026-05-19), the operator may add
+`--legacy-tolerate-before 2026-05-19` to the gate command for one
+cycle, but the gate command itself MUST be reverted to the strict
+form once backfill (`cs delegate` import or chronicle annotation)
+catches up. The tolerate flag is the option (b) escape hatch per
+ADR-105 §"Backfill discipline" — observable in detections.md, never
+silent.
+
+This step is non-fatal under `--legacy-tolerate-before`: a downgrade
+to SKIP for backdated events keeps the step green during the
+migration window without breaking the cosmon-ward feedback flow.
+"""
+command = "cs verify --federation"
+acceptance = "cs verify --federation exits 0; cross-galaxy events scanned and all carry federation_provenance (or are legacy-tolerated by explicit cutoff)."
+
+[[steps]]
+id = "scan"
+title = "Scan chronicles across reachable galaxies"
+description = """
+Enumerate the three galaxies visible from the worktree:
+
+  1. `./docs/lore/`                      — the current galaxy
+  2. `../mailroom/docs/lore/`         — worktree-relative
+  3. `../showroom/docs/lore/`          — worktree-relative
+
+For each galaxy that exists, discover chronicles via one of two paths
+(priority order):
+
+  a. **Neurion chronicles table.** If the `chronicles` table exists in
+     the neurion registry (check with
+     `neurion.query_registry("SELECT name FROM sqlite_master WHERE \
+     type='table' AND name='chronicles'")`), fetch the pointer set via
+     `neurion.query_registry("SELECT id, relative_path, origin, \
+     principle_sentence FROM chronicles")`. Open each `relative_path`
+     from the galaxy root to read the body.
+  b. **Filesystem walk fallback.** If the table is absent, walk each
+     `docs/lore/*.md` (non-recursive; skip `CHRONICLES.md` index and
+     `essays/`). Each file is a chronicle; its stable ID is the
+     filename stem.
+
+Extraction rules (keep the heuristics simple; imperfect is fine, we
+are looking for signal, not proof):
+
+  - **Shared vocabulary terms.** Extract tokens that appear either in
+    **bold** (`**...**`) or inline `backticks` within the chronicle
+    body. Lowercase, strip surrounding punctuation. A term is *shared*
+    if it appears in chronicles from ≥2 galaxies.
+  - **One-clause definition.** For each shared term, capture the first
+    sentence in which the term appears in each galaxy (up to the first
+    period). This is the galaxy-local one-clause meaning.
+  - **Citation edges.** A citation is any relative path of the form
+    `../<galaxy>/docs/lore/<slug>.md` or `docs/lore/<slug>.md` inside a
+    chronicle body (match markdown link targets, not bare prose).
+    Record `(citer_galaxy, citer_id, target_path, target_exists_on_disk)`.
+  - **Verdict annotations.** Detect the three verdict verbs near a
+    citation: `inherit`, `adapt(`, `refuse(`. Presence means the citer
+    answered the cited. Absence (citation with no verdict within the
+    same chronicle) is a silent-ignore candidate.
+
+Output — write `MOLECULE_DIR/scan.md` (MOLECULE_DIR from \
+`cs --json observe {mol_id}` — NEVER the worktree) with:
+
+  - **Galaxies seen** — list of `(galaxy_name, chronicle_count)` with
+    missing galaxies explicitly called out (`../mailroom/docs/lore/:
+    not found — skipped`).
+  - **Shared vocabulary table** — `term | galaxies | first-clause per
+    galaxy`. Sorted by number of galaxies referencing the term
+    (descending), then alphabetically.
+  - **Citation edges table** — `citer_galaxy | citer_id | target_path |
+    exists?`.
+  - **Verdict coverage** — per citation, list the nearest verdict
+    verb (inherit / adapt / refuse) or `none`.
+
+Silence handling: if zero shared terms are detected across ≥2
+galaxies, write a single-line section `## Quarterly floor signal` with
+the diagnosis `SYZYGIE SILENT — no shared vocabulary detected in the
+scan window` and continue to the detect step anyway (Wheeler's reversible
+disconnection is a legal state, but it must be surfaced).
+"""
+acceptance = "MOLECULE_DIR/scan.md written with: (a) galaxies seen with absent galaxies explicitly called out, (b) shared vocabulary table, (c) citation edges table with on-disk existence flags, (d) verdict coverage per citation."
+
+[[steps]]
+id = "detect"
+title = "Detect silent ignore, vocabulary drift, and stale cross-refs"
+description = """
+Using the data captured in `scan.md`, classify every observation into
+one of three detections:
+
+1. **Silent ignore** — a shared term defined by a one-clause in galaxy
+   A, reused textually in galaxy B's chronicle body, but galaxy B's
+   chronicle contains NO verdict verb (`inherit` / `adapt(` /
+   `refuse(`) anywhere in the same chronicle. Report each instance:
+   `(term, defining_galaxy, reusing_galaxy, reusing_chronicle_id)`.
+   Do NOT auto-nucleate — silent ignore is a soft signal (the heuristic
+   has false positives); a human judges whether a verdict is owed.
+
+2. **Vocabulary drift** — a shared term for which the first-clause
+   definitions across galaxies differ by more than one clause of
+   meaning. Simple heuristic: compute token-set overlap between the
+   first clauses; if overlap is <50% of the shorter clause's
+   content-word tokens (excluding stop-words `a/an/the/is/of/to/and`),
+   flag as drift. For EACH distinct drift, auto-nucleate a bug
+   molecule:
+
+   ```
+   cs nucleate chronicle-lint \
+     --kind issue \
+     --var topic="vocabulary-drift: <term> — <galaxyA> vs <galaxyB>" \
+     --tag bug:vocabulary-drift \
+     --tag temp:warm
+   ```
+
+   NOTE: `cs nucleate` requires a formula; use the minimal stub approach
+   — if no `vocabulary-drift-report.formula.toml` exists, nucleate via
+   the `spark-capture` formula with the topic and tags above; this
+   records the drift as a typed signal in the backlog without requiring
+   a dedicated formula. The `temp:warm` tag is MANDATORY (per CLAUDE.md
+   preventive-curation rule; untagged pendings are invisible to
+   ensemble/temp-review sweeps).
+
+3. **Stale cross-ref** — from the citation edges table, every row
+   with `exists? = no` is a stale cross-ref. Report the citer galaxy,
+   citer chronicle ID, and the missing target path. Do NOT
+   auto-nucleate — chronicles are append-only, so a stale cross-ref
+   is a prompt for the citer (or its galaxy's operator) to write an
+   amendment chronicle, not an issue to queue.
+
+Write intermediate findings to `MOLECULE_DIR/detections.md` (three
+sections, one per detection type) so the report step can summarize
+them. Include the list of nucleated bug molecule IDs with their
+tags, so the report can cite them.
+
+Rate-limit guard — if the detect step would nucleate more than 10
+bug molecules in a single run, STOP nucleating and write an explicit
+`## Overflow` section to `detections.md`: *N drifts detected, only
+first 10 nucleated — re-run after addressing the first batch.* This
+prevents a broken heuristic from flooding the backlog.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detections.md written with three sections (silent-ignore, vocabulary-drift, stale-cross-ref); all vocabulary-drift cases nucleated as bug:vocabulary-drift molecules with temp:warm tag (up to 10 per run); nucleated molecule IDs recorded in the file."
+
+[[steps]]
+id = "report"
+title = "Produce the triage report"
+description = """
+Write `MOLECULE_DIR/triage-report.md` (MOLECULE_DIR from \
+`cs --json observe {mol_id}` — NEVER the worktree) summarizing the
+sweep. Required sections:
+
+  ```
+  # Chronicle Lint — {date}
+
+  ## Galaxies scanned
+  | Galaxy | Path | Chronicles | Status |
+  |--------|------|------------|--------|
+  | cosmon | ./docs/lore/ | N | ok |
+  | mailroom | ../mailroom/docs/lore/ | N / missing | ok / missing |
+  | showroom | ../showroom/docs/lore/ | N / missing | ok / missing |
+
+  ## Silent-ignore candidates (N)
+  Each row: term | defining galaxy | reusing galaxy | reusing chronicle.
+  If N = 0, write "none detected — verdicts are current."
+
+  ## Vocabulary drift (N)
+  | Term | Galaxy A clause | Galaxy B clause | Bug molecule ID |
+  |------|-----------------|-----------------|-----------------|
+  Each drift has an auto-nucleated bug molecule (tagged
+  `bug:vocabulary-drift` + `temp:warm`); list the IDs. If N = 0, write
+  "none detected — shared vocabulary is coherent."
+
+  ## Stale cross-refs (N)
+  | Citer galaxy | Citer chronicle | Missing target |
+  If N = 0, write "none detected — all citations resolve."
+
+  ## Quarterly floor signal (Godin)
+  Report the count of cross-galaxy citations detected in the scan
+  window. If ≥1, write "SYZYGIE LIVE — N cross-references this window."
+  If 0, write "SYZYGIE SILENT — no cross-references detected. If this
+  state persists for 90 days, the link is cosmetic." This is the
+  falsification signal; it MUST be present in every run, even when
+  N = 0.
+
+  ## Recommendations
+  One line per detection category that is non-empty: "Resolve K
+  silent-ignore candidates", "Address N drift bug molecules",
+  "Remove/rewrite M stale cross-refs". If every category is empty,
+  write "No action required this cycle."
+
+  ## Next sweep
+  Recommend a cadence — default: run again in 30 days, or sooner if a
+  new syzygie protocol amendment lands.
+  ```
+
+Non-goals to reaffirm in the report epilogue:
+
+  - This lint does NOT fix drifts automatically. It reports and
+    nucleates bug molecules; humans resolve.
+  - This lint does NOT enforce a dictionary; shared vocabulary is
+    discovered from chronicle content, not from a curated list.
+  - This lint is pull-only, per-event; never automatic (Godin).
+
+End with a one-line recommendation of when the next sweep should run.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/triage-report.md written with: galaxies scanned, three detection sections (silent-ignore/drift/stale-xref) with counts and tables, quarterly floor signal (MANDATORY, even at zero), recommendations, and next-sweep cadence."

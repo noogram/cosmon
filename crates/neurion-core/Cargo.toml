@@ -1,0 +1,20 @@
+[package]
+name = "neurion-core"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "Apache-2.0"
+description = "Neurion core — referents, reaches, and the Reachable trait. Zero I/O."
+
+[dependencies]
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints.clippy]
+# Imported code — will be brought up to workspace pedantic standard incrementally.
+pedantic = { level = "allow", priority = -1 }
+should_implement_trait = "allow"

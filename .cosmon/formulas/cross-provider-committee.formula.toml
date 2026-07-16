@@ -1,0 +1,355 @@
+formula = "cross-provider-committee"
+version = 2
+description = """
+The cross-provider reading committee (ADR-147, C2) as an executable \
+formula — a jury that is provider-diverse *by construction*, not by \
+adapter-name label.
+
+WHY A FORMULA, NOT A RUNTIME PRIMITIVE. The registry (ADR-004) is the \
+extension point; a committee is a *recipe over molecules*, so it ships \
+as a formula, never a new command or daemon (composability principle). \
+The one real mechanism gap the delib-20260711-f62a panel found is \
+exactly this: cosmon had the multi-provider plumbing but no way to \
+*convene* a provider-diverse jury. This formula is that missing recipe.
+
+WHY NOT A deep-think PANEL. deep-think fans its panel out with the \
+`Agent()` tool (deep-think.formula.toml:148), which is Claude-only by \
+construction — every persona is the same weights wearing a different \
+name. A "committee" built that way is `A → A` disguised as `A → B`: an \
+echo, not a witness. Channel/session independence (ADR-032 P_external, \
+the mindguard, `cs witness`) does NOT buy error-independence — a Claude \
+auditing a Claude is channel-independent yet error-*correlated*, so it \
+shares blind spots. ADR-147 promotes **provider-family \
+error-independence** to a constitutional invariant precisely because it \
+is a genuinely new axis, not a restatement of P_external (turing, S-2).
+
+THE SHAPE: A DAG OF ADAPTER-PINNED MOLECULES. Each seat is its own \
+reader molecule tackled under its own resolved provider. The refuter \
+seat's provider is chosen by *pinning its adapter* — either the \
+per-step `adapter =` field a formula step carries (threaded into \
+`resolve_adapter_selection`, tackle.rs) or, when the family is resolved \
+dynamically at convene-time, the `cs tackle <seat> --adapter <family>` \
+flag (which outranks the step pin). Both reuse the tackle-time **Path \
+A** dispatch wholesale (`spawn_openai_session` et al., tackle.rs:4019) \
+— OpenAI-compatible providers cost zero new code (`OpenAIProvider::\
+with_base_url`, live Mistral standby). **Zero new plumbing.**
+
+DO NOT BRANCH `lookup_provider` (D-1, torvalds). It is mock-only \
+(cosmon-provider .../llm.rs:387) and wiring it to real adapters \
+re-implements the credential / base_url / egress / telemetry that Path \
+A already owns — cambrian drift. The DAG-of-molecules sidesteps the \
+in-worker `[steps.llm]` path entirely; the seats *are* the \
+multi-provider dispatch. If you feel the urge to wire the stub, you are \
+rebuilding tackle. Stop.
+
+THE POSTURE: ARTEFACTS TO AUDIT, NEVER TESTIMONY TO BELIEVE. The \
+generator (provider A) ships a *diagnosis + fix + falsifier*. The \
+refuter seat(s) (provider B, C — a different family, enforced below) \
+receive that diff as **artefacts to audit**, with a refutation posture: \
+the generator's confident prose raises persuasive weight WITHOUT \
+raising truth-probability (the cmb-verify hazard, verbatim). So each \
+refuter reuses the **cmb-verify verdict-door** (confirmed / refuted / \
+inconclusive) and its typed `Refutes` / `RefutedBy` edge — nucleated \
+`cs nucleate cmb-verify --refutes <generator-seat> …`. The generator's \
+diagnosis becomes the refuter's `stated_mechanism` (a hypothesis, \
+granted no authority beyond "a good place to look"); the shipped \
+falsifier is the concrete instrument the refuter *runs*, not a claim it \
+reads.
+
+THE DECISION RULE: A VERDICT-DOOR, NOT A MAJORITY VOTE. One concrete \
+red falsifier beats ten "looks fine." The committee verdict is \
+**conjunctive**: `refuted` if ANY refuter lands `refuted` (or the \
+generator's own falsifier goes red under a refuter's hand); `confirmed` \
+ONLY if EVERY seat returns `confirmed`; `inconclusive` otherwise. A \
+vote would let a mono-family majority drown a single true refutation — \
+the exact failure the provider-diversity invariant exists to prevent. \
+On **max stake**, the jury is ≥3 distinct families and the verdict \
+stays conjunctive across all of them.
+
+DIVERSITY IS ENFORCED ON THE RESOLVED ENDPOINT, NEVER THE NAME (C3, \
+turing + buterin, D-2). "≥1 non-Claude by adapter-name" is gameable by \
+the **proxy-costume attack**: an `openai`-named seat whose `base_url` \
+fronts Claude. cosmon sees only the declared string. So the convene \
+step measures distinctness on the *resolved* \
+`(provider, base_url, model-family)` tuple \
+(`cosmon_core::provider_diversity::resolve_endpoint_tuple`), and the \
+`[provider_bias]` baseline (C3, config.rs) supplies the floor — \
+`additional_falsifiers` and `min_distinct_provider_endpoints`, a \
+monotone union no profile can lower. `cs reconcile --check` runs the \
+tier-(a) lint (`requirement_downgrade_violations` via \
+`check_no_profile_requirement_downgrade`, reconcile.rs) so a committee \
+config that silently collapses to one family reddens CI.
+
+TWO SEPARATE, CONJUNCTIVE WITNESSES (C4, ADR-153). Provider-family \
+distinctness alone is NOT enough. Two *different* providers both handed \
+the generator's confident prose as "the mechanism" and both told to \
+*confirm* are still an echo of the same framing — channel independence \
+without POSTURE independence is a costume. So roster admission requires \
+**two witnesses, joined conjunctively** — a seat sits only if BOTH pass, \
+and the SOR (C3) cannot bargain either one: \
+  (1) PROVIDER-FAMILY — the seat's resolved \
+      `(provider, base_url, model-family)` tuple \
+      (`cosmon_core::provider_diversity::resolve_endpoint_tuple`) is \
+      distinct from the generator's AND every other seat's; the \
+      `[provider_bias]` baseline supplies the floor. \
+  (2) PERSONA/ROLE — the seat plays a DISTINCT `role_id` from the \
+      generator and every other seat, carries a VERSIONED adversarial \
+      briefing contract that was REALLY INJECTED into its briefing.md \
+      (a paper contract that is declared-but-not-delivered fails), and \
+      ships a FALSIFICATION-ATTEMPT ARTEFACT (proof it tried to break \
+      the fix, not merely read it). \
+The pure kernel is `cosmon_core::committee::plan_committee`: it admits \
+each refuter under both witnesses and returns the admissible roster; \
+only those seat ids are ever offered to the SOR \
+(`RosterPlan::admissible_seat_ids`). A witness-rejected seat is not a \
+low score to outweigh — it is a seat NOT ON THE BALLOT \
+(`sor_may_not_resurrect`). A budget-blocked *admissible* seat is a \
+typed SOR refusal, never a silent fall-back to a rejected witness.
+
+NO "GENERATOR FAMILY = GALAXY DEFAULT" FALLBACK (C4). The generator's \
+family must be the registered Incarnation of the completed generator \
+molecule (read `cs --json observe {{target}}`). If no such registered \
+Incarnation exists, convene CLOSES with a missing-input finding — it \
+does NOT silently assume the galaxy default, because a wrong generator \
+family silently collapses witness (1).
+
+THE §8b CEILING — SELL NONE OF THIS AS A LOCK. The lint makes a \
+mono-family committee *visible and attributable*, not impossible: the \
+family label is derived from operator config, not attested, so a \
+motivated proxy-costume survives tier (a). Binding family to an \
+attested token (`SameFamilyRefusal`) is tier (b), an ADR-147 follow-on. \
+And the residual elasticity migrates to **stake self-classification** — \
+a worker declaring its own molecule low-stake to dodge the requirement \
+(S-3); no schema closes that, only C5's empirical calibration probe \
+polices it. This formula makes the jury loud, not incorruptible.
+
+VARIABLES:
+  - target : the molecule id (or artifact locus) carrying the \
+    generator's diagnosis + fix + falsifier to be audited. In the \
+    common case this is an ALREADY-COMPLETED provider-A molecule whose \
+    diff is on main — the refuters audit its committed artefacts. If \
+    the diagnosis+fix+falsifier do not exist yet, convene first \
+    nucleates a generator seat (adapter = the generator family).
+  - symptom : the observed defect / claim under stake — trusted \
+    evidence (the cmb-verify load-bearing gift), kept separate from the \
+    generator's inferred mechanism.
+  - stake : routine | root | security | max — drives the jury size and \
+    the `min_distinct_provider_endpoints` floor. Defaults to `root`.
+
+UPSTREAM: ADR-147 (C1, the invariant), `[provider_bias]` + the \
+diversity lint (C3), synthesis delib-20260711-f62a §Q3 / §D-1 / §S-1. \
+DOWNSTREAM: C5 (the per-provider calibration probe empirically \
+validates these readers and polices the stake residual). Cite back to \
+showroom by relative path (syzygie, ADR-049).
+
+ARTIFACT PATHS — CRITICAL: all artifacts (roster.md, dag.md, \
+handoff.md) MUST be written to the MOLECULE STATE DIRECTORY (the \
+`molecule_dir` field from `cs --json observe {mol_id}`), NEVER the \
+worktree — the worktree is destroyed by `cs done`.
+"""
+id_prefix = "committee"
+freeze_on_last_step = false
+
+# Required, default-free operator inputs. A committee with no target and no
+# symptom carries no stake to adjudicate — the briefless-molecule guard
+# (task-20260711-919a) refuses to birth or dispatch it.
+[vars.target]
+description = "Molecule id or artifact locus carrying the generator's diagnosis + fix + falsifier to audit."
+required = true
+
+[vars.symptom]
+description = "The observed defect / claim under stake — trusted evidence, kept separate from the generator's inferred mechanism."
+required = true
+
+[vars.stake]
+description = "routine | root | security | max — drives jury size and the min_distinct_provider_endpoints floor."
+default = "root"
+
+# Tier 1 — the committee decomposes into a DAG of adapter-pinned seat
+# molecules (the refuter jury + a collector). `measure = "count"` is the
+# finite structural bound: the seat count is enumerated at convene time from
+# the resolved `[provider_bias]` floor and the stake, and never grows during
+# execution — a well-founded fan-out, not open recursion.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "convene"
+title = "Convene the jury — resolve a provider-diverse roster on the endpoint, not the name"
+description = """
+Assemble the committee roster and PROVE it is provider-diverse before \
+a single seat is nucleated. This step nucleates nothing; it decides \
+who sits.
+
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe \
+{mol_id}` — NEVER the worktree.
+
+  1. Read the stake ({{stake}}). It sets the jury floor: `routine` → \
+     the committee is optional (note it and stop if the operator only \
+     wanted the diverse read for a low-stake change); `root` → ≥1 \
+     refuter of a family distinct from the generator; `security`/`max` \
+     → ≥2 refuters spanning ≥3 DISTINCT families total (generator + \
+     two), conjunctive across all.
+  2. Resolve the generator family — from the REGISTERED INCARNATION, \
+     never the galaxy default (C4, ADR-153). Read `cs --json observe \
+     {{target}}`: the generator's family is the adapter of its recorded \
+     Incarnation. If {{target}} carries no registered Incarnation, CLOSE \
+     with a missing-input finding — do NOT fall back to the galaxy \
+     default, because a wrong generator family silently collapses \
+     witness (1). Confirm the target actually carries the three \
+     artefacts — a **diagnosis**, a **fix diff**, and a **falsifier** \
+     (a test that goes red when the fix is reverted). If the falsifier \
+     is absent, that is the FIRST FINDING: a fix with no falsifier \
+     cannot be adjudicated — demand one (nucleate the generator seat, \
+     or send it back) before convening refuters.
+  3. Resolve the refuter families from the `[provider_bias]` baseline \
+     (C3): `additional_falsifiers` and the effective \
+     `min_distinct_provider_endpoints` for {{stake}}. For EACH candidate \
+     seat resolve its endpoint identity the way \
+     `cosmon_core::provider_diversity::resolve_endpoint_tuple` does — \
+     `(provider, base_url, model-family)` derived from `base_url` + \
+     `model`, **never the `[adapters.<name>]` section name** (the \
+     proxy-costume forbids the name as the distinctness key). This is \
+     **witness (1)**: assert every refuter's tuple differs from the \
+     generator's AND from every other refuter's. The pure kernel is \
+     `cosmon_core::committee::plan_committee` — the two witnesses and \
+     the floor are one call. If the wired adapters cannot supply enough \
+     distinct families to meet the floor, STOP with a loud finding — a \
+     committee that collapses to one family is no committee (do not \
+     quietly seat a same-family echo).
+  4. WITNESS (2) — PERSONA/ROLE (C4, ADR-153). Provider distinctness \
+     is necessary but NOT sufficient. Assign each seat a DISTINCT \
+     `role_id` (the generator's is `author`; each refuter is a distinct \
+     adversarial persona, e.g. `skeptic`, `security-refuter`). Two seats \
+     that share a `role_id` are the same posture wearing two provider \
+     hats — reject the second. Fix the VERSIONED adversarial briefing \
+     contract each refuter will receive (schema version \
+     `cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION`), and record \
+     that it MUST be really injected (step `dispatch-seats` injects it \
+     and records the `contract_hash`). A seat with a declared-but-not- \
+     injected contract, or no falsification artefact, fails witness (2). \
+  5. Run `cs reconcile --check` and confirm it is green on the \
+     `[provider_bias]` diversity lint (`requirement_downgrade_\
+     violations`). A red here means the config itself downgrades the \
+     floor — fix the config, not the roster.
+
+Write MOLECULE_DIR/roster.md: the stake and its jury floor; the \
+generator seat (family + resolved endpoint tuple + `role_id` + the \
+three artefact paths, or the "falsifier absent" finding); each refuter \
+seat (planned family + resolved endpoint tuple + distinct `role_id` + \
+the `--adapter` it will be tackled under + the versioned briefing it \
+will receive); TWO explicit ✓/✗ tables — DISTINCT-ENDPOINTS (witness 1) \
+AND DISTINCT-PERSONA (witness 2) — proving BOTH axes differ; and the \
+`cs reconcile --check` result. State the §8b ceiling in one line: the \
+tuples are config-derived, not attested — tier (a) makes a costume \
+loud, tier (b) (`SameFamilyRefusal`) is the ADR-147 follow-on.
+"""
+acceptance = "MOLECULE_DIR/roster.md written: stake + jury floor; generator family with resolved endpoint tuple, `role_id`, and the three artefact paths (or a 'falsifier absent' finding); each refuter's planned family, resolved endpoint tuple, DISTINCT `role_id`, versioned adversarial briefing, and tackle `--adapter`; TWO tables — DISTINCT-ENDPOINTS (witness 1) and DISTINCT-PERSONA (witness 2) — proving both axes differ; and a green `cs reconcile --check`. The generator family is read from {{target}}'s registered Incarnation, never the galaxy default (missing Incarnation closes with a missing-input finding). If the wired adapters cannot meet the stake's diversity floor, roster.md records the loud STOP instead."
+
+[[steps]]
+id = "dispatch-seats"
+title = "Nucleate the seat DAG — one adapter-pinned molecule per juror, refuters as verdict-doors"
+description = """
+Turn the roster into a DAG of molecules. The `count` of seats is fixed \
+by the convened roster (the Tier-1 measure) and does not grow here — a \
+well-founded fan-out. Every nucleation MUST carry an explicit \
+`--blocked-by`/`--blocks` edge (this step is `requires_parent_link`) \
+and be tagged `temp:warm` immediately, per the auto-tag discipline.
+
+  1. GENERATOR SEAT (only if the target does not already carry the \
+     three artefacts). Nucleate a leaf that produces \
+     diagnosis + fix + falsifier under the generator family:
+        cs nucleate task-work --kind task \\
+          --blocked-by {this_committee_id} \\
+          --var topic="Produce a diagnosis, a minimal fix diff, and a \
+          FALSIFIER (a test that goes red when the fix is reverted) for: \
+          {{symptom}}. Ship all three as auditable artefacts."
+        cs tackle <gen_id> --adapter <generator_family>   # Path A
+        cs tag <gen_id> --add temp:warm
+     When the target is already a completed provider-A molecule, SKIP \
+     this — it IS the generator seat; its committed diff on main is the \
+     artefact the refuters audit.
+
+  2. REFUTER SEATS (one per resolved refuter family). Each is a \
+     **cmb-verify** molecule carrying the typed refutation edge — reuse, \
+     not reinvention: cmb-verify already demotes a relayed mechanism to \
+     a hypothesis, reproduces the symptom, reads the locus, RUNS the \
+     instrument, and emits the verdict-door + `Refutes`/`RefutedBy`.
+        cs nucleate cmb-verify \\
+          --refutes <generator_seat_or_target> \\
+          --blocked-by <generator_seat_or_target> \\
+          --var diagnosis_molecule_id=<generator_seat_or_target> \\
+          --var symptom="{{symptom}}" \\
+          --var stated_mechanism="<provider-A's diagnosis, verbatim>"
+        cs tackle <ref_id> --adapter <refuter_family>   # DISTINCT family — Path A
+        cs tag <ref_id> --add temp:warm
+     WITNESS (2) INJECTION — really inject, do not merely declare \
+     (C4, ADR-153). Paste into each refuter's MOLECULE_DIR/briefing.md, \
+     under `## Committee posture`, the VERSIONED adversarial briefing \
+     contract (schema \
+     `cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION`): the fix \
+     diff and the falsifier are ARTEFACTS to audit, never testimony — \
+     run the falsifier yourself, try to make it (or a sharper one) go \
+     red; the generator's confidence is not evidence. Record the \
+     injected contract's `contract_hash` in dag.md — a paper contract \
+     that is declared-but-not-injected fails witness (2) at \
+     `plan_committee`. The refuter MUST ship a FALSIFICATION-ATTEMPT \
+     ARTEFACT (e.g. `MOLECULE_DIR/falsification-attempt.md`) — proof it \
+     tried to break the fix; a refuter with no such artefact is \
+     inadmissible.
+
+  3. COLLECTOR SEAT — the conjunctive verdict-door. Nucleate a leaf \
+     blocked-by EVERY refuter seat (and the generator seat if any):
+        cs nucleate task-work --kind task \\
+          --blocked-by <ref_1> --blocked-by <ref_2> ... \\
+          --var topic="Aggregate the committee: read each refuter's \
+          verdict.md. Emit CONJUNCTIVE verdict — refuted if ANY refuter \
+          refuted OR any falsifier went red; confirmed ONLY if every \
+          seat confirmed; else inconclusive. One red falsifier beats ten \
+          'looks fine'. Write committee-verdict.md."
+        cs tag <collector_id> --add temp:warm
+     The aggregate verdict lives HERE, downstream — the orchestrator \
+     cannot wait on its own children (worker/human boundary).
+
+Write MOLECULE_DIR/dag.md: every nucleated seat id with its role, \
+resolved family, the `--adapter` it is (to be) tackled under, and its \
+`--blocked-by` / `--refutes` edges — the full committee closure a \
+`cs deps {this_committee_id} --transitive` will show.
+"""
+needs = ["convene"]
+requires_parent_link = true
+acceptance = "MOLECULE_DIR/dag.md written enumerating every nucleated seat (generator if needed, each refuter as a cmb-verify molecule with `--refutes`, and the collector) with role, resolved family, DISTINCT `role_id`, injected adversarial-briefing `contract_hash`, tackle `--adapter`, and typed edges. Each child was tagged `temp:warm`. The seat count matches the convened roster (the Tier-1 `count` measure). Refuter families are DISTINCT from the generator on the resolved endpoint (witness 1) AND carry distinct personas with injected briefings and a falsification artefact (witness 2)."
+
+[[steps]]
+id = "handoff"
+title = "Hand the DAG to the pilot and record the aggregation rule + return-citation"
+description = """
+The committee is a DAG the pilot runs; this orchestrator's job ends at \
+a clean hand-off. Do NOT tackle or wait on the seats — that is the \
+pilot's role (`cs tackle` / `cs run` are human-only; the worker/human \
+boundary is non-negotiable).
+
+Write MOLECULE_DIR/handoff.md:
+  1. The exact pilot commands to run the committee — either \
+     `cs tackle <seat> --adapter <family>` per seat (each under its \
+     DISTINCT resolved family, Path A) then `cs done` in dependency \
+     order, or a single `cs run <root>` if the seats' adapters are \
+     pinned. Name the `--adapter` for every seat explicitly so a \
+     later reader cannot accidentally collapse the jury to one family.
+  2. The CONJUNCTIVE decision rule restated for the record: committee \
+     `refuted` if ANY refuter refuted or any falsifier went red; \
+     `confirmed` only if EVERY seat confirmed; else `inconclusive`. \
+     A verdict-door, never a majority vote.
+  3. The §8b honesty line: this makes the jury loud, not incorruptible \
+     — tier (a) endpoint distinctness is config-derived; the attested \
+     `SameFamilyRefusal` (tier b) and C5's empirical calibration probe \
+     are what harden it. Name the residual (stake self-classification, \
+     S-3) as unclosed.
+  4. The return-citation: when the committee's verdict lands, cite it \
+     back to the showroom surveys by RELATIVE path (syzygie, \
+     ADR-049) and note C5 as the downstream that will calibrate these \
+     readers.
+"""
+needs = ["dispatch-seats"]
+acceptance = "MOLECULE_DIR/handoff.md written: the per-seat `cs tackle … --adapter <family>` (or `cs run`) pilot commands with every seat's family named; the conjunctive verdict-door rule restated; the §8b ceiling + unclosed stake-self-classification residual named; and the syzygie return-citation to showroom + C5. The orchestrator did NOT tackle or wait on its own seats."

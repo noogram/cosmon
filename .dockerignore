@@ -1,0 +1,29 @@
+# Build cache + worktrees — never sent to Docker daemon
+target/
+.worktrees/
+**/target/
+**/.cosmon/state/
+**/.cosmon/archive/
+
+# Git
+.git/
+.gitignore
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+
+# Secrets / local config
+.env
+.env.local
+
+# Tests / docs (not needed in container build context)
+docs/
+docs-src/
+*.md
+!crates/cosmon-rpp-adapter/Dockerfile.md
+# cosmon-cli embeds the operator handbook via include_str!, so the `cs`
+# build (Dockerfile.strace-test, docker/local-default-container/Dockerfile)
+# needs this one doc in the context despite the blanket docs/ exclusion.
+!docs/handbook.md

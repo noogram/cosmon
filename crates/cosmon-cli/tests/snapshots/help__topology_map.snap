@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+PageRank-ranked structural map of a Rust project
+
+Usage: cs topology map [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]  Path to the project root (defaults to current directory) [default: .]
+
+Options:
+      --config <PATH>              Path to configuration file
+      --max-symbols <MAX_SYMBOLS>  Maximum symbols per module (0 = unlimited) [default: 0]
+  -v, --verbose                    Enable verbose output
+      --json                       Output in JSON format
+  -h, --help                       Print help

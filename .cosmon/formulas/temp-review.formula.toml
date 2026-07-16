@@ -1,0 +1,130 @@
+formula = "temp-review"
+version = 1
+description = """
+Periodic molecule temperature curator — IT FROM BIT. The system \
+observes itself, decides its own priorities, and prunes state \
+sediment from the backlog. A temp-review sweep scans every pending \
+molecule, categorizes by age and temp:* tag, triages each into \
+hot/warm/cold/frozen (or collapses obsoletes), and reports on the \
+shape of the backlog.
+
+This is curation-as-signal (⚡): a lightweight, one-shot sweep, not \
+a persistent actor. Run it every ~week or after a big session — \
+`cs nucleate temp-review` then `cs tackle <id>`.
+
+ARTIFACT PATHS — CRITICAL: all artifacts (scan.md, triage-report.md) \
+MUST be written to the MOLECULE STATE DIRECTORY, not to the worktree. \
+The molecule state directory is returned by `cs --json observe {mol_id}` \
+in the `molecule_dir` field (typically \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`). Files written to \
+the worktree (.worktrees/{mol_id}/) are DESTROYED when `cs done` tears \
+the session down.
+
+Temperature tag vocabulary (from CLAUDE.md):
+  - temp:hot 🔥   actionable backlog — tackle soon
+  - temp:warm 🌡  valid design, parkable on the shelf
+  - temp:cold ❄  deprioritized — revisit later
+  - temp:frozen 🧊 blocked on external decision or prerequisite
+
+Rules this formula enforces:
+  - Any pending molecule older than ~48h with no temp:* tag is a
+    triage candidate: tag or collapse.
+  - temp:hot molecules are reviewed: if the world has moved past them,
+    downgrade to temp:warm or collapse.
+  - temp:frozen molecules are reviewed: if the prerequisite has
+    landed, re-tag to temp:hot/warm.
+
+No variables required — the sweep operates on the project it is
+nucleated in.
+"""
+id_prefix = "temp"
+freeze_on_last_step = false
+
+# Tier 0 — curation sweep, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Scan the backlog"
+description = """
+Run `cs --json observe` to enumerate every pending molecule. For \
+each one, compute:
+  - age (now − updated_at)
+  - whether it carries a temp:* tag, and which one
+  - whether any event touched it in the last 48h (recent activity)
+
+Write MOLECULE_DIR/scan.md with three categorized tables \
+(MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — NEVER the worktree):
+
+  a. UNTAGGED STALE PENDINGS — candidates for triage (no temp:* tag,
+     age > 48h). Columns: id, kind, topic, age, last_activity.
+  b. TAGGED temp:hot — review whether still a priority. Columns:
+     id, topic, age, last_activity.
+  c. TAGGED temp:warm / temp:cold / temp:frozen — review whether
+     ready to escalate or collapse. Columns: id, tag, topic, age.
+
+Include a summary header: total pendings, % tagged, % stale untagged.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with the three categorized tables and summary header."
+
+[[steps]]
+id = "triage"
+title = "Triage each molecule"
+description = """
+For each UNTAGGED STALE PENDING from scan.md, decide one of:
+  - OBSOLETE              → `cs collapse <id> --reason "..."`
+  - ACTIONABLE            → `cs tag <id> --add temp:hot`
+  - STILL VALID, not urgent → `cs tag <id> --add temp:warm`
+  - INTERESTING, deprioritized → `cs tag <id> --add temp:cold`
+  - BLOCKED ON EXTERNAL   → `cs tag <id> --add temp:frozen`
+
+TTL note (ADR-029 superseded by ADR-052 §CLI delta, 2026-04-19):
+`cs touch` and `cs expire` have been retired — per-molecule TTL
+refresh is no longer a CLI primitive. A molecule that needs a hard
+deadline should set it **at nucleation** via `cs nucleate --ttl <dur>`
+or `cs nucleate --expires-at <date>`; the `MoleculeData.expires_at`
+field still exists and is rendered by surface badges. Re-tagging a
+molecule during triage no longer carries an implicit freshness horizon
+— the tag itself is the signal, and the next sweep is the refresh.
+
+For each temp:hot from scan.md, ask: is it still the priority? If
+the world has moved past it, downgrade (`cs tag <id> --add temp:warm`
++ `cs tag <id> --remove temp:hot`) or collapse with reason.
+
+For each temp:frozen from scan.md, ask: has the prerequisite landed?
+If yes, re-tag to temp:hot or temp:warm via `cs tag`.
+
+Every decision is applied via the `cs` CLI — no manual file edits \
+to state JSON. Record decisions inline so step 3 can summarize them.
+"""
+needs = ["scan"]
+acceptance = "Every UNTAGGED STALE PENDING has received a tag or a collapse decision. temp:hot and temp:frozen molecules have been reviewed. All actions applied via `cs tag` or `cs collapse`."
+
+[[steps]]
+id = "report"
+title = "Produce the triage report"
+description = """
+Write MOLECULE_DIR/triage-report.md (MOLECULE_DIR from \
+`cs --json observe {mol_id}` — NEVER the worktree) summarizing the \
+sweep:
+
+  - N molecules collapsed (with reasons, one line each).
+  - N tagged temp:hot / temp:warm / temp:cold / temp:frozen, with a
+    brief rationale per molecule.
+  - A **per-molecule decisions table** with columns:
+    `id | kind | topic | decision (tag/collapse)`.
+    A future sweep can diff this against the previous report to see
+    which molecules drifted.
+  - Top 3 temp:hot priorities after the sweep — one line each, ordered
+    by the curator's judgment of what unblocks most downstream work.
+  - Trends observed: is the backlog growing or shrinking? Are
+    temp:hot molecules actually getting tackled or accumulating?
+    Is any tag over- or under-represented? Call out anything the
+    next sweep should watch.
+
+End with a one-line recommendation of when the next sweep should run.
+"""
+needs = ["triage"]
+acceptance = "MOLECULE_DIR/triage-report.md written with collapsed/tagged counts, per-molecule decisions table (id|kind|topic|decision), top 3 temp:hot priorities, trends, and next-sweep recommendation."

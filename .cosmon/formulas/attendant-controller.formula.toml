@@ -1,0 +1,293 @@
+formula = "attendant-controller"
+version = 1
+description = """
+Attendant patrol — the entity that attends to backlog and surfaces
+what it cannot decide.
+
+PURPOSE — pull on the threads of a galaxy until it drains. Per-kind
+attendant policies; emits MORE than it acts. Every refusal and every
+miss is a labeled IFBDD experiment, not a silent skip.
+
+NOT a daemon. ONE tick = ONE invocation. Composable with launchd,
+patrol, cron. Stateless, idempotent on disjoint molecules.
+
+ETYMOLOGY (wheeler, delib-20260509-18df §"naming") —
+  > "A drain removes without learning; this controller's purpose is
+  > to learn what it cannot yet drain. Consider `attendant` (the
+  > entity that attends to backlog and surfaces what it cannot
+  > decide)."
+The historical name "drain" surfaces only in retrospective notes;
+the live verb in events.jsonl is `attendant.*`.
+
+EMIT > ACT — by default the formula scans, classifies, and emits all
+event types but performs no state mutations. The operator (or a
+future `--apply` upgrade) decides which refusals to upgrade to
+acted-by-policy after observing a few ticks. This is the same
+default-off discipline as `oversee`: intervene only on safe,
+mechanical pathologies; gate everything else behind a human verdict.
+
+CAUSAL-FILTER GUARD (hawking §1, load-bearing) — the candidate
+selection MUST exclude any molecule recently touched by an
+`Attendant` emitter (within 24h). Without this filter the natural
+failure mode is dilution (auto-immune fatigue): the attendant
+re-touches its own candidates, signal-to-noise tends to zero. This
+formula assumes events.jsonl carries an `emitter_kind` field on every
+record (substrate landed by task-20260509-7210).
+
+EVENT VOCABULARY (wheeler §A) — every record carries
+`emitter_kind=attendant` and `emitter_id=attendant:<this_mol_id>`:
+
+  attendant.candidate    {target_kind, target_mol_id, target_age_h,
+                          target_state, policy_matched, reason}
+  attendant.acted        {target_mol_id, action, action_args,
+                          exit_code, artifact_path?}
+  attendant.refused      {target_mol_id, policy_matched,
+                          refusal_reason, would_have_done}
+  attendant.deferred     {target_mol_id, policy_matched,
+                          defer_reason, retry_after_h}
+  attendant.policy_miss  {target_mol_id, target_kind, target_state,
+                          no_policy_for}
+  attendant.tick         {scanned_n, candidates_n, acted_n,
+                          refused_n, deferred_n, missed_n,
+                          duration_ms}
+  attendant.boundary     {meta_level, attempted_target_mol_id,
+                          reason="reentrance_blocked"}
+
+`attendant.policy_miss` is the IFBDD primitive — the policy table
+grows by misses, not by anticipation. Each miss is a typed prompt to
+the operator: "I saw a `decision` molecule pending for 72h, I have
+no policy for that case, what would you have done?"
+
+PER-KIND POLICY TABLE (v0):
+  - Idea          temp:cold > 14d         → suggest collapse
+  - Task          temp:hot + ready_frontier → suggest tackle
+  - Issue         temp:hot + no assignee  → suggest tackle
+  - Decision      terminal                → ignore
+  - Signal        ephemeral, auto-absorbed → ignore
+  - Deliberation  temp:warm > 7d          → suggest retrospective
+  - Constellation human-curated           → ignore
+
+Anything outside this table → emit `attendant.policy_miss`, do NOT
+silently skip.
+
+CROSS-REFS — delib-20260509-18df (parent), §D-A unanimous BUILD;
+wheeler §A (event schema); hawking §1 (causal filter, dilution
+failure mode); torvalds §1 (formula not crate not bash);
+von-neumann §4 (TLA+ confluence + integration tests for the rest);
+godin §narrative (contagion vector for cosmon emancipation).
+
+NO COMPOSITION with operator-event-stream (task-20260509-9f78) in
+v0. The deliberation explicitly defers the typestate
+operator-as-molecule. The attendant's policy table operates on
+existing `MoleculeKind` only; if `operator-event-stream` lands, a
+follow-up molecule can extend the policy table to consume
+`operator.*` events, but that is not in this scope.
+
+ARTIFACT PATHS — all artifacts (scan-report.md, suggestions.md,
+attendant-pressure.md) MUST be written to the MOLECULE STATE
+DIRECTORY returned by `cs --json observe {mol_id}` in the
+`molecule_dir` field (typically
+`.cosmon/state/fleets/default/molecules/{mol_id}/`). Files written
+to the worktree (.worktrees/{mol_id}/) are DESTROYED when `cs done`
+tears the session down.
+
+No variables required — the sweep operates on the project it is
+nucleated in.
+"""
+id_prefix = "attend"
+freeze_on_last_step = false
+
+# Tier 0 — observes + emits, does not nucleate children of its own kind.
+# (A future `--apply` upgrade may transition selected refusals to acted,
+# but those acts use existing primitives — `cs tag`, `cs collapse` —
+# and never nucleate attendant offspring.)
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Snapshot the galaxy state — classify by kind, age, temp tag"
+description = """
+Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
+`molecule_dir` field). NEVER write artifacts to the worktree — they \
+are destroyed by `cs done`.
+
+Run `cs ensemble --json > MOLECULE_DIR/snapshot.json` to capture \
+the fleet snapshot. Then enumerate every PENDING molecule and \
+classify each by:
+  - kind          (idea / task / decision / issue / signal /
+                   deliberation / constellation)
+  - age_h         (now − updated_at, in hours)
+  - temp_tag      (temp:hot / temp:warm / temp:cold / temp:frozen
+                   / none)
+  - ready_frontier (true if all blocked_by edges are completed)
+  - state         (pending / running / blocked / etc.)
+
+Apply the CAUSAL-FILTER GUARD on candidate selection: a molecule is \
+NOT a candidate if any event in events.jsonl in the last 24h was \
+emitted with `emitter_kind=attendant`. This excludes the attendant's \
+own footprints; it does NOT exclude routine fleet activity.
+
+events.jsonl is at `.cosmon/state/events.jsonl` (fleet-level append \
+log). Read it with `tail -n 50000` and grep for \
+`"emitter_kind":"attendant"` records whose `timestamp` is within 24h \
+of now. Build a SET of `molecule_id` values from those records — \
+this is the EXCLUDE-SET. A molecule whose id is in the EXCLUDE-SET \
+emits an `attendant.boundary` event (reason=\"reentrance_blocked\") \
+and is dropped from candidates.
+
+Write MOLECULE_DIR/scan-report.md with:
+  - Header summary: total pendings scanned, candidates after filter,
+    excluded by causal filter, missing emitter_kind (legacy lines).
+  - Per-kind table: kind | count | hot | warm | cold | frozen |
+    untagged.
+  - Per-kind candidate list (only pendings that survived the causal
+    filter): id | age_h | temp_tag | ready_frontier | one-line topic.
+  - Bounded-by-design line: the formula touches at most ONE molecule
+    per 24h window (per the causal filter). State the count of
+    excluded molecules to make the bound visible.
+
+ALSO write MOLECULE_DIR/snapshot.json (raw `cs ensemble --json` \
+output) for audit-trail purposes — a future verifier can replay \
+the policy step from this snapshot.
+
+EMIT (one record per molecule examined):
+  - For each candidate that passes the filter:
+      attendant.candidate {target_kind, target_mol_id, target_age_h,
+                            target_state, policy_matched=null,
+                            reason=\"scan\"}
+    (`policy_matched` is filled in step 2; this row says \"I saw \
+    you and you survived the filter\".)
+  - For each molecule excluded by the causal filter:
+      attendant.boundary {meta_level=0,
+                           attempted_target_mol_id=<id>,
+                           reason=\"reentrance_blocked\"}
+
+Emission MUST go through whatever event-emit primitive the cosmon \
+binary exposes today. If a direct CLI primitive is missing, append \
+JSONL records to `.cosmon/state/events.jsonl` with the exact \
+schema documented in the formula header — the file is the \
+authoritative event log (FILESYSTEM as data plane, ADR-038 §C). \
+EVERY record carries:
+  emitter_kind=\"attendant\"
+  emitter_id=\"attendant:<this_mol_id>\"
+  meta_level=0
+  timestamp=<RFC3339 UTC>
+"""
+acceptance = """
+MOLECULE_DIR/scan-report.md exists with the per-kind tables, the \
+candidate list, and the bounded-by-design line. \
+MOLECULE_DIR/snapshot.json exists. attendant.candidate records \
+appear in events.jsonl for each surviving candidate; \
+attendant.boundary records appear for every molecule excluded by \
+the causal filter."""
+
+[[steps]]
+id = "policy"
+title = "Apply per-kind attendant policy — emit suggestions, do not act"
+description = """
+For each candidate from MOLECULE_DIR/scan-report.md, look up the \
+per-kind policy:
+
+  Idea          temp:cold AND age_h > 14*24      → SUGGEST collapse
+                                                    (reason=\"cold-shelf-aged\")
+  Task          temp:hot AND ready_frontier      → SUGGEST tackle
+  Issue         temp:hot AND no assignee         → SUGGEST tackle
+  Decision      always                           → IGNORE (terminal)
+  Signal        always                           → IGNORE (ephemeral)
+  Deliberation  temp:warm AND age_h > 7*24       → SUGGEST retrospective
+  Constellation always                           → IGNORE (human-curated)
+
+For each candidate:
+  - If a policy matches AND the candidate satisfies the predicate,
+    emit `attendant.refused` (NOT `attendant.acted` — the default-off
+    discipline) with would_have_done=<the suggested action>.
+    Append a row to MOLECULE_DIR/suggestions.md.
+  - If a policy matches but the predicate fails (e.g. Idea with
+    temp:cold but age=2d), emit `attendant.deferred` with
+    defer_reason=<which condition failed> and
+    retry_after_h=<earliest age at which the predicate could pass>.
+  - If NO policy matches the (kind, state) tuple, emit
+    `attendant.policy_miss` with no_policy_for=<the tuple>.
+    DO NOT silently skip. The miss is the IFBDD primitive — the
+    operator reads it and either grows the table or confirms the
+    gap is intentional.
+
+EMIT > ACT. Default behavior is REFUSE for every match (act=no, \
+suggestion-only). A future `--apply` flag may upgrade selected \
+refusals to acted-by-policy after the operator has observed a few \
+ticks; v0 ships with `--apply` permanently disabled.
+
+Write MOLECULE_DIR/suggestions.md as a flat list:
+  - Section per kind, each row: target_mol_id | suggested_action |
+    rationale | would_have_done (CLI command).
+  - Header counts: candidates_n, refused_n, deferred_n, missed_n.
+  - One CLI command per row that the operator could paste verbatim
+    to apply the suggestion (e.g. `cs collapse <id> --reason \"...\"`,
+    `cs tackle <id>`, `cs nucleate retrospective --var ...`).
+
+EMIT (one record per candidate processed):
+  - attendant.refused      (policy match + predicate satisfied)
+  - attendant.deferred     (policy match + predicate failed)
+  - attendant.policy_miss  (no policy)
+
+EVERY record carries `emitter_kind=\"attendant\"`, \
+`emitter_id=\"attendant:<this_mol_id>\"`, `meta_level=0`. \
+attendant.acted MUST NOT appear unless a future invocation runs \
+with `--apply` (v0 forbids it).
+"""
+needs = ["scan"]
+acceptance = """
+MOLECULE_DIR/suggestions.md exists with per-kind sections, header \
+counts, and one CLI command per row. No state mutations were \
+performed (verifiable via `git status` showing no `cs tag` / \
+`cs collapse` / `cs tackle` side effects). Events emitted: \
+attendant.refused for matched-and-predicate-true, \
+attendant.deferred for matched-and-predicate-false, \
+attendant.policy_miss for unmatched. NO attendant.acted records \
+(would have required --apply, which is v0-disabled)."""
+
+[[steps]]
+id = "report"
+title = "Aggregate attendant pressure metric — one tick row in the time series"
+description = """
+Compute three numbers from MOLECULE_DIR/suggestions.md:
+
+  drainable_now    count of suggestions that would unblock work
+                   (Task tackle, Issue tackle, Idea collapse, Delib
+                    retrospective)
+  frozen_external  count of temp:frozen pendings waiting on external
+                   decision (read from scan-report.md)
+  sediment_risk    count of pendings older than 7d with no temp:* tag
+                   (read from scan-report.md)
+
+Append ONE LINE to MOLECULE_DIR/attendant-pressure.md (one line per \
+tick — the file is a time series). Format:
+
+  YYYY-MM-DDThh:mm:ssZ | drainable_now=N | frozen_external=N |
+  sediment_risk=N | candidates_n=N | refused_n=N | deferred_n=N |
+  missed_n=N | duration_ms=N
+
+If MOLECULE_DIR/attendant-pressure.md does not exist, create it with \
+a one-line header explaining the columns, then append the tick row.
+
+EMIT a single `attendant.tick` record summarizing the sweep:
+  attendant.tick {scanned_n, candidates_n, acted_n=0, refused_n,
+                  deferred_n, missed_n, duration_ms}
+
+Write MOLECULE_DIR/tick-summary.md with:
+  - The tick row (verbatim, copy-pasteable into the time series).
+  - Top 3 IFBDD candidates: the three policy_miss records that the
+    operator should look at first (kind+state tuples that would
+    most expand the policy table if resolved).
+  - One-line recommendation: should the next tick run sooner
+    (drainable_now > 5), at the regular cadence (default), or
+    later (drainable_now == 0 and sediment_risk == 0)?
+"""
+needs = ["policy"]
+acceptance = """
+MOLECULE_DIR/attendant-pressure.md updated with one new tick row \
+(timestamp + the seven metrics). MOLECULE_DIR/tick-summary.md \
+exists with top-3 IFBDD candidates and a next-tick \
+recommendation. attendant.tick record present in events.jsonl \
+with acted_n=0 (default-off discipline preserved)."""

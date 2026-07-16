@@ -1,0 +1,101 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+
+Usage: cs done [OPTIONS] <MOLECULE>
+
+Arguments:
+  <MOLECULE>
+          Molecule ID to tear down
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --force
+          Proceed even if the molecule is not in a terminal state
+
+      --if-completed
+          Silent no-op when the molecule is not `Completed` or already merged.
+          
+          Hook-friendly gate for callers that do not know whether the molecule is ready for teardown — tmux `pane-died` hooks, patrol sweeps, and the legacy `cs harvest` alias. Exits success without touching state when the precondition is not met; otherwise, behaves exactly like `cs done`. Supersedes the stand-alone `cs harvest` verb (ADR-052).
+
+  -v, --verbose
+          Enable verbose output
+
+      --dry-run
+          Compute and display the teardown plan without executing any steps.
+          
+          Reports what `cs done` *would* do: worktree state (clean/dirty), whether a merge is needed, whether the tmux session is alive, whether a fleet worker is registered, and whether the branch exists.
+
+      --json
+          Output in JSON format
+
+      --no-merge
+          Skip merging the worker's branch into the base branch
+
+      --no-worktree-remove
+          Skip removing the git worktree
+
+      --no-branch-delete
+          Skip deleting the worker's branch after merge
+
+      --no-kill
+          Skip killing the tmux session
+
+      --strategy <STRATEGY>
+          Merge strategy for the worker's branch.
+          
+          `merge` (default) creates a merge commit (`git merge --no-ff`) so parallel workers can land independently even when main has moved. `ff-only` preserves a strictly linear history and refuses anything that is not a fast-forward.
+
+          Possible values:
+          - merge:   Non-fast-forward merge (`git merge --no-ff --no-edit`)
+          - ff-only: Fast-forward-only merge (`git merge --ff-only`)
+          
+          [default: merge]
+
+      --no-auto-propel
+          Disable auto-propel escalation on merge conflict.
+          
+          By default, when a merge conflict is detected, `cs done` escalates by sending a resume signal to the worker with rebase instructions, then retries the merge after a backoff delay. This flag restores the old behavior: abort immediately and print a manual-resolution message.
+          
+          Mechanical-first escalation: see docs/architectural-invariants.md
+
+      --propel-message <PROPEL_MESSAGE>
+          Custom message sent to the worker during auto-propel escalation.
+          
+          The default instructs the worker to rebase onto the base branch, resolve conflicts, run tests, and NOT call `cs done` itself.
+
+      --max-retries <MAX_RETRIES>
+          Maximum number of auto-propel escalation retries before giving up
+          
+          [default: 3]
+
+      --skip-pre-done-hook
+          Skip the blocking `[hooks] pre_done` gate for this invocation.
+          
+          The `pre_done` hook (when configured) runs before the merge and *aborts* teardown on a non-zero exit — the galaxy-owned Definition-of- Done gate. This flag is the human operator's kill-switch: it bypasses the gate entirely for a deliverable the operator knows is good but the script cannot see (e.g. evidence living outside the repo). Equivalent to setting the `COSMON_SKIP_PRE_DONE_HOOK` environment variable. No effect when no `pre_done` hook is configured.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs done task-example-0001                      # merge + teardown
+  cs done <mol> --strategy ff-only                # strict linear history
+  cs done <mol> --force                           # skip completion check
+  cs done <mol> --if-completed                    # silent no-op if not Completed
+
+Not-the-worker. Legitimate callers: humans, external schedulers
+(cron/launchd), and transport watchdogs (tmux pane-died hooks via
+`cs done --if-completed`). Required to close the nucleate → tackle →
+wait → done cycle: without it the branch never merges and the tmux
+worktree persists.
+
+`--if-completed` is the hook-friendly gate: exits success without
+touching state when the molecule is not `Completed` or already merged;
+behaves identically to plain `cs done` otherwise. Supersedes the
+former `cs harvest` verb (ADR-052 §D3).
+
+SEE ALSO: cs complete (state transition only), cs tackle (counterpart).

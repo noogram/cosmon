@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Teardown a fleet — gracefully stop all fleet workers
+
+Usage: cs teardown [OPTIONS] <FLEET>
+
+Arguments:
+  <FLEET>  Name of the fleet to tear down (matches fleet.toml `fleet = "..."` name)
+
+Options:
+      --config <PATH>  Path to configuration file
+      --force          Force-kill instead of graceful quench
+      --no-tmux        Skip tmux interaction (state-only, for testing)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs teardown                 # gracefully stop every worker in the default fleet
+  cs teardown --fleet research
+
+SEE ALSO: cs kill (single worker, hard), cs quench (single worker, graceful).

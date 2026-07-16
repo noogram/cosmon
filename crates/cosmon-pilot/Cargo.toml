@@ -1,0 +1,52 @@
+[package]
+name = "cosmon-pilot"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+# Frontier crate (ADR-092): cosmon-pilot is the interactive cognitive-pilot
+# DRIVER that sits above the agent-harness + ops-tools and a downstream
+# author would `cargo add` it. Apache-2.0 keeps the permissive boundary
+# consistent with `cosmon-agent-harness` and `cosmon-ops-tools`.
+license = "AGPL-3.0-only"
+rust-version.workspace = true
+description = "Interactive cognitive-pilot REPL for cosmon — a foreground read→step→render loop driving the cosmon-agent-harness InteractiveSession against a local Ollama model, with read-only cosmon-ops tools, in-REPL pilot directives, and an on-disk transcript. The IFBDD walking skeleton of cs-pilot (delib 2026-05-31, ADR-115/ADR-096)."
+
+[[bin]]
+name = "cosmon-pilot"
+path = "src/main.rs"
+
+[dependencies]
+# The interactive `InteractiveSession::{with_registry, submit, step}` FSM
+# the REPL drives turn-by-turn (ADR-115 step() refactor). The REPL owns the
+# loop; the harness owns one model round-trip.
+cosmon-agent-harness = { workspace = true }
+# The read-only cosmon-domain tool registry (observe / peek / ensemble) the
+# model may call during a turn, and that the `/observe` directive reuses
+# directly (no model round-trip).
+cosmon-ops-tools = { workspace = true }
+# The `OpenAIProvider` adapter, pointed at the local Ollama OpenAI-compatible
+# endpoint (base_url = http://localhost:11434/v1, per autonomy-local-first).
+cosmon-provider = { workspace = true }
+# Domain types surfaced in the binary's default wiring (molecule ids, etc.).
+cosmon-core = { workspace = true }
+# StateStore trait — re-exported for downstream wiring; the ops-tools resolve
+# their own FileStore from work_dir, so the REPL itself only needs the trait
+# surface for documentation/typing parity.
+cosmon-state = { workspace = true }
+# Walk-up `.cosmon/state` discovery for the binary's default transcript and
+# work-dir resolution.
+cosmon-filestore = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# The harness `step()` is async; the REPL drives it on a tokio runtime.
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# The end-to-end test drives a scripted provider; `async-trait` is needed to
+# impl the harness `Provider` trait on the test double.
+async-trait = { workspace = true }
+chrono = { workspace = true }
+
+[lints]
+workspace = true

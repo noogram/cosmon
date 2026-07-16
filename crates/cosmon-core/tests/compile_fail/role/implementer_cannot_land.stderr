@@ -1,0 +1,13 @@
+error[E0599]: the method `acquire_trunk` exists for struct `TypedWorker<Implementer>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/role/implementer_cannot_land.rs:10:20
+   |
+10 |     let _ = worker.acquire_trunk().land();
+   |                    ^^^^^^^^^^^^^ method cannot be called on `TypedWorker<Implementer>` due to unsatisfied trait bounds
+   |
+  ::: src/role.rs
+   |
+   | pub enum Implementer {}
+   | -------------------- doesn't satisfy `Implementer: CanWriteTrunk`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Implementer: CanWriteTrunk`

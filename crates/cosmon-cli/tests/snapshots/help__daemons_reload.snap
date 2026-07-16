@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Trigger a hot-reload by touching the config file.
+
+The supervisor's notify watcher picks up the modification and runs [`diff`]; no signal is sent and no child is restarted unless its `DaemonSpec` actually changed.
+
+[`diff`]: cosmon_daemon_supervisor::reload::diff
+
+Usage: cs daemons reload [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to the daemons config file. Defaults to `~/.config/cosmon/daemons.toml`
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

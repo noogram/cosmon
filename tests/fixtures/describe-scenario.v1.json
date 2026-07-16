@@ -1,0 +1,101 @@
+{
+  "schema_version": "1.0.0",
+  "galaxy": {
+    "project_id": "cosmon-9de1",
+    "root": "/srv/cosmon/cosmon",
+    "cosmon_version": "0.1.0"
+  },
+  "residence": {
+    "mode": "team",
+    "repo": "git@github.com:noogram/cosmon.git",
+    "encrypted_recipients": null,
+    "remote_url": null
+  },
+  "genres": [
+    {
+      "name": "chronicle",
+      "audience": "author+agent",
+      "residence": "team",
+      "location_globs": ["docs/lore/**/*.md"],
+      "tracked_count": 47
+    },
+    {
+      "name": "adr",
+      "audience": "public",
+      "residence": "team",
+      "location_globs": ["docs/adr/**/*.md"],
+      "tracked_count": 59
+    },
+    {
+      "name": "addl",
+      "audience": "partner:<name>",
+      "residence": "team",
+      "location_globs": ["docs/addl/<name>/**/*"],
+      "tracked_count": 12
+    },
+    {
+      "name": "github-surface",
+      "audience": "solo",
+      "residence": "solo",
+      "location_globs": ["docs/surfaces/**/*.md", "STATUS.md", "ISSUES.md"],
+      "tracked_count": 0
+    },
+    {
+      "name": "deliberation",
+      "audience": "author+agent",
+      "residence": "team",
+      "location_globs": [".cosmon/state/fleets/*/molecules/*/synthesis.md"],
+      "tracked_count": 134
+    },
+    {
+      "name": "code",
+      "audience": "public",
+      "residence": "team",
+      "location_globs": ["**/*"],
+      "tracked_count": 8231
+    }
+  ],
+  "notary": {
+    "backend": "local",
+    "pubkey": "d70b272e0df978cddd5095fa0d286735901cd12ded345676f417a4aaeb1c9660",
+    "pubkey_alg": "ed25519",
+    "seal_count": 17,
+    "last_seal_at": "2026-04-21T17:05:25.237321Z",
+    "canonical_version": 1
+  },
+  "channels": [
+    {
+      "kind": "neurion",
+      "endpoint": "stdio",
+      "auth": "none"
+    },
+    {
+      "kind": "dag",
+      "endpoint": "filesystem",
+      "auth": "filesystem-acl"
+    },
+    {
+      "kind": "filesystem",
+      "endpoint": "/srv/cosmon/cosmon/.cosmon/state",
+      "auth": "filesystem-acl"
+    },
+    {
+      "kind": "artifact",
+      "endpoint": "git@github.com:noogram/cosmon.git",
+      "auth": "ssh-agent"
+    },
+    {
+      "kind": "propulsion",
+      "endpoint": "tmux",
+      "auth": "local-user"
+    },
+    {
+      "kind": "whisper",
+      "endpoint": null,
+      "auth": "none"
+    }
+  ],
+  "deployment_class": "B",
+  "deployment_class_rationale": "Team residence, local notary, no remote witness",
+  "emitted_at": "2026-04-22T09:14:33.512Z"
+}

@@ -1,0 +1,565 @@
+formula = "curate-patrol"
+version = 1
+description = """
+Cross-galaxy curate patrol — the recurring formula that scans a \
+galaxy's pending backlog, classifies each molecule against the \
+kahneman decision matrix, decides {Tackle | Revise | Collapse | \
+Surface | Skip}, applies the cheap+reversible actions (tag, \
+collapse-into-graveyard) under Rung 2 autonomy, surfaces the rest as \
+atomic questions for the operator's morning, and reports in \
+Feynman register. v0 of cross-galaxy drain patrol — see parent \
+delib-20260521-c3cd/synthesis.md for the full design contract.
+
+WHY THE NAME — wheeler rejected `drain` (plumbing metaphor, removal-
+biased). The atomic act is `classify` → one molecule gets one
+`Verdict`. The mechanism is *curation*, not removal. The wheeler
+naming choice is also the godel firebreak: any molecule whose
+formula starts with `curate-` is in the curation family and skipped
+by the patrol itself — tautological by construction, crash-proof,
+extends to future `curate-*` siblings (one naming convention = one
+structural firebreak).
+
+ARTIFACT PATHS — CRITICAL: all artifacts (scan.ndjson, \
+decisions.ndjson, surfaced.md, report.md) MUST be written to the \
+MOLECULE STATE DIRECTORY returned by `cs --json observe {mol_id}` in \
+the `molecule_dir` field (typically \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`). Files written \
+to the worktree (.worktrees/{mol_id}/) are DESTROYED when `cs done` \
+tears the session down.
+
+LOAD-BEARING INVARIANTS (every step honours these — restated per
+step for crash-proof reading):
+
+  (a) GODEL FIREBREAK. `scan` skips every molecule whose
+      `formula.starts_with("curate-")`. This is the load-bearing
+      mechanism that prevents self-collapse (the patrol cannot
+      classify itself or its siblings). Encoded structurally, not
+      culturally — the firebreak survives a crash, a rename of the
+      patrol, or an operator forgetting to tag the molecule.
+
+  (b) DEFENSIVE FIREBREAK. `scan` also skips kind ∈ {decision,
+      deliberation} and kind=patrol. These are operator-intent
+      artefacts and would always Surface anyway under the matrix —
+      skip them at scan to save tokens.
+
+  (c) IN-FLIGHT SKIP. `scan` skips any molecule that is active,
+      propelled, or whose worker tmux session is live, or whose
+      worktree directory exists on disk. Touching an in-flight
+      molecule is structurally forbidden (it would mutate state under
+      a live worker's feet).
+
+  (d) PEER-SESSION GUARD. At step start, every step queries
+      `cs ensemble --all` for live presence-pings <3 min in any peer
+      galaxy. Molecules in such galaxies are skipped entirely. This
+      protects cross-galaxy drift when v1 ships; in v0 (cosmon-only)
+      it is a no-op but the call is wired so v1 inherits the guard
+      for free.
+
+  (e) KILL-SWITCH. Each step checks `~/.cosmon/autopilot.off` at
+      start. If present, the step writes a one-line abort marker to
+      `MOLECULE_DIR/abort.log` and exits cleanly without firing any
+      side effect. The operator's kill-switch is honoured even
+      mid-classify.
+
+  (f) WORKER-CHECKPOINT DISCIPLINE. Every DrainVerdict is appended
+      to `scan.ndjson` then fsynced *before* the next molecule is
+      classified. Every decision is appended to `decisions.ndjson`
+      and fsynced *before* the side-effect (`cs tag` / `cs collapse`)
+      fires. A `kill -9` mid-run leaves a usable partial ledger and
+      a partial set of applied actions — the next run reads
+      decisions.ndjson and resumes where the crash left off.
+      Substrate lesson from drain-worker 2026-05-21 (machine sleep
+      silently killed the unflushed report).
+
+  (g) TWO-PASS DISCIPLINE. `decide` encodes `decided_pass` on every
+      DrainVerdict. Pass 1 (this night) = retag only (Verdict::Revise
+      to temp:warm or temp:hot allowed; Verdict::Collapse rejected
+      with rationale "pass-1-retag-only"). Pass 2 (next night) =
+      collapse allowed for molecules that survived pass 1 without
+      operator intervention. This prevents the kahneman D1 convoy
+      cascade (frozen → blocker lands → patrol collapses before
+      downstream notices). NEVER both passes in one run.
+
+  (h) RUNG 2 AUTONOMY. v0 ships with `max_tackle_per_night = 0`.
+      Every `Verdict::Tackle` lands in `surfaced.md` as an atomic
+      question for the operator. The patrol never runs `cs tackle`
+      itself. Graduation Rung 2 → Rung 3 requires two consecutive
+      weeks with zero `cs revive` and zero `patrol-regret` chronicle
+      entries — explicit operator promotion only.
+
+  (i) 24h GRAVEYARD SOAK. `cs collapse` only — the patrol NEVER
+      runs `cs purge`. A separate operator gesture (or a later night
+      with `pass=2` and explicit soak verification) does the purge.
+      Collapsed molecules sit in the graveyard for ≥24h so the
+      operator can `cs revive` them at breakfast.
+
+  (j) SURFACE CAP. ≤ 20 atomic-question entries to `surfaced.md`
+      per night cross-galaxy. Overflow (>50 surfaces over 3 nights)
+      triggers a self-review deliberation nucleated by the operator,
+      not by the patrol itself.
+
+  (k) MAIN IS SACRED. The patrol never runs `git push`. `cs done`
+      is NOT in the v0 action set. Only `cs tag` and `cs collapse`
+      are wired into the `act` step. The graveyard soak makes
+      reversibility cheap; pushing main would not.
+
+INPUTS — read by the formula steps directly via `tomlq` or `jq` over \
+the env-resolved variables block:
+
+  - dry_run        Default `false`. If `true`, the `act` step skips
+                   every `cs tag` / `cs collapse` invocation (writes
+                   `decisions.ndjson` as plan, fires nothing).
+  - pass           Default `1`. Which pass this invocation is.
+                   Pass 1 = retag-only; Pass 2 = collapse allowed.
+  - galaxy         Required. The galaxy name (for report headers and
+                   the `DrainVerdict.galaxy` field).
+
+BUDGET KNOBS — read by the `classify` step from \
+`~/.config/cosmon/curate.toml` (operator-owned, not formula-owned). \
+Defaults if the config is absent:
+
+  max_collapse_per_night = 1500
+  max_classify_per_night = 200
+  max_tackle_per_night   = 0      (v0 Rung 2 invariant; never auto)
+  max_surface_per_night  = 20     (cross-galaxy hard cap)
+
+DrainVerdict CONTRACT (the data plane — see synthesis.md §DrainVerdict):
+
+  { mol_id, galaxy, kind, formula,
+    age_hours, tags, blocked_by, blocks, syzygie_cited,
+    action: { Tackle | Revise{tag} | Collapse{reason} | Surface | Skip{why} },
+    confidence: f32 in 0..1,
+    rationale: String ≤200 chars,
+    surface_to_operator: bool,
+    decided_at: RFC3339 UTC,
+    decided_pass: u8 (1 or 2),
+    sealed: BLAKE3 hex of (mol_id || action || decided_at) }
+
+CROSS-REFS — delib-20260521-c3cd (parent, full design contract);
+torvalds (shape A — per-galaxy molecule, serial loop, append+flush
+ledger); godel (firebreak predicate `formula.starts_with("curate-")`,
+the load-bearing one); kahneman (Rung 2, two-pass, 24h soak, surface
+cap); carnot (budget caps as exergy ceiling); wheeler (naming = the
+same firebreak string).
+
+NO META-PATROL. There is no patrol-of-patrols. The chronicle gesture
+is one terse line per night to `docs/lore/curate-log.md`. The weekly
+operator dezoom terminates at the human — the regress stops at the
+operator, by construction.
+"""
+id_prefix = "curate"
+freeze_on_last_step = false
+
+# Tier 0 — observes, classifies, applies reversible actions, surfaces
+# the rest. Does NOT nucleate children (the surfaced.md entries are
+# atomic questions to the operator, who decides whether to nucleate
+# follow-up molecules — the patrol itself never spawns new molecules).
+[tier]
+level = 0
+
+# ---------------------------------------------------------------------------
+# Inputs — read by every step from the molecule's variables block.
+# ---------------------------------------------------------------------------
+
+[vars.dry_run]
+description = "Set to `true` to skip the `act` step (plan only, no side effects)."
+type = "string"
+required = false
+default = "false"
+
+[vars.pass]
+description = "Which pass: `1` = retag-only (first night); `2` = collapse allowed (second night). Two-pass discipline encoded as `DrainVerdict.decided_pass`."
+type = "string"
+required = false
+default = "1"
+
+[vars.galaxy]
+description = "The galaxy name (for report headers and `DrainVerdict.galaxy`). Required."
+type = "string"
+required = true
+
+# ---------------------------------------------------------------------------
+# Step 1 — scan
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "scan"
+title = "Enumerate pending molecules, apply firebreaks, write scan.ndjson"
+description = """
+Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
+`molecule_dir` field). NEVER write artifacts to the worktree — they \
+are destroyed by `cs done`.
+
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+line to `MOLECULE_DIR/abort.log` (`scan aborted: autopilot.off`) and \
+exit 0. Honoured at the start of every step.
+
+PEER-SESSION GUARD. Run `cs ensemble --all --json` to gather live \
+presence pings. If any peer galaxy has a session with \
+`last_ping_age < 180 s`, mark that galaxy as locked. v0 is \
+cosmon-only so this is typically a no-op, but the call is wired so \
+v1 inherits the guard for free. Locked galaxies are skipped entirely.
+
+ENUMERATE. Run `cs ensemble --json` to list every pending molecule \
+in *this* galaxy. For each one, run `cs --json observe <id>` to \
+fetch state.json, tags, and DAG edges (blocked_by, blocks).
+
+LOAD-BEARING FIREBREAKS — applied in this order, each producing a \
+`DrainVerdict` with `action = Skip { why: "..." }`:
+
+  (a) GODEL FIREBREAK — formula.starts_with("curate-") → Skip
+      { why: "patrol-self" }. This is the load-bearing skip; it
+      prevents the patrol from classifying itself or any sibling
+      `curate-*` formula. Encoded structurally (string-prefix on
+      `formula` field, read from observe JSON), not culturally.
+
+  (b) DEFENSIVE FIREBREAK — kind ∈ {decision, deliberation} OR
+      kind = patrol → Skip { why: "operator-intent" }. These would
+      always Surface under the matrix anyway; skip at scan to save
+      tokens.
+
+  (c) IN-FLIGHT SKIP — status ∈ {running, propelled, blocked} OR
+      worker tmux session alive (test via `tmux has-session -t
+      <worker_name>`) OR worktree directory exists (test via
+      `[ -d .worktrees/<mol_id> ]`) → Skip { why: "in-flight" }.
+
+For each SURVIVING molecule (not skipped), construct a DrainVerdict \
+shell record with:
+
+  - mol_id, galaxy (from $CURATE_GALAXY var), kind, formula
+  - age_hours = (now − updated_at) / 3600
+  - tags (full list, including any temp:*)
+  - blocked_by, blocks (DAG edges from observe JSON)
+  - syzygie_cited = true iff this molecule's id appears in any peer
+    galaxy's `docs/lore/CHRONICLES.md` or any `docs/adr/*.md` under
+    /srv/cosmon/* other than this one (grep -r over the registered
+    syzygie peer set; absence of peers = always false). In v0
+    (cosmon-only) the peer set is empty so this is always false; in
+    v1 the grep returns truthy entries.
+  - action = null (filled by `classify`)
+  - confidence = null (filled by `classify`)
+  - rationale = null (filled by `classify`)
+  - surface_to_operator = null (filled by `classify`)
+  - decided_at = null (filled by `decide`)
+  - decided_pass = $CURATE_PASS (1 or 2, from input var)
+  - sealed = null (filled by `decide` once action is known)
+
+APPEND each DrainVerdict line to MOLECULE_DIR/scan.ndjson, fsync \
+after each row. The skipped molecules ARE included in scan.ndjson \
+with action=Skip{why} — this is the audit trail for the firebreaks.
+
+Write MOLECULE_DIR/scan-summary.md with:
+  - Header: total enumerated, skipped-firebreak counts (per why),
+    survivors awaiting classify.
+  - Per-skip-reason table: why | count.
+  - Galaxy lock status from the peer-session guard.
+"""
+acceptance = """
+MOLECULE_DIR/scan.ndjson exists with one JSON line per molecule \
+enumerated (including skipped); each line is valid JSON and ends \
+with newline. MOLECULE_DIR/scan-summary.md exists with the header \
+counts, per-skip-reason table, and peer-lock status. Every molecule \
+whose formula starts with `curate-` appears as Skip{why: \
+\"patrol-self\"} (godel firebreak visible in the ledger). \
+If ~/.cosmon/autopilot.off was present at step start, \
+MOLECULE_DIR/abort.log exists and no scan.ndjson rows were written \
+beyond it.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 2 — classify
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "classify"
+title = "Apply the decision matrix; honour budget caps"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+Read MOLECULE_DIR/scan.ndjson line by line. Skip any line whose \
+action is already Skip{...} (firebreaks land in step 1). For each \
+remaining DrainVerdict, apply the kahneman decision matrix (from \
+parent delib-20260521-c3cd/synthesis.md §Decision matrix; the full \
+table also lives in sibling `task-20260521-d05d` — C-CURATE-MATRIX):
+
+  | Signal pattern                                          | Action                       | Confidence | Surface? |
+  |---|---|---|---|
+  | syzygie_cited == true                                   | Surface                      | —          | always   |
+  | kind ∈ {decision, deliberation}                         | Surface                      | —          | always   |
+  | prompt first-person + age >14d + no temp:*              | Surface                      | —          | always   |
+  | pending, age >30d, no temp:*, no DAG edges, no events   | Collapse (24h soak)          | high       | never    |
+  | pending, temp:cold OR temp:frozen, no edge activity 14d | Collapse (24h soak)          | high       | never    |
+  | pending, age >7d, no temp:* at all                      | Revise { tag: temp:warm }    | high       | never    |
+  | pending, temp:hot, age >7d, no progress                 | Surface                      | —          | always   |
+  | temp:hot, age ≤7d, no blockers, briefing complete       | Tackle                       | medium     | always (Rung 2) |
+  | ambiguous / signal contradicts                          | Surface                      | —          | always   |
+
+BUDGET CAPS — read from ~/.config/cosmon/curate.toml (or use the \
+defaults if absent: max_collapse_per_night=1500, \
+max_classify_per_night=200, max_tackle_per_night=0, \
+max_surface_per_night=20). Track running counts in MOLECULE_DIR/\
+budget.json (per-action counter). If a cap is hit:
+
+  - Collapse cap → degrade the action to Surface with rationale
+    "budget-cap-collapse-reached"; the operator can manually
+    collapse at breakfast.
+  - Classify cap → stop classifying further candidates, log
+    "budget-cap-classify-reached" in scan-summary.md tail, leave
+    remaining lines with action=null (the next night picks them up).
+  - Tackle cap → always 0 in v0; every Tackle verdict is Surface'd
+    by construction (rationale "rung-2-no-auto-tackle"). The
+    matrix's "Tackle medium-confidence" verdict still fires — it
+    just lands in surfaced.md, not in cs tackle.
+  - Surface cap (20/night) → 21st through Nth go to a separate
+    `surfaced-overflow.md` and the operator sees a one-line warning
+    in report.md. If overflow >50 cumulative over 3 nights, the
+    report.md "coin-coin" section flags this as a candidate for an
+    operator-nucleated self-review deliberation (the patrol never
+    nucleates that deliberation itself — kahneman D3).
+
+For each candidate that gets a verdict, update its DrainVerdict in \
+scan.ndjson by appending a NEW line with the now-filled action / \
+confidence / rationale / surface_to_operator fields. (NDJSON is \
+append-only; the latest line per mol_id is the authoritative verdict. \
+The `decide` step deduplicates by latest line.)
+
+Honour worker-checkpoint discipline: append + fsync per row before \
+moving to the next molecule. A `kill -9` mid-classify leaves a \
+partial ledger that the next run can resume from.
+
+Write MOLECULE_DIR/classify-summary.md with the per-verdict counts \
+(Tackle/Revise/Collapse/Surface) and budget-cap warnings if any.
+"""
+needs = ["scan"]
+acceptance = """
+MOLECULE_DIR/scan.ndjson has at least one classified row per \
+non-skipped candidate (with action, confidence, rationale, \
+surface_to_operator filled). MOLECULE_DIR/budget.json contains \
+per-action counters bounded by the configured caps. \
+MOLECULE_DIR/classify-summary.md exists with per-verdict counts and \
+any budget-cap warnings. NO `cs tag` / `cs collapse` / `cs tackle` \
+side effects yet — those land in step 4 (`act`).
+"""
+
+# ---------------------------------------------------------------------------
+# Step 3 — decide
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "decide"
+title = "Encode two-pass discipline; freeze the action plan into decisions.ndjson"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+Read MOLECULE_DIR/scan.ndjson; deduplicate by mol_id (latest line \
+wins). For each verdict, apply the TWO-PASS DISCIPLINE — the \
+load-bearing kahneman D1 firebreak against convoy-cascade:
+
+  - If $CURATE_PASS == 1 (this is the retag night):
+      - Verdict::Revise → APPROVED (write to decisions.ndjson with
+        decided_pass=1).
+      - Verdict::Collapse → DEMOTED to Revise{tag: temp:warm} with
+        rationale appended " [pass-1: retag-only, collapse deferred
+        to pass 2]". This is non-negotiable: the first night NEVER
+        collapses. If the molecule still satisfies the collapse
+        predicate at pass 2 (no operator intervention between
+        nights), it gets collapsed then.
+      - Verdict::Surface → APPROVED.
+      - Verdict::Tackle → DEMOTED to Surface (Rung 2 invariant —
+        max_tackle_per_night = 0 in v0).
+      - Verdict::Skip → APPROVED (no-op in act step).
+
+  - If $CURATE_PASS == 2 (this is the collapse night):
+      - Verdict::Revise → APPROVED.
+      - Verdict::Collapse → APPROVED ONLY IF a pass-1 verdict for
+        the same mol_id exists in *yesterday's* scan.ndjson (read
+        from the prior molecule's MOLECULE_DIR if available, or
+        from the most recent `curate-*` molecule in `cs ensemble
+        --json`). If no pass-1 record exists, DEMOTE to Surface
+        with rationale "collapse-without-prior-pass-1-retag".
+      - Verdict::Surface → APPROVED.
+      - Verdict::Tackle → DEMOTED to Surface (Rung 2 invariant —
+        still 0 in v0).
+      - Verdict::Skip → APPROVED.
+
+For every APPROVED action, write a final DrainVerdict line to \
+MOLECULE_DIR/decisions.ndjson with:
+
+  - All fields from scan.ndjson.
+  - decided_at = now (RFC3339 UTC).
+  - decided_pass = $CURATE_PASS.
+  - sealed = BLAKE3(mol_id || serialize(action) || decided_at) hex.
+    Use `b3sum` if available, fall back to `openssl dgst -sha256` and
+    record the algorithm in a sealed-algo field. The seal is a
+    trace, not a lock (cosmon §8b).
+  - Append + fsync per row. decisions.ndjson is the authoritative
+    action plan; if step 4 crashes after this step, the next run
+    can replay it idempotently.
+
+Honour the surface cap: if more than max_surface_per_night entries \
+have surface_to_operator=true, the overflow goes into a separate \
+MOLECULE_DIR/decisions-overflow.ndjson and a one-line warning \
+appears in report.md.
+
+NO SIDE EFFECTS in this step (no `cs tag`, no `cs collapse`). \
+This is a pure planning step — the data plane is fully prepared \
+before any action fires.
+"""
+needs = ["classify"]
+acceptance = """
+MOLECULE_DIR/decisions.ndjson exists with one JSON line per \
+APPROVED action; each line has decided_at, decided_pass, and sealed \
+filled. If pass=1, no line has action=Collapse{...} (all demoted to \
+Revise temp:warm). If pass=2, every action=Collapse{...} line has a \
+demonstrable pass=1 predecessor (or has been demoted to Surface). \
+No action=Tackle{...} lines appear in v0 (all demoted to Surface — \
+Rung 2 invariant). NO side effects fired in this step.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 4 — act
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "act"
+title = "Apply the cheap+reversible actions one at a time"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+DRY-RUN GUARD. If $CURATE_DRY_RUN == "true", write one line to \
+MOLECULE_DIR/act.log (`act skipped: dry_run=true`) and exit 0. \
+decisions.ndjson stands as the plan; nothing fires.
+
+Read MOLECULE_DIR/decisions.ndjson line by line. For each APPROVED \
+action, apply it via the `cs` CLI ONE AT A TIME, in order. Honour \
+worker-checkpoint discipline: append the application result (exit \
+code + stdout/stderr capture if non-zero) to MOLECULE_DIR/act.log \
+AFTER the side effect fires. The decisions.ndjson row is already \
+durable from step 3, so this append-after is the right ordering: a \
+crash mid-`act` leaves decisions.ndjson as the plan, act.log as \
+the partial-applied-tail; the next run reads both, diffs, and \
+resumes from the first un-applied row (idempotent by mol_id +
+action).
+
+Action set (v0, deliberately tiny):
+
+  - Action::Revise { tag: T } →
+      `cs tag <mol_id> --add <T>` (and possibly `--remove <old_tag>`
+      if the verdict was a downgrade from temp:hot → temp:warm).
+  - Action::Collapse { reason } →
+      `cs collapse <mol_id> --reason "<reason>"`
+      NEVER followed by `cs purge`. The 24h graveyard soak is the
+      reversibility window; a separate operator gesture (or a later
+      curate-patrol night with explicit `pass=purge`) handles purge.
+  - Action::Surface → no `cs` action; the row is rendered into
+      surfaced.md by step 5 (`report`).
+  - Action::Tackle → MUST NOT appear here (Rung 2 invariant); if it
+      does, log an `INVARIANT-VIOLATION` line to act.log and exit
+      1. This is a structural alarm — the demotion in step 3 should
+      have caught it.
+  - Action::Skip → no `cs` action.
+
+MAIN IS SACRED. The patrol NEVER runs `git push`, never runs `cs \
+done`, never runs `cs purge`. These are operator-gated actions; if \
+a future formula needs them, it ships under a different name with \
+its own deliberation. v0 forbids them by omission from this action \
+set.
+
+If a `cs tag` or `cs collapse` invocation returns non-zero, append \
+the error to act.log and continue to the next row. The patrol does \
+not abort on per-molecule failure — a single misbehaving molecule \
+must not block draining the rest of the backlog.
+"""
+needs = ["decide"]
+acceptance = """
+MOLECULE_DIR/act.log exists with one line per APPROVED action that \
+fired (or one `act skipped: dry_run=true` line if dry_run was set). \
+For each Action::Revise / Action::Collapse row in decisions.ndjson, \
+the corresponding `cs tag` / `cs collapse` was invoked exactly once \
+(idempotent on retry by checking act.log for prior success). NO \
+`git push`, NO `cs done`, NO `cs purge`, NO `cs tackle` invocations \
+fired (verifiable via grep over act.log).
+"""
+
+# ---------------------------------------------------------------------------
+# Step 5 — report
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "report"
+title = "Render Feynman-register report.md, write surfaced.md, append curate-log.md line"
+description = """
+KILL-SWITCH CHECK (autopilot.off → abort).
+
+Render MOLECULE_DIR/report.md in Feynman register (≤60s read, \
+template reproduced verbatim each night for muscle-memory). The \
+template is the one from sibling task-20260521-6c8a \
+(C-CURATE-REPORT-TEMPLATE); if that file is not yet in the \
+worktree, fall back to the inline template in parent \
+delib-20260521-c3cd/synthesis.md §Operator report. Required \
+sections:
+
+  # Curate-patrol night YYYY-MM-DD — galaxy <G> (pass <N>)
+
+  **Headline.** N molécules vues. K collapsed (24h soak). R retaggées.
+  S surfacées pour ta lecture. Reste P pending après cette nuit.
+  Top 3 plus vieilles qui résistent : [id, age, raison une-ligne].
+
+  ## Ce qui a bougé
+  - Collapsed (réversible jusqu'à demain matin) : <count>
+    - <id> — <reason une ligne>
+  - Retaggées temp:warm : <count>
+  - Restées temp:hot mais sans progrès : <count, surfacées ci-dessous>
+
+  ## Ce qui te demande une décision (≤20 questions atomiques)
+  1. <id> — <question 1 ligne, verdict 1/2/3/later>
+  2. ...
+
+  ## Coin-coin (ce qui m'a étonné)
+  <one paragraph, optional — illuminating moments only ;
+  if nothing, omit entirely>
+
+Render MOLECULE_DIR/surfaced.md as a numbered list of \
+atomic-question entries (one per surface_to_operator=true row in \
+decisions.ndjson). Each entry has the format:
+
+  N. <mol_id> [<kind>] — <one-line topic from prompt.md>
+     Verdict: 1 (<suggested-action-A>) / 2 (<suggested-action-B>) /
+              3 (<suggested-action-C>) / later
+     Why surfaced: <rationale from decisions.ndjson, ≤200 chars>
+
+If the surface cap (20/night) was exceeded, render \
+MOLECULE_DIR/surfaced-overflow.md with the remaining entries and \
+flag "OVERFLOW: N entries beyond the 20/night cap" in report.md \
+headline.
+
+Append ONE LINE to `docs/lore/curate-log.md` (the mechanical \
+journal — separate from the narrative CHRONICLES.md per kahneman \
+D3 split). The line format:
+
+  YYYY-MM-DDThh:mm:ssZ | galaxy=<G> | pass=<N> | seen=N | collapsed=K |
+  retagged=R | surfaced=S | overflow=O | dry_run=<true|false> |
+  mol_id=<this_mol_id>
+
+If `docs/lore/curate-log.md` does not exist, create it with a \
+one-line header explaining the columns, then append the run row.
+
+CHRONICLES.md IS NOT TOUCHED. The narrative chronicle is operator-
+grade only (illuminating moments). The patrol's mechanical journal \
+lives entirely in `docs/lore/curate-log.md`.
+
+Exit cleanly. The next night's invocation is scheduled by the \
+LaunchAgent (sibling task C-CURATE-LAUNCHAGENT), not by this step.
+"""
+needs = ["act"]
+acceptance = """
+MOLECULE_DIR/report.md exists with the four sections (Headline, \
+Ce qui a bougé, Ce qui te demande une décision, Coin-coin). \
+MOLECULE_DIR/surfaced.md exists with one numbered entry per \
+surface_to_operator=true row. If overflow occurred, \
+MOLECULE_DIR/surfaced-overflow.md exists and report.md flags it. \
+`docs/lore/curate-log.md` has exactly one new line appended (or was \
+created with a header + the run line). `docs/lore/CHRONICLES.md` \
+is NOT modified (verifiable via `git status` over the galaxy's lore \
+directory).
+"""

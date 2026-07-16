@@ -1,0 +1,44 @@
+name: Artifact-map residence gate
+
+# The one-repo membrane (ADR-133). Turns the build RED if any tracked path
+# classifies as a non-public audience in .cosmon/artifact-map.toml — i.e. a
+# regenerable / local-only (`solo`) artifact leaked into the index, or a path
+# matches no genre (totality violation). This is the EXOGENOUS residence referee:
+# plain stdlib Python, NO skip-env, NO continue-on-error. Silencing it requires
+# editing scripts/artifact-map-audit.py or this workflow in a visible commit.
+# It is NOT the `cs` binary auditing its own release (ADR-127 §6 self-referee
+# pathology) — a fresh clone runs it with nothing but Python 3.11+.
+#
+# It becomes a true GATE only once the job name below — "Artifact-map residence
+# gate" — is listed in required_status_checks under branch protection, which
+# scripts/apply-branch-protection.sh wires post-flip.
+#
+# All third-party Actions pinned by 40-char commit SHA (delib-20260425-39c1).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-map:
+    name: Artifact-map residence gate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Full history is unnecessary for a `git ls-files` audit; the default
+          # shallow checkout is enough and faster.
+          fetch-depth: 1
+      - name: Verify Python has tomllib (3.11+)
+        run: python3 -c 'import tomllib; print("tomllib OK")'
+      - name: Residence audit (every tracked path must be public-audience)
+        run: python3 scripts/artifact-map-audit.py

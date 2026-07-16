@@ -1,0 +1,48 @@
+# <CHANGE_ME_PROJECT_NAME> — <CHANGE_ME_SUBJECT> wiki
+#
+# Absorbed from wiki3 colony (Frank ENS seminar, 2026-04-13).
+# Replace sentinels before use:
+#   <CHANGE_ME_PROJECT_NAME> → short project name (e.g. "wiki-kuramoto")
+#   <CHANGE_ME_SUBJECT>      → article subject noun-phrase
+#   <CHANGE_ME_DESCRIPTION>  → one-line description of the production goal
+
+Production-grade knowledge wiki on **<CHANGE_ME_SUBJECT>**, built by a 5+1-role cosmon fleet with mechanical anti-hallucination gates.
+
+## Sources
+
+- `sources/` — drop PDFs, notes, BibTeX here (see `sources/README.md`)
+
+## Fleet (5 + 2 roles)
+
+| Role | Artifact |
+|------|----------|
+| `editor-in-chief` | `scope.md`, `assessment-matrix.md`, `promotion-decision.md` |
+| `sourcer` | `source-ledger.md` (reliability tiers) |
+| `writer` | `wiki/<slug>.md` (ledger entries only) |
+| `cite-checker` | `verification-log.md` + `verification-log.replay.sh` |
+| `reviewer` | `ga-review.md`, `talk.md` |
+| `skeptic` (opt-in) | `verification-failed.md`, `unreliable-sources.md` |
+| `arbiter` (opt-in) | `rfc.md`, `dissent-log.md` |
+
+## Shell gates (block promotion)
+
+- Citekey closure: `comm -23 draft_cites sourcer_ledger | ifne exit 1`
+- Replay executable: `bash verification-log.replay.sh` exits 0
+- Maintenance files empty: no `verification-failed.md`, `unreliable-sources.md`, `citations-needed.md`
+- Assessment matrix signed by `editor-in-chief`
+- `talk.md` non-empty
+
+## Run the mission
+
+```bash
+just mission          # launch or resume (idempotent)
+just status           # snapshot
+just peek             # fractal TUI
+just clean            # kill tmux server (last resort)
+```
+
+Prerequisites: `cs` on PATH, `just`, `git`.
+
+## License
+
+MIT

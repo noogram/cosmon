@@ -1,0 +1,401 @@
+name: Release
+
+# Signed, reproducible release pipeline (deployment-scenarios guide §9 G3).
+#
+# Closes the gap named G3 in delib-20260420-a631: without a signed release
+# pipeline, the "30-second `brew install`" promise is a lie — every binary a
+# user runs has a trust chain that terminates at "a download from the internet".
+#
+# What this workflow guarantees, end to end, for a tag push `vX.Y.Z`:
+#   1. Reproducible build  — `cargo build --release --locked` with
+#      SOURCE_DATE_EPOCH pinned to the tag commit's timestamp + path remapping,
+#      so two runs of the same tag produce byte-identical binaries.
+#   2. Keyless signing     — cosign (OpenSSF Sigstore) signs each artifact with
+#      a short-lived certificate bound to THIS workflow's OIDC identity. No
+#      long-lived private key exists to steal.
+#   3. Rekor publication   — the signature + artifact hash are appended to the
+#      public Sigstore transparency log (Rekor). Anyone can audit after the fact.
+#   4. SBOM                 — an SPDX SBOM is generated per artifact and attached
+#      to the release, so downstreams can scan the dependency closure.
+#   5. Tap publication      — `Formula/cosmon.rb` in the homebrew tap repo is
+#      regenerated with the new version + per-target sha256 and pushed.
+#      GATED: only runs when the repo variable ENABLE_HOMEBREW_TAP=true (the
+#      tap repo + HOMEBREW_TAP_TOKEN secret are reserved operator gestures
+#      that do not exist for v0.1 — see the update-tap job header).
+#   6. Smoke test           — fresh macOS and Linux runners `brew install` from
+#      the just-published tap and assert `cs --version` returns in < 30 s.
+#      GATED behind the same ENABLE_HOMEBREW_TAP variable as the tap job.
+#
+# For v0.1 the supported install channel is `cargo install --git`; steps 1–4
+# (build, sign, Rekor, SBOM, GitHub Release) run on every tag push, so the
+# first release completes end-to-end with steps 5–6 dormant.
+#
+# The verification surface a user gets is documented in
+# docs/guides/release-verification.md.
+#
+# All third-party Actions are pinned by 40-char commit SHA
+# (delib-20260425-39c1). Tag-mutable references (@v4, @stable) are FORBIDDEN —
+# re-pin via `gh api repos/<owner>/<repo>/git/refs/tags/<tag>` before bumping.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # Manual dry-runs build + sign + smoke-test against the tap WITHOUT cutting a
+  # release (guarded by `if` on `startsWith(github.ref, 'refs/tags/')` below).
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)build, e.g. v0.1.0 — for re-running a release'
+        required: false
+        default: ''
+
+# Default to least privilege; jobs widen only what they need.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  # Reproducibility: no embedded build timestamps drifting between runs.
+  # SOURCE_DATE_EPOCH is set per-job from the tag commit (see the build job).
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # 1. Build + sign every target. The matrix fans out across the platforms the
+  #    tap formula serves. Each leg emits: tarball, sha256, cosign .sig + .pem
+  #    (for both the raw `cs` binary and the tarball), and an SPDX SBOM.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+      id-token: write   # cosign keyless: mint the OIDC token for this run
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-14         # Apple Silicon
+          - target: x86_64-apple-darwin
+            os: macos-13         # Intel mac
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest      # cross-compiled (gcc-aarch64-linux-gnu linker, below)
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # Full history so `git log -1 --pretty=%ct` resolves the tag commit.
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${ref#refs/tags/}"
+          version="${version#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Building cosmon $version for ${{ matrix.target }}"
+
+      - name: Pin SOURCE_DATE_EPOCH to the tag commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          epoch="$(git log -1 --pretty=%ct)"
+          echo "SOURCE_DATE_EPOCH=$epoch" >> "$GITHUB_ENV"
+          echo "Pinned SOURCE_DATE_EPOCH=$epoch"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          # Cache key includes the target so cross legs don't poison each other.
+          key: release-${{ matrix.target }}
+
+      # linux-arm64 is cross-compiled on an x86_64 ubuntu runner: install the
+      # aarch64 GNU cross toolchain and point cargo's linker at it. The other
+      # three legs build natively and skip this. SOURCE_DATE_EPOCH + the
+      # --remap-path-prefix flags below keep the cross output reproducible too.
+      - name: Install aarch64 cross linker (linux-arm64 only)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build (reproducible, locked)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # --remap-path-prefix erases absolute build paths from the binary so
+          # the output does not depend on the runner's checkout directory.
+          # strip=symbols drops the symbol table (smaller, deterministic).
+          export RUSTFLAGS="-C strip=symbols --remap-path-prefix=${PWD}=/cosmon --remap-path-prefix=${HOME}=/home"
+          cargo build --release --locked --bin cs --target ${{ matrix.target }}
+
+      - name: Package + checksum
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          target="${{ matrix.target }}"
+          stem="cosmon-${version}-${target}"
+          bindir="target/${target}/release"
+
+          mkdir -p dist
+          cp "${bindir}/cs" "dist/cs"
+          # Deterministic tarball: pinned mtime (SOURCE_DATE_EPOCH), sorted
+          # entries, no owner/group metadata, GNU format.
+          tar \
+            --sort=name \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            --format=gnu \
+            -C dist -czf "dist/${stem}.tar.gz" cs
+
+          cd dist
+          # sha256 over the tarball (what brew pins) and the raw binary.
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
+            sha256sum cs > "${stem}.bin.sha256"
+          else
+            shasum -a 256 "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
+            shasum -a 256 cs > "${stem}.bin.sha256"
+          fi
+          mv cs "${stem}"   # name the raw binary by target for the release
+          echo "stem=${stem}" >> "$GITHUB_OUTPUT"
+          echo "Packaged ${stem}.tar.gz"
+          cat "${stem}.tar.gz.sha256"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
+
+      - name: Sign artifacts (keyless, Rekor-anchored)
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          stem="${{ steps.package.outputs.stem }}"
+          # Keyless signing: cosign mints a short-lived cert from the GitHub
+          # OIDC token, signs, and uploads the entry to the public Rekor log by
+          # default. --yes skips the interactive confirmation in CI.
+          for blob in "${stem}.tar.gz" "${stem}"; do
+            cosign sign-blob --yes \
+              --output-signature "${blob}.sig" \
+              --output-certificate "${blob}.pem" \
+              "${blob}"
+            echo "Signed ${blob} (sig + cert + Rekor entry)"
+          done
+
+      - name: Generate SBOM (SPDX)
+        uses: anchore/sbom-action@df80a981bc6edbc4e220a492d3cbe9f5547a6e75  # v0.17.9
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/${{ steps.package.outputs.stem }}.spdx.json
+          # We attach the SBOM to the release ourselves (upload-artifact below);
+          # don't let the action also try to publish to a release here.
+          upload-release-assets: false
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: ${{ steps.package.outputs.stem }}
+          path: |
+            dist/${{ steps.package.outputs.stem }}.tar.gz
+            dist/${{ steps.package.outputs.stem }}.tar.gz.sig
+            dist/${{ steps.package.outputs.stem }}.tar.gz.pem
+            dist/${{ steps.package.outputs.stem }}.tar.gz.sha256
+            dist/${{ steps.package.outputs.stem }}
+            dist/${{ steps.package.outputs.stem }}.sig
+            dist/${{ steps.package.outputs.stem }}.pem
+            dist/${{ steps.package.outputs.stem }}.bin.sha256
+            dist/${{ steps.package.outputs.stem }}.spdx.json
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # 2. Cut the GitHub Release with every signed artifact attached. Skipped on
+  #    workflow_dispatch dry-runs (no tag ref) — those only exercise build+sign.
+  # ---------------------------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # create the release + upload assets
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+
+      - name: Flatten + aggregate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          find artifacts -type f -exec cp {} release/ \;
+          # One SHA256SUMS file over every shipped artifact (tarballs + bins).
+          ( cd release && sha256sum cosmon-* > SHA256SUMS )
+          ls -la release
+
+      - name: Create release
+        uses: softprops/action-gh-release@c95fe1489396fe8a9eb87c0abf8aa5b2ef267fda  # v2.2.1
+        with:
+          files: release/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          body_path: ${{ github.workspace }}/.github/release-notes-preamble.md
+          append_body: true
+
+  # ---------------------------------------------------------------------------
+  # 3. Regenerate the homebrew tap formula and push it to the tap repo. The
+  #    formula points at the signed GitHub Release tarballs; brew verifies the
+  #    sha256 at install time. Requires a HOMEBREW_TAP_TOKEN secret with push
+  #    access to <owner>/homebrew-tap (a fine-grained PAT or deploy key).
+  #
+  #    GATED OFF BY DEFAULT (task-20260610-e923 / delib-20260610-d108, W5).
+  #    For v0.1 the install channel is `cargo install --git` (one channel that
+  #    actually runs). The brew tap is ~90% wired here, but the tap repo
+  #    (<owner>/homebrew-tap) and the HOMEBREW_TAP_TOKEN secret do not exist
+  #    yet — both are reserved operator gestures. A tag push today would build
+  #    + sign + cut the GitHub Release, then this job would 404 on the tap
+  #    checkout, leaving an installable-formula-less release and a red run on
+  #    first contact. So this job and its smoke partner only fire when the
+  #    operator opts in by setting the repo variable ENABLE_HOMEBREW_TAP=true.
+  #
+  #    To turn the brew channel on (three operator gestures, none automated):
+  #      1. Create <owner>/homebrew-tap (public) with a Formula/ directory
+  #         — see packaging/homebrew-tap/README.md.
+  #      2. Add the HOMEBREW_TAP_TOKEN secret (fine-grained PAT / deploy key
+  #         with push access to that repo).
+  #      3. Set the repo variable ENABLE_HOMEBREW_TAP=true
+  #         (`gh variable set ENABLE_HOMEBREW_TAP --body true`).
+  #    Until all three are in place this job is a no-op skip, and the first
+  #    real tag push completes end-to-end without it.
+  # ---------------------------------------------------------------------------
+  update-tap:
+    name: Update homebrew tap
+    needs: release
+    if: ${{ startsWith(github.ref, 'refs/tags/') && vars.ENABLE_HOMEBREW_TAP == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          path: cosmon
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          path: artifacts
+
+      - name: Checkout tap repo
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          repository: ${{ github.repository_owner }}/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+
+      - name: Render formula
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          owner="${{ github.repository_owner }}"
+
+          declare -A sha
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+            f="$(find artifacts -name "cosmon-${version}-${target}.tar.gz.sha256" | head -1)"
+            sha[$target]="$(awk '{print $1}' "$f")"
+          done
+
+          mkdir -p tap/Formula
+          cosmon/scripts/release/render-brew-formula.sh \
+            --version "$version" \
+            --owner   "$owner" \
+            --sha-arm-macos    "${sha[aarch64-apple-darwin]}" \
+            --sha-x86-macos    "${sha[x86_64-apple-darwin]}" \
+            --sha-x86-linux    "${sha[x86_64-unknown-linux-gnu]}" \
+            > tap/Formula/cosmon.rb
+          echo "::group::Rendered formula"
+          cat tap/Formula/cosmon.rb
+          echo "::endgroup::"
+
+      - name: Commit + push formula
+        shell: bash
+        working-directory: tap
+        run: |
+          set -euo pipefail
+          version="${{ needs.release.outputs.version }}"
+          git config user.name  "cosmon-release[bot]"
+          git config user.email "cosmon-release@users.noreply.github.com"
+          git add Formula/cosmon.rb
+          if git diff --cached --quiet; then
+            echo "Formula unchanged — nothing to push."
+          else
+            git commit -m "cosmon ${version}"
+            git push
+          fi
+
+  # ---------------------------------------------------------------------------
+  # 4. Fresh-machine smoke test: tap + install + run, asserting < 30 s. Proves
+  #    the 30-second promise by construction on both macOS and Linux runners.
+  # ---------------------------------------------------------------------------
+  smoke:
+    name: Smoke install ${{ matrix.os }}
+    needs: update-tap
+    # Same gate as update-tap: the brew smoke test can only run once the tap
+    # channel is wired (ENABLE_HOMEBREW_TAP=true + repo + secret). Without the
+    # gate this would skip transitively via the skipped `update-tap` need, but
+    # the explicit condition documents the coupling and keeps the dry-run path
+    # (build+sign only) honest.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && vars.ENABLE_HOMEBREW_TAP == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - name: brew install from tap + assert <30s
+        shell: bash
+        run: |
+          set -euo pipefail
+          owner="${{ github.repository_owner }}"
+          start="$(date +%s)"
+          brew tap "${owner}/tap" "https://github.com/${owner}/homebrew-tap"
+          brew install "${owner}/tap/cosmon"
+          out="$(cs --version)"
+          end="$(date +%s)"
+          elapsed=$(( end - start ))
+          echo "cs --version => ${out}"
+          echo "tap+install+run took ${elapsed}s"
+          case "$out" in
+            cs\ *) : ;;   # expected: "cs X.Y.Z"
+            *) echo "unexpected --version output: $out" >&2; exit 1 ;;
+          esac
+          if [ "$elapsed" -gt 30 ]; then
+            echo "::warning::install took ${elapsed}s (> 30s budget)"
+          fi

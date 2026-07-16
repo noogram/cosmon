@@ -1,0 +1,11 @@
+host = "https://cosmon.example.ts.net"
+sub = "tenant-example"
+aud = "cosmon-rpp"
+oidc_url = "https://cosmon.example.ts.net/oidc"
+noyau = "tenant-example-prod"
+scopes = [
+    "cosmon:molecule:read",
+    "cosmon:molecule:write",
+]
+artifacts_dir = "/home/tenant/cosmon-artifacts"
+timeout_secs = 45

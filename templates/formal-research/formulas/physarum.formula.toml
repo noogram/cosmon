@@ -1,0 +1,41 @@
+# Absorbed from foundry colony (2026-04-13).
+# Phantom DAG observation — planner nucleates N sequential hyphae over drained DAG.
+# Design A: distributed fold (phantom DAG).
+
+formula = "physarum"
+version = 1
+description = "Phantom DAG observation — planner nucleates N sequential hyphae over drained DAG"
+id_prefix = "physarum"
+
+[[steps]]
+id = "germinate"
+title = "Survey the drained DAG"
+description = """Survey the drained DAG (cs deps <mission_root> --transitive). List all completed
+molecules in topological order. For each, record: molecule ID, topic, artifact
+paths (briefing.md, log.md, synthesis.md, responses/). Write physarum-plan.md
+with the full traversal inventory."""
+acceptance = "physarum-plan.md exists with molecule inventory and topological traversal order"
+
+[[steps]]
+id = "inoculate"
+title = "Nucleate N sequential hyphae"
+description = """Nucleate N hypha molecules chained sequentially via --blocked-by:
+
+  hypha-1: --blocked-by <this-physarum-planner> --var host=<mol-1> --var position=1 --var total=N
+  hypha-2: --blocked-by hypha-1 --var host=<mol-2> --var position=2 --var total=N
+  ...
+  hypha-N: --blocked-by hypha-(N-1) --var host=<mol-N> --var position=N --var total=N
+
+Each hypha uses formula task-work. Each hypha's briefing.md carries fold interface
+instructions:
+
+  INPUT:  docs/lore/CHRONICLES.md (accumulated by predecessors) + artifacts of molecule {{host}}
+  OUTPUT: updated CHRONICLES.md (append) OR MOLECULE_DIR/scribe-report.md (skip)
+
+Tag each hypha with temp:warm.
+Write physarum-manifest.md listing all nucleated hyphae with their chain order.
+
+After inoculation, the planner freezes. The runtime (cs run) dispatches hyphae
+sequentially — each blocked-by its predecessor."""
+needs = ["germinate"]
+acceptance = "physarum-manifest.md exists, N hyphae nucleated with correct --blocked-by chain, each briefing carries fold instructions"

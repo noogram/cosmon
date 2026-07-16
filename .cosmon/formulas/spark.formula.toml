@@ -1,0 +1,60 @@
+formula = "spark"
+version = 1
+description = """
+Capture a one-line SPARK — an atomic operator intent dropped into the \
+fleet's Inbox with zero ceremony. The companion to `cs spark <text>` \
+(the CLI verb): every spark molecule is `MoleculeKind::Idea`, tagged \
+`temp:hot`, and carries the sparker's identity in its variables.
+
+A spark is not a task; it is the pre-task — the raw intent that the \
+operator (or a second human on a phone over SSH) types when an idea \
+appears. The Inbox surface picks it up on the next refresh. No \
+worktree, no worker, no auto-evolve — the molecule waits for the \
+operator to promote, tackle, or collapse it.
+
+See `cs help spark` and ADR-061 (§Open questions 1-2 on nucleon_id \
+derivation and SparkedBy auto-link).
+
+Variables:
+  - `topic`      — the spark text itself (required).
+  - `nucleon_id` — SSH-identity-derived sparker handle (auto-set by \
+                   `cs spark`; fallback to git config user.email or \
+                   `$USER@$(hostname)`).
+  - `sparked_by` — currently-open pilot-session molecule id, when \
+                   one exists (auto-set by `cs spark`; empty \
+                   otherwise, v1).
+"""
+id_prefix = "spark"
+freeze_on_last_step = false
+
+# Tier 0 — leaf formula, no child nucleation. A spark is a pending
+# molecule; operator curation decides whether it evolves, decays into
+# tasks, or collapses.
+[tier]
+level = 0
+
+[vars.topic]
+description = "The spark text — what appeared in the operator's head."
+required = true
+
+[vars.nucleon_id]
+description = "Sparker identity (SSH-derived). Empty when unknown."
+required = false
+default = ""
+
+[vars.sparked_by]
+description = "Pilot-session id the spark belongs to (ADR-061). Empty outside a session."
+required = false
+default = ""
+
+[[steps]]
+id = "capture"
+title = "Capture the spark"
+description = """
+The spark is captured at nucleation time — this step exists so the \
+molecule has a lifecycle handle, not because there is work to do. \
+The operator closes the loop via `cs tackle` (promote to work), \
+`cs transform` (re-kind to task/decision/issue), `cs decay` (split \
+into child tasks), or `cs collapse` (reject).
+"""
+acceptance = "Spark captured in prompt.md with sparker identity (nucleon_id)."

@@ -1,0 +1,30 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Notarize — issue or verify an operator-signed attestation for a molecule (ADR-056)
+
+Usage: cs notarize [OPTIONS] [MOLECULE_ID] [COMMAND]
+
+Commands:
+  issue   Issue a new seal — build the commitment, sign with Ed25519, write `mint.json`
+  verify  Verify an existing seal — full Ed25519 + canonical commitment bytes
+
+Arguments:
+  [MOLECULE_ID]  Legacy: molecule ID (or prefix) to notarize. Equivalent to `cs notarize issue <MOLECULE_ID>`
+
+Options:
+      --config <PATH>
+          Path to configuration file
+  -v, --verbose
+          Enable verbose output
+      --dry-run
+          Legacy: skip signing — compute and print the commitment only
+      --json
+          Output in JSON format
+      --key <PATH>
+          Legacy: path to an Ed25519 secret-key file
+      --cosmon-version <COSMON_VERSION>
+          Legacy: override `cosmon_version` in the commitment
+  -h, --help
+          Print help

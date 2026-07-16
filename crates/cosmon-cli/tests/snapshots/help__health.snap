@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Health — read-only molecule-health anomaly catalog, federation-wide (ADR-137 §7)
+
+Usage: cs health [OPTIONS]
+
+Options:
+      --all            Scan every `.cosmon/state/` below the configured cluster root, the way `cs peek --all` aggregates. Without it, only the current galaxy's state store is scanned
+      --config <PATH>  Path to configuration file
+      --no-tmux        Skip the tmux liveness probe (state-only mode, for tests / headless). Session liveness is reported as `unknown`, so session-dependent classes (A1/A4/A5/A9) are conservatively not flagged
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs health                   # read-only anomaly catalog, current galaxy
+  cs health --all             # every project below the configured root
+  cs health --json            # NDJSON: one header line, one line per finding
+  cs health --no-tmux         # state-only (skip the tmux liveness probe)
+
+The Witness (ADR-137 Phase 1): a zero-mutation, control-plane-only scan
+that surfaces the molecule-health anomaly catalog (A1 unsent-paste, A3
+auth-dead, A4 idle-after-complete, A5 idle-running-zombie, A6 overloaded,
+A7 ghost-merge, A8 completed-unharvested, A9 crash-zombie) the way
+`cs peek` surfaces fleet state. Every signal is read from the state
+machine — molecule status, liveness lease, transport probe — NEVER from a
+pane glyph (the be1e use/mention guard). It heals nothing; the remedies it
+prints are advisory. Exit code: 0 all-healthy, 1 findings present
+(CI/monitor-friendly).

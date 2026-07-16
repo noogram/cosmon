@@ -1,0 +1,235 @@
+# justfile — piloter votre container cosmon depuis l'extérieur, via l'API HTTP.
+#
+# Servi par le cosmon-server à `GET /dist/justfile` (cosmon-remote, Phase 0).
+# Aucun shell dans le container n'est requis : tout passe par `curl` + JWT OIDC
+# (invariant no-direct-shell, ADR-0017 smithy).
+#
+# Installation :  curl <host>/install.sh | sh   (installe `just` + dépose ce fichier)
+#
+# Deux surfaces seulement :
+#   1. auth-claude : ping-pong PKCE pour écrire le token Claude côté container.
+#   2. mol-*       : cycle de vie des molécules (nucleate / list / get / tackle / collapse).
+#
+# ── Config partagée avec le binaire `cosmon-remote` (task-20260525-a476) ──
+# Ce justfile (Phase 0) et le binaire `cosmon-remote` (Phase 1) lisent
+# DÉSORMAIS le MÊME fichier de profil :
+#   ~/.config/cosmon-remote/profiles/<profile>.toml
+# (source de vérité, écrit par `install.sh`). Le profil porte le
+# quadruplet (host, sub, aud, oidc_url) — fini les `sub=operator&aud=cosmon-rpp`
+# hardcodés qui produisaient `mol-list → null` (aud mismatch, AWS Tenant-Demo).
+# La recette privée `_cfg` résout le profil exactement comme `cosmon-remote`
+# (et comme `install.sh` pour le nom dérivé du host), puis chaque recette
+# `eval "$(just _cfg)"`.
+#
+# Précédence par champ : variable d'env explicite > valeur du profil >
+# host figé au serve-time (`__COSMON_HOST__`, templé par le serveur).
+# Surcharges d'env reconnues (rétro-compat) : COSMON_HOST, COSMON_OIDC_URL,
+# COSMON_REMOTE_PROFILE (choisit le profil), COSMON_REMOTE_TOKEN (JWT partagé
+# avec le binaire — voir `mol-jwt`).
+#
+# Cache des JWT : un SEUL emplacement, partagé et hors /tmp :
+#   ${XDG_CACHE_HOME:-~/.cache}/cosmon-remote/
+# (avant : /tmp/cosmon-*.txt épars — divergence corrigée task-20260525-a476).
+#
+# Le host est figé à l'installation (templating serve-time). Pour le surcharger :
+#   COSMON_HOST=https://autre-host just mol-list
+
+default:
+    @just --list
+
+# ──────────────────────────────────────────────────────────────────────
+# Résolution de config partagée — lit le profil cosmon-remote (Phase 1).
+# Émet des lignes KEY=value pour `eval`. Le nom du profil est dérivé
+# IDENTIQUEMENT à install.sh (même `sed`) → les deux pointent sur le
+# même fichier sur une machine donnée. NB: `__COSMON_HOST__` est remplacé
+# par le serveur (request base URL) au moment du `GET /dist/justfile`.
+# ──────────────────────────────────────────────────────────────────────
+[private]
+_cfg:
+    #!/usr/bin/env bash
+    set -eu
+    CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}/cosmon-remote"
+    # 1. nom du profil : $COSMON_REMOTE_PROFILE, sinon default_profile de
+    #    config.toml, sinon dérivé du host figé (comme install.sh).
+    PROFILE="${COSMON_REMOTE_PROFILE:-}"
+    if [ -z "$PROFILE" ] && [ -f "$CONFIG_HOME/config.toml" ]; then
+      PROFILE=$(sed -n 's/^default_profile *= *"\([^"]*\)".*/\1/p' "$CONFIG_HOME/config.toml" | head -n1)
+    fi
+    if [ -z "$PROFILE" ]; then
+      PROFILE=$(printf '%s' "__COSMON_HOST__" | sed -e 's|^https\?://||' -e 's|/$||' -e 's|[:/.]|-|g')
+    fi
+    f="$CONFIG_HOME/profiles/$PROFILE.toml"
+    # 2. lecture d'un scalaire TOML plat (vide si profil/clé absent).
+    get() { [ -f "$f" ] && sed -n "s/^$1 *= *\"\([^\"]*\)\".*/\1/p" "$f" | head -n1 || true; }
+    host="${COSMON_HOST:-$(get host)}";          host="${host:-__COSMON_HOST__}"
+    oidc="${COSMON_OIDC_URL:-$(get oidc_url)}";   oidc="${oidc:-__COSMON_HOST__}"
+    sub="$(get sub)";                             sub="${sub:-operator}"
+    aud="$(get aud)";                             aud="${aud:-cosmon-rpp}"
+    # 3. cache JWT unifié (hors /tmp, partagé).
+    cache="${XDG_CACHE_HOME:-$HOME/.cache}/cosmon-remote"
+    mkdir -p "$cache"
+    # Single-quoted emit so `eval` is safe for values with spaces (e.g. a
+    # $HOME with a space) and shell metacharacters.
+    printf "ADAPTER_URL='%s'\n" "$host"
+    printf "OIDC_URL='%s'\n"    "$oidc"
+    printf "SUB='%s'\n"         "$sub"
+    printf "AUD='%s'\n"         "$aud"
+    printf "PROFILE='%s'\n"     "$PROFILE"
+    printf "AUTH_JWT='%s'\n"    "$cache/auth-claude-jwt.txt"
+    printf "SESSION='%s'\n"     "$cache/auth-claude-session-id.txt"
+    printf "MOL_JWT='%s'\n"     "$cache/mol-jwt.txt"
+    printf "LAST_MOL='%s'\n"    "$cache/last-mol.txt"
+
+# Afficher la config résolue (debug — quel profil, quel host/sub/aud).
+config-show:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    echo "profile     : $PROFILE"
+    echo "ADAPTER_URL : $ADAPTER_URL"
+    echo "OIDC_URL    : $OIDC_URL"
+    echo "sub / aud   : $SUB / $AUD"
+    echo "jwt cache   : $(dirname "$MOL_JWT")"
+
+# ──────────────────────────────────────────────────────────────────────
+# Surface 1 — auth-claude : ping-pong PKCE (écrit le token côté container)
+# ──────────────────────────────────────────────────────────────────────
+
+# Mint un JWT avec le scope auth-claude (sub/aud lus du profil partagé).
+auth-claude-jwt:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    curl -sS -X POST "$OIDC_URL/issue?sub=$SUB&aud=$AUD&scopes=cosmon:auth:claude:write" | jq -r .access_token > "$AUTH_JWT"
+    echo "JWT auth-claude minté ($SUB/$AUD) → $AUTH_JWT"
+
+# POST /v1/auth/claude/start → session_id stocké
+auth-claude-start:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    JWT=$(cat "$AUTH_JWT")
+    RESP=$(curl -sS -X POST "$ADAPTER_URL/v1/auth/claude/start" -H "Authorization: Bearer $JWT")
+    echo "$RESP" | jq .
+    echo "$RESP" | jq -r .session_id > "$SESSION"
+    echo ""
+    echo "session_id → $SESSION"
+
+# POST /v1/auth/claude/email <email> → verification_url affiché
+auth-claude-email email:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    JWT=$(cat "$AUTH_JWT")
+    SID=$(cat "$SESSION")
+    RESP=$(curl -sS -X POST "$ADAPTER_URL/v1/auth/claude/email" \
+      -H "Authorization: Bearer $JWT" \
+      -H 'Content-Type: application/json' \
+      -d "{\"session_id\":\"$SID\",\"email\":\"{{email}}\"}")
+    echo "$RESP" | jq .
+    echo ""
+    echo "════════════════════════════════════════════════════════════"
+    echo "VISITEZ CETTE URL DANS VOTRE BROWSER :"
+    echo "$RESP" | jq -r .verification_url
+    echo "════════════════════════════════════════════════════════════"
+    echo "Puis : just auth-claude-code <le-code-affiché-après-login>"
+
+# POST /v1/auth/claude/confirm <code> → token écrit côté container
+# (recipe name reste "code" pour mémoire opérateur — endpoint réel = /confirm,
+# champ JSON = authorization_code, conformément à ADR-0017 + OpenAPI v1.1)
+auth-claude-code code:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    JWT=$(cat "$AUTH_JWT")
+    SID=$(cat "$SESSION")
+    curl -sS -X POST "$ADAPTER_URL/v1/auth/claude/confirm" \
+      -H "Authorization: Bearer $JWT" \
+      -H 'Content-Type: application/json' \
+      -d "{\"session_id\":\"$SID\",\"authorization_code\":\"{{code}}\"}" | jq .
+
+# GET /v1/auth/claude/{session_id} → état courant
+auth-claude-status:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    JWT=$(cat "$AUTH_JWT")
+    SID=$(cat "$SESSION")
+    curl -sS "$ADAPTER_URL/v1/auth/claude/$SID" \
+      -H "Authorization: Bearer $JWT" | jq .
+
+# DELETE /v1/auth/claude/{session_id} → cleanup
+auth-claude-delete:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    JWT=$(cat "$AUTH_JWT")
+    SID=$(cat "$SESSION")
+    curl -sS -X DELETE "$ADAPTER_URL/v1/auth/claude/$SID" \
+      -H "Authorization: Bearer $JWT" | jq .
+
+# ──────────────────────────────────────────────────────────────────────
+# Surface 2 — cycle de vie des molécules via l'API
+# ──────────────────────────────────────────────────────────────────────
+
+# Mint un JWT molecule:read+write (sub/aud du profil). Si $COSMON_REMOTE_TOKEN
+# est posé, on le réutilise tel quel — c'est le MÊME JWT que le binaire
+# `cosmon-remote` (config unifiée, task-20260525-a476).
+mol-jwt:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    if [ -n "${COSMON_REMOTE_TOKEN:-}" ]; then
+      printf '%s' "$COSMON_REMOTE_TOKEN" > "$MOL_JWT"
+      echo "JWT molecule depuis \$COSMON_REMOTE_TOKEN (partagé avec cosmon-remote) → $MOL_JWT"
+    else
+      curl -sS -X POST "$OIDC_URL/issue?sub=$SUB&aud=$AUD&scopes=cosmon:molecule:read%20cosmon:molecule:write" | jq -r .access_token > "$MOL_JWT"
+      echo "JWT molecule minté ($SUB/$AUD) → $MOL_JWT"
+    fi
+
+# POST /v1/molecules — nucléer (formula + topic + description)
+mol-nucleate formula topic description:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    [ -f "$MOL_JWT" ] || just mol-jwt
+    JWT=$(cat "$MOL_JWT")
+    RESP=$(curl -sS -X POST "$ADAPTER_URL/v1/molecules" \
+      -H "Authorization: Bearer $JWT" -H 'Content-Type: application/json' \
+      -d "{\"formula\":\"{{formula}}\",\"variables\":{\"topic\":\"{{topic}}\",\"description\":\"{{description}}\"}}")
+    echo "$RESP" | jq .molecule
+    echo "$RESP" | jq -r '.molecule.id // empty' > "$LAST_MOL"
+    echo "→ molecule id: $(cat "$LAST_MOL")  (sauvé dans $LAST_MOL)"
+
+# GET /v1/molecules — lister (l'ensemble)
+mol-list:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    [ -f "$MOL_JWT" ] || just mol-jwt
+    curl -sS "$ADAPTER_URL/v1/molecules" -H "Authorization: Bearer $(cat "$MOL_JWT")" | jq '.ensemble'
+
+# GET /v1/molecules/{id} — observer (défaut : dernière nucléée)
+mol-get id="":
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    ID="{{id}}"; [ -n "$ID" ] || ID=$(cat "$LAST_MOL" 2>/dev/null || true)
+    curl -sS "$ADAPTER_URL/v1/molecules/$ID" -H "Authorization: Bearer $(cat "$MOL_JWT")" | jq .
+
+# POST /v1/molecules/{id}/tackle — lancer un worker (défaut : dernière nucléée)
+mol-tackle id="":
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    ID="{{id}}"; [ -n "$ID" ] || ID=$(cat "$LAST_MOL" 2>/dev/null || true)
+    curl -sS -X POST "$ADAPTER_URL/v1/molecules/$ID/tackle" -H "Authorization: Bearer $(cat "$MOL_JWT")" | jq .
+
+# POST /v1/molecules/{id}/collapse — effondrer (avec raison)
+mol-collapse id reason:
+    #!/usr/bin/env bash
+    set -e
+    eval "$(just _cfg)"
+    curl -sS -X POST "$ADAPTER_URL/v1/molecules/{{id}}/collapse" \
+      -H "Authorization: Bearer $(cat "$MOL_JWT")" -H 'Content-Type: application/json' \
+      -d "{\"reason\":\"{{reason}}\"}" | jq .

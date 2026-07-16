@@ -1,0 +1,158 @@
+formula = "drift-infra-imposition"
+version = 1
+description = """
+Drift-detection patrol #3 — *infra → imposition*.
+
+An `infra` galaxy enables its sisters; the promise is *sisters pull*, \
+not *infra prescribes*. The drift is a reservoir-impedance flip \
+(carnot): when sisters start filing `infra-coupling` issues, the \
+gradient has inverted — the infra is imposing structure the sisters \
+did not ask for.
+
+Threshold (delib-20260419-5168 §4 Q8c):
+  - 0 issues per quarter  → no fire.
+  - 1 issue  per quarter  → WARNING (soft signal; watch).
+  - 2+ issues per quarter → FIRE (verdict).
+
+The per-quarter window is 90 days trailing.
+
+Neurion gate — reads `galaxy_kind = 'infra'` from `repos`.
+
+Threshold helper — \
+`neurion_core::domain::drift::infra_to_imposition_drift`. Pure Rust, \
+unit-tested.
+
+ARTIFACT PATHS — MOLECULE_DIR from `cs --json observe {mol_id}`; \
+NEVER the worktree.
+
+No variables required.
+"""
+id_prefix = "drift-infra"
+freeze_on_last_step = false
+
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Count sister-filed infra-coupling issues per infra galaxy"
+description = """
+1. **Enumerate infra galaxies** via neurion:
+
+   ```
+   neurion.query_registry("SELECT name, path FROM repos WHERE \
+   galaxy_kind = 'infra'")
+   ```
+
+   Fall back to `cs galaxies list --json | jq '.galaxies[] | \
+   select(.galaxy_kind == \"infra\") | .name'`.
+
+2. **Count issues per galaxy** with the `infra-coupling` tag \
+   (or `galaxy:<name>` tag + `drift-detected`) filed in the trailing \
+   90 days (today − 90d):
+
+   ```
+   cs ensemble --json \
+     | jq --arg g "<galaxy>" --arg cutoff "$(date -u -v-90d \
+         +%Y-%m-%dT%H:%M:%S)" \
+         '[.molecules[] |
+           select(.kind == "issue") |
+           select(.tags | index("infra-coupling")) |
+           select(.tags | index("galaxy:" + $g)) |
+           select(.created_at > $cutoff)] | length'
+   ```
+
+   If `cs ensemble` is unavailable, walk \
+   `.cosmon/state/fleets/*/molecules/` and read each `state.json`; \
+   apply the same filters in jq.
+
+3. **Write** `MOLECULE_DIR/scan.md` with:
+
+   | galaxy | path | infra_coupling_issues_90d |
+   |--------|------|----------------------------|
+
+   Per-galaxy subsection: list the actual issue molecule IDs + \
+   topics. Knuth's rule: the numbers are only useful if the reader \
+   can trace them back to the molecules that produced them.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with one row per infra galaxy; issue_id list per galaxy as evidence."
+
+[[steps]]
+id = "detect"
+title = "Apply the 0/1/2+ threshold and emit issues"
+description = """
+Per galaxy, apply `infra_to_imposition_drift(galaxy, \
+coupling_issues_90d)`:
+
+  - `0`  → `NoFire`.
+  - `1`  → `Warning`.
+  - `≥2` → `Fire`.
+
+For Warning AND Fire, nucleate ONE `issue` molecule:
+
+```
+cs nucleate spark-capture \
+  --kind issue \
+  --var topic="drift-detected: infra-to-imposition — <galaxy> \
+(<N> sister-filed infra-coupling issues in 90d, severity=<warning|fire>)" \
+  --tag drift-detected \
+  --tag drift:infra-to-imposition \
+  --tag galaxy:<galaxy> \
+  --tag severity:<warning|fire> \
+  --tag temp:warm
+```
+
+- `temp:warm` MANDATORY.
+- Warnings get the same tag shape as fires but severity=`warning` — \
+  this lets the operator filter: \
+  `cs ensemble --tag drift:infra-to-imposition --tag severity:fire` \
+  shows only the verdicts.
+
+**Rate-limit guard**: if more than 5 galaxies trip (warning + fire \
+combined), STOP and write `## Overflow`. A multi-infra surge usually \
+means the `infra-coupling` tag is being over-applied downstream or \
+a sister-wide change landed that cascaded the signal.
+
+**Write** `MOLECULE_DIR/detect.md`:
+  - one row per galaxy: `galaxy | count_90d | severity | issue_id`.
+  - zero-fire line when applicable.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detect.md written; up to 5 issue molecules nucleated (warning or fire) with full tag set incl. severity; overflow section if >5."
+
+[[steps]]
+id = "report"
+title = "Produce the patrol report"
+description = """
+Write `MOLECULE_DIR/report.md`:
+
+  ```
+  # Drift patrol — infra → imposition — {date}
+
+  ## Galaxies scanned
+  | galaxy | infra_coupling_90d | severity |
+  |--------|---------------------|----------|
+
+  ## Warnings
+  Soft signals — one issue in the window. Watch, do not act.
+
+  ## Fires
+  Verdicts — two or more issues in the window. Interpretation \
+  (carnot): "The reservoir impedance has flipped — sisters are \
+  complaining against the infra's primitive."
+
+  ## Non-actions
+  The patrol does NOT retract primitives, downgrade kind, or close \
+  sister issues. It surfaces the count; the operator and the infra's \
+  maintainer decide.
+
+  ## Next sweep
+  Default: 30 days (quarter/3). Sooner if a new version of the infra \
+  lands.
+  ```
+
+Pointer: `infra_to_imposition_drift` in neurion-core.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/report.md written with galaxies-scanned, separate Warnings and Fires sections, non-actions, next-sweep."

@@ -1,0 +1,37 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
+
+Usage: cs await-operator [OPTIONS] --question <TEXT> <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID whose worker is blocking
+
+Options:
+      --config <PATH>    Path to configuration file
+      --question <TEXT>  A decision the operator is being asked to make (repeatable). At least one is required
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+  -h, --help             Print help
+
+EXAMPLES:
+  cs await-operator <mol> --question "Sign and transmit the act, or revise?"
+  cs await-operator <mol> --question "Push to the shared remote?" --question "Tag v1.2?"
+
+Worker-callable (ADR-123). The ONLY sanctioned way to block on an operator
+decision at an IRREVERSIBLE boundary (signature transmitted, push to a shared
+remote, publish, an authoritative value downstream consumers act on). NEVER
+raise an off-cosmon modal (AskUserQuestion) — it is invisible to cosmon and the
+DAG stalls silently.
+
+Routes on the molecule's `op-block:<boundary>` capability (granted at nucleation
+via `cs nucleate --may-block-on-operator <boundary>`):
+  • capability present  → BLOCK: writes blocked_on.json, emits
+    worker_blocked_on_operator, tags temp:awaiting-op, and yields. Molecule
+    stays Running.
+  • capability absent    → SURFACE-AND-CONTINUE: writes responses/needs-review.md
+    and tells you to pick a sensible default and keep working (reversible).
+
+SEE ALSO: cs nucleate --may-block-on-operator, cs patrol --event-age.

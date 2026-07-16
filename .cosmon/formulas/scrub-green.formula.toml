@@ -1,0 +1,190 @@
+formula = "scrub-green"
+version = 1
+id_prefix = "scrub"
+description = '''
+Phase A of `public-release-readiness` — the ① SCRUB-GREEN spine gate. Remediate a
+private galaxy's git history so a fresh scratch clone audits GREEN, WITHOUT
+amputating the narrative journal by default.
+
+This is the load-bearing, heterogeneous sub-formula of the release constellation.
+Its sequence is extracted from cosmon's OWN membrane re-run (task-20260616-cc22),
+not guessed: the brief said "the chain aborts at Pass 3" and it actually had FOUR
+distinct breaks, none of which the panel predicted. That hard-won wisdom is frozen
+into the step descriptions below so the next galaxy does not re-learn it.
+
+## The operator order this formula encodes (delib-20260616-0f4f, AUTHORITATIVE)
+
+DEFAULT = filter-repo token-replace + simple-scrub, which PRESERVES the narrative
+memory (the per-step `evolve` diary, plausibly load-bearing PRODUCT — the visible
+proof of the self-documenting-DAG thesis). SQUASH-orphan + frozen private archive
+is a CONDITIONAL FALLBACK kept on a shelf, triggered ONLY by an explicit
+post-cleanup judgment (A5), never by default.
+
+## Required variables
+
+  - target_galaxy_path   absolute path of the LIVE private galaxy (stays private;
+                         it is the real archive if A6 squash is ever chosen)
+  - project_binary_name  steers the orchestrator-leak class of the audit
+
+## The shape
+
+  A1  diagnose + repair the scrub chain   (file a 🐛 for any real abort)
+  A2  filter-repo token-replace           (tree AND commit messages)
+  A3  scrub-messages + de-poison B3        (fix the self-poisoning, do not bypass)
+  A4  AUDIT on a fresh scratch clone       (the green gate — measures THIS tree now)
+  A5  ⟦POST-CLEANUP JUDGMENT GATE⟧         (operator verdict-door — the innovation)
+  A6  [SHELVED] squash-orphan + archive    (only if A5 = TOO-MUCH-LEFT)
+
+A5 converts the binary squash-vs-filter choice into a SEQUENCE WITH A JUDGMENT
+VALVE: default to memory-preservation, escalate to amputation only on explicit
+post-cleanup evidence. Because A5 can trigger an irreversible squash, it is an
+OPERATOR GESTURE — the worker prepares and proposes; the operator decides.
+'''
+
+# Tier 1 — A1 may nucleate a 🐛 issue molecule for a real abort; count-bounded.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "a1-repair-chain"
+title = "A1 — diagnose and repair the scrub chain"
+description = '''
+Run the existing scrub/resync chain on a scratch clone and fix every break.
+FROZEN WISDOM from cosmon's re-run — the chain broke in FOUR places, not one:
+
+- **Pass-3 abort (the named one).** `git grep -c` returns exit 1 on NO match —
+  which is the SUCCESS case — and under `set -euo pipefail` that kills the script
+  one line before its own commit. Fix: append `|| true` (the other greps already
+  had it). File the real abort as a 🐛 issue with captured stderr — do NOT assume
+  the brief's narrative (cc22 filed task-20260616-b871).
+- **Pass-6 abort.** `git add` of a template inside a now-wholesale-ignored folder
+  returns 1 → `set -e` kill. Fix: force-add the scoped fixture template.
+- **Pass-4 leak.** Surname perl rules lacking `/i` let lowercase names survive.
+  Fix: add `/gi` and lowercase message entries.
+- **Gate-E build break.** An internal galaxy name used as a Rust `const`
+  identifier cannot be replaced by a hyphenated token. Fix: identifier-safe
+  replacement (underscore, not hyphen).
+
+Diagnose against the actual code, not the brief: an idempotent/no-op script that
+"aborts" is a bug to file, not an architectural blocker.
+
+This step may nucleate AT MOST one 🐛 issue molecule per real abort; the child
+count is finite and bounded by the number of distinct breaks found (tier measure:
+count), not an open-ended fan-out.
+'''
+acceptance = "The scrub chain runs end-to-end on a scratch clone without aborting. Any real abort is filed as a 🐛 issue molecule with captured stderr and the root cause named."
+
+[[steps]]
+id = "a2-filter-repo"
+title = "A2 — filter-repo token-replace, tree AND commit messages"
+description = '''
+Run the filter-repo token replacement across BOTH channels: the working tree AND
+the commit messages (client names, `democorp`, operator domains, private binary
+names). FROZEN WISDOM:
+
+- **Clone scope is load-bearing.** A plain clone drags in every work branch
+  (cc22 pulled 116 local heads with unscrubbed trees — a `--mirror` disaster
+  invisible to the audit). Clone `--single-branch --branch main`.
+- Names are DUAL-CHANNEL and diffuse — in the tree AND in 80+ commit messages.
+  Both channels must be rewritten; a single missed occurrence in the message
+  channel is permanent disclosure.
+- filter-repo's "preserved history" is honest only if the rewrite is flawless:
+  the reader sees the rewritten token where the engineer typed the real name. A4
+  measures whether that rewrite actually reached zero.
+'''
+needs = ["a1-repair-chain"]
+acceptance = "Client names and configured private tokens are zero in both the tree and the commit messages of the scratch clone's main branch."
+
+[[steps]]
+id = "a3-scrub-messages"
+title = "A3 — scrub-messages and de-poison the B3 self-poisoning bug"
+description = '''
+The operator order keeps the message-scrub subsystem ALIVE (squash would have
+retired it). So the B3 self-poisoning bug MUST be fixed, not bypassed: a
+replacement chain that rewrites its OWN replacement table mid-run is
+non-deterministic and will false-green A4. Make the replacement deterministic and
+idempotent (apply against a frozen snapshot of the table, never the live-mutating
+one). Cover accented Unicode — the rewrite race across thousands of commits plus
+accented names is exactly where one occurrence slips.
+'''
+needs = ["a2-filter-repo"]
+acceptance = "scrub-messages runs deterministically and idempotently (twice = once); the B3 self-poisoning table-rewrite is fixed, not bypassed."
+
+[[steps]]
+id = "a4-audit-scratch"
+title = "A4 — audit on a fresh scratch clone (the green gate)"
+description = '''
+Run the release audit on a FRESH scratch clone (not the live tree, not the working
+clone A1–A3 mutated). This gate measures THIS tree, NOW. FROZEN WISDOM — the audit
+must look where it used to be blind:
+
+- rewritten COMMIT MESSAGES, scoped to actually-pushable refs;
+- annotated TAGS' messages and `git notes`;
+- `refs/original/*` and the reflog (filter-repo leftovers);
+- the UTF-16/BOM seam that hides from `git grep -I`;
+- leaks OUTSIDE the purge prefix (tracked `.cosmon/formulas/*.toml`, stray
+  `.cosmon/molecules/.../*.md`);
+- the binary/pixel leak surface (deny-by-default — client names rendered in
+  pixels are invisible to a text grep);
+- the NEW orchestrator-leak gate class keyed off `project_binary_name`.
+
+The green gate is the standing membrane in miniature: prefer deny-by-default
+(allowlist) polarity wherever a gate can express it, so dP/dt>0 makes the audit
+MORE conservative over time, not silently false-green.
+'''
+needs = ["a3-scrub-messages"]
+acceptance = "The release audit runs on a fresh scratch clone and its result (each gate GREEN/RED) is recorded in MOLECULE_DIR/outcomes.md, with the full residual leak surface for any RED gate (not truncated)."
+acceptance_artifacts = ["outcomes.md"]
+
+[[steps]]
+id = "a5-judgment-gate"
+title = "A5 — POST-CLEANUP JUDGMENT GATE (operator verdict-door)"
+description = '''
+The structural innovation the operator asked for. Prepare — do NOT decide — a
+one-decision verdict-door for the operator, written to
+`MOLECULE_DIR/A5-residual-sensitivity-assessment.md`. You PREPARE AND PROPOSE; the
+operator gestures.
+
+The assessment MUST contain, in Feynman register (the membrane-as-a-galaxy-walking
+image, what stays in the backpack):
+
+1. The A4 audit scorecard (every gate, GREEN/RED).
+2. The RESIDUAL — for each RED gate, the exact leak surface bucketed by the
+   DECISION it needs (e.g. "is this whole subsystem even meant to be public?" is
+   architectural, operator-only; "purge-by-parity" is mechanical follow-up;
+   "the detector must name what it detects" is irreducible).
+3. The verdict-door, ONE decision, default named first:
+
+   ① CLEAN-ENOUGH  → the filter-repo path HOLDS. History preserved; the
+                      load-bearing fear (client roster) is closed; the residual is
+                      operator/tooling fingerprints, acceptable to cross or to
+                      clean with small follow-ups. Proceed downstream. (DEFAULT.)
+   ② TOO-MUCH-LEFT → escalate to the SHELVED squash fallback (A6), executed as the
+                      operator's atomic gesture.
+
+Surface it as an iMessage-style enumerated reply (1 / 2). Give your recommendation
+with evidence, but the gesture is the operator's. NOTHING is pushed here; A6 is
+NOT executed; this step's only product is the proposal.
+'''
+needs = ["a4-audit-scratch"]
+acceptance = "MOLECULE_DIR/A5-residual-sensitivity-assessment.md exists with the audit scorecard, the decision-bucketed residual, and a one-decision verdict-door (① CLEAN-ENOUGH default / ② TOO-MUCH-LEFT) plus an evidence-based worker recommendation. No push, no squash executed."
+acceptance_artifacts = ["A5-residual-sensitivity-assessment.md"]
+
+[[steps]]
+id = "a6-squash-shelved"
+title = "A6 — [SHELVED] squash-orphan + frozen private archive"
+description = '''
+SHELVED. Execute ONLY if A5 = ② TOO-MUCH-LEFT, and ONLY as the operator's atomic
+gesture (a worker never runs this unprompted). If reached: one clean orphan commit
+on the public projection + an explicit FULL MIRROR of the live galaxy
+(`target_galaxy_path`) as the frozen private archive. FROZEN WISDOM: do NOT treat
+a quarantine branch as the archive — the all-refs filter-repo rewrites it too, so
+it is not a true pre-purge copy. The real archive is the live private galaxy.
+
+When A5 = ① CLEAN-ENOUGH (the default), this step is a NO-OP: record in the
+briefing seal / manifest that the squash fallback was not triggered, and the
+journal is preserved.
+'''
+needs = ["a5-judgment-gate"]
+acceptance = "If A5 chose ①, this step records (no-op) that the squash fallback was not triggered and the journal is preserved. If A5 chose ②, the squash-orphan + full-mirror private archive plan is recorded for the operator's atomic execution — never auto-run."

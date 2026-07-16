@@ -1,0 +1,115 @@
+[package]
+name = "cosmon-cli"
+publish.workspace = true
+# Inherits the workspace version (`0.1.0`) — the `cs` binary version is the
+# user-facing contract sealed by the `v0.1.0` tag + CHANGELOG heading. Keep
+# this as `version.workspace = true` so the triple agreement
+# (`cs --version` ↔ tag ↔ CHANGELOG) cannot silently drift.
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "CLI entry point for Cosmon agent orchestrator"
+
+[lib]
+name = "cosmon_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cs"
+path = "src/main.rs"
+
+[features]
+default = []
+# NOTE: the `llama` feature (forwarding `cosmon-provider/llama` for the
+# in-process llama.cpp loop) was removed in the pre-publication scope trim
+# (delib-20260622-187a B1 / ADR-126), along with the vendored cosmon-llama
+# crates. The `llama-cpp` adapter row stays registered (so `cs tackle
+# --adapter llama-cpp` fails with the typed `FeatureNotCompiled` rather than
+# `UnknownAdapter`), but no build compiles the concrete adapter. A
+# Rust-native local-model path will be reconsidered separately.
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+# `cs __markdown-help` renders the per-group Reference pages of the mdBook
+# from the live clap tree — the markdown twin of the `clap_mangen` man-page
+# machinery. Real (non-dev) dependency: the generator subcommand ships in the
+# binary. See docs/book/src/reference/ + the `markdown_reference_*` goldens.
+clap-markdown.workspace = true
+clap_mangen = "0.2"
+claudion.workspace = true
+colored.workspace = true
+cosmon-api.workspace = true
+cosmon-core.workspace = true
+cosmon-daemon-supervisor.workspace = true
+cosmon-filestore.workspace = true
+cosmon-graph.workspace = true
+cosmon-hash.workspace = true
+cosmon-notary.workspace = true
+cosmon-observability.workspace = true
+cosmon-provider.workspace = true
+cosmon-agent-harness.workspace = true
+cosmon-ops-tools.workspace = true
+cosmon-pilot.workspace = true
+cosmon-process-witness.workspace = true
+# `cs pilot --remote` resolves a cosmon-remote profile + mints/loads a JWT,
+# then hands the (host, token) to the remote `cosmon-ops-tools` backend.
+cosmon-remote.workspace = true
+cosmon-registry.workspace = true
+cosmon-ask.workspace = true
+cosmon-runtime.workspace = true
+cosmon-scenario.workspace = true
+cosmon-scheduler.workspace = true
+axum.workspace = true
+cosmon-state.workspace = true
+ratatui.workspace = true
+unicode-width.workspace = true
+ansi-to-tui = "7"
+tui-markdown = "0.3"
+ratatui-core = "0.1"
+crossterm.workspace = true
+dirs.workspace = true
+fs2.workspace = true
+globset.workspace = true
+ignore.workspace = true
+cosmon-style.workspace = true
+cosmon-surface.workspace = true
+cosmon-verify.workspace = true
+neurion-core.workspace = true
+notify.workspace = true
+# `nix` (signal feature) lets the post-merge gate SIGKILL a timed-out cargo
+# subprocess's *whole process group*, not just the direct child — so a
+# descendant that inherited the capture pipe cannot hold it open and hang the
+# gate past its wall-clock budget (done.rs `run_bounded`/`run_bounded_capture`).
+nix.workspace = true
+rusqlite.workspace = true
+cosmon-transport.workspace = true
+ctrlc.workspace = true
+rand.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tokio = { version = "1", features = ["full"] }
+topon-core.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+
+[build-dependencies]
+# build.rs only declares rerun-if-changed triggers; man-page generation
+# moved to the `__man-page` hidden subcommand + `help_goldens` integration
+# test (task-20260421-0179), so no build-time deps are needed.
+
+[dev-dependencies]
+cosmon-transport = { workspace = true, features = ["test-support"] }
+insta.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

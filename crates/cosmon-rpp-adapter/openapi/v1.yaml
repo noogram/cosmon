@@ -1,0 +1,2375 @@
+openapi: 3.1.0
+info:
+  title: Cosmon Remote Pilot Port (RPP) — V0+V1
+  version: "0.5.0"
+  description: |
+    Hand-written OpenAPI for the V0 read-only + V1 mutation cuts of the
+    Cosmon Remote Pilot Port (ADR-080, §8j HTTPS+OIDC instantiation).
+    The §8p-pinned wire surface is **nineteen routes** (8 molecule +
+    3 artifact + 5 auth-claude + 1 auth-me + 1 SSE events + 1 quota) —
+    pinned by the freeze test in `tests/api_surface_freeze.rs` and
+    held by the §8p invariant
+    ("API surface ⊊ CLI surface"). The artifact endpoints (e653 spec,
+    `task-20260522-ef4f`) are filesystem-mediated rather than
+    state-mediated and exempt from the §8p CLI-bijection check. The
+    SSE events route (`task-20260522-c46a`) is HTTP-only — there is
+    no `cs events stream` verb and durable history lives in the
+    per-tenant filesystem state, not on the bus.
+
+    Three **operational** endpoints sit *outside* `/v1/` and never
+    count toward the §8p surface — `/healthz` (minimal liveness),
+    `/metrics` (Prometheus text), `/diagnostics` (JSON snapshot of
+    in-RAM projections). They are unauthenticated and carry no
+    per-tenant data — aggregate counters and projection sizes only
+    (task-20260523-d820, gap report ae3d §i).
+
+    Eight of the nine routes are library-direct (T-RPP-LIB-DIRECT,
+    2026-05-04): the adapter calls
+    `cosmon_state::ops::{observe,nucleate,tag,ensemble,collapse,freeze,thaw,stuck}`
+    in-process. There is no subprocess, no in-image `cs` binary
+    invocation, no shell-out per request on those routes. The
+    ninth route (`POST /v1/molecules/{id}/tackle`, T9 Tenant-Demo V2,
+    `task-20260512-c6de`) re-instates the original ADR-080 §3.5
+    subprocess envelope because spawning an external agent (Claude
+    Code via tmux) is fundamentally out-of-process. Cross-noyau
+    isolation remains structural — every request resolves a
+    per-tenant `<galaxies_root>/<noyau>/.cosmon/state/` from the JWT
+    and the adapter never walks outside that root.
+
+    This file is **hand-curated** (R6 of ADR-080). It is not generated
+    from the Rust types. Drift between this file and the implementation
+    must be caught by the surface-freeze test and resolved by editing
+    the YAML in the same PR that touches a route.
+
+    ## What this spec is not
+
+    It is not the full Cosmon CLI surface. The §8p invariant forbids
+    exposing operator-only verbs (`done`, `evolve`, `complete`,
+    `security`, `run`, `kill`, `purge`, `reconcile`, `verify`,
+    `whisper`, `drop`) over the network. Adding any of them here is a
+    structural breach.
+  contact:
+    name: Cosmon — Remote Pilot Port
+    url: https://github.com/noogram/cosmon
+  license:
+    name: MIT OR Apache-2.0
+
+servers:
+  - url: https://rpp.{domain}
+    description: Operator-controlled deployment (typical tenant_auditor-facing instance).
+    variables:
+      domain:
+        default: example.invalid
+        description: The pilot's HTTPS host. Locally, often a Tailscale FQDN.
+
+security:
+  - bearerAuth: []
+
+paths:
+  /v1/molecules:
+    get:
+      operationId: listMolecules
+      summary: |
+        List molecules in the caller's tenant (ensemble), with optional
+        filters. V1 read cut (T-CST-EXPAND).
+      description: |
+        Library-direct call to `cosmon_state::ops::ensemble`. The
+        response is byte-stable with `cs --json ensemble`.
+
+        ## Required scope
+
+        `cosmon:molecule:read` OR `cosmon:molecule:write` (write
+        implies visibility).
+
+        ## Filters (all optional)
+
+        Multiple filters are combined with AND.
+      tags: [molecules]
+      parameters:
+        - in: query
+          name: status
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by lifecycle status (`pending`, `active`, `running`,
+            `completed`, `collapsed`, `frozen`).
+        - in: query
+          name: kind
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by molecule kind (`task`, `idea`, `decision`,
+            `issue`, `signal`, `deliberation`).
+        - in: query
+          name: tag
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter by tag glob — substring match against any tag the
+            molecule carries (e.g. `temp:hot`).
+        - in: query
+          name: fleet
+          required: false
+          schema:
+            type: string
+          description: Optional fleet filter.
+      responses:
+        "200":
+          description: Ensemble list (possibly empty).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EnsembleEnvelope"
+        "400":
+          description: Invalid filter expression.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing, malformed, or rejected JWT.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: JWT valid but lacks read scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Per-`sub` rate limit exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: State store unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+    post:
+      operationId: nucleateMolecule
+      summary: |
+        Nucleate (create) a new molecule from a formula. V1 mutation
+        cut (ADR-080 §10.2 / T-V1-MUTATIONS-NUCLEATE 2026-05-04).
+      description: |
+        Library-direct call to `cosmon_state::ops::nucleate`. The
+        molecule is recorded under the caller's per-tenant
+        `<galaxies_root>/<noyau>/.cosmon/state/` and does **not**
+        auto-tackle: the operator retains the gesture of propelling
+        work via the local `cs tackle` (operator-only, ADR-080 §5.1).
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+
+        ## Body shape
+
+        ```json
+        {
+          "formula": "task-work",
+          "kind": "task",
+          "variables": { "topic": "..." },
+          "tags": ["temp:warm"]
+        }
+        ```
+
+        - `formula` is required (non-empty).
+        - `kind` is optional and defaults to the formula's own default.
+        - `variables` is an object mapping `string → string`. Other
+          value types are rejected with 400.
+        - `tags` is an optional list of plain strings. Invalid tags
+          (whitespace, malformed scheme) surface as 409.
+      tags: [molecules]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NucleateBody"
+            examples:
+              minimal:
+                summary: Minimal (formula only)
+                value:
+                  formula: "task-work"
+              full:
+                summary: With kind, variables, tags
+                value:
+                  formula: "task-work"
+                  kind: "task"
+                  variables:
+                    topic: "test the V1 mutation cut"
+                  tags: ["temp:warm"]
+      responses:
+        "201":
+          description: |
+            Molecule created. The `Location` header carries
+            `/v1/molecules/<id>` and the body is the same envelope
+            shape as `GET /v1/molecules/{id}`.
+          headers:
+            Location:
+              schema:
+                type: string
+              description: Path of the created molecule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoleculeEnvelope"
+        "400":
+          description: Invalid body shape (missing `formula`, etc.).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing, malformed, or rejected JWT.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: JWT valid but lacks `cosmon:molecule:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            `ops::nucleate` refused — typically an unknown formula, an
+            invalid `--var` parse, or a tag-string the cosmon Tag
+            parser rejects.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Per-`sub` rate limit exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: Internal adapter failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}:
+    get:
+      operationId: getMolecule
+      summary: Read one molecule by id (idempotent, scoped to caller's tenant).
+      description: |
+        Reads the public projection of a single molecule, scoped to
+        the caller's noyau (tenant) by clauses (a) and (e) of §8j:
+
+        - **(a) identity** — the JWT's `sub` is mapped to a
+          `nucleon_id` and a `noyau` via the operator-controlled
+          nucleon map. Tokens whose `iss` is not pinned, whose `aud`
+          is foreign, or whose `sub` is unknown are rejected at
+          clause (a).
+        - **(e) per-tenant root pin** — the actual lookup runs against
+          `<galaxies_root>/<noyau>/.cosmon/state/` resolved from the
+          JWT, so a leak across noyaus is structurally impossible.
+
+        Library-direct (no subprocess). The body is byte-stable with
+        `cs --json observe <id>`, wrapped in an envelope that carries
+        the `request_id`.
+
+        ## Required scope
+
+        `cosmon:molecule:read`. (V0 policy grid: missing scope still
+        yields a successful response with `AuthzDecisionEvaluated`
+        emitted; the 403 below is reserved for V1.)
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+          description: |
+            Molecule identifier. Opaque to the caller — only the
+            regex pattern (`^[A-Za-z0-9._:-]{1,128}$`) is part of the
+            contract. The server-side encoding may change without
+            notice; do not parse substrings.
+      responses:
+        "200":
+          description: Molecule found and accessible to the caller.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MoleculeEnvelope"
+              examples:
+                task:
+                  summary: A typical task molecule
+                  value:
+                    request_id: "01HV9C7XDH"
+                    molecule:
+                      id: "task-20260503-7e0a"
+                      kind: "task"
+                      status: "active"
+                      last_5_events:
+                        - { ts: "2026-05-03T14:51:00Z", kind: "Nucleated" }
+                        - { ts: "2026-05-03T14:52:13Z", kind: "Tackled" }
+        "401":
+          description: |
+            Missing, malformed, or rejected JWT. The body carries no
+            information about which clause rejected the token
+            (existence-oracle suppression, turing §8.2.3).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: |
+            (V1 reserved.) JWT valid but lacks the required scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            Molecule not found, **or** caller's tenant has no such
+            molecule. Both cases collapse to the same status to avoid
+            leaking cross-tenant existence.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: |
+            Per-`sub` rate limit exhausted (clause (c)). The leaky
+            bucket is operator-tuneable in
+            `~/.config/cosmon/rpp.toml`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "500":
+          description: |
+            Internal adapter failure. The body never includes paths
+            or stack traces — only an opaque `request_id`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/tags:
+    post:
+      operationId: tagMolecule
+      summary: Add and/or remove tags on a molecule (T-CST-V0).
+      description: |
+        Library-direct call to `cosmon_state::ops::tag`. At least one
+        of `add` / `remove` must be non-empty (empty body → 400).
+        Tag strings are parsed via cosmon's `Tag::new` validator;
+        invalid tags surface as 409.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TagBody"
+            examples:
+              add_only:
+                summary: Add a single tag
+                value:
+                  add: ["temp:hot"]
+              add_and_remove:
+                summary: Promote temp:warm → temp:hot
+                value:
+                  add: ["temp:hot"]
+                  remove: ["temp:warm"]
+      responses:
+        "200":
+          description: Tags applied. Body shape mirrors `cs --json tag`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TagEnvelope"
+        "400":
+          description: |
+            Empty add+remove, malformed JSON, or invalid tag string.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: Missing, malformed, or rejected JWT.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Lacks `cosmon:molecule:write`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/collapse:
+    post:
+      operationId: collapseMolecule
+      summary: Collapse (terminate) a molecule with a reason (T-CST-EXPAND).
+      description: |
+        Library-direct call to `cosmon_state::ops::collapse`. The
+        `reason` field is mandatory. `cause` is an optional structured
+        attribution (`"rate_limit"`, `"design_change"`, `"abandoned"`);
+        when `cause = "rate_limit"`, `account` and `kind` further
+        qualify the rate-limit context.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollapseBody"
+            examples:
+              minimal:
+                summary: Minimal (reason only)
+                value:
+                  reason: "scope changed"
+              with_cause:
+                summary: Rate-limit attribution
+                value:
+                  reason: "Anthropic 429"
+                  cause: "rate_limit"
+                  account: "operator-default"
+                  kind: "anthropic-tokens"
+      responses:
+        "200":
+          description: Molecule collapsed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollapseEnvelope"
+        "400":
+          description: Empty / missing reason or invalid body.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            Molecule already in a terminal status (cannot collapse a
+            collapsed/completed molecule).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/freeze:
+    post:
+      operationId: freezeMolecule
+      summary: |
+        Toggle a molecule's frozen status (T-CST-EXPAND).
+      description: |
+        Library-direct call to `cosmon_state::ops::freeze` (when
+        `state = "frozen"`) or `cosmon_state::ops::thaw` (when
+        `state = "active"`). The two former routes
+        (`/freeze` and `/thaw`) were fused in v1.0.0-rc to normalise
+        the body and capture a `reason` on resume (previously lost).
+
+        ## Migration
+
+        Callers that previously hit `POST /v1/molecules/{id}/thaw`
+        receive **410 Gone** with body
+        `{"error":"endpoint_removed","hint":"POST /v1/molecules/{id}/freeze {\"state\":\"active\"}"}`.
+        The 410 is wired for **2 minor releases** then drops to 404.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FreezeBody"
+            examples:
+              freeze:
+                summary: Pause a running molecule
+                value:
+                  state: frozen
+                  reason: "waiting on tenant_auditor audit"
+              thaw:
+                summary: Resume a frozen molecule
+                value:
+                  state: active
+                  reason: "tenant_auditor audit cleared"
+      responses:
+        "200":
+          description: Molecule frozen.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FreezeEnvelope"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Already in a terminal status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: State store unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/stuck:
+    post:
+      operationId: stuckMolecule
+      summary: Mark a molecule as stuck with a mandatory reason (T-CST-EXPAND).
+      description: |
+        Library-direct call to `cosmon_state::ops::stuck`. The
+        `reason` field is mandatory and must be non-empty after
+        trim.
+
+        ## Required scope
+
+        `cosmon:molecule:write`.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/StuckBody"
+            examples:
+              waiting:
+                summary: Stuck waiting on dependency
+                value:
+                  reason: "blocked on T-RPP-LIB-DIRECT review"
+      responses:
+        "200":
+          description: Molecule marked stuck.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StuckEnvelope"
+        "400":
+          description: Empty / missing reason.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: Already in a terminal status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/tackle:
+    post:
+      operationId: tackleMolecule
+      summary: |
+        Spawn a worker session against a Pending molecule
+        (T9 Tenant-Demo V2, `task-20260512-c6de`).
+      description: |
+        Subprocess invocation of `cs tackle <id> --force` inside the
+        per-tenant `cosmon-server` container (the `cs-thin` image was
+        renamed to `cosmon-server:v1` in T9 to disambiguate from the
+        client-side `cs-thin` CLI). `cs tackle` in turn launches Claude
+        Code via tmux with the `ANTHROPIC_API_KEY` resolved through the
+        `AuthProvider` trait (ADR-0008).
+
+        Unlike the other §8p verbs, tackle is **not** library-direct:
+        spawning an external agent is fundamentally out-of-process, so
+        the original ADR-080 §3.5 subprocess envelope is reinstated for
+        this single verb.
+
+        ## Required scopes (composition AND)
+
+        `cosmon:molecule:write` **AND** `cosmon:worker:spawn`. The
+        second scope is **new** in v1.0.0-rc
+        (`task-20260522-b538` §3) — it prevents a tenant token that
+        was meant to "write molecules" from also being able to burn
+        operator Anthropic budget. A binding granting only `:write`
+        receives 403 `forbidden` on tackle. Audit emits two
+        `AuthzDecisionEvaluated` events (verbs `tackle` and
+        `tackle:spawn`) correlated by `request_id`.
+
+        ## Anthropic cost
+
+        Every successful tackle consumes real Anthropic API credit.
+        The cosmon-anthropic-audit pipeline (T2) writes one
+        `anthropic.call` event per LLM invocation under
+        `<galaxies_root>/<noyau>/.cosmon/state/events.jsonl` with the
+        token counts and dollar estimate.
+      tags: [molecules]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      responses:
+        "200":
+          description: Tackle dispatched; worker session id returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TackleEnvelope"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: Molecule not found in caller's tenant.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "409":
+          description: |
+            `already_active` — a worker session is already attached to
+            this molecule.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: |
+            `tackle_unavailable` — `cs` binary missing, subprocess
+            spawn failed, or Claude Code not installed in the
+            container.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "504":
+          description: |
+            `subprocess_timeout` — `cs tackle` exceeded the per-call
+            subprocess deadline.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/artifacts:
+    get:
+      operationId: listArtifacts
+      summary: |
+        List artifacts produced by the worker for a molecule
+        (e653 spec, `task-20260522-ef4f`).
+      description: |
+        Scans `<artifact_root>/<noyau>/<molecule_id>/` and returns a
+        typed manifest of every regular file (dotfiles skipped). The
+        artifact root convention is set at tackle time: the adapter
+        materialises the per-molecule directory and exports
+        `COSMON_ARTIFACT_DIR` into the worker subprocess env so the
+        worker writes outputs at the canonical path the GET reads
+        from.
+
+        Filesystem-mediated — no `cosmon-state::ops::artifact*`
+        operation exists, by design (artifacts may carry large
+        payloads we do not want to fold into the briefing seal).
+
+        ## Required scope
+
+        `cosmon:artifact:read`. Distinct from `cosmon:molecule:read`
+        because artifact payloads can have different exposure rules
+        than molecule observability.
+
+        ## Empty manifest
+
+        If the molecule has not produced any artifacts (or the
+        directory does not exist yet), the response carries
+        `{ "artifacts": [] }` rather than 404. The `id` echoes
+        whatever the caller sent — a malformed `id` is rejected as
+        `400 invalid_path_segment`, not 404, because the input is
+        structurally invalid.
+      tags: [artifacts]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema:
+            type: string
+            pattern: "^[A-Za-z0-9._:-]{1,128}$"
+      responses:
+        "200":
+          description: Manifest of all artifacts under the molecule dir.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactManifest"
+        "400":
+          description: |
+            `invalid_path_segment` — `id` contains `..` / `/` / `\`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:artifact:read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: Rate limit.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/molecules/{id}/artifacts/{token}:
+    get:
+      operationId: fetchArtifact
+      summary: |
+        Stream the binary bytes of one artifact
+        (e653 spec, `task-20260522-ef4f`).
+      description: |
+        Look up the manifest entry whose `token` matches, then stream
+        its bytes. The `token` is the opaque
+        `art_<24 base32 chars>` value returned by the manifest — it
+        is deterministically derived from
+        `SHA-256(molecule_id || "/" || name)` and isolates URL
+        surface from arbitrary on-disk filenames.
+
+        Response carries `Content-Type` (from the manifest's
+        `content_type`), `Content-Length` (the file size), and
+        `ETag` (the blake3 hex of the contents — same value the
+        manifest reports under `integrity.hex`).
+      tags: [artifacts]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9._:-]{1,128}$" }
+        - in: path
+          name: token
+          required: true
+          schema: { type: string, pattern: "^art_[a-z0-9]{24}$" }
+      responses:
+        "200":
+          description: Binary stream of the artifact.
+          headers:
+            Content-Type:
+              schema: { type: string }
+              description: MIME type detected from the filename extension.
+            Content-Length:
+              schema: { type: integer }
+            ETag:
+              schema: { type: string }
+              description: Lowercase blake3 hex of the contents.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:artifact:read` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "404":
+          description: |
+            `artifact_not_found` — token not in the manifest.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+    put:
+      operationId: pushArtifact
+      summary: |
+        Push a back-utterance artifact into the molecule's artifact
+        dir (e653 spec, `task-20260522-ef4f`).
+      description: |
+        The path segment `{token}` carries the on-disk filename
+        (not a manifest token — the GET and PUT share the same axum
+        pattern; the handler renames the segment internally for
+        clarity).
+
+        The body is the raw bytes. The adapter computes the blake3
+        digest server-side; if the request carries
+        `Digest: blake3=<hex>` per RFC 9530, the server verifies in
+        constant time and rejects mismatches with `400 digest_mismatch`.
+
+        ## Idempotence — `If-Match`
+
+        A PUT with `If-Match: "<blake3-hex>"` succeeds only if the
+        file already exists at `name` and its current digest matches.
+        Mismatch is `412 if_match_failed`. Absence is fine (the PUT
+        creates the file).
+
+        ## Required scope
+
+        `cosmon:artifact:write`. Distinct from `cosmon:molecule:write`
+        because uploading binary payloads has a different blast
+        radius than nucleating / tagging.
+      tags: [artifacts]
+      parameters:
+        - in: path
+          name: id
+          required: true
+          schema: { type: string, pattern: "^[A-Za-z0-9._:-]{1,128}$" }
+        - in: path
+          name: token
+          required: true
+          description: |
+            On the PUT side this segment carries the on-disk filename
+            (the same path pattern as GET — method disambiguates).
+          schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,255}$" }
+        - in: header
+          name: Digest
+          required: false
+          schema: { type: string, pattern: "^blake3=" }
+          description: |
+            RFC 9530 — `blake3=<hex>`. When present, server
+            verifies the body's blake3 against this value.
+        - in: header
+          name: If-Match
+          required: false
+          schema: { type: string }
+          description: |
+            Optional precondition — `"<blake3-hex>"` of the existing
+            file. Mismatch yields 412.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "201":
+          description: Artifact written; manifest entry returned.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ArtifactPushedEnvelope"
+        "400":
+          description: |
+            `digest_mismatch` — server-computed blake3 differs from
+            the `Digest:` header. Or `invalid_path_segment` — `id`
+            or `name` contains `..`, `/`, or `\`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: JWT issue.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:artifact:write` scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "412":
+          description: |
+            `if_match_failed` — pre-condition refuted by the on-disk
+            blake3.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: |
+            `artifact_dir_unavailable` or `artifact_write_failed` —
+            filesystem error.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+  /v1/noyaux:
+    get:
+      operationId: listNoyaux
+      summary: |
+        Multi-noyau discovery (task-20260523-eb61, gap-report ae3d
+        workflow f).
+      description: |
+        Returns the list of noyaux the JWT's `sub` is bound to, with
+        the per-noyau binding count and the absolute `galaxies_root`
+        on the adapter host. A multi-noyau operator can call
+        `/v1/noyaux` once and then pick a noyau to scope subsequent
+        calls against — without first guessing a slug.
+
+        Admission-side route, **no scope check** — a valid JWT is the
+        whole gate. Same discovery class as `/v1/auth/me`: an unbound
+        principal still gets a 200 with `noyaux: []` so the tenant
+        can debug the binding independently of the read/write
+        surface.
+
+        The route is exempt from the §8p molecule⇔verb bijection
+        check (no `cs` CLI counterpart — multi-noyau enumeration is a
+        wire-side concern).
+      tags: [noyaux]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: |
+            Validated JWT, projected to the discovery envelope. May
+            carry an empty `noyaux` array when the principal is not
+            yet bound to any nucleon.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NoyauxResponse"
+        "401":
+          description: |
+            Missing / malformed `Authorization` header, JWT signature
+            invalid, expired, unknown issuer, or audience mismatch.
+            One stable label per reject reason; the wire body never
+            leaks `sub` / nucleon / tenant identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  /v1/auth/me:
+    get:
+      operationId: authMe
+      summary: |
+        JWT introspection / whoami (task-20260522-560a, gap-report
+        ae3d workflow j priority-1).
+      description: |
+        Decode the bearer JWT and echo back the server-side view: the
+        `sub` and `aud` it carries, the `scopes` it claims, the bound
+        `noyau` (resolved via the sealed nucleon map), the absolute
+        `expires_at` in ISO-8601 UTC, and the IdP `issuer` that signed
+        it.
+
+        Admission-side route, **no scope check** — a valid JWT is the
+        whole gate. The route is the wire counterpart of `cs whoami`,
+        not a state-mutating verb; an unbound principal still gets a
+        200 with `noyau: null` so the tenant can debug the binding
+        independently of the read/write surface.
+
+        Carried under the `/v1/auth/` prefix so the §8p
+        molecule⇔verb bijection check exempts it automatically (same
+        class as `/v1/auth/claude/*`).
+      tags: [auth]
+  /v1/quota:
+    get:
+      summary: |
+        Read the tenant's current rate-limit snapshot (gap report
+        ae3d §h, `task-20260522-2f91`).
+      description: |
+        Returns the tenant's leaky-bucket snapshot — burst capacity,
+        current level, remaining tokens, and the ISO-8601 wall-clock
+        at which the bucket fully drains back to zero. Symmetric read
+        face of [`IngressRateLimiter::check_and_consume`] (the
+        §8j(c) clause); lets a programmatic client throttle itself
+        before eating a `429`.
+
+        **Tenant model.** The §8j ingress is a **leaky bucket**, not
+        a per-minute / per-hour counter. The response honestly
+        exposes the leaky-bucket shape: `limits.burst_capacity` is
+        the cap, `limits.leak_per_{minute,hour}` is the drain rate,
+        `current.bucket_level` is the live level. Tenants should
+        treat `remaining = capacity − level` as the budget-before-
+        next-token and `reset_at` as the soonest moment a full burst
+        is available again.
+
+        **Consumption.** Calling `/v1/quota` itself bumps the bucket
+        once (the route is gated by the same admission boundary as
+        every other `/v1/` call). This is intentional: a tenant
+        cannot poll quota in a tight loop to amplify denial
+        elsewhere. The accompanying `X-RateLimit-Remaining` header
+        carries the *post*-consumption snapshot — body and header
+        agree by construction.
+      operationId: getQuota
+      tags: [quota]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: |
+            The validated JWT, projected to the whoami envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMeResponse"
+        "401":
+          description: |
+            Missing / malformed `Authorization` header, JWT signature
+            invalid, expired, unknown issuer, or audience mismatch.
+            One stable label per reject reason; the wire body never
+            leaks `sub` / nucleon / tenant identity.
+  /v1/events:
+    get:
+      operationId: streamEvents
+      summary: |
+        Subscribe to the per-tenant Server-Sent Events stream of
+        molecule lifecycle events (`task-20260522-c46a`).
+      description: |
+        Long-lived `text/event-stream` response. The adapter publishes
+        a `MoleculeEvent` to an in-process bus from every mutation
+        route (`nucleate`, `tag`, `collapse`, `freeze`, `stuck`,
+        `tackle`); the SSE handler subscribes to the bus and forwards
+        events matching the caller's tenant `noyau` (and optionally a
+        single `molecule_id`) to the wire.
+
+        ## Required scope
+
+        `cosmon:events:subscribe` (distinct from
+        `cosmon:molecule:read` — a long-lived SSE tail is a different
+        blast radius than periodic observe).
+
+        ## Wire format
+
+        Each event arrives as:
+
+        ```
+        id: <monotonic-u64>
+        event: <name>
+        data: <json>
+
+        ```
+
+        Two event names are emitted today (the set is additive — a
+        v1 subscriber MUST ignore unknown names rather than reject):
+
+        - `molecule.state_changed` —
+          `{"molecule_id": "...", "old_state": "...", "new_state": "...", "timestamp": "..."}`
+        - `molecule.event_appended` —
+          `{"molecule_id": "...", "event": {...}, "timestamp": "..."}`
+
+        A keep-alive comment line (`: keep-alive`) is sent every 30 s
+        so any HTTP/1.1 proxy in the middle keeps the socket open.
+
+        ## Reconnection
+
+        The SSE channel is a *live tail*: history is **not** replayed
+        server-side. A client that drops and reconnects with
+        `Last-Event-ID: <n>` will have events with `id <= n` filtered
+        out at the adapter, but events that landed on the bus between
+        disconnect and reconnect are gone. Durable history lives in
+        the per-tenant filesystem state.
+
+        ## Cross-tenant isolation
+
+        Structural — every event carries an internal `noyau` field
+        (skipped on serialisation); the handler subscribes after
+        resolving the JWT's nucleon and refuses to forward events
+        whose `noyau` does not match.
+      tags: [events]
+      parameters:
+        - in: query
+          name: molecule_id
+          required: false
+          schema:
+            type: string
+          description: |
+            Filter to a single molecule id. When omitted, every event
+            for the caller's noyau is streamed.
+        - in: header
+          name: Last-Event-ID
+          required: false
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          description: |
+            Resume floor — events with `id <= Last-Event-ID` are
+            filtered out before they reach the wire. No replay.
+      responses:
+        "200":
+          description: |
+            SSE stream — the connection stays open until the client
+            disconnects, the server is shut down, or the network
+            drops.
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE-encoded event stream (see description).
+        "400":
+          description: Malformed query parameter.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "401":
+          description: |
+            Missing or malformed `Authorization` header / invalid JWT
+            / unknown `sub`.
+            Successful snapshot. Body and `X-RateLimit-*` headers
+            describe the same accounting moment.
+          headers:
+            X-RateLimit-Limit:
+              schema: { type: integer, format: int64, minimum: 0 }
+              description: |
+                Burst capacity (max tokens the bucket can hold). V0
+                production default: 30.
+            X-RateLimit-Remaining:
+              schema: { type: integer, format: int64, minimum: 0 }
+              description: |
+                Tokens still available before the next request
+                would overflow (`floor(capacity − level)`).
+            X-RateLimit-Reset:
+              schema: { type: string, format: date-time }
+              description: |
+                Wall-clock at which the bucket will be fully drained
+                back to zero. ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaResponse"
+        "401":
+          description: |
+            Missing / invalid JWT, expired, mis-audienced, or
+            unknown `sub`. Header triplet is **not** emitted on this
+            response — only validated JWTs receive the snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing `cosmon:events:subscribe` scope.
+          description: |
+            JWT lacks `cosmon:molecule:read` (or `:write`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: |
+            The admission rate-limit already exceeded — the wire
+            response still carries `X-RateLimit-*` headers + a
+            `Retry-After` so the client knows when to retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+  # ── Operational endpoints (outside /v1/, no JWT gate, excluded
+  # from the §8p frozen surface). Documented here for completeness so
+  # a dashboard tenant can render the adapter health page without
+  # out-of-band discovery (task-20260523-d820, gap report ae3d §i).
+  /healthz:
+    get:
+      operationId: healthz
+      summary: Liveness probe with build identification.
+      description: |
+        Tailscale-style liveness probe. Body is intentionally minimal
+        and **stable**: the liveness pair (`ok`, `service`) plus the
+        two version fields added by delib-20260610-9a0c (tolnay) so
+        the deployed build no longer has to be deduced by behavioural
+        inference. The four-key set is frozen — use `/metrics` for
+        Prometheus-format operational data and `/diagnostics` for the
+        full JSON snapshot.
+
+        No authentication. Outside `/v1/`, so does not count toward the
+        §8p frozen API surface.
+      tags: [operational]
+      security: []
+      responses:
+        "200":
+          description: Adapter is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, version, api_surface_version]
+                properties:
+                  ok:
+                    type: boolean
+                    enum: [true]
+                  service:
+                    type: string
+                    enum: [cosmon-rpp-adapter]
+                  version:
+                    type: string
+                    description: |
+                      Adapter binary version, aligned on the bake tag
+                      series (image `cosmon-server:v2.0.1` reports
+                      `"2.0.1"`).
+                  api_surface_version:
+                    type: integer
+                    description: |
+                      Number of `surface_added` events the binary was
+                      compiled with (`data/surface_events.txt` is
+                      append-only, so this is monotonic). Clients may
+                      compare against their own compiled-in count and
+                      emit an informative note on mismatch — never
+                      blocking, never a `/v2/`.
+  /metrics:
+    get:
+      operationId: metrics
+      summary: Prometheus exposition of adapter counters and gauges.
+      description: |
+        Returns `text/plain; version=0.0.4` body in the Prometheus
+        exposition format. The family set is intentionally bounded —
+        every label is closed (status class, backend name, JWKS
+        issuer, reject reason) so the scrape cardinality stays
+        proportional to the operator's static configuration.
+
+        ## Emitted families
+
+        - `cosmon_adapter_uptime_seconds` — gauge, seconds since boot.
+        - `cosmon_adapter_build_info{version,posture}` — gauge always
+          `1`, surfaces static labels.
+        - `cosmon_adapter_http_responses_total{class}` — counter by
+          status class (`1xx|2xx|3xx|4xx|5xx`).
+        - `cosmon_adapter_admission_rejects_total{reason}` — counter
+          by stable `RppRejectReason::label` value. The label set is
+          closed (≤ 25 values, see error.rs).
+        - `cosmon_adapter_rate_limit_capacity` / `…_leak_per_minute`
+          — gauges of the static per-`sub` leaky-bucket parameters.
+        - `cosmon_adapter_backend_status{backend}` — gauge encoded as
+          `3=ok, 2=degraded, 1=down, 0=configured-but-unused`.
+        - `cosmon_adapter_backend_latency_p95_ms{backend}` — gauge,
+          only emitted when ≥5 successful probes have landed.
+        - `cosmon_adapter_jwks_keys_loaded{issuer}` — gauge per pinned
+          issuer.
+        - `cosmon_adapter_nucleon_bindings` / `…_nucleon_noyaux` —
+          gauges of the sealed map projection sizes.
+        - `cosmon_adapter_events_subscribers` — gauge, live SSE
+          subscriber count.
+
+        ## What is NOT emitted
+
+        - **Per-tenant labels** (`noyau`, `sub`) — labelling counters
+          by tenant identity would leak existence onto a public
+          surface. Aggregate counters only.
+        - **Workers actifs / molécules par état** — these signals
+          live in the per-tenant filesystem state; the adapter does
+          not aggregate across tenants. A dashboard renders them
+          tenant-by-tenant via `GET /v1/molecules?status=…` instead.
+
+        No authentication. Outside `/v1/`, so does not count toward the
+        §8p frozen API surface.
+      tags: [operational]
+      security: []
+      responses:
+        "200":
+          description: Prometheus exposition body.
+          content:
+            text/plain:
+              schema:
+                type: string
+                description: |
+                  Prometheus exposition format §3.1 — one `# HELP` and
+                  one `# TYPE` line per family, followed by the
+                  samples. The `Content-Type` is
+                  `text/plain; version=0.0.4; charset=utf-8`.
+  /diagnostics:
+    get:
+      operationId: diagnostics
+      summary: JSON diagnostic snapshot of in-RAM projections.
+      description: |
+        Dashboard companion to `/metrics`. Returns a single JSON object
+        with named top-level projections — `nucleon_map`, `jwks`,
+        `backends`, `rate_limit`, `events`, `rejects`, plus the
+        adapter `version`, `posture` and `uptime_seconds`.
+
+        Wire shape is additive — new keys may appear in later
+        versions; clients MUST ignore unknown top-level keys. The
+        existing keys (`service`, `version`, …) are stable.
+
+        No authentication. Outside `/v1/`, so does not count toward the
+        §8p frozen API surface.
+      tags: [operational]
+      security: []
+      responses:
+        "200":
+          description: Adapter diagnostics snapshot.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiagnosticsBody"
+  /v1/workers:
+    get:
+      summary: |
+        List active workers in the per-tenant noyau (gap report
+        ae3d workflow §e priority 5, `task-20260523-f82b`).
+      description: |
+        Return the set of workers currently bound to molecules in the
+        caller's noyau. The route is read-only and tenant-pinned —
+        a noyau-A JWT only ever sees noyau-A workers; cross-tenant
+        enumeration is structurally impossible.
+
+        ## Source of truth
+
+        The handler scans the per-tenant store for molecules carrying
+        a live [`MoleculeProcess`] record (the inline slot
+        `molecule.process`, added by `delib-20260426-1bcd` to collapse
+        the legacy tri-witness `assigned_worker` / `current_molecule`
+        / `session_name`). Presence of the slot means "the pilot
+        believes a live worker is bound"; absence means no worker.
+
+        Tmux is **not** consulted directly — tmux sessions live in a
+        host-global namespace and re-introducing it as a witness would
+        bring back the phantom-worker disagreement the fold-in fixed.
+
+        ## Required scope
+
+        `cosmon:worker:read` (distinct from `cosmon:molecule:read` —
+        the worker surface exposes session-level facts such as the
+        tmux session name, PID, and start instant, which a tenant
+        scoped only for molecule state should not be granted).
+
+        ## Empty noyau
+
+        When no molecule carries a live process record, the response
+        is `{ workers: [], count: 0 }` (200, not 204). The shape stays
+        stable for tenant code that always parses the array.
+
+        ## Pagination + ordering
+
+        V1 returns the full list. Entries are sorted by `started_at`
+        ascending so a paginating client sees a deterministic ordering
+        across calls. The count is small in practice (a noyau rarely
+        runs more than a few dozen concurrent workers).
+      operationId: listWorkers
+      tags: [workers]
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: |
+            Active workers in the caller's noyau. Empty array on a
+            freshly-provisioned noyau or when no molecule carries a
+            live process.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkersResponse"
+        "401":
+          description: |
+            Missing / malformed `Authorization` header, JWT signature
+            invalid, expired, unknown issuer, or audience mismatch.
+            One stable label per reject reason; the wire body never
+            leaks `sub` / nucleon / tenant identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: |
+            JWT lacks `cosmon:worker:read`. The route does NOT fall
+            back to `cosmon:molecule:read` — observability over the
+            worker surface is a strictly distinct scope by design.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: |
+            The admission rate-limit already exceeded — the wire
+            response still carries `X-RateLimit-*` headers + a
+            `Retry-After` so the client knows when to retry.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "503":
+          description: |
+            The per-tenant store could not be read. Transient — the
+            adapter does not crash, the next call may succeed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        OIDC-issued JWT signed with `RS256` or `ES256` (clause (a)).
+        The token's `kid` MUST resolve in the operator's pinned JWKS
+        (`<state_dir>/security/jwks/`). `none`, `HS256`, `EdDSA`,
+        `RS384`, `RS512` are rejected at parse time.
+
+  schemas:
+    NucleateBody:
+      type: object
+      required: [formula]
+      properties:
+        formula:
+          type: string
+          description: Formula name (e.g. `task-work`, `deep-think`).
+          minLength: 1
+        kind:
+          type: string
+          description: |
+            Molecule kind. Defaults to the formula's own default.
+            Common values: `task`, `idea`, `decision`, `issue`,
+            `signal`, `deliberation`.
+        variables:
+          type: object
+          additionalProperties:
+            type: string
+          description: |
+            Variables map (string → string). Each entry is rendered
+            as `--var key=value` on the cosmon CLI. Non-string
+            values are rejected with 400.
+        tags:
+          type: array
+          items:
+            type: string
+          description: |
+            Optional tag list. Values are passed as `--tag <t>`; the
+            cosmon Tag parser rejects whitespace and `:` outside
+            scheme position. Invalid tags surface as 409.
+
+    TagBody:
+      type: object
+      description: |
+        At least one of `add` / `remove` must be non-empty
+        (empty payload → 400).
+      properties:
+        add:
+          type: array
+          items:
+            type: string
+          description: Tags to add.
+        remove:
+          type: array
+          items:
+            type: string
+          description: Tags to remove.
+
+    CollapseBody:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: Free-form reason (mandatory, non-empty after trim).
+        cause:
+          type: string
+          description: |
+            Structured cause attribution. Suggested values:
+            `rate_limit`, `design_change`, `abandoned`,
+            `dependency_dropped`.
+        account:
+          type: string
+          description: |
+            Account alias (only meaningful with `cause = "rate_limit"`).
+        kind:
+          type: string
+          description: |
+            Quota currency name (only meaningful with
+            `cause = "rate_limit"` — e.g. `anthropic-tokens`).
+
+    FreezeBody:
+      type: object
+      required: [state]
+      additionalProperties: false
+      description: |
+        Toggle the molecule's frozen status. `state: "frozen"` pauses
+        a Running molecule; `state: "active"` resumes a Frozen one.
+        `reason` is threaded into the corresponding `MoleculeFrozen`
+        or `MoleculeThawed` event for traceability.
+      properties:
+        state:
+          type: string
+          enum: [frozen, active]
+          description: Target lifecycle status.
+        reason:
+          type: string
+          description: |
+            Optional reason recorded against the state transition.
+
+    StuckBody:
+      type: object
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          description: Free-form reason (mandatory, non-empty after trim).
+
+    MoleculeEnvelope:
+      type: object
+      required: [request_id, molecule]
+      properties:
+        request_id:
+          type: string
+          description: |
+            Opaque correlation id (BLAKE3 prefix). Used to find the
+            audit envelope under
+            `.cosmon/whispers/inbox/api/<request_id>.json`.
+          example: "01HV9C7XDH"
+        molecule:
+          $ref: "#/components/schemas/MoleculeView"
+
+    EnsembleEnvelope:
+      type: object
+      required: [request_id, ensemble]
+      properties:
+        request_id:
+          type: string
+        ensemble:
+          type: object
+          additionalProperties: true
+          description: |
+            Byte-stable projection of `cs --json ensemble`. Concrete
+            shape: `{ molecules: [MoleculeView, ...] }` with the same
+            field set as `cs --json ensemble`.
+
+    TagEnvelope:
+      type: object
+      required: [request_id, tag]
+      properties:
+        request_id:
+          type: string
+        tag:
+          type: object
+          additionalProperties: true
+          description: |
+            Byte-stable projection of `cs --json tag <id>`. Carries
+            the resulting tag set after add/remove.
+
+    CollapseEnvelope:
+      type: object
+      required: [request_id, collapse]
+      properties:
+        request_id:
+          type: string
+        collapse:
+          type: object
+          additionalProperties: true
+          description: |
+            Byte-stable projection of `cs --json collapse`. Carries
+            the post-collapse status + emitted event reference.
+
+    FreezeEnvelope:
+      type: object
+      required: [request_id, freeze]
+      properties:
+        request_id:
+          type: string
+        freeze:
+          type: object
+          additionalProperties: true
+          description: |
+            Byte-stable projection of `cs --json freeze`. Carries
+            `previous_status`, `new_status`, and `event_kind`
+            (`MoleculeFrozen` or `MoleculeThawed`).
+
+    StuckEnvelope:
+      type: object
+      required: [request_id, stuck]
+      properties:
+        request_id:
+          type: string
+        stuck:
+          type: object
+          additionalProperties: true
+
+    ArtifactEntry:
+      type: object
+      description: |
+        One artifact in the per-molecule manifest (e653 spec,
+        `task-20260522-ef4f`). Stable shape across the three
+        artifact routes — manifest, fetch (response surface), and
+        push (response envelope).
+      required: [name, content_type, size_bytes, integrity, created_at, token]
+      properties:
+        name:
+          type: string
+          description: Filename (basename, no path separator).
+        content_type:
+          type: string
+          description: |
+            MIME type detected from the filename extension; defaults
+            to `application/octet-stream` for unknown extensions.
+        size_bytes:
+          type: integer
+          format: int64
+          minimum: 0
+          description: File size in bytes at scan time.
+        integrity:
+          $ref: "#/components/schemas/IntegrityHash"
+        created_at:
+          type: string
+          format: date-time
+          description: RFC 3339 timestamp of the file's last modification.
+        token:
+          type: string
+          pattern: "^art_[a-z0-9]{24}$"
+          description: |
+            Opaque token used to fetch the binary. Deterministic over
+            `(molecule_id, name)` so a refetch with no on-disk change
+            returns the same token.
+
+    IntegrityHash:
+      type: object
+      description: |
+        `{algo, hex}` tuple. `algo` is `"blake3"` for V0 — open by
+        contract for future algos.
+      required: [algo, hex]
+      properties:
+        algo:
+          type: string
+          example: blake3
+        hex:
+          type: string
+          description: Lowercase hex digest.
+
+    ArtifactManifest:
+      type: object
+      description: |
+        Response envelope for `GET /v1/molecules/{id}/artifacts`
+        (e653 spec, `task-20260522-ef4f`).
+      required: [request_id, molecule_id, artifacts]
+      properties:
+        request_id:
+          type: string
+          description: Opaque correlation id.
+        molecule_id:
+          type: string
+          description: Echo of the molecule id from the URL.
+        artifacts:
+          type: array
+          description: Sorted by `name` for byte-stable output.
+          items:
+            $ref: "#/components/schemas/ArtifactEntry"
+
+    ArtifactPushedEnvelope:
+      type: object
+      description: |
+        Response envelope for `PUT /v1/molecules/{id}/artifacts/{name}`
+        (e653 spec, `task-20260522-ef4f`).
+      required: [request_id, artifact]
+      properties:
+        request_id:
+          type: string
+        artifact:
+          $ref: "#/components/schemas/ArtifactEntry"
+
+    TackleEnvelope:
+      type: object
+      description: |
+        Response envelope for `POST /v1/molecules/:id/tackle`
+        (T9 Tenant-Demo V2, `task-20260512-c6de`).
+      required: [request_id, tackle]
+      properties:
+        request_id:
+          type: string
+        tackle:
+          type: object
+          additionalProperties: true
+          required: [molecule_id, worker_session, spawned_at]
+          properties:
+            molecule_id:
+              type: string
+              description: Echo of the tackled molecule id.
+            worker_session:
+              type: string
+              nullable: true
+              description: |
+                Opaque worker session identifier — typically the tmux
+                session name spawned by `cs tackle`. Nullable when the
+                CLI did not surface a session name (rare, e.g. dry-run
+                mode).
+            spawned_at:
+              type: string
+              format: date-time
+              description: |
+                RFC 3339 timestamp at which the worker was spawned.
+                Falls back to the adapter wall clock if `cs tackle`
+                did not stamp one in its JSON output.
+
+    MoleculeView:
+      type: object
+      description: |
+        Public projection of a molecule. The exact field set is
+        intentionally lenient — additional fields may appear without
+        bumping the API version, but the contract is that `id`,
+        `kind`, and `status` are always present.
+      additionalProperties: true
+      required: [id, kind, status]
+      properties:
+        id:
+          type: string
+          description: Molecule identifier.
+        kind:
+          type: string
+          description: |
+            Molecule kind — one of `idea`, `task`, `decision`,
+            `issue`, `signal`, `deliberation`. Encoded as a string
+            for forward compatibility.
+        status:
+          type: string
+          description: |
+            Lifecycle status — `pending`, `active`, `running`,
+            `completed`, `collapsed`, `frozen`, etc.
+        last_5_events:
+          type: array
+          maxItems: 5
+          description: |
+            Optional tail of the molecule's event log.
+          items:
+            $ref: "#/components/schemas/MoleculeEvent"
+
+    MoleculeEvent:
+      type: object
+      required: [ts, kind]
+      properties:
+        ts:
+          type: string
+          format: date-time
+        kind:
+          type: string
+          description: |
+            Event kind (e.g. `Nucleated`, `Tackled`, `Tagged`,
+            `Collapsed`, `Frozen`, `Thawed`, `Stuck`, `Completed`).
+
+    NoyauxResponse:
+      type: object
+      required: [noyaux]
+      description: |
+        Discovery envelope for `GET /v1/noyaux` (task-20260523-eb61).
+        Echoes the per-`sub` projection of the sealed nucleon map —
+        one row per noyau the JWT principal is bound to, with the
+        per-noyau binding count and the absolute path of the noyau's
+        galaxy tree on the adapter host. Empty array when no nucleon
+        binding exists for the principal.
+      properties:
+        noyaux:
+          type: array
+          description: |
+            One entry per noyau visible to the JWT's `sub`. Order is
+            first-occurrence in the underlying `(iss, sub)` map (a
+            `BTreeMap`), so deterministic across boots.
+          items:
+            $ref: "#/components/schemas/NoyauEntry"
+
+    NoyauEntry:
+      type: object
+      required: [id, binding_count, galaxies_root]
+      properties:
+        id:
+          type: string
+          description: |
+            Noyau identifier (e.g. `"tenant-demo-sandbox"`,
+            `"operator-sandbox"`). Used as the `--noyau` slug by the
+            operator-host CLI.
+        binding_count:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Number of `(iss, sub) → noyau` rows backing this noyau
+            for the JWT's `sub`. ≥ 1 by construction (zero-count
+            rows are not emitted). > 1 when an operator is bound
+            under several pinned issuers (multi-IdP), all resolving
+            to the same noyau.
+        galaxies_root:
+          type: string
+          description: |
+            Absolute path of the noyau's galaxy tree on the adapter
+            host (`<galaxies_root>/<id>`). The operator-host CLI
+            uses this to scope subprocess invocations.
+
+    AuthMeResponse:
+      type: object
+      required: [sub, aud, scopes, noyau, expires_at, issuer]
+      description: |
+        Whoami envelope for `GET /v1/auth/me` (task-20260522-560a).
+        Echoes only what the server already trusts after JWT
+        validation — raw token bytes and the `jti` claim are
+        deliberately omitted.
+      properties:
+        sub:
+          type: string
+          description: |
+            `sub` claim — the principal identifier the IdP signs into
+            the token.
+        aud:
+          type: array
+          items:
+            type: string
+          description: |
+            `aud` claim. Always carried as a one-element array so the
+            response shape is stable whether the IdP issues a string
+            or a list at the token level (RFC 7519 allows both).
+        scopes:
+          type: array
+          items:
+            type: string
+          description: |
+            Scopes carried by the JWT itself. Does NOT include
+            binding-granted scopes from the nucleon map — those are
+            an authorization detail the whoami route deliberately
+            does not leak.
+        noyau:
+          type: string
+          nullable: true
+          description: |
+            Tenant axis bound to `(iss, sub)`. `null` when no
+            nucleon binding exists for the principal — the JWT is
+            valid but not yet provisioned for any tenant.
+        expires_at:
+          type: string
+          format: date-time
+          description: |
+            Absolute expiry as ISO-8601 UTC (`YYYY-MM-DDTHH:MM:SSZ`).
+            Formatted server-side from the `exp` claim so callers do
+            not need to parse the JWT themselves.
+        issuer:
+          type: string
+          description: |
+            `iss` claim — the IdP that signed the token (e.g. the
+            cosmon `cs-oidc-mock` issuer URL or a Forgejo instance).
+        claude_credentials_present:
+          type: boolean
+          nullable: true
+          description: |
+            Whether the worker container's Claude Code credentials
+            file exists — i.e. whether `auth login` has completed at
+            least once. `null` when the auth-claude surface is not
+            configured on this deployment (the server cannot know).
+            Additive field (smithy C1 onboarding).
+        version:
+          type: string
+          description: |
+            Adapter binary version, aligned on the bake tag series
+            (image `cosmon-server:v2.0.1` reports `"2.0.1"`). Mirrors
+            `/healthz` so an authenticated client gets the same answer
+            without a second round-trip. Additive field
+            (delib-20260610-9a0c, tolnay).
+        api_surface_version:
+          type: integer
+          description: |
+            Number of `surface_added` events the binary was compiled
+            with (monotonic — `data/surface_events.txt` is
+            append-only). Clients may compare against their own
+            compiled-in count and emit an informative note on
+            mismatch — never blocking, never a `/v2/`. Additive field
+            (delib-20260610-9a0c, tolnay).
+
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: |
+            Coarse-grained error label.
+
+            **Open by contract.** The server may emit new labels in
+            future versions without an API bump. Callers MUST treat
+            any unknown value as semantically equivalent to
+            `internal` (i.e. retry-on-idempotent, surface-as-opaque).
+            Known values at v1.0.0 include `unauthorized`,
+            `forbidden`, `not_found`, `invalid_filter`,
+            `invalid_json_body`, `missing_reason`, `empty_reason`,
+            `empty_tag_request`, `terminal_status`, `invalid_status`,
+            `rate_limited`, `store_unavailable`, `endpoint_removed`,
+            `internal` — but this list is *informative*, not
+            normative. Mirror of the lenient `#[non_exhaustive]` +
+            `#[serde(other)] Unknown(String)` discipline already
+            inscribed for `Status` / `Kind` / `MoleculeEventKind`.
+
+            The wire body never carries `sub`, `nucleon_id`, or any
+            tenant-identifying field.
+        request_id:
+          type: string
+          description: |
+            Optional correlation id; present on errors that
+            materialise an audit envelope.
+
+    QuotaResponse:
+      type: object
+      required: [request_id, limits, current, remaining, reset_at]
+      properties:
+        request_id:
+          type: string
+          description: |
+            Audit-correlation id for the inbox-materialised admission
+            row of this `/v1/quota` call. The same value lands in
+            `<state_dir>/whispers/inbox/api/<request_id>.json`.
+        limits:
+          type: object
+          required: [burst_capacity, leak_per_minute, leak_per_hour]
+          properties:
+            burst_capacity:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Maximum tokens the bucket can hold.
+            leak_per_minute:
+              type: number
+              format: double
+              minimum: 0
+              description: "Tokens drained per minute (V0 = 10)."
+            leak_per_hour:
+              type: number
+              format: double
+              minimum: 0
+              description: "Tokens drained per hour (V0 = 600)."
+        current:
+          type: object
+          required: [bucket_level, bucket_level_floor]
+          properties:
+            bucket_level:
+              type: number
+              format: double
+              minimum: 0
+              description: |
+                Live bucket level, drained to the request's wall-clock.
+            bucket_level_floor:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Floor of `bucket_level`, useful for tables.
+        remaining:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            `floor(burst_capacity − bucket_level)`. Equal to the
+            `X-RateLimit-Remaining` header on the same response.
+        reset_at:
+          type: string
+          format: date-time
+          description: |
+            ISO-8601 wall-clock at which the bucket will be fully
+            drained back to zero. Equal to the `X-RateLimit-Reset`
+            header on the same response.
+
+    # Operational diagnostics body (task-20260523-d820, gap-report ae3d
+    # workflow §i). Shape is *additive* — clients MUST ignore unknown
+    # top-level keys so the adapter can grow the projection without
+    # breaking dashboards.
+    DiagnosticsBody:
+      type: object
+      required:
+        - service
+        - version
+        - posture
+        - uptime_seconds
+        - nucleon_map
+        - jwks
+        - backends
+        - rate_limit
+        - events
+        - rejects
+        - http_responses
+      properties:
+        service:
+          type: string
+          description: Service identifier — always `cosmon-rpp-adapter`.
+        version:
+          type: string
+          description: |
+            Crate semver of the running binary (e.g. `0.1.0`). Bumps
+            whenever the adapter is rebuilt; dashboards compare across
+            scrapes to detect a rolling restart.
+        posture:
+          type: string
+          enum: [prepared, active]
+          description: Adapter posture (ADR-076 §3).
+        uptime_seconds:
+    WorkersResponse:
+      type: object
+      required: [request_id, workers, count]
+      description: |
+        Response body for `GET /v1/workers` (`task-20260523-f82b`,
+        gap report ae3d workflow §e priority 5). Lists the active
+        workers in the caller's noyau.
+      properties:
+        request_id:
+          type: string
+          description: |
+            Audit-correlation id for the inbox-materialised admission
+            row of this `/v1/workers` call.
+        workers:
+          type: array
+          description: |
+            Active workers, sorted by `started_at` ascending so a
+            paginating client sees a deterministic enumeration.
+            Empty when no molecule carries a live process record.
+          items:
+            $ref: "#/components/schemas/WorkerEntry"
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            Seconds since the in-RAM metrics registry was constructed
+            (≈ adapter boot). Reset on restart.
+        nucleon_map:
+          type: object
+          required: [bindings, noyaux]
+          properties:
+            bindings:
+              type: integer
+              minimum: 0
+              description: Active `(iss, sub)` bindings in the sealed map.
+            noyaux:
+              type: integer
+              minimum: 0
+              description: Distinct noyaux covered by the bindings.
+        jwks:
+          type: object
+          required: [issuer_count, total_keys, by_issuer]
+          properties:
+            issuer_count:
+              type: integer
+              minimum: 0
+            total_keys:
+              type: integer
+              minimum: 0
+            by_issuer:
+              type: array
+              items:
+                type: object
+                required: [issuer, keys]
+                properties:
+                  issuer:
+                    type: string
+                  keys:
+                    type: integer
+                    minimum: 0
+        backends:
+          type: object
+          required: [count, snapshot]
+          properties:
+            count:
+              type: integer
+              minimum: 0
+            snapshot:
+              type: array
+              description: |
+                Same shape as the body of `GET /health/backends` —
+                inlined so a single `/diagnostics` round-trip covers
+                the dashboard.
+              items:
+                type: object
+                required: [name, status]
+                properties:
+                  name:
+                    type: string
+                  status:
+                    type: string
+                    enum: [ok, degraded, down, configured-but-unused]
+                  last_check_ms:
+                    type: integer
+                    format: int64
+                  latency_p95_ms:
+                    type: integer
+                    minimum: 0
+        rate_limit:
+          type: object
+          required: [capacity, leak_per_minute, leak_per_hour]
+          properties:
+            capacity:
+              type: number
+              description: Burst capacity (tokens).
+            leak_per_minute:
+              type: number
+            leak_per_hour:
+              type: number
+        events:
+          type: object
+          required: [subscribers, capacity]
+          properties:
+            subscribers:
+              type: integer
+              minimum: 0
+              description: |
+                Live SSE subscriber count on the broadcast bus.
+            capacity:
+              type: integer
+              minimum: 1
+              description: Per-bus backlog window.
+        rejects:
+          type: object
+          required: [total, by_reason]
+          properties:
+            total:
+              type: integer
+              format: int64
+              minimum: 0
+            by_reason:
+              type: array
+              items:
+                type: object
+                required: [reason, count]
+                properties:
+                  reason:
+                    type: string
+                    description: |
+                      Stable label from `RppRejectReason::label`
+                      (e.g. `expired`, `unknown_sub`,
+                      `audience_mismatch`).
+                  count:
+                    type: integer
+                    format: int64
+                    minimum: 0
+        http_responses:
+          type: object
+          required: ["1xx", "2xx", "3xx", "4xx", "5xx"]
+          description: Status-class counters since boot.
+          properties:
+            "1xx":
+              type: integer
+              format: int64
+              minimum: 0
+            "2xx":
+              type: integer
+              format: int64
+              minimum: 0
+            "3xx":
+              type: integer
+              format: int64
+              minimum: 0
+            "4xx":
+              type: integer
+              format: int64
+              minimum: 0
+            "5xx":
+              type: integer
+              format: int64
+              minimum: 0
+            `workers.length`. Pre-computed server-side so a tenant
+            can render a count without parsing the array.
+
+    WorkerEntry:
+      type: object
+      required: [molecule_id, session_name, started_at, tmux_session]
+      description: |
+        One worker entry inside [`WorkersResponse`]. Stable
+        additive-only wire shape: adding a field is allowed; renaming
+        or removing one is a §8p break.
+      properties:
+        molecule_id:
+          type: string
+          description: |
+            Molecule the worker is bound to (the inline
+            `MoleculeProcess` slot on the molecule's state).
+        session_name:
+          type: string
+          description: |
+            Worker identity stamped at `cs tackle` time — the same
+            string the operator sees in `cs status` rows. Currently
+            equal to the tmux session name; the two fields are kept
+            distinct so they can evolve independently.
+        started_at:
+          type: string
+          format: date-time
+          description: |
+            ISO-8601 / RFC 3339 instant when the process record was
+            created (typically by `cs tackle`).
+        pid:
+          type: integer
+          format: int64
+          minimum: 0
+          nullable: true
+          description: |
+            Operating-system PID when the transport backend surfaced
+            one. `null` for backends that do not expose PIDs (legacy
+            or in-process adapters). The field is always present so
+            clients can branch on its absence rather than on a
+            missing key.
+        tmux_session:
+          type: string
+          description: |
+            Tmux session owning the worker process — same string that
+            `tmux -L <socket> attach -t <session>` would target.
+
+tags:
+  - name: molecules
+    description: |
+      The eight RPP-exposable verb routes (V0 read-only +
+      V1 mutation cuts). Surface frozen by
+      `tests/api_surface_freeze.rs`.
+  - name: artifacts
+    description: |
+      Three filesystem-mediated routes (e653 spec, `task-20260522-ef4f`)
+      that expose the worker's outputs under
+      `<artifact_root>/<noyau>/<molecule_id>/`. Required scopes:
+      `cosmon:artifact:read` (GETs) and `cosmon:artifact:write` (PUT).
+  - name: auth
+    description: |
+      Admission-side authentication helpers. `GET /v1/auth/me`
+      (task-20260522-560a) is JWT introspection / whoami — valid JWT
+      is the whole gate, no scope check.
+  - name: quota
+    description: |
+      Rate-limit snapshot (`task-20260522-2f91`, gap report ae3d §h).
+      Read face of the §8j(c) leaky bucket; carries the same
+      `X-RateLimit-*` headers as every other `/v1/` route.
+  - name: noyaux
+    description: |
+      Multi-noyau discovery (`task-20260523-eb61`, gap report ae3d
+      §f). Enumerates the noyaux the JWT's `sub` is bound to —
+      adapter-only surface, no `cs` CLI verb counterpart.
+  - name: operational
+    description: |
+      Operator-facing endpoints outside `/v1/` — `/healthz`,
+      `/metrics`, `/diagnostics`. Unauthenticated, deliberately
+      excluded from the §8p frozen API surface. Carry **no
+      per-tenant data**: aggregate counters and projection sizes
+      only (task-20260523-d820, gap report ae3d §i).
+  - name: workers
+    description: |
+      Active workers in the caller's noyau (`task-20260523-f82b`,
+      gap report ae3d §e priority 5). Read-only; required scope
+      `cosmon:worker:read`. Adapter-only — no `cs` CLI verb
+      counterpart since operator-side observability already uses
+      `cs status` / `cs ensemble` against the on-disk fleet.

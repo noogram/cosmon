@@ -1,0 +1,419 @@
+formula = "galaxy-onboarding"
+version = 1
+description = """
+Birth formula for a new cosmon-managed galaxy. Codifies the repeatable \
+steps of a galaxy birth that are currently hand-rolled: write CLAUDE.md \
+from a syzygie-aware template, seed docs/lore/CHRONICLES.md with a \
+genesis entry, register the repo in neurion, and make the first commit. \
+Peer syzygie patches (naming this galaxy in the other galaxies' \
+CHRONICLES.md) are intentionally NOT automated — see step `syzygie` \
+below for the rationale.
+
+This formula is the product of Feynman's experiment in \
+`delib-20260418-770e`: before growing `cs galaxy *` primitives, write \
+ONE formula that reproduces a galaxy birth end-to-end and measure the \
+residual gap. If it runs end-to-end, the sole CLI change needed is \
+`cs init <path>` accepting a non-existent path (sibling \
+`task-20260418-3c79`). Anything the formula cannot express is the \
+primitive question.
+
+SELF-BOOTSTRAPPING — `cs init` is run as the first step.
+  Since `cs init` (a) accepts a non-existent path and creates it with \
+  `mkdir -p`, and (b) is strictly idempotent on an existing `.cosmon/`, \
+  it is now folded into the formula as step `bootstrap`. The operator \
+  no longer has to remember to run `cs init` first. This closes the \
+  doctrinal hole surfaced 2026-04-29 (chronicle "Le trou doctrinal du \
+  brief de bootstrap"): a generic `task-work` brief for a new galaxy \
+  produced strictly the briefed artefacts (CLAUDE.md/THESIS/ROADMAP) \
+  and silently omitted `cs init`, git init, and neurion registration. \
+  The fix is to make `galaxy-onboarding` the canonical instrument for \
+  birthing a galaxy, and to make it self-contained — running it on a \
+  bare directory is enough.
+
+IDEMPOTENCY — every step is a no-op on re-run.
+  Running this formula against an already-birthed galaxy logs \
+  "already present" at every step and modifies no files. This is the \
+  evidence gate of the experiment: the formula must be a clean no-op \
+  against `cadence`, which was manually birthed on 2026-04-18.
+
+PORTABILITY — paths are workdir-relative from `galaxy_path`.
+  The worker treats `galaxy_path` as its working root. All writes \
+  inside the galaxy use paths like `docs/lore/CHRONICLES.md`, never \
+  `/Users/...`. The template below contains no absolute paths.
+
+Required variables:
+  - galaxy_path    Absolute path to the galaxy root (e.g. \
+                   `/srv/cosmon/cadence`). Must already \
+                   contain `.cosmon/` (prerequisite above).
+  - galaxy_name    Short name of the galaxy (e.g. `cadence`). Used in \
+                   the CLAUDE.md H1, chronicle title, and neurion \
+                   repos-table key.
+  - one_line       The single-sentence pitch that is the galaxy's \
+                   reason to exist (e.g. \"Atoms of cadencel thought, \
+                   not works, not samples — and let them compose.\"). \
+                   Becomes the CLAUDE.md opening line.
+
+Optional variables:
+  - syzygie_peers  Comma-separated peer galaxy names for the CLAUDE.md \
+                   syzygie section (e.g. \
+                   \"cosmon,mailroom,showroom\"). Defaults to \
+                   \"cosmon,mailroom,showroom,sandbox,workshop\" \
+                   — the current syzygie as of 2026-04-19 (workshop joined \
+                   2026-04-19 per delib-20260419-e402). \
+                   \
+                   Galaxies that consume personas resolve short-names via \
+                   `/srv/cosmon/workshop/personas/<name>/<name>.md` — the \
+                   single canonical source of truth (the former \
+                   `~/dev/projects/agent-templates/` tree was archived on \
+                   2026-04-22; see workshop CHRONICLES "Un seul workshop").
+  - remote_url     Git remote origin URL to record in neurion \
+                   (optional — absent means local-only galaxy).
+
+ARTIFACT PATHS — MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}`. Any per-step trace files (e.g. \
+`birth-trace.md`) MUST be written there, never to the worktree.
+"""
+id_prefix = "galaxy"
+
+# Tier 0 — leaf formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "bootstrap"
+title = "Run `cs init` to ensure `.cosmon/` is bootstrapped"
+description = """
+Run `cs init {{galaxy_path}}`. The command:
+
+  - creates `{{galaxy_path}}` with `mkdir -p` if it does not exist;
+  - bootstraps `.cosmon/config.toml` and the project-local state store \
+    if `.cosmon/` is missing;
+  - is a strict no-op if `.cosmon/` is already present.
+
+This step folds the previously-manual bootstrap gesture into the \
+formula. After 2026-04-29 (chronicle "Le trou doctrinal du brief de \
+bootstrap"), `galaxy-onboarding` is the canonical instrument for \
+birthing a galaxy — the operator should not have to remember `cs init` \
+as a separate command.
+
+Open `MOLECULE_DIR/birth-trace.md` with a header `# Galaxy birth \
+trace — {{galaxy_name}}` and a first line recording whether \
+`cs init` logged `already initialized` (idempotent no-op) or \
+bootstrapped the state store. Every subsequent step appends one line \
+to this trace so a reader can see at a glance which steps were no-ops \
+and which wrote new content.
+"""
+acceptance = "`cs init {{galaxy_path}}` exited 0. `{{galaxy_path}}/.cosmon/config.toml` exists. MOLECULE_DIR/birth-trace.md opened with the bootstrap outcome."
+
+[[steps]]
+id = "precheck"
+title = "Verify the bootstrap landed"
+description = """
+Confirm `{{galaxy_path}}/.cosmon/config.toml` exists after the \
+`bootstrap` step. This is a defensive check: if it fails, the \
+preceding `cs init` did not behave as expected (e.g. permission error, \
+disk full) and the rest of the formula must not run.
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: \
+`precheck: state store present` or \
+`precheck: state store MISSING — bootstrap step failed`.
+"""
+needs = ["bootstrap"]
+acceptance = "`{{galaxy_path}}/.cosmon/config.toml` exists. birth-trace.md updated."
+
+[[steps]]
+id = "claude_md"
+title = "Ensure CLAUDE.md is syzygie-aware"
+description = """
+Read `{{galaxy_path}}/CLAUDE.md`. Classify its current state:
+
+  A. MISSING             — file does not exist. Write the template \
+                           below.
+  B. BARE                — file exists but is the auto-generated stub \
+                           from `cs init` (no `## DNA`, no `## \
+                           Syzygie` section — typically <15 lines and \
+                           only the `<!-- cosmon:start -->` block). \
+                           Overwrite with the template below, \
+                           preserving the `<!-- cosmon:start -->` \
+                           marker block at the tail.
+  C. RICH                — file already contains a `## DNA` OR a \
+                           `## Syzygie` header. Log \
+                           `already present — CLAUDE.md is \
+                           syzygie-aware` and leave it untouched. \
+                           This is the no-op branch.
+
+Template (Leeloo principle — minimum genetic code, max entropy per \
+line; the agent reconstructs the rest by cognition):
+
+```
+# {{galaxy_name}}
+
+**{{one_line}}**
+
+## DNA
+
+One line per invariant. None are negotiable.
+
+- (declare the galaxy's invariants here — fill in during birth)
+
+## Syzygie with {{syzygie_peers}}
+
+{{galaxy_name}} is a cosmon-managed galaxy in the syzygie — a \
+citation-only, pull-only alignment with the others. "Connection" here \
+means *citation by relative path*, not MCP tooling.
+
+Personas (if invoked via deep-think or Claude Code subagents) live at \
+[`../workshop/personas/`](../workshop/personas/) — the canonical source \
+of truth in the syzygie.
+
+When a principle or term traverses between galaxies, **three verdicts \
+obligatory — `inherit`, `adapt`, `refuse` — never silence**. \
+Meta-protocol: \
+[`../cosmon/docs/lore/2026-04-17-syzygie.md`](../cosmon/docs/lore/2026-04-17-syzygie.md).
+
+## Narrative memory
+
+- **[`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md)** — Feynman \
+  register, moments that illuminated a principle in this galaxy's life.
+
+## Pilot cycle
+
+Standard cosmon : `cs nucleate` → `cs tackle` → `cs wait &` → `cs done`.
+
+<!-- cosmon:start -->
+## Cosmon
+
+Run `cs help` for the full command reference.
+Run `cs help guide` for the operator handbook.
+Run `man cs` for the manual page.
+
+Source of truth: `.cosmon/state/` (JSON). Surfaces are projections — \
+never edit directly.
+<!-- cosmon:end -->
+```
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: either \
+`claude_md: already present` (branch C), \
+`claude_md: wrote template (was bare stub)` (branch B), or \
+`claude_md: wrote template (was missing)` (branch A).
+"""
+needs = ["precheck"]
+acceptance = "`{{galaxy_path}}/CLAUDE.md` exists and is syzygie-aware (contains `## DNA` or `## Syzygie`). If branch C fired, no file modification; otherwise the template above was written. birth-trace.md updated."
+
+[[steps]]
+id = "chronicles"
+title = "Seed docs/lore/CHRONICLES.md with the genesis entry"
+description = """
+Ensure `{{galaxy_path}}/docs/lore/CHRONICLES.md` exists with at least \
+a genesis entry. Classify its current state:
+
+  A. MISSING  — `docs/lore/` does not exist OR CHRONICLES.md is absent. \
+                Run `mkdir -p {{galaxy_path}}/docs/lore/` then write \
+                the genesis template below (seeded with today's date).
+  B. PRESENT  — the file exists and contains at least one dated entry \
+                (line matching `^## \\d{4}-\\d{2}-\\d{2}`). Log \
+                `already present — chronicles seeded` and leave it \
+                untouched.
+
+Genesis template:
+
+```
+# Chronicles — {{galaxy_name}}
+
+Append-only index of moments that illuminated a principle in \
+{{galaxy_name}}'s life. Feynman register — pas de jargon sans image. \
+Le fichier est l'os ; le muscle vient dans les \
+`YYYY-MM-DD-slug.md` companions.
+
+**Writing guidelines** : see \
+[`../../../cosmon/docs/lore/CHRONICLES.md`](../../../cosmon/docs/lore/CHRONICLES.md) \
+section *Writing guidelines*.
+
+**Cross-galactic discipline** : when a principle traverses between \
+galaxies, **three verdicts obligatory — `inherit`, `adapt`, \
+`refuse` — never silence**. Meta-protocol: \
+[`../../../cosmon/docs/lore/2026-04-17-syzygie.md`](../../../cosmon/docs/lore/2026-04-17-syzygie.md).
+
+---
+
+# Entries
+
+## <today's date> — Genesis: {{galaxy_name}}
+
+**Principe.** {{one_line}}
+
+*(Expand this entry with the story of the birth — the conversation, \
+the constraint, the image that made the galaxy legible. Feynman \
+register, no jargon without a picture. See sibling galaxies' genesis \
+chronicles for tone.)*
+```
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: either \
+`chronicles: already present` (branch B) or \
+`chronicles: wrote genesis entry` (branch A).
+"""
+needs = ["claude_md"]
+acceptance = "`{{galaxy_path}}/docs/lore/CHRONICLES.md` exists with at least one dated entry. No mutation on branch B. birth-trace.md updated."
+
+[[steps]]
+id = "neurion"
+title = "Register the galaxy in neurion"
+description = """
+Ensure neurion's `repos` table has an entry for `{{galaxy_name}}` \
+pointing at `{{galaxy_path}}`. The `neurion.upsert_entry` MCP tool is \
+idempotent by contract — running it twice produces one row.
+
+Use the MCP tool directly:
+
+  neurion.upsert_entry(
+    table = "repos",
+    data = {
+      "name": "{{galaxy_name}}",
+      "local_path": "{{galaxy_path}}",
+      "remote_url": <optional `remote_url` variable, else leave unset>,
+      "description": <one-line description derived from \
+        `{{one_line}}`, or leave unset>
+    }
+  )
+
+Before writing, read the existing row to record whether this was a \
+no-op (all fields match) or an actual update. Query:
+
+  neurion.query_registry(sql =
+    "SELECT name, local_path, remote_url, description \
+     FROM repos WHERE name = '{{galaxy_name}}'")
+
+If the row exists and every submitted field already matches, log \
+`already present` and skip the upsert entirely — that preserves the \
+`updated_at` timestamp and makes idempotency visible in the registry.
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: either \
+`neurion: already present ({{galaxy_name}} → {{galaxy_path}})` or \
+`neurion: upserted ({{galaxy_name}} → {{galaxy_path}})`.
+"""
+needs = ["chronicles"]
+acceptance = "neurion `repos` table contains a row with `name = {{galaxy_name}}` and `local_path = {{galaxy_path}}`. birth-trace.md updated."
+
+[[steps]]
+id = "syzygie"
+title = "Flag peer syzygie patch as a manual follow-up (NOT automated)"
+description = """
+When a new galaxy joins the syzygie, each peer galaxy's \
+`docs/lore/CHRONICLES.md` ideally gains a short entry naming the new \
+pair and — if a natural coupling exists (e.g. cadence ↔ showroom) — \
+declaring one of the three verdicts (`inherit` / `adapt` / `refuse`). \
+This formula INTENTIONALLY DOES NOT automate that patch. Three \
+reasons, in order of weight:
+
+  1. Cross-galaxy mutation violates cosmon's composability guardrail \
+     #4 from the deliberation synthesis: *"no primitive that mutates \
+     two galaxies in one invocation."* A formula invocation is a \
+     primitive act in this sense. Peer patching must be its own \
+     per-peer-galaxy formula invocation, so each galaxy's chronicle \
+     mutation is sealed by that galaxy's own artifact chain — not by \
+     the newborn's.
+  2. Peer chronicles are narrative artifacts in Feynman register. \
+     "Cadence is the fifth galaxy" is a statement a human writes \
+     because they saw the conversation that birthed cadence; a formula \
+     that writes "cadence joined the syzygie on <date>" is a form \
+     letter, not a chronicle. Templates here would freeze the tone \
+     before the tone has stabilized (carnot's argument against \
+     scaffold, applied to narrative).
+  3. The peer patch needs VERDICTS. For each (new galaxy, peer) pair, \
+     the operator must decide: inherit (the peer's principles apply \
+     verbatim), adapt (principles apply with diff), or refuse (no \
+     coupling). That decision is the chronicle's reason to exist. A \
+     formula cannot issue verdicts without operator intent.
+
+MANUAL FOLLOW-UP CHECKLIST — emit to \
+`MOLECULE_DIR/syzygie-followup.md` with the body below, so the \
+operator has an actionable todo at the end of the birth:
+
+```
+# Syzygie peer-patch follow-up — {{galaxy_name}}
+
+For each peer in the syzygie, decide one of:
+  - inherit: {{galaxy_name}} adopts this peer's principles verbatim.
+  - adapt:   this peer's principles apply with a specific diff.
+  - refuse:  no coupling with this peer (reversible disconnection).
+
+Write ONE Feynman-register chronicle entry per peer (or one entry \
+covering the full syzygie if the story is unified — see \
+cosmon/docs/lore/CHRONICLES.md "La syzygie grandit: cadence est la \
+cinquième galaxie" for the reference shape).
+
+Peers to patch:
+  - <one line per peer from `{{syzygie_peers}}`, with checkbox>
+
+Once drafted, commit each peer's chronicle locally in that peer's \
+repo. Do NOT cross-commit from {{galaxy_name}}.
+```
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: \
+`syzygie: documented as manual follow-up (see syzygie-followup.md)`.
+"""
+needs = ["neurion"]
+acceptance = "`MOLECULE_DIR/syzygie-followup.md` written with per-peer checklist. No peer galaxy was mutated by this step. birth-trace.md updated."
+
+[[steps]]
+id = "git_init"
+title = "Initialize git and make the genesis commit"
+description = """
+Ensure `{{galaxy_path}}` is a git repo with at least one commit.
+
+Decision tree:
+  - `{{galaxy_path}}/.git/` missing    → `cd {{galaxy_path}} && git init`. \
+                                          Then continue to commit.
+  - `.git/` present, no commits yet    → continue to commit.
+  - `.git/` present, HEAD exists       → check working tree. If clean, \
+                                          log `already present` and \
+                                          finish. If dirty with the \
+                                          birth-only files (CLAUDE.md \
+                                          and docs/lore/CHRONICLES.md \
+                                          from earlier steps), commit.
+
+Commit command (Conventional Commits subject):
+
+  cd {{galaxy_path}} && git add CLAUDE.md docs/lore/CHRONICLES.md && \
+    git -c commit.gpgsign=false commit -m \
+    "genesis: {{galaxy_name}} — {{one_line}}"
+
+IDEMPOTENCY NOTE: the command stages specific files by name rather \
+than `git add -A`. This protects against accidentally committing \
+secrets, .cosmon/ runtime state (already .gitignored), or unrelated \
+edits the operator might have in flight.
+
+Append to `MOLECULE_DIR/birth-trace.md` one line: exactly one of \
+`git_init: already present (HEAD exists, tree clean)`, \
+`git_init: committed genesis`, or \
+`git_init: initialized repo and committed genesis`.
+"""
+needs = ["syzygie"]
+acceptance = "`{{galaxy_path}}/.git/` exists AND `git -C {{galaxy_path}} rev-parse HEAD` succeeds. If branch was `already present`, no new commit was made. birth-trace.md updated."
+
+[[steps]]
+id = "report"
+title = "Summarize the birth and flag any gap"
+description = """
+Finalize `MOLECULE_DIR/birth-trace.md` by appending a `## Summary` \
+section. Report per step whether it was a no-op (`already present`) or \
+an actual write. Then state the gap, if any, between what this \
+formula automated and what was hand-rolled during the reference \
+manual birth (cadence, 2026-04-18):
+
+  - Step this formula CANNOT express in its current form.
+  - Primitive (CLI extension, new typed link, new MCP tool) that \
+    would be required to close the gap.
+
+If no gap is detected, write: \
+`No gap. The formula reproduces a galaxy birth end-to-end starting \
+from a non-existent path: cs init bootstraps the state store, the \
+formula seeds CLAUDE.md, chronicles, neurion, syzygie checklist, and \
+the genesis commit.`
+
+This artifact is the output the calling task reads to decide whether \
+the formula is sufficient or to escalate with a new primitive \
+question.
+"""
+needs = ["git_init"]
+acceptance = "MOLECULE_DIR/birth-trace.md ends with a `## Summary` section naming per-step outcomes and either declaring `No gap` or naming the primitive that would be required."

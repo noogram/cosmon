@@ -1,0 +1,252 @@
+[workspace]
+resolver = "2"
+# ── Scope-trimmed public member set (ADR-126 §2 Gate 1 + §6 + §8) ────────────
+# This `members` list is the public `cosmon` *product* closure: the
+# crash-recovery agent runtime (`cs`) and its direct organs. The two-gate
+# crossing rule (ADR-126) sorts the workspace's crates into:
+#
+#   1. Unrelated-galaxy crates NOT in the product closure → **git-rm'd** from
+#      this repo in the pre-publication scope trim (delib-20260622-187a B1):
+#      almanac-*, mailroom-voice-*, foundry-*, ga-*, neurion-mcp, topon-mcp,
+#      noogram-mycelial-monitor, schedulerd, cosmon-bridge-gastown. They live
+#      on in their own galaxy repos / this repo's git history, not in the
+#      published tree. (Earlier these were only dropped from `members`; the
+#      crates were still git-tracked and would have published verbatim — the
+#      adversarial review B1 finding this molecule closes.)
+#   2. Unrelated-galaxy crates IN the product closure → KEPT here, vendored
+#      in-tree and name-scrubbed (claudion, neurion-core, topon-core,
+#      apps-transport-http). They are non-dev deps of the shipping `cs` /
+#      `cosmon-daemon` binaries, so they ship; dropping them would break
+#      `cargo build --workspace`.
+#   3. Operator-feature crates, confidentiality-clean but out of product
+#      scope → **git-rm'd** too: cosmon-matrix-tick / cosmon-saas /
+#      cosmon-voice-bridge (zero reverse-deps in the SHIP closure) and the
+#      vendored llama.cpp chain cosmon-llama / cosmon-llama-sys (removal
+#      ripped the `cosmon-provider` `llama` / `mock-ffi` feature too). The
+#      `ProviderId::LlamaCpp` enum variant survives for state back-compat but
+#      no build compiles a local llama adapter. A Rust-native local-model
+#      path for "local-first autonomy" will be reconsidered separately.
+#
+# Result: the on-disk `crates/` set now equals cargo's resolved product
+# closure. `cosmon-mcp` stays out of this explicit `members` list, but no
+# longer because it is deprecated dead code awaiting deletion (decision C14,
+# task-20260712-74a1): its legacy stdio surface (`cs mcp`, `serve_stdio`, the
+# standalone binary) was removed 2026-07-12. It survives as a transport-only
+# library nested by `cosmon-rpp-adapter` (a member), so `cargo build
+# --workspace` still compiles it as a first-class transitive dependency.
+# See docs/adr/126-crate-frontier-two-gates.md and this molecule's outcomes.md.
+members = [
+    # Name-reservation crate — the ONE publishable crate (publish = true).
+    # Holds `cosmon` on crates.io; ships no code. See packaging/RESERVE-NAMES.md.
+    "crates/cosmon",
+    # Repo tooling (cargo xtask …) — generates the smithy API
+    # reference from the §8p surface canon (avatar-surface A3).
+    "xtask",
+    "crates/cosmon-core",
+    "crates/cosmon-cli",
+    "crates/cosmon-graph",
+    # cosmon-mcp intentionally NOT an explicit workspace member — it is a
+    # transport-only library (remote Streamable-HTTP MCP surface) nested by
+    # cosmon-rpp-adapter, which pulls it in transitively. See
+    # crates/cosmon-mcp/README.md and decision C14 (task-20260712-74a1).
+    "crates/cosmon-transport",
+    "crates/cosmon-process-witness",
+    "crates/cosmon-state",
+    "crates/cosmon-filestore",
+    "crates/cosmon-bridge-claude",
+    # neurion-core — vendored in-tree, product closure (cosmon-cli, cosmon-registry). ADR-126 §6 class 2.
+    # neurion-mcp dropped from members (not in closure, rehomes to the neurion galaxy).
+    "crates/neurion-core",
+    # topon-core — vendored in-tree, product closure (cosmon-cli). ADR-126 §6 class 2.
+    # topon-mcp dropped from members (not in closure, rehomes to the topon galaxy).
+    "crates/topon-core",
+    "crates/cosmon-surface",
+    "crates/cosmon-surface-canon",
+    "crates/cosmon-runtime",
+    "crates/cosmon-cockpit",
+    "crates/cosmon-cockpit-http",
+    "crates/cosmon-style",
+    "crates/cosmon-observability",
+    "crates/cosmon-archive",
+    "crates/cosmon-hash",
+    "crates/cosmon-notary",
+    "crates/cosmon-scenario",
+    "crates/cosmon-crashtest",
+    "crates/cosmon-verify",
+    "crates/cosmon-fuzz",
+    "crates/cosmon-agent-harness",
+    "crates/cosmon-provider",
+    "crates/cosmon-scheduler",
+    "crates/cosmon-daemon-supervisor",
+    "crates/cosmon-ops-tools",
+    "crates/cosmon-pilot",
+    "crates/cosmon-client",
+    "crates/cosmon-remote",
+    "crates/cosmon-api",
+    "crates/cosmon-rpp-adapter",
+    "crates/cosmon-oidc-testkit",
+    "crates/cosmon-registry",
+    "crates/cosmon-ask",
+    # apps-transport-http — vendored in-tree, product closure (cosmon-daemon). ADR-126 §6 class 2.
+    "crates/apps-transport-http",
+    "crates/cosmon-daemon",
+    "crates/cosmon-thin-cli",
+    "crates/cosmon-thin-macro",
+    # claudion — vendored in-tree, name-scrubbed, product closure (cosmon-cli, cosmon-observability). ADR-126 §6 class 2.
+    "crates/claudion",
+]
+# ── No `exclude` needed (ADR-126 §6 + delib-20260622-187a B1) ────────────────
+# The pre-publication scope trim git-rm'd every non-product crate so that the
+# on-disk `crates/` set equals cargo's resolved product closure. The vendored
+# llama.cpp chain (`cosmon-llama` / `cosmon-llama-sys`) and the
+# operator-feature crates (matrix-tick / saas / voice-bridge) were removed
+# from the repo, not merely dropped from `members`, so there is nothing left
+# for Cargo to auto-promote as an implicit member. A Rust-native local-model
+# path for the "local-first autonomy" story will be reconsidered separately.
+
+[workspace.package]
+# The workspace version is the **user-facing `cs` CLI version** — the only
+# version a cosmon user ever sees (`cs --version`) and the contract the
+# `v0.1.0` git tag and the CHANGELOG `[0.1.0]` heading seal. Only the crates
+# that opt in with `version.workspace = true` (today: `cosmon-cli`) inherit it;
+# library crates are internal-only and carry their own independent versions
+# (ADR forgemaster B6 — do NOT force-synchronize the workspace, the CLI binary
+# version is the pinned contract, the libraries are not). See
+# task-20260610-ccce version-cut-report.md for the audit table.
+version = "0.1.0"
+rust-version = "1.88"
+# Default cosmon licence is AGPL-3.0-only (core, runtime, end-to-end binaries).
+# Frontier crates (libs/SDKs that a third party would `cargo add`) override
+# `license = "Apache-2.0"` in their own [package] section.
+# See ADR-092 (license bascule MPL-2.0 → AGPL-3.0 + Apache-2.0).
+license = "AGPL-3.0-only"
+# Default-deny registry publication for the whole workspace. Every library
+# crate inherits this with `publish.workspace = true`, so nothing internal can
+# be `cargo publish`ed by accident. The sole exception is the name-reservation
+# crate `crates/cosmon`, which overrides with `publish = true`. The `cs`
+# product binary ships via GitHub Releases, never crates.io.
+# See packaging/RESERVE-NAMES.md and ADR Q7 (delib-20260616-0f4f).
+publish = false
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+clap-markdown = "0.1"
+colored = "3"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# `bytes` provides `Bytes::from_owner`, which lets `cosmon-remote` hand reqwest
+# a zero-copy view over the wipe-on-drop `Zeroizing<Vec<u8>>` that carries the
+# OIDC token-endpoint form body (plaintext refresh token). The body is built
+# directly with `url::form_urlencoded` — no `serde_urlencoded` intermediate
+# `String` that would realloc and orphan unwiped fragments (RÉSIDUEL SÉCU A,
+# task-20260713-fcb0; security-review task-20260712-5008 finding A#1). Version
+# floor 1.10 for `Bytes::from_owner`.
+bytes = "1.10"
+sha2 = "0.10"
+thiserror = "2"
+toml = "0.8"
+strum = { version = "0.27", features = ["derive"] }
+tempfile = "3"
+fs2 = "0.4"
+proptest = "1"
+insta = "1"
+arc-swap = "1"
+claudion = { path = "crates/claudion" }
+ctrlc = "3"
+cosmon-api = { path = "crates/cosmon-api" }
+cosmon-bridge-claude = { path = "crates/cosmon-bridge-claude" }
+cosmon-core = { path = "crates/cosmon-core" }
+cosmon-mcp = { path = "crates/cosmon-mcp" }
+cosmon-graph = { path = "crates/cosmon-graph" }
+cosmon-filestore = { path = "crates/cosmon-filestore" }
+cosmon-runtime = { path = "crates/cosmon-runtime" }
+cosmon-agent-harness = { path = "crates/cosmon-agent-harness" }
+cosmon-ops-tools = { path = "crates/cosmon-ops-tools" }
+cosmon-pilot = { path = "crates/cosmon-pilot" }
+cosmon-provider = { path = "crates/cosmon-provider" }
+cosmon-state = { path = "crates/cosmon-state" }
+cosmon-style = { path = "crates/cosmon-style" }
+cosmon-surface = { path = "crates/cosmon-surface" }
+cosmon-surface-canon = { path = "crates/cosmon-surface-canon" }
+cosmon-transport = { path = "crates/cosmon-transport" }
+cosmon-process-witness = { path = "crates/cosmon-process-witness" }
+neurion-core = { path = "crates/neurion-core" }
+topon-core = { path = "crates/topon-core" }
+rusqlite = { version = "0.35", features = ["bundled"] }
+dirs = "6"
+ignore = "0.4"
+globset = "0.4"
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+notify = "8"
+nix = { version = "0.31", default-features = false, features = ["signal"] }
+cosmon-cockpit = { path = "crates/cosmon-cockpit" }
+cosmon-observability = { path = "crates/cosmon-observability" }
+cosmon-archive = { path = "crates/cosmon-archive" }
+cosmon-hash = { path = "crates/cosmon-hash" }
+cosmon-scenario = { path = "crates/cosmon-scenario" }
+cosmon-scheduler = { path = "crates/cosmon-scheduler" }
+cosmon-daemon-supervisor = { path = "crates/cosmon-daemon-supervisor" }
+cosmon-verify = { path = "crates/cosmon-verify" }
+cosmon-registry = { path = "crates/cosmon-registry" }
+cosmon-ask = { path = "crates/cosmon-ask" }
+cosmon-remote = { path = "crates/cosmon-remote" }
+apps-transport-http = { path = "crates/apps-transport-http" }
+async-trait = "0.1"
+secrecy = "0.8"
+# Best-effort in-memory secret wiping for the credential-store (ADR delib-20260710-33b7
+# C6). NOT a containment boundary — shrinks the in-process window only.
+zeroize = { version = "1", features = ["derive"] }
+# `O_NOFOLLOW` + fstat perm check on the 0600 credential file (turing-T6). Used
+# through `OpenOptionsExt::custom_flags` — no `unsafe` to reference the constant.
+libc = "0.2"
+# OS-native credential store (macOS Keychain / Windows Cred Manager / Linux Secret
+# Service). default-features off; the backend is selected per-target below because
+# feature choice cannot be expressed through workspace inheritance alone.
+keyring = { version = "3", default-features = false }
+blake3 = "1"
+base64 = "0.22"
+regex = "1"
+shell-words = "1"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# TLS backend: rustls (ring), NOT native-tls/openssl. The `default-tls` feature
+# pulls `openssl-sys`, which cannot cross-compile to `x86_64-unknown-linux-musl`
+# without a target OpenSSL sysroot — it breaks the sovereign static-musl build
+# (scripts/lpthe, delib-20260705-7288 C2). rustls is pure-Rust + `ring`, which
+# cross-compiles to musl cleanly, and no code uses any native-tls-specific API.
+# This makes the workspace default match what cosmon-cli / cosmon-remote /
+# cosmon-provider already declared per-crate ("so musl builds are clean").
+# Feature set = reqwest 0.12 defaults minus `default-tls`, plus `rustls-tls` +
+# `json`, so behaviour is identical except the TLS provider.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "system-proxy"] }
+ratatui = "0.29"
+crossterm = "0.28"
+unicode-width = "0.2"
+unicode-normalization = "0.1"
+ed25519-dalek = { version = "2", default-features = false, features = ["std", "zeroize", "rand_core"] }
+rand_core = { version = "0.6", features = ["getrandom"] }
+# Deterministic CBOR for the detached `ScopeBadge` (ADR-0023 MVP-B):
+# offline/sneakernet-first interchange. The canonical signing form is a
+# positional CBOR array (no map-key-ordering ambiguity); ciborium emits
+# preferred (shortest, definite-length) encodings → byte-stable.
+ciborium = "0.2"
+# Rust→TS type contract for the federation badge (ADR-0023 §D8). The TS
+# side describes/routes a badge but NEVER verifies it — verification is
+# Rust-only (`verify_badge`). Export runs in a test, not at runtime.
+ts-rs = "10"
+cosmon-notary = { path = "crates/cosmon-notary" }
+
+# NOTE: the `matrix-sdk` workspace dependency, its `[patch.crates-io]` vendored
+# pin, and the `vendor/matrix-sdk/` tree were removed in the pre-publication
+# scope trim (delib-20260622-187a B1) together with their only consumer,
+# `cosmon-matrix-tick` (the operator-homeserver ingress bridge, ADR-064). No
+# product-closure crate depends on matrix-sdk.
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }

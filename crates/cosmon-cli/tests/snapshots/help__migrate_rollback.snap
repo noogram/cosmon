@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Roll back the last migration by re-materializing `state.prev/`
+
+Usage: cs migrate rollback [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --dry-run        Preview which rename would run without touching disk
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

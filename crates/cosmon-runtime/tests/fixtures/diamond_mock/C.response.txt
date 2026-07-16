@@ -1,0 +1,1 @@
+C: derived from A.out. Produced artifact C.out.

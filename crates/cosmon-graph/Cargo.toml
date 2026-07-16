@@ -1,0 +1,19 @@
+[package]
+name = "cosmon-graph"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Lightweight DAG primitives: topological sort and ready-frontier"
+
+[dependencies]
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

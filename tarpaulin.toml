@@ -1,0 +1,11 @@
+# Coverage configuration for cargo-tarpaulin.
+# Run: cargo tarpaulin --config tarpaulin.toml
+
+[cosmon-core]
+# Target 90%+ coverage on the pure domain crate.
+packages = ["cosmon-core"]
+out = ["Html", "Lcov"]
+output-dir = "target/coverage"
+run-types = ["Tests", "Doctests"]
+# Skip transport/CLI stubs — they have no logic yet.
+exclude-files = ["crates/cosmon-cli/*", "crates/cosmon-transport/src/tmux.rs"]

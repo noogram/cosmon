@@ -1,0 +1,43 @@
+[package]
+name = "cosmon-daemon"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP-on-Tailscale daemon serving multi-galaxy cosmon state to native cluster apps (Cosmon-app)."
+
+[[bin]]
+name = "cosmon-daemon"
+path = "src/main.rs"
+
+[lib]
+name = "cosmon_daemon"
+path = "src/lib.rs"
+
+[dependencies]
+apps-transport-http = { path = "../apps-transport-http" }
+cosmon-cockpit.workspace = true
+cosmon-core.workspace = true
+cosmon-filestore.workspace = true
+cosmon-state.workspace = true
+axum = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+dirs.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "macros", "rt-multi-thread"] }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+tempfile.workspace = true
+reqwest.workspace = true
+
+[lints]
+workspace = true

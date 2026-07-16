@@ -1,0 +1,160 @@
+# cs ↔ cs-thin parity allowlist
+# ----------------------------------------------------------------------
+# Every entry here permits a specific JSON field path to differ between
+# the local `cs --json <verb>` output (operator-paid binary) and the
+# `cs-thin <verb>` output (HTTP via rpp-adapter, JWT-paid). Each entry
+# MUST carry a written rationale — there is no
+# "ignore-everything-that-differs" escape hatch by design.
+#
+# `verb` values:
+#   - "*"        — any verb
+#   - "observe"  — `GET /v1/molecules/:id`
+#   - "nucleate" — `POST /v1/molecules`
+#   - "tag"      — `POST /v1/molecules/:id/tags`
+#   - "ensemble" — `GET /v1/molecules`
+#   - "collapse" — `POST /v1/molecules/:id/collapse`
+#   - "freeze"   — `POST /v1/molecules/:id/freeze` (also dispatches the
+#                  former /thaw via `{state: "active"}` fusion v1.0.0-rc,
+#                  task-20260522-b538)
+#   - "stuck"    — `POST /v1/molecules/:id/stuck`
+#
+# `path` templates:
+#   - literal dotted segments              (e.g. `molecule_dir`)
+#   - single-segment wildcard `*`          (e.g. `tags.*`)
+#   - trailing `**` — any descendants      (e.g. `energy.**`)
+#
+# Loaded by the `parity_with_cs` integration test via
+# `cosmon_thin_cli::parity::Allowlist::from_toml_str`. See
+# `docs/guides/cs-thin-parity.md` for the audit narrative.
+
+[[allowed]]
+verb = "observe"
+path = "molecule_dir"
+reason = """
+cs prints an absolute filesystem path
+(`<state_dir>/fleets/default/molecules/<id>`) because the operator
+binary has direct disk access. cs-thin only sees the wire envelope; the
+rpp-adapter intentionally substitutes the molecule id for `molecule_dir`
+to avoid leaking server filesystem layout to multi-tenant pilots.
+"""
+
+[[allowed]]
+verb = "*"
+path = "request_id"
+reason = """
+The rpp-adapter generates a fresh UUID per request and wraps the body in
+`{ request_id, molecule|tag }`. cs-thin strips that wrapper before
+printing, but we keep this rule on the allowlist as a safety net for
+future surfaces (e.g. an error envelope) that may carry it through.
+The local `cs` binary has no request envelope.
+"""
+
+[[allowed]]
+verb = "nucleate"
+path = "id"
+reason = """
+Each invocation creates a brand-new molecule; the `id` is the very thing
+that differs. We pin shape (well-formed `task-` / `idea-` / etc. prefix)
+and let the test assertion machinery — not the parity diff — police the
+identifier syntax.
+"""
+
+[[allowed]]
+verb = "nucleate"
+path = "created_at"
+reason = """
+`created_at` is stamped by `cosmon_state::ops::nucleate` at the moment
+of creation. cs runs first, cs-thin runs second; the two timestamps are
+guaranteed to differ by the wall-clock delta between the two calls.
+"""
+
+[[allowed]]
+verb = "observe"
+path = "updated_at"
+reason = """
+`observe` re-reads the molecule from disk. Between the cs and cs-thin
+calls the molecule may be touched by no-one — but if a clock-bound
+field (e.g. `last_progress_at` derivative) is recomputed on read, the
+two surfaces could disagree by a tick. Allowed conservatively.
+"""
+
+[[allowed]]
+verb = "*"
+path = "tags.*"
+reason = """
+Tag set is intentionally compared at the structural level only when both
+calls target the SAME molecule with no concurrent mutation. In the
+parity test we always compare against the cs result first; if cs-thin's
+`add` lands a duplicate tag (idempotent, expected behaviour) the count
+diverges by 1. This is a known acceptable divergence — the absolute set
+identity is asserted separately by the per-verb scenario.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "archived"
+reason = """
+The cs-cli `cs collapse` flow archives the molecule on disk (ADR-030 M3)
+and emits `archived` on the wire envelope. The lib-direct path does not
+yet implement archiving (out of T-CST-EXPAND scope); cs-thin's response
+omits the field entirely. Allowed under the verb-scoped rule until the
+archive primitive lands library-side.
+"""
+
+[[allowed]]
+verb = "stuck"
+path = "archived"
+reason = """
+Same rationale as collapse.archived — `cs stuck` archives the frozen
+molecule, the lib-direct path does not. Allowed.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "previous_status"
+reason = """
+cs --json collapse omits previous_status from its envelope (it stamps
+the new status only); cs-thin emits both for symmetry with freeze /
+thaw / stuck. Adding it to cs is a follow-up; allowed in the meantime.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "already_collapsed"
+reason = """
+cs --json collapse signals re-entry via a different field
+(`already_collapsed` only when prev=Collapsed); cs-thin always emits the
+boolean. Allowed for shape parity.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "cause"
+reason = """
+cs --json collapse emits cause as `cause: null` when absent; cs-thin
+omits the field entirely (Option<_> with skip_serializing_if). Allowed
+as omit-vs-null divergence.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "reason_kind"
+reason = """
+cs --json collapse emits reason_kind as `reason_kind: null` when the
+operator did not pass an explicit `--reason-kind`; cs-thin omits the
+field entirely (same Option<_> + skip_serializing_if mechanism as
+`cause`). Sibling case to the cause entry above — same omit-vs-null
+divergence, allowed.
+"""
+
+[[allowed]]
+verb = "collapse"
+path = "nudge_count"
+reason = """
+cs --json collapse surfaces the post-mortem nudge_count introduced by
+delib-20260420-1b02 P2 (a > 2 count flags an ambiguous briefing rather
+than a runtime stall). cs-thin's lib-direct path does not yet read this
+field from MoleculeData and therefore omits it from the wire envelope.
+Same shape as `archived` / `previous_status` — allowed until the
+counter is plumbed into the cosmon-api collapse handler.
+"""

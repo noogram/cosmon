@@ -1,0 +1,84 @@
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 124 and seed 39412372187930717 with 16 workers on 16 cores with 27300MB heap and 64MB offheap memory [pid: 85646] (Mac OS X 26.4.1 aarch64, Homebrew 21.0.8 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/CosmonRun.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/Naturals.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/Sequences.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/TLC.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/TLCExt.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-882485264246884050/Integers.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module CosmonRun
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module CosmonRun
+Starting... (2026-04-19 17:29:54)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-04-19 17:29:54.
+Error: Invariant I4_SessionImpliesLiveProcess is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ tmux_session = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 0 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Absent" @@ m2 :> "Absent" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+State 2: <Nucleate(m2) line 58, col 16 to line 61, col 79 of module CosmonRun>
+/\ tmux_session = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 0 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Absent" @@ m2 :> "Pending" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+State 3: <Nucleate(m1) line 58, col 16 to line 61, col 79 of module CosmonRun>
+/\ tmux_session = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 0 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Pending" @@ m2 :> "Pending" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+State 4: <Tackle(m1) line 63, col 14 to line 68, col 77 of module CosmonRun>
+/\ tmux_session = (m1 :> TRUE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "Registered" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 0 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Running" @@ m2 :> "Pending" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "None" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> TRUE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+State 5: <Evolve(m1) line 70, col 14 to line 77, col 61 of module CosmonRun>
+/\ tmux_session = (m1 :> TRUE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "Registered" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 1 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Running" @@ m2 :> "Pending" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "Worker" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> TRUE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+State 6: <ProcessCrash(m1) line 133, col 20 to line 137, col 83 of module CosmonRun>
+/\ tmux_session = (m1 :> TRUE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ fleet_desired = (m1 :> "Registered" @@ m2 :> "None" @@ m3 :> "None")
+/\ events_seqno = (m1 :> 1 @@ m2 :> 0 @@ m3 :> 0)
+/\ mol_status = (m1 :> "Running" @@ m2 :> "Pending" @@ m3 :> "Absent")
+/\ events_writer_lock = (m1 :> "Worker" @@ m2 :> "None" @@ m3 :> "None")
+/\ worker_pid_alive = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+/\ branch_merged = (m1 :> FALSE @@ m2 :> FALSE @@ m3 :> FALSE)
+
+187 states generated, 139 distinct states found, 83 states left on queue.
+The depth of the complete state graph search is 7.
+Finished in 00s at (2026-04-19 17:29:54)
+Trace exploration spec path: ./CosmonRun_TTrace_1776612594.tla

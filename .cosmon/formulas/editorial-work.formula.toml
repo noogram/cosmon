@@ -1,0 +1,128 @@
+formula = "editorial-work"
+version = 2
+description = """
+Execute an editorial or legal task — contract drafting, email \
+composition, legal analysis, document hardening, charte éditoriale, \
+sovereignty corpus, or any non-code prose artifact.
+
+This formula replaces `task-work` for molecules where the deliverable \
+is a document, not compiled code. The two steps mirror `task-work`'s \
+implement/verify, but the acceptance criteria are editorial, not \
+Rust-gate:
+
+  - **draft**: produce the artifact, check internal consistency, cite \
+    sources.
+  - **review**: coherence, completeness, compliance with the briefing.
+
+No `cargo` commands. No compilation gates. The worker's verification \
+is reading-based: does the artifact say what the briefing asked, is \
+it internally consistent, does it cite what it claims?
+
+Typical use cases: contract templates and sovereignty corpora, \
+client-engagement documents, all contract work, external-facing \
+texts, and charte éditoriale sections.
+
+Motivated by the observation that `task-work` Rust gates cause \
+friction and skip-or-fail on verify for editorial molecules.
+
+VISUAL DELIVERABLES — when the artifact is RENDERED and a human will \
+LOOK at it (a deck, slides, a poster, a printable PDF/HTML), the \
+reading-based prose review does NOT inspect the layout. Compose the \
+`visual-qa` gate (G_visual) before completion: render → read the \
+pixels → adversarial layout checklist → fail-closed. See \
+`.cosmon/formulas/visual-qa.formula.toml`, ADR-120, and \
+`docs/guides/visual-qa-gate.md`.
+"""
+id_prefix = "edit"
+
+# Tier 0 — leaf formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "draft"
+title = "Draft the editorial artifact"
+description = """
+Produce the deliverable described in the briefing. This may be a \
+contract clause, an email draft, a legal analysis, a document \
+template, a charte éditoriale section, or any prose artifact.
+
+## Behavioural guards
+
+- **Guard ID:** `editorial-work/draft/axis-artifact-only`.
+- **Mode / scope:** Produce **only** the artifact for your assigned axis, not an entire study.
+- **Forbidden actions:** Do not build, test, change code, or expand into unassigned axes.
+- **Bounded output:** Write only the requested editorial artifact and its necessary source citations.
+- **Confidentiality:** Anonymise internal names; never disclose private paths, credentials, or operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+
+Exit criteria (all must hold):
+  - The artifact exists at the expected location (molecule dir or \
+    worktree path specified in the briefing).
+  - The artifact is internally consistent — no contradictory clauses, \
+    no dangling cross-references, no placeholder text left behind.
+  - Sources are cited where applicable — legal bases, prior art, \
+    upstream documents, Zotero references.
+  - The artifact addresses every point enumerated in the briefing. \
+    Missing points are flagged explicitly in log.md, not silently \
+    dropped.
+"""
+acceptance = "Artifact produced, internally consistent, sources cited, all briefing points addressed or explicitly flagged"
+
+[[steps]]
+id = "review"
+title = "Review the draft for coherence and compliance"
+description = """
+Review the artifact produced in the draft step. The reviewer may be \
+the same worker (self-review) or a different persona (red-team, \
+juge-adversarial, notaire-forme — as specified in the briefing).
+
+## Behavioural guards
+
+- **Guard ID:** `editorial-work/review/axis-artifact-only`.
+- **Mode / scope:** Review **only** the artifact for your assigned axis, not an entire study.
+- **Forbidden actions:** Do not build, test, change code, or expand into unassigned axes.
+- **Bounded output:** Produce only the review verdict and any in-scope correction to the editorial artifact.
+- **Confidentiality:** Anonymise internal names; never disclose private paths, credentials, or operational detail.
+- **No silent deviation:** If the guard cannot be met, do not substitute work; record a ward event with the formula/version/step, adapter/model, guard ID, observed action, confidentiality impact, and briefing seal/trace.
+
+Verification checklist:
+  - Coherence: does the artifact read as a unified document? No \
+    contradictions between sections, no orphaned definitions, no \
+    tone shifts.
+  - Completeness: does every briefing requirement have a corresponding \
+    section or clause in the artifact? Cross-check the briefing \
+    point-by-point.
+  - Compliance: does the artifact respect the constraints named in \
+    the briefing (jurisdiction, confidentiality, formatting, charte \
+    éditoriale)?
+  - Sources: are all cited references real and correctly attributed? \
+    Spot-check at least one citation against the source.
+
+RENDERED-DELIVERABLE BRANCH (mandatory, not optional). Before you may \
+mark this step green, answer one question: **will a human LOOK at a \
+rendered form of this artifact?** (an HTML page, a PDF, slides, a \
+poster, a printable document). \
+  - NO (plain prose — Markdown source, an email body, a clause) → the \
+    reading checklist above is the whole gate. Proceed. \
+  - YES → the prose checklist is NOT sufficient. A reading-based review \
+    passes text that renders into a broken layout (misaligned columns, \
+    a block over the footer, an empty zone under a title). You MUST \
+    compose the visual-QA gate (G_visual) before completion: render → \
+    rasterise → **read the pixels** → run the adversarial layout \
+    checklist → fail-closed, iterating render→read→correct until every \
+    page passes. Use the headless path only (Chrome `--print-to-pdf` \
+    then `pdftoppm`, or the `playwright-headless` MCP) — **never** \
+    `playwright-extension` / `claude-in-chrome`, which cannot answer in \
+    a fleet worker. Write `visual-verdict.md` + the annotated PNGs to \
+    the molecule dir. Substrate: `.cosmon/formulas/visual-qa.formula.toml`, \
+    ADR-120, `docs/guides/visual-qa-gate.md`. Marking review green on a \
+    rendered deliverable WITHOUT having read the pixels is the exact \
+    failure this branch exists to stop (task-20260704-f153). \
+
+If issues are found, fix them in place and note the fixes in log.md. \
+The step succeeds when no unresolved issues remain AND — for a rendered \
+deliverable — the visual-QA checklist passes on every page.
+"""
+needs = ["draft"]
+acceptance = "Artifact reviewed for coherence, completeness, and compliance; for a RENDERED deliverable the visual-QA gate (G_visual) was composed and the pixels read (never 'green' on a rendered artifact without reading it); all issues resolved or explicitly deferred with justification"

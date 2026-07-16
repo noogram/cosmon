@@ -1,0 +1,67 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Verify — walk a molecule's event hash chain (plumbing v2)
+
+Usage: cs verify [OPTIONS] [MOLECULE_ID]
+
+Arguments:
+  [MOLECULE_ID]
+          Molecule ID (or prefix) whose proof-of-work chain should be verified.
+          
+          Optional when `--federation` is set — the federation provenance scan is a fleet-wide audit and does not target a single molecule.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --no-replay
+          Skip gate replay (shell/native step re-execution). Artifact hash check and event chain check still run
+
+      --step <N>
+          Verify the briefing seal for a specific zero-based step index.
+          
+          When omitted, the most recent briefing seal (if any) is checked against the current `briefing.md`. When specified, the corresponding entry from `MoleculeData::briefing_seals` is used. If no seal exists for the requested step, the check is reported as SKIP (inconclusive), never as FAIL.
+
+  -v, --verbose
+          Enable verbose output
+
+      --federation
+          Scan the fleet-wide event log for cross-galaxy events missing federation provenance (ADR-105, I9' machinery).
+          
+          When set, walks `<state_dir>/events.jsonl` and reports every cross-galaxy event whose `federation_provenance` is `None`:
+          
+          - `MergeDispatched` / `MergeCompleted` whose `molecule_id` or `branch` carries a foreign galaxy alias (Oracle B subject-mark per ADR-105 §D3). - `ChronicleAdded` whose `cites_galaxies` mentions a non-cosmon peer (Oracle B'' delegation-dispatched per ADR-105 §D3). - `AdrInscribed` whose `cites_galaxies` mentions a non-cosmon peer (same Oracle B'' channel for ADR-grade citations).
+          
+          Missing provenance is a hard FAIL — the federation discipline is detect-on-write, `cs verify --federation` is the audit oracle.
+          
+          The flag stacks with `molecule_id`: when both are given, the scan is restricted to the molecule's local `events.jsonl`. When `molecule_id` is omitted, the fleet-wide log is scanned.
+
+      --json
+          Output in JSON format
+
+      --legacy-tolerate-before <DATE>
+          Tolerate cross-galaxy events emitted before a specific date that lack federation provenance.
+          
+          Format: ISO8601 date (e.g. `2026-05-19`). Events whose envelope timestamp is strictly before the date are downgraded from FAIL to SKIP with a `tracing::warn!`-equivalent detail line. Only meaningful in combination with `--federation`.
+          
+          Default: not set — every cross-galaxy event without provenance is a hard FAIL. ADR-105 §"Backfill discipline" recommends option (a) (backfill the field by reading the existing citation format); this flag is option (b), the legacy-tolerate escape hatch for the migration window.
+
+      --invariants
+          Check structural state-machine invariants over molecule rows.
+          
+          Currently a single invariant is enforced: **`archived ⇒ status.is_terminal()`** — an archived molecule must carry a terminal status (`Completed` or `Collapsed`). A row with `{archived: true, status: running}` is a *ghost*: it was torn down out-of-band (e.g. `cs done --force` on a never-completed molecule) without terminalizing its status, so it keeps rendering as live work.
+          
+          Detection only — `cs verify --invariants` never mutates state; it exits non-zero when any violation is found. To *heal* the on-disk rows (rewrite `status → Collapsed`), run `cs reconcile --heal-invariants`.
+          
+          Like `--federation`, the flag stacks with `molecule_id`: with a molecule given, only that row is checked; without one, every molecule in the fleet is swept (the galaxy-wide audit).
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs verify <mol>                 # walk the event hash chain
+  cs verify <mol> --strict        # also replay gates
+
+Proof-of-work chain integrity check.

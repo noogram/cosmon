@@ -1,0 +1,58 @@
+name: Front Door
+
+# Canary for the PUBLIC install front door (BLOCKER B1+M1, task-20260616-3238).
+#
+# ci.yml and readme-quickstart.yml only ever install via `--path` (the
+# contributor path, from a local checkout). Nothing exercised the literal
+# command a STRANGER runs:
+#
+#   cargo install --git https://github.com/noogram/cosmon.git --locked cosmon-cli
+#
+# So a 404 (repo not yet public), a broken `--locked` build from a fresh clone,
+# or a renamed package would all pass CI silently while the README's headline
+# install command was dead. This workflow runs that exact command so the door
+# is verified, not assumed.
+#
+# Canary, NOT a PR gate: it is deliberately absent from `pull_request`, so it
+# never blocks feature work. It stays RED until `noogram/cosmon` is published
+# publicly (an operator push + visibility gesture — see ADR-113), converting the
+# silent 404 into a loud, dated signal. Once the repo is public it goes green
+# and guards the front door on every push and daily.
+#
+# All third-party Actions pinned by 40-char commit SHA (delib-20260425-39c1).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 5 * * *'
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "crates/cosmon-cli/Cargo.toml"
+      - ".github/workflows/front-door.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  stranger-install:
+    name: Stranger install (cargo install --git, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - name: Install cs the way a stranger does
+        # The literal README front-door command. No checkout — a stranger has
+        # no local clone. If this fails, the public install path is broken.
+        run: cargo install --git https://github.com/noogram/cosmon.git --locked cosmon-cli
+      - name: Assert the binary works
+        run: cs --version

@@ -1,0 +1,35 @@
+[package]
+name = "cosmon-registry"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Stateless galaxy-name registry for Cosmon — TOML source of truth + optional neurion fallback"
+
+[dependencies]
+cosmon-core.workspace = true
+dirs.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true
+toml.workspace = true
+
+# Optional neurion fallback — gated so the default workspace build does
+# not drag rusqlite in via cosmon-registry. Callers that need it enable
+# `neurion-fallback` explicitly.
+rusqlite = { workspace = true, optional = true }
+neurion-core = { workspace = true, optional = true }
+
+[features]
+default = []
+neurion-fallback = ["dep:rusqlite", "dep:neurion-core"]
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

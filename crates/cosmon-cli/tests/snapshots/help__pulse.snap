@@ -1,0 +1,78 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+assertion_line: 88
+expression: stdout
+---
+Pulse — runtime-vitality reading: RPM tachometer, six-voyant strip (ADR-138 P1)
+
+Usage: cs pulse [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --window <WINDOW>
+          Observation window — accepts `<N>d` / `<N>h` / `<N>m` / `<N>s`. Defaults to 5 minutes (`5m`)
+          
+          [default: 5m]
+
+      --sched-tau <SCHED_TAU>
+          Scheduler-dead threshold — age beyond which `H_sched` triggers RED. Defaults to 10 minutes (`10m`)
+          
+          [default: 10m]
+
+  -v, --verbose
+          Enable verbose output
+
+      --sched-log <SCHED_LOG>
+          Path to the launchd-scheduler heartbeat log.
+          
+          Defaults to `~/.cosmon/scheduler.state.json.events.jsonl` (derived from the scheduler state file by appending `.events.jsonl`).
+          
+          Override with `COSMON_SCHED_LOG` env var or this flag for testability or non-standard launchd setups.
+          
+          [env: COSMON_SCHED_LOG=]
+
+      --sched-state <SCHED_STATE>
+          Path to `scheduler.state.json`.
+          
+          The drainage, propel, and heal voyants read `patrols.<name>.last_fired_at` from this file — the authoritative per-patrol fire time written by the scheduler on every dispatch, regardless of what the patrol command does.
+          
+          Defaults to `~/.cosmon/scheduler.state.json`. Override with `COSMON_SCHED_STATE` env var or this flag for testability.
+          
+          [env: COSMON_SCHED_STATE=]
+
+      --json
+          Emit the aggregate as a single `cosmon.pulse/v1` NDJSON line. The global `--json` flag also enables this
+
+      --swiftbar
+          Emit `SwiftBar`/`BitBar` formatted output for the macOS menubar plugin.
+          
+          First line = menubar face (colored dot + headline + `SwiftBar` params). Below `---`: the six voyant lines, fuel%, scanned, separator, action items. Consumed by `menubar/cosmon-pulse.10s.sh` which execs `cs pulse --swiftbar`. See ADR-068: `cs pulse --swiftbar` is the UI surface for `cs pulse`.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs pulse                    # runtime-vitality: RPM tachometer + six voyants
+  cs pulse --window 10m       # widen observation window (default 5m)
+  cs pulse --json             # cosmon.pulse/v1 NDJSON line (CI/scripting)
+
+Pulse (ADR-138 Phase 1): a zero-mutation, stateless projection of fleet
+liveness onto a single tachometer headline + six-voyant strip.
+
+Headline: RPM = dΦ/dt = completions/min in the observation window W.
+The event log is the pre-integrated derivative — no stored Φ, no new
+state store (IFBDD). A word replaces the number when magnitude lies:
+  SPINNING — tokens burn, Φ flat (P==0, B>b_min) → RED
+  DRAINAGE OFF — no forward tick in τ → RED
+
+Traffic light (first-match wins):
+  RED   — subsystem dead (H_sched>τ) OR fuel exhausted OR spinning
+  AMBER — stalled (P==0, L>0, ¬dead) OR starved molecules present
+  GREEN — doing work (P>0) OR quiescent (L==0)
+
+Voyant strip: scheduler / drainage / propel / heal / fuel / workers
+A dead subsystem serializes 'off' (red-class) — never silently absent.
+
+Exit code: always 0 (read-only, non-blocking — callers use --json state).

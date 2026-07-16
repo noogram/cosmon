@@ -1,0 +1,53 @@
+# A blocks B. Collapsing A RELEASES B rather than cascading the collapse:
+# `blocked-by` releases on *done*, not on *verdict* (task-20260706-4d1e).
+# Once A is terminal (collapsed), B's Blocks-gate clears and B runs to
+# completion — a `fix` blocked-by a `reproduce` still runs after the
+# reproduce concludes "refuted". B is free to read A's collapse verdict
+# from disk and decide, but the DAG never freezes or auto-collapses it.
+
+[scenario]
+name = "collapse-releases-successors"
+description = "Collapse of a blocker releases (does not cascade to) its downstream molecules."
+
+[binds]
+constitution_clause = "collapse-releases-successors"
+
+[[given.molecules]]
+id = "A"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+]
+
+[[given.molecules]]
+id = "B"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+]
+
+[[given.links]]
+from = "A"
+to = "B"
+kind = "Blocks"
+
+# Collapse A (e.g. a reproduce that refuted the bug), then let the runtime
+# drive the DAG: B is released and runs to completion.
+[[actions]]
+op = "collapse"
+target = "A"
+reason = "manual-reject"
+
+[[actions]]
+op = "run_root"
+target = "B"
+
+[[assert]]
+molecule = "A"
+status = "collapsed"
+collapse_reason = "manual-reject"
+
+# B is NOT cascade-collapsed — it is released and runs to completion.
+[[assert]]
+molecule = "B"
+status = "completed"

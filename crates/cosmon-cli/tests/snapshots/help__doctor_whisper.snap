@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Probe the whisper channel of a molecule's assigned worker
+
+Usage: cs doctor whisper [OPTIONS] <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID (full or unambiguous prefix)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

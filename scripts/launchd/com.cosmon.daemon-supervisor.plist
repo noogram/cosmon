@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cosmon-daemon-supervisor — meta-LaunchAgent supervising long-running
+  Cosmon-managed daemons (notification-bot, almanac, archive-service,
+  emacs-daemon, zotero-mcp, the Flask dashboard, …).
+
+  ONE LaunchAgent replaces the fan of per-daemon plists. The supervisor
+  reads `~/.config/cosmon/daemons.toml`, supervises the declared children
+  with KeepAlive-like semantics (throttle, respawn, SIGTERM cascade), and
+  hot-reloads on config edits via `notify`. Between events nothing
+  periodic runs inside the supervisor itself — it is event-driven, not
+  tick-based. See crates/cosmon-daemon-supervisor/src/lib.rs for the
+  architecture and the internal rollout plan.
+
+  Relationship to `com.cosmon.scheduler.plist`:
+    - scheduler   = cron-like, StartInterval=60s, spawn-and-forget patrols
+    - supervisor  = event-driven, RunAtLoad=true, KeepAlive children
+
+  Placeholders below use __HOME__ for the operator's home directory. The
+  install script (scripts/install-daemon-supervisor.sh) substitutes them
+  at load time so this template stays portable across machines.
+
+  KeepAlive = true: if the supervisor itself crashes, launchd respawns
+  it. The 5s throttle window keeps a crash loop from hammering launchd.
+
+  NOT auto-installed. The operator runs:
+      scripts/install-daemon-supervisor.sh install
+      scripts/install-daemon-supervisor.sh status
+      scripts/install-daemon-supervisor.sh uninstall
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cosmon.daemon-supervisor</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/cosmon-daemon-supervisor</string>
+    </array>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-daemon-supervisor.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-daemon-supervisor.err</string>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

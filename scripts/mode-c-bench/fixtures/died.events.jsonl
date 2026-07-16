@@ -1,0 +1,3 @@
+{"type":"molecule_nucleated","mol_id":"task-fixture-died","ts":"2026-07-08T00:00:00Z"}
+{"type":"adapter_liveness_probed","mol_id":"task-fixture-died","worker_id":"w-died","adapter_name":"local","probe_kind":"pane_signature","probe_result":{"verdict":"retried","reason":"tool_parse_reinject"},"elapsed_since_last_advance_ms":0}
+{"type":"adapter_liveness_probed","mol_id":"task-fixture-died","worker_id":"w-died","adapter_name":"local","probe_kind":"pane_signature","probe_result":{"verdict":"stuck","reason":"SF-1 http: 500 Internal Server Error: {\"error\":{\"message\":\"error parsing tool call: raw='{\\n  \\\"code\\\": \\\"import sympy...\\\"'\"}}"},"elapsed_since_last_advance_ms":827000}

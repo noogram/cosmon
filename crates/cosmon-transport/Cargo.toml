@@ -1,0 +1,45 @@
+[package]
+name = "cosmon-transport"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Transport backend adapters for Cosmon (tmux, mock)"
+
+[features]
+integration = []
+test-support = []
+
+[dependencies]
+blake3.workspace = true
+chrono.workspace = true
+cosmon-bridge-claude.workspace = true
+# `test-harness` exposes cosmon_core::harness, which holds the *production*
+# `CommandRunner` / `CommandOutput` / `CommandRunnerError` ports this crate's
+# RealCommandRunner implements at production scope (not just the test mocks).
+# Commit 494999bd4 (minimize core public API) gated the whole module behind
+# this feature, breaking the workspace build fleet-wide. Stop-gap unblock
+# mirroring cosmon-runtime; the proper fix is to split the production ports
+# out of the test-gated `harness` module (task-20260622-da94 seam-lifting).
+# Surfaced cosmon-ward in molecule task-20260623-a2db outcomes.
+cosmon-core = { workspace = true, features = ["test-harness"] }
+cosmon-state.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+# Logging facade only — a no-op when no subscriber is installed, so the
+# frontier `cargo add cosmon-transport` cost is one lightweight dep. The
+# hosts that actually run this backend (cosmon-daemon, cosmon-rpp-adapter)
+# already install a `tracing-subscriber`, so submit-budget-exhaustion events
+# emitted from `send_input` surface there. Declared directly (not via
+# workspace deps) to match the existing in-repo convention for `tracing`.
+tracing = "0.1"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

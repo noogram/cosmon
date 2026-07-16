@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  session-to-spark — periodic consumer of the session carnet.
+
+  Fires `scripts/session-to-spark-tick.sh --all-spark-prefix --json`
+  every 300 seconds (5 min, aligned with the whisper-to-spark cadence
+  so a `!spark`-prefixed note lands as a spark molecule within one
+  tick). The flag makes the invocation explicit and self-documenting:
+  the LaunchAgent only promotes notes that begin with the `!spark `
+  prefix. Targeted promotion (`cs session promote <ts>`) bypasses
+  this agent and runs synchronously in the operator's shell.
+
+  The script is idempotent — re-runs with nothing to do are cheap
+  (~10ms to iterate every session's notes and skip via sidecar). It
+  walks up from `$WorkingDirectory` to find the project's
+  `.cosmon/state/sessions/` directory, so running from the repo root
+  is enough.
+
+  Placeholders substituted by
+  `scripts/install-session-to-spark-launchagent.sh` at install time:
+    __HOME__         the operator's home directory.
+    __COSMON_ROOT__  the absolute path of the cosmon project to watch.
+
+  Not auto-installed. Operator runs:
+      scripts/install-session-to-spark-launchagent.sh install
+      scripts/install-session-to-spark-launchagent.sh status
+      scripts/install-session-to-spark-launchagent.sh uninstall
+
+  Governing invariants:
+    - §8b seal-as-trace: never mutates session files; sidecar markers only.
+    - §8j ingress: session is the human-carnet ingress port; each spark
+      carries source:session + stream:session-to-spark tags.
+    - ADR-016: no daemon in core — external scheduler fires a one-shot.
+    - CLI-first: script invokes `cs nucleate spark`, not MCP.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.session-to-spark</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__COSMON_ROOT__/scripts/session-to-spark-tick.sh</string>
+        <string>--cosmon-root</string>
+        <string>__COSMON_ROOT__</string>
+        <string>--all-spark-prefix</string>
+        <string>--json</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/session-to-spark.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/session-to-spark.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__COSMON_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

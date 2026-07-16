@@ -1,0 +1,441 @@
+#!/usr/bin/env bash
+# fake-tmux — minimal subset of tmux(1) for testing cosmon's spawn surface.
+#
+# Implements only the commands cosmon actually invokes, plus fault-injection
+# env vars that let the spawn-matrix harness reproduce real-world failure
+# modes (zombie sessions, dead panes, lost server, etc.) without touching
+# cosmon's production code.
+#
+# ── Commands implemented ───────────────────────────────────────────────────
+#   new-session -d -s <name> [-c <workdir>] <cmd>
+#   list-sessions [-F <fmt>]              # supports #{session_name}
+#   list-panes -t <session> [-F <fmt>]    # supports #{pane_dead},
+#                                         #         #{pane_pid},
+#                                         #         #{pane_current_command}
+#   kill-session -t <name>
+#   kill-server
+#   has-session -t <name>                 # exit 0/1
+#   capture-pane -t <session> -p [-S <n>] # prints tracked buffer
+#   send-keys -t <session> [...]          # recorded, no-op on output
+#   load-buffer -b <name> <path>          # stores buffer
+#   paste-buffer -d -b <name> -t <session>
+#   delete-buffer -b <name>
+#   set-hook -t <session> <event> <cmd>   # no-op
+#   wait-for [-S] <channel>               # no-op (returns immediately)
+#
+# ── Fault-injection env vars ───────────────────────────────────────────────
+#   FAKE_TMUX_NEW_SESSION_EXIT    exit code for new-session (default 0)
+#   FAKE_TMUX_PANE_DEAD=1         list-panes reports pane_dead=1
+#   FAKE_TMUX_SESSION_EXITED=1    sessions appear but pane is dead + PID=0
+#   FAKE_TMUX_LIST_EMPTY=1        list-sessions returns empty
+#   FAKE_TMUX_HAS_SESSION_MISS=1  has-session always exits 1
+#   FAKE_TMUX_NO_SERVER=1         list-sessions reports "no server running"
+#   FAKE_TMUX_TRACE                if set, trace every call into $FAKE_TMUX_TRACE
+#   FAKE_TMUX_DIR                 state directory (default: $TMPDIR/fake-tmux)
+#
+# The state directory holds one file per live session:
+#   $FAKE_TMUX_DIR/$SOCKET/$SESSION.meta   — "pid=<n> cmd=<cmd> cwd=<path>"
+#   $FAKE_TMUX_DIR/$SOCKET/$SESSION.out    — captured output buffer
+#   $FAKE_TMUX_DIR/$SOCKET/buffers/$NAME   — paste buffer content
+
+set -u
+
+FAKE_TMUX_DIR="${FAKE_TMUX_DIR:-${TMPDIR:-/tmp}/fake-tmux}"
+
+_trace() {
+    if [ -n "${FAKE_TMUX_TRACE:-}" ]; then
+        printf '[fake-tmux] %s\n' "$*" >> "$FAKE_TMUX_TRACE"
+    fi
+}
+
+_trace "argv: $*"
+
+# ── Parse -L <socket> (may appear before subcommand) ──────────────────────
+SOCKET="default"
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -L)
+            SOCKET="$2"
+            shift 2
+            ;;
+        -f|-S)
+            # -f <file> (config) / -S <socket-path> — ignore argument
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+SOCK_DIR="$FAKE_TMUX_DIR/$SOCKET"
+mkdir -p "$SOCK_DIR/buffers"
+
+if [ $# -eq 0 ]; then
+    exit 0
+fi
+
+CMD="$1"
+shift
+
+case "$CMD" in
+    new-session)
+        # Parse: new-session -d -s <name> [-c <workdir>] [cmd...]
+        detached=0
+        session=""
+        workdir=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -d) detached=1; shift ;;
+                -s) session="$2"; shift 2 ;;
+                -c) workdir="$2"; shift 2 ;;
+                -x|-y) shift 2 ;;
+                -A) shift ;;
+                --) shift; break ;;
+                *) break ;;
+            esac
+        done
+        run_cmd="$*"
+
+        exit_code="${FAKE_TMUX_NEW_SESSION_EXIT:-0}"
+        if [ "$exit_code" != "0" ]; then
+            echo "fake-tmux: new-session failed (injected exit=$exit_code)" >&2
+            exit "$exit_code"
+        fi
+
+        if [ -z "$session" ]; then
+            echo "fake-tmux: new-session requires -s <name>" >&2
+            exit 1
+        fi
+
+        meta="$SOCK_DIR/$session.meta"
+        out="$SOCK_DIR/$session.out"
+
+        # Track the command that would have been run. We do NOT actually
+        # fork it here — the matrix harness wants deterministic state.
+        # Exception: if the command starts with `env ... FAKE_CLAUDE_...`
+        # or resolves to the fake-claude binary, we can run it briefly
+        # in the background to exercise exit-path logic, controlled by
+        # FAKE_TMUX_FORK=1.
+        pid="0"
+        if [ -n "${FAKE_TMUX_FORK:-}" ] && [ -n "$run_cmd" ]; then
+            # Run the command in the background, capture output, record pid.
+            (
+                cd "${workdir:-$PWD}" || exit 1
+                # shellcheck disable=SC2086
+                bash -c "$run_cmd" > "$out" 2>&1
+            ) &
+            pid="$!"
+        else
+            # Seed the capture buffer with the Claude "ready" prompt marker
+            # so `cosmon_transport::readiness::wait_ready` detects Ready and
+            # returns in <1s. The harness can override to simulate hang
+            # (FAKE_TMUX_INIT_OUTPUT='') or a different state (trust prompt,
+            # loading, etc.). Default matches the healthy-spawn baseline.
+            if [ -n "${FAKE_TMUX_INIT_OUTPUT+set}" ]; then
+                printf '%s\n' "$FAKE_TMUX_INIT_OUTPUT" > "$out"
+            else
+                printf '❯ Type your message\n' > "$out"
+            fi
+        fi
+
+        {
+            echo "pid=$pid"
+            echo "cwd=${workdir:-$PWD}"
+            echo "cmd=$run_cmd"
+            echo "created_at=$(date +%s)"
+        } > "$meta"
+
+        _trace "new-session s=$session pid=$pid cmd=$run_cmd"
+        exit 0
+        ;;
+
+    list-sessions)
+        if [ -n "${FAKE_TMUX_LIST_EMPTY:-}" ]; then
+            exit 0
+        fi
+        if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then
+            echo "no server running on $SOCK_DIR" >&2
+            exit 1
+        fi
+
+        fmt="#{session_name}"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -F) fmt="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+
+        any=0
+        for meta in "$SOCK_DIR"/*.meta; do
+            [ -f "$meta" ] || continue
+            any=1
+            session_name="$(basename "$meta" .meta)"
+            line="$fmt"
+            line="${line//#\{session_name\}/$session_name}"
+            echo "$line"
+        done
+        if [ "$any" -eq 0 ]; then
+            # tmux prints "no server running" to stderr when no sessions
+            # exist on a fresh socket. Matches real tmux behavior.
+            echo "no server running on $SOCK_DIR" >&2
+            exit 1
+        fi
+        exit 0
+        ;;
+
+    list-panes)
+        session=""
+        all=0
+        fmt="#{pane_dead}"
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) session="$2"; shift 2 ;;
+                -F) fmt="$2"; shift 2 ;;
+                -a) all=1; shift ;;
+                *) shift ;;
+            esac
+        done
+
+        # Resolve the pane-level format fields. These are shared across
+        # the single-session and -a variants; fault-injection env vars
+        # flip them uniformly.
+        pane_dead=0
+        if [ -n "${FAKE_TMUX_PANE_DEAD:-}" ] || [ -n "${FAKE_TMUX_SESSION_EXITED:-}" ]; then
+            pane_dead=1
+        fi
+
+        pane_current_command="${FAKE_TMUX_PANE_CMD:-claude}"
+        if [ "$pane_dead" = "1" ]; then
+            pane_current_command=""
+        fi
+
+        _emit_pane_line() {
+            local meta="$1" session_name
+            session_name="$(basename "$meta" .meta)"
+            local pane_pid=0
+            if [ "$pane_dead" != "1" ]; then
+                pane_pid="$(grep '^pid=' "$meta" | cut -d= -f2)"
+            fi
+            local line="$fmt"
+            line="${line//#\{session_name\}/$session_name}"
+            line="${line//#\{pane_dead\}/$pane_dead}"
+            line="${line//#\{pane_pid\}/$pane_pid}"
+            line="${line//#\{pane_current_command\}/$pane_current_command}"
+            echo "$line"
+        }
+
+        if [ "$all" = "1" ] && [ -z "$session" ]; then
+            # `list-panes -a` — iterate every tracked session on this
+            # socket. cosmon calls this with `-F '#{session_name}|#{pane_dead}'`
+            # to do liveness filtering globally (see the post-ef31
+            # `observe_spawn_postcondition` + `TmuxBackend::list_sessions`).
+            # Without this branch the fake exited 1 and the postcondition
+            # always failed as "last alive=false".
+            if [ -n "${FAKE_TMUX_LIST_EMPTY:-}" ]; then
+                exit 0
+            fi
+            if [ -n "${FAKE_TMUX_NO_SERVER:-}" ]; then
+                echo "no server running on $SOCK_DIR" >&2
+                exit 1
+            fi
+            any=0
+            for meta in "$SOCK_DIR"/*.meta; do
+                [ -f "$meta" ] || continue
+                any=1
+                _emit_pane_line "$meta"
+            done
+            if [ "$any" -eq 0 ]; then
+                echo "no server running on $SOCK_DIR" >&2
+                exit 1
+            fi
+            exit 0
+        fi
+
+        meta="$SOCK_DIR/$session.meta"
+        if [ ! -f "$meta" ]; then
+            echo "can't find session: $session" >&2
+            exit 1
+        fi
+        _emit_pane_line "$meta"
+        exit 0
+        ;;
+
+    kill-session)
+        session=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) session="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        meta="$SOCK_DIR/$session.meta"
+        if [ ! -f "$meta" ]; then
+            echo "can't find session: $session" >&2
+            exit 1
+        fi
+        pid="$(grep '^pid=' "$meta" | cut -d= -f2)"
+        if [ "${pid:-0}" != "0" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -TERM "$pid" 2>/dev/null || true
+        fi
+        rm -f "$meta" "$SOCK_DIR/$session.out"
+        _trace "kill-session s=$session"
+        exit 0
+        ;;
+
+    kill-server)
+        # Kill all tracked processes, wipe the socket directory.
+        for meta in "$SOCK_DIR"/*.meta; do
+            [ -f "$meta" ] || continue
+            pid="$(grep '^pid=' "$meta" | cut -d= -f2 2>/dev/null || echo 0)"
+            if [ "${pid:-0}" != "0" ] && kill -0 "$pid" 2>/dev/null; then
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
+        rm -rf "$SOCK_DIR"
+        mkdir -p "$SOCK_DIR/buffers"
+        _trace "kill-server"
+        exit 0
+        ;;
+
+    has-session)
+        if [ -n "${FAKE_TMUX_HAS_SESSION_MISS:-}" ]; then
+            exit 1
+        fi
+        session=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) session="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        if [ -f "$SOCK_DIR/$session.meta" ]; then
+            exit 0
+        fi
+        exit 1
+        ;;
+
+    capture-pane)
+        session=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) session="$2"; shift 2 ;;
+                -p|-e|-N) shift ;;
+                -S|-E|-b) shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        out="$SOCK_DIR/$session.out"
+        if [ -f "$out" ]; then
+            cat "$out"
+        fi
+        exit 0
+        ;;
+
+    send-keys)
+        session=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -t) session="$2"; shift 2 ;;
+                -l|-X|-R|-M) shift ;;
+                *) break ;;
+            esac
+        done
+        # Append remaining argv to session.out for debugging / capture.
+        meta="$SOCK_DIR/$session.meta"
+        if [ ! -f "$meta" ]; then
+            echo "can't find session: $session" >&2
+            exit 1
+        fi
+        printf '[send-keys]' >> "$SOCK_DIR/$session.out"
+        for arg in "$@"; do
+            printf ' %s' "$arg" >> "$SOCK_DIR/$session.out"
+        done
+        printf '\n' >> "$SOCK_DIR/$session.out"
+        _trace "send-keys s=$session argv=$*"
+        exit 0
+        ;;
+
+    load-buffer)
+        name=""
+        path=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -b) name="$2"; shift 2 ;;
+                *) path="$1"; shift ;;
+            esac
+        done
+        if [ -z "$name" ]; then
+            echo "load-buffer: missing -b <name>" >&2
+            exit 1
+        fi
+        if [ "$path" = "-" ] || [ -z "$path" ]; then
+            cat > "$SOCK_DIR/buffers/$name"
+        else
+            cp "$path" "$SOCK_DIR/buffers/$name"
+        fi
+        exit 0
+        ;;
+
+    paste-buffer)
+        name=""
+        session=""
+        delete=0
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -b) name="$2"; shift 2 ;;
+                -t) session="$2"; shift 2 ;;
+                -d) delete=1; shift ;;
+                *) shift ;;
+            esac
+        done
+        buf="$SOCK_DIR/buffers/$name"
+        out="$SOCK_DIR/$session.out"
+        if [ -f "$buf" ] && [ -n "$session" ]; then
+            printf '[paste-buffer] ' >> "$out"
+            cat "$buf" >> "$out"
+            printf '\n' >> "$out"
+        fi
+        if [ "$delete" -eq 1 ] && [ -f "$buf" ]; then
+            rm -f "$buf"
+        fi
+        exit 0
+        ;;
+
+    delete-buffer)
+        name=""
+        while [ $# -gt 0 ]; do
+            case "$1" in
+                -b) name="$2"; shift 2 ;;
+                *) shift ;;
+            esac
+        done
+        rm -f "$SOCK_DIR/buffers/$name"
+        exit 0
+        ;;
+
+    set-hook|set-option)
+        exit 0
+        ;;
+
+    wait-for)
+        # Signal-or-wait; we treat as no-op (returns immediately).
+        exit 0
+        ;;
+
+    display-message|show-options|show-environment)
+        # Used by various diagnostics; print nothing, exit clean.
+        exit 0
+        ;;
+
+    -V|--version)
+        echo "fake-tmux 0.1 (cosmon spawn-matrix test fake)"
+        exit 0
+        ;;
+
+    *)
+        echo "fake-tmux: unsupported command: $CMD $*" >&2
+        exit 0
+        ;;
+esac

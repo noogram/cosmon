@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// This file is part of a Cosmon frontier crate (pure library, SDK, type
+// crate, or boundary contract that a third party would `cargo add`).
+// Distributed under the Apache License, Version 2.0 — see the
+// LICENSE-APACHE file at the repository root, or
+// http://www.apache.org/licenses/LICENSE-2.0.
+//
+// Per-crate partition fixed by ADR-092
+// (docs/adr/092-license-bascule-mpl-to-agpl.md).

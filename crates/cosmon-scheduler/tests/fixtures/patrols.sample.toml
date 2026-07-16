@@ -1,0 +1,74 @@
+# Sample patrol scheduler configuration.
+#
+# Copy to `~/.config/cosmon/patrols.toml` and edit.
+# Validate before wiring:  cosmon-scheduler tick --dry-run --config patrols.toml
+
+[scheduler]
+state_file            = "~/.cosmon/scheduler.state.json"
+log_file              = "~/.cosmon/scheduler.log"
+kill_switch           = "~/.cosmon/stand-down.lock"
+tick_interval_seconds = 60
+
+# A cron-scheduled patrol (POSIX 5-field).
+[[patrol]]
+name        = "chronicle-lint-weekly"
+cron        = "0 9 * * 0"
+command     = ["cs", "nucleate", "chronicle-lint"]
+working_dir = "~/dev/projects/cosmon"
+enabled     = true
+
+# An interval-scheduled patrol.
+[[patrol]]
+name             = "executor-pulse"
+interval_seconds = 300
+command          = ["mailroom", "executor-pulse"]
+dispatch         = "detached"
+enabled          = true
+
+# A gated patrol: fires only when PATROL_REPLIES_READY is set.
+[[patrol]]
+name             = "executor-pulse-replies"
+interval_seconds = 600
+command          = ["mailroom", "executor-pulse-replies"]
+require_env      = ["PATROL_REPLIES_READY"]
+enabled          = true
+
+# A disabled patrol kept in the file for documentation / rollback.
+[[patrol]]
+name             = "legacy-noop"
+interval_seconds = 3600
+command          = ["true"]
+enabled          = false
+
+# ----------------------------------------------------------------------
+# u2-probe — Apple Notes unique-count campaign.
+#
+# Variance-threshold auto-sunset: the probe fires every 5 minutes and
+# writes one sample per tick to ~/.cosmon/probes/u2-notes.tsv. Once the
+# rolling stdev over the last 20 samples squares to < 0.02 (and we have
+# at least 30 samples), the scheduler declares convergence, runs the
+# on_sunset hooks, and sets sunset_decided_at so no more ticks fire.
+#
+# Hooks are feature-flagged by environment variable so the same TOML
+# ships unchanged across machines:
+#   COSMON_TELEGRAM_HOOK_SCRIPT  path to hooks/telegram-notify.sh
+#   COSMON_CHRONICLE_FILE        path to docs/lore/CHRONICLES.md
+# If either is unset, the matching hook is a silent no-op.
+#
+# Sample-file convention: docs/probes/sample-file-convention.md
+# Parent idea:            idea-20260419-cb4e
+# ----------------------------------------------------------------------
+[[patrol]]
+name             = "u2-probe"
+interval_seconds = 300
+command          = ["/Users/you/bin/notes-u2-probe"]
+log_file         = "~/.cosmon/logs/u2-probe.log"
+dispatch         = "detached"
+
+[patrol.sunset]
+strategy           = "variance-threshold"
+sample_file        = "~/.cosmon/probes/u2-notes.tsv"
+window             = 20
+variance_threshold = 0.02
+min_samples        = 30
+on_sunset          = ["notify_telegram", "write_chronicle_stub"]

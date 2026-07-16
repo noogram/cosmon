@@ -1,0 +1,57 @@
+[package]
+name = "cosmon-ops-tools"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+# Frontier crate (ADR-092): cosmon-ops-tools exposes cosmon-DOMAIN tools
+# that plug into `cosmon-agent-harness`'s Tool trait. Like the harness it
+# sits above the Worker-Spawn Port and a downstream pilot author would
+# `cargo add` it — Apache-2.0 keeps the permissive boundary consistent
+# with `cosmon-agent-harness`.
+license = "AGPL-3.0-only"
+rust-version.workspace = true
+description = "cosmon-domain operation tools (observe / peek / ensemble / nucleate / tackle) implementing the cosmon-agent-harness Tool trait. Two backends behind one Tool surface: a LOCAL backend calling cosmon-core / cosmon-state directly (no `cs` subprocess) and a REMOTE backend calling cosmon-rpp-adapter's §8p routes via cosmon-remote. The swappable tool backend for cs-pilot (delib 2026-05-31, ADR-115, ADR-096)."
+
+[dependencies]
+# The Tool trait + ToolRegistry the cs-pilot loop drives. cosmon-ops-tools
+# is a *backend* for that registry: it produces Box<dyn Tool> values.
+cosmon-agent-harness = { workspace = true }
+# Domain types (MoleculeId, MoleculeStatus, Subject, …) and the read-only
+# verb library (cosmon_state::ops::{observe, ensemble}) the tools call
+# directly. This direct call — not shelling out to the `cs` binary — is the
+# whole point of the crate (delib §4: "efficiency via internal API").
+cosmon-core = { workspace = true }
+cosmon-state = { workspace = true }
+# Walk-up `.cosmon/state` discovery + the FileStore StateStore adapter.
+cosmon-filestore = { workspace = true }
+# The REMOTE tool backend (increment 2, ADR-115 §6): the same Tool trait
+# implemented over the wire by calling `cosmon-rpp-adapter`'s §8p routes
+# (observe / ensemble / nucleate / tackle). `cosmon-remote` is the canonical
+# thin RPP client — JWT (sub→nucleon_id) auth, `/v1/molecules*` paths. We
+# REUSE it rather than reinventing an HTTP client: the local backend calls
+# `cosmon-state` directly, the remote backend calls `cosmon-remote::Client`,
+# both expose the identical `Tool` surface so the cs-pilot loop is unchanged.
+cosmon-remote = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+# The remote backend bridges the SYNC `Tool::execute` contract to
+# `cosmon-remote`'s ASYNC client by running each request on an isolated
+# current-thread runtime (see `remote::run_blocking`). The `rt` feature is
+# pulled in by the `full` workspace feature set.
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+# Test fixtures construct `MoleculeData` literals with `created_at` /
+# `updated_at` timestamps — `chrono::Utc::now()`. Test-only; the library
+# itself never touches the clock.
+chrono = { workspace = true }
+# Wire-contract tests for the remote backend stand up a local HTTP mock and
+# assert the §8p route + bearer header + decoded envelope — the same harness
+# the `cosmon-remote` crate uses for its own client tests.
+wiremock = "0.6"
+
+[lints]
+workspace = true

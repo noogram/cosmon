@@ -1,0 +1,77 @@
+# <CHANGE_ME_PROJECT> — the proof memory
+#
+# Absorbed from foundry colony (2026-04-13).
+#
+#   just dev       Launch the formal-research dev fleet
+#   just mycelium  Blob chronicler (Design B — single observer)
+#   just physarum  Phantom DAG (Design A — distributed observation)
+#   just check     Cargo gates (check + test + clippy + fmt)
+#   just status    Ensemble snapshot
+#   just peek      Fractal TUI
+#   just clean     Kill tmux server (nuclear)
+
+set shell := ["bash", "-euc"]
+
+# Launch or resume the formal-research dev fleet
+dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ -d .cosmon ] || { echo "ERROR: .cosmon missing — run cs init first"; exit 1; }
+    MISSION=$(cs --json observe 2>/dev/null | jq -r '[.[] | select(.id | startswith("mission-"))] | last | .id' 2>/dev/null || true)
+    if [ -z "$MISSION" ] || [ "$MISSION" = "null" ]; then
+      echo -e "\033[1;36m══ No mission found — nucleate one first ══\033[0m"
+      echo "  cs nucleate mission-controller --var goal=\"\$(cat MISSION.md)\""
+      exit 1
+    fi
+    echo -e "\033[1;36m══ <CHANGE_ME_PROJECT> DEV — $MISSION ══\033[0m"
+    echo -e "\033[0;90mCtrl-C to pause, just dev to resume\033[0m\n"
+    cs run "$MISSION" --poll-interval 10
+    echo ""
+    echo -e "\033[1;33m🍄 Host DAG drained. Run just mycelium to inoculate the observation layer.\033[0m"
+
+# Inoculate the mycelium (run after host DAG drains)
+mycelium:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo -e "\033[1;33m🍄 Mycelium Phase 1 — chronicle the drained DAG\033[0m"
+    ID=$(cs nucleate mycelium --kind task --var topic="Mycelium Phase 1: chronicle the drained <CHANGE_ME_PROJECT> DAG" 2>&1 | grep -oE '[a-z]+-[0-9]{8}-[a-f0-9]{4}')
+    echo "Nucleated: $ID"
+    echo "  cs tackle $ID && cs wait $ID & cs peek"
+
+# Inoculate phantom DAG (Design A — distributed observation)
+physarum:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo -e "\033[1;33m🍄 Physarum — phantom DAG observation layer\033[0m"
+    MISSION=$(cs --json observe 2>/dev/null | jq -r '[.[] | select(.id | startswith("mission-"))] | last | .id' || true)
+    if [ -z "$MISSION" ] || [ "$MISSION" = "null" ]; then
+      echo "No mission found. Run just dev first."
+      exit 1
+    fi
+    ID=$(cs nucleate physarum --kind task --var topic="Physarum planner: phantom DAG over $MISSION" --var mission_root="$MISSION" 2>&1 | grep -oE '[a-z]+-[0-9]{8}-[a-f0-9]{4}')
+    echo "Nucleated planner: $ID"
+    cs tackle "$ID"
+    echo "Planner will nucleate N hyphae. After planner freezes:"
+    echo "  cs run $ID --poll-interval 10  # dispatches hyphae sequentially"
+
+# Cargo gates (check + test + clippy + fmt)
+check:
+    cargo check --workspace
+    cargo test --workspace
+    cargo clippy --workspace -- -D warnings
+    cargo fmt --all -- --check
+
+# Ensemble snapshot
+status:
+    cs ensemble
+
+# Fractal TUI
+peek:
+    cs peek
+
+# Kill tmux server (nuclear)
+clean:
+    #!/usr/bin/env bash
+    SOCKET=$(grep -oP 'socket_name\s*=\s*"\K[^"]+' .cosmon/config.toml 2>/dev/null || echo "<CHANGE_ME_PROJECT>")
+    tmux -L "$SOCKET" kill-server 2>/dev/null || true
+    echo "cleaned"

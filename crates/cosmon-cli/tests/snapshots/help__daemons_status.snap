@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show current status of each supervised child (reads `state.json`)
+
+Usage: cs daemons status [OPTIONS]
+
+Options:
+      --config <PATH>      Path to the daemons config file. Defaults to `~/.config/cosmon/daemons.toml`. Used to resolve the state file
+      --state-file <PATH>  Path to the supervisor state file. Overrides the `state_file` declared in the config
+  -v, --verbose            Enable verbose output
+      --json               Output in JSON format
+  -h, --help               Print help

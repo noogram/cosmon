@@ -1,0 +1,158 @@
+# docker-compose.yml — V0 live deployment of the §8j Remote Pilot Port
+# (ADR-080) on the operator's Mac for the tenant_auditor Usage 2 cURL flow.
+#
+# Two services on a private bridge network:
+#   - oidc-mock        — V0 demo IdP (cosmon-oidc-testkit/cs-oidc-mock).
+#                        Pre-stages the JWKS file on a shared volume so
+#                        the rpp-adapter can pin it from disk at boot.
+#   - rpp-adapter      — cosmon-rpp-adapter, the HTTPS+OIDC ingress.
+#                        Reads JWKS + nucleon mappings from the shared
+#                        state volume; bind-mounts the operator's
+#                        $HOME/galaxies tree for the §3.5 subprocess
+#                        envelope (clause (e)).
+#
+# Build context is the workspace root (../../..) so each Dockerfile can
+# `COPY . .` the entire workspace without `..` path traversal.
+#
+# Variables (override in `.env` next to this file or via the shell):
+#   COSMON_RPP_NOYAU         — tenant the JWT will be bound to (e.g.
+#                              "tenant-demo"). Default: "tenant-demo".
+#   COSMON_RPP_AUDIENCE      — JWT `aud` claim pinned by the adapter.
+#                              Default: "cosmon-rpp-tenant-demo".
+#   COSMON_GALAXIES_HOST     — host path bind-mounted as
+#                              `/cosmon/galaxies` inside the adapter.
+#                              Default: "$HOME/galaxies".
+#
+# Tailscale serve (out of compose, see dist/rpp-live/start.sh) wires
+# port 8443 to a public-on-tailnet URL distinct from the brew-tap
+# distribution (port 8765).
+
+name: cs-rpp-live
+
+services:
+  oidc-mock:
+    build:
+      context: ../../..
+      dockerfile: crates/cosmon-oidc-testkit/Dockerfile
+    image: cs-oidc-mock:v0
+    container_name: cs-oidc-mock
+    restart: unless-stopped
+    ports:
+      # Operator-side cURL (`POST /issue`) goes here. tenant_auditor reaches
+      # the same endpoint over Tailscale serve if the operator decides
+      # to expose JWT issuance remotely (V0 demo: usually issue locally
+      # then hand the token over).
+      - "127.0.0.1:8444:8444"
+    networks:
+      rpp-net:
+        aliases:
+          - oidc-mock
+    volumes:
+      # Shared JWKS hand-off — `oidc-mock` writes here at boot,
+      # `rpp-adapter` reads from the same volume. Mounted at
+      # `/shared/jwks` to match the path layout the rpp-adapter
+      # expects (`<state_dir>/security/jwks/*.json`) — the Dockerfile
+      # pre-creates the directory as `oidcmock` so the empty volume
+      # inherits the right ownership on first mount.
+      - rpp-jwks:/shared/jwks
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+    command:
+      - "--bind"
+      - "0.0.0.0:8444"
+      # The rpp-adapter pins JWKS by `iss`, so the URL we put in JWTs
+      # MUST match what the adapter has in its disk-pinned JWKS file.
+      - "--issuer"
+      - "http://oidc-mock:8444"
+      # Repeat --audience per nucleon binding the adapter accepts. The
+      # first entry is the default `aud` claim when `POST /issue` is
+      # called without `?aud=`. Add more in lock-step with new entries
+      # under `state/nucleons/`.
+      - "--audience"
+      - "${COSMON_RPP_AUDIENCE:-cosmon-rpp-tenant-demo}"
+      - "--audience"
+      - "cosmon-rpp-cosmon"
+      # Pre-stage the JWKS at the shared path the adapter loads from.
+      # Filename derives from the issuer URL (sanitised) — keep this in
+      # sync with `cosmon_rpp_adapter::jwt::JwksStore::load`'s glob (any
+      # `.json` file under `<state_dir>/security/jwks/`).
+      - "--write-jwks-out"
+      - "/shared/jwks/oidc-mock.json"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8444/healthz | grep -q ok"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+  rpp-adapter:
+    build:
+      context: ../../..
+      dockerfile: crates/cosmon-rpp-adapter/Dockerfile
+    image: cs-rpp-adapter:v0
+    container_name: cs-rpp-adapter
+    restart: unless-stopped
+    depends_on:
+      oidc-mock:
+        condition: service_healthy
+    ports:
+      # Bound on 127.0.0.1 — Tailscale serve relays from here to the
+      # tailnet so the public surface is auditable in one place.
+      - "127.0.0.1:8443:8443"
+    networks:
+      rpp-net:
+        aliases:
+          - rpp-adapter
+    volumes:
+      # Writable state — inbox, rate-limiter buckets, deny-list cache.
+      - rpp-state:/cosmon/.cosmon/state
+
+      # JWKS shared from oidc-mock. Sub-mount inside the state volume:
+      # the adapter scans `<state_dir>/security/jwks/*.json` at boot.
+      # Read-only here — only `oidc-mock` is the producer.
+      - rpp-jwks:/cosmon/.cosmon/state/security/jwks:ro
+
+      # Nucleon bindings — sealed `(iss, sub) → noyau` map the operator
+      # provisions out of band (see dist/rpp-live/start.sh).
+      - ./state/nucleons:/cosmon/.cosmon/state/nucleons:ro
+
+      # Operator config — `rpp.toml`. Mounted read-only so the adapter
+      # cannot rewrite its own posture from inside the container.
+      - ./rpp.toml:/cosmon/.config/cosmon/rpp.toml:ro
+
+      # Tenant galaxies — bind-mount of the operator's host
+      # `$HOME/galaxies`. Per-noyau isolation is enforced by the §3.5
+      # subprocess envelope (`cwd = /cosmon/galaxies/<noyau>`); the
+      # adapter does NOT walk this tree itself.
+      #
+      # Read-write since the V1 mutation cut (T-V1-MUTATIONS-NUCLEATE,
+      # 2026-05-04): `POST /v1/molecules` shells out to `cs nucleate`
+      # which materialises a new molecule directory under
+      # `<noyau>/.cosmon/state/molecules/<id>/`. Tenant isolation is
+      # still structural via the cwd-pin — the adapter cannot write
+      # outside the caller's noyau.
+      - ${COSMON_GALAXIES_HOST:-${HOME}/galaxies}:/cosmon/galaxies
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      COSMON_RPP_CS: /usr/local/bin/cs
+    # Mirrors the oidc-mock probe shape so `docker compose ps` reports
+    # both services with the same healthcheck semantics. The `/healthz`
+    # route is excluded from the §8p frozen API surface (it is
+    # operational, not user-facing — see `crates/cosmon-rpp-adapter/
+    # src/routes/mod.rs`). `wget` is provisioned by the adapter's
+    # Dockerfile alongside ca-certificates; the adapter binary never
+    # invokes it.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8443/healthz | grep -q '\"ok\":true'"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+
+volumes:
+  rpp-state:
+    driver: local
+  rpp-jwks:
+    driver: local
+
+networks:
+  rpp-net:
+    driver: bridge

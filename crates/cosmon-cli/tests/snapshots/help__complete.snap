@@ -1,0 +1,29 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Complete a molecule — idempotent Active→Completed transition (worker-callable)
+
+Usage: cs complete [OPTIONS] [MOLECULE]
+
+Arguments:
+  [MOLECULE]  Molecule ID to complete (single mode)
+
+Options:
+      --batch <BATCH>...               Complete multiple molecules at once
+      --config <PATH>                  Path to configuration file
+      --reason <REASON>                Reason for completion (recorded in the log) [default: "completed via cs complete"]
+  -v, --verbose                        Enable verbose output
+      --json                           Output in JSON format
+      --ops-dir <OPS_DIR>              Path to the state store root (overrides walk-up discovery)
+      --override-mindguard-down        Bypass mindguard *only when the gate machinery itself is unreachable*. Requires `--justification`. Lands a record in the append-only ledger at `~/.cosmon/audit/mindguard-overrides.jsonl` *before* the completion proceeds. NEVER use this to bypass a `MindguardRefused` — the remedy for that is to run `cs nucleate verify-surface --var target=<MOL>`
+      --justification <JUSTIFICATION>  Justification for `--override-mindguard-down`. Required when the override flag is set. Recorded write-once in the audit ledger
+  -h, --help                           Print help
+
+EXAMPLES:
+  cs complete <mol> --reason "all steps done"
+
+Idempotent Active→Completed transition. Worker-callable. Does NOT merge
+the branch or teardown the tmux session — use `cs done` for that.
+
+SEE ALSO: cs done (merge + teardown), cs evolve (advance one step).

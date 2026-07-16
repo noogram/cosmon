@@ -1,0 +1,23 @@
+#!/bin/sh
+# prepare-commit-msg — auto-append the DCO Signed-off-by trailer if absent.
+#
+# The DCO (DCO.md / CONTRIBUTING.md) requires every commit to carry a
+# `Signed-off-by:` line. This hook adds it automatically from your git identity,
+# so a plain `git commit` (and every fleet `cs` commit) is signed off without
+# needing `-s`.
+#
+# Activate (per clone) — symlink so it composes with any .git/hooks (e.g. the
+# pre-push leak-gate), rather than redirecting core.hooksPath:
+#     ln -sf ../../hooks/prepare-commit-msg .git/hooks/prepare-commit-msg
+#
+# It never adds a second sign-off (idempotent) and leaves an existing one alone.
+
+msg_file="$1"
+name="$(git config user.name)"
+email="$(git config user.email)"
+
+# Skip if we cannot identify the committer, or a sign-off is already present.
+[ -n "$name" ] && [ -n "$email" ] || exit 0
+grep -qi '^Signed-off-by:' "$msg_file" && exit 0
+
+printf '\nSigned-off-by: %s <%s>\n' "$name" "$email" >> "$msg_file"

@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Paths — project the write-path taxonomy (`--writes`), a pure derived view
+
+Usage: cs paths [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --writes
+          Emit the set of paths cosmon **writes** under the state root.
+          
+          Currently the only projection mode; the flag is explicit so future projections (e.g. `--reads`) can be added without changing the default behaviour. Omitting it is equivalent to passing it.
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

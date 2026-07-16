@@ -1,0 +1,131 @@
+[package]
+name = "cosmon-remote"
+publish.workspace = true
+version = "0.3.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third-party operator who runs `cosmon-remote` against
+# their own cosmon-rpp-adapter pulls this binary; the boundary must stay permissive.
+license = "AGPL-3.0-only"
+description = "The ONE tenant CLI for the cosmon-rpp v1 surface — routes projected from the §8p canon (cs-thin fused in, avatar-surface A2)"
+
+[[bin]]
+name = "cosmon-remote"
+path = "src/main.rs"
+
+[lib]
+name = "cosmon_remote"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+# `string` feature: the route-verb `about` strings are projected at
+# runtime from the canon consts (avatar-surface A2) — clap must accept
+# owned `String`s in builder positions.
+clap = { workspace = true, features = ["string"] }
+# Man page = projection of the live clap tree via the hidden
+# `__man-page` subcommand (avatar-surface A3, patron `cs __man-page`).
+# The committed `man/cosmon-remote.1` is golden-checked against it.
+clap_mangen = "0.2"
+# Single source for the `Exposure` type referenced by the generated
+# canon table (one type, never a per-crate mirror — task-20260610-06a4).
+# Zero-dependency, Apache-2.0 — safe for the 4-platform musl builds.
+cosmon-surface-canon = { path = "../cosmon-surface-canon" }
+# Share the canonical `MoleculeKind` enum (B1 collapse, task-20260607-db17):
+# the wire `kind` field deserialises into the *one* source-of-truth enum,
+# never a hand-typed `String`. `cosmon-core` is pure domain (zero I/O), so it
+# cross-compiles cleanly to the four static-binary targets (ADR-092 frontier).
+cosmon-core.workspace = true
+dirs.workspace = true
+# `cosmon-remote` ships as a static binary cross-compiled to 4 platforms
+# (`task-20260522-aad5`), including `*-unknown-linux-musl` targets where the
+# default `native-tls` (OpenSSL) backend would require a sysroot. Override
+# the workspace reqwest spec to use `rustls-tls` so musl builds are
+# self-contained — no system OpenSSL, no pkg-config-cross gymnastics.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# Credential-store (delib-20260710-33b7): best-effort secret zeroization (C6) and
+# the sidecar advisory file-lock primitive (C2) that `oidc` orchestrates.
+zeroize.workspace = true
+# Wipe-on-drop request body for the OIDC token endpoint: the form-encoded body
+# (which carries the plaintext refresh token) is built directly into a single,
+# up-front-sized `Zeroizing<Vec<u8>>` (`oidc::exchange::encode_form_zeroizing`,
+# via `url::form_urlencoded` — no `serde_urlencoded` intermediate `String`) and
+# handed to reqwest as a zero-copy `bytes::Bytes::from_owner` view, so the buffer
+# and every intermediate allocation are zeroized when reqwest drops the last body
+# clone (RÉSIDUEL SÉCU A, task-20260713-fcb0).
+bytes.workspace = true
+fs2.workspace = true
+# OAuth2-PKCE login flow against Forgejo (delib-20260710-33b7 C2/C7, Child 2):
+# `sha2` for the S256 code-challenge, `base64` for base64url-nopad encoding of
+# the verifier and challenge, `rand` (OS CSPRNG) for the 256-bit verifier /
+# CSRF `state` / `nonce`. All pure-Rust → clean on the 4 static-musl targets.
+sha2.workspace = true
+base64.workspace = true
+rand.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "fs", "io-util", "net", "time"] }
+toml.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+blake3 = "1"
+# `StreamExt::next()` on the reqwest body stream consumed by
+# `Client::events_stream` (task-20260522-c46a). `std`-only;
+# default-features (which pull `tokio-codec`, `tokio-io`, …) are not
+# needed.
+futures-util = { version = "0.3", default-features = false }
+
+# Credential-store backend selection is a RUNTIME probe, not a compile-time
+# feature gate (delib-20260710-33b7 C3): one binary ships to both desktop and
+# headless box. But the keyring crate needs a *backend* compiled in per OS —
+# these sections pick it. The runtime probe still degrades to the 0600 file when
+# the backend is unreachable (e.g. Linux headless, no D-Bus).
+[target.'cfg(target_os = "macos")'.dependencies]
+keyring = { workspace = true, features = ["apple-native"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { workspace = true, features = ["windows-native"] }
+
+# The synchronous Secret Service backend links libdbus through pkg-config.
+# Keep it for glibc desktop Linux, but omit it from static musl builds: those
+# binaries run on headless hosts and the credential store already degrades to
+# its 0600 file backend when no native keyring is available.
+[target.'cfg(all(target_os = "linux", not(target_env = "musl")))'.dependencies]
+keyring = { workspace = true, features = ["sync-secret-service", "crypto-rust"] }
+
+# Retain the keyring API for musl builds without selecting a native backend.
+# `keyring` then provides its built-in mock backend, allowing the runtime
+# reachability probe to select the file store instead of requiring libdbus.
+[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
+keyring.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[build-dependencies]
+# One parser for the §8p surface canon, shared with
+# cosmon-rpp-adapter/build.rs and cosmon-thin-cli/build.rs
+# (task-20260610-06a4) — one parser, one source, three folds.
+cosmon-surface-canon = { path = "../cosmon-surface-canon" }
+
+[dev-dependencies]
+tempfile.workspace = true
+# Property-based tests for the credential-store invariants (delib-20260710-33b7 C9):
+# roundtrip, audience-isolation keying, expiry monotone, storage-id injectivity.
+proptest.workspace = true
+wiremock = "0.6"
+# Bijection gate (avatar-surface A2): the delivered binary's consumed
+# route table is compared against the `#[verb]` link-time registry.
+# Dev-only — the registry stubs do not ship inside the binary; the
+# canon fold (build.rs) is the shipped projection.
+cosmon-thin-cli = { path = "../cosmon-thin-cli" }
+
+[lints]
+workspace = true

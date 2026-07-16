@@ -1,0 +1,35 @@
+[package]
+name = "cosmon-mcp"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Remote-MCP (Streamable-HTTP) transport substrate for the Cosmon HTTP surface (cosmon-rpp-adapter)"
+
+[lib]
+name = "cosmon_mcp"
+path = "src/lib.rs"
+
+[dependencies]
+chrono.workspace = true
+cosmon-core.workspace = true
+http = "1"
+cosmon-filestore.workspace = true
+cosmon-state.workspace = true
+cosmon-transport.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rmcp = { version = "1", features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+schemars = "0.8"
+tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-warm\", \"pending\", &i)"
+---
+row_kind=Idle
+raw       = 💤 task-warm [🌡] pending
+stripped  = ð¤ task-warm [ð¡] pending

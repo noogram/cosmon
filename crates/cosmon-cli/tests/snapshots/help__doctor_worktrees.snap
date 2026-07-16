@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Audit `.worktrees/` for perm/symlink/untracked hazards
+
+Usage: cs doctor worktrees [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --root <ROOT>    Override the project root (default: git top-level)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

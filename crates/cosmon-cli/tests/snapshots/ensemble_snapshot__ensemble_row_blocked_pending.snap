@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-blk1\", \"pending\", &i)"
+---
+row_kind=Blocked
+raw       = · task-blk1 [ ] pending
+stripped  = Â· task-blk1 [ ] pending

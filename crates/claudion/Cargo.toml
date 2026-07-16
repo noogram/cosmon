@@ -1,0 +1,29 @@
+[package]
+name = "claudion"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+# Vendored in-tree 2026-05-31 (task-20260531-f087) so a fresh public
+# cosmon clone builds with no external sibling path dependency and no
+# private-infra name in the manifest. Upstream was MIT OR Apache-2.0;
+# the Apache-2.0 facet is retained here, matching the neurion-core /
+# topon-core particle convention.
+license = "Apache-2.0"
+description = "The probe — measures Claude Code session energy (tokens, cost, context)"
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints.clippy]
+# Imported code — will be brought up to workspace pedantic standard incrementally.
+pedantic = { level = "allow", priority = -1 }
+should_implement_trait = "allow"

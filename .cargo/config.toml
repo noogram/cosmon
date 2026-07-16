@@ -1,0 +1,4 @@
+# `cargo xtask …` — the conventional alias for the repo-tooling crate
+# (xtask/). Today: `cargo xtask gen-api-ref [--check] <target.md>`.
+[alias]
+xtask = "run --package xtask --"

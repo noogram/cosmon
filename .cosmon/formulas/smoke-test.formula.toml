@@ -1,0 +1,39 @@
+formula = "smoke-test"
+version = 1
+description = "Run cargo check/test/clippy/fmt as native steps (no shell round-trip)"
+id_prefix = "smoke"
+
+# Tier 0 — leaf formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "check"
+title = "cargo check --workspace"
+description = "Native: cosmon::smoke::cargo_check"
+native = "cosmon::smoke::cargo_check"
+timeout = 300
+
+[[steps]]
+id = "test"
+title = "cargo test --workspace"
+description = "Native: cosmon::smoke::cargo_test"
+needs = ["check"]
+native = "cosmon::smoke::cargo_test"
+timeout = 600
+
+[[steps]]
+id = "clippy"
+title = "cargo clippy --workspace -- -D warnings"
+description = "Native: cosmon::smoke::cargo_clippy"
+needs = ["test"]
+native = "cosmon::smoke::cargo_clippy"
+timeout = 300
+
+[[steps]]
+id = "fmt"
+title = "cargo fmt --all -- --check"
+description = "Native: cosmon::smoke::cargo_fmt_check"
+needs = ["clippy"]
+native = "cosmon::smoke::cargo_fmt_check"
+timeout = 60

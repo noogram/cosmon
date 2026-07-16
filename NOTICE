@@ -1,0 +1,62 @@
+Cosmon
+Copyright (c) 2026 Noogram (noogram.dev)
+
+This product is an open-core, mixed-licence workspace. The licensing
+strategy was settled by operator decision on 2026-06-21 (deliberation
+delib-20260620-ca76) and is documented in
+docs/adr/092-license-bascule-mpl-to-agpl.md. The split:
+
+- The kernel, persistence/ports, product CLI & runtime, agent engine,
+  cockpit/UX, and the multi-tenant federation SERVER are licensed under
+  the GNU Affero General Public License, Version 3 only (AGPL-3.0-only).
+  See LICENSE-AGPL for the full text, or
+  https://www.gnu.org/licenses/agpl-3.0.html.
+
+- The pure network SDK that third parties link to *talk to* a cosmon
+  instance over the wire (cosmon-thin-cli, cosmon-thin-macro,
+  cosmon-client) is licensed under the Apache License, Version 2.0
+  (Apache-2.0). See LICENSE-APACHE, or
+  http://www.apache.org/licenses/LICENSE-2.0.
+
+The governing rule — the network-boundary doctrine — is that a crate may
+stay Apache-2.0 only if its real `[dependencies]` closure contains zero
+AGPL crates (it reaches the AGPL core over the network, never by
+code-linking). See the LICENSE file for the rule in full.
+
+================================================================================
+Vendored and third-party attributions
+================================================================================
+
+The following code is vendored in-tree and retains its UPSTREAM license.
+It is not relicensed by the partition above.
+
+(The in-process llama.cpp inference chain — the `--features llama` build,
+the vendored `crates/cosmon-llama-sys/vendor/llama.cpp/` sources, and the
+`vendor/matrix-sdk/` Matrix transport tree — was git-rm'd in the
+pre-publication scope trim (delib-20260622-187a B1 / ADR-126) and is no
+longer part of any build. Their attributions were removed with them.)
+
+1. Sibling-galaxy crates, vendored in-tree and name-scrubbed under
+   ADR-126 §6 (class 2 — in the product closure, so they ship):
+     - neurion-core        (Apache-2.0) — registry primitives
+     - topon-core          (Apache-2.0) — codebase topology primitives
+     - claudion            (Apache-2.0) — Claude bridge primitives
+     - apps-transport-http (Apache-2.0) — HTTP-on-Tailscale transport
+   These are first-party (authored by the same maintainer) but originate
+   in sibling galaxies; they are kept Apache-2.0 as pure network/utility
+   libraries consumed by the AGPL product (Apache→consumed-by-AGPL is a
+   legal direction).
+
+Third-party crates pulled from crates.io retain their own licenses; the
+permissive set admitted into the dependency closure is enumerated and
+enforced in deny.toml (`[licenses].allow`) and checked in CI by
+`cargo deny check licenses`.
+
+================================================================================
+History
+================================================================================
+
+The historical MPL-2.0 text is preserved verbatim in LICENSE-MPL-archive
+for traceability of the transitional MPL-2.0 sweep (task-20260415-100f),
+superseded by ADR-092 (2026-05-09) and the AGPL-core decision
+(delib-20260620-ca76, 2026-06-21).

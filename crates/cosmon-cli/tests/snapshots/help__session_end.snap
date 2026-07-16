@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Close the open session, optionally sealing it with BLAKE3
+
+Usage: cs session end [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --no-seal        Skip the BLAKE3 seal — ephemeral scratch close. By default the session body is sealed (mirrors `prompt_seal` / `briefing_seals`)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

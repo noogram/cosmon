@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Evolve a molecule to its next lifecycle state
+
+Usage: cs evolve [OPTIONS] --evidence <EVIDENCE> --formula <FORMULA> <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID to evolve
+
+Options:
+      --config <PATH>        Path to configuration file
+      --evidence <EVIDENCE>  Evidence documenting why the current step is complete
+      --ops-dir <OPS_DIR>    Path to the state store root (overrides walk-up discovery)
+  -v, --verbose              Enable verbose output
+      --formula <FORMULA>    Path to the formula TOML file
+      --json                 Output in JSON format
+  -h, --help                 Print help
+
+EXAMPLES:
+  cs evolve <mol> --evidence "step 1 done" \
+      --formula .cosmon/formulas/task-work.formula.toml
+
+Worker-callable. Advances the molecule one step per invocation.

@@ -1,0 +1,30 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Parse + expand a spore as a dry run; print the ordered nucleate call list without germinating anything
+
+Usage: cs spore validate [OPTIONS] <REF>
+
+Arguments:
+  <REF>  Path to a `spore.toml` manifest (or a directory containing one)
+
+Options:
+      --config <PATH>    Path to configuration file
+      --var <KEY=VALUE>  Bind a parameter (repeatable: `--var key=value`). Values are coerced into the declared `ParamSchema` type before expansion
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+  -h, --help             Print help
+
+EXAMPLES:
+  cs spore validate ./spore.toml --var subject="octopus cognition"
+  cs spore validate ./bundle/ --var axes=a,b,c        # directory ref
+  cs spore validate ./spore.toml --json               # NDJSON expansion
+
+Dry run only: parse (N2) + expand (N3), print the ordered
+'cs nucleate ... --blocked-by ...' call list, germinate nothing. The seal
+is reported but never gated here; use it to inspect what 'cs spore run'
+would create. Each --var is coerced into its declared ParamSchema type
+before expansion; a list<string> param splits on commas.
+
+SEE ALSO: cs spore run, cs spore export, ADR-140 D3.

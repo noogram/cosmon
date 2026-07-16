@@ -1,0 +1,33 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Galaxies — inspect the four-family taxonomy
+
+Usage: cs galaxies [OPTIONS] <COMMAND>
+
+Commands:
+  list      List every galaxy grouped by its `galaxy_kind` family
+  registry  Inspect the stateless galaxy-name registry (`~/.config/cosmon/galaxies.toml`) used by `cs ask`
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+IMAGE:
+  The fleet of repositories is not a flat list — it is four families,
+  classified by the direction the bits flow across the galaxy's boundary:
+
+    infra        bits flow inward    the galaxy enables its sisters
+    project      bits flow through   artefacts + illuminated principles
+    social-hub   bits flow laterally human-to-human coordination
+    editorial    bits flow outward   one-way publication to strangers
+    nascent      not yet classified  awaiting W=28d observable tests
+
+EXAMPLES:
+  cs galaxies list              # grouped view, one section per family
+  cs galaxies list --json       # flat array + `by_kind` totals
+
+SEE ALSO: cs status --json (embeds the same `galaxies` block).

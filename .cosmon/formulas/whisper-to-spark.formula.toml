@@ -1,0 +1,140 @@
+formula = "whisper-to-spark"
+version = 1
+description = """
+Consume admitted whispers from `.cosmon/whispers/inbox/<room>/*.md` and \
+nucleate one `spark` molecule per whisper, then archive the processed \
+file to `.cosmon/whispers/sparked/<room>/`. This is the missing \
+automation link between `matrix-echo-tick` (ingress) and the rest of \
+the cosmon flow (inbox → tackle → evolve → done).
+
+**Mechanism is shell-only.** The heavy lifting lives in \
+`scripts/whisper-to-spark-tick.sh` — parse YAML frontmatter, invoke \
+`cs nucleate spark`, `mv` the file. No LLM is required for a single \
+tick. The LaunchAgent companion \
+(`scripts/launchd/dev.noogram.cosmon.whisper-to-spark.plist`) fires the \
+same script every N minutes; this formula is the manual / \
+semantically-tracked entry point.
+
+**Idempotent.** The whisper filename (`<ts>-<event_id>.md`) is the \
+dedup key. Re-running this formula on an inbox where every whisper is \
+already sparked produces zero new molecules and a report counting the \
+skips.
+
+**Respects §8j (ingress).** This formula does NOT re-do admission — \
+matrix-echo-tick has already admitted the events. Whisper-to-spark \
+consumes files that are already typed cosmon artifacts.
+
+**Respects ADR-016 (no daemon in core).** One-shot formula, fired on \
+demand by the operator or on a cadence by an external scheduler \
+(LaunchAgent). Between ticks, nothing runs.
+
+**ARTIFACT PATHS** — all artifacts (`scan.md`, `report.md`) MUST be \
+written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files written \
+to the worktree (`.worktrees/{mol_id}/`) are destroyed by `cs done`.
+
+No variables required — the formula operates on the inbox of the \
+project it is nucleated in.
+"""
+id_prefix = "task"
+freeze_on_last_step = false
+
+# Tier 0 — leaf formula. Each spark molecule emitted IS a child
+# molecule, but it is emitted via the normal `cs spark` path with its
+# own `nucleon_id` and traceability tags — not as a silent decay product
+# of this formula. temp:hot is applied to each spark at birth so the
+# operator sees them immediately in `cs inbox`.
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Scan the whisper inbox"
+description = """
+List every whisper file under `.cosmon/whispers/inbox/<room>/*.md` in \
+the project root. For each file, record: path, event_id (parsed from \
+YAML frontmatter), sender_nucleon_id, room_id, whether a file with the \
+same name already exists under `.cosmon/whispers/sparked/<room>/` (if \
+yes, this whisper has already been sparked in a prior tick).
+
+Write MOLECULE_DIR/scan.md with one table:
+
+  | path | event_id | sender | room | already_sparked |
+
+End with a one-line summary: N whispers found, K already sparked, M \
+pending materialization.
+
+MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — never the worktree.
+
+This step performs NO state mutation. If the inbox is empty, scan.md \
+records that and the next step becomes a no-op.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with the whisper inventory."
+
+[[steps]]
+id = "materialize"
+title = "Nucleate a spark per pending whisper, archive the .md"
+description = """
+For each whisper under `.cosmon/whispers/inbox/<room>/*.md` whose \
+filename is NOT already present under `.cosmon/whispers/sparked/<room>/`:
+
+  1. Parse the frontmatter (event_id, sender_nucleon_id, room_id) and \
+     the body.
+  2. Invoke `cs nucleate spark` with:
+       --var topic=<body>
+       --var nucleon_id=<sender_nucleon_id>
+       --var whisper_source=<inbox path>
+       --var matrix_event_id=<event_id>
+       --var room_id=<room_id>
+       --tag temp:hot
+       --tag source:whisper
+       --tag stream:matrix
+       --tag matrix:event:<event_id>
+     (Extra vars like `whisper_source` / `matrix_event_id` / `room_id` \
+      pass through the nucleate layer and land in `prompt.md`'s \
+      frontmatter `variables:` block — full traceability.)
+  3. `mv` the whisper to `.cosmon/whispers/sparked/<room>/<fname>`.
+
+**Preferred implementation**: delegate to \
+`bash scripts/whisper-to-spark-tick.sh --json` (run from the project \
+root). The script already implements the loop above; the worker only \
+needs to invoke it and capture the NDJSON.
+
+If the shell script is unavailable or the worker wants a dry-run \
+first, the loop can also be implemented step-by-step with `yq` or \
+`awk` + `cs nucleate spark` directly. Either way, keep the TAG list \
+above exactly as specified — downstream consumers (`cs ensemble \
+--tag source:whisper`) depend on it.
+
+Record the NDJSON stdout in MOLECULE_DIR/tick.ndjson (one line per \
+processed whisper + one `tick_complete` summary line).
+"""
+needs = ["scan"]
+acceptance = """
+MOLECULE_DIR/tick.ndjson exists. Every whisper that was pending in scan.md \
+is now either (a) present as a file in `.cosmon/whispers/sparked/<room>/` \
+AND referenced by a fresh spark molecule tagged `source:whisper`, or \
+(b) logged as a `whisper_rejected` / `whisper_failed` line with a reason.
+"""
+
+[[steps]]
+id = "report"
+title = "Produce the report"
+description = """
+Synthesize MOLECULE_DIR/report.md from scan.md + tick.ndjson:
+
+  - **Top-line counts**: found / sparked / skipped / failed — copied \
+    verbatim from the `tick_complete` NDJSON line.
+  - **Per-spark table**: spark_id | event_id | sender | body excerpt \
+    (≤ 80 chars).
+  - **Skipped table** (if any): path | reason (`already_sparked`).
+  - **Failed table** (if any): path | reason | stderr excerpt.
+  - **Next tick recommendation**: expected cadence (default: every \
+    5 minutes via LaunchAgent, aligned with matrix-echo-tick).
+
+Keep the file short — one page. Operator scans it, acknowledges, \
+moves on.
+"""
+needs = ["materialize"]
+acceptance = "MOLECULE_DIR/report.md written with top-line counts, per-spark table, and next-tick recommendation."

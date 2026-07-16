@@ -1,0 +1,454 @@
+formula = "galaxy-transport"
+version = 1
+description = """
+Physically transport a cosmon galaxy from one path on disk to \
+another — freeze source workers, archive, move, rewrite Claude Code \
+session slugs, verify the destination. Codifies the 5 garde-fous \
+that emerged from the ad-hoc `/tmp/migrate-20260418/` script. Sealed \
+as a reusable formula per the delib-20260418-770e panel verdict \
+(transport is a formula, not a primitive; composability principle \
+over exergy dissent).
+
+BACKGROUND — the 5 garde-fous.
+
+  1. **Freeze source workers.** Before any filesystem move, every live
+     worker rooted in the source galaxy must be frozen. A running
+     worker writes into its `.worktrees/` and `.cosmon/state/` paths
+     — moving a directory while a worker writes to it corrupts state
+     and orphans tmux panes.
+  2. **Migrate-from-outside.** The formula MUST run from a galaxy
+     OTHER than the one being migrated. A galaxy cannot transport
+     itself — the working directory it lives in would disappear under
+     the worker mid-step, stranding every subsequent action. This is
+     the first check of the preflight step.
+  3. **Rename Claude slugs.** Claude Code session logs live in
+     `~/.claude/projects/<slug>` where `<slug>` is the galaxy's
+     absolute path with `/` → `-` (e.g.
+     `/srv/cosmon/cosmon` → `-Users-you-galaxies-cosmon`). After
+     `mv`, every slug referencing the old path must be renamed (or
+     archived) so session replay still resolves.
+  4. **Archive before prune.** The source is archived into a
+     tarball BEFORE the filesystem is pruned or overwritten. The
+     tarball IS the reverse button — until it is deleted, every
+     earlier step is recoverable. Stale `.worktrees/` entries are
+     pruned before archival so the tarball stays lean.
+  5. **Verify-burn.** The destination must pass a coherence check
+     (`.cosmon/` present, `config.toml` parses, at least one
+     `cs observe --json` succeeds, no dangling `.worktrees/` pointing
+     at the old source path) before the tarball is declared safe to
+     delete. The formula STOPS at "safe to delete"; the operator
+     performs the final `rm` — prune is NEVER automatic.
+
+IDEMPOTENCE — re-running on any intermediate state.
+
+Each step begins with a state probe and is a no-op (or clear error)
+if the work has already been done. Concretely:
+
+  - Step 1 (`preflight`) is pure validation — running it twice is a
+    no-op. If `dest_path` already exists AND `source_path` does not,
+    the formula reports "transport already complete, proceeding to
+    verify" and fast-forwards through the write steps to
+    verify-burn.
+  - Step 2 (`freeze`) only freezes workers whose effective status is
+    `running`. Re-running on an already-frozen source is a no-op.
+  - Step 3 (`archive`) skips if a tarball matching the expected
+    `{source_basename}-{timestamp}.tar.gz` already exists in
+    `archive_dir` AND its checksum matches the current source tree.
+    Partial tarballs (written by a killed worker) are deleted and
+    re-created.
+  - Step 4 (`transplant`) is a single atomic `mv`. If source is
+    absent and dest is present, skip. If both are present, error
+    (manual reconciliation needed — this is the only non-idempotent
+    state).
+  - Step 5 (`rename-slugs`) enumerates slugs referencing the old
+    path and renames them; already-renamed slugs are skipped.
+  - Step 6 (`verify-burn`) is pure read-only validation and can run
+    as many times as desired.
+
+REQUIRED VARIABLES.
+
+  - `source_path` — absolute path to the galaxy being moved (e.g.
+    `/Users/you/dev/projects/cosmon`). MUST be an existing directory
+    at preflight time (unless the migration has already completed).
+  - `dest_path` — absolute path where the galaxy will live after
+    transport (e.g. `/srv/cosmon/cosmon`). MUST NOT
+    already be a cosmon galaxy (presence of `.cosmon/`) at preflight
+    time — the formula refuses to overwrite existing state.
+
+OPTIONAL VARIABLES.
+
+  - `archive_dir` — absolute path where the safety tarball is
+    written. Default: `~/backup/galaxies/`. Created if absent.
+
+PORTABILITY.
+
+No absolute paths are hard-coded in this formula. Every path is
+expressed via the variables above or via the invocation galaxy's
+own walk-up discovery. The formula runs correctly from any galaxy
+OTHER than `source_path`.
+
+ARTIFACT PATHS — CRITICAL: all logs (preflight.md, freeze-log.md, \
+archive-log.md, transplant-log.md, rename-log.md, verify-log.md) \
+MUST be written to the MOLECULE STATE DIRECTORY — returned by \
+`cs --json observe {this_mol_id}` in the `molecule_dir` field \
+(typically `.cosmon/state/fleets/default/molecules/{mol_id}/`). \
+Files written to the worktree (`.worktrees/{mol_id}/`) are DESTROYED \
+when `cs done` tears the session down. Each log begins with BEFORE \
+state and ends with AFTER state so the migration is auditable end \
+to end.
+"""
+id_prefix = "transport"
+freeze_on_last_step = false
+
+# Tier 0 — side-effect formula (filesystem + tmux + Claude session slugs);
+# no child molecules are nucleated. The blast radius is one galaxy per run.
+[tier]
+level = 0
+
+[[steps]]
+id = "preflight"
+title = "Validate invocation context and source/dest paths"
+description = """
+First check in the chain — if this step fails, NO side effects have \
+been applied. All remaining steps rely on the invariants this step \
+establishes.
+
+Check 1 — **Migrate-from-outside (garde-fou #2).** The worker's \
+current working directory MUST NOT be a descendant of \
+`{source_path}`. Walk up from `$PWD` to `/`; if any ancestor equals \
+the canonical form of `{source_path}`, FAIL with the exact message:
+
+  > Refusing to transport `{source_path}` from inside itself. \
+  > Re-run this formula from a different galaxy (e.g. `cd \
+  > /srv/cosmon/cosmon && cs tackle <this_mol_id>`).
+
+This is not a warning — it is a hard refusal. A galaxy cannot \
+transport itself; the cwd disappears under the worker mid-step.
+
+Check 2 — **Source path shape.** Either:
+  a. `{source_path}` exists AND contains a `.cosmon/` directory, OR
+  b. `{source_path}` does not exist AND `{dest_path}` exists and \
+     contains a `.cosmon/` directory (the migration has already \
+     completed; the formula will fast-forward to verify-burn).
+
+Any other combination is an error:
+  - `{source_path}` exists but has no `.cosmon/` → "not a cosmon \
+    galaxy, refuse to transport".
+  - `{source_path}` and `{dest_path}` BOTH exist with `.cosmon/` → \
+    "ambiguous state — two galaxies at the same endpoints; manual \
+    reconciliation required".
+  - Neither path exists → "nothing to transport".
+
+Check 3 — **Destination safety.** If `{dest_path}` does not yet \
+exist, its parent directory MUST exist (the formula does not \
+`mkdir -p` silently — creating `/foo/bar/baz/cosmon` when \
+`/foo/bar/baz/` was not intended is a classic footgun).
+
+Check 4 — **Archive dir writable.** `{archive_dir}` (default \
+`~/backup/galaxies/`) is created if absent. Refuse if the path \
+exists as a non-directory.
+
+Output — write `MOLECULE_DIR/preflight.md` with:
+
+  - The resolved canonical form of every variable (source_path, \
+    dest_path, archive_dir).
+  - The cwd walk-up trace proving Check 1 passed.
+  - A one-line verdict per check (PASS / FAIL / FAST-FORWARD).
+  - If FAST-FORWARD is triggered, note which steps will be skipped \
+    in the subsequent runs (freeze, archive, transplant, \
+    rename-slugs all become no-ops).
+
+Set a machine-readable sentinel at the bottom: `VERDICT: proceed` \
+or `VERDICT: fast-forward-to-verify` — subsequent steps read this \
+to decide whether to run their side effects.
+"""
+acceptance = "MOLECULE_DIR/preflight.md exists with the four checks each marked PASS or FAST-FORWARD (FAIL aborts the step). The cwd is NOT inside source_path (garde-fou #2 satisfied). Either source_path contains a .cosmon/ directory, or dest_path does and source_path is absent (fast-forward). The VERDICT sentinel line is present."
+
+[[steps]]
+id = "freeze"
+title = "Freeze live workers in the source galaxy (garde-fou #1)"
+description = """
+Prevent a running worker from writing into a path about to move. \
+Read the `VERDICT` sentinel from `MOLECULE_DIR/preflight.md`; if it \
+is `fast-forward-to-verify`, write `MOLECULE_DIR/freeze-log.md` with \
+a single line "skipped — source already absent" and exit success.
+
+Otherwise:
+
+  1. Enumerate workers rooted in the source galaxy by running the \
+     `cs` CLI with its config pointing at the source's state:
+     ```
+     cs --config {source_path}/.cosmon/config.toml --json ensemble
+     ```
+     (The `--config` override ensures we see the source's fleet, \
+     not the caller's fleet. If that flag is unsupported in the \
+     current binary, `cd {source_path} && cs --json ensemble` is \
+     the equivalent walk-up fallback.)
+
+  2. For each worker whose `effective` status is `healthy` and \
+     `live` is `idle` / `thinking` / `waiting` (i.e. actually \
+     running), call:
+     ```
+     cs --config {source_path}/.cosmon/config.toml freeze <worker_name>
+     ```
+     Workers already in a terminal state (`stopped`, `error`, \
+     `stale`) are skipped — they have no live tmux to preserve.
+
+  3. After the freeze pass, re-query `cs --json ensemble` and \
+     confirm NO worker in source has a live status. If any remains, \
+     retry once; if still live after the retry, FAIL loudly — the \
+     operator investigates.
+
+Output — write `MOLECULE_DIR/freeze-log.md` with:
+
+  - BEFORE: table of all workers in source (name, fleet, live \
+    status) pulled from the initial ensemble query.
+  - Actions: one line per freeze call — `cs freeze <worker> → ok / \
+    skipped (terminal)`.
+  - AFTER: table of workers, confirming `live = idle | unknown | \
+    frozen` for every remaining entry.
+
+This step is idempotent: running on an already-fully-frozen source \
+produces a freeze-log.md whose Actions section is empty or reports \
+every worker as "skipped (already frozen / terminal)".
+"""
+needs = ["preflight"]
+acceptance = "MOLECULE_DIR/freeze-log.md exists with BEFORE/AFTER worker tables. No worker in source_path is in a live-writing state (healthy + idle/thinking/waiting). If the preflight verdict was fast-forward, the log notes the skip and step exits success without touching the source."
+
+[[steps]]
+id = "archive"
+title = "Prune stale worktrees and create a safety tarball (garde-fou #4)"
+description = """
+Create the reverse button. Until this step's tarball is deleted by \
+the operator AFTER verify-burn succeeds, every later step is \
+recoverable.
+
+Read the `VERDICT` sentinel from `MOLECULE_DIR/preflight.md`; if it \
+is `fast-forward-to-verify`, write `MOLECULE_DIR/archive-log.md` \
+with "skipped — source already absent" and exit success.
+
+Otherwise, in two phases:
+
+**Phase A — prune stale worktrees.** In `{source_path}/.worktrees/`, \
+walk each subdirectory. A worktree is **stale** if BOTH:
+
+  - Its corresponding molecule (from the directory name) is in a \
+    terminal state (`completed`, `collapsed`, `stuck`) per \
+    `cs --json observe <mol_id>`.
+  - Its git branch has already been merged into `main` (verified \
+    via `git -C {source_path} branch --merged main` containing the \
+    branch name).
+
+Stale worktrees are removed via \
+`git -C {source_path} worktree remove <path> --force`. Active \
+worktrees (running molecules, or unmerged branches) are LEFT IN \
+PLACE and their presence is logged — the operator decides whether \
+to freeze/complete them before re-running.
+
+**Phase B — tarball.** Create \
+`{archive_dir}/{source_basename}-{YYYYMMDD-HHMMSS}.tar.gz` where \
+`source_basename` is the final path component of \
+`{source_path}` (e.g. `cosmon`) and the timestamp is taken at the \
+moment the archive starts. Include:
+
+  - The entire pruned source tree.
+  - Record the archive's BLAKE3 (or SHA-256 fallback) checksum.
+
+Idempotence: before creating the tarball, scan `{archive_dir}` for \
+any existing `{source_basename}-*.tar.gz` written within the last \
+24 hours whose content hash matches the current source tree — if \
+found, SKIP the tar creation and re-use that tarball. Partial \
+tarballs from killed runs (size ≪ expected, or no trailing \
+checksum file) are deleted and rebuilt.
+
+Output — write `MOLECULE_DIR/archive-log.md` with:
+
+  - BEFORE: `.worktrees/` listing with per-entry staleness \
+    classification.
+  - Actions: worktrees removed, tarball path + size + checksum, or \
+    "reused existing tarball <path>" if the idempotence check hit.
+  - AFTER: `.worktrees/` listing after pruning, confirming only \
+    active worktrees remain.
+  - **TARBALL_PATH sentinel**: the absolute path of the tarball, on \
+    its own line. verify-burn reads this to know what is safe to \
+    delete once coherence is confirmed.
+"""
+needs = ["freeze"]
+acceptance = "MOLECULE_DIR/archive-log.md contains a valid TARBALL_PATH sentinel pointing at a .tar.gz that exists on disk and has a recorded checksum. Stale worktrees in source_path have been pruned; active worktrees are preserved and logged. If preflight verdict was fast-forward, the log notes the skip."
+
+[[steps]]
+id = "transplant"
+title = "Move source to dest — the irreversible step"
+description = """
+The atomic `mv`. Until this step runs, everything is reversible via \
+the worktree state alone. After it runs, the tarball from step 3 is \
+the only path back.
+
+Read the `VERDICT` sentinel from `MOLECULE_DIR/preflight.md`; if it \
+is `fast-forward-to-verify`, write `MOLECULE_DIR/transplant-log.md` \
+with "skipped — already transplanted" and exit success.
+
+Otherwise:
+
+  1. Double-check invariants from preflight are STILL true (state \
+     may have changed since preflight ran):
+       - `{source_path}` exists and has `.cosmon/`.
+       - `{dest_path}` does not exist (or exists and is empty).
+       - `{dest_path}`'s parent exists.
+     If any invariant is violated, FAIL (do NOT try to fix state \
+     automatically).
+
+  2. Re-verify no live workers in source — one more `cs --json \
+     ensemble` under the source config. If any are live, FAIL and \
+     point the operator back at step 2.
+
+  3. Execute the move:
+     ```
+     mv {source_path} {dest_path}
+     ```
+     Do NOT use `cp -r && rm -rf` — `mv` is atomic within a single \
+     filesystem, and "copy then delete" creates an exploitable \
+     window where both paths exist with identical state. If `mv` \
+     fails because of a cross-filesystem boundary, surface the \
+     error and let the operator decide (the formula refuses to \
+     implicitly copy-then-delete across filesystems).
+
+  4. Verify post-move: `{source_path}` no longer exists, \
+     `{dest_path}/.cosmon/` exists.
+
+Output — write `MOLECULE_DIR/transplant-log.md` with BEFORE/AFTER \
+directory listings (source: exists/empty; dest: absent/populated) \
+and the verified `mv` outcome.
+"""
+needs = ["archive"]
+acceptance = "MOLECULE_DIR/transplant-log.md confirms source_path no longer exists and dest_path contains the galaxy's .cosmon/ directory. If preflight verdict was fast-forward, the log notes the skip. The log contains BEFORE/AFTER directory snapshots."
+
+[[steps]]
+id = "rename-slugs"
+title = "Rewrite Claude Code session slugs for the new path (garde-fou #3)"
+description = """
+Claude Code stores session logs at `~/.claude/projects/<slug>/` \
+where `<slug>` is the galaxy's absolute path with `/` replaced by \
+`-` (e.g. `/srv/cosmon/cosmon` → \
+`-Users-you-galaxies-cosmon`). After a `mv`, every slug \
+referencing the OLD source path is orphaned — session replay, \
+`/resume`, and transcript tooling all break.
+
+Compute:
+
+  - `old_slug_prefix` = `{source_path}` with `/` → `-`, prefixed \
+    with `-` if `source_path` starts with `/`. E.g. \
+    `/Users/you/dev/projects/cosmon` → \
+    `-Users-you-cosmon`.
+  - `new_slug_prefix` = same transformation on `{dest_path}`.
+
+Enumerate every directory under `~/.claude/projects/` whose name \
+starts with `old_slug_prefix`. For each match, the new name is \
+obtained by replacing the leading `old_slug_prefix` with \
+`new_slug_prefix`.
+
+Rename semantics:
+
+  - If `~/.claude/projects/<new_name>` does NOT exist: \
+    `mv ~/.claude/projects/<old_name> ~/.claude/projects/<new_name>`.
+  - If `~/.claude/projects/<new_name>` ALREADY exists (partial \
+    prior run, or operator pre-created): FAIL with a clear error \
+    naming both slugs; operator reconciles manually (merging \
+    JSONL logs is out of scope for this formula).
+  - If NO slugs match `old_slug_prefix`: this is a legal state \
+    (galaxy was never touched by Claude Code). Log and continue.
+
+After the rename pass, verify: `~/.claude/projects/<old_slug_prefix>*` \
+matches zero entries, and the count of `<new_slug_prefix>*` entries \
+equals the pre-rename count.
+
+Output — write `MOLECULE_DIR/rename-log.md` with:
+
+  - The computed `old_slug_prefix` and `new_slug_prefix`.
+  - BEFORE: every matching old slug with its mtime.
+  - Actions: one line per rename, plus any skipped / failed entries.
+  - AFTER: every matching new slug, confirming the transformation.
+
+Idempotence: re-running after a successful rename finds zero old \
+slugs and reports "no-op, already renamed".
+"""
+needs = ["transplant"]
+acceptance = "MOLECULE_DIR/rename-log.md records old_slug_prefix, new_slug_prefix, and one line per rename. Post-step, zero slugs matching old_slug_prefix exist under ~/.claude/projects/. If the galaxy was never touched by Claude Code, the log documents the empty match explicitly."
+
+[[steps]]
+id = "verify-burn"
+title = "Verify destination integrity and authorize tarball deletion (garde-fou #5)"
+description = """
+The last gate. Until this step confirms destination coherence, the \
+tarball from step 3 stays on disk as the reverse button. After \
+this step declares success, the operator (NOT this formula) decides \
+whether to delete the tarball.
+
+Read the TARBALL_PATH sentinel from \
+`MOLECULE_DIR/archive-log.md` for reference.
+
+Checks (all must pass):
+
+  1. **Filesystem shape.** `{dest_path}/.cosmon/` exists and \
+     contains at minimum `config.toml`, `state/`, `formulas/`. \
+     `{dest_path}/.cosmon/config.toml` parses as valid TOML.
+
+  2. **Walk-up discovery works.** \
+     `cd {dest_path} && cs --json observe` returns a JSON list of \
+     molecules (or an empty array if the galaxy truly has none), \
+     exit code 0. Any parse error or crash is a FAIL.
+
+  3. **No references to old source path.** Grep \
+     `{dest_path}/.cosmon/` recursively for `{source_path}` (the \
+     pre-move absolute path). In practice cosmon stores relative \
+     paths, so zero matches is expected. If matches are found, \
+     log each one and FAIL — the state contains references to a \
+     path that no longer exists, and subsequent `cs` commands will \
+     produce broken behavior.
+
+  4. **Worktree coherence.** For each subdirectory in \
+     `{dest_path}/.worktrees/`, verify:
+       a. The path is a valid git worktree per \
+          `git -C {dest_path} worktree list --porcelain`.
+       b. Its registered path matches `{dest_path}/.worktrees/...` \
+          (NOT `{source_path}/.worktrees/...`). If git still \
+          remembers the old source path, run \
+          `git -C {dest_path} worktree repair` and re-verify.
+
+  5. **Claude slugs resolve.** For each new slug under \
+     `~/.claude/projects/{new_slug_prefix}*/`, confirm the slug's \
+     path (when decoded back by replacing `-` with `/` on the \
+     leading components) matches `{dest_path}` or one of its \
+     worktree children.
+
+  6. **verify the molecule chain.** Pick up to 3 molecules from \
+     `cs --json observe` (prefer one completed, one frozen, one \
+     running if available), and run `cs verify <mol_id>` for each. \
+     Any hash-chain verification failure FAILS this step.
+
+Output — write `MOLECULE_DIR/verify-log.md` with:
+
+  - Per-check verdict table (check name | PASS / FAIL | details).
+  - List of molecules sampled for `cs verify` with their outcomes.
+  - A final section titled `## Tarball deletion authorization` \
+    that reads, on success only:
+
+    ```
+    Coherence verified. The safety tarball is SAFE TO DELETE.
+
+    Tarball: <TARBALL_PATH>
+
+    To delete, the operator runs:
+        rm <TARBALL_PATH>
+
+    The formula DOES NOT delete the tarball automatically. Prune \
+    is always a human decision (garde-fou #4 + cosmon `rm -rf` \
+    discipline).
+    ```
+
+  - On FAIL, replace that section with `## Tarball deletion \
+    WITHHELD` plus a list of checks that failed and a recommended \
+    restore procedure (`tar -xzf <TARBALL_PATH> -C <parent_of_source>`).
+"""
+needs = ["rename-slugs"]
+acceptance = "MOLECULE_DIR/verify-log.md contains the six-check verdict table, sampled `cs verify` outcomes, and a final 'Tarball deletion authorization' or 'Tarball deletion WITHHELD' section referencing the archive-log.md TARBALL_PATH. All six checks PASS for a successful migration; any FAIL withholds tarball deletion and lists the restore procedure."

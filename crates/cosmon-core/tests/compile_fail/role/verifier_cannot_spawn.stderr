@@ -1,0 +1,13 @@
+error[E0599]: the method `spawn_child` exists for struct `TypedWorker<Verifier>`, but its trait bounds were not satisfied
+  --> tests/compile_fail/role/verifier_cannot_spawn.rs:10:22
+   |
+10 |     let _ = verifier.spawn_child(WorkerId::new("child-1").unwrap());
+   |                      ^^^^^^^^^^^ method cannot be called on `TypedWorker<Verifier>` due to unsatisfied trait bounds
+   |
+  ::: src/role.rs
+   |
+   | pub enum Verifier {}
+   | ----------------- doesn't satisfy `Verifier: CanSpawn`
+   |
+   = note: the following trait bounds were not satisfied:
+           `Verifier: CanSpawn`

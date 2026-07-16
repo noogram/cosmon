@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Kill a worker — immediate termination (no state flush)
+
+Usage: cs kill [OPTIONS] <WORKER>
+
+Arguments:
+  <WORKER>  ID of the worker to terminate
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs kill worker-3            # DEPRECATED — see below
+
+DEPRECATED (ADR-052 §D3): use `cs purge worker-3 --force` instead. This
+alias will be removed after one release cycle.
+
+SEE ALSO: cs purge (canonical), cs freeze (preserve state), cs done
+(teardown after a molecule completes).

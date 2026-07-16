@@ -1,0 +1,17 @@
+
+# Scenario: native-step-drain
+#
+# Binds the Constitution clause "native step drain" to an executable
+# scenario. When `cs tackle` runs, consecutive `native = "…"` steps are
+# drained in a single invocation — no Claude worker is spawned for a
+# leading run of native steps. See commit 1b34a58.
+#
+# Status: SKELETON — see scenarios/merge-before-dispatch.toml.
+
+name = "native-step-drain"
+clause = "native step drain"
+description = "`cs tackle` cascades consecutive native steps in one call."
+foundry_proposition = ""  # TODO: Lean proposition NativeStepDrain_maximal
+
+[expect]
+kind = "cascade"

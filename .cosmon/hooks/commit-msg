@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# commit-msg — ADR-052 §I9 / §D5 provenance gate.
+#
+# Out-of-band enforcement of the I9 Gödel sentence
+# (BranchMergedOnlyIfCompleted). Every *merge* commit landing in a
+# cosmon-tracked repo must:
+#   1. carry a subject derived from a tracked molecule, and
+#   2. point at a mol_id that already has a recorded completion
+#      (or collapse) event in .cosmon/state/events.jsonl.
+#
+# Why commit-msg and not pre-merge-commit
+# ---------------------------------------
+# ADR-052 §D5 names the gate "pre-merge hook". In practice, git's
+# `pre-merge-commit` hook fires *before* `git fmt-merge-msg` writes
+# `.git/MERGE_MSG` and before `MERGE_HEAD` is materialised, so it has
+# no access to the merge subject — it can only veto the merge as a
+# whole. `commit-msg` fires after the message is finalised, with the
+# message file as $1 and `MERGE_HEAD` present, which is exactly the
+# shape this provenance check needs. Same intent, correct hook.
+#
+# What this catches:
+#   - The c1cb class — a pilot running `git merge` (or rebase + ff)
+#     inline, bypassing `cs done`, leaving the ledger without a
+#     transition record (ADR-052 §I9 case study).
+#   - Renegade merge subjects — anything that does not derive from
+#     `cs done` / `cs evolve` / a feat/<mol_id> branch fold.
+#
+# What it cannot catch (Gödel boundary, ADR-052 §I9 Enforceability):
+#   - A pilot who also forges a `MoleculeCompleted` line into
+#     events.jsonl. See ADR-052 §I7 + §8b for the events.jsonl
+#     integrity work that closes that secondary surface.
+#   - Force-pushed fast-forwards on the *remote*. Only `pre-receive`
+#     can stop those, and we only own the local hook here. The CI
+#     mirror (`scripts/check-provenance.sh`) is the second oracle.
+#
+# Bypass (operator escape hatch, logged on stderr):
+#
+#     COSMON_SKIP_PROVENANCE=1 git merge ...
+#
+# Install:  bash scripts/install-git-hooks.sh   (idempotent symlink)
+# CI mirror: .github/workflows/ci.yml job `provenance-gate`
+#
+# References:
+#   - docs/adr/052-one-ledger-one-writer-one-witness.md §I9, §D5
+#   - docs/lore/pilot-refusal-register.md (cultural half of I9)
+
+set -euo pipefail
+
+if [ "${COSMON_SKIP_PROVENANCE:-}" = "1" ]; then
+    echo "cosmon: provenance gate bypassed via COSMON_SKIP_PROVENANCE=1" >&2
+    exit 0
+fi
+
+MSG_FILE="${1:-}"
+if [ -z "$MSG_FILE" ] || [ ! -f "$MSG_FILE" ]; then
+    # Defensive: not invoked with a message file — let git decide.
+    exit 0
+fi
+
+GITDIR=$(git rev-parse --git-dir 2>/dev/null || true)
+if [ -z "$GITDIR" ]; then
+    exit 0
+fi
+
+# Only enforce on actual merge commits — every other commit shape is
+# out of scope for I9.
+if [ ! -f "$GITDIR/MERGE_HEAD" ]; then
+    exit 0
+fi
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null || true)
+if [ -z "$ROOT" ]; then
+    exit 0
+fi
+
+EVENTS="$ROOT/.cosmon/state/events.jsonl"
+if [ ! -f "$EVENTS" ]; then
+    # Not a cosmon repo — silent pass.
+    exit 0
+fi
+
+SUBJECT=$(head -n 1 "$MSG_FILE")
+
+# Validate the subject and extract mol_id.
+# Mol_id format: <kind>-<YYYYMMDD>-<hex>
+MOL_ID_RE='([a-z]+-[0-9]{8}-[a-f0-9]+)'
+PATTERNS=(
+    "^Merge branch [\"']feat/${MOL_ID_RE}[\"']"
+    "^evolve\(${MOL_ID_RE}\)"
+    "^done\(${MOL_ID_RE}\)"
+    "^auto-merge\(${MOL_ID_RE}\)"
+)
+
+mol_id=""
+for re in "${PATTERNS[@]}"; do
+    if [[ "$SUBJECT" =~ $re ]]; then
+        mol_id="${BASH_REMATCH[1]}"
+        break
+    fi
+done
+
+if [ -z "$mol_id" ]; then
+    cat >&2 <<EOF
+cosmon: REJECTED merge — subject does not match the provenance pattern.
+
+  Got:      $SUBJECT
+  Required: one of
+              Merge branch 'feat/<mol_id>' [ — annotation]
+              evolve(<mol_id>): ...
+              done(<mol_id>): ...
+              auto-merge(<mol_id>): ...
+
+ADR-052 §I9 (the Gödel sentence): every merge into a cosmon-tracked
+repo must trace back to a tracked molecule, so the in-band detection
+surface (is_ghost) and the out-of-band oracle (this hook) agree on
+who owns each landed change.
+
+If this merge is genuinely outside the cosmon discipline (emergency
+hotfix, external contribution rebase, repo bootstrap), bypass with:
+
+    COSMON_SKIP_PROVENANCE=1 git merge ...
+
+Reference: docs/adr/052-one-ledger-one-writer-one-witness.md §I9, §D5.
+EOF
+    exit 1
+fi
+
+# Check the ledger for evidence the merge has cosmon provenance:
+#   - molecule_completed   (cs complete ran)
+#   - molecule_collapsed   (cs collapse / cs stuck ran)
+#   - merge_dispatched     (cs done emitted this immediately before the
+#                          merge call — strong proxy that the state
+#                          machine, not a renegade pilot, owns the merge;
+#                          the c1cb pathology has none of these)
+# Both V1 ("kind") and V2 ("type") event shapes are accepted; merge_*
+# events use "molecule" rather than "molecule_id" for the ID field.
+# The test requires BOTH the event-name AND the molecule ID on the same
+# line — JSONL is one event per line, so a co-occurrence is the correct
+# atomic check.
+rc=0
+awk -v id="$mol_id" '
+    ((index($0, "\"molecule_id\":\"" id "\"") > 0) \
+        || (index($0, "\"molecule\":\"" id "\"") > 0)) \
+        && (index($0, "\"kind\":\"molecule_completed\"") > 0 \
+         || index($0, "\"type\":\"molecule_completed\"") > 0 \
+         || index($0, "\"kind\":\"molecule_collapsed\"") > 0 \
+         || index($0, "\"type\":\"molecule_collapsed\"") > 0 \
+         || index($0, "\"type\":\"merge_dispatched\"") > 0) {
+        found = 1
+    }
+    END { exit found ? 0 : 1 }
+' "$EVENTS" || rc=$?
+if [ "$rc" -ne 0 ]; then
+    cat >&2 <<EOF
+cosmon: REJECTED merge of '$mol_id' — no recorded completion in the ledger.
+
+The molecule '$mol_id' has no MoleculeCompleted or MoleculeCollapsed
+entry in .cosmon/state/events.jsonl. This means \`cs complete\` (or
+\`cs collapse\`) was never called: the merge is bypassing the cosmon
+state machine.
+
+This is the c1cb pathology (ADR-052 §I9 case study): the pilot stepped
+into a role no one had named. Six of the nine April ghosts collapse to
+this single invariant violation.
+
+Recovery:
+  1. If the molecule is genuinely complete, run the legitimate flow:
+       cs complete $mol_id --reason "<one-line summary>"
+       cs done $mol_id
+  2. If this merge is intentional and outside the cosmon discipline:
+       COSMON_SKIP_PROVENANCE=1 git merge ...
+       (and consider adding an entry to docs/lore/pilot-refusal-register.md)
+
+Reference: docs/adr/052-one-ledger-one-writer-one-witness.md §I9, §D5.
+EOF
+    exit 1
+fi
+
+echo "cosmon: provenance ok ($mol_id)" >&2
+exit 0

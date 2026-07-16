@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Apply the [archive.retention] policy; `--dry-run` shows the plan
+
+Usage: cs archive prune [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --dry-run        Show what would be deleted and exit — never touch disk
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

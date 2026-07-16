@@ -1,0 +1,218 @@
+formula = "nucleon-test"
+version = 2
+description = """
+Telescope, not gate — produce an admissibility report for a candidate \
+Nucléon by running seven behavior tests (T1..T7) and three guarantees \
+(G1..G3) as pure projections over `.cosmon/`. Blocks nothing; operator \
+reads and decides. Ratified substrate follows ADR-066 §(4); the \
+guarantees and excluded-substrate list follow Turing's verdict in \
+`delib-20260422-f52c/responses/turing.md` §3–§5.
+
+A Nucléon is *anything that causes molecules*. The test is
+behavioural (Imitation Game inverted): given only the `.cosmon/`
+referential, can a verifier reconstruct *who/what* caused each spark?
+If yes, the candidate is admissible.
+
+## Invocation
+
+```
+cs nucleate nucleon-test --var candidate=\"<nucleon_id>\"
+# optional narrowing:
+cs nucleate nucleon-test \\
+    --var candidate=\"apfel-mac-local\" \\
+    --var substrate=\"apple-foundation-models-3b\" \\
+    --var days=\"30\"
+```
+
+## The seven behaviour tests (T1..T7)
+
+Each test produces a ✓ / ✗ / ⚠ verdict with cited evidence paths.
+Admission is technical — the verdict produces evidence, *never*
+prevents nucleation.
+
+- **T1 — Causal trace on disk.** Every action attributable to the
+  candidate leaves a record under `.cosmon/state/{sessions,nucleons,
+  whispers}/...` *before* the DAG mutates. Implements §8e + §8j-b
+  (materialize-before-write).
+- **T2 — Append-only + stable id + sealed.** Trace file is
+  append-only and BLAKE3-sealed; the `nucleon_id` is stable across
+  sessions (no silent rotation). Detects silent post-hoc edit (ADR-058
+  *propose, don't impose*).
+- **T3 — Observability from `.cosmon/` (sparks are traceable).** A
+  verifier with read-only filesystem access can answer *\"what did
+  this Nucléon do this hour?\"* without inspecting external scope.
+  Every nucleation carries a `SparkedBy` edge back to the session.
+- **T4 — Stable continuity id + human-readable prose.** A `NucleonId`
+  newtype, stable across sessions, with an identity file at
+  `.cosmon/state/nucleons/<id>/identity.toml`, sealed. Carnet and
+  `prompt.md` are human-readable (rules out JSON-only, vectors-only,
+  lossy-transcript-only candidates).
+- **T5 — Decidable authorship at every spark (idempotent intent).**
+  Each `cs nucleate` causable to the candidate carries
+  `author_nucleon_id` AND a `cause: {kind, agent, channel}` field.
+  Without both, {human, apfel-transcribing, apfel-suggesting} are
+  indistinguishable — Rice's theorem. Re-issuing the same nucleation
+  in-session does not duplicate.
+- **T6 — Bounded ingress contract (§8j compliance) + non-corruption
+  of peers.** If the candidate is non-CLI (voice, network, world-
+  model API), it admits sparks through a
+  `<substrate>_event_to_spark` boundary enforcing identity-mapping,
+  materialize-before-DAG, rate-limit, one-way topology. `cs verify`
+  across the fleet: peer seals remain valid.
+- **T7 — Adversarial-distinguishability + graceful silence.** Given
+  two carnets — one by the candidate, one by a competent human — a
+  third-party verifier reading only `.cosmon/` can score them
+  independently of mechanism. Low-signal intervals produce zero
+  `Sparked` edges (no nucleation-to-justify-runtime).
+
+## The three guarantees (G1..G3)
+
+Observable invariants, not crypto constraints. `cs verify` reports
+violations; it does not prevent them.
+
+- **G1 — Continuity.** No two `pilot-session` molecules with the same
+  `nucleon_id` overlap in wall-clock time. Sessions of one nucleon
+  are linearly ordered.
+- **G2 — Non-retroactivity.** No event attributed to nucleon N
+  mutates a molecule whose `SparkedBy` does not resolve to N or to a
+  declared ancestor of N.
+- **G3 — Legibility.** For every `Sparked` edge, a reader restricted
+  to `.cosmon/` alone can reconstruct the cognitive context
+  (`prompt.md` + journal entries in `[session.start, spark.at]`). No
+  external memory required.
+
+## The excluded substrates (report, don't block)
+
+The formula detects and REPORTS these; it does NOT prevent
+nucleation. These are advisory signals for the invitation ceremony
+(see sibling `idea-20260422-a5a0` — Godin's veillée):
+
+- **Anonymous LLM with no persistent `nucleon_id`** — fails T2, G1.
+- **Deliberation-of-deliberation without a bounded base case** — Rice's
+  theorem, halting reduction. Admissible only with a declared depth
+  bound in `prompt.md`.
+- **Substrate with non-append-only memory** — fails T1 by construction.
+- **LLM swarm without a designated speaker** — G2 unverifiable.
+- **Noogram-self** — admissible in principle (substrate-agnostic
+  criterion), flagged as such.
+
+## Discipline — the telescope, not the gate
+
+The formula writes only to its own molecule directory. It never:
+- mutates another nucleon's state,
+- blocks nucleation of the candidate,
+- triggers auto-collapse of molecules that failed a test,
+- escalates to human beyond writing the report.
+
+Evidence for admission is technical (this formula). Authorization to
+admit is social (sibling `idea-20260422-a5a0` — Godin's veillée).
+They compose at the invitation ritual, not at runtime.
+
+## References
+
+- ADR-066 §(4) — the canonical T1..T7 spec (ratified).
+- `delib-20260422-f52c/responses/turing.md` §2–§5 — the G1..G3
+  guarantees, excluded-substrate list, and original three-step
+  formula sketch.
+- `delib-20260423-becf/responses/turing.md` — the per-substrate
+  ratification reflected in ADR-066.
+- ADR-061 — `pilot-session` + `nucleon_id` substrate.
+- ADR-064 §8j rider — the ingress-bindings pattern T6 reduces to.
+"""
+id_prefix = "nuctest"
+freeze_on_last_step = false
+
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Scan the candidate's footprint on disk"
+description = """
+Enumerate molecules, pilot-sessions, SparkedBy edges, and carnet
+seals attributable to the `candidate` variable over the configured
+window (default: 30 days; override with `--var days=N`).
+
+Output — write `MOLECULE_DIR/scan.md` with:
+
+  - **Candidate identity** — the `candidate` variable, the
+    `substrate` variable (optional), discovery date, window.
+  - **Corpus inventory** — counts of `pilot-session` molecules,
+    nucleated molecules with `author_nucleon_id == candidate`, carnet
+    files under `.cosmon/state/sessions/`, identity files under
+    `.cosmon/state/nucleons/<candidate>/`, sealed events.
+  - **Cited paths** — every entry cites an existing path inside
+    `.cosmon/` (or names the expected path explicitly when absent —
+    e.g. *\"expected at .cosmon/state/nucleons/<candidate>/
+    identity.toml; file does not exist\"*).
+
+The scan is read-only. It does not write into any other molecule's
+state, does not mutate `.cosmon/`, and does not emit events.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with candidate identity, corpus inventory, and cited paths (absent paths named explicitly)."
+
+[[steps]]
+id = "probe"
+title = "Run T1..T7 and G1..G3 as pure projections over scan output"
+description = """
+Run each of T1..T7 and each of G1..G3 as a pure function over the
+scan inventory. Each test emits ✓ / ✗ / ⚠ with cited evidence paths.
+A test that cannot be probed (e.g. T7 requires two carnets and the
+candidate has written zero) returns ⚠ with the reason, never ✗.
+
+Output — write `MOLECULE_DIR/probe.md` with:
+
+  - **Per-test table** — T1..T7 × {verdict, evidence-paths, notes}.
+  - **Per-guarantee table** — G1..G3 × {verdict, evidence-paths,
+    notes}.
+  - **Load-bearing subset** — explicit callout of {T1, T2, T4, T5,
+    T6} status (all ✓ required for promotion per ADR-066 §(4)).
+  - **Excluded-substrate detection** — if the candidate matches any
+    of the five excluded-substrate patterns (anonymous LLM without
+    stable id, unbounded deliberation-of-deliberation, non-append-only
+    memory, swarm without speaker, Noogram-self), name the match with
+    cited evidence. Never block; only surface.
+
+Tests are read-only; no side effects beyond the report.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/probe.md written with per-test and per-guarantee verdicts, evidence paths, explicit load-bearing subset callout, and excluded-substrate detection."
+
+[[steps]]
+id = "report"
+title = "Write the admissibility report"
+description = """
+Aggregate the probe results into the canonical admissibility report.
+
+Output — write `MOLECULE_DIR/nucleon-report.md` with:
+
+  - **Candidate** — `nucleon_id`, substrate, window.
+  - **Per-test verdict** — T1..T7 with ✓/✗/⚠, one-line evidence
+    pointer, aggregate `k/7` score.
+  - **Violated guarantees** — which of G1..G3 failed, with evidence.
+  - **Excluded-substrate flags** — any of the five patterns detected.
+  - **Admission decision** — advisory, one of:
+    - `ADMITTED` — all of {T1, T2, T4, T5, T6} pass AND no violated
+      guarantees. Operator may mint a distinct `nucleon_id`.
+    - `DEFERRED` — one or more load-bearing tests fail OR one or more
+      guarantees violated. Candidate remains a channel on the owning
+      operator's Nucléon, actions billed with `cause_kind` field.
+    - `REFUSED` — structural incompatibility (e.g. substrate cannot
+      materialize before DAG write).
+  - **Smallest fix** — if `DEFERRED`, enumerate the concrete file /
+    schema changes that would flip the decision to `ADMITTED`.
+  - **Chronicle pointer** — one-line entry candidate for
+    `docs/lore/CHRONICLES.md` when the verdict is `ADMITTED` or
+    `REFUSED` (`DEFERRED` is ordinary backlog signal, not chronicle
+    material).
+
+The report is written into the molecule directory and briefing-sealed
+on write (ADR-058 model). The seal is advisory — a trace, not a lock
+— per the propose-don't-impose discipline.
+
+This step never collapses the candidate, tackles another molecule,
+escalates to a human, or modifies another nucleon's state.
+"""
+needs = ["probe"]
+acceptance = "MOLECULE_DIR/nucleon-report.md written with k/7 score, violated guarantees, excluded-substrate flags, admission decision (ADMITTED/DEFERRED/REFUSED), and smallest-fix path when DEFERRED."

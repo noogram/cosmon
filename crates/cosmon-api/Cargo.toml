@@ -1,0 +1,40 @@
+[package]
+name = "cosmon-api"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Local HTTP daemon (`cs-api`) that shells out to `cs` for native pilots (Mac/iOS/iPad)"
+
+[[bin]]
+name = "cs-api"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+chrono.workspace = true
+clap.workspace = true
+cosmon-core.workspace = true
+cosmon-filestore.workspace = true
+cosmon-state.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+toml.workspace = true
+tower = { workspace = true, features = ["util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+reqwest.workspace = true
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

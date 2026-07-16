@@ -1,0 +1,121 @@
+# cosmon-gitleaks-baseline v1
+#
+# Canonical, federation-shared gitleaks configuration for cosmon-managed
+# galaxies. SOURCE OF TRUTH: cosmon `assets/gitleaks/cosmon-baseline.gitleaks.toml`.
+# `cs init` scaffolds a copy into each galaxy's repo-root `.gitleaks.toml`.
+# Do NOT hand-edit divergent copies per galaxy — that is the silent config
+# drift this file exists to prevent (see docs/guides/gitleaks-state-journals.md).
+#
+# WHY THIS EXISTS
+# ----------------
+# Cosmon writes `.cosmon/state/events.jsonl` — an append-only journal whose
+# `reason` field is FREE-TEXT natural language (molecule summaries). Galaxies
+# that track that journal in git AND run gitleaks in a pre-commit hook hit a
+# STRUCTURAL false positive: gitleaks' entropy-based `generic-api-key` rule
+# flags benign `word=word` prose fragments (observed: `artefact=knowledge`
+# inside `... mechanism=mailroom, artefact=knowledge ...`). Every `cs done`
+# that flushes state then fails the pre-commit, the merge aborts, and the
+# harvest is blocked until manual intervention. Harvest must ALWAYS be able to
+# complete — a blocked `cs done` is a broken invariant, not mere friction
+# ("Le réacteur apprend de ce qu'il brûle", cosmon CHRONICLES).
+#
+# THE FIX (decided 2026-06-23, task-20260623-e9f0)
+# ------------------------------------------------
+# Rejected: (a) sanitising `reason` at write time — events.jsonl is the
+# hash-sealed SOURCE OF TRUTH for cognitive history; mutating it corrupts the
+# record, breaks the seal chain, and is whack-a-mole on prose. (b) gitignoring
+# events.jsonl — it is the authoritative cognitive log that application
+# galaxies legitimately track on their main branch.
+#
+# Chosen: a SHARED SCAN PROFILE that silences ONLY the entropy heuristic
+# (`generic-api-key`) and ONLY on cosmon state-journal paths, while every
+# high-confidence rule (GitHub PAT, Slack, GCP key, PEM private keys, and the
+# dedicated AWS rule below) keeps scanning those journals. A real secret
+# accidentally pasted into a `reason` (cf. the Wasabi incident) is STILL caught
+# at commit time — the noisy heuristic is the only thing disarmed, on the only
+# files where it structurally misfires.
+
+[extend]
+useDefault = true
+
+# Dedicated high-confidence AWS access-key-id rule. gitleaks' default ruleset
+# has NO keyword-free AKIA/ASIA rule — it catches AWS keys only via the
+# entropy-based `generic-api-key` rule, which we silence on state journals
+# below. Without this rule, a real AWS key pasted into a `reason` would slip
+# through on the journal. Mirrors cosmon `~/.config/cosmon/leak-corpus.toml` K02
+# (the corpus used by `cs doctor leaks --corpus`). This rule fires EVERYWHERE,
+# journals included.
+[[rules]]
+id = "cosmon-aws-access-key-id"
+description = "AWS Access Key ID (AKIA/ASIA — keyword-free shape, no entropy heuristic)"
+regex = '''\b(AKIA|ASIA)[0-9A-Z]{16}\b'''
+keywords = ["AKIA", "ASIA"]
+
+# Scope-disable ONLY `generic-api-key`, ONLY on cosmon state journals.
+# `targetRules` (gitleaks ≥ 8.21) restricts this allowlist to the named rule;
+# every other rule still scans the matched paths. `paths` are regexes matched
+# against the file path.
+[[allowlists]]
+description = "Cosmon state journals: free-text `reason` prose trips the entropy-only generic-api-key heuristic. Silence ONLY that rule here; all high-confidence rules still scan these append-only logs."
+targetRules = ["generic-api-key"]
+paths = [
+  '''(^|/)events\.jsonl$''',
+  '''\.cosmon/.*\.jsonl$''',
+]
+
+# ---------------------------------------------------------------------------
+# INTENTIONAL SECRET-SHAPED ASSETS (task-20260716-c4eb)
+#
+# Found when release-checklist.sh GATE 1 was repaired. That gate probed for a
+# repo-root `.gitleaks.toml`, never found one in cosmon (this file is the
+# source; `.gitleaks.toml` is the copy `cs init` scaffolds DOWNSTREAM), and so
+# ran gitleaks on stock defaults with this profile never loaded. Unconfigured it
+# reported 137 findings on a real projection and zero were secrets.
+#
+# Everything allowlisted below is an asset that MUST look like a secret to do
+# its job. Each is scoped to one rule and one path shape — never a blanket mute.
+# A real secret in any of these files is still caught by every other rule.
+
+# The leak DETECTOR cannot be forbidden from naming what it detects. Same
+# intentional-keep rationale as the scrub machinery (which carries every client
+# name verbatim so it can replace them) and as confidentiality-banlist.sh.
+[[allowlists]]
+description = "cs doctor leaks: the detector's own pattern table and its tests must spell the shapes they hunt for."
+targetRules = ["generic-api-key", "private-key", "cosmon-aws-access-key-id"]
+paths = [
+  '''crates/cosmon-cli/src/cmd/doctor/leaks\.rs$''',
+  '''crates/cosmon-cli/tests/doctor\.rs$''',
+  '''docs/guides/gitleaks-state-journals\.md$''',
+]
+
+# AKIAIOSFODNN7EXAMPLE is AWS's own published documentation key. It is the
+# canonical example precisely BECAUSE it is not a credential.
+[[allowlists]]
+description = "AWS documentation example key — published by AWS as a non-credential."
+targetRules = ["cosmon-aws-access-key-id", "generic-api-key"]
+regexes = ['''AKIAIOSFODNN7EXAMPLE''']
+
+# Test keypairs, generated for the test suite and committed on purpose: the
+# OIDC/RPP tests need a real RSA key to sign and verify real JWTs. They protect
+# nothing. Scoped to the fixture paths so a stray real PEM elsewhere still reds.
+[[allowlists]]
+description = "RSA test fixtures for the OIDC/RPP suites — generated for tests, guard nothing."
+targetRules = ["private-key"]
+paths = [
+  '''crates/cosmon-oidc-testkit/assets/test_rsa_private\.pem$''',
+  '''crates/cosmon-rpp-adapter/tests/fixtures/test_rsa_private\.pem$''',
+]
+
+# Avatar ids and llama model tags are high-entropy by construction (hashes,
+# quantisation tags). `generic-api-key` is a pure entropy heuristic and cannot
+# tell them from a token — the same structural misfire this file was created
+# for on state journals, in the same shape, so it gets the same narrow answer.
+[[allowlists]]
+description = "Avatar ids / model tags: high-entropy identifiers, not credentials. Entropy heuristic only; every high-confidence rule still scans these files."
+targetRules = ["generic-api-key"]
+paths = [
+  '''crates/cosmon-core/src/avatar\.rs$''',
+  '''crates/cosmon-state/src/avatar\.rs$''',
+  '''crates/cosmon-thin-cli/tests/avatar_lifecycle\.rs$''',
+  '''crates/cosmon-provider/src/llama\.rs$''',
+]

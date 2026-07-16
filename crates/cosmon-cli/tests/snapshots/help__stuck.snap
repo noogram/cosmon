@@ -1,0 +1,23 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Stuck — freeze a molecule and record the blocker
+
+Usage: cs stuck [OPTIONS] --reason <REASON> <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID that is stuck
+
+Options:
+      --config <PATH>    Path to configuration file
+      --reason <REASON>  What is blocking progress
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+  -h, --help             Print help
+
+EXAMPLES:
+  cs stuck <mol> --reason "waiting on ADR-30 decision"
+
+Terminal-ish: freezes the molecule with a recorded blocker. Consider
+`cs tag <mol> --add temp:frozen` for backlog hygiene.

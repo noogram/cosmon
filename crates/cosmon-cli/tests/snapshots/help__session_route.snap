@@ -1,0 +1,40 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Route session notes through the Tier-1 regex classifier (ADR-072).
+
+Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/sessions/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
+
+Usage: cs session route [OPTIONS] [SESSION]
+
+Arguments:
+  [SESSION]
+          Session file stem (e.g. `session-2026-04-22T10-31-31Z`) or an absolute path. When omitted, defaults to scanning every session file if `--all` is passed, or the currently-open session otherwise
+
+Options:
+      --all
+          Process every session file under `.cosmon/state/sessions/`
+
+      --config <PATH>
+          Path to configuration file
+
+      --dry-run
+          Print what would be classified without writing sidecars or nucleating molecules
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --no-stage
+          Skip auto-nucleation of high-confidence `temp:proposed` molecules — write sidecars only. Useful when backfilling or debugging
+
+      --max <MAX>
+          Cap sidecars emitted this run (safety net for batch backfills)
+          
+          [default: 500]
+
+  -h, --help
+          Print help (see a summary with '-h')

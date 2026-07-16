@@ -1,0 +1,23 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Detect binaries supervised by both cosmon and a `LaunchAgent`
+
+Usage: cs doctor supervision [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+      --patrols <PATROLS>
+          Override the patrols config (`~/.config/cosmon/patrols.toml`)
+      --daemons <DAEMONS>
+          Override the daemons config (`~/.config/cosmon/daemons.toml`)
+  -v, --verbose
+          Enable verbose output
+      --json
+          Output in JSON format
+      --launch-agents-dir <LAUNCH_AGENTS_DIR>
+          Override the LaunchAgents directory to scan
+  -h, --help
+          Print help

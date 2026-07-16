@@ -1,0 +1,81 @@
+Thin CLI for the cosmon-rpp v1 API
+
+Usage: cosmon-remote [OPTIONS] <COMMAND>
+
+Commands:
+  do        One gesture: nucleate + tackle + follow until the result is ready (composition of `POST /v1/molecules` and `POST /v1/molecules/{id}/tackle`; zero new routes). Shows the credit guard before the first spend — once, remembered. `molecule nucleate` stays available as the advanced path
+  molecule  Molecule lifecycle (the §8p frozen surface)
+  run       Like `do`, then price it: brackets the same nucleate + tackle + follow flow with two `GET /v1/quota` reads and reports the quota delta THIS run charged against your bucket. Zero new routes; the leak caveat is printed honestly
+  artifact  Artifact endpoints
+  auth      Auth-claude PKCE flow
+  login     Sign in to cosmon via the real OAuth 2.0 PKCE browser flow against the deployment's Forgejo identity provider, then persist the access and refresh tokens in the OS keyring (or a 0600 file on a headless box). Distinct from the Claude/Anthropic device flow reached by "auth login". After this, every command refreshes the 15-minute access token silently — no re-auth until the roughly monthly refresh token lapses
+  logout    Forget the persisted cosmon credential for the active profile (the reverse of "login"). Idempotent — logging out when already signed out is a no-op. Does not touch the Claude/Anthropic session
+  events    Server-Sent Events stream of molecule lifecycle events (`GET /v1/events`)
+  config    Profile and deployment config
+  avatar    D-AVATAR instance lifecycle (drained from cs-thin by the fusion)
+  doctor    Onboarding checks, named and falsifiable: réseau, oidc-url, badge tenant, lunettes du worker. Vert/rouge par check, la commande de réparation sur chaque ligne rouge. Run by install.sh and whenever something breaks
+  healthz   Adapter liveness probe (diagnostic)
+  quota     `GET /v1/quota` — read the current rate-limit snapshot. Table by default, JSON with `--json`. (diagnostic)
+  workers   Worker observability (`GET /v1/workers`). (diagnostic)
+  noyaux    `GET /v1/noyaux` — discovery endpoint for multi-noyau operators. (diagnostic)
+  converse  `POST /v1/avatar/converse` — Send a typed message to a bound avatar-tiers, canal (b) — on-by-binding, `request` hop-bounded server-side (ADR-0020 §5)
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
+      --json
+          Render machine-readable JSON instead of human text where applicable
+
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+First steps (golden path):
+  1. cosmon-remote doctor                          verify the install (green/red checks)
+  2. cosmon-remote auth login --email <you>        connect the Claude worker (once)
+  3. cosmon-remote molecule nucleate task-work --topic "…" --kind task
+     cosmon-remote molecule tackle <id>            start the work (costs credit)
+  4. cosmon-remote molecule result <id>            fetch the deliverable
+
+Diagnostics (when something breaks, not before):
+  doctor · healthz · auth me · quota · workers list · noyaux list
+
+AUTHENTICATION — two independent badges:
+  1. The API badge (JWT). Minted automatically from the profile's
+     oidc_url when needed, or supplied via --token / $COSMON_REMOTE_TOKEN.
+  2. The worker badge (Claude credential). Posed once with `auth login`
+     (a guided three-step flow — see `auth login --help`). Without it,
+     a tackled worker has nothing to spend.
+
+EFFECT MARKERS:
+  Verbs marked [coûteux] burn real Anthropic credit; verbs marked
+  [irréversible] cannot be undone. The marker is DERIVED from the OAuth
+  scope the route requires (one distinct scope per costly or
+  irreversible effect — ADR-080 §6.5), never from hand-written prose.
+
+FORMULAS — this help documents the call, never the formula:
+  `molecule nucleate <formula>` passes an opaque server-side name. What
+  a formula DOES (which steps it runs, which children it nucleates,
+  what it produces) is content of the deployment you target — NOT part
+  of the frozen API surface and NOT documented here or in the man page.
+  Discover the catalogue on the instance itself (its served docs, or
+  ask its operator); an unknown formula is refused with 404.
+
+EXIT CODES:
+  0   success
+  1   API or transport error (anything not listed below)
+  2   configuration error (profile missing or incomplete)
+  3   authentication flow error (PKCE)
+  4   authorization refused (HTTP 401/403)
+  5   not found (HTTP 404)
+
+SEE ALSO:
+  man cosmon-remote     # this same clap tree, rendered as a man page
+  cosmon-rpp API reference (smithy docs/specs/) — the wire-level view

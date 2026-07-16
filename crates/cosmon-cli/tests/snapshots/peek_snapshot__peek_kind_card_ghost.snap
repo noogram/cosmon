@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Ghost)"
+---
+variant=Ghost
+label=ghost
+glyph=👻
+ratatui_style=fg=Red mod=BOLD
+needs_attention=true

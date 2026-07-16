@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Resolve a single galaxy by name. Exits with status 1 if the name is not registered, so scripts can use it as a gate
+
+Usage: cs galaxies registry resolve [OPTIONS] <NAME>
+
+Arguments:
+  <NAME>  Galaxy name to look up (exact match, case-sensitive)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

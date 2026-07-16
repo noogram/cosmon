@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Tag — add or remove typed labels on a molecule
+
+Usage: cs tag [OPTIONS] <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID to retag
+
+Options:
+      --add <TAG>      Tag to add (repeatable). Format: `key` or `key:value`
+      --config <PATH>  Path to configuration file
+      --remove <TAG>   Tag to remove (repeatable). Matched by exact string
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs tag <mol> --add temp:hot
+  cs tag <mol> --remove temp:warm --add temp:frozen
+
+Temperature tags govern backlog curation — see CLAUDE.md § Molecule
+Temperature Tags.

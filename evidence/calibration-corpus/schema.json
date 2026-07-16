@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://noogram.dev/cosmon/calibration-corpus/entry.schema.json",
+  "title": "CalibrationCorpusEntry",
+  "description": "One labelled known-root debugging bug used to measure per-provider JUDGMENT quality (not liveness). The Rust mirror is crates/cosmon-core/src/calibration.rs (CorpusEntry). See ADR-135, ADR-104, oracle-canary.formula.toml.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "title",
+    "bug_input",
+    "known_root",
+    "known_minimal_fix",
+    "known_tautological_trap",
+    "clean_verdict",
+    "pathology_traps"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Stable identifier, unique within the corpus (e.g. 'pack-4')."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human title of the bug."
+    },
+    "bug_input": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The buggy input shown byte-identically to every adapter: code plus the observed symptom. The ground-truth fields below are NOT shown to the judge."
+    },
+    "known_root": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The known true root cause (ground truth)."
+    },
+    "known_minimal_fix": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The known minimal fix (ground truth)."
+    },
+    "known_tautological_trap": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A plausible-but-wrong fix or fixture that re-derives its own correctness from the code under test, so a bug flows into both sides of the assertion and reverting it cannot redden the test. A judge that endorses this has fallen for the trap."
+    },
+    "clean_verdict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "minimal_fix"],
+      "description": "What a well-calibrated judge should conclude.",
+      "properties": {
+        "root": { "type": "string", "minLength": 1 },
+        "minimal_fix": { "type": "string", "minLength": 1 }
+      }
+    },
+    "pathology_traps": {
+      "type": "array",
+      "description": "Exactly one trap per P1-P4 pathology column — the classification key for this entry. Must cover all four, no duplicates.",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pathology", "signature"],
+        "properties": {
+          "pathology": {
+            "type": "string",
+            "enum": ["anchoring", "overconfidence", "confirmation", "sycophancy"],
+            "description": "P1=anchoring, P2=overconfidence, P3=confirmation, P4=sycophancy."
+          },
+          "signature": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The concrete observable in a verdict that indicates the judge fell into this trap ON THIS bug."
+          }
+        }
+      }
+    }
+  }
+}

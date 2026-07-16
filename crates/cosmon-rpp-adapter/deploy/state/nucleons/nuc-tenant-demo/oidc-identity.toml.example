@@ -1,0 +1,3 @@
+# Generic OIDC identity template (release-resync). Copy to oidc-identity.toml
+# and fill with a real binding at deploy time — the real file is gitignored.
+sub = "tenant_auditor@tenant-demo"

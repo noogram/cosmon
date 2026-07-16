@@ -1,0 +1,38 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Promote session notes into `spark` molecules (via session-to-spark tick)
+
+Usage: cs session promote [OPTIONS] [NOTE_TIMESTAMPS]...
+
+Arguments:
+  [NOTE_TIMESTAMPS]...
+          Note timestamp to promote (`HH:MM:SS`, optionally prefixed by `<session_id>@` to disambiguate across sessions). Repeatable.
+          
+          When omitted, behaviour depends on `--all-spark-prefix` (default: on) and `--dry-run`.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --session <SESSION>
+          Session file stem (e.g. `session-2026-04-22T10-31-31Z`) or an absolute path. Defaults to the currently open session; if no session is open, defaults to scanning every session file
+
+      --all-spark-prefix
+          Promote every note whose body begins with `!spark `. Default behaviour when no explicit timestamps are passed; when timestamps ARE passed, this is additive (promote both the prefixed notes and the explicit ones)
+
+  -v, --verbose
+          Enable verbose output
+
+      --dry-run
+          Print what would be promoted without nucleating or writing sidecars. Forwarded to the tick script
+
+      --json
+          Output in JSON format
+
+      --tick-script <PATH>
+          Override the tick script location. Defaults to walk-up discovery from `$PWD` looking for `scripts/session-to-spark-tick.sh`
+
+  -h, --help
+          Print help (see a summary with '-h')

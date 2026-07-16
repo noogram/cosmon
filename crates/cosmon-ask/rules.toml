@@ -1,0 +1,110 @@
+# Rule table for `cs ask` (cosmon-ask::rule_parser).
+#
+# Each rule maps a set of intent verbs to a (kind, formula) pair.
+# Declaration order is priority: the first matching rule wins.
+#
+# Keep the table short and sharp — the goal is high-precision on the
+# common intents, with a clean fallback (zero-confidence) on everything
+# else so the atomic question stage handles the tail.
+
+# --- bugs / repairs -------------------------------------------------------
+[[rules]]
+verbs = ["fix", "patch", "debug", "repair"]
+kind = "issue"
+formula = "task-work"
+confidence = 0.9
+example = "fix the bug in mailroom"
+
+# --- delivery -------------------------------------------------------------
+[[rules]]
+verbs = ["ship", "deploy", "release", "merge"]
+kind = "task"
+formula = "task-work"
+confidence = 0.9
+example = "ship the current mailroom branch"
+
+# --- review cycles --------------------------------------------------------
+[[rules]]
+verbs = ["triage", "review", "audit", "sweep"]
+kind = "task"
+formula = "task-work"
+confidence = 0.9
+example = "triage my open bugs"
+
+# --- planning-intent ------------------------------------------------------
+# Intentionally after "ship" so "ship the plan" still resolves to a
+# task. "plan" alone is ambiguous (noun vs verb) but practical usage
+# in cosmon is verb-first.
+[[rules]]
+verbs = ["plan", "roadmap", "rollout"]
+kind = "idea"
+formula = "idea-to-plan"
+confidence = 0.88
+example = "plan the cosmon-node rollout"
+
+# --- architect / design ---------------------------------------------------
+[[rules]]
+verbs = ["design", "architect", "spec"]
+kind = "idea"
+formula = "idea-to-plan"
+confidence = 0.88
+example = "design the ask pipeline"
+
+# --- deliberation panel ---------------------------------------------------
+[[rules]]
+verbs = ["delib", "deliberate", "panel", "think"]
+kind = "deliberation"
+formula = "deep-think"
+confidence = 0.92
+example = "deliberate on cs ask with jobs,niel,godin"
+
+# --- chronicle / capture --------------------------------------------------
+[[rules]]
+verbs = ["chronicle", "record", "capture"]
+kind = "task"
+formula = "task-work"
+confidence = 0.88
+example = "chronicle today's syzygie event"
+
+# --- write / draft --------------------------------------------------------
+[[rules]]
+verbs = ["draft", "write", "author", "compose"]
+kind = "task"
+formula = "task-work"
+confidence = 0.87
+example = "draft the ADR for cs ask"
+
+# --- refactor / tidy ------------------------------------------------------
+[[rules]]
+verbs = ["refactor", "clean", "tidy", "polish"]
+kind = "task"
+formula = "task-work"
+confidence = 0.88
+example = "refactor the cosmon-cli event handlers"
+
+# --- explore / investigate ------------------------------------------------
+[[rules]]
+verbs = ["explore", "investigate", "study", "probe"]
+kind = "idea"
+formula = "idea-to-plan"
+confidence = 0.86
+example = "explore idempotency in cs reconcile"
+
+# --- map / survey ---------------------------------------------------------
+# Uses the `map` formula when present; the CLI will fall back to
+# `task-work` if the formula is absent in the target galaxy (handled
+# by cs nucleate itself).
+[[rules]]
+verbs = ["map", "survey", "inventory"]
+kind = "task"
+formula = "map"
+confidence = 0.85
+example = "map the mailroom alert surfaces"
+
+# --- note / remember -----------------------------------------------------
+[[rules]]
+verbs = ["note", "remember", "jot"]
+kind = "task"
+formula = "task-work"
+confidence = 0.85
+example = "note the build regression I just saw"

@@ -1,0 +1,21 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Pilot — interactive cognitive pilot REPL over a client-side model (--experimental). --remote pilots an avatar over the §8p wire (ADR-115)
+
+Usage: cs pilot [OPTIONS]
+
+Options:
+      --config <PATH>      Path to configuration file
+      --experimental       Enable the experimental verb. While the interactive loop matures, `cs pilot` without this flag prints a safety notice and does nothing — no REPL, no model call, no side effects (mirrors `cs ask`, ADR-071)
+      --model <TAG>        Ollama model tag to drive the loop (default: `llama3.2`). Falls back to the `COSMON_PILOT_MODEL` environment variable when the flag is omitted
+  -v, --verbose            Enable verbose output
+      --base-url <URL>     Override the model endpoint (default: the local Ollama OpenAI-compatible endpoint `http://localhost:11434/v1`). Falls back to `COSMON_PILOT_BASE_URL` when the flag is omitted
+      --json               Output in JSON format
+      --transcript <PATH>  Path the on-disk transcript is appended to (default: `pilot-transcript.md` in the current directory). Falls back to `COSMON_PILOT_TRANSCRIPT` when the flag is omitted
+      --timeout <SECS>     Per-request timeout in seconds for each model round-trip (default: 300). The pilot defaults far above the provider's 60s library default because it injects the full repo `CLAUDE.md` (~36 KB) as bootstrap context, so a large local model (e.g. `qwen2.5:32b`) legitimately spends minutes on the first prefill. Falls back to `COSMON_PILOT_TIMEOUT` (also in seconds) when the flag is omitted
+      --remote             Pilot a REMOTE avatar over the network instead of the local cosmon instance (ADR-115 §6). The model still runs client-side (this box); only cosmon *operations* cross the wire, via the avatar's `cosmon-rpp-adapter` §8p routes (ADR-080). Read-only unless `--write`
+      --profile <NAME>     Which `cosmon-remote` profile to use in `--remote` mode (the avatar's host + JWT identity). Defaults to the configured default profile (`~/.config/cosmon-remote/`). Ignored without `--remote`
+      --write              In `--remote` mode, expose the write tools (`nucleate` / `tackle`) in addition to the read tools. Off by default — a remote session sees the fleet but cannot change it unless asked. `done` / `evolve` are never available regardless (ADR-080 §5). Ignored without `--remote`
+  -h, --help               Print help

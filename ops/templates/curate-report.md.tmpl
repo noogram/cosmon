@@ -1,0 +1,65 @@
+<!--
+curate-report.md.tmpl — per-night, per-galaxy curate-patrol report.
+
+Rendered VERBATIM into MOLECULE_DIR/report.md by the `report` step of the
+`curate-patrol` formula. Predictability is the feature: the operator should
+read the same shape every morning. Don't get creative with section order or
+vocabulary. ≤60 seconds to read, end-to-end.
+
+This is the *mechanical* per-night surface. It is NOT a chronicle. Chronicle
+entries live in `docs/lore/CHRONICLES.md` and are only authored manually
+when a principle is illuminated (kahneman: CHRONICLES.md is sacré). The
+trend journal `docs/lore/curate-log.md` is the cross-galaxy companion.
+
+Sentinels (`<…>`) are filled by the `report` step from the verdict ledger;
+no variable-substitution engine is used — the step writes the rendered
+markdown directly.
+
+See: delib-20260521-c3cd §operator-report, task-20260521-99e1 (chronicle
+sibling), task-20260521-6c8a (this template).
+-->
+
+# Curate-patrol night <YYYY-MM-DD> — galaxy <G> (pass <N>)
+
+**Headline.** <N> molécules vues. <K> collapsées (24h soak). <R> retaggées.
+<S> surfacées pour ta lecture. Reste <P> pending après cette nuit.
+
+Top 3 plus vieilles qui résistent :
+- `<id>` — age <hours>h — <one-line reason>
+- `<id>` — age <hours>h — <one-line reason>
+- `<id>` — age <hours>h — <one-line reason>
+
+## Ce qui a bougé
+
+- **Collapsées** (réversibles jusqu'à demain matin) : <count>
+  - `<id>` — <reason ≤80 chars>
+  - `<id>` — <reason ≤80 chars>
+- **Retaggées temp:warm** : <count>
+- **Retaggées temp:hot** (blocker landed) : <count>
+- **Restées temp:hot sans progrès** : <count, voir surfaced.md>
+- **Skippées** : <count> (patrol-self / in-flight / peer-locked)
+
+## Ce qui te demande une décision
+
+Voir `surfaced.md` — <count> questions atomiques avec verdict-door
+(`1/2/3/later`). Cap = 20 ; <count_deferred> reportées au compteur 3-nuits.
+
+## Budgets
+
+| Action | Used | Cap | Remaining |
+|---|---|---|---|
+| Collapse | <n> | 1500 | <r> |
+| Classify | <n> | 200 | <r> |
+| Tackle | 0 | 0 (Rung 2) | — |
+| Surface | <n> | 20 | <r> |
+
+## Coin-coin
+
+<!--
+OPTIONAL — include this section ONLY if something genuinely illuminating
+happened tonight (strange molecule pattern, unexpected DAG cycle, syzygie
+citation surfaced by accident). One paragraph max. If nothing's
+illuminating, OMIT the entire `## Coin-coin` heading. Do NOT promote these
+notes into `docs/lore/CHRONICLES.md` automatically — the operator decides
+what becomes a chronicle.
+-->

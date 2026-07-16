@@ -1,0 +1,45 @@
++++
+# ── Editorial frontmatter ───────────────────────────────────────────
+# `subject` is the TITLE NOUN-PHRASE (what the article is OF).
+#   Example: "Kuramoto model" — a noun-phrase you could write as a
+#   Wikipedia title. Slugifies to the article filename.
+subject = "<CHANGE_ME_SUBJECT>"
+
+# `scope` is the ONE-SENTENCE EDITORIAL BRIEF (what the article does
+# and does NOT cover). Feynman's split: subject = the *thing*,
+# scope = the *angle on the thing*. Two wikipedia articles on the
+# same subject can have radically different scopes.
+#   Example: "Introductory treatment of the Kuramoto model aimed at
+#   a graduate physics reader; excludes non-identical oscillator
+#   extensions and networked variants."
+scope = "<CHANGE_ME_SCOPE>"
+
+# `sources` — primary corpus description. Files live in ./sources/.
+[sources]
+# policy = "secondary-preferred" | "primary-allowed" | "medical-medrs"
+policy = "secondary-preferred"
+# If `policy = "secondary-preferred"` and sources/ contains only primary
+# sources, the sourcer role will surface a `secondary-source-gap.md`
+# rather than proceed.
+
+# `quality` — target assessment level. Mechanical (see fleet.toml):
+#   "stub" | "start" — writer only, no review gate.
+#   "C" | "B"       — + reviewer + cite-checker.
+#   "GA"            — + full 5 roles + replay-script gate.
+#   "FA"            — + skeptic always on + 2-of-3 arbitration.
+quality = "C"
+
+# `adversarial_intensity` — red-team level. Mechanical:
+#   "off"   — skeptic/arbiter never dispatched.
+#   "light" — skeptic dispatched once after reviewer.
+#   "heavy" — skeptic before AND after reviewer; arbiter on disagreement.
+adversarial_intensity = "light"
++++
+
+# <CHANGE_ME_SUBJECT>
+
+<!--
+  Free-form editorial notes below. The editor-in-chief reads this file
+  to derive scope.md and the assessment-matrix.md. Mention any
+  known-unknowns, required depth, audience, or hard exclusions.
+-->

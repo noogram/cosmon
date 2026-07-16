@@ -1,0 +1,25 @@
+[package]
+name = "cosmon-notary"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Notary protocol v0 — operator-signed content-hash commitments (ADR-056, PoSP + PoLE)"
+
+[dependencies]
+blake3 = { workspace = true }
+chrono = { workspace = true }
+cosmon-hash.workspace = true
+ed25519-dalek = { workspace = true }
+rand_core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+
+[lints]
+workspace = true

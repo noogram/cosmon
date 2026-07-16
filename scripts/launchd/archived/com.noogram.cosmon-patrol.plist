@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.noogram.cosmon-patrol</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/you/.local/bin/cs</string>
+        <string>patrol</string>
+        <string>--respawn</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/Users/you/cosmon/state/log/patrol.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/you/cosmon/state/log/patrol.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin:/Users/you/.local/bin:/Users/you/.cargo/bin</string>
+        <key>HOME</key>
+        <string>/Users/you</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>

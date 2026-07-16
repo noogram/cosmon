@@ -1,0 +1,44 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Display ensemble status — observe the fleet at a glance
+
+Usage: cs ensemble [OPTIONS]
+
+Options:
+      --all
+          Show molecules from all projects, not just the current one
+
+      --config <PATH>
+          Path to configuration file
+
+      --cluster
+          Walk every `.cosmon/`-bearing galaxy under `$COSMON_CLUSTER_ROOT` (default `$HOME/galaxies`) and print one aggregated table.
+          
+          This is the cross-galaxy extension of `--all`. Where `--all` drops the project-id filter within the current state dir, `--cluster` visits every sibling galaxy on disk and prints their workers + molecule counts. Works in tandem with `--all` (implicitly drops the project filter because the scope is now the whole cluster).
+          
+          [aliases: --cluster]
+
+  -v, --verbose
+          Enable verbose output
+
+      --cluster-root <DIR>
+          Override the cluster root directory when `--cluster` is set. Defaults to `$COSMON_CLUSTER_ROOT` env var, then `$HOME/galaxies`
+
+      --json
+          Output in JSON format
+
+      --tag <GLOB>
+          Filter molecules by tag glob pattern (repeatable, any-match).
+          
+          Patterns support `*` as wildcard. Example: `--tag deferred:*`. Molecules without a matching tag are excluded from the molecule summary counts.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs ensemble                      # all molecules, all fleets
+  cs ensemble --tag temp:hot       # actionable backlog snapshot
+  cs ensemble --fleet research     # one fleet only
+  cs ensemble --json               # NDJSON for scripting

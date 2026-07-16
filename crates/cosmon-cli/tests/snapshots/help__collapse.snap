@@ -1,0 +1,38 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Collapse a molecule — terminate with final state recording
+
+Usage: cs collapse [OPTIONS] --reason <REASON> <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID to collapse
+
+Options:
+      --config <PATH>              Path to configuration file
+      --reason <REASON>            Reason for the collapse
+      --cause <CAUSE>              Structured cause attribution (ADR-062): `rate_limit`, `inference_stall`, `manual`, `process_death`, `unknown`. With `rate_limit`, pair `--account` and `--kind` for the K3 fixture shape
+  -v, --verbose                    Enable verbose output
+      --account <ALIAS>            Account alias for `--cause rate_limit` (e.g. `default`)
+      --json                       Output in JSON format
+      --kind <KIND>                Quota currency name for `--cause rate_limit` (e.g. `max_rolling_5h`, `max_weekly`, `api_key_org_monthly`, `financial_usd`, `custody_scoped`). Free-form to remain extensible across providers
+      --reason-kind <REASON_KIND>  Operator-facing collapse classification for `cs errors` aggregation: one of `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value lands in [`CollapseReason::Other`] verbatim
+      --ops-dir <OPS_DIR>          Path to the state store root (overrides walk-up discovery)
+  -h, --help                       Print help
+
+EXAMPLES:
+  cs collapse <mol> --reason "superseded by <other>"
+  cs collapse <mol> --reason "Claude usage limit reached" \
+      --cause rate_limit --account default --kind max_rolling_5h
+
+Terminal transition. Use instead of leaving stale pending molecules.
+
+Pass --cause to attribute the failure with a structured tag (ADR-062):
+  rate_limit  — quota refused; pair with --account ALIAS --kind CURRENCY
+                (max_rolling_5h, max_weekly, api_key_org_monthly, …).
+                Surfaces as ghost: quota-exhausted in cs peek.
+  inference_stall  — worker alive but stopped emitting tokens.
+  manual           — operator decision (default if --reason alone).
+  process_death    — worker process died (OOM, signal).
+  unknown          — could not be classified.

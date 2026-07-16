@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Quench a worker — graceful shutdown with state preservation
+
+Usage: cs quench [OPTIONS] <WORKER>
+
+Arguments:
+  <WORKER>  ID of the worker to gracefully shut down
+
+Options:
+      --config <PATH>      Path to configuration file
+      --timeout <TIMEOUT>  Grace period in seconds before force-killing (default: 30) [default: 30]
+      --force              Skip graceful exit — go straight to force-kill (same as `kill`)
+  -v, --verbose            Enable verbose output
+      --json               Output in JSON format
+      --no-tmux            Skip tmux interaction (state-only transition, for testing)
+  -h, --help               Print help
+
+EXAMPLES:
+  cs quench worker-3          # DEPRECATED — see below
+
+DEPRECATED (ADR-052 §D3): use `cs freeze worker-3 --reason quench`
+instead. Graceful shutdown with state preservation IS freeze; `--reason`
+captures operator intent. Note: the canonical path lands in `Paused`
+(resumable via `cs thaw`) rather than `Stopped`. This alias will be
+removed after one release cycle.
+
+SEE ALSO: cs freeze (canonical), cs purge (fleet teardown), cs teardown
+(fleet-wide graceful shutdown).

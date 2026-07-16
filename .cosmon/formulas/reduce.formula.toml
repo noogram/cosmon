@@ -1,0 +1,120 @@
+formula = "reduce"
+version = 1
+description = """
+Fan-in pattern — consolidate the outputs of N children molecules \
+into a single synthesis. Paired counterpart of `map`.
+
+This formula is the canonical cosmon realization of the REDUCE \
+pattern (Dust's `reduce` block, functional `reduce`). It is NOT a \
+new molecule kind and NOT a new Rust type — it is a TOML formula \
+that reads the children's filesystem artifacts and produces a \
+consolidated output. Data plane is the filesystem (git + \
+molecule_dir); control plane is the DAG (children are linked to \
+this reduce via `--blocked-by` so it only runs after they complete).
+
+Required variables (one of):
+  - children_ids      Comma-separated list of explicit child
+                      molecule ids to reduce over
+                      (e.g. "task-2026…,task-2026…").
+  - tag_filter        Tag used to select children (e.g.
+                      "map-children:map-20260415-abcd" — the default
+                      convention emitted by the `map` formula).
+
+Required variable:
+  - strategy          Reduction strategy. One of:
+                        - "concat"       — concatenate all children's
+                                           synthesis.md in order.
+                        - "summarize-llm" — the worker reads all
+                                           children and produces a
+                                           written synthesis.
+                        - "vote"         — count agreement across
+                                           children's outputs
+                                           (useful for N-way
+                                           deliberation results).
+
+ARTIFACT PATHS — MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}`.
+
+Wiring pattern (recommended):
+  1. Nucleate the `map` parent, record its id `<M>`.
+  2. Let map fan out N children tagged `map-children:<M>`.
+  3. Nucleate the reduce:
+       cs nucleate reduce \\
+         --var tag_filter=map-children:<M> \\
+         --var strategy=summarize-llm \\
+         --blocked-by <M>
+     The `--blocked-by <M>` ensures reduce cannot start until map
+     (and therefore all its children) has completed.
+
+The reduce formula itself does NOT nucleate any child — it is a \
+pure fan-in / consumer. It is therefore Tier 0.
+"""
+id_prefix = "reduce"
+
+# Tier 0 — fan-in consumer, no nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "resolve"
+title = "Resolve the children set"
+description = """
+If `children_ids` was supplied, split it and use it verbatim. \
+Otherwise call:
+
+    cs ensemble --tag {{tag_filter}} --json
+
+to list every molecule carrying `{{tag_filter}}`. Filter to those \
+whose status is `completed` (skip collapsed with a recorded note).
+
+Write MOLECULE_DIR/children.md with the resolved set — one row per \
+child (id, kind, status, molecule_dir path). Record the resolution \
+method (explicit vs. tag_filter) in the header.
+
+If zero children resolve, collapse with reason "empty reduce set".
+"""
+acceptance = "MOLECULE_DIR/children.md lists the resolved child set with status. At least one child is completed, else molecule is collapsed."
+
+[[steps]]
+id = "collect"
+title = "Collect children's artifacts"
+description = """
+For each child in MOLECULE_DIR/children.md, read its primary \
+artifact (usually `synthesis.md`; fall back to `outcomes.md` or \
+`triage-report.md` if synthesis is absent) from its molecule_dir. \
+Copy each into MOLECULE_DIR/inputs/<child_id>.md verbatim — \
+untouched. This preserves the raw data plane for audit and makes \
+the reduce idempotent: re-running step 3 reads from inputs/, not \
+from the live children (which may have moved on).
+"""
+needs = ["resolve"]
+acceptance = "MOLECULE_DIR/inputs/<child_id>.md exists for every resolved child, verbatim copy of the child's primary artifact."
+
+[[steps]]
+id = "reduce"
+title = "Apply the reduction strategy"
+description = """
+Depending on `{{strategy}}`:
+
+  - **concat** — concatenate MOLECULE_DIR/inputs/*.md in sorted
+    order, with a header `## <child_id>` per section. Write to
+    MOLECULE_DIR/synthesis.md.
+
+  - **summarize-llm** — the worker reads every input and produces a
+    consolidated synthesis: a shared-findings section, a per-child
+    one-line highlight, and an integrated "what we learned across
+    the fan-out" section. Write to MOLECULE_DIR/synthesis.md. This
+    is the cognitive mirror of deep-think's synthesize step, but
+    over map children instead of panelists.
+
+  - **vote** — for each distinct claim or decision option surfaced
+    across children, tally a count ("3/5 children chose X, 2/5
+    chose Y"). Output MOLECULE_DIR/synthesis.md with the ranked
+    tally followed by a short "majority outcome" paragraph.
+
+The reduce step does NOT nucleate follow-ups. If the consolidated \
+output warrants next-actions, the operator reads synthesis.md and \
+nucleates explicitly — same discipline as `spark-capture`.
+"""
+needs = ["collect"]
+acceptance = "MOLECULE_DIR/synthesis.md written, structured according to the chosen strategy."

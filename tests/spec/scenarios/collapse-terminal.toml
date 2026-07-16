@@ -1,0 +1,17 @@
+
+# Scenario: collapse-terminal
+#
+# Binds the Constitution clause "collapse is terminal" to an executable
+# scenario. Once a molecule is collapsed, no state transition may move
+# it back to a live phase (pending, active, …).
+#
+# Status: SKELETON — see scenarios/merge-before-dispatch.toml.
+
+name = "collapse-terminal"
+clause = "collapse is terminal"
+description = "A collapsed molecule cannot be re-evolved or re-completed."
+foundry_proposition = ""  # TODO: Lean proposition Collapse_absorbing
+
+[expect]
+kind = "absorbing_state"
+state = "collapsed"

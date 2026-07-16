@@ -1,0 +1,32 @@
+# Cosmon runtime noise — durable markdown artifacts (synthesis.md,
+# outcomes.md, briefing.md, notes/**, responses/**, scan.md,
+# triage-report.md, analysis.md) and events.jsonl ARE tracked.
+registry.sqlite
+registry.sqlite-journal
+registry.sqlite-wal
+*.lock
+*.tmp
+
+# Top-level runtime logs (cs run / watchdog / one-off fix logs). These are
+# transient noise — never source of truth — and previously leaked into the
+# tracked surface (one carried a client worker name). Source of cognitive
+# history is events.jsonl, not these. Ignore at the .cosmon root.
+*.log
+
+# Runtime state — selective: ignore ephemeral/binary, track markdown.
+#
+# state.json is a DERIVABLE CACHE rebuilt by `cs reconcile` from events.jsonl.
+# events.jsonl is the SOURCE OF TRUTH for cognitive history (seals included).
+# Crossing the cache across a residence boundary creates a two-clock paradox
+# (hawking: chronology protection); crossing only the log preserves seals.
+# See docs/architectural-invariants.md §9 and synthesis at
+# .cosmon/state/fleets/default/molecules/delib-20260420-0469/synthesis.md (R4).
+state/fleet.json
+state/fleet.runtime.json
+state/**/state.json
+state/**/runtime.lock
+state/**/*.lock
+state/**/*.pid
+state/**/pty.log
+state/**/tmux-capture.log
+state/**/*.log

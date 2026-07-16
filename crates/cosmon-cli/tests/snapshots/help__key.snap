@@ -1,0 +1,33 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Key — manage the operator's Ed25519 notary key (generate, show)
+
+Usage: cs key [OPTIONS] <COMMAND>
+
+Commands:
+  generate  Generate a fresh Ed25519 operator key (32 bytes OS randomness, hex-encoded)
+  show      Print the public key (and its path) for an existing operator key file
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs key generate                              # ~/.config/cosmon/operator.key (0600)
+  cs key generate --output /tmp/dev.key        # alternate destination
+  cs key generate --force                      # overwrite an existing key
+  cs key show                                  # print pubkey hex of the default key
+
+Generates a fresh Ed25519 secret (32 bytes of OS randomness, 64-char
+lowercase hex) at the path `cs notarize --key` already expects. Silent
+rotation is forbidden: without `--force` the command refuses to
+clobber an existing key file. For retirement / successor publication,
+see ADR-060 (`cs rotate-key`, deferred post-S4).
+
+SEE ALSO:
+  cs notarize (sign a molecule under the operator key),
+  docs/guides/notary-operator-guide.md, ADR-056, ADR-060.

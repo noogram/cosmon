@@ -1,0 +1,26 @@
+[package]
+name = "cosmon-bridge-claude"
+publish.workspace = true
+version = "0.2.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Bridge layer for Claude Code agents — bd CLI wrappers for bead operations"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+cosmon-core.workspace = true
+miniz_oxide = "0.8"
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true }
+
+[lints]
+workspace = true

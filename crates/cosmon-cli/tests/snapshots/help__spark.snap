@@ -1,0 +1,84 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Spark — capture a one-line operator intent into the Inbox (ADR-061)
+
+Usage: cs spark [OPTIONS] <TEXT>
+
+Arguments:
+  <TEXT>
+          The spark text itself — what appeared in the operator's head.
+          
+          Captured verbatim into the molecule's `topic` variable and thus into `prompt.md` (sealed by the usual nucleate path). Quote the argument if it contains spaces.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --kind <KIND>
+          Override the molecule kind. Defaults to `idea` (💡) — the Jobs §2 shape. Accepts `idea`, `task`, `issue`, or any other [`cosmon_core::kind::MoleculeKind`] string the operator cares to pass; the actual validation happens in `nucleate`
+          
+          [default: idea]
+
+      --tag <TAG>
+          Tag to attach (repeatable). When no `--tag` is supplied the spark lands with `temp:hot` so it surfaces immediately in `cs inbox` (HOT bucket) and `cs ensemble --tag temp:hot`
+
+  -v, --verbose
+          Enable verbose output
+
+      --fleet <FLEET>
+          Fleet to nucleate into. Defaults to `default`
+          
+          [default: default]
+
+      --json
+          Output in JSON format
+
+      --nucleon <NUCLEON>
+          Override the auto-derived `nucleon_id` (sparker identity).
+          
+          Normally derived from `git config user.email` with a `$USER@$(hostname)` fallback. Pass this when scripting a test demo or when the git email is not the identity you want to record.
+
+      --sparked-by <SESSION_ID>
+          Currently-open pilot-session molecule id (ADR-061 §`SparkedBy`).
+          
+          Recorded as a variable only in v1 — the `SparkedBy` typed link is reserved until ADR-061 is marked `accepted`. Passed verbatim into `prompt.md` so later migrations can recover the edge.
+
+      --formula <FORMULA>
+          Override the formula name (defaults to `spark`). Exists for tests and for exotic deployments that vendor their own capture formula; normal callers leave this unset
+          
+          [default: spark]
+
+      --formulas-dir <DIR>
+          Path to the formulas directory (defaults to walk-up discovery)
+
+      --store-dir <DIR>
+          Path to the state store root (defaults to walk-up discovery)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs spark "réunion demain : revoir le pitch"
+  cs spark "debug the flaky test" --kind task
+  cs spark "CI broken on macOS" --kind issue --tag temp:warm
+  cs spark "constellation idea" --nucleon operator-demo@example.com
+
+A spark is the pre-task — a one-line operator intent dropped into the
+Inbox (HOT bucket by default) with the sparker's identity attached. The
+demo criterion: operator-demo on her iPhone via
+Blink Shell SSH types a single spark and the operator sees it on the
+next 'cs peek' refresh. No Claude Code in the chain.
+
+DEFAULTS:
+  --kind idea                # 💡 one-line Inbox shape
+  --tag  temp:hot            # surfaces in 'cs inbox' HOT bucket
+  nucleon_id: git user.email, else $USER@$(hostname)
+
+SACRIFICES: offline fails, auth ≡ SSH access, no push (next
+refresh), raw Blink terminal UX, v1 is one-way (no pilot reply from
+Inbox).
+
+SEE ALSO: cs inbox (where sparks land), cs tackle (promote to work),
+          cs transform (re-kind), cs collapse (reject with reason).

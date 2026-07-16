@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List archived molecules (optionally filtered by year / month)
+
+Usage: cs archive list [OPTIONS]
+
+Options:
+      --config <PATH>   Path to configuration file
+      --year <YYYY>     Restrict the scan to a single year (e.g. `2026`)
+      --month <MM>      Restrict the scan to a single month (01..=12). Must be used with `--year` to be meaningful; standalone `--month` still filters across whichever years contain that month
+  -v, --verbose         Enable verbose output
+      --json            Output in JSON format
+      --since-days <N>  Keep only entries whose directory was modified within the last `N` days. `0` means no limit. Combines with `--year`/`--month`. Used by the CI gate (`.github/workflows/archive-verify.yml`)
+      --ids-only        Emit one molecule id per line, skipping the table header / JSON envelope. Intended for shell pipelines (`xargs cs archive verify`)
+  -h, --help            Print help

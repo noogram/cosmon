@@ -1,0 +1,16 @@
+`PUT /v1/molecules/{mol_id}/artifacts/{name}`
+
+Usage: cosmon-remote artifact push [OPTIONS] --file <FILE> <MOL_ID> <NAME>
+
+Arguments:
+  <MOL_ID>  
+  <NAME>    
+
+Options:
+      --file <FILE>                  
+      --profile <PROFILE>            Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --content-type <CONTENT_TYPE>  
+      --json                         Render machine-readable JSON instead of human text where applicable
+      --if-match <IF_MATCH>          Previous `ETag` for overwrite — omit on first push
+      --token <TOKEN>                Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+  -h, --help                         Print help

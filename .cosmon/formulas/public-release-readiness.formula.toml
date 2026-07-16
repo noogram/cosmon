@@ -1,0 +1,243 @@
+formula = "public-release-readiness"
+version = 1
+id_prefix = "prr"
+description = '''
+Take a private cosmon-managed galaxy public WITHOUT leaving anything private on
+the far side of the one-way door. This is the generalization of the oxymake
+9-phase A→I playbook into a mechanism `cs` can apply to ANY galaxy.
+
+This formula is DELIBERATELY THIN. It does not itself scrub history, build a
+doc-site, or push a tag. It builds the *constellation* — a DAG of `--blocked-by`
+phase molecules — and lets cosmon's own primitives (`cs run`, `cs done`'s
+merge-before-dispatch, `cs verify`) walk it. A release workflow that ignored the
+DAG would be cosmon failing to use cosmon.
+
+## Topology (frozen — substituted per galaxy, never rewritten)
+
+Hard-sequential SPINE — three gates, each unrecoverable-if-skipped, because the
+HARM is sequential (you do not polish a front door on a house with an open back
+wall; you do not tag a surface that still lies):
+
+  ① SCRUB-GREEN        (Phase A)        → sub-formula `scrub-green`
+  ② FRONT-DOOR-TRUE    (Phases C+D)     → sub-formula `entry-point-premortem`
+  ③ RELEASE-FIRES-CLEAN (Phase F)       → frozen node, clean-clone release dry-run
+
+Parallel finishing FAN — blocks nothing irrecoverable, because the VALUE is
+independent:
+
+  B  CI = Definition-of-Done
+  E  doc-site            (NON-OBVIOUS EDGE: D ──▶ E — publish only the *scrubbed*
+                          agentic surface; E is blocked-by ② not by the spine root)
+  G  namespace reservation
+  H  standards / FAIR     (SKIPPABLE for non-research galaxies like cosmon —
+                          a flag, not a phase; the formula nucleates it only when
+                          `--var emit_standards_phase=true`)
+
+Operator-only irreversible FRONTIER:
+
+  Z  flip-public / cargo publish / push-tag / squash-execute / DNS — a DAG LEAF,
+     NEVER a worker step. Blocked-by every spine gate and the whole fan. The
+     fleet *prepares and proposes*; the operator *fires*. See the guard-rail
+     below: "fire" must be mechanically unavailable to the worker, not flag-gated.
+
+## Required variables (the anti-leak fulcrum)
+
+  - target_galaxy_path   absolute path of the LIVE private galaxy (stays private)
+  - repo_url             the public remote the scrubbed projection will reach
+  - project_binary_name  the public binary name. THIS IS THE ANTI-LEAK FULCRUM:
+                         for oxymake `ox` ≠ `cs`, an easy case; for cosmon `cs`
+                         is BOTH the public binary AND the private orchestrator,
+                         so the leak is `cs` → `.cosmon/state/`. One formula must
+                         handle both; the pre-mortem (② FRONT-DOOR-TRUE) keys its
+                         orchestrator-leak hunt off this variable.
+  - emit_standards_phase optional, default false. true only for research galaxies
+                         that make a FAIR/standards claim. cosmon skips H.
+
+## Why a constellation and not a single linear 9-step formula
+
+Phases have heterogeneous mechanisms (② is itself a `deep-think`-class panel),
+real parallelism, and an operator-only irreversible frontier (Z) that must be a
+DAG leaf, not a worker step. A single linear formula could express none of these.
+Source: delib-20260616-0f4f (jobs + architect convergent), extracted from two data
+points — oxymake (the seed playbook) and cosmon's own membrane re-run
+(task-20260616-cc22). Two points define the line.
+
+## Briefing-seal roll-up (answers the adversary's fragmentation warning)
+
+A constellation fragments the briefing-seal chain across N molecule_dirs, which
+would weaken the retrospective verifiability a release workflow most wants. The
+final step `seal-rollup` collects every phase molecule's `briefing_seals` into one
+`release-manifest.md` chain, so `cs verify` over the manifest re-checks the whole
+release as a single verifiable artifact instead of N disconnected ones.
+'''
+
+# Tier 1 — the `constellate` step nucleates the bounded constellation of phase
+# molecules (spine + fan + Z leaf); count is enumerated at frame time.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "frame"
+title = "Bind the three inputs and freeze the release frame"
+description = '''
+Write `MOLECULE_DIR/frame.md` (from `cs --json observe {mol_id}` →
+`molecule_dir`). This is the frozen frame the constellation carries instead of a
+human's head — substituted per galaxy, never rewritten. It MUST contain:
+
+1. **The three bound inputs** — `target_galaxy_path`, `repo_url`,
+   `project_binary_name` rendered verbatim, plus whether `emit_standards_phase`
+   is set. Name the `project_binary_name` collision explicitly: is the public
+   binary name also the private orchestrator name (the cosmon hard case) or not
+   (the oxymake easy case)? This single line steers ② FRONT-DOOR-TRUE.
+
+2. **The topology** — the 3-gate spine, the parallel fan with the D──▶E edge, and
+   the Z operator-only leaf, as the DAG you will build in `constellate`.
+
+3. **The four invariant-guards as NAMED enforcement points** (implement, do not
+   merely diagram — each phase molecule inherits its row):
+
+   | Invariant | Enforcement point |
+   |-----------|-------------------|
+   | no-push-from-dirty-history | extend `[git_remote_blocklist]` in `.cosmon/config.toml` (the `cs done` merge gate) so the LIVE tree can never carry the public remote; backstop with a `pre-push` hook on the scratch clone + remote branch-protection. |
+   | transport-layer-AGENTS.md | create `AGENTS.md` (a TRANSPORT layer that POINTS at single-source docs, never paraphrases them), make `CLAUDE.md` a symlink to it, enforce with a CI symlink-check (`cs reconcile --check` idiom) + an `agentic-surface` step-gate (`acceptance_artifacts` HARD-gate idiom). This is the ONLY invariant unsatisfied from zero — prioritize it. |
+   | no-private-orchestrator-leak | add a NEW forbidden-string gate class to `scripts/release/cosmon-release-audit.sh` (the orchestrator-leak gate, beside the client-name / private-sibling gates — architect proposed letter "I"; allocate the next FREE letter since cc22's ref-hygiene gate already took I). Keyed off `project_binary_name`: a public surface routing a stranger to private `cs`/`.cosmon` fails the gate. Most portable across galaxies. |
+   | release-from-clean-clone | transplant `scripts/release/preflight.sh` GUARD 1 (never operate on a live `/srv/cosmon/` galaxy) into a `tag-release` justfile recipe preamble — the recipe does not exist yet; ③ RELEASE-FIRES-CLEAN creates it. |
+
+4. **The standing-membrane doctrine — deny-by-default ALLOWLIST.** The recurring
+   audit must NOT be a frozen denylist: confidential tokens P(t) grow with
+   dP/dt>0 while a frozen blocklist B has dB/dt=0 between human gestures, so P\B
+   grows silently with no diff and no alarm (a seal measures freshness-at-t0, not
+   cleanliness-now). Invert polarity: ship NOTHING except positively-cleared
+   paths; build the public projection by copying *in*, not deleting *out*.
+   Per-path diffable permits, NEVER a glob (a glob invites rubber-stamp fatigue).
+   Generalize the audit's existing binary-blob deny-by-default gate to the whole
+   text tree.
+
+5. **The operator-gesture guard-rail (mechanical, not flag-based).** Every
+   irreversible/outbound gesture is operator-only AND must be physically
+   unavailable to the worker: no `origin` remote in the worktree, no publish
+   tokens (crates.io/npm/pypi) in worker env, any Cloudflare/Pages MCP scoped to
+   preview, `release.yml` gated on a `workflow_dispatch` input the worker cannot
+   set. Note the conflict to reconcile: the global "commit and push after every
+   edit" rule directly COMMANDS the forbidden push — in the release context it is
+   suspended; the worker commits to its branch and NEVER pushes to `repo_url`.
+
+Anti-substitution constraint (frozen): a finding without a `file:line` is an
+opinion — reject it. This travels into every phase molecule.
+'''
+acceptance = "MOLECULE_DIR/frame.md exists with all five sections, the three inputs bound verbatim, and the project_binary_name collision named explicitly."
+# HARD gate (deep-think Lever B idiom): cs evolve refuses to advance until frame.md exists.
+acceptance_artifacts = ["frame.md"]
+
+[[steps]]
+id = "constellate"
+title = "Nucleate the constellation — spine, fan, and the Z operator leaf"
+needs = ["frame"]
+description = '''
+Build the DAG. Nucleate each phase as its own molecule, wired with `--blocked-by`
+so cosmon's `cs run` / merge-before-dispatch walks it. The frozen briefing text
+below is SUBSTITUTED (inputs swapped in) NOT rewritten — it is the formula's
+anti-rot memory. For EVERY child: pass `--blocked-by`, then `cs tag <child>
+--add temp:warm`, then inject the relevant frame section into its
+`MOLECULE_DIR/briefing.md` under `## Context from the release frame` (a child
+whose briefing is byte-identical to the generic nucleate default is a silent
+substitution failure — reject it).
+
+### SPINE (hard-sequential — each gate blocks the next)
+
+**① SCRUB-GREEN** — `cs nucleate scrub-green --blocked-by {this_mol} --var
+target_galaxy_path=... --var project_binary_name=...`. The Phase-A history
+remediation with the embedded A5 post-cleanup judgment gate (default
+filter-repo/preserve, squash shelved). Its detailed mechanism lives in the
+`scrub-green` sub-formula. This gate is GREEN only when an audit on a fresh
+scratch clone passes.
+
+**② FRONT-DOOR-TRUE** — `cs nucleate entry-point-premortem --blocked-by {① id}
+--var target_galaxy_path=... --var repo_url=... --var project_binary_name=...`.
+Phases C+D collapsed: the reusable entry-point pre-mortem panel (its detailed
+spec is the pre-mortem child's concern — task-20260616-9132 / karpathy's
+`entry-point-premortem`; this formula only INVOKES it as the ② node). It produces
+the severity-ranked punch-list whose headline self-RED for cosmon is Phase D
+(no AGENTS.md, CLAUDE.md not a symlink, orchestrator-leak via `cs`).
+
+**③ RELEASE-FIRES-CLEAN** — `cs nucleate task-work --blocked-by {② id} ...` with
+this frozen briefing: create the `tag-release` justfile recipe whose preamble
+transplants `preflight.sh` GUARD 1 (refuse to operate on a live `/srv/cosmon/`
+galaxy); prove a release DRY-RUN fires from a fresh clean scratch clone with NO
+`origin` remote and NO publish token in env. The actual fire is Z, not here.
+
+### FAN (parallel — blocks nothing irrecoverable)
+
+Each fan molecule is `cs nucleate task-work --blocked-by {predecessor} ...` then
+tagged temp:warm. Wire the predecessors so the fan starts as soon as its input
+exists, NOT after the whole spine:
+
+- **B  CI = Definition-of-Done** — blocked-by {this_mol}; the gates
+  (build/test/lint/format) become the CI contract. Independent of history scrub.
+- **E  doc-site** — blocked-by {② FRONT-DOOR-TRUE id}, NOT the spine root. This
+  is the non-obvious **D──▶E** edge: the doc-site must publish only the *scrubbed*
+  agentic surface, so E waits for ②'s front-door verification, not merely for ①.
+  **Phase-E QA is HEADLESS-only.** Verifying a deployed doc-site (does the page
+  serve, does client-side Mermaid/JS actually render) is a browser job, and a
+  fleet worker is headless: drive `chrome --headless --screenshot` or the
+  `playwright-headless` MCP, then READ the PNG. ⛔ NEVER `playwright-extension` —
+  it drives the operator's logged-in Chrome through a browser extension a tmux
+  worker does not have, so the call hangs forever and the worker never reaches
+  `cs evolve` (observed task-20260617-6ae2: 50+ min deadlock while the deploy had
+  already succeeded — only the visual-QA leg hung; chronicle 2026-06-17). Pilot-
+  side `curl` (HTTP/SSL/leak-token grep) is a valid fallback for the non-visual
+  gates but cannot confirm a client-side render — that needs headless Chrome. Run
+  the E QA leg via the `visual-qa` formula's render step (live-URL case), which
+  carries this same headless-only rule as its substrate of record.
+- **G  namespace reservation** — blocked-by {this_mol}; placeholder `publish=true`
+  on the binary crate, `publish=false` on libs, a manual one-shot. Low-risk,
+  parked behind the spine for the actual claim.
+- **H  standards / FAIR** — nucleate ONLY if `emit_standards_phase=true`. cosmon
+  makes no FAIR claim, so for cosmon this phase is SKIPPED (do not nucleate an
+  empty ceremony molecule — that is the over-applied-abstraction smell).
+
+### Z — the operator-only irreversible leaf
+
+**Z  FIRE** — `cs nucleate task-work --blocked-by {③ id} --blocked-by {B} --blocked-by {E} --blocked-by {G} [--blocked-by {H}]`,
+tagged `temp:frozen` (it is blocked on an external decision: the operator). Its
+briefing states plainly: this molecule is NEVER tackled by a worker. It is the
+DAG leaf that records the operator gesture (flip-public / cargo publish /
+push-tag / squash-execute / DNS). The guard-rail from frame §5 is restated in its
+briefing: the worktree carries no `origin` remote, no tokens, preview-scoped MCP,
+dispatch-gated CI — so even a confused worker physically cannot fire.
+
+### Verify the DAG
+
+The count of phase molecules nucleated here is bounded and enumerated at frame
+time (tier measure: count) — the spine (3) + the active fan (3 or 4) + the Z leaf
+(1), never an open-ended fan-out. After nucleation, `cs deps {this_mol}
+--transitive` must return exactly the phase molecules you created (spine + fan +
+Z; H present iff emit_standards_phase). Each
+`cs observe <child>` shows its temp:* tag. Each child briefing.md reads back with
+the injected frame context, not the generic default.
+'''
+acceptance = "Spine (①②③), the active fan (B, E with the D→E edge, G, and H iff emit_standards_phase), and the Z operator-only leaf are nucleated, each --blocked-by-wired per the topology, each tagged temp:* and carrying a frame-injected briefing.md. `cs deps {mol_id} --transitive` returns exactly those molecules; Z is a leaf blocked-by every spine gate and the whole fan."
+
+[[steps]]
+id = "seal-rollup"
+title = "Roll the per-phase briefing seals into one verifiable chain"
+needs = ["constellate"]
+description = '''
+Write `MOLECULE_DIR/release-manifest.md`. For every phase molecule nucleated in
+`constellate`, read its `MoleculeData.briefing_seals` (via `cs --json observe
+<child>`) and record, per phase: the molecule id, the phase letter/gate, its
+current status, and the BLAKE3 briefing seal(s) on record. The manifest is the
+single rolled-up chain that answers the adversary's fragmentation warning: instead
+of N disconnected per-phase seals, a later auditor (or `cs verify`) reads ONE
+artifact to re-check the whole release.
+
+The manifest MUST also carry the GREEN-GATE summary: the release crosses the
+membrane only when (a) ① SCRUB-GREEN's scratch-clone audit is GREEN, (b) ②
+FRONT-DOOR-TRUE's punch-list is cleared, (c) ③ RELEASE-FIRES-CLEAN's dry-run
+fired from a clean clone, and (d) the operator has not yet been asked to touch Z.
+State explicitly: this manifest is a TRACE, not a LOCK (the seal-vs-lock doctrine)
+— it catches the lazy shadow contract, not a motivated adversary.
+'''
+acceptance = "MOLECULE_DIR/release-manifest.md exists, lists every phase molecule with its briefing seal(s) and status as one rolled-up chain, and states the four green-gate conditions plus the seal-is-a-trace-not-a-lock caveat."
+acceptance_artifacts = ["release-manifest.md"]

@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Merge molecules into a synthesis (N → 1)
+
+Usage: cs merge [OPTIONS] --formula <FORMULA> --reason <REASON> [SOURCES]...
+
+Arguments:
+  [SOURCES]...  Source molecule IDs to merge (space-separated)
+
+Options:
+      --config <PATH>                Path to configuration file
+      --formula <FORMULA>            Formula for the product molecule
+      --product-kind <PRODUCT_KIND>  Kind for the product molecule (default: decision) [default: decision]
+  -v, --verbose                      Enable verbose output
+      --json                         Output in JSON format
+      --reason <REASON>              Reason for the merge
+  -h, --help                         Print help
+
+EXAMPLES:
+  cs merge <a> <b> <c> --into synthesis-<topic>
+  cs merge <a> <b> --formula synthesis --var kind=decision
+
+N → 1. Inverse of `decay`.

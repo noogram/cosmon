@@ -1,0 +1,29 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Decay a molecule into child molecules (1 → N)
+
+Usage: cs decay [OPTIONS] --formula <FORMULA> --reason <REASON> <SOURCE>
+
+Arguments:
+  <SOURCE>  Source molecule ID to decay
+
+Options:
+      --config <PATH>                Path to configuration file
+      --formula <FORMULA>            Formula for the product molecules
+      --count <COUNT>                Number of products to create (or provide --product-vars multiple times) [default: 1]
+  -v, --verbose                      Enable verbose output
+      --json                         Output in JSON format
+      --product-kind <PRODUCT_KIND>  Kind for the product molecules (default: task) [default: task]
+      --reason <REASON>              Reason for the decay
+      --chain                        Wire consecutive decay products with Blocks/BlockedBy links (A→B→C)
+      --blocks <BLOCKS>              Explicit Blocks edges: product[i] blocks the given molecule IDs. Repeatable; applied to each product in order
+  -h, --help                         Print help
+
+EXAMPLES:
+  cs decay <parent> --into task --var topic="subtask A"
+  cs decay <parent> --formula task-work --var topic="subtask B"
+
+1 → N. Children get a `DecayProduct` link back to parent. Remember to
+`cs tag <child> --add temp:warm` so backlog curation works.

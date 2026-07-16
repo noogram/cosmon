@@ -1,0 +1,28 @@
+# Name-reservation crate for `cosmon` on crates.io.
+#
+# Cosmon's product is the **`cs` binary** (the stateless agent-orchestration
+# CLI), shipped via GitHub Releases — NOT a library you `cargo add`. This crate
+# exists only to HOLD the `cosmon` name on crates.io and point users at the
+# install path. It is the single crate in the workspace that overrides the
+# workspace-wide `publish = false`; every library crate stays unpublishable so
+# nothing internal (and no client-named artefact) can leak to a registry.
+#
+# Reservation ≠ publication. `cargo package -p cosmon` is the safe verify;
+# `cargo publish -p cosmon` is a deliberate one-shot OPERATOR gesture (see
+# packaging/RESERVE-NAMES.md). Workers never run the live publish.
+[package]
+name = "cosmon"
+version = "0.0.0"
+edition = "2021"
+rust-version.workspace = true
+authors = ["Noogram"]
+license = "AGPL-3.0-only"
+repository = "https://github.com/noogram/cosmon"
+homepage = "https://docs.noogram.org"
+description = "Cosmon — a stateless CLI giving AI coding agents a persistent identity, a typed lifecycle, and crash-recovery. Reserved name; the `cs` binary ships via GitHub Releases."
+keywords = ["agents", "orchestration", "ai", "cli", "workflow"]
+categories = ["development-tools", "command-line-utilities"]
+readme = "README.md"
+publish = true
+
+[dependencies]

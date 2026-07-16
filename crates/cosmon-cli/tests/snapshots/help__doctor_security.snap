@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Run every security probe and aggregate findings
+
+Usage: cs doctor security [OPTIONS]
+
+Options:
+      --config <PATH>        Path to configuration file
+      --root <ROOT>          Override the workspace/git root
+      --registry <REGISTRY>  Override the path to the service registry database
+  -v, --verbose              Enable verbose output
+      --include-untracked    Also include untracked files in the leak scan
+      --json                 Output in JSON format
+  -h, --help                 Print help

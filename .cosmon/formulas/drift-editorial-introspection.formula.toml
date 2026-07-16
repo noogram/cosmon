@@ -1,0 +1,162 @@
+formula = "drift-editorial-introspection"
+version = 1
+description = """
+Drift-detection patrol #2 — *editorial → introspection*.
+
+An `editorial` galaxy exists to carry artefacts across the boundary \
+to strangers (carnot: external publication is irreversible; godin: \
+the promise is *emit-outward*). When ≥ 30 consecutive days pass with \
+ZERO artefact crossing to a named external audience, the galaxy has \
+inverted its chemical potential — internal drafts accumulate, nothing \
+leaves. That is the drift (delib-20260419-5168 §4 Q8b).
+
+This patrol is on-demand. It nucleates ONE `issue` molecule per \
+firing galaxy, tagged `drift-detected`. It NEVER re-types the galaxy.
+
+Neurion gate — reads `galaxy_kind = 'editorial'` from \
+`repos`. Hard-coded galaxy names are forbidden.
+
+Threshold helper — \
+`neurion_core::domain::drift::editorial_to_introspection_drift`. If \
+the formula and the helper disagree, the helper wins.
+
+ARTIFACT PATHS — MOLECULE_DIR from `cs --json observe {mol_id}`; \
+NEVER the worktree.
+
+Carnot caveat (from synthesis §6 measurement ceilings): *publication \
+count* is observable; *reach* and *reader engagement* are not. The \
+threshold uses count, not reach, deliberately — we measure the one \
+boundary we can see.
+
+No variables required.
+"""
+id_prefix = "drift-edit"
+freeze_on_last_step = false
+
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Measure the silence window of each editorial galaxy"
+description = """
+1. **Enumerate editorial galaxies** via neurion:
+
+   ```
+   neurion.query_registry("SELECT name, path FROM repos WHERE \
+   galaxy_kind = 'editorial'")
+   ```
+
+   Fall back to `cs galaxies list --json | jq '.galaxies[] | \
+   select(.galaxy_kind == \"editorial\") | .name'`. Empty set → \
+   write `## No editorial galaxies` and advance.
+
+2. **Compute the silence window** for each galaxy. A *publication* \
+   is any artefact the editorial galaxy produced that crossed to an \
+   external audience. Approximate counters (source-of-truth is the \
+   publication tracker, but most galaxies do not yet have one):
+
+   - Git tags of the form `publish/*`, `release/*`, `chapter-*` on \
+     the galaxy's repo (`git -C <path> for-each-ref --sort=-creatordate \
+     --format='%(creatordate:iso) %(refname:short)' refs/tags/`).
+   - Chronicles that flagged outbound artefacts — \
+     `git -C <path> log --since=60.days.ago --pretty='%ad|%s' \
+     --date=short docs/lore/ | grep -iE \
+     'publish|chapter|release|shipped'`.
+   - Files added under `public/`, `publications/`, `chapters/`, \
+     `press/` directories within the window.
+
+3. For each galaxy, compute `silence_days = today - \
+   latest_publication_date`. If no publication is ever found, \
+   `silence_days = 9999` (treated as ≥ 30 → fires).
+
+4. **Write** `MOLECULE_DIR/scan.md` with a table:
+
+   | galaxy | path | latest_publication | silence_days |
+   |--------|------|--------------------|--------------|
+
+   Per-galaxy section: list the publication signals found (tags, \
+   chronicles, files) so the reader can verify.
+"""
+acceptance = "MOLECULE_DIR/scan.md written: one row per editorial galaxy with latest_publication + silence_days; evidence list per galaxy."
+
+[[steps]]
+id = "detect"
+title = "Apply the 30-day silence threshold and emit issues"
+description = """
+Threshold: fires when `silence_days >= 30`. Per \
+`editorial_to_introspection_drift(galaxy, silence_days)`.
+
+For EACH firing galaxy, nucleate:
+
+```
+cs nucleate spark-capture \
+  --kind issue \
+  --var topic="drift-detected: editorial-to-introspection — <galaxy> \
+(<silence_days>d since last outbound artefact)" \
+  --tag drift-detected \
+  --tag drift:editorial-introspection \
+  --tag galaxy:<galaxy> \
+  --tag temp:warm
+```
+
+`temp:warm` MANDATORY.
+
+**Rate-limit guard**: if more than 5 galaxies fire, STOP after the \
+5th and append `## Overflow` to `detect.md`. A multi-galaxy editorial \
+silence is usually an operator-wide event (vacation, focus-block, \
+upstream dependency) — the operator decides whether to extend the \
+window or address the cause.
+
+**Write** `MOLECULE_DIR/detect.md` with:
+  - one row per galaxy: `galaxy | silence_days | verdict | \
+    issue_id`.
+  - explicit zero-fire line when none drift: *"All editorial \
+    galaxies publish within the 30-day boundary."*
+
+**Do NOT** auto-collapse or re-type — a frozen editorial galaxy is \
+a drift signal for a human, not a licence to touch classification.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detect.md written with verdict rows; at most 5 issue molecules nucleated with tags (drift-detected, drift:editorial-introspection, galaxy:<name>, temp:warm); overflow section if >5."
+
+[[steps]]
+id = "report"
+title = "Produce the patrol report"
+description = """
+Write `MOLECULE_DIR/report.md`:
+
+  ```
+  # Drift patrol — editorial → introspection — {date}
+
+  ## Galaxies scanned
+  | galaxy | silence_days | latest_publication | verdict |
+  |--------|--------------|---------------------|---------|
+
+  ## Fires
+  Per fire: galaxy, silence_days, issue ID, one-line interpretation. \
+  Include a carnot-style note: "Drafts that do not leave become \
+  heat — the chemical potential has inverted."
+  If zero fires: "Every editorial galaxy has crossed the external \
+  boundary within 30 days."
+
+  ## Measurement ceiling (carnot)
+  Remind the reader: this patrol measures **publication count**, not \
+  reach or engagement. A galaxy publishing 1 post/month that no one \
+  reads is NOT flagged here; that is a separate concern \
+  (not yet measurable — see synthesis §6).
+
+  ## Non-actions
+  The patrol emits an issue; the operator decides whether to re-type \
+  to `project`, collapse, or accept the introspection as a sabbatical.
+
+  ## Next sweep
+  Default: 30 days. Accelerate if a chronicle flags an imminent \
+  publication deadline.
+  ```
+
+Close with pointer to `editorial_to_introspection_drift`.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/report.md written with galaxies-scanned table, per-fire interpretation, measurement-ceiling note (MANDATORY), non-actions, next-sweep cadence."

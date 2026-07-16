@@ -1,0 +1,18 @@
+[package]
+name = "cosmon-crashtest"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Property-based crash-resilience harness for cosmon. Asserts bisimulation equivalence between uninterrupted and crashed+resumed lifecycle traces."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+rand = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

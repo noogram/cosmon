@@ -1,0 +1,45 @@
+`POST /v1/molecules` — create a molecule
+
+Usage: cosmon-remote molecule nucleate [OPTIONS] <FORMULA>
+
+Arguments:
+  <FORMULA>
+          
+
+Options:
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
+      --topic <TOPIC>
+          
+
+      --description <DESCRIPTION>
+          
+
+      --json
+          Render machine-readable JSON instead of human text where applicable
+
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+
+      --var <KEY=VALUE>
+          Free-form variables `--var k=v`, repeat as needed
+
+      --kind <KIND>
+          
+
+      --tag <TAGS>
+          
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+WORKFLOW — nucleate is step one of three:
+  nucleate <formula> ...   create the molecule (PENDING — nothing runs yet)
+  tackle <id>              dispatch a worker on it [coûteux]
+  result <id>              fetch the canonical deliverable when it lands
+
+The <formula> name is opaque to this CLI: its semantics (steps,
+children, outputs) live with the deployment and are not frozen with
+the API surface — discover the catalogue on the instance you target.
+An unknown formula is refused with 404.

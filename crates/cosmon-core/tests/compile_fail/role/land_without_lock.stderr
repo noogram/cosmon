@@ -1,0 +1,8 @@
+error[E0599]: no method named `land` found for struct `TypedWorker<Stitcher>` in the current scope
+  --> tests/compile_fail/role/land_without_lock.rs:11:22
+   |
+11 |     let _ = stitcher.land();
+   |                      ^^^^ method not found in `TypedWorker<Stitcher>`
+   |
+   = note: the method was found for
+           - `TypedWorker<R, TrunkHeld>`

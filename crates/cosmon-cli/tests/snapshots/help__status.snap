@@ -1,0 +1,21 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Project pulse — quick DAG overview like git status
+
+Usage: cs status [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs status                   # pulse: active / pending / blocked / completed
+  cs status --fleet research
+  cs status --json            # includes `galaxies` block (by-kind + nascent)
+
+SEE ALSO: cs peek (fractal TUI), cs ensemble (full snapshot),
+          cs galaxies list (four-family taxonomy).

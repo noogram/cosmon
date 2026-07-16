@@ -1,0 +1,18 @@
+[package]
+name = "cosmon-fuzz"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Property-based and in-process fuzz harness for the cs CLI surface. feynman companion to CLI type-tightening: the type system prevents ill-formed inputs by construction; this crate catches everything that is grammatically valid but semantically ill-formed."
+
+[dependencies]
+cosmon-core = { workspace = true }
+proptest = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }

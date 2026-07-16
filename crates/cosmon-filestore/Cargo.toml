@@ -1,0 +1,27 @@
+[package]
+name = "cosmon-filestore"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "JSON filesystem backend for the Cosmon StateStore trait"
+
+[dependencies]
+chrono.workspace = true
+cosmon-core.workspace = true
+cosmon-hash.workspace = true
+cosmon-state.workspace = true
+fs2.workspace = true
+nix.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

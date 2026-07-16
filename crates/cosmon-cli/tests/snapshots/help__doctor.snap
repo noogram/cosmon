@@ -1,0 +1,22 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Doctor — diagnostic probes (whisper channel, …)
+
+Usage: cs doctor [OPTIONS] <COMMAND>
+
+Commands:
+  whisper      Probe the whisper channel of a molecule's assigned worker
+  leaks        Scan tracked files for leaked secrets and non-public state (blocking)
+  worktrees    Audit `.worktrees/` for perm/symlink/untracked hazards
+  mcp          Audit MCP servers registered in the configured service registry
+  deps         Flag unpinned or mutable dependency declarations
+  supervision  Detect binaries supervised by both cosmon and a `LaunchAgent`
+  security     Run every security probe and aggregate findings
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

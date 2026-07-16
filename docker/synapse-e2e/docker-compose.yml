@@ -1,0 +1,21 @@
+name: synapse-e2e
+
+services:
+  synapse:
+    container_name: synapse-e2e-homeserver
+    image: matrixdotorg/synapse:v1.132.0
+    restart: "no"
+    environment:
+      - SYNAPSE_SERVER_NAME=localhost
+      - SYNAPSE_REPORT_STATS=no
+      - SYNAPSE_NO_TLS=1
+    volumes:
+      - ./synapse-data:/data
+    ports:
+      - "127.0.0.1:8008:8008"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8008/_matrix/client/versions"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s

@@ -1,0 +1,19 @@
+---
+source: crates/cosmon-thin-cli/tests/help_snapshots.rs
+expression: body
+---
+avatar_audit GET /v1/avatar/:instance_id/audit
+avatar_grant POST /v1/avatar/:instance_id/grant
+avatar_incarnate POST /v1/avatar/:instance_id/incarnate
+avatar_mould_info GET /v1/avatar/:instance_id/mould-info
+avatar_status GET /v1/avatar/:instance_id/status
+collapse     POST /v1/molecules/:id/collapse
+converse     POST /v1/avatar/converse
+ensemble     GET /v1/molecules
+freeze       POST /v1/molecules/:id/freeze
+nucleate     POST /v1/molecules
+observe      GET /v1/molecules/:id
+run          POST /v1/molecules/:id/run
+stuck        POST /v1/molecules/:id/stuck
+tackle       POST /v1/molecules/:id/tackle
+tag          POST /v1/molecules/:id/tags

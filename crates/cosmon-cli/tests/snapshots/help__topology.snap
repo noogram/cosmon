@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Topology — structural maps of the workspace (wraps the `topon` CLI)
+
+Usage: cs topology [OPTIONS] <COMMAND>
+
+Commands:
+  map      PageRank-ranked structural map of a Rust project
+  outline  Symbol outline of a single Rust file
+  symbols  Search symbols by name across a Rust project
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs topology map                      # PageRank-ranked module graph
+  cs topology outline crates/cosmon-core/src/lib.rs
+  cs topology symbols MoleculeId
+
+Thin wrapper over the `topon` CLI. Structural view, not runtime state.

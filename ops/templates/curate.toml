@@ -1,0 +1,56 @@
+# curate.toml — config for the nightly cross-galaxy drain-patrol.
+#
+# Lives at ~/.config/cosmon/curate.toml. Read by
+# scripts/curate-all-galaxies.sh, which is fired by the LaunchAgent
+# dev.democorp.cosmon.curate (see ops/launchd/).
+#
+# Provenance:
+#   - delib-20260521-c3cd (cross-galaxy drain patrol architecture v0).
+#   - task-20260521-9ee1 (this template).
+#
+# Install gesture (operator only — system-state change):
+#   mkdir -p ~/.config/cosmon
+#   cp ops/templates/curate.toml ~/.config/cosmon/curate.toml
+#   chmod 600 ~/.config/cosmon/curate.toml
+
+# ---------------------------------------------------------------------------
+# [drain] — which galaxies the nightly sweep visits.
+#
+# v0 ALLOWLIST: cosmon only. Start small. Add galaxies one at a time,
+# only after the cosmon sweep has proven safe (~1 week of soak with no
+# false-positive collapses or surface noise > max_surface_per_night).
+# ---------------------------------------------------------------------------
+[drain]
+galaxies = ["cosmon"]
+
+# ---------------------------------------------------------------------------
+# [budget] — per-night caps (rate-limiters, not quotas).
+#
+# Caps are passed into `cs nucleate curate-patrol` as `--var max_*=N`.
+# The formula (sibling task-20260521-276b) honours them as ceilings:
+# the worker stops promoting/collapsing once it hits the cap and surfaces
+# the overflow back to the operator.
+# ---------------------------------------------------------------------------
+[budget]
+max_collapse_per_night = 1500   # ceiling on auto-collapses (untagged stale, drift)
+max_classify_per_night = 200    # ceiling on retag operations (Rung 1)
+max_tackle_per_night = 0        # Rung 2 — surface candidates, NEVER auto-tackle
+max_surface_per_night = 20      # operator wake-up read-bandwidth ceiling
+
+# ---------------------------------------------------------------------------
+# [soak] — graveyard window before `cs purge` removes collapsed molecules.
+#
+# 24h gives the operator a morning-after window to inspect what was
+# auto-collapsed and resurrect false-positives. After this window,
+# collapsed molecules are eligible for physical purge.
+# ---------------------------------------------------------------------------
+[soak]
+collapse_purge_delay_hours = 24
+
+# ---------------------------------------------------------------------------
+# [firebreak] — guards against curate molecules curating themselves
+# (gödel) and against running on empty galaxies (kahneman D2).
+# ---------------------------------------------------------------------------
+[firebreak]
+formula_prefix = "curate-"        # curate-* formulas never auto-collapse each other
+min_non_patrol_molecules = 3      # skip galaxies with < N non-patrol pendings

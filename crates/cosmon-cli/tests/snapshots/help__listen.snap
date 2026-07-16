@@ -1,0 +1,106 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
+
+Usage: cs listen [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --seconds <SECONDS>
+          Seconds to record before cutting off (no VAD in v0).
+          
+          Ignored when `--transcript` or `--audio` is supplied. Keep the value short: whisper-cli on CPU runs near 1× realtime on the `small` model, so 15 s of speech costs ~15 s of wall-clock.
+          
+          [default: 10]
+
+      --transcript <TEXT>
+          Skip recording + transcription and use this text directly.
+          
+          Useful for scripting (end-to-end dry-runs without a microphone) and for isolating the spark pipeline from the audio stack when debugging. Incompatible with `--audio`.
+
+  -v, --verbose
+          Enable verbose output
+
+      --audio <PATH>
+          Transcribe an existing audio file instead of recording.
+          
+          Accepted formats are whatever the configured `whisper-cli` was built with (WAV/FLAC/MP3 on the default homebrew build). Incompatible with `--transcript`.
+
+      --json
+          Output in JSON format
+
+      --whisper-bin <PATH>
+          Path to the whisper-cli binary (defaults to `whisper-cli` in $PATH).
+          
+          This is the `whisper.cpp` CLI (`brew install whisper-cpp`), not the `OpenAI` Python package — the latter is slower and violates the local-first constraint (it bundles `PyTorch`).
+          
+          [default: whisper-cli]
+
+      --model <PATH>
+          Path to the whisper model (e.g. `ggml-small.bin`).
+          
+          Can also be set via the `COSMON_WHISPER_MODEL` env var. Required for actual transcription — if absent and `--transcript` was not supplied the command fails loudly instead of silently producing an empty spark.
+          
+          [env: COSMON_WHISPER_MODEL=]
+
+      --language <LANG>
+          Whisper language hint: `auto`, `fr`, `en`, …
+          
+          The whisper-cpp flag accepts ISO 639-1 codes. `auto` asks whisper to detect the language itself.
+          
+          [default: auto]
+
+      --ffmpeg-bin <PATH>
+          Path to the ffmpeg binary used for recording
+          
+          [default: ffmpeg]
+
+      --device <SPEC>
+          ffmpeg `AVFoundation` input device specifier.
+          
+          On macOS the default microphone is `":0"`. Run `ffmpeg -f avfoundation -list_devices true -i ""` to enumerate.
+          
+          [default: :0]
+
+      --dry-run
+          Skip nucleation — print the transcript only.
+          
+          Use this when validating the audio path on a fresh machine so you do not pollute the Inbox with test utterances.
+
+      --kind <KIND>
+          Molecule kind for the resulting spark (delegated to `cs spark`)
+          
+          [default: idea]
+
+      --tag <TAG>
+          Tag to attach (repeatable, defaults to `temp:hot`)
+
+      --fleet <FLEET>
+          Fleet to nucleate into
+          
+          [default: default]
+
+      --nucleon <NUCLEON>
+          Override the auto-derived `nucleon_id` (sparker identity)
+
+      --formulas-dir <DIR>
+          Path to the formulas directory (defaults to walk-up discovery)
+
+      --store-dir <DIR>
+          Path to the state store root (defaults to walk-up discovery)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs listen                   # voice-driven spark capture (whisper.cpp)
+  cs listen --once            # single utterance, then exit
+
+Voice ingress to the fleet. Wraps whisper.cpp transcription and
+produces a `spark` molecule per utterance.
+
+SEE ALSO: cs spark, cs drop.

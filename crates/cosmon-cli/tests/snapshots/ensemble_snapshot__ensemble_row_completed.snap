@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-done\", \"completed\", &i)"
+---
+row_kind=Terminal
+raw       = ◌ task-done [ ] completed
+stripped  = â task-done [ ] completed

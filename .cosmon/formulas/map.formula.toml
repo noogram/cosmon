@@ -1,0 +1,133 @@
+formula = "map"
+version = 1
+description = """
+Fan-out pattern — apply a per-item formula to each element of a \
+collection, producing N child molecules in parallel.
+
+This formula is the canonical cosmon realization of the MAP pattern \
+(Dust's `map` block, functional `map`). It is NOT a new molecule \
+kind and NOT a new Rust type — it is a TOML formula that fans out \
+by nucleating N children via the existing `cs nucleate --blocked-by \
+--decayed-from` primitives. The DAG edges carry ordering; each \
+child's branch carries its payload (data plane / control plane \
+separation — see CLAUDE.md §Communication Model).
+
+Required variables:
+  - collection        JSON array of item payloads. Every element
+                      becomes one child. Supported shapes:
+                        1. `[1, 2, 3]`                (scalars)
+                        2. `["alpha", "beta"]`        (strings)
+                        3. `[{"k":"v"}, {"k":"w"}]`   (objects, rendered as JSON)
+  - per_item_formula  Name of the formula to nucleate per item
+                      (e.g. `task-work`). Must exist under
+                      `.cosmon/formulas/<name>.formula.toml`.
+  - per_item_var      Name of the variable to feed each item into
+                      (e.g. `topic`). The child is nucleated with
+                      `--var <per_item_var>=<item>`.
+
+Optional variables:
+  - child_tag         Additional tag to attach to every child
+                      (e.g. `map-children-<parent-id>`). Used by the
+                      `reduce` formula to pick up the fan-out via
+                      `--tag-filter`. Defaults to
+                      `map-children:<this_molecule_id>`.
+
+ARTIFACT PATHS — all artifacts (plan.md, children.md, synthesis.md) \
+MUST be written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files \
+written to the worktree are destroyed by `cs done`.
+
+Contract with reduce: the conventional tag is \
+`map-children:<parent_mol_id>`; a sibling `reduce` molecule can be \
+nucleated with `--var tag_filter=map-children:<parent_mol_id>` to \
+fan back in. See `docs/handbook.md` §"Map / Reduce / While".
+"""
+id_prefix = "map"
+
+# Tier 1 — nucleates `items` children. The measure is the length of
+# the `collection` variable; bounded and well-founded.
+[tier]
+level = 1
+measure = "items"
+
+[[steps]]
+id = "plan"
+title = "Plan the fan-out"
+description = """
+Parse the `collection` variable as JSON. Count the `items`. For \
+each item, decide the exact `--var` pair that will be passed to the \
+child. Write MOLECULE_DIR/plan.md (MOLECULE_DIR from \
+`cs --json observe {mol_id}`) with a table:
+
+  | index | item (rendered) | child topic / var | per_item_formula |
+
+Record the chosen `child_tag` (explicit or default \
+`map-children:<this_mol_id>`). If the collection has zero items, \
+stop here and collapse with reason "empty collection"; downstream \
+steps are unreachable.
+"""
+acceptance = "MOLECULE_DIR/plan.md written with per-item rows and chosen child_tag."
+
+[[steps]]
+id = "fanout"
+title = "Nucleate one child per item"
+description = """
+For each row in plan.md, nucleate the child:
+
+    cs nucleate {{per_item_formula}} \\
+      --var {{per_item_var}}=<item> \\
+      --decayed-from {{this_mol_id}} \\
+      --tag {{child_tag}} \\
+      --tag temp:warm
+
+MANDATORY rules:
+  1. **Typed parent link** — use `--decayed-from {{this_mol_id}}` so
+     the child carries a typed `DecayedFrom` edge back to this map.
+     This is an information edge (not blocking); children run in
+     parallel, not sequentially.
+  2. **Temperature tag** — every child gets `--tag temp:warm`
+     immediately at nucleation. Untagged pendings are invisible to
+     `cs ensemble --tag temp:hot` and to the temp-review sweep
+     (convoy-cascade anti-pattern).
+  3. **Fan-out tag** — every child gets `--tag {{child_tag}}` so a
+     paired `reduce` molecule can pick them up by filter.
+
+After nucleation, run `cs tackle <child_id>` for each child to \
+actually launch its worker (map is a plan-fanout step; dispatch is \
+explicit). Write MOLECULE_DIR/children.md with the resulting \
+molecule ids, one per row.
+
+REGRESSION GUARDS (same as deep-think step 4):
+  - NEVER omit `--decayed-from` — textual parent mention in the
+    child's topic is invisible to `cs deps --transitive`.
+  - NEVER leave a child untagged — apply temp:warm at nucleation.
+  - Use `cs nucleate` individually per child, NOT `cs decay` —
+    decay is for homogeneous clones of the same topic, map is for
+    heterogeneous items.
+"""
+needs = ["plan"]
+acceptance = "N children nucleated (N = items), each with DecayedFrom link, temp:warm tag, and child_tag. MOLECULE_DIR/children.md lists all child ids."
+
+[[steps]]
+id = "collect"
+title = "Wait for children and collect outputs"
+description = """
+For every child id in MOLECULE_DIR/children.md, call \
+`cs wait <child_id>` until it reaches a terminal state \
+(completed/collapsed). Then aggregate:
+
+  - For each completed child, copy or link its `synthesis.md` (or
+    other primary artifact) into MOLECULE_DIR/responses/<index>.md.
+  - For each collapsed child, record the collapse reason in
+    MOLECULE_DIR/responses/<index>.md as a single line.
+
+Finally, write MOLECULE_DIR/synthesis.md — a high-level index:
+
+  | index | child_id | status | one-line summary |
+
+Do NOT re-interpret the children's outputs here — that is the \
+reduce formula's job. Map is fan-out + index, reduce is fan-in + \
+interpretation.
+"""
+needs = ["fanout"]
+acceptance = "MOLECULE_DIR/synthesis.md contains an index table of all children with status. MOLECULE_DIR/responses/ holds one file per child."

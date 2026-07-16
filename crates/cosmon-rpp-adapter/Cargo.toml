@@ -1,0 +1,99 @@
+[package]
+name = "cosmon-rpp-adapter"
+publish.workspace = true
+# Tracks the bake tag series (image `cosmon-server:vX.Y.Z`) — this is
+# the value `/healthz` and `/v1/auth/me` report as `version`
+# (delib-20260610-9a0c, tolnay). Bump it with every bake that rebuilds
+# the adapter binary.
+version = "2.5.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Remote Pilot Port (RPP) — §8j HTTPS+OIDC ingress adapter for Cosmon (ADR-080)."
+
+# Library + binary split: integration tests build the router against
+# in-memory state without touching the binary's startup path.
+[[bin]]
+name = "cosmon-rpp-adapter"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+# Lock-free, atomically-swappable handle to the live NucleonMap so the
+# adapter can reload sealed bindings on SIGHUP without a process restart
+# (and without dropping in-flight tmux workers). See src/reload.rs.
+arc-swap = { workspace = true }
+axum = { workspace = true }
+base64 = "0.22"
+blake3 = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+cosmon-core = { path = "../cosmon-core" }
+cosmon-filestore = { path = "../cosmon-filestore" }
+cosmon-hash = { path = "../cosmon-hash" }
+# MCP surface as a third projection of the same core the REST routes
+# project — nested at `/mcp` via Streamable HTTP (delib-20260709-943e).
+cosmon-mcp = { workspace = true }
+# Reused Ed25519 surface (`Scheme`/`Ed25519Scheme`/`PublicKey`/`Signature`)
+# for the detached ScopeBadge — the adapter does NOT reinvent the crypto
+# (ADR-0023 MVP-B; ADR-0002 mint surface).
+cosmon-notary = { workspace = true }
+cosmon-process-witness = { workspace = true }
+cosmon-state = { path = "../cosmon-state" }
+# Deterministic CBOR canon for the ScopeBadge (ADR-0023 MVP-B, offline-first).
+ciborium = { workspace = true }
+# Rust→TS contract for the badge schema (ADR-0023 §D8). The TS side never
+# verifies — derive only shapes the generated type; export lives in a test.
+ts-rs = { workspace = true }
+# Shared §8p canon types (`Exposure`) referenced by the generated
+# surface-events table (task-20260610-06a4).
+cosmon-surface-canon = { path = "../cosmon-surface-canon" }
+dashmap = "6"
+http = "1"
+jsonwebtoken = "9"
+nix = { workspace = true }
+# auth-claude module: PKCE generation + Anthropic HTTP exchange.
+rand = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+subtle = "2"
+thiserror = { workspace = true }
+tokio = { workspace = true }
+# SSE bridge from `tokio::sync::broadcast` → `Stream` for axum's
+# `Sse` response (task-20260522-c46a). The `sync` feature unlocks
+# `BroadcastStream`, the only wrapper used today.
+tokio-stream = { version = "0.1", features = ["sync"] }
+toml = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "cors", "limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
+# Client↔server contract net (replay-Dave D1, task-20260610-828e):
+# the auth_claude integration test deserialises the REAL route bytes
+# into the cosmon-remote client structs, so a wire drift between the
+# adapter and the CLI fails here instead of in a tenant's terminal.
+cosmon-remote = { path = "../cosmon-remote" }
+cosmon-thin-cli = { path = "../cosmon-thin-cli" }
+http-body-util = { workspace = true }
+# Phase 3 / Étage 3 (ADR-110 §"Phase 3 — conditional" point 2,
+# délib-20260523-a682 von-neumann Option D'): property tests on the
+# EventBus and the I3 ADDITIVE-COUNTERS fold. See
+# tests/proptest_event_bus.rs and tests/proptest_i3_additive_counters.rs.
+proptest = { workspace = true }
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
+
+[build-dependencies]
+# One parser for data/surface_events.txt, shared with
+# cosmon-thin-cli/build.rs (task-20260610-06a4).
+cosmon-surface-canon = { path = "../cosmon-surface-canon" }

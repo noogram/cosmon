@@ -1,0 +1,18 @@
+
+# Scenario: ready-frontier-monotone
+#
+# Binds the Constitution clause "ready_frontier monotone" to an
+# executable scenario. The set of ready molecules grows only as
+# predecessors complete; no completed-then-ready molecule ever leaves
+# the frontier except by being dispatched.
+#
+# Status: SKELETON — see scenarios/merge-before-dispatch.toml.
+
+name = "ready-frontier-monotone"
+clause = "ready_frontier monotone"
+description = "ready_frontier(t) ⊆ ready_frontier(t+1) ∪ dispatched(t)."
+foundry_proposition = ""  # TODO: Lean proposition ReadyFrontier_monotone
+
+[expect]
+kind = "monotone"
+observable = "ready_frontier"

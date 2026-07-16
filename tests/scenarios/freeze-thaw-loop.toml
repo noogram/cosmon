@@ -1,0 +1,53 @@
+# Freeze then thaw a running molecule, repeatedly. The cycle is
+# idempotent: status returns to Running, and a final run_root completes it.
+
+[scenario]
+name = "freeze-thaw-loop"
+description = "Freeze/thaw is idempotent and preserves step progress."
+
+[binds]
+constitution_clause = "freeze-thaw-idempotent"
+
+[[given.molecules]]
+id = "M"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+  { name = "s2", native = "cosmon::test::noop" },
+]
+
+[[actions]]
+op = "activate"
+target = "M"
+
+[[actions]]
+op = "freeze"
+target = "M"
+
+[[actions]]
+op = "thaw"
+target = "M"
+
+[[actions]]
+op = "thaw"        # second thaw is a no-op (idempotent)
+target = "M"
+
+[[actions]]
+op = "freeze"
+target = "M"
+
+[[actions]]
+op = "thaw"
+target = "M"
+
+[[actions]]
+op = "run_root"
+target = "M"
+
+[[assert]]
+molecule = "M"
+status = "completed"
+
+[[assert]]
+molecule = "M"
+step = "2/2"

@@ -1,0 +1,182 @@
+formula = "drift-vanity-family"
+version = 1
+description = """
+Drift-detection patrol #4 — *vanity family*.
+
+A vanity family is a galaxy claiming a `galaxy_kind` it does not \
+earn: the family's success metric reads zero for three consecutive \
+reporting periods while a *neighbor* family's metric would be \
+non-zero on the same repo. The prescription is **re-type, do not \
+prop up** (delib-20260419-5168 §4 Q8d / godin).
+
+Threshold:
+  - Own-family North Star = 0 across three consecutive reporting \
+    periods, AND
+  - At least one of the three periods would read non-zero if the \
+    galaxy had been classified as its strongest neighbor.
+
+The reporting period is configurable (default: 14 days). The patrol \
+picks the strongest neighbor empirically — the neighbor kind whose \
+metric reads largest on the repo.
+
+Neurion gate — reads `galaxy_kind` for every repo in `repos`. Also \
+reads `name` and `path` so the metric helpers can run `git log` on \
+the actual working tree.
+
+Threshold helper — `neurion_core::domain::drift::vanity_family_drift`. \
+Pure Rust, unit-tested. If the formula and helper disagree, the \
+helper wins.
+
+ARTIFACT PATHS — MOLECULE_DIR from `cs --json observe {mol_id}`; \
+NEVER the worktree.
+
+Cross-cutting — skip galaxies tagged `status:nascent` or \
+`status:frozen`; they are not vanity candidates (no claim to break). \
+Also skip galaxies with no `galaxy_kind` (nothing claimed, nothing \
+to falsify).
+
+No variables required.
+"""
+id_prefix = "drift-vanity"
+freeze_on_last_step = false
+
+# Tier 1 — bounded by the number of classified galaxies with a non-null
+# kind. Each vanity signal fires at most one issue.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Compute own-family and neighbor-family metrics over 3 periods"
+description = """
+1. **Enumerate classified galaxies** (neurion):
+
+   ```
+   neurion.query_registry("SELECT name, path, galaxy_kind FROM repos \
+   WHERE galaxy_kind IS NOT NULL")
+   ```
+
+   Fall back to `cs galaxies list --json | jq '.galaxies[] | \
+   select(.galaxy_kind != null)'`. Exclude any galaxy with \
+   `status:frozen` or `status:nascent` tags.
+
+2. **For each galaxy**, compute the family's North Star metric \
+   (synthesis §6) over THREE consecutive periods of 14 days each \
+   (today−42 → today−28, today−28 → today−14, today−14 → today):
+
+   - `infra` North Star = distinct sister galaxies committing against \
+     the infra's primitives in the window. Approximation: grep the \
+     other galaxies' `Cargo.toml`/`package.json` for imports of this \
+     galaxy's name, and check whether commits landed in the window.
+   - `project` North Star = `chronicles × shipped` per period. \
+     Shipped = git tags like `release/*` or `v*.*.*`. Chronicles = \
+     files touched under `docs/lore/` in the window.
+   - `social-hub` North Star = human-co-signed molecules per period \
+     (≥2 distinct human authors on a molecule).
+   - `editorial` North Star = external publications per period (git \
+     tags `publish/*`, files in `public/`, chronicles tagged \
+     `published`).
+
+3. **For each galaxy**, compute the *strongest neighbor* metric on \
+   the same repo: run the 3 other North Star formulas. Pick the \
+   neighbor with the largest sum across the three periods. Record \
+   both that neighbor's `kind` and its per-period values.
+
+4. **Write** `MOLECULE_DIR/scan.md` with one section per galaxy:
+
+   ```
+   ### <galaxy> (claimed: <kind>)
+   own_metric_periods: [p1, p2, p3]
+   strongest_neighbor: <neighbor-kind>
+   neighbor_metric_periods: [p1, p2, p3]
+   ```
+
+   Followed by a summary table:
+   | galaxy | claimed | own_sum | neighbor | neighbor_sum |
+"""
+acceptance = "MOLECULE_DIR/scan.md written: one section per classified galaxy with own_metric_periods (length 3), strongest_neighbor, neighbor_metric_periods (length 3); summary table."
+
+[[steps]]
+id = "detect"
+title = "Apply the vanity threshold and emit issues"
+description = """
+Per galaxy, instantiate `VanityObservation { own_metric_periods, \
+neighbor_kind, neighbor_metric_periods }` and call \
+`vanity_family_drift(name, claimed_kind, obs)`.
+
+Fire condition (from the helper):
+  - `own_metric_periods == [0, 0, 0]` AND
+  - at least one `neighbor_metric_periods[i] != 0`.
+
+For EACH fire, nucleate:
+
+```
+cs nucleate spark-capture \
+  --kind issue \
+  --var topic="drift-detected: vanity-family — <galaxy> claims <claimed_kind> \
+but reads 0×3 while <neighbor_kind> would read <n1>,<n2>,<n3>" \
+  --tag drift-detected \
+  --tag drift:vanity-family \
+  --tag galaxy:<galaxy> \
+  --tag claimed:<claimed_kind> \
+  --tag neighbor:<neighbor_kind> \
+  --tag temp:warm
+```
+
+`temp:warm` MANDATORY.
+
+**Rate-limit guard**: if more than 5 vanity fires in a single sweep, \
+STOP after the 5th and write `## Overflow`. The cause is almost \
+certainly a systematic metric bug (silence across every galaxy); do \
+not flood the backlog.
+
+**Do NOT** update `galaxy_kind` automatically. The issue molecule is \
+a prompt for the operator to run the Q2 observable-tests migration \
+or to collapse the galaxy.
+
+**Write** `MOLECULE_DIR/detect.md`:
+  - one row per galaxy: `galaxy | claimed | own_sum | neighbor | \
+    neighbor_sum | verdict | issue_id`.
+  - zero-fire line when applicable.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detect.md with per-galaxy verdict rows; up to 5 issues nucleated with claimed + neighbor tags + temp:warm; overflow section if >5."
+
+[[steps]]
+id = "report"
+title = "Produce the patrol report"
+description = """
+Write `MOLECULE_DIR/report.md`:
+
+  ```
+  # Drift patrol — vanity family — {date}
+
+  ## Galaxies scanned
+  | galaxy | claimed | own_sum_3p | strongest_neighbor | neighbor_sum_3p | verdict |
+
+  ## Fires (vanity candidates)
+  Per fire: galaxy, claimed vs neighbor, raw numbers, issue ID, \
+  godin-style interpretation ("The name does not change what the \
+  operator does on Monday morning — re-type or collapse.").
+  If zero fires: "No vanity family detected in this window."
+
+  ## Measurement ceiling (carnot)
+  Social-hub authenticity and project principle-value are \
+  not directly measurable — the patrol uses observable proxies \
+  (co-author count, chronicle count). False positives are possible; \
+  operator review is mandatory before re-typing.
+
+  ## Non-actions
+  The patrol NEVER updates galaxy_kind, collapses molecules, or \
+  renames repos. It emits a typed signal; the operator runs the \
+  Q2 observable-test migration if re-typing is warranted.
+
+  ## Next sweep
+  Default: 42 days (one full 3-period window).
+  ```
+
+Pointer: `vanity_family_drift` + `VanityObservation` in neurion-core.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/report.md with galaxies-scanned table, per-fire interpretation with godin framing, measurement-ceiling caveat, non-actions, next-sweep."

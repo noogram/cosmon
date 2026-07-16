@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Healthy)"
+---
+variant=Healthy
+label=healthy
+glyph=♥
+ratatui_style=fg=Green mod=BOLD
+needs_attention=false

@@ -1,0 +1,340 @@
+formula = "merge-conflict"
+version = 1
+description = """
+Pipeline cosmon pour résoudre un conflit de merge sur une feature branch \
+sans que le pilote exécute à la main. Né de l'escalation `task-20260413-c1cb` \
+(chronicle 2026-04-19 *Le pilote qui a rebasé à la main*) où un worker avait \
+brûlé $32 en escalations avant d'abandonner, laissant le pilote résoudre 6 \
+régions de conflit manuellement — sans molécule, sans briefing.md, sans \
+synthesis_hash. Le produit livré, le trail borgne.
+
+**Principe.** L'escalation n'est un bon geste que si elle est *nommée*. \
+Un merge conflict est une infrastructure manquante : cette formule remplit \
+le trou. Le prochain qui rebasera c1cb-style le fera via `cs tackle` sur une \
+molécule typée — jamais à la main.
+
+**Invocation.**
+
+    cs nucleate merge-conflict \\
+        --var branch=feat/task-20260413-c1cb \\
+        --var base=main
+    cs tackle <id>
+    cs wait <id> &
+    cs done <id>
+
+**Variables.**
+  - `branch` (required): feature branch to merge (e.g. `feat/task-20260413-c1cb`).
+  - `base` (default: `main`): integration branch to rebase/merge onto.
+  - `max_retries` (default: `3`): per-conflict resolution attempts before \
+    the worker MUST `cs stuck` rather than keep burning tokens. This is the \
+    explicit bound that kills the c1cb anti-pattern (infinite escalations).
+  - `adr_ref` (optional): ADR id to cite in the commit message when the \
+    resolution encodes an architectural choice (e.g. `ADR-047`).
+
+**Artifact trail** (proof-of-work):
+  - `MOLECULE_DIR/briefing.md`              (written by cs tackle)
+  - `MOLECULE_DIR/conflict-map.md`          (step 1 — taxonomy of conflicts)
+  - `MOLECULE_DIR/diagnostic.md`            (step 3 — semantic resolution log)
+  - `MOLECULE_DIR/synthesis.md`             (step 5 — final merge report)
+
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` — \
+NEVER the worktree `.worktrees/{mol_id}/`, which is destroyed by `cs done`.
+
+**Non-code auto-resolution policy** (step 2). Cosmon state files follow \
+well-known merge rules that never need human judgment:
+
+  | Path pattern                   | Strategy                               |
+  |--------------------------------|----------------------------------------|
+  | `.cosmon/state/**/events.jsonl`| union-merge (append both sides)        |
+  | `.cosmon/state/**/frontier.json`| checkout --ours (fleet-local cache)    |
+  | `.cosmon/state/**/archive/**` | skip (sibling — handled by archive formula) |
+  | `.cosmon/state/**/state.json`  | checkout --ours (gitignored per ADR-030) |
+
+Code conflicts — anything under `crates/`, `src/`, `bin/`, `tests/`, \
+`docs/**/*.md` — require step 3 semantic resolution with a diagnostic \
+entry. *No mechanical diff. The resolution must take the functional \
+superset of both sides, not the line-wise union.*
+
+**Bounded escalation** (kills the c1cb pattern). If any single conflict \
+region fails `max_retries` resolution attempts (compile errors, logical \
+incoherence the worker cannot disentangle), the worker MUST:
+
+  1. Append the failing region + the N attempted resolutions to \
+     `MOLECULE_DIR/diagnostic.md` under a `## Escalated` section.
+  2. Run `cs stuck <mol_id> --reason "merge-conflict: <region> exhausted \
+     <max_retries> resolution attempts"`.
+  3. Exit. DO NOT keep retrying, DO NOT call a subagent to retry, DO NOT \
+     request whispers — that is the c1cb infinite-loop antipattern.
+
+The pilot will `cs thaw` + `cs resume` after reading the diagnostic, \
+typically after an operator decision or an ADR update.
+"""
+id_prefix = "merge"
+
+# Tier 0 — leaf formula, no child nucleation. All work happens in the
+# target worktree; no sibling molecules are spawned.
+
+[tier]
+level = 0
+
+[[steps]]
+id = "analyze"
+title = "Analyze the conflict surface"
+description = """
+Open the target branch `{{branch}}` in a fresh worktree (cs tackle already \
+created it under `.worktrees/{{mol_id}}/`). Run `git fetch origin` then \
+`git diff {{base}}...HEAD --name-status` to enumerate every file the \
+branch touches. For each file, predict the merge outcome by trial-merging \
+`{{base}}` into the branch on a throwaway worktree:
+
+    git worktree add /tmp/cs-merge-probe-{{mol_id}} {{branch}}
+    cd /tmp/cs-merge-probe-{{mol_id}}
+    git merge --no-commit --no-ff {{base}} || true
+    git status --porcelain=v1 | grep '^UU\\|^AA\\|^DU\\|^UD' > conflicts.txt
+    git merge --abort
+    cd -
+    git worktree remove /tmp/cs-merge-probe-{{mol_id}}
+
+Classify each conflict into one of four buckets:
+
+  1. **add/add** (AA) — both sides created the same path with distinct \
+     content. Most common root cause: two tasks dispatched in parallel \
+     that touched the same file (the c1cb scenario — `cmd/archive.rs`).
+  2. **content/content** (UU) — both sides modified the same region of \
+     an existing file. Requires semantic resolution in step 3.
+  3. **state-jsonl race** — conflict on `.cosmon/state/**/events.jsonl`, \
+     `frontier.json`, or `state.json`. Resolvable by the non-code policy \
+     in step 2. No human judgment.
+  4. **delete/modify** (DU/UD) — one side deleted, the other modified. \
+     REQUIRES operator decision: keep or discard? This is an automatic \
+     `cs stuck` — the worker does not guess intent.
+
+Write `MOLECULE_DIR/conflict-map.md` with a table:
+
+    | Path | Bucket | Strategy | Notes |
+    |------|--------|----------|-------|
+    | crates/cli/src/cmd/archive.rs | AA | semantic (step 3) | two parallel impls of Archive cmd |
+    | .cosmon/state/.../events.jsonl | state-jsonl | union-merge (step 2) | — |
+    | docs/adr/047.md | UU | semantic (step 3) | header + section merge |
+    | templates/old.toml | DU/UD | ESCALATE | pilot decision: keep or drop |
+
+Include a summary header: N total conflicts, broken down by bucket, and \
+a *plan of record* stating which steps will handle which buckets.
+
+**Exit criteria.** `MOLECULE_DIR/conflict-map.md` exists, enumerates \
+every conflicting path with a bucket + strategy, and flags any DU/UD \
+for escalation. If all conflicts are DU/UD, the worker MUST `cs stuck` \
+here — there is no work this formula can do without operator input.
+"""
+acceptance = "MOLECULE_DIR/conflict-map.md written with per-path bucket classification (AA/UU/state-jsonl/DU-UD), strategy column, and summary counts. DU/UD escalated via cs stuck if any."
+
+[[steps]]
+id = "rebase"
+title = "Start the rebase and auto-resolve non-code conflicts"
+description = """
+In the worktree `.worktrees/{{mol_id}}/`, start the integration merge:
+
+    git fetch origin
+    git merge --no-ff origin/{{base}} || true
+
+For every path classified as **state-jsonl** in `conflict-map.md`, apply \
+the non-code auto-resolution policy:
+
+    # events.jsonl — union merge (both sides appended events)
+    git merge-file --union <path> <path> <path>   # or:
+    git checkout --theirs <path> && cat <path.ours> >> <path>
+
+    # frontier.json — fleet cache, keep ours
+    git checkout --ours <path>
+
+    # state.json — gitignored, but if present: keep ours
+    git checkout --ours <path>
+
+    # archive sibling — skip (the archive formula owns it)
+    git checkout --ours <path>
+
+    git add <path>
+
+After each resolution, verify the file parses:
+  - events.jsonl: `jq -s . <path> > /dev/null` (NDJSON must still be valid)
+  - frontier.json / state.json: `jq . <path> > /dev/null`
+
+If a state-file resolution produces invalid JSON, that is NOT a semantic \
+conflict — it is a merge-driver bug. Document it in `diagnostic.md` under \
+`## State-file parse failures` and `cs stuck` with reason \
+`merge-conflict: state-file parse failure after auto-resolve`. Do NOT \
+hand-edit state files.
+
+Leave AA and UU conflicts for step 3. Do NOT `git commit` yet — the \
+merge is still in progress (MERGE_HEAD exists). Step 3 continues on the \
+same index.
+
+**Exit criteria.** Every state-jsonl path from the conflict map is \
+staged (`git diff --cached --name-only` contains it) and passes its \
+parse check. The working tree still shows unresolved AA/UU entries — \
+that is expected.
+"""
+needs = ["analyze"]
+acceptance = "Every state-jsonl path is resolved per policy, staged, and parses valid JSON. MERGE_HEAD still present. AA/UU conflicts remain for step 3."
+
+[[steps]]
+id = "resolve-code"
+title = "Semantic resolution of code conflicts"
+description = """
+For each AA or UU path in `conflict-map.md`, resolve the conflict by \
+reading *both sides in full* and producing the **functional superset** — \
+not a line-wise diff. This is the step that distinguishes a merge \
+formula from `git mergetool`: the worker understands what each side was \
+trying to do and writes a resolution that honors both intents.
+
+**Procedure per conflict region.**
+
+  1. Read the <<<<<<< ours ... ======= theirs >>>>>>> region in full.
+  2. Read surrounding context: the whole function, the whole struct, the \
+     whole test module. A conflict is never local — it is always about \
+     intent.
+  3. Identify the *intent* of each side. Typical patterns:
+       - both sides added a new function → keep both, rename if needed;
+       - both sides modified the same signature → unify to the superset \
+         (e.g. union of args, most permissive return type);
+       - both sides added an enum variant → keep both;
+       - both sides rewrote an impl → merge by responsibility, not by \
+         lexical union.
+  4. Write the resolution into the file. Remove all conflict markers.
+  5. Append an entry to `MOLECULE_DIR/diagnostic.md` documenting:
+       - **Path + line range** of the resolved region.
+       - **Ours intent** (one sentence, the semantic change from {{branch}}).
+       - **Theirs intent** (one sentence, the semantic change from {{base}}).
+       - **Resolution rationale** (one paragraph — why this superset).
+       - **ADR ref** if applicable (`{{adr_ref}}`).
+
+**Bounded retries** (kills c1cb antipattern). Maintain a per-region \
+retry counter. A retry is: compilation failure after writing the \
+resolution, or a test failure whose root cause is this region. Cap at \
+`{{max_retries}}`. When exhausted:
+
+  1. Append the failing region + every attempted resolution to \
+     `diagnostic.md` under `## Escalated — exhausted {{max_retries}} attempts`.
+  2. Run `cs stuck {{mol_id}} --reason "merge-conflict: <path>:<lines> \
+     exhausted {{max_retries}} attempts"`.
+  3. Exit. DO NOT spawn subagents to retry. DO NOT request whispers. \
+     DO NOT keep editing. The pilot resumes after operator review.
+
+**DU/UD regions** (from step 1) escalate immediately without retry — \
+they encode an intent question only the operator can answer.
+
+After all non-escalated code conflicts are resolved, stage them: \
+`git add -A`. The working tree is now clean except MERGE_HEAD.
+
+**Exit criteria.** `git status --porcelain=v1` shows no `UU`/`AA`/`DU`/\
+`UD` entries; every code conflict has a `diagnostic.md` entry with the \
+four fields; no region was silently resolved without a diagnostic line.
+"""
+needs = ["rebase"]
+acceptance = "Every AA/UU region resolved semantically (superset, not diff) with a diagnostic.md entry (path+lines, ours intent, theirs intent, rationale, optional ADR ref). Exhausted regions escalated via cs stuck. git status clean of conflict markers."
+
+[[steps]]
+id = "verify"
+title = "Run all gates before commit"
+description = """
+The merge is staged but not committed. Run the project's verification \
+gates IN THE WORKTREE — if any gate fails, the merge is semantically \
+broken even if `git status` is clean. Gates come from \
+`.cosmon/config.toml` `[gates]`; for cosmon itself they are:
+
+    cargo check --workspace
+    cargo test --workspace
+    cargo clippy --workspace -- -D warnings
+    cargo fmt --all -- --check
+
+Run them IN ORDER. Stop at the first failure and fix it IN PLACE — a \
+gate failure here is usually one of:
+
+  - Resolution introduced an unused import (clippy) → remove it.
+  - Resolution missed a `use` statement (check) → add it.
+  - Resolution changed a signature one test expected → update the test \
+    if the new signature is intended; otherwise revisit step 3.
+  - Resolution mis-formatted (fmt) → `cargo fmt --all` (not \
+    `fmt -- --check`).
+
+**Bounded retries on gate failures.** Cap fixes-per-gate at \
+`{{max_retries}}`. If a gate fails `{{max_retries}}` times consecutively, \
+append the failing output to `diagnostic.md` under `## Gate failures` \
+and `cs stuck` with reason `merge-conflict: <gate> failed \
+{{max_retries}} times`. The pilot resumes after operator review.
+
+**No shortcut.** Never `--no-verify` the commit, never `clippy --allow`, \
+never `#[allow(dead_code)]` to paper over a mis-resolution. That is the \
+silent-patch antipattern the silence-as-signal ADR forbids.
+
+**Exit criteria.** All four gates pass. The working tree is clean \
+(apart from MERGE_HEAD) and every staged change is semantically honored \
+by the compiler and the test suite.
+"""
+needs = ["resolve-code"]
+acceptance = "cargo check + test + clippy + fmt all pass in the worktree. No --no-verify, no allow-shortcuts. Gate failures escalated via cs stuck after {{max_retries}} attempts."
+
+[[steps]]
+id = "commit"
+title = "Seal the merge with a structured commit"
+description = """
+Compose and write the merge commit. The subject follows the \
+Conventional Commits format for a merge:
+
+    Merge branch '{{branch}}' into {{base}}
+
+    Resolved <N> conflict regions across <K> files:
+      - <path1>:<lines>  (bucket: AA)    → <one-line rationale>
+      - <path2>:<lines>  (bucket: UU)    → <one-line rationale>
+      - .cosmon/state/.../events.jsonl   → union-merge (state-jsonl policy)
+      - ...
+
+    ADR reference: {{adr_ref}}
+    Formula:       merge-conflict v1
+    Molecule:      {{mol_id}}
+    Diagnostic:    see MOLECULE_DIR/diagnostic.md
+
+    Co-Authored-By: Cosmon merge-conflict formula <cosmon@local>
+
+Commands:
+
+    git commit --file=MERGE_MSG       # compose via heredoc or write MERGE_MSG
+    # DO NOT git push — cs done handles integration.
+
+**No push.** The worker does not push to remote. `cs done` is the \
+human-only command that merges the branch back to `{{base}}` on the \
+main checkout and tears down the worktree. Pushing here would bypass \
+`cs done` and violate the worker/human boundary (architectural \
+invariant #7).
+
+Finally, write `MOLECULE_DIR/synthesis.md`:
+
+    # Merge synthesis: {{branch}} → {{base}}
+
+    ## Outcome
+    <one sentence — merged cleanly, or escalated via cs stuck>
+
+    ## Conflict breakdown
+    <copy the summary table from conflict-map.md>
+
+    ## Key resolutions
+    <bullet list of the 3-5 most semantically interesting resolutions, \
+     each with a one-paragraph rationale — this is what future readers \
+     will grep for>
+
+    ## Gates
+    <cargo check/test/clippy/fmt results>
+
+    ## Escalated (if any)
+    <list of cs stuck calls with reasons>
+
+    ## ADR reference
+    {{adr_ref}}
+
+**Exit criteria.** A single merge commit exists on `{{branch}}` with \
+the structured message. `MOLECULE_DIR/synthesis.md` exists and names \
+every escalated region. The branch is ready for `cs done`, which will \
+merge it back to `{{base}}` on the human's primary checkout.
+"""
+needs = ["verify"]
+acceptance = "Single merge commit on {{branch}} with structured message (resolved regions, ADR ref, molecule id). MOLECULE_DIR/synthesis.md written with outcome, breakdown, key resolutions, gate results, escalations. No git push — cs done is the integration step."

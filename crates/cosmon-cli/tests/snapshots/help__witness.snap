@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Witness — Layer-2 witness-quorum seal for stress-test molecules (ADR-085 §3)
+
+Usage: cs witness [OPTIONS] <COMMAND>
+
+Commands:
+  attest  Attest a stress-test molecule's prior seal — emit `SealAttested`
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs witness attest <mol>                       # default prior path: <mol_dir>/prior.md
+  cs witness attest <mol> --prior-path prior.md # explicit prior file
+  cs witness attest <mol> --witness-id ci-bot   # deterministic identity (LaunchAgent/CI)
+  cs witness attest <mol> --json                # NDJSON for scripting
+
+Layer-2 witness-quorum seal for stress-test molecules (ADR-085 §3).
+A separate cosmon agent reads the prior file's bytes, computes its
+BLAKE3 hash, and emits a SealAttested event distinct from the
+molecule's tackler session. Refuses if the molecule's class is not
+stress-test, or if the witness identity matches the tackler's
+session_name (cheap structural-independence check).
+
+SEE ALSO: cs notarize (operator Ed25519 attestation, ADR-056).

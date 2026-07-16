@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  whisper-to-spark — periodic consumer of the Matrix whisper inbox.
+
+  Fires `scripts/whisper-to-spark-tick.sh --json` every 300 seconds (5 min,
+  aligned with the default matrix-echo-tick cadence so a whisper lands
+  in the inbox and becomes a spark within one tick).
+
+  The script is idempotent — re-runs with nothing to do are cheap (~10ms
+  to iterate an empty inbox). It walks up from `$WorkingDirectory` to
+  find the project's `.cosmon/whispers/inbox/` directory, so running from
+  the repo root is enough.
+
+  Placeholders substituted by `scripts/install-whisper-to-spark-launchagent.sh`
+  at install time:
+    __HOME__         the operator's home directory.
+    __COSMON_ROOT__  the absolute path of the cosmon project to watch.
+
+  Not auto-installed. Operator runs:
+      scripts/install-whisper-to-spark-launchagent.sh install
+      scripts/install-whisper-to-spark-launchagent.sh status
+      scripts/install-whisper-to-spark-launchagent.sh uninstall
+
+  Governing invariants:
+    - ADR-016: no daemon in core — external scheduler fires a one-shot.
+    - §8j:    this job does NOT re-do admission; matrix-echo-tick does.
+    - CLI-first for workers: script invokes `cs nucleate spark`, not MCP.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.whisper-to-spark</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__COSMON_ROOT__/scripts/whisper-to-spark-tick.sh</string>
+        <string>--cosmon-root</string>
+        <string>__COSMON_ROOT__</string>
+        <string>--json</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/whisper-to-spark.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/whisper-to-spark.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__COSMON_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

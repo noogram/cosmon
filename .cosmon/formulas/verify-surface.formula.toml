@@ -1,0 +1,107 @@
+formula = "verify-surface"
+version = 1
+description = """
+Independent visual witness for the `surface_visual` mindguard.
+
+A molecule that touched the visual surface (HTML / CSS / JS / wiki /
+lumen-web) cannot `cs complete` until a *sibling* verify-surface
+molecule has landed GREEN inside the gate's `T_max` window. This
+formula IS that sibling: a short two-step render→observe act whose
+whole job is to make an independent channel touch the rendered
+observable, so the claim "the surface is ready" is no longer a
+saillant proxy the producing channel invented about itself.
+
+Recognised by the gate when ALL hold (surface_visual.rs):
+
+  - `formula_id == "verify-surface"`;
+  - `variables.target == "<MOL>"` (the molecule under verification);
+  - `status == Completed`;
+  - `updated_at >= now − T_max`.
+
+Nucleate it with the molecule it verifies as the `target` variable:
+
+    cs nucleate verify-surface --var target=<MOL>
+
+Why two steps and not one: a single-step formula that merely flips a
+bit would be the empty "satisfy-the-system" formula the composability
+principle forbids — and worse, it would let the gate be satisfied
+without anyone *looking*, recreating the very Kahneman trap the
+mindguard exists to close (CHRONICLES 2026-05-27, *L'auto-pilote qui
+claim sans regarder*). The render step produces the observable; the
+observe step forces a witness, independent of the channel that wrote
+the surface, to actually touch it. Both must pass for GREEN.
+
+Reference: `docs/runbook/verify-surface.md`,
+`crates/cosmon-cli/src/mindguard/surface_visual.rs`, parent
+`idea-20260531-3fbd`.
+"""
+id_prefix = "verify"
+
+# Tier 0 — leaf formula, no child nucleation. The witness pass is the
+# whole work; it spawns nothing.
+[tier]
+level = 0
+
+[[steps]]
+id = "render"
+title = "Render the target's visual surface to a viewable artifact"
+description = """
+Read the surface that the target molecule `{{target}}` touched —
+the HTML / CSS / JS / wiki / lumen-web files in its diff against
+mainline — and produce a *rendered* observable an independent witness
+can inspect. Do NOT trust the source diff as the observable: render it.
+
+Concretely, for each touched surface entry point (e.g. an `index.html`
+deck, a wiki page, a lumen/web build):
+
+  1. Serve or open it the way a human would, with a HEADLESS browser
+     (headless Chrome `--print-to-pdf` / `--screenshot`, a static-server
+     load, or the `playwright-headless` MCP — whichever the surface needs
+     to actually paint). ⛔ NEVER the `playwright-extension` MCP: it
+     drives the operator's logged-in Chrome through a browser extension a
+     headless tmux worker does not have, so the call hangs forever and
+     the worker never advances (observed task-20260617-6ae2 — 50+ min
+     deadlock; chronicle 2026-06-17). That server is operator-cockpit-
+     only.
+  2. Capture the painted result as a durable artifact under the
+     MOLECULE STATE DIRECTORY (from `cs --json observe {mol_id}`,
+     `molecule_dir` field — NEVER the worktree, which `cs done`
+     destroys). One screenshot / PDF per entry point.
+  3. Note any entry point that fails to render at all (blank page,
+     404, JS console error, empty deck) — a failed render is a
+     first-class observation, not a step error to swallow.
+
+Output: `MOLECULE_DIR/render.md` listing every entry point, the
+artifact captured for it, and whether it painted.
+"""
+acceptance = "MOLECULE_DIR/render.md written: every surface entry point in the target's diff has a captured rendered artifact (screenshot/PDF) or is explicitly flagged as failing to render."
+
+[[steps]]
+id = "observe"
+title = "Independent witness inspects the rendered artifacts and records a verdict"
+description = """
+Now the witness step — the load-bearing half. A reader independent of
+the channel that wrote the surface opens each rendered artifact from
+the render step and judges whether the surface renders *as intended*:
+content present (not blank), layout not broken, no obvious 404 / empty
+deck / console-error screen.
+
+This is the touch the mindguard requires: the observable defined by
+the claim ("the surface is ready") is touched by a channel other than
+the one that produced it. Do not re-derive readiness from the git
+diff, the build exit code, or "git push OK" — those are the saillant
+proxies that lied on 2026-05-21 / 24 / 27. Look at the picture.
+
+For each artifact, record one of: PASS (renders as intended),
+CONCERN (renders but with a visible defect — describe it), or FAIL
+(does not render / blank / broken). Write the verdict table to
+`MOLECULE_DIR/witness.md` with one row per entry point and a one-line
+overall verdict at the top.
+
+The molecule completes GREEN only when every entry point is PASS (or
+PASS-with-noted-CONCERN the operator has accepted). Any FAIL means the
+surface is not ready: do NOT complete — report the FAIL so the target
+molecule's surface gets fixed before its `cs complete` is retried.
+"""
+needs = ["render"]
+acceptance = "MOLECULE_DIR/witness.md written by an independent witness: per-entry-point PASS/CONCERN/FAIL verdict plus an overall verdict; no entry point left FAIL when the molecule is allowed to complete GREEN."

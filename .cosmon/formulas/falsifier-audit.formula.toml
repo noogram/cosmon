@@ -1,0 +1,108 @@
+formula = "falsifier-audit"
+version = 1
+description = """
+The falsifier sweep — cosmon's answer to the one class of gate the tree did
+NOT have. Every existing gate (build, test, clippy, fmt, `cs verify`) proves the
+suite still PASSES on the code as written; `cs verify` merely REPLAYS the
+recorded gates (verify.rs:483). None of them ask the harder question that
+delib-20260710-95a7 §Q6 (torvalds + feynman) named:
+
+  *"reverting the fix must redden the test"* — does the suite actually CATCH a
+  change, or is it green theatre?
+
+This formula runs the two falsifier gates as B2 `command` steps
+(Step::is_gate() = command.is_some(), formula.rs:801) — reusing the existing
+gate mechanism, no cosmon-core change:
+
+  1. fixture-independence (FAST, hard) — a grep tripwire over the tracked test
+     surface. A fixture that re-derives its expected value from
+     size_of/align_of/offset_of of the type under test is a tautology: a layout
+     bug flows into both sides of the assert, so reverting it cannot redden the
+     test. This is the "reuse the constant of the code being tested" pathology,
+     caught statically and cheaply.
+
+  2. mutation-falsifier (SLOW, periodic) — a `cargo-mutants` wrapper. It mutates
+     the code and reports any mutant the suite failed to kill (a surviving
+     mutant is a test hole: the corresponding fix could be reverted and nothing
+     would go red). Mutation testing is minutes-to-hours (ADR-010:177), so this
+     step is a PERIODIC sweep, never an inline hard-abort on `cs done`/`cs
+     evolve` (feynman). Its natural cadence is a weekly LaunchAgent or the
+     nightly CI cron — the same audit-cadence pattern chronicle-lint uses.
+
+cargo-test-at-harvest already exists (smoke-test.formula.toml + `cs verify`) —
+this formula deliberately adds ONLY the falsifier dimension neither expresses.
+
+CADENCE — run this formula periodically, not on the hot path:
+
+  cs nucleate falsifier-audit
+  cs tackle <id>
+  cs wait <id>
+  cs done <id>
+
+The fixture-independence step is fail-closed (exit 1 stops the formula); the
+mutation-falsifier step reports surviving mutants but, by its non-blocking
+cadence, is meant to be read as a findings list, not a merge veto — the operator
+decides which holes to close. This mirrors the seal doctrine (§8b): propose
+mechanisms of verification, do not impose them.
+
+No variables required — the sweep operates on the workspace it runs in. Diff
+scope for the mutation step defaults to the merge base (origin/main, else main);
+pass --whole-tree by editing the step for a full-tree nightly audit.
+"""
+id_prefix = "falsify"
+
+# Tier 0 — leaf gate formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "fixture-independence"
+title = "Fixture-independence gate (fast, hard) — no tautological fixtures"
+description = """
+Run `./scripts/check-fixture-independence.sh` from the worktree root. The gate
+`git grep`s the tracked test surface (`*/tests/*.rs`, `*fixture*.rs`) for lines
+that re-derive layout from the type under test — `size_of::<T>()`,
+`align_of::<T>()`, `offset_of!(T, field)` — inside an assertion/expected
+context. A hit is a tautology candidate: the fixture recomputes what it should
+pin with a literal, so reverting a layout bug cannot redden it.
+
+Exit 0 clean · exit 1 tautology candidate(s) — the step fails and the formula
+stops. A genuinely intentional ABI-conformance pin declares itself inline with
+`// fixture-independence: allow — <reason>` (the single visible waiver).
+
+The gate carries a `--self-test` proving the pattern catches; its companion
+`check-fixture-independence.test.sh` is the regression suite.
+"""
+command = "./scripts/check-fixture-independence.sh"
+acceptance = "check-fixture-independence.sh exits 0 — no fixture re-derives size_of/align_of/offset_of on an asserted value (or every such line carries the // fixture-independence: allow waiver)."
+
+[[steps]]
+id = "mutation-falsifier"
+title = "Mutation-falsifier gate (slow, periodic) — the suite must kill its mutants"
+description = """
+Run `./scripts/mutation-falsifier.sh` from the worktree root. The gate wraps
+`cargo-mutants`: it mutates the code (default scope: the diff vs the merge base)
+and parses `mutants.out/missed.txt` for surviving mutants — changes the suite
+FAILED to catch. Each survivor is a test hole; the corresponding fix could be
+reverted with the suite still green.
+
+⚠️ This is the SLOW gate (ADR-010:177). It is wired here as a PERIODIC sweep
+step, NOT as an inline hard-abort on `cs done`/`cs evolve` (feynman). By its
+cadence, treat surviving mutants as a findings list for the operator to triage,
+not an automatic merge veto.
+
+Behaviour:
+  - empty diff vs base → exit 0 (nothing to mutate);
+  - all mutants caught → exit 0;
+  - surviving mutant(s) → exit 1 with the list of test holes;
+  - cargo-mutants not installed → exit 2 (the audit could not run — a finding,
+    never a silent skip; install with `cargo install cargo-mutants`).
+
+For a full-tree nightly audit, change the command to
+`./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core --timeout 180`
+(the cosmon-core scope keeps a whole-tree run bounded). The CI nightly cron
+already runs exactly that, advisory (`continue-on-error`).
+"""
+needs = ["fixture-independence"]
+command = "./scripts/mutation-falsifier.sh"
+acceptance = "mutation-falsifier.sh runs cargo-mutants over the scope and reports 0 surviving mutants (exit 0), OR surfaces the surviving-mutant list for operator triage (exit 1). cargo-mutants unavailable (exit 2) is a finding, not a pass."

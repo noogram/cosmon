@@ -1,0 +1,66 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+`spec-audit` — ledger audit against the TLA+ spec (catches c1cb `bypass_merge`)
+
+Usage: cs spec-audit [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --fleet <FLEET>
+          Fleet id whose ledger should be audited. Defaults to the fleet resolved from the walk-up config (`default` for single-fleet projects). The fleet id is **advisory** today — the canonical `events.jsonl` lives at `.cosmon/state/events.jsonl` regardless of fleet — but the flag is accepted so future multi-ledger layouts stay backward-compatible
+
+      --spec <SPEC>
+          Which spec to audit against. Defaults to `cosmon-run` (historical behaviour). Other accepted values: `mycelial-gate`, `attestor-graph`, `witness-freshness`. A path to a `.tla` file is also accepted; the basename (snake/Camel-case normalised) is looked up in the registry
+          
+          [default: cosmon-run]
+
+  -v, --verbose
+          Enable verbose output
+
+      --events <PATH>
+          Explicit path to the events file to audit. Overrides `--fleet` and the walk-up state-dir discovery. The expected format depends on `--spec`:
+          
+          * `cosmon-run` → `.cosmon/state/events.jsonl` (`EventV2` envelopes). * Noogram specs → `.cosmon/state/attestor-events.jsonl` (`AttestorEventV1` envelopes, see `cosmon/docs/specs/attestor-events.schema.json`).
+
+      --json
+          Output in JSON format
+
+      --repo <PATH>
+          Repository whose branch topology should be probed for the c1cb out-of-band check. Defaults to the current working directory. Pass `--no-git-probe` to disable the probe entirely (useful when `git` is not available, e.g. inside CI sandboxes). Only meaningful when `--spec cosmon-run`
+
+      --no-git-probe
+          Disable the git-topology probe. When set, the audit still flags disabled-action-fired drifts but does not emit `bypass_merge` findings. The switch exists so the audit stays useful in environments without `git` (containers, strict sandboxes). Only meaningful when `--spec cosmon-run`
+
+      --target-ref <REF>
+          Target branch for the merge-topology probe. Defaults to `origin/main`; pass `main` to check the local branch when no remote tracking is configured. Only meaningful when `--spec cosmon-run`
+          
+          [default: origin/main]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs spec-audit                          # default: cosmon-run × events.jsonl
+  cs spec-audit --fleet default          # explicit fleet (advisory today)
+  cs spec-audit --events path/to/events.jsonl
+  cs spec-audit --json                   # NDJSON drift report
+  cs spec-audit --no-git-probe           # skip the c1cb merge-topology probe
+
+Multi-spec:
+  cs spec-audit --spec mycelial-gate     --events .cosmon/state/attestor-events.jsonl
+  cs spec-audit --spec attestor-graph    --events .cosmon/state/attestor-events.jsonl
+  cs spec-audit --spec witness-freshness --events .cosmon/state/attestor-events.jsonl
+  cs spec-audit --spec noogram/specs/MycelialGate.tla   # path also accepted
+
+Ledger audit: replays events through the TLA+ spec and flags drifts. For
+--spec cosmon-run (default), drifts include c1cb bypass_merge and
+disabled-action-fired. For the noogram specs, drifts are emitted as
+spec_invariant_violation with stable (spec, invariant) tags
+— see crates/cosmon-core/src/attestor_audit.rs for the full taxonomy
+and docs/specs/attestor-events.schema.json for the AttestorEventV1
+NDJSON schema. One-shot, not a daemon.
+Exit 0 if clean, 1 if any drift is found.

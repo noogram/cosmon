@@ -1,0 +1,223 @@
+formula = "visual-qa"
+version = 1
+description = """
+G_visual — the adversarial visual-QA gate for molecules whose \
+deliverable is *seen*, not compiled: HTML decks, PDF slides, posters, \
+rendered diagrams, charts, printable documents. The generic `task-work` \
+formula validates build / lint / test; `editorial-work` validates prose \
+coherence. NEITHER looks at the rendered page. A worker can therefore \
+ship a deck that compiles and prints cleanly while its layout is broken \
+— columns misaligned, a block overflowing the footer rule, a large \
+empty zone under a title, cards off-grid, text clipped at a margin — and \
+nothing stops it. This formula is the missing gate: render → rasterise \
+→ READ the pixels (vision) → binary adversarial checklist → fail-closed \
+→ iterate until every page passes.
+
+Provenance — cosmon-ward feedback flow (CLAUDE.md). The root cause was \
+surfaced from the `echo` galaxy: a 7-slide deck shipped 3 slides \
+with misaligned column tops/bottoms plus a block overflowing the footer \
+separator, requiring a manually-requested corrective pass a posteriori \
+(`echo task-20260605-fd35`). The checklist below generalises \
+`/srv/cosmon/echo/presentation/LAYOUT-QA.md` from a deck-specific \
+note into a reusable cosmon primitive. See ADR-120.
+
+WHY A FORMULA, NOT A NEW COMMAND OR DAEMON — Composability Principle \
+(CLAUDE.md): molecules + formulas are the only extension points. The \
+gate is the *discipline* (render → read → checklist → iterate, \
+fail-closed); it is encoded as steps a worker executes, not as a new \
+`cs` verb. Where an objective pixel-level engine exists — lumen's \
+`lumen visual-audit` (the `G_visual_inspection` gate: fail-closed, \
+emits RFC 6902 JSON Patch + annotated overlap PNG) — this formula CALLS \
+it as the collision oracle rather than re-implementing it. The vision \
+checklist is BROADER than lumen's pixel-overlap detection: lumen \
+catches collisions and pixel-drift; it does not catch an *empty zone* \
+or an *imbalanced* layout (the echo failure was imbalance, not a \
+collision). The two layers compose — see ADR-120 §"Two layers".
+
+TWO COMPOSITION MODES (see docs/guides/visual-qa-gate.md):
+  - Standalone: nucleate `visual-qa` blocked-by the producing molecule, \
+    so the gate runs as its own molecule before `cs done`.
+  - Inline: the producing molecule's worker runs these steps before \
+    calling `cs complete`. The formula text is the checklist of record \
+    either way.
+
+Variables:
+  - artifact   : path (or glob) to the rendered deliverable under audit \
+    — a PDF, a directory of PNGs, or an HTML entrypoint. Required.
+  - render_cmd : optional shell command that (re)produces `artifact` \
+    from source (e.g. \"pandoc deck.md -o deck.pdf\" or a `just` \
+    recipe). When set, the correct-and-re-render loop runs it between \
+    iterations. When unset, the worker re-renders by whatever means the \
+    briefing describes.
+
+ARTIFACT PATHS — the verdict (`visual-verdict.md`) and the annotated \
+PNGs MUST be written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files written \
+to the worktree (`.worktrees/{mol_id}/`) are DESTROYED by `cs done`. The \
+*corrected source* (HTML/CSS/Markdown), by contrast, lives in the \
+versioned worktree and is committed normally.
+
+NOT FOR: code-only molecules (use `task-work`), prose-only molecules \
+with no rendered surface (use `editorial-work`). The test is \
+\"does this molecule emit something a human will LOOK at?\" — if no, \
+this gate does not apply.
+"""
+id_prefix = "vqa"
+freeze_on_last_step = false
+
+# Tier 0 — leaf gate. No child nucleation: a FAIL does not fan out into
+# sub-molecules; it loops in place (render → read → correct) until pass,
+# exactly like a cargo gate loops until green. The verdict is a single
+# pass/fail with an evidence trail.
+[tier]
+level = 0
+
+[[steps]]
+id = "render"
+title = "Render and rasterise the deliverable"
+description = """
+Produce the artifact under audit and turn it into one PNG per page so
+the next step can READ it.
+
+  1. If `render_cmd` is set, run it to (re)produce `{artifact}`. If
+     unset, ensure `{artifact}` exists by whatever path the briefing
+     describes. A render that exits non-zero is an immediate FAIL —
+     record it and stop; there is nothing to inspect.
+  2. Rasterise every page to PNG at print resolution:
+       - PDF  : `pdftoppm -png -r 100 {artifact} {MOLECULE_DIR}/page`
+       - HTML : print to PDF first (Chrome headless
+         `--print-to-pdf`), then `pdftoppm` as above. xelatex/wkhtml
+         drop emojis — prefer the Chrome path (CLAUDE.md markdown-
+         rendering rule).
+       - LIVE URL / deployed site (the case that needs a real browser,
+         e.g. a doc-site whose Mermaid/JS renders CLIENT-SIDE): drive a
+         HEADLESS browser and screenshot. Either
+           `chrome --headless --screenshot={MOLECULE_DIR}/page.png \
+              --window-size=1280,2000 <url>`
+         OR the `playwright-headless` MCP server (`npx @playwright/mcp
+         --headless` — one isolated Chromium per session). After a
+         client-side render, wait for the JS to settle before the shot
+         (`browser_wait_for`, or a Chrome `--virtual-time-budget`).
+       - already-PNG : copy/symlink into `{MOLECULE_DIR}/`.
+
+     ⛔ HEADLESS ONLY — NEVER `playwright-extension`. A fleet worker runs
+     headless in a tmux pane with NO attached Chrome and NO browser
+     extension, so the `playwright-extension` MCP (`@playwright/mcp
+     --extension`, which drives the OPERATOR's logged-in Chrome via a
+     Chrome extension) can never return — its first call hangs forever
+     and the worker never reaches `cs evolve`. This is operator-cockpit-
+     only tooling. Use `playwright-headless` or `chrome --headless`
+     instead. Observed task-20260617-6ae2: a cosmon-docs deploy worker
+     hung 50+ min on a single "Calling playwright-extension…" that could
+     never resolve headless; the deploy itself had already succeeded —
+     only the visual-QA leg deadlocked. (See chronicle 2026-06-17.)
+  3. Confirm the PNG count matches the expected page count. A missing
+     page is a FAIL (the render silently dropped content).
+
+Write nothing to the worktree that must survive — PNGs go to
+MOLECULE_DIR. The *source* edits (next step's corrections) stay in the
+worktree and are committed.
+"""
+acceptance = "render_cmd (if set) exits 0; one PNG per page exists under MOLECULE_DIR; PNG count matches expected page count."
+
+[[steps]]
+id = "inspect"
+title = "READ each page and run the binary adversarial checklist"
+description = """
+This is the gate. For EACH rasterised page, actually LOOK at the PNG
+(vision) — not merely confirm the file exists — and answer every box
+below with yes/no. \"The PDF was generated\" is NOT \"the PDF is good.\"
+
+Objective oracle (when available) — if `lumen` is on PATH, run it
+first as the collision/drift detector and fold its verdict in:
+    lumen visual-audit --pdf {artifact} --out {MOLECULE_DIR}/lumen --json
+  exit 0 = no collision/drift; exit 2 = FAIL (see overlap.png +
+  audit.json). Treat any lumen FAIL as a hard fail of this gate. lumen
+  is the pixel-level floor; the vision checklist below is the ceiling it
+  cannot reach (balance, fill, empty zones).
+
+Binary adversarial checklist — per page, every box must be YES:
+
+  Balance & fill
+  - [ ] No abnormal empty zone (no single contiguous blank region
+        > ~20% of the page outside intended margins). Content fills its
+        space.
+  - [ ] Left/right columns have comparable heights (not one full, one
+        half-empty with a large gap).
+  - [ ] The main block is vertically centred in its zone OR top-aligned
+        — never floating mid-page with a void above AND below.
+
+  Alignment (the echo failure class)
+  - [ ] Cards/lists/boxes share a grid: left edges aligned, gutters
+        regular, card top edges and bottom edges line up across columns.
+  - [ ] Bullets/numbers are vertically aligned with each other.
+  - [ ] Title, header band, and footer sit on the SAME margins as the
+        body.
+
+  Overlap & overflow
+  - [ ] No overlap: text on text, text on figure, label outside its
+        box, equation biting an edge.
+  - [ ] Nothing is clipped: no word/equation/figure truncated by an
+        edge or by pagination.
+  - [ ] No block crosses the footer separator rule or bleeds into the
+        footer/margin band.
+  - [ ] SVG/diagrams sit inside their card with a margin (not glued to
+        the edges).
+
+  Legibility
+  - [ ] Sufficient contrast; no un-rendered math (no raw `\\frac`
+        visible).
+  - [ ] Footer bibliography/credits present and not overflowing onto a
+        second line that collides with content.
+
+Fail-closed loop — if ANY box on ANY page is NO:
+  1. Diagnose the offending HTML/CSS/Markdown in the worktree source.
+  2. Correct it.
+  3. Re-render (re-run the `render` step's commands).
+  4. Re-read and re-check.
+  Iterate until ALL pages pass ALL boxes. Log each defect found and the
+  fix applied — `{MOLECULE_DIR}/visual-iterations.md`, one entry per
+  loop. NEVER advance with an open NO. This gate is fail-closed: the
+  default verdict is FAIL until proven PASS.
+"""
+needs = ["render"]
+acceptance = "Every page READ (not merely listed); lumen visual-audit (if present) exits 0; every checklist box YES on every page; each defect→fix iteration logged in MOLECULE_DIR/visual-iterations.md; no open NO remains."
+
+[[steps]]
+id = "verdict"
+title = "Emit the visual verdict"
+description = """
+Write `{MOLECULE_DIR}/visual-verdict.md` (MOLECULE_DIR from
+`cs --json observe {mol_id}` — NEVER the worktree). Required sections:
+
+  # Visual QA — {artifact} — {date}
+
+  ## Verdict
+  PASS or FAIL. (FAIL only if the worker is forced to stop before
+  convergence — e.g. a structural blocker it cannot fix. The normal
+  exit of the loop is PASS; if you cannot reach PASS, FAIL loudly and
+  name the blocker. Do NOT emit a soft \"mostly fine.\")
+
+  ## Pages audited
+  | Page | Empty-zone | Alignment | Overlap | Clipped | Legible | OK? |
+  One row per page, each cell yes/no, last column the AND of the row.
+
+  ## lumen visual-audit
+  Present / absent. If present: exit code, findings count, link to
+  `lumen/overlap.png` + `lumen/audit.json`. If absent: \"lumen not
+  on PATH — vision checklist only (pixel-collision floor not applied).\"
+
+  ## Defects found and corrected
+  Summarise `visual-iterations.md`: N defects across M iterations, each
+  with the page, the failing box, and the one-line fix. If zero, write
+  \"first render passed — no corrections needed.\"
+
+  ## Residual risks
+  Anything the gate cannot see (interactivity, fonts on another machine,
+  colour-blind contrast). Honest \"none observed\" is allowed.
+
+End the file with the artifact path and the commit SHA that holds the
+corrected source, so a later audit can reproduce the rendered state.
+"""
+needs = ["inspect"]
+acceptance = "MOLECULE_DIR/visual-verdict.md written with: explicit PASS/FAIL verdict, per-page checklist table, lumen present/absent block, defects-corrected summary, residual-risks section, and the corrected-source commit SHA."

@@ -1,0 +1,91 @@
+# crates/cosmon-rpp-adapter/data/surface_events.txt
+#
+# Append-only surface event log. Each line is one `surface_added` event:
+# a molecule mounted an HTTP route on the RPP and pinned it into the
+# §8p frozen surface (ADR-080).
+#
+# This file is the single source of truth for `frozen_api_surface()` —
+# AND, since task-20260610-06a4 (delib-20260610-9a0c K2), for the
+# per-route principal, minimal scope, §8p exposure classification, and
+# one-line blurb. The parser lives in `crates/cosmon-surface-canon`;
+# `cosmon-rpp-adapter/build.rs` and `cosmon-thin-cli/build.rs` fold it
+# at compile time into const tables. Counter assertions derive from
+# `cargo build`, not from hand-edited numbers.
+#
+# Discipline (vg-20260523-a682, Phase 1 / Commit 3 — torvalds Option D';
+# wheeler I-ADDITIVE-COUNTERS invariant):
+#   1. ADD: append a new line at the end. Never reorder.
+#   2. NEVER edit an existing line — events are immutable. (Exceptions
+#      on record: task-20260610-06a4 performed the one-pass controlled
+#      column migration 4 → 7 fields; task-20260610-0b57 flipped the
+#      exposure column of the `POST /v1/avatar/converse` line
+#      adapter-only → tenant-verb (delib-20260610-9a0c T3 — the verb
+#      joined the §8p bijection). In both cases the (METHOD PATH,
+#      molecule_id, date) triples were byte-preserved.)
+#   3. NEVER renumber, never bump a count — the test reads the file.
+#   4. A merge of two branches each appending one event yields two
+#      adjacent diff lines and merges cleanly.
+#
+# Format: METHOD PATH | molecule_id | YYYY-MM-DD | principal | scope | exposure | blurb
+#
+#   principal ∈ {tenant, operator, worker} — wire-form principal class
+#     (mirrors the `#[verb]` annotation on the matching stub).
+#   scope — minimal OAuth2 scope required by the route: `-` for
+#     authentication-level routes (no scope check), else one or more
+#     `cosmon:`-prefixed scopes joined by `+` (AND semantics).
+#   exposure ∈ {tenant-verb, adapter-only, operator-only} — the §8p
+#     classification. `tenant-verb` routes MUST have a matching
+#     `#[verb]` annotation (bijection-tested); `adapter-only` routes
+#     intentionally have none; `operator-only` must never appear on
+#     the frozen surface (asserted by api_surface_freeze.rs).
+#   blurb — one-line human description (drained from the clap
+#     doc-comments). Required.
+#
+# Lines starting with `#` and blank lines are ignored.
+# The seven `|`-separated fields are trimmed; `|` is not allowed inside
+# any field. The fold REFUSES ambiguous lines (unknown principal or
+# exposure, malformed scope, empty blurb) — the build fails.
+#
+# --- backfilled events (initial migration from the v1.5 const array) ---
+GET /v1/molecules | task-20260504-af6b | 2026-05-04 | tenant | cosmon:molecule:read | tenant-verb | List molecules in the caller's noyau (ensemble view)
+GET /v1/molecules/{id} | adr-080-v0 | 2026-04-23 | tenant | cosmon:molecule:read | tenant-verb | Read one molecule's full state (observe)
+POST /v1/molecules | task-20260504-af6b | 2026-05-04 | tenant | cosmon:molecule:write | tenant-verb | Create a molecule from a formula (nucleate)
+POST /v1/molecules/{id}/tags | task-20260504-tcst-v0 | 2026-05-01 | tenant | cosmon:molecule:write | tenant-verb | Add or remove tags on a molecule
+POST /v1/molecules/{id}/collapse | task-20260504-af6b | 2026-05-04 | tenant | cosmon:molecule:write | tenant-verb | Collapse a molecule to its terminal state
+POST /v1/molecules/{id}/freeze | task-20260522-b538 | 2026-05-22 | tenant | cosmon:molecule:write | tenant-verb | Freeze or thaw a molecule (thaw fused via {state} body)
+POST /v1/molecules/{id}/stuck | task-20260504-af6b | 2026-05-04 | tenant | cosmon:molecule:write | tenant-verb | Mark a molecule stuck (needs operator attention)
+POST /v1/molecules/{id}/tackle | task-20260512-c6de | 2026-05-12 | tenant | cosmon:molecule:write+cosmon:worker:spawn | tenant-verb | Dispatch a worker against a pending molecule (burns Anthropic credit)
+GET /v1/molecules/{id}/artifacts | task-20260522-ef4f | 2026-05-22 | tenant | cosmon:artifact:read | adapter-only | List artifacts produced by a molecule's worker
+GET /v1/molecules/{id}/artifacts/{token} | task-20260522-ef4f | 2026-05-22 | tenant | cosmon:artifact:read | adapter-only | Fetch one artifact's bytes
+PUT /v1/molecules/{id}/artifacts/{token} | task-20260522-ef4f | 2026-05-22 | tenant | cosmon:artifact:write | adapter-only | Push an artifact into the molecule's artifact dir
+POST /v1/auth/claude/start | adr-0017-smithy | 2026-05-19 | tenant | - | adapter-only | Begin the PKCE OAuth flow for Claude credentials
+POST /v1/auth/claude/email | adr-0017-smithy | 2026-05-19 | tenant | - | adapter-only | Submit the e-mail step of the PKCE flow
+GET /v1/auth/claude/{session_id} | adr-0017-smithy | 2026-05-19 | tenant | - | adapter-only | Poll an in-flight PKCE session
+DELETE /v1/auth/claude/{session_id} | adr-0017-smithy | 2026-05-19 | tenant | - | adapter-only | Abort an in-flight PKCE session
+POST /v1/auth/claude/confirm | adr-0017-smithy | 2026-05-19 | tenant | - | adapter-only | Confirm the PKCE flow with the pasted code
+GET /v1/auth/me | task-20260522-560a | 2026-05-22 | tenant | - | adapter-only | Introspect the presented JWT (whoami)
+GET /v1/events | task-20260522-c46a | 2026-05-22 | tenant | cosmon:events:subscribe | adapter-only | SSE stream of molecule lifecycle events
+GET /v1/molecules/{id}/logs | task-20260523-ad25 | 2026-05-23 | tenant | cosmon:logs:subscribe | adapter-only | SSE tail of the worker's live tmux pane
+GET /v1/quota | task-20260522-2f91 | 2026-05-22 | tenant | cosmon:molecule:read | adapter-only | Rate-limit and quota snapshot for the caller
+GET /v1/noyaux | task-20260523-eb61 | 2026-05-23 | tenant | - | adapter-only | Discover noyaux reachable by the presented JWT
+GET /v1/workers | task-20260523-f82b | 2026-05-23 | tenant | cosmon:worker:read | adapter-only | List active workers in the caller's noyau
+# --- D-AVATAR routes (recovered alongside the event-fold migration;
+#     these 7 landed on `main` while 3134 was off-branch, so they are
+#     backfilled here to keep the surface byte-identical) ---
+POST /v1/avatar/converse | task-20260524-270a | 2026-05-24 | tenant | cosmon:pilote:converse | tenant-verb | Send a typed message to a bound avatar-tiers, canal (b) — on-by-binding, `request` hop-bounded server-side (ADR-0020 §5)
+POST /v1/avatar/perceive | task-20260524-270a | 2026-05-24 | tenant | cosmon:world:observe | adapter-only | World-to-avatar perception push, canal (d) (ADR-0020 §5)
+GET /v1/avatar/{instance_id}/status | task-20260525-738e | 2026-05-25 | tenant | cosmon:world:observe | tenant-verb | Read an avatar instance's lifecycle status
+POST /v1/avatar/{instance_id}/incarnate | task-20260525-738e | 2026-05-25 | tenant | cosmon:pilote:converse | tenant-verb | Incarnate an avatar instance
+POST /v1/avatar/{instance_id}/grant | task-20260525-738e | 2026-05-25 | tenant | cosmon:pilote:converse | tenant-verb | Grant a capability to an avatar instance
+GET /v1/avatar/{instance_id}/audit | task-20260525-738e | 2026-05-25 | tenant | cosmon:world:observe | tenant-verb | Read an avatar instance's audit trail
+GET /v1/avatar/{instance_id}/mould-info | task-20260525-738e | 2026-05-25 | tenant | cosmon:world:observe | tenant-verb | Read an avatar instance's mould info
+GET /v1/molecules/{id}/result | task-20260605-f46c | 2026-06-05 | tenant | cosmon:molecule:read | adapter-only | Read the canonical deliverable of a tackled molecule
+POST /v1/molecules/{id}/run | task-20260610-56c4 | 2026-06-11 | tenant | cosmon:molecule:write+cosmon:worker:spawn | tenant-verb | Start the resident drain loop on a DAG root (server decides what to tackle, under binding bounds; burns Anthropic credit)
+POST /v1/admin/habilitations | task-20260616-f112 | 2026-06-16 | operator | - | adapter-only | Provision a habilitation binding (operator-sealed, host-side root-of-trust), reload the map in-process
+GET /v1/admin/habilitations | task-20260616-f112 | 2026-06-16 | operator | - | adapter-only | List provisioned habilitations (operator introspection, never the seal)
+DELETE /v1/admin/habilitations/{id} | task-20260616-f112 | 2026-06-16 | operator | - | adapter-only | Revoke a provisioned habilitation binding and reload
+POST /v1/admin/reload | task-20260616-f112 | 2026-06-16 | operator | - | adapter-only | Reload the nucleon map in-process (no SIGHUP, no reboot) — pick up bindings staged by any channel
+POST /v1/admin/federations | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | Federate a partner on N galaxies — one gesture materialises N per-galaxy habilitations, grouped as one portée (ADR-0023 G5)
+GET /v1/admin/federations | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | List portées (federation relations) grouped — the user-facing view over N habilitations
+DELETE /v1/admin/federations/{id} | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | Dissolve a whole portée — revoke every backing habilitation and remove the grouping manifest
+DELETE /v1/admin/federations/{id}/galaxies/{galaxy} | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | Revoke one galaxy from a portée, leaving the rest of the relation intact

@@ -1,0 +1,72 @@
+name: Archive Verify
+
+# Guards the durable terminal-transition archive against silent edits.
+#
+# For every archived molecule whose entry directory was modified in the
+# last 7 days, recompute the response + synthesis hashes and compare
+# against the hashes sealed in that entry's `manifest.json`. Any
+# mismatch fails the workflow and prints a human-readable diff so the
+# tamper is visible in the job log.
+#
+# Runs on push to main (post-merge gate) and on pull requests so a PR
+# that edits `archive/**` is caught before it lands. It also runs on a
+# daily schedule to catch silent drift introduced outside the normal
+# merge path (manual edits, git mistakes).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  archive-verify:
+    name: Verify archive entries (last 7 days)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Build cs binary
+        run: cargo build --bin cs -p cosmon-cli --locked
+      - name: Run archive verify
+        run: |
+          set -euo pipefail
+          CS=./target/debug/cs
+
+          ids=$($CS archive list --since-days 7 --ids-only)
+          if [ -z "$ids" ]; then
+            echo "archive-verify: no entries in the last 7 days — nothing to check"
+            exit 0
+          fi
+
+          echo "archive-verify: checking the following entries"
+          echo "$ids" | sed 's/^/  - /'
+          echo
+
+          failed=0
+          while IFS= read -r id; do
+            [ -n "$id" ] || continue
+            if ! $CS archive verify "$id"; then
+              failed=$((failed + 1))
+              echo "::error::archive verify failed for $id"
+            fi
+          done <<< "$ids"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "archive-verify: $failed archive entries failed verification"
+            exit 1
+          fi
+          echo "archive-verify: all entries pass"

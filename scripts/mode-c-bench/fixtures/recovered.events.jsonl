@@ -1,0 +1,4 @@
+{"type":"molecule_nucleated","mol_id":"task-fixture-rec","ts":"2026-07-08T00:00:00Z"}
+{"type":"adapter_liveness_probed","mol_id":"task-fixture-rec","worker_id":"w-rec","adapter_name":"local","probe_kind":"pane_signature","probe_result":{"verdict":"retried","reason":"tool_parse_reinject"},"elapsed_since_last_advance_ms":0}
+{"type":"adapter_liveness_probed","mol_id":"task-fixture-rec","worker_id":"w-rec","adapter_name":"local","probe_kind":"pane_signature","probe_result":{"verdict":"retried","reason":"tool_parse_reinject"},"elapsed_since_last_advance_ms":0}
+{"type":"molecule_completed","mol_id":"task-fixture-rec","ts":"2026-07-08T00:05:00Z"}

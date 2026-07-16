@@ -1,0 +1,103 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.cosmon.vllm-mlx — LaunchAgent template for the vllm-mlx HTTP sidecar.
+
+  Long-lived local LLM server bound to 127.0.0.1:8000. Exposes both
+  OpenAI `/v1/*` and Anthropic `/v1/messages` envelopes from a single
+  process; cosmon-provider::openai and cosmon-provider::anthropic point
+  at this endpoint when the operator's molecule selects the local
+  inference path.
+
+  Ship date: 2026-06-15 (Claude Code billing flip). Picked over the
+  full-Rust internalization (Path A) on 5/5 panel convergence in
+  delib-20260519-f6c3. See docs/lore/2026-05-19-vllm-mlx-offramp.md
+  for the principle and the four-observable falsification test that
+  gates any future re-internalization.
+
+  ADR-016 posture: vllm-mlx is **côté hôte** — the model runtime is a
+  host-side concern that cosmon consumes through a wire schema, not a
+  substrate component. The substrate-galaxy obligation (ADR-082) is
+  satisfied by **seam discipline** (the OpenAI / Anthropic wire schemas
+  are the stable contract), not by uniform language.
+
+  This file is a TEMPLATE. It is NOT the plist launchd loads —
+  `scripts/install-vllm-mlx-launchagent.sh` substitutes the tokens
+  below and writes the rendered plist to
+  `~/Library/LaunchAgents/dev.cosmon.vllm-mlx.plist`. The rendered
+  plist holds the operator's chosen model id, port, and cache dir —
+  never commit it.
+
+  Placeholder tokens (leading + trailing double underscores):
+  HOME, BINARY, MODEL, HOST, PORT, HF_HOME, EXTRA_ARGS_LINES,
+  WORKING_DIRECTORY, STDOUT_LOG, STDERR_LOG.
+
+  EXTRA_ARGS_LINES carries the operator's `vllm-mlx serve` knobs
+  (`--continuous-batching`, `--enable-prefix-cache`, etc.) as zero or
+  more `<string>…</string>` lines; the install script chooses safe
+  defaults and lets the operator override.
+
+  Install / uninstall:
+      scripts/install-vllm-mlx-launchagent.sh --help
+      scripts/uninstall-vllm-mlx-launchagent.sh --help
+
+  Governing docs: ADR-016 (no daemon in core; adapters are fine),
+  ADR-082 (substrate-galaxy obligation; seam discipline),
+  ADR-103 (loop ownership × runtime ownership — pending amendment),
+  docs/guides/vllm-mlx-offramp.md (operator runbook),
+  docs/lore/2026-05-19-vllm-mlx-offramp.md (chronicle).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.cosmon.vllm-mlx</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BINARY__</string>
+        <string>serve</string>
+        <string>__MODEL__</string>
+        <string>--host</string>
+        <string>__HOST__</string>
+        <string>--port</string>
+        <string>__PORT__</string>
+__EXTRA_ARGS_LINES__
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__STDOUT_LOG__</string>
+
+    <key>StandardErrorPath</key>
+    <string>__STDERR_LOG__</string>
+
+    <key>WorkingDirectory</key>
+    <string>__WORKING_DIRECTORY__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>HF_HOME</key>
+        <string>__HF_HOME__</string>
+    </dict>
+</dict>
+</plist>

@@ -1,0 +1,42 @@
+[book]
+title = "noogram / cosmon"
+description = "Noogram — the open-source distribution for composing, piloting, and auditing AI missions, built on the Cosmon kernel."
+authors = ["Noogram"]
+language = "en"
+src = "src"
+
+# Output goes to docs/book/book/ (relative to this file). This is the directory
+# Cloudflare Pages publishes — see wrangler.toml (pages_build_output_dir).
+# NOTE: publication is an operator gesture held behind the membrane-repair gate.
+# There is intentionally NO auto-deploy-on-push workflow for docs.noogram.org:
+# merging these pages to main must NOT flip the site public while the
+# confidentiality scrub (task-20260616-cc22) is still red.
+# Canonical docs host is docs.noogram.org (delib-20260711-8d00, topology A).
+# The apex noogram.org and the noogram.dev→noogram.org 301 are C2's remit
+# (domain/DNS), not configured here.
+build-dir = "book"
+
+[output.html]
+default-theme = "light"
+# Light sage is the universal default: a fresh visitor always opens in light,
+# even under an OS dark preference. Coal remains one click away via the toggle.
+preferred-dark-theme = "light"
+git-repository-url = "https://github.com/noogram/cosmon"
+edit-url-template = "https://github.com/noogram/cosmon/edit/main/docs/book/{path}"
+no-section-label = false
+additional-css = ["noogram-charte.css"]
+additional-js = ["mermaid.min.js", "mermaid-init.js", "conway.js", "page-toc.js"]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.search]
+enable = true
+limit-results = 30
+use-boolean-and = true
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

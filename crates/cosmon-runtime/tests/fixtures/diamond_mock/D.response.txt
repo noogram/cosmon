@@ -1,0 +1,1 @@
+D: merged B.out and C.out. Produced artifact D.out.

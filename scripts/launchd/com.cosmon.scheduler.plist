@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cosmon-scheduler — unified patrol scheduler (cron-triggered, TOML-driven).
+
+  One LaunchAgent that fires `cosmon-scheduler tick` every 60 seconds. The
+  binary reads `~/.config/cosmon/patrols.toml`, decides which patrols are
+  due, and dispatches each as a detached subprocess. Between ticks nothing
+  runs — this honours the cosmon "no daemon in core" invariant
+  (ADR-016). See crates/cosmon-scheduler/src/lib.rs for the architecture
+  and the governing plan at
+  .cosmon/state/fleets/default/molecules/idea-20260417-b52d/plan.md.
+
+  Placeholders below use __HOME__ for the operator's home directory. The
+  install script (scripts/install-scheduler.sh) substitutes them at load
+  time, so this template stays portable across machines.
+
+  StartInterval = 60 (seconds): the top-level clock of the entire patrol
+  layer. Changing this cadence is a design decision (see ADR from
+  task-20260417-e162), not a config tweak.
+
+  NOT auto-installed. The operator runs:
+      scripts/install-scheduler.sh install
+      scripts/install-scheduler.sh status
+      scripts/install-scheduler.sh uninstall
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cosmon.scheduler</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__HOME__/.local/bin/cosmon-scheduler</string>
+        <string>tick</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-scheduler.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-scheduler.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__HOME__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

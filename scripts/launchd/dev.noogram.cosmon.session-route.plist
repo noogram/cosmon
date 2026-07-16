@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  session-route — periodic Tier-1 regex router for session carnets (ADR-072).
+
+  Fires `scripts/session-route-tick.sh --all --json` every 300 seconds
+  (5 min, same cadence as session-to-spark so the two coexist during
+  the deprecation window). The tick delegates to `cs session route`;
+  all classification logic is in
+  `crates/cosmon-cli/src/cmd/route.rs`. The script is idempotent —
+  re-runs that see a matching sidecar skip with no I/O.
+
+  Placeholders substituted by
+  `scripts/install-session-route-launchagent.sh` at install time:
+    __HOME__         the operator's home directory.
+    __COSMON_ROOT__  the absolute path of the cosmon project to watch.
+
+  Not auto-installed. Operator runs:
+      scripts/install-session-route-launchagent.sh install
+      scripts/install-session-route-launchagent.sh status
+      scripts/install-session-route-launchagent.sh uninstall
+
+  Governing invariants (see ADR-072 §Formal invariants):
+    I1 body-primacy: every sidecar keyed by blake3(body).
+    I2 idempotent pure: same (body, router_version) → byte-identical output.
+    I3 append-only: router_version bumps write new sidecars, never overwrite.
+    I4 carnet untouched: session-*.md never opened for write.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.session-route</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__COSMON_ROOT__/scripts/session-route-tick.sh</string>
+        <string>--cosmon-root</string>
+        <string>__COSMON_ROOT__</string>
+        <string>--all</string>
+        <string>--json</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/session-route.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/session-route.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__COSMON_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

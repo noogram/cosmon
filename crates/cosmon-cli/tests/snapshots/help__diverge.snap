@@ -1,0 +1,27 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Diverge — structural agreement check between two sessions on a molecule (turing §5)
+
+Usage: cs diverge [OPTIONS] <A> <B>
+
+Arguments:
+  <A>  First session — a session id or a path to a galaxy root
+  <B>  Second session — a session id or a path to a galaxy root
+
+Options:
+      --config <PATH>        Path to configuration file
+  -m, --molecule <MOLECULE>  Molecule id (or prefix) whose views to compare. If omitted, only the git merge-base clause is evaluated and all molecule clauses are marked inconclusive
+  -v, --verbose              Enable verbose output
+      --json                 Output in JSON format
+  -h, --help                 Print help
+
+EXAMPLES:
+  cs diverge <mol_id>         # structural agreement check between two sessions
+
+A structural-agreement primitive: two independent sessions on
+the same molecule are compared for divergence on the artifacts they
+produced. Used by livelock detection and consensus checks.
+
+SEE ALSO: cs observe, cs deps.

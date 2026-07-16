@@ -1,0 +1,55 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
+
+Usage: cs whisper [OPTIONS] [MOLECULE_ID]
+
+Arguments:
+  [MOLECULE_ID]
+          Molecule whose worker pane will receive the whisper.
+          
+          Optional because `--to-session` is an alternative destination; enforced at runtime so clap's error text points at the mutual exclusion rather than an unsatisfied positional.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --to-session <SID>
+          Target a Claude session by id — appends one line to `.cosmon/state/presence/<sid>.log` instead of pasting into a tmux pane. Mutually exclusive with the positional `<molecule_id>`.
+          
+          CEILING: whispers accumulate in the log; beyond ~10 per session the signal drowns in the tail. Past that, fall back to `cs drop` / `cs tail`.
+
+  -m, --message <TEXT>
+          Inline payload. Mutually exclusive with `--file` / `--stdin`
+
+  -v, --verbose
+          Enable verbose output
+
+  -f, --file <PATH>
+          Read payload from a file. Mutually exclusive with `--message` / `--stdin`
+
+      --json
+          Output in JSON format
+
+      --stdin
+          Read payload from stdin (conventional `-`). Mutually exclusive with `--message` / `--file`
+
+      --dry-run
+          Validate and log the payload without actually pasting into tmux.
+          
+          In `--to-session` mode, skips the append (and the seek bump) — useful for CI-style sanity checks.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs whisper <mol> --message "check the latest ADR before merging"
+  cs whisper <mol> --file hint.md
+  echo "nudge" | cs whisper <mol> --stdin
+  cs whisper <mol> --message "…" --dry-run      # validate, do not paste
+
+Experimental v0. Perturbation port, not a control-plane event.
+Refuses unless the target pane's foreground command is in
+`[whisper] allowed_commands` (default: ["claude"]).

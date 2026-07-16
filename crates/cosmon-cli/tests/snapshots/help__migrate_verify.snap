@@ -1,0 +1,13 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Verify the pre-migration BLAKE3 manifest against the current state. Exit codes mirror `cs verify`: `0` match, `1` divergence, `2` no manifest on record
+
+Usage: cs migrate verify [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

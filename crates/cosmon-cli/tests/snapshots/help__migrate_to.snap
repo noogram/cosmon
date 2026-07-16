@@ -1,0 +1,53 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Perform a residence migration: seal manifest → stage next tree → verify staged tree → atomic rename pair to flip.
+
+Atomic data-and-git residence flip. After the data-side phases (seal → stage → verify → rename), the git-side half runs (untrack + ignore-file update + path-scoped auto-commit) unless `--no-git` / `--no-commit` opt out.
+
+Per-residence behavior (the four places the galaxy's memory can live):
+
+solo       Writes `.cosmon/` to `.git/info/exclude` (per-clone notebook, never pushed). Sweeps any legacy `.cosmon/` / `.worktrees/` lines still present in the tracked `.gitignore` so the shared bulletin board doesn't override the local rule. Total local invisibility (ADR-055 §3.1).
+
+team       Appends `.cosmon/state/` to the tracked `.gitignore` (shared with the code repo) and untracks any state files previously committed. Structural files (`config.toml`, `formulas/*.toml`, `surfaces.toml`, `.gitignore`) stay trackable. Orphan-branch-backed state sharing (`cosmon/state`) is the cosmon-le-repo backend target.
+
+encrypted  Same gitignore footprint as `team` today. The age-wrap backend (requires `age` on PATH and a `--recipient` recipient key) is deferred to cosmon-le-repo.
+
+remote     Same gitignore footprint as `team`. The server-backed transport backend is not yet implemented.
+
+The pre-migration manifest snapshots git HEAD + ignore files so `cs migrate rollback` can restore the git side byte-for-byte. Orphan files (not tied to any molecule id) are carried in a distinct bucket and never silently discarded.
+
+Usage: cs migrate to [OPTIONS] <RESIDENCE>
+
+Arguments:
+  <RESIDENCE>
+          Target residence: `solo`, `team`, `encrypted`, or `remote`
+
+          Possible values:
+          - solo:      Solo — local, single operator. Writes the whole `.cosmon/` directory to `.git/info/exclude` (per-clone notebook, never pushed) and sweeps any legacy `.cosmon/` / `.worktrees/` lines from the tracked `.gitignore` (ADR-055 §3.1)
+          - team:      Team — local, shared across operators via git. Appends `.cosmon/state/` to the tracked `.gitignore` (shared bulletin board) and untracks any previously committed state files. Structural files (config.toml, formulas/*.toml, surfaces.toml) stay trackable on `main`. Orphan-branch-based state sharing (`cosmon/state`) is the cosmon-le-repo backend target
+          - encrypted: Encrypted — local, encrypted at rest. Same gitignore footprint as `team` today; the age-wrap backend (requires `age` on PATH and a `--recipient` key) is deferred to cosmon-le-repo
+          - remote:    Remote — server-backed state accessed via network transport. Same gitignore footprint as `team`; the transport backend is not yet implemented (tracked by cosmon-le-repo)
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --dry-run
+          Preview the plan (seal + staging path) without renaming anything
+
+      --no-git
+          Skip the git-side half of the migration (no `git rm --cached`, no gitignore/exclude update, no auto-commit). Useful for tests and for galaxies that live outside a git repository
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --no-commit
+          Apply git-side changes to the index + ignore file but do not create the `chore(cosmon): migrate to <residence> residence (git-side)` commit. The operator can inspect `git status` and commit manually
+
+  -h, --help
+          Print help (see a summary with '-h')

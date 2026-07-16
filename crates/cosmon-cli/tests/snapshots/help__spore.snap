@@ -1,0 +1,37 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR-140)
+
+Usage: cs spore [OPTIONS] <COMMAND>
+
+Commands:
+  validate  Parse + expand a spore as a dry run; print the ordered nucleate call list without germinating anything
+  run       Germinate the polymer: parse + expand + seal gate, then replay the call list against the live state store
+  export    Emit a content-addressed bundle id and an ASTRA descriptive layer (ADR-140 D6) for sharing the spore
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs spore validate ./spore.toml --var subject="octopus cognition"
+  cs spore run ./bundle/ --var subject="..." --var axes=a,b,c
+  cs spore run ./spore.toml --allow-unchecked-seal     # sealed, no TLC
+  cs spore export ./spore.toml --out dist/             # bundle hash + ASTRA
+  cs spore validate ./spore.toml --json                # NDJSON expansion
+
+VERBS:
+  validate   parse + expand as a dry run; prints the ordered nucleate
+             call list, germinates nothing.
+  run        parse + expand + seal gate, then germinate the polymer into
+             the live state store. --json emits one NDJSON line per molecule.
+  export     content-addressed bundle hash + ASTRA descriptive layer (D6).
+
+SEAL (ADR-140 D4): a sealed spore fails closed unless --allow-unchecked-seal
+is passed; the status line never claims 'verified' when TLC did not run.
+
+SEE ALSO: cs nucleate (one molecule), ADR-140, docs/design/spore-impl-dag-manifest.md.

@@ -1,0 +1,13 @@
+`GET /v1/molecules/{mol_id}/artifacts/{token}`
+
+Usage: cosmon-remote artifact get [OPTIONS] <MOL_ID> <TOKEN>
+
+Arguments:
+  <MOL_ID>  
+  <TOKEN>   
+
+Options:
+      --out <OUT>          Destination path. Default: `<artifacts_dir>/<mol_id>/<token>`
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+  -h, --help               Print help

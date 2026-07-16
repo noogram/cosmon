@@ -1,0 +1,31 @@
+[package]
+name = "cosmon-state"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Hexagonal StateStore port for Cosmon persistence"
+
+[dependencies]
+cosmon-core.workspace = true
+cosmon-hash.workspace = true
+cosmon-thin-cli = { path = "../cosmon-thin-cli" }
+cosmon-thin-macro = { path = "../cosmon-thin-macro" }
+chrono.workspace = true
+fs2.workspace = true
+linkme = "0.3"
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true
+
+[lints]
+workspace = true

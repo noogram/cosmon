@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Scan tracked files for leaked secrets and non-public state (blocking)
+
+Usage: cs doctor leaks [OPTIONS]
+
+Options:
+      --config <PATH>      Path to configuration file
+      --path <PATH>        Limit scanning to this subdirectory (relative to repo root)
+      --include-untracked  Also scan untracked working-tree files (use when pre-commit check)
+  -v, --verbose            Enable verbose output
+      --corpus <FILE>      Byte-literal patterns, one per line (UTF-8, `#` comments)
+      --json               Output in JSON format
+  -h, --help               Print help

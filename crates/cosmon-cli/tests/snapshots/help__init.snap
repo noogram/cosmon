@@ -1,0 +1,75 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
+
+Usage: cs init [OPTIONS] [PATH]
+
+Arguments:
+  [PATH]
+          Directory to initialize (default: current directory).
+          
+          Need not exist. If it does not, `cs init` creates it with `mkdir -p`. If it exists and already contains `.cosmon/`, the command is a no-op (strict idempotency).
+          
+          [default: .]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --upgrade
+          Upgrade an existing `.cosmon/` project by backfilling missing canonical formulas AND `project_id` without overwriting existing files
+
+      --soft
+          Generate only a minimal CLAUDE.md (≤50 lines) without creating `.cosmon/`.
+          
+          Constitutional projection: conventions propagated via a single file that any agent can read independently. No orchestration infrastructure, no runtime state, no external dependency.
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --template <TEMPLATE>
+          Project-type template for `--soft` (default: generic)
+
+          Possible values:
+          - generic: Generic project — language-agnostic conventions
+          - rust:    Rust project — cargo-based conventions
+          - data:    Data/research project — notebook + pipeline conventions
+          
+          [default: generic]
+
+  -y, --yes
+          Assume "yes" to any confirmation prompt (non-interactive mode).
+          
+          `cs init` is already fully non-interactive today, so this flag is accepted and ignored. It is reserved so that README quickstarts (`cs init --yes`) stay paste-testable if prompts are ever added — per the knuth paste-testability invariant and tolnay's semver rule that reserving a flag now makes adding prompts later a non-breaking elaboration.
+
+      --tenant <NOYAU>
+          Tenant (noyau) this galaxy belongs to. Records the ADR-063 layer-3 label in `config.toml` and provisions the `.cosmon/state/nucleons/` directory where ADR-080 OIDC identity mappings (`oidc-identity.toml`) and future `YubiKey` keyring entries land.
+          
+          Convention: one tenant per galaxy below the configured cluster root. This flag records the label but does not enforce a path. Downstream tools read the `noyau` to verify the galaxy belongs to its tenant.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs init                      # bootstrap .cosmon/ in the current directory
+  cs init ./new-galaxy         # create ./new-galaxy/, then populate .cosmon/
+  cs init --soft               # generate only CLAUDE.md (no .cosmon/)
+  cs init --soft --template rust   # Rust-specific conventions
+  cs init --soft --template data   # data/research conventions
+  cs init --upgrade            # backfill missing canonical formulas
+
+Creates `.cosmon/{config.toml, state/, formulas/, …}`. The target path
+may not exist — `cs init` runs `mkdir -p` before populating. Running
+twice on the same path is a strict no-op.
+
+Does NOT run `git init` (that is git's job) and does NOT write
+CLAUDE.md by default — pass `--soft` to generate an agent template.
+Refuses to nest: if an ancestor already carries `.cosmon/`, exits
+non-zero — no `--force`.
+
+Symmetric undo: `rm -rf <path>/.cosmon/`.

@@ -1,0 +1,91 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
+
+Usage: cs daemons [OPTIONS] <COMMAND>
+
+Commands:
+  list    List declared daemons (reads `daemons.toml`, no state)
+  status  Show current status of each supervised child (reads `state.json`)
+  reload  Trigger a hot-reload by touching the config file
+  logs    Tail the supervisor log (the aggregate one, not per-daemon stdout)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+IMAGE:
+  cosmon-daemon-supervisor is the night watchman. It does not look at
+  the clock. It looks at the dogs — processes that must always be
+  alive. It reads its tablet (`~/.config/cosmon/daemons.toml`), keeps
+  each dog alive; if one dies, it calls it back. Dogs never die
+  voluntarily; if they die, it is an accident.
+
+  (See the '2026-04-19 — Le gardien des chiens,
+  et le gardien des portes' and '2026-04-19 — Deux métiers, deux outils'
+  chronicles for the full gardien-de-chiens / veilleur-de-nuit image.)
+
+WHEN TO USE THE SUPERVISOR:
+  - long-running process, persistent connection (Telegram long-polling,
+    IMAP IDLE, MCP stdio server, Emacs daemon)
+  - must be restarted if it dies
+  - throttle respawns to avoid crashloops
+  Synthetic examples: notification-bot, archive-service, editor-daemon,
+  metrics-dashboard.
+  If the command should run once-and-exit on a cadence, use `cs
+  scheduler` instead.
+
+EXAMPLES — operator-facing (cs daemons):
+  cs daemons list                       # declared daemons (from daemons.toml)
+  cs daemons status                     # per-daemon status + last spawn age
+  cs daemons status --json              # NDJSON, one object per daemon
+  cs daemons reload                     # touch config → supervisor hot-reload
+  cs daemons logs --lines 100           # tail the supervisor aggregate log
+
+MINIMAL daemons.toml (~/.config/cosmon/daemons.toml):
+  [supervisor]
+  state_file  = "~/.cosmon/daemon-supervisor.state.json"
+  log_file    = "~/.cosmon/daemon-supervisor.log"
+  kill_switch = "~/.cosmon/stand-down.lock"
+
+  [[daemon]]
+  name             = "notification-bot"
+  binary           = "~/.local/bin/notification-bot"
+  args             = []
+  throttle_seconds = 30
+  env              = { RUST_LOG = "info" }
+  log_stdout       = "~/.local/state/notification-bot/stdout.log"
+  log_stderr       = "~/.local/state/notification-bot/stderr.log"
+  enabled          = true
+
+HOT-RELOAD:
+  `cs daemons reload` touches `~/.config/cosmon/daemons.toml`. The
+  supervisor's notify watcher picks up the modification, runs the diff,
+  and restarts ONLY the daemons whose spec actually changed (debounce
+  ~200ms). Adding a new `[[daemon]]` block makes that daemon appear;
+  removing one makes it exit gracefully. No signal sent to the
+  supervisor itself.
+
+SUPERVISOR-OF-THE-SUPERVISOR:
+  The supervisor itself is a long-running process — it needs its own
+  watchman. That is `launchd` (macOS): scripts/install-daemon-supervisor.sh
+  installs one LaunchAgent for the supervisor, and launchd keeps it
+  alive. The supervisor keeps N dogs alive. One plist, N dogs.
+
+  Install the LaunchAgent:
+    scripts/install-daemon-supervisor.sh install
+    scripts/install-daemon-supervisor.sh status
+    scripts/install-daemon-supervisor.sh uninstall
+
+KILL-SWITCH:
+  `touch ~/.cosmon/stand-down.lock` — the supervisor SIGTERMs every
+  child and parks them until the file disappears. Same convention as
+  cs scheduler (one lockfile silences both).
+
+SEE ALSO:
+  cs scheduler (tick-based patrols), ADR-053 (cosmon-daemon-supervisor),
+  ADR-016 §Autonomous (the regime this lives in).

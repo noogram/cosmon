@@ -1,0 +1,15 @@
+formula = "hello"
+version = 1
+description = "Minimal smoke-test formula — one step, zero children, no gates. Used by the lifecycle smoke harness to drive a full nucleate→tackle→complete→done cycle in seconds without touching claude or cargo."
+id_prefix = "hello"
+
+# Leaf. The smoke harness simulates the worker by calling `cs complete`
+# directly — no child molecules are ever nucleated.
+[tier]
+level = 0
+
+[[steps]]
+id = "greet"
+title = "Say hello"
+description = "Trivial step. The harness (acting as the worker) transitions the molecule to Completed."
+acceptance = "Any evidence string accepted."

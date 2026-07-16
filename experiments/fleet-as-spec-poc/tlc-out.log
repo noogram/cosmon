@@ -1,0 +1,45 @@
+java    : /opt/homebrew/opt/openjdk@17/bin/java
+tla jar : /srv/cosmon/cosmon/docs/specs/tla2tools.jar
+cwd     : /srv/cosmon/cosmon/.worktrees/task-20260420-ac88/experiments/fleet-as-spec-poc
+
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 73 and seed 7896823738494436846 with 16 workers on 16 cores with 27300MB heap and 64MB offheap memory [pid: 72401] (Mac OS X 26.4.1 aarch64, Homebrew 17.0.18 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260420-ac88/experiments/fleet-as-spec-poc/WikiCore.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/Naturals.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/Sequences.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/TLC.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/TLCExt.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-5562084674639268215/Integers.tla (jar:file:/srv/cosmon/cosmon/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module WikiCore
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module WikiCore
+Starting... (2026-04-20 23:24:22)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-04-20 23:24:22.
+Checking temporal properties for the current state space with 481788 total distinct states at (2026-04-20 23:24:25)
+Finished checking temporal properties in 01s at 2026-04-20 23:24:26
+Progress(12) at 2026-04-20 23:24:26: 1 149 029 states generated (1 149 029 s/min), 481 788 distinct states found (481 788 ds/min), 358 249 states left on queue.
+Progress(15) at 2026-04-20 23:25:26: 18 425 595 states generated (17 276 566 s/min), 5 474 408 distinct states found (4 992 620 ds/min), 1 864 138 states left on queue.
+Progress(18) at 2026-04-20 23:26:22: 27 001 057 states generated, 7 835 008 distinct states found, 0 states left on queue.
+Checking temporal properties for the complete state space with 7835008 total distinct states at (2026-04-20 23:26:22)
+Finished checking temporal properties in 01min 37s at 2026-04-20 23:28:00
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 8.1E-6
+  based on the actual fingerprints:  val = 1.1E-7
+27001057 states generated, 7835008 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 18.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 20 and the 95th percentile is 4).
+Finished in 03min 38s at (2026-04-20 23:28:00)

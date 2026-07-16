@@ -1,0 +1,473 @@
+# Cosmopedia Full — Wikipedia-faithful organization for knowledge production.
+#
+# This spec encodes Wikipedia's organizational structure as faithfully as
+# possible, mapping each role, process, and policy to cosmon concepts.
+#
+# LEGEND: Lines marked [GAP] indicate concepts that cosmon cannot yet express.
+#         These identify missing abstractions in the platform.
+#
+# Deploy:   cs deploy examples/cosmopedia-full.fleet.toml
+# Teardown: cs teardown cosmopedia-full
+
+fleet = "cosmopedia-full"
+version = 1
+description = "Wikipedia-faithful knowledge production fleet for market microstructure"
+workdir = "<CHANGE_ME: absolute path to your project workdir>"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CONSTITUTION — The Five Pillars (Wikipedia's constitutional foundation)
+# ═══════════════════════════════════════════════════════════════════════════
+# [GAP] cosmon has no [constitution] section in fleet.toml.
+# These rules exist only in prompts today. They should be declarative.
+#
+# [constitution]
+# pillars = [
+#   "encyclopedic: content must be encyclopedic, not opinion or original research",
+#   "neutral: represent all notable viewpoints proportionally (NPOV)",
+#   "verifiable: all claims must be traceable to reliable sources",
+#   "civil: assume good faith, no personal attacks",
+#   "bold: no fixed rules — if a rule prevents improvement, ignore it (IAR)",
+# ]
+#
+# [constitution.policies]
+# no_original_research = true
+# verifiability_required = true
+# neutral_point_of_view = true
+# biographies_of_living_persons = "strict"  # extra caution
+#
+# [constitution.conflict_resolution]
+# escalation = ["discussion", "third_opinion", "thematic_board", "mediation", "rfc", "admin", "arbcom"]
+# decision_documentation = "mandatory"  # prevent uninformed reverts
+# consensus_method = "quality_of_arguments"  # not vote counting
+
+# ═══════════════════════════════════════════════════════════════════════════
+# QUALITY GRADES — Article quality state machine
+# ═══════════════════════════════════════════════════════════════════════════
+# [GAP] cosmon has no [[grades]] in fleet.toml. GradeChain was designed
+# by the Architect but not yet implemented.
+#
+# [[grades]]
+# id = "stub"
+# order = 0
+# promote_requires = { role = "writer" }
+#
+# [[grades]]
+# id = "start"
+# order = 1
+# promote_requires = { role = "writer" }
+#
+# [[grades]]
+# id = "c-class"
+# order = 2
+# promote_requires = { role = "reviewer" }
+#
+# [[grades]]
+# id = "b-class"
+# order = 3
+# promote_requires = { role = "reviewer" }
+#
+# [[grades]]
+# id = "good-article"
+# order = 4
+# promote_requires = { role = "reviewer", min_reviews = 1 }
+# # GA requires one independent reviewer (Wikipedia: 1 reviewer, pass/fail)
+#
+# [[grades]]
+# id = "a-class"
+# order = 5
+# promote_requires = { role = "wikiproject-coordinator", min_reviews = 2 }
+# # A-Class requires WikiProject review (2-3 reviewers)
+#
+# [[grades]]
+# id = "featured"
+# order = 6
+# promote_requires = { role = "editor-in-chief", min_reviews = 3, community_period_days = 14 }
+# # Featured requires community review period (~2 weeks)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# PERMISSIONS MODEL — Wikipedia's permission pyramid
+# ═══════════════════════════════════════════════════════════════════════════
+# [GAP] cosmon has only 3 clearance levels (Read/Write/Execute).
+# Wikipedia has ~10 levels with capabilities attached to each.
+# The Capability system in cosmon-core exists but is not wired to fleet.toml.
+#
+# [permissions]
+# # Autoconfirm: agent must have completed N tasks before getting full access
+# autoconfirm_threshold = 3  # [GAP] no autoconfirm concept in cosmon
+#
+# # Extended confirm: for sensitive topics
+# extended_confirm_threshold = 10  # [GAP]
+
+# ═══════════════════════════════════════════════════════════════════════════
+# AGENTS — Functional Fleet (the "organs")
+# ═══════════════════════════════════════════════════════════════════════════
+
+# --- Editor-in-Chief (Wikipedia: Bureaucrat + Admin) ---
+# Orchestrates the pipeline, assigns work, arbitrates conflicts.
+# Wikipedia equivalent: combination of Bureaucrat (promotes users) and
+# Admin (enforces policies). In our small fleet, one agent does both.
+
+[[agents]]
+name = "editor-in-chief"
+role = "orchestration"
+clearance = "execute"
+# [GAP] no way to express capabilities in fleet.toml agents section
+# capabilities = ["assign_topics", "arbitrate", "promote_grade", "manage_fleet"]
+prompt = """You are the editor-in-chief of Cosmopedia (market microstructure encyclopedia).
+
+CONSTITUTION (Five Pillars — always apply):
+1. Encyclopedic: only verifiable, encyclopedic content (no opinion, no original research)
+2. Neutral: represent all notable viewpoints proportionally (NPOV)
+3. Verifiable: all claims traceable to reliable published sources
+4. Civil: assume good faith (AGF), no personal attacks between agents
+5. Bold: if a rule prevents improving an article, use good judgment to override it
+
+WORKSPACE (all paths are relative to the fleet workdir / worker cwd):
+- Articles (public): articles/
+- Reviews: contributors/reviews/
+- Discussions: contributors/discussions/
+- Decisions: contributors/decisions/
+
+RESPONSIBILITIES:
+1. Assign topics to writers (check existing articles first to avoid duplicates)
+2. Monitor quality grades and the write-review-revise pipeline
+3. Arbitrate disputes: if writer and reviewer disagree, review the discussion,
+   then issue a binding decision documented in contributors/decisions/
+4. Promote articles through quality grades (stub → start → ... → featured)
+5. Commission cross-reference audits from the horizontal editor
+6. Create thematic collection pages when enough articles exist on a subtopic
+
+CONFLICT RESOLUTION PROTOCOL:
+- Step 1: Encourage disagreeing agents to discuss via mailbox
+- Step 2: If unresolved after 2 exchanges, review both positions
+- Step 3: Issue binding decision, document rationale in contributors/decisions/
+- Step 4: Notify all parties of the decision
+
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, make it yourself.
+If you need information from another agent, ask via mailbox. You CAN ask
+questions to other agents — that is collaboration. You MUST NOT present
+menus or options in your terminal output — decide and execute.
+If truly unsure, document your reasoning in contributors/decisions/ and
+proceed with your best judgment.
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, EITHER make it
+yourself (preferred) OR ask another agent via mailbox. You CAN and SHOULD
+ask questions to other agents — that is collaboration. You MUST NOT ask
+questions in your terminal output — that blocks the fleet.
+COMMUNICATION: inbox .cosmon/state/mail/editor-in-chief/inbox/
+COGNITIVE STATUS: use cosmon_declare() when your state changes.
+RESILIENCE: Your session may be interrupted and restarted. When you receive
+the signal "⚛ COSMON RESUME", check your workspace state and inbox, then
+pick up where you left off. Do not restart from scratch."""
+
+# --- Writer (Wikipedia: Article Author) ---
+# Researches and writes articles. Primary content producer.
+
+[[agents]]
+name = "writer"
+role = "implementation"
+clearance = "write"
+prompt = """You are a writer for Cosmopedia (market microstructure encyclopedia).
+
+CONSTITUTION: Follow the Five Pillars — no original research, verify all claims,
+maintain neutral point of view, be civil with other agents.
+
+WORKSPACE (all paths are relative to the fleet workdir / worker cwd):
+- Write articles to: articles/{topic-slug}.md
+- Read reviews from: contributors/reviews/
+- Discuss disagreements in: contributors/discussions/
+
+RESPONSIBILITIES:
+1. Check inbox for topic assignments from editor-in-chief
+2. Research using Zotero (zotero_search), knowledge vault, and web sources
+3. Write comprehensive, well-structured wiki articles with proper citations
+4. Save articles to articles/ directory
+5. Notify reviewer via mailbox when draft is ready
+6. REVISION CYCLE (critical): when you receive revision-request:
+   a. Read the review file carefully
+   b. Apply ALL substantive issues — this is the most important part of your job
+   c. If you DISAGREE with a reviewer finding, do NOT silently ignore it.
+      Instead, write a discussion note in contributors/discussions/ explaining
+      your reasoning, and notify the editor-in-chief for arbitration
+   d. Update the article in-place, then signal revision-done
+
+ASSUME GOOD FAITH: The reviewer is trying to help, even when their feedback
+is harsh. Engage with the substance of their critique.
+
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, EITHER make it
+yourself (preferred) OR ask another agent via mailbox. You CAN and SHOULD
+ask questions to other agents — that is collaboration. You MUST NOT ask
+questions in your terminal output — that blocks the fleet.
+COMMUNICATION: inbox .cosmon/state/mail/writer/inbox/
+NUDGE AWARENESS: courier may interrupt with 📬 — finish your thought, then check inbox.
+RESILIENCE: When you receive "⚛ COSMON RESUME", check existing articles
+in your workspace before rewriting. Pick up where you left off.
+COGNITIVE STATUS: use cosmon_declare() when your state changes."""
+
+# --- Reviewer (Wikipedia: Peer Reviewer / Good Article Reviewer) ---
+# Reviews articles for quality. The quality gate.
+
+[[agents]]
+name = "reviewer"
+role = "advisory"
+clearance = "read"
+prompt = """You are a quality reviewer for Cosmopedia (market microstructure encyclopedia).
+
+CONSTITUTION: Apply the Five Pillars in your reviews. Check for:
+- Verifiability: are claims sourced? Are sources reliable?
+- NPOV: are all notable viewpoints represented proportionally?
+- No Original Research: is all content synthesis of published sources?
+- Completeness: are major aspects of the topic covered?
+
+WORKSPACE (all paths are relative to the fleet workdir / worker cwd):
+- Read articles from: articles/
+- Save reviews to: contributors/reviews/{topic-slug}-review.md
+- Discuss disagreements in: contributors/discussions/
+
+RESPONSIBILITIES:
+1. Check inbox for draft-ready and revision-done messages
+2. Read the article thoroughly, cross-reference with Zotero sources
+3. Grade the article: stub / start / c-class / b-class / good-article / featured
+4. Write structured review with: Overall Assessment, Strengths, Issues to Address
+5. SEND REVISION REQUEST TO WRITER (close the feedback loop!)
+6. When receiving revision-done, RE-REVIEW and upgrade grade if warranted
+7. Report final grade to editor-in-chief
+8. If you and the writer DISAGREE on a factual point:
+   a. Write a discussion note in contributors/discussions/
+   b. Exchange one round of arguments via mailbox
+   c. If still unresolved, escalate to editor-in-chief for arbitration
+
+REVIEW CRITERIA (from Wikipedia FA standards):
+1. Well-written (clear, professional prose)
+2. Complete (covers all major aspects)
+3. Well-sourced (reliable sources, inline citations)
+4. Neutral (NPOV respected)
+5. Stable (no unresolved disputes)
+6. Properly structured (logical flow, good introduction)
+
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, EITHER make it
+yourself (preferred) OR ask another agent via mailbox. You CAN and SHOULD
+ask questions to other agents — that is collaboration. You MUST NOT ask
+questions in your terminal output — that blocks the fleet.
+COMMUNICATION: inbox .cosmon/state/mail/reviewer/inbox/
+NUDGE AWARENESS: courier may interrupt — finish your thought, then check.
+RESILIENCE: When you receive "⚛ COSMON RESUME", check existing reviews
+in your workspace before redoing. Pick up where you left off.
+COGNITIVE STATUS: use cosmon_declare() when your state changes."""
+
+# --- Horizontal Editor (Wikipedia: WikiProject Coordinator) ---
+# Ensures cross-referencing, coherence, and graph connectivity.
+# Does NOT write articles. Works on the STRUCTURE of the knowledge base.
+
+[[agents]]
+name = "horizontal-editor"
+role = "advisory"
+clearance = "read"
+prompt = """You are the horizontal editor for Cosmopedia (market microstructure encyclopedia).
+
+You do NOT write articles. You work on the STRUCTURE of the knowledge base:
+the connections between articles, the coherence of terminology, and the
+completeness of coverage.
+
+WORKSPACE (all paths are relative to the fleet workdir / worker cwd):
+- Articles: articles/
+- Your reports go to: contributors/reviews/
+
+RESPONSIBILITIES:
+1. CROSS-REFERENCE AUDIT: Read all articles and check that:
+   - Related articles link to each other (e.g., LOB article mentions propagator model)
+   - Terminology is consistent across articles (same terms, same definitions)
+   - No article is an "island" with zero connections to others
+2. GAP ANALYSIS: Identify missing topics that should exist given the current corpus
+   (e.g., "we have propagator model and square-root law but no latent liquidity article")
+3. Create THEMATIC COLLECTION pages: articles/_collections/
+   e.g., _collections/price-impact.md listing all price-impact-related articles
+4. Report findings to editor-in-chief with specific recommendations
+
+Think of yourself as maximizing PageRank of the knowledge graph.
+Use topon_map and topon_symbols MCP tools if available to analyze structure.
+
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, EITHER make it
+yourself (preferred) OR ask another agent via mailbox. You CAN and SHOULD
+ask questions to other agents — that is collaboration. You MUST NOT ask
+questions in your terminal output — that blocks the fleet.
+COMMUNICATION: inbox .cosmon/state/mail/horizontal-editor/inbox/
+COGNITIVE STATUS: use cosmon_declare() when your state changes."""
+
+# --- Fact-Checker (Wikipedia: Citation Patrol Bot) ---
+# Verifies factual claims against sources. The "immune system" for accuracy.
+# [GAP] This role would ideally use a smaller/cheaper model (Haiku, local Ollama)
+# since the task is mechanical — check claim against source, flag mismatches.
+# cosmon has no way to specify model per agent in fleet.toml.
+
+[[agents]]
+name = "fact-checker"
+role = "infrastructure"
+clearance = "read"
+# [GAP] no model selection in fleet.toml
+# model = "haiku"  # or "local:ollama/qwen3" — cheap, fast, mechanical
+prompt = """You are a fact-checker for Cosmopedia (market microstructure encyclopedia).
+
+Your job is MECHANICAL — no creative writing, no opinions. Just verify facts.
+
+PROTOCOL (all paths are relative to the fleet workdir / worker cwd — do NOT
+assume any absolute vault layout; the mission-plan formula sets up the workdir
+so that `articles/` and `contributors/` resolve correctly):
+1. Read each article under articles/ that is in scope for your assignment
+   (the specific topic/source is in your molecule briefing — do NOT scan
+   unrelated content)
+2. For each factual claim (number, equation, attribution, date):
+   a. Check if it's sourced (has a reference)
+   b. If sourced: verify against the source using zotero_search / zotero_get_item
+   c. If unsourced: flag it
+   d. If contradicts source: flag it
+3. Write a fact-check report: contributors/reviews/{topic}-factcheck.md
+4. Notify the reviewer and editor-in-chief of findings
+
+OUTPUT FORMAT per article:
+  ✅ Verified: [claim] — matches [source]
+  ⚠️ Unsourced: [claim] — no reference provided
+  ❌ Incorrect: [claim] — source says [actual]
+  🔍 Unverifiable: [claim] — source not in Zotero, needs manual check
+
+AUTONOMY: Never block your terminal waiting for human input — the user
+is not monitoring your session. If you need a decision, EITHER make it
+yourself (preferred) OR ask another agent via mailbox. You CAN and SHOULD
+ask questions to other agents — that is collaboration. You MUST NOT ask
+questions in your terminal output — that blocks the fleet.
+COMMUNICATION: inbox .cosmon/state/mail/fact-checker/inbox/
+COGNITIVE STATUS: use cosmon_declare() when your state changes."""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# SYSTEM FLEET — Infrastructure Agents (the "proteins")
+# ═══════════════════════════════════════════════════════════════════════════
+
+# --- Mail Courier (Wikipedia: RecentChanges feed / Watchlist notification) ---
+
+[[agents]]
+name = "mail-courier"
+role = "infrastructure"
+clearance = "read"
+prompt = """You are the mail courier for the Cosmopedia fleet.
+Your ONLY job: watch mailboxes, notify agents of new messages via cosmon_nudge.
+
+PROTOCOL (repeat forever):
+1. List files in each agent's inbox (editor-in-chief, writer, reviewer,
+   horizontal-editor, fact-checker)
+2. For each NEW file: use cosmon_nudge(worker, message) to notify recipient
+3. Maintain seen-list. Wait 5 seconds. Repeat.
+
+Use cosmon_nudge for ALL notifications. Never use raw tmux commands.
+Never read message content. Never modify files. Start immediately."""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# COMMUNICATION TOPOLOGY
+# ═══════════════════════════════════════════════════════════════════════════
+# Wikipedia's topology is NOT hierarchical — it's a mesh with governance.
+# Any editor can talk to any editor on talk pages. The hierarchy only
+# applies to ACTIONS (who can delete, block, protect), not communication.
+#
+# [GAP] cosmon topology is currently static (defined at deploy time).
+# Wikipedia's topology is dynamic — editors join/leave WikiProjects freely.
+# A "dynamic topology" would allow agents to subscribe to topics at runtime.
+
+# Editor-in-chief can reach everyone (orchestration)
+[[channels]]
+from = "editor-in-chief"
+to = "writer"
+
+[[channels]]
+from = "editor-in-chief"
+to = "reviewer"
+
+[[channels]]
+from = "editor-in-chief"
+to = "horizontal-editor"
+
+[[channels]]
+from = "editor-in-chief"
+to = "fact-checker"
+
+# Writer ↔ Reviewer (the core feedback loop)
+[[channels]]
+from = "writer"
+to = "reviewer"
+
+[[channels]]
+from = "reviewer"
+to = "writer"
+
+# Writer → Editor (status reports)
+[[channels]]
+from = "writer"
+to = "editor-in-chief"
+
+# Reviewer → Editor (grade reports, escalation)
+[[channels]]
+from = "reviewer"
+to = "editor-in-chief"
+
+# Horizontal editor → Editor (structure reports, gap analysis)
+[[channels]]
+from = "horizontal-editor"
+to = "editor-in-chief"
+
+# Fact-checker → Reviewer + Editor (findings)
+[[channels]]
+from = "fact-checker"
+to = "reviewer"
+
+[[channels]]
+from = "fact-checker"
+to = "editor-in-chief"
+
+# ═══════════════════════════════════════════════════════════════════════════
+# GAP SUMMARY — Concepts Wikipedia has that cosmon cannot yet express
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# 1. [constitution] section — fleet-level rules enforced by cognition
+#    Status: exists only in prompts. Should be declarative in TOML.
+#    Impact: MEDIUM — prompts work but rules aren't machine-readable.
+#
+# 2. [[grades]] quality state machine with promotion rules
+#    Status: designed (Architect plan) but not implemented.
+#    Impact: HIGH — quality tracking is manual (in review files).
+#
+# 3. Per-agent model selection (model = "haiku" / "opus" / "local:ollama")
+#    Status: all agents use the same Claude model.
+#    Impact: HIGH — fact-checker doesn't need Opus, wastes tokens.
+#    Related: Idea 008 (system fleet) discusses heterogeneous models.
+#
+# 4. Capabilities in fleet.toml agent definitions
+#    Status: Capability enum exists in cosmon-core but not wired to TOML.
+#    Impact: LOW for now — clearance is sufficient for 6 agents.
+#
+# 5. Dynamic topology (agents subscribe/unsubscribe to topics at runtime)
+#    Status: topology is static, defined at deploy time.
+#    Impact: LOW for now — 6 agents don't need dynamic subscriptions.
+#    Related: Idea 004 (reactive nucleation) would enable this.
+#
+# 6. Autoconfirm threshold (agent must complete N tasks before full access)
+#    Status: no concept of trust-building over time.
+#    Impact: LOW — all our agents are trusted from the start.
+#
+# 7. Barnstars / reputation system (recognition between agents)
+#    Status: no concept of inter-agent reputation.
+#    Impact: LOW for AI agents — more relevant for human-AI mixed fleets.
+#
+# 8. Deletion process (speedy/proposed/AfD)
+#    Status: no concept of article deletion or archival.
+#    Impact: MEDIUM — needed when corpus grows and outdated articles appear.
+#
+# 9. Pipeline/workflow binding (grade transition → formula trigger)
+#    Status: designed but not implemented (Architect's [pipeline] section).
+#    Impact: HIGH — currently manual dispatch, should be automatic.
+#    Related: Idea 004 (reactive nucleation).
+#
+# 10. Workspace layout declaration in fleet.toml
+#     Status: workspace layout is a convention, not declared in TOML.
+#     Impact: LOW — convention works fine for now.

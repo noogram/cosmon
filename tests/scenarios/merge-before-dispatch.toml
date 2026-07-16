@@ -1,0 +1,51 @@
+# A blocks B. Driving B via run_root must first drive A to Completed
+# (merged), and only then dispatch B. The property assertion verifies
+# that at every Pending→Running transition of a molecule with blockers,
+# every blocker was already merged.
+
+[scenario]
+name = "merge-before-dispatch"
+description = "Predecessor branch merged before dependent is dispatched."
+
+[binds]
+constitution_clause = "merge-before-dispatch"
+foundry_proposition = "MergeBeforeDispatch_monotone"
+
+[[given.molecules]]
+id = "A"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+  { name = "s2", native = "cosmon::test::noop" },
+]
+
+[[given.molecules]]
+id = "B"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+]
+
+[[given.links]]
+from = "A"
+to = "B"
+kind = "Blocks"
+
+[[actions]]
+op = "run_root"
+target = "B"
+
+[[assert]]
+molecule = "A"
+status = "completed"
+
+[[assert]]
+molecule = "B"
+status = "completed"
+
+[[assert]]
+property = "merge_before_dispatch"
+
+[[assert]]
+property = "target_branch_base_is_blocker"
+target = "B"

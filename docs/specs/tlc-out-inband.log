@@ -1,0 +1,36 @@
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 116 and seed -8088624740221762007 with 16 workers on 16 cores with 27300MB heap and 64MB offheap memory [pid: 23013] (Mac OS X 26.4.1 aarch64, Homebrew 21.0.8 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/CosmonRun.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/Naturals.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/Sequences.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/TLC.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/TLCExt.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-11513457906145966/Integers.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-af4c/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module CosmonRun
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module CosmonRun
+Starting... (2026-04-19 17:28:42)
+Implied-temporal checking--satisfiability problem has 6 branches.
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-04-19 17:28:43.
+Progress(25) at 2026-04-19 17:28:43: 98 416 states generated, 19 683 distinct states found, 0 states left on queue.
+Checking 6 branches of temporal properties for the complete state space with 118098 total distinct states at (2026-04-19 17:28:43)
+Finished checking temporal properties in 00s at 2026-04-19 17:28:44
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 8.4E-11
+98416 states generated, 19683 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 25.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 8 and the 95th percentile is 4).
+Finished in 01s at (2026-04-19 17:28:44)

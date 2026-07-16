@@ -1,0 +1,86 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
+
+Usage: cs peek [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --no-tui
+          Disable the TUI and render plaintext events to stdout. Required until the Phase 1 ratatui TUI lands
+
+      --once
+          Run a single poll + diff + propel pass and exit. Implies `--no-tui`
+
+  -v, --verbose
+          Enable verbose output
+
+      --follow
+          Follow the event stream until interrupted (the default for `--no-tui` when `--once` is not set)
+
+      --json
+          Output in JSON format
+
+      --stale-after <STALE_AFTER>
+          Staleness threshold in seconds, passed to the propel pass
+          
+          [default: 300]
+
+      --poll-ms <POLL_MS>
+          State poll cadence in milliseconds
+          
+          [default: 1000]
+
+      --propel-every <PROPEL_EVERY>
+          Propel nudge cadence in seconds. Defaults to `min(60, stale_after/5)`
+
+      --no-tmux
+          Disable tmux propulsion. State is still read and diffed, but no nudges are sent
+
+      --all
+          Sugar for `--all-galaxies --phase all`, and exactly that. Both axes at their widest: every project AND every phase, archive included. `--all` means all, literally; it never narrows. Conflicts with the two flags it expands to — sugar and its expansion are one way of saying one thing, not two ways of saying it twice. See `docs/guides/peek-temporalities.md`
+
+      --all-galaxies
+          Perimeter axis: scan every project under `$COSMON_CLUSTER_ROOT` instead of the current one. Opt-in — cross-project reach is never implicit. Says nothing about which phases you see. Same spelling as `cs tail --all-galaxies`: one word, one meaning, across the binary. In TUI mode the `a` key toggles this at runtime
+
+      --phase <PHASE>
+          Temporality axis: which phases to surface. Repeatable and comma-separated; the values union. Says nothing about the perimeter. Defaults to `unfinished` — every molecule whose story is not over. `--phase unfinished,done,failed` is what `--past` used to mean. In TUI mode the `A` key cycles this at runtime
+
+          Possible values:
+          - live:       A worker is on it right now
+          - waiting:    Nucleated, not yet started
+          - blocked:    An external authority is refusing service (ADR-062)
+          - parked:     Frozen by an operator gesture; one `cs thaw` from running
+          - failed:     Collapsed
+          - done:       Completed
+          - unfinished: Every phase whose story is not over — the default view
+          - all:        Every phase, archive included. All of this axis, and only this axis: it does not touch the perimeter
+
+      --energy-tick-interval <ENERGY_TICK_INTERVAL>
+          Cadence in seconds for emitting `EnergyTick` events into `events.jsonl`. Zero disables emission. Only active in `--no-tui` mode
+          
+          [default: 30]
+
+      --snapshot
+          Emit a byte-deterministic, fixed-width (120-col) ASCII snapshot of the fleet and exit. The same fleet state produces byte-identical output across every device — iPhone SSH, iPad Blink, `MacBook`, tmux pane — so a PR reviewer can `diff` two captures and expect zero differences. Implies `--no-tui` and disables propulsion; no clock or environment (`$COLUMNS`, `$TERM`) affects the output
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs peek                         # TUI over the current .cosmon/
+  cs peek --phase done,failed     # + the archive; project scope unchanged
+  cs peek --all-galaxies          # same phases, every .cosmon/ + tmux socket
+  cs peek --all                   # sugar for --all-galaxies --phase all
+  cs peek --no-tui                # plaintext event stream
+  cs peek --snapshot              # byte-deterministic 120-col canonical view
+  cs peek --snapshot > /tmp/a     # capture from any device, then `diff` two
+                                  #   captures and expect zero bytes (see
+                                  #   docs/guides/peek-snapshot.md)
+
+Keys in the TUI: j/k navigate, p tmux pane capture, b/l/e/s/r/n/g
+briefing/log/events/synthesis/responses/notes/git tabs.

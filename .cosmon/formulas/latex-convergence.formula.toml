@@ -1,0 +1,208 @@
+formula = "latex-convergence"
+version = 1
+description = """
+G_latex — the typographic quality-convergence gate for molecules whose \
+deliverable is a COMPILED PAPER: a LaTeX/PDF report, article, preprint, \
+or any .tex document a human will read on the page. It is the paper \
+sibling of `visual-qa` (G_visual, the slide/deck gate, ADR-120): same \
+discipline — render → READ the defects → fail-closed checklist → iterate \
+to convergence — applied to the LaTeX surface instead of the deck \
+surface.
+
+WHY THIS EXISTS — paper fleets ship PDFs with obvious, mechanical \
+defects that NO existing gate catches. `task-work` checks that code \
+compiles. `editorial-work` checks that prose is coherent. Neither looks \
+at the typeset page. So a worker ships a paper that builds cleanly yet \
+carries ~30 Overfull \\hbox (text bleeding past the right margin), every \
+figure dumped in the appendix instead of placed near the sentence that \
+discusses it, undefined cross-references, and no microtype. \"The PDF \
+compiled\" is NOT \"the PDF is well-set.\" Provenance: cosmon-ward \
+feedback flow (CLAUDE.md) from the `qfa` galaxy's q4beam-poc paper \
+pipeline (re-dispatch of collapsed spark-20260621-3c04 → \
+task-20260622-5055). See ADR-129.
+
+WHY A FORMULA, NOT A NEW COMMAND OR DAEMON — Composability Principle \
+(CLAUDE.md): molecules + formulas are the only extension points. The \
+gate is a DISCIPLINE (build → audit → correct → re-build, fail-closed), \
+and a discipline is what a formula encodes — not a new `cs` verb, not a \
+`[gates]` entry (those are universal one-shot shell commands; this gate \
+is conditional on paper deliverables and ITERATIVE), not a daemon \
+(forbidden in the transactional core). This is the same reasoning that \
+made visual-qa a formula rather than `cs visual-audit`.
+
+TWO LAYERS — objective floor + semantic ceiling, exactly like visual-qa:
+  - FLOOR (deterministic): `scripts/latex-audit.sh` parses the build \
+    `.log` + the `.tex` source and reports Overfull \\hbox/\\vbox, \
+    undefined \\ref/\\cite, figures stranded after the appendix, rigid \
+    [H]/[h] float placement, and missing microtype. Exit 2 = FAIL. This \
+    is cosmon's in-tree analogue of `lumen visual-audit` — pure text \
+    parsing, no TeX install, no rasteriser in the core. It catches the \
+    mechanical defect classes the fleet keeps shipping.
+  - CEILING (semantic): the worker READS the rendered PDF and answers \
+    \"is each figure actually beside the sentence that discusses it, is \
+    the first figure early, does the page read well\". The floor cannot \
+    see whether figure 3 belongs next to paragraph 2; the worker can. \
+    For full visual-layout QA (column balance, empty zones, overlap), \
+    compose `visual-qa` ON THE SAME PDF — the two gates stack.
+
+TWO COMPOSITION MODES (see docs/guides/latex-convergence-gate.md):
+  - Standalone: nucleate `latex-convergence` blocked-by the producing \
+    molecule, so the gate runs as its own molecule before `cs done`.
+  - Inline: the producing molecule's worker runs these steps before \
+    calling `cs complete`. The formula text is the checklist of record \
+    either way.
+
+Variables:
+  - tex_main   : path to the root .tex (the file passed to the \
+    compiler). Required.
+  - build_cmd  : shell command that compiles tex_main and leaves the \
+    `.log` beside it. Optional — when unset the worker compiles per the \
+    `latex` skill (LuaLaTeX preferred, XeLaTeX fallback; multi-pass + \
+    biber for bibliographies). Required only on hosts where the toolchain \
+    is non-standard.
+  - max_overfull : integer tolerance for Overfull \\hbox passed through \
+    to latex-audit.sh (default 0 — SOTA render has zero).
+
+ARTIFACT PATHS — the verdict (`latex-verdict.md`) and the iteration \
+trail (`latex-iterations.md`) MUST be written to the MOLECULE STATE \
+DIRECTORY returned by `cs --json observe {mol_id}` in the `molecule_dir` \
+field. Files written to the worktree (`.worktrees/{mol_id}/`) are \
+DESTROYED by `cs done`. The CORRECTED SOURCE (.tex/.bib/.sty), by \
+contrast, lives in the versioned worktree and is committed normally.
+
+NOT FOR: code-only molecules (use `task-work`), prose-only molecules \
+with no compiled surface (use `editorial-work`), or deck/slide \
+deliverables (use `visual-qa`). The test is \"does this molecule emit a \
+compiled .tex a human will read?\" — if no, this gate does not apply. \
+The `latex` skill (content-generation) is the worker's TOOL inside the \
+correct step; this formula is the LOOP that makes the worker keep using \
+it until the page converges.
+"""
+id_prefix = "ltx"
+freeze_on_last_step = false
+
+# Tier 0 — leaf gate. No child nucleation: a FAIL does not fan out into
+# sub-molecules; it loops in place (build → audit → correct) until clean,
+# exactly like a cargo gate loops until green and like visual-qa loops
+# until every page passes. The verdict is a single pass/fail with an
+# evidence trail.
+[tier]
+level = 0
+
+[[steps]]
+id = "build"
+title = "Compile the paper and capture the log"
+description = """
+Produce the PDF and the `.log` the audit step reads. There is nothing to
+inspect if the compile never finished.
+
+  1. If `build_cmd` is set, run it. If unset, compile `{tex_main}` per the
+     `latex` skill (~/.claude/skills/latex):
+       - Preferred: LuaLaTeX. Fallback: XeLaTeX (never pdflatex; never
+         inputenc/fontenc).
+       - Multi-pass: run the compiler at least twice so cross-references
+         and the table of contents settle.
+       - Bibliography: lualatex/xelatex → biber → compiler → compiler.
+       - Use the project Makefile / `latex/compile.sh` when one exists.
+  2. The compile MUST leave a readable `.log` beside `{tex_main}` (same
+     basename). A compiler that exits non-zero with no `.log` is an
+     immediate FAIL — record it and stop.
+
+Do NOT chase warnings yet — that is the audit step's job. Just get a PDF
+and a log on disk.
+"""
+acceptance = "build_cmd (or the latex-skill compile) ran; a .log exists beside {tex_main}; the log contains 'Output written on …pdf' (the compile finished)."
+
+[[steps]]
+id = "audit"
+title = "Run the objective oracle and read the rendered PDF"
+description = """
+This is the gate. Two layers — both must pass; either can fail it.
+
+FLOOR — deterministic, always run:
+    bash scripts/latex-audit.sh --tex {tex_main} --max-overfull {max_overfull} --json <build-dir>
+  (or pass the directory / the `.log` directly; `--json` for parsing).
+  Exit 0 = clean floor; exit 2 = FAIL with a per-check table. The FAIL
+  classes are: any Overfull \\hbox beyond tolerance, any Overfull \\vbox,
+  any undefined \\ref or \\cite, and ALL figures stranded after the
+  appendix/bibliography. WARN classes (mixed-appendix figures, rigid
+  [H]/[h] floats, underfull boxes, missing microtype, missing glyphs) are
+  surfaced for judgment but do not fail the floor on their own — fix them
+  unless you can justify leaving them.
+
+CEILING — semantic, the worker READS the PDF (rasterise with
+`pdftoppm -png -r 100 {pdf} {MOLECULE_DIR}/page` and LOOK):
+  - [ ] Every figure sits NEAR the first sentence that discusses it —
+        not pages later, not in an appendix the body never sends you to.
+  - [ ] The first figure appears EARLY (within the first ~2 pages of
+        body, not after the conclusion).
+  - [ ] No line visibly bleeds past the right margin (the human check
+        behind the Overfull \\hbox count).
+  - [ ] Tables fit the text block (no column sliced by the margin).
+  - [ ] Captions read as captions (below figures, sized down, complete).
+  - [ ] Math is set, not raw (no visible \\frac, no overfull display
+        equations biting the margin).
+
+For full visual-layout QA (column balance, empty zones, overlap on a
+poster-like page), compose `visual-qa` on the same PDF — it stacks on
+top of this gate.
+
+FAIL-CLOSED LOOP — if the floor exits 2 OR any ceiling box is NO:
+  1. Diagnose the offending .tex/.bib/.sty in the worktree.
+  2. Correct it WITH THE `latex` SKILL — real fixes, not \\sloppy
+     band-aids: rewrap or hyphenate the offending line; load microtype;
+     \\resizebox or `tabularx` a wide table; shorten/`\\url`-wrap a long
+     URL; move each figure to just before/after its first \\ref with a
+     `[tbp]` specifier (NOT [H]); add `\\FloatBarrier` (placeins) at
+     section ends instead of dumping floats in an appendix.
+  3. Re-build (re-run the `build` step's commands).
+  4. Re-audit (floor + ceiling).
+  Iterate until the floor is clean AND every ceiling box is YES. Log each
+  defect found and the fix applied to `{MOLECULE_DIR}/latex-iterations.md`,
+  one entry per loop. NEVER advance with an open defect. This gate is
+  fail-closed: the default verdict is FAIL until proven PASS.
+"""
+needs = ["build"]
+acceptance = "latex-audit.sh exits 0 at --max-overfull {max_overfull}; the PDF was READ (not merely listed) and every ceiling box is YES; each defect→fix iteration logged in {MOLECULE_DIR}/latex-iterations.md; no open defect remains."
+
+[[steps]]
+id = "verdict"
+title = "Emit the LaTeX convergence verdict"
+description = """
+Write `{MOLECULE_DIR}/latex-verdict.md` (MOLECULE_DIR from
+`cs --json observe {mol_id}` — NEVER the worktree). Required sections:
+
+  # LaTeX convergence — {tex_main} — {date}
+
+  ## Verdict
+  PASS or FAIL. (FAIL only if forced to stop before convergence — e.g. a
+  structural blocker you cannot fix, or a toolchain absent on this host.
+  The normal exit of the loop is PASS; if you cannot reach PASS, FAIL
+  loudly and name the blocker. No soft \"mostly fine.\")
+
+  ## latex-audit (objective floor)
+  Paste the final `latex-audit.sh` table (the PASS run). Record the
+  `--max-overfull` tolerance used and why if non-zero.
+
+  ## Reading checklist (semantic ceiling)
+  The six ceiling boxes, each yes/no, with a one-line note on figure
+  placement (where the first figure landed, page of its first \\ref).
+
+  ## Defects found and corrected
+  Summarise `latex-iterations.md`: N defects across M iterations, each
+  with the defect class, the page/line, and the one-line fix. Lead with
+  the headline counts: Overfull \\hbox went X → 0, figures moved from
+  appendix → body. If the first build passed, write \"first build passed
+  — no corrections needed.\"
+
+  ## Residual risks
+  Anything the gate cannot guarantee (fonts on another machine, journal
+  template overrides, content the human must still judge). Honest \"none
+  observed\" is allowed.
+
+End the file with {tex_main}, the final overfull/figure metrics, and the
+commit SHA that holds the corrected source, so a later audit can
+reproduce the converged state.
+"""
+needs = ["audit"]
+acceptance = "{MOLECULE_DIR}/latex-verdict.md written with: explicit PASS/FAIL verdict, the final latex-audit table, the six-box reading checklist, defects-corrected summary, residual-risks section, and the corrected-source commit SHA."

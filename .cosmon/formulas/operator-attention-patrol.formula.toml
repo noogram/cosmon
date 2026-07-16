@@ -1,0 +1,130 @@
+formula = "operator-attention-patrol"
+version = 1
+description = """
+Detect operator stalls using only existing CLI-invocation timestamps \
+and operator.* events on events.jsonl.
+
+Mach proxy for `MoleculeKind::Operator` (delib-20260509-18df §D-B, \
+einstein §4): if this works for 2 weeks, the variant is unnecessary. \
+If it systematically fails on a *namable, bounded* class of stalls, \
+the failure tells us which slice the variant must cover — and a \
+follow-up `task` cosmon can ship a narrow `MoleculeKind::Operator` \
+that addresses exactly that slice. If false negatives are absent or \
+unsystematic, **REJECT the variant** and close the loop.
+
+# What this patrol consumes
+
+- `operator.spark` events on `events.jsonl` (joined to verdicts /
+  refusals / silents by `spark_id`).
+- `operator.present` / `operator.absent` last-touch per session.
+- `temp:hot` molecule list (the actionable backlog).
+
+# What it produces
+
+- `MOLECULE_DIR/stall-report.md` — per-molecule silence age + per-spark
+  latency table.
+- `MOLECULE_DIR/operator-attention-pressure.md` — append-only one-line-
+  per-tick aggregate (oldest silence, alert count, escalation
+  distribution). The trace itself is the Mach test substrate; reading
+  the file across 2 weeks answers "did the proxy work?".
+
+# Mirror risk (briefing §Notes for the worker)
+
+The deliberation explicitly named `cs creative` as a precedent: \
+shipped, never branched into the runtime, sediment. The mirror risk \
+here is shipping `operator.*` events that no patrol ever consumes. \
+This formula EXISTS to consume them. If after 2 weeks the patrol's \
+`operator.silent` events have produced zero operator action, this \
+patrol is `cs creative` 2.0 and must itself be collapsed.
+
+# No new variant
+
+This formula does NOT nucleate any `MoleculeKind::Operator` molecule. \
+Detection lives entirely in the report files. A future molecule kind \
+is gated by a separate, explicit decision after 2 weeks of data.
+
+# No variables required
+
+The patrol operates on the events log + state of the project it is \
+nucleated in. Configurable thresholds (silence-age cutoffs, \
+escalation policy) are part of the formula description below; they \
+are advisory until empirical data motivates parametrisation.
+"""
+id_prefix = "attn"
+freeze_on_last_step = false
+
+# Tier 0 — observation-only sweep, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Scan operator silence per molecule and per spark"
+description = """
+For each pending molecule with tag `temp:hot`:
+  - Read its `events.jsonl` (or the fleet-wide log if no per-molecule
+    log exists) and find the most recent operator-touch event:
+      `operator.present`, `operator.spark`, `operator.signed`, OR
+      a `cs verb` event whose envelope `emitter_kind = "cli"` (i.e. an
+      operator-initiated CLI command — `cs nucleate`, `cs tackle`,
+      `cs tag`, `cs done`, etc.).
+  - Compute `silence_age_h` = now − last_operator_touch.
+  - If `silence_age_h > 24` (advisory threshold): emit an
+    `operator.silent` event via `cs --json events emit operator.silent`
+    (or the equivalent best-effort writer). Carry `spark_id` =
+    `mol-<id>` (synthetic — molecule-as-spark for proxy purposes),
+    `age_h` = silence_age_h, `escalation_level` = 1 + count of prior
+    `operator.silent` events for this molecule.
+
+For each `operator.spark` on the fleet-wide log without a matching
+`operator.verdict` / `operator.refused` (joined on `spark_id`):
+  - If `(now − spark.timestamp) > spark.ttl_h.unwrap_or(24)`: emit an
+    `operator.silent` event the same way.
+
+Write MOLECULE_DIR/stall-report.md (MOLECULE_DIR from
+`cs --json observe {mol_id}` — NEVER the worktree) with two tables:
+
+  a. PER-MOLECULE SILENCE — Columns: id, kind, topic, last_touch_ts,
+     silence_age_h, escalation_level.
+  b. UNANSWERED SPARKS — Columns: spark_id, src, content_hash,
+     mol_ref, age_h, ttl_h.
+
+Include a summary header: total temp:hot molecules, total silent,
+oldest silence age, number of operator.silent events emitted this
+tick.
+"""
+acceptance = "MOLECULE_DIR/stall-report.md exists with per-molecule silence and unanswered sparks tables. Any silent molecule has a corresponding operator.silent event on events.jsonl (best-effort — failure is logged, not fatal)."
+
+[[steps]]
+id = "report"
+title = "Append one line to the attention pressure ledger"
+description = """
+Append ONE line to MOLECULE_DIR/operator-attention-pressure.md
+(MOLECULE_DIR from `cs --json observe {mol_id}` — NEVER the worktree).
+
+The file is the Mach-test substrate: its 2-week shape answers \
+"did the proxy work?". If it does, the variant is unnecessary; if \
+it doesn't, the failure mode must be *namable and bounded* before \
+nucleating a follow-up `MoleculeKind::Operator` task.
+
+Line format (one per tick, append-only, never rewrite history):
+
+```
+YYYY-MM-DDTHH:MM:SSZ | hot=<n> | silent=<n> | oldest_h=<f.f> | escal_max=<n> | sparks_open=<n>
+```
+
+If the file does not yet exist, prepend a header line documenting the
+columns and the Mach-test rationale, then append the first line.
+
+Aggregate across stall-report.md:
+  - hot       = total temp:hot molecules
+  - silent    = total silent molecules + unanswered sparks
+  - oldest_h  = max silence_age_h observed this tick
+  - escal_max = max escalation_level observed this tick
+  - sparks_open = unanswered sparks count
+
+End with a sentinel line in stdout naming the artifact path so a \
+downstream observer can pipe `tail -F` on the pressure file.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/operator-attention-pressure.md updated with a new line carrying the five aggregates. Header present on first run."

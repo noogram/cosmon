@@ -1,0 +1,40 @@
+[package]
+name = "cosmon-client"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "Apache-2.0"
+description = "Thin HTTP client (cs-client) for a remote cosmon-saas server"
+
+[[bin]]
+name = "cs-client"
+path = "src/main.rs"
+
+[lib]
+name = "cosmon_client"
+path = "src/lib.rs"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+dirs.workspace = true
+reqwest = { workspace = true, features = ["json", "stream"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["full"] }
+toml.workspace = true
+flate2 = "1"
+tar = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

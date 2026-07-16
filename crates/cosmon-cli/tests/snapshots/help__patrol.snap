@@ -1,0 +1,86 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Patrol the fleet — health checks and anomaly detection
+
+Usage: cs patrol [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+      --respawn
+          Auto-respawn: restart dead workers by re-creating tmux sessions
+      --no-tmux
+          Skip tmux liveness checks and respawn (state-only mode, for testing)
+  -v, --verbose
+          Enable verbose output
+      --json
+          Output in JSON format
+      --propel
+          Propel: detect running molecules with stale progress and nudge their workers via transport. The cognitive safety net that complements the new propulsion prompt — if a worker falls silent mid-molecule, patrol re-engages it. Idempotent: nudges are cheap
+      --stale-after <STALE_AFTER>
+          Staleness threshold in seconds for `--propel` (default: 300). A molecule is considered stale if `updated_at` is older than this [default: 300]
+      --nudge
+          Nudge: per-step stall remediation. Like `--propel`, but classifies stalls from `last_progress_at` against the active step's `timeout_minutes` budget (M3, default 30 min) and guards idempotence — a worker won't be nudged twice within 60 s. The nudge text references `briefing.md` so the re-engaged worker re-reads its contract before continuing. Increments [`cosmon_state::MoleculeData::nudge_count`] (M5)
+      --expire
+          Expire sweep: scan molecules whose `expires_at` is in the past and apply their [`ExpiryPolicy`] (ADR-029). Idempotent — safe to run repeatedly on the same state. `Warn` tags the molecule with `expired` and emits a surface alert; `Collapse` transitions `pending` → `collapsed` with reason `expired (TTL)`; `Escalate` tags `escalated` and emits the canonical `Expired` event for downstream transforms
+      --auto-collapse
+          Aggressive orphan remediation: transition orphaned molecules to `Collapsed` (terminal) instead of `Frozen` (recoverable). Default is `Frozen` because the molecule can be revived once the worker situation is understood; `--auto-collapse` is for cases where the operator wants the DAG to advance past the dead work and never revisit it
+      --harvest
+          Harvest sweep: scan every `Completed` molecule with `merged_at = None` and invoke `cs harvest --molecule <id>` on each one. Belt-and- suspenders safety net for cases where the tmux `pane-died` hook never armed (tmux server restart, brutal crash, molecule completed before the hook was installed, …). Idempotent: already-merged molecules are silent no-ops inside `cs harvest`
+      --livelock
+          Livelock sweep: read `.cosmon/state/presence/<sid>/blocked_on.json` for every live session, build the session-wait graph, and report any non-trivial strongly connected component. Emits a `temp:hot` issue molecule tagged `livelock-detected` per cycle. **Never auto-resolves** (turing §6, §8b: propose, don't impose)
+      --livelock-stale-after <LIVELOCK_STALE_AFTER>
+          Staleness threshold for `--livelock`, in seconds. `blocked_on.json` entries older than this are considered crashed-session residue rather than live waits and are excluded from the graph. Defaults to one hour — the cost of a false negative (missing a real lock) is lower than the cost of a false positive (nuisance issue) [default: 3600]
+      --silence-detect
+          Silence-detect: scan running molecules for those whose worker has not emitted a `WorkerHeartbeat` in `silence_after` seconds. Tags `temp:frozen`, emits `WorkerSilenceDetected`, and fires `cs notify` ("absence of signal must itself be a signal"). Does **not** kill the worker
+      --silence-after <SILENCE_AFTER>
+          Threshold in seconds for `--silence-detect` (default: 90). Roughly `3 ×` the recommended 30-second heartbeat cadence; raise it for fleets with longer steps or noisy networks [default: 90]
+      --event-age
+          Event-age check: for every `Running` molecule, raise an ALERT-only signal when the most recent entry in the event log *for that molecule* is older than `event_age_after` seconds. Unlike `--silence-detect` (which keys specifically on `WorkerHeartbeat`), this keys on **any** event append, so it catches the external-modal case — a Claude Code `AskUserQuestion` modal that emits no cosmon-visible state at all. It never tags, never kills, never touches transport: it is a pure read over `molecules + events.jsonl`, so it works even when `cosmon-runtime` is dead (CV-5 — the watchdog's liveness must be independent of the thing it watches). Alerts are tiered by irreversibility (CV-6): only an irreversible-class block (signature / push / publish) fires `cs notify`; operational stalls are report-only, to keep the one load-bearing alert out of an alert-fatigue flood
+      --event-age-after <EVENT_AGE_AFTER>
+          Threshold in seconds for `--event-age` (default: 900 = 15 min). The panel's suggested floor — long enough that a worker genuinely thinking between event appends is not mistaken for a stall [default: 900]
+      --abandon
+          Abandon sweep (patrouille-abandon): fold traces an instance has ALREADY emitted (audit envelopes, phone-home reports, PKCE auth sessions, instance ledgers) into named abandonment motifs per tenant — nucleate-sans-tackle, pkce-start-sans-completed, incarne-sans-login, rafale-4xx-puis-silence, decroissance-de-signalement (the Dave rule, gravity HIGH: losing the client who talks loses the only human sensor). Read-only: reports, never remediates
+      --abandon-root <ABANDON_ROOT>
+          Instance root for `--abandon` — the instance's `.cosmon/` directory (containing `whispers/inbox/` and `state/`). Defaults to the parent of the resolved state dir
+      --abandon-quiet-hours <ABANDON_QUIET_HOURS>
+          Quiet window in hours for the "puis silence" motifs of `--abandon` (default 24 — one daily patrol cadence) [default: 24]
+      --heal
+          Heal (the Deacon, ADR-137 §11 P3): run one detect → guard → remediate pass over the molecule-health anomaly catalog, mutating **only the safe, reversible classes**, each behind the §5 no-interference guard: A1 unsent-paste (delegate to the transport submit-retry), A4/A8 idle-after-complete / completed-unharvested (`cs done` harvest from the orchestrator — never a worker self-`done`), A5 idle-no-progress (nudge), A6 overloaded (backoff hold). The collapse / integrity classes (A3/A7/A9) are *reported* but never auto-collapsed here (that is P4). Detection is keyed off control-plane state only — **never a pane glyph** (the be1e SEV-1 lesson). Pair with `--dry-run` for a zero-mutation preview. Use `cs health` for the read-only, federation-wide catalog
+      --dry-run
+          Dry-run: with `--heal`, compute and print the health report + the guarded actions the Deacon *would* take, but mutate nothing. The safe default for earning operator trust before enabling a scheduled heal pass
+      --dialogue-scan
+          Dialogue-scan: capture each running worker's pane and classify any blocking dialogue sitting in it (tool-permission prompt vs. the Claude Code spend-/usage-limit dialog). The motivating incident: ten synthetic workers blocked on the spend-limit dialog with no human to press Enter. Per the be1e discipline (ADR-137 §2) pane text is read only to **surface** a finding — a `money_stake` class **always** pages the operator via `cs notify` and is **never** auto-confirmed; an `unknown` block alerts too; a safe `permission` prompt is auto-confirmed **only** when `--auto-confirm-safe` is also passed. Report-only by default (no keystroke) so it is safe to schedule
+      --auto-confirm-safe
+          With `--dialogue-scan`, opt in to firing the default-accept keystroke (Enter) on **safe** permission-class prompts only. Money stakes and unrecognised blocks are still never auto-confirmed — that refusal is encoded in the classifier, not in this flag. Off by default: the safe posture is to surface every block to a human
+      --dialogue-lines <DIALOGUE_LINES>
+          Number of pane lines `--dialogue-scan` captures per worker (default 40). The live prompt sits at the bottom of the pane, so a small tail is enough; raise it for TUIs that render tall dialogs [default: 40]
+      --dialogue-blocked-after <DIALOGUE_BLOCKED_AFTER>
+          Blocked-duration threshold in seconds for `--dialogue-scan` (default 900 = 15 min). A molecule whose progress has been frozen longer than this *and* is still sitting on a blocking dialogue escalates to a **canary RED** operator page — the heartbeat half of the primitive: "blocked > X min despite detection ⇒ RED" [default: 900]
+  -h, --help
+          Print help
+
+EXAMPLES:
+  cs patrol                   # run one health sweep
+  cs patrol --propel          # nudge stale molecules
+  cs patrol --respawn         # restart dead workers
+  cs patrol --harvest         # close Completed-but-unmerged molecules
+  cs patrol --silence-detect  # flag workers that stopped heartbeating
+  cs patrol --livelock        # detect circular blocked-on waits
+  cs patrol --event-age       # flag Running molecules with a quiet event log
+  cs patrol --heal            # remediate safe anomaly classes, each §5-guarded
+  cs patrol --heal --dry-run  # preview the Deacon's actions, mutate nothing
+
+Designed to be run by an external scheduler (cron, launchd) in the
+Propelled regime. `--harvest` is the belt-and-suspenders sweep that
+complements the tmux pane-died hook installed at `cs tackle` time.
+`--silence-detect`, `--livelock`, and `--event-age` are the
+runtime-independent stall detectors: they read state from disk only, so
+they fire even when `cosmon-runtime` is dead (the watchdog's liveness is
+independent of the thing it watches). `--event-age` is the external-modal
+backstop — it keys on the age of any event-log append, so it catches a
+worker parked at a Claude Code AskUserQuestion modal that emits no
+cosmon-visible state. Alerts are tiered by irreversibility: only an
+irreversible-class block (signature/push/publish) fires `cs notify`.

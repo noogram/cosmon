@@ -1,0 +1,72 @@
+# XcodeGen specification for CosmonApp.xcodeproj.
+#
+# Decision (2026-04-26 operator): Cosmon-app is the third native app in
+# the local cluster (after Verdict and Mur du Matin). HTTP-on-Tailscale
+# is the wire (cosmon-daemon at port 8790); AppsTransportHTTP is the
+# Swift foundation; CosmonAppKit is this repo's testable layer.
+#
+# Single iOS target, universal iPhone+iPad (TARGETED_DEVICE_FAMILY
+# 1,2). The app reads CockpitHost/CockpitPort from Info.plist; default
+# is `host.example:8790`.
+#
+# Regenerate after any change:
+#   cd apps/CosmonApp && xcodegen
+# Install once: `brew install xcodegen`.
+
+name: CosmonApp
+options:
+  bundleIdPrefix: dev.noogram.cosmon
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  createIntermediateGroups: true
+
+packages:
+  CosmonAppKit:
+    path: .
+
+targets:
+  CosmonApp:
+    type: application
+    platform: iOS
+    sources:
+      - path: App
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleName: Cosmon
+        CFBundleDisplayName: Cosmon
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        LSApplicationCategoryType: public.app-category.productivity
+        LSRequiresIPhoneOS: true
+        NSHumanReadableCopyright: "© 2026 Noogram."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        UISupportedInterfaceOrientations~iphone:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UILaunchScreen:
+          UIColorName: ""
+        CockpitHost: host.example
+        CockpitPort: 8790
+    dependencies:
+      - package: CosmonAppKit
+        product: CosmonAppKit
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.noogram.cosmon.app
+        PRODUCT_NAME: Cosmon
+        SWIFT_VERSION: "5.9"
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        # 1,2 = iPhone + iPad — same binary, same surface. The tab
+        # layout reflows naturally between phone and tablet, so we
+        # do not need a separate target.
+        TARGETED_DEVICE_FAMILY: "1,2"
+        SUPPORTS_MACCATALYST: NO
+        DEVELOPMENT_TEAM: 69Y2Z265F9
+        CODE_SIGN_STYLE: Automatic

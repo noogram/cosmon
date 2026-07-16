@@ -1,0 +1,47 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Purge dead workers from fleet state (Stopped, Error, Stale)
+
+Usage: cs purge [OPTIONS] [WORKER]
+
+Arguments:
+  [WORKER]
+          Optional worker ID — when given, targeted purge of that worker only.
+          
+          Without a worker the command sweeps every terminal-state worker from fleet state (the pre-ADR-052 behaviour). With a worker, only that worker is removed; pair with `--force` to SIGKILL its tmux session first (formerly `cs kill`).
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --force
+          In targeted mode, SIGKILL the tmux session before removing the fleet entry. Ignored in sweep mode. Supersedes the stand-alone `cs kill` verb (ADR-052 §D3)
+
+      --status <STATUS>
+          Only purge workers matching this desired state (default: sweep all workers — Stopped ones and Running/Paused ones whose tmux session is gone)
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --role <ROLE>
+          Restrict the purge to workers matching this role discriminator — either `cognition` or `runtime` (see `WorkerRole`). Without this flag `cs purge` removes both runtime and cognition workers that meet the status predicate; with it, operators can clean up one half of a runtime+cognition pair without collapsing the other
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs purge                    # sweep: remove Stopped / Error / Stale workers
+  cs purge worker-3           # targeted: remove a single worker (graceful path)
+  cs purge worker-3 --force   # targeted + SIGKILL tmux (supersedes `cs kill`)
+
+ADR-052 §D3 collapses `cs kill` + `cs purge` into this one verb: both
+are infrastructure teardown. Sweep mode (no argument) stays unchanged;
+targeted mode with `--force` replaces `cs kill`.
+
+SEE ALSO: cs freeze (graceful + state preservation), cs teardown
+(fleet-wide graceful shutdown).

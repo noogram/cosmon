@@ -1,0 +1,7 @@
+# Cosmon state is per-deployment; don't ship it with the template.
+.cosmon/state/
+.cosmon/logs/
+# Source PDFs are project-specific.
+sources/*.pdf
+sources/*.PDF
+!sources/README.md

@@ -1,0 +1,272 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" width="1600" height="1000" role="img" aria-labelledby="ttl desc">
+  <title id="ttl">Comment cosmon tourne — le pilote, le DAG, le disque, la fédération</title>
+  <desc id="desc">Illustration statique en quatre bandes verticales. En haut le pilote humain (◆ vermillon, verbes nucleate·tackle·wait·done, ligne whisper pointillée advisory). Au centre le plan de contrôle : une courte chaîne de molécules role-hued reliées par des flèches fines 1px étiquetées « 1 bit ». En dessous le disque .cosmon/, source unique de vérité, avec un filet vert à gauche et des flèches épaisses 3px write/read terminées par un sceau ∴. En bas la fédération : des cartes de machines pairs, chacune son .cosmon/ ∴, reliées par une flèche de partage épaisse pointillée au milieu délibérément vide — aucun hub. La thèse est l'épaisseur du trait : 1px contrôle contre 3px données. L'appel modèle SORT du périmètre.</desc>
+
+  <!-- ============================================================
+       TOKEN BLOCK — dark by default, light variant via media query.
+       This <style> block IS the light/dark toggle: no JS, pure CSS
+       custom properties. Green is rationed to exactly three homes:
+       the ∴ seals, the disk-lane left border, the control links.
+       ============================================================ -->
+  <style>
+    :root{
+      --bg:#08090c; --surface:#12151a; --surface2:#0d1014; --hairline:#1c2128;
+      --body:#d7dce3; --title:#f2f5f9; --meta:#828c9a;
+      --green:#3fb950; --vermilion:#ef4444;
+      --hue-idea:#f59e0b; --hue-task:#3b82f6; --hue-delib:#8b5cf6;
+      --hue-decision:#f472b6; --hue-editor:#10b981;
+      --status-pending:#828c9a; --status-active:#f2f5f9; --status-done:#5a6572;
+    }
+    @media (prefers-color-scheme: light){
+      :root{
+        --bg:#e8efe7; --surface:#d8e2d7; --surface2:#dfe8de; --hairline:#c4d0c3;
+        --body:#20272e; --title:#05070a; --meta:#5c6573;
+        --green:#176d2b; --vermilion:#dc2626;
+        --hue-idea:#b7791f; --hue-task:#2563eb; --hue-delib:#7c3aed;
+        --hue-decision:#db2777; --hue-editor:#0f8f5f;
+        --status-pending:#5c6573; --status-active:#05070a; --status-done:#8a96a3;
+      }
+    }
+    text{font-family:ui-sans-serif,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;}
+    .mono{font-family:ui-monospace,"SF Mono",Menlo,"DejaVu Sans Mono",monospace;}
+    .title{fill:var(--title);}
+    .body{fill:var(--body);}
+    .meta{fill:var(--meta);}
+    .idx{fill:var(--hairline);font-weight:700;}
+  </style>
+
+  <defs>
+    <!-- Data arrowhead — thick 3px lanes (write / read / shared files). Body-hued. -->
+    <marker id="ah-data" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 Z" fill="var(--body)"/>
+    </marker>
+    <!-- Control arrowhead — thin 1px links (1 bit, ordering). Green (rationed). -->
+    <marker id="ah-ctrl" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+      <path d="M0,0.5 L8,4 L0,7.5 Z" fill="var(--green)"/>
+    </marker>
+    <!-- Whisper arrowhead — advisory, vermilion. -->
+    <marker id="ah-whisper" markerWidth="8" markerHeight="8" refX="6.5" refY="4" orient="auto">
+      <path d="M0,0.5 L8,4 L0,7.5 Z" fill="var(--vermilion)"/>
+    </marker>
+    <!-- Model-call arrowhead — the cognition request leaving the perimeter. Meta-hued. -->
+    <marker id="ah-model" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+      <path d="M0,0 L9,4.5 L0,9 Z" fill="var(--meta)"/>
+    </marker>
+
+    <!-- File glyph (plain group, cloned by translate-only <use>): sheet + folded corner. -->
+    <g id="file">
+      <path d="M2,2 H22 L32,12 V40 H2 Z" fill="var(--surface2)" stroke="var(--hairline)" stroke-width="1.5"/>
+      <path d="M22,2 V12 H32" fill="none" stroke="var(--hairline)" stroke-width="1.5"/>
+      <line x1="8" y1="20" x2="26" y2="20" stroke="var(--meta)" stroke-width="1.5"/>
+      <line x1="8" y1="27" x2="26" y2="27" stroke="var(--meta)" stroke-width="1.5"/>
+      <line x1="8" y1="34" x2="20" y2="34" stroke="var(--meta)" stroke-width="1.5"/>
+    </g>
+
+    <!-- Peer machine card (plain group): identical for every peer — equals, no hub. -->
+    <g id="peer">
+      <rect x="1" y="1" width="328" height="140" rx="12" fill="var(--surface)" stroke="var(--hairline)" stroke-width="1.5"/>
+      <rect x="1" y="1" width="4" height="140" rx="2" fill="var(--green)"/>
+      <text class="mono" x="24" y="34" font-size="15" fill="var(--title)">machine · pair</text>
+      <path d="M28,58 h20 l7,9 h44 a6,6 0 0 1 6,6 v34 a6,6 0 0 1 -6,6 H28 a6,6 0 0 1 -6,-6 V64 a6,6 0 0 1 6,-6 Z"
+            fill="var(--surface2)" stroke="var(--hairline)" stroke-width="1.5"/>
+      <text class="mono" x="120" y="86" font-size="15" fill="var(--body)">.cosmon/</text>
+      <text x="120" y="108" font-size="12.5" fill="var(--meta)">état + historique, sur le disque</text>
+      <text x="272" y="118" font-size="30" fill="var(--green)" text-anchor="middle">∴</text>
+      <text x="272" y="134" font-size="10.5" fill="var(--meta)" text-anchor="middle">sceau</text>
+    </g>
+  </defs>
+
+  <!-- ============================== BACKGROUND ============================== -->
+  <rect x="0" y="0" width="1600" height="1000" fill="var(--bg)"/>
+
+  <!-- Header -->
+  <text class="title" x="60" y="52" font-size="27" font-weight="700">comment cosmon tourne</text>
+  <text class="meta"  x="60" y="76" font-size="14">le pilote pose l'ordre · le disque porte le contenu · les pairs partagent des fichiers, d'égal à égal</text>
+  <text class="mono meta" x="1540" y="52" font-size="13" text-anchor="end">noogram / cosmon</text>
+
+  <!-- ============================================================
+       MACHINE PERIMETER — bands 1..3 live INSIDE your machine.
+       Only the cognition request crosses this boundary (right edge).
+       ============================================================ -->
+  <rect x="60" y="96" width="1180" height="648" rx="18"
+        fill="none" stroke="var(--hairline)" stroke-width="1.5"/>
+  <text class="mono meta" x="80" y="120" font-size="13">TA MACHINE · ton périmètre — pas de serveur dans la boucle, pas de compte</text>
+
+  <!-- ======================= BAND 1 — LE PILOTE HUMAIN ======================= -->
+  <text class="idx" x="86" y="200" font-size="52">1</text>
+  <text class="title" x="150" y="168" font-size="17" font-weight="700">PILOTE HUMAIN</text>
+  <text class="meta"  x="150" y="188" font-size="12.5">l'autorité est en haut du cadre — l'horloge est humaine (régime Propelled)</text>
+
+  <!-- vermilion diamond ◆ -->
+  <path d="M124,150 l14,16 l-14,16 l-14,-16 Z" fill="var(--vermilion)"/>
+
+  <!-- four verbs as one-shot strokes (cs is a tool, not a running service) -->
+  <g font-size="15" class="mono">
+    <line x1="360" y1="150" x2="360" y2="176" stroke="var(--vermilion)" stroke-width="2"/>
+    <text x="372" y="171" fill="var(--body)">nucleate</text>
+    <line x1="560" y1="150" x2="560" y2="176" stroke="var(--vermilion)" stroke-width="2"/>
+    <text x="572" y="171" fill="var(--body)">tackle</text>
+    <line x1="740" y1="150" x2="740" y2="176" stroke="var(--vermilion)" stroke-width="2"/>
+    <text x="752" y="171" fill="var(--body)">wait</text>
+    <line x1="900" y1="150" x2="900" y2="176" stroke="var(--vermilion)" stroke-width="2"/>
+    <text x="912" y="171" fill="var(--body)">done</text>
+  </g>
+  <text class="meta" x="1010" y="171" font-size="12.5">— cs : coups one-shot, pas un service qui tourne</text>
+
+  <!-- whisper: dashed vermilion line dropping into the control plane (advisory) -->
+  <path d="M740,182 C760,240 800,270 838,318" fill="none"
+        stroke="var(--vermilion)" stroke-width="1.5" stroke-dasharray="3 5" marker-end="url(#ah-whisper)"/>
+  <text class="meta" x="712" y="232" font-size="11.5" transform="rotate(50 712 232)">whisper · advisory</text>
+
+  <!-- ================= BAND 2 — PLAN DE CONTRÔLE (le DAG) ================= -->
+  <text class="idx" x="86" y="392" font-size="52">2</text>
+  <text class="title" x="150" y="272" font-size="17" font-weight="700">PLAN DE CONTRÔLE — le DAG</text>
+  <text class="meta"  x="150" y="292" font-size="12.5">l'arête ne porte qu'un ordre : fait / pas-fait — un seul bit</text>
+
+  <!-- edges: thin 1px control links, green (rationed), labelled 1 bit -->
+  <g stroke="var(--green)" stroke-width="1" fill="none" marker-end="url(#ah-ctrl)">
+    <line x1="292" y1="360" x2="392" y2="360"/>
+    <line x1="492" y1="360" x2="592" y2="360"/>
+    <line x1="692" y1="360" x2="790" y2="360"/>
+  </g>
+  <g class="mono" fill="var(--green)" font-size="11" text-anchor="middle">
+    <text x="342" y="350">1 bit</text>
+    <text x="542" y="350">1 bit</text>
+    <text x="741" y="350">1 bit</text>
+  </g>
+  <!-- merge-before-dispatch: the predecessor's branch merges before the child starts -->
+  <text class="meta" x="741" y="392" font-size="11" text-anchor="middle">merge → dispatch</text>
+
+  <!-- molecule glyphs: fill = role hue, stroke = status, ▁▄█ = energy spark -->
+  <!-- node A — idea (pending: dashed pending-stroke) -->
+  <g>
+    <circle cx="250" cy="360" r="23" fill="var(--hue-idea)" stroke="var(--status-pending)" stroke-width="2.5" stroke-dasharray="4 3"/>
+    <g stroke="var(--meta)" stroke-width="3"><line x1="240" y1="396" x2="240" y2="390"/><line x1="250" y1="396" x2="250" y2="386"/><line x1="260" y1="396" x2="260" y2="382"/></g>
+    <text class="meta" x="250" y="416" font-size="11" text-anchor="middle">idea · pending</text>
+  </g>
+  <!-- node B — task (done) -->
+  <g>
+    <circle cx="450" cy="360" r="23" fill="var(--hue-task)" stroke="var(--status-done)" stroke-width="2.5"/>
+    <g stroke="var(--meta)" stroke-width="3"><line x1="440" y1="396" x2="440" y2="388"/><line x1="450" y1="396" x2="450" y2="384"/><line x1="460" y1="396" x2="460" y2="390"/></g>
+    <text class="meta" x="450" y="416" font-size="11" text-anchor="middle">task · done</text>
+  </g>
+  <!-- node C — deliberation (done) -->
+  <g>
+    <circle cx="650" cy="360" r="23" fill="var(--hue-delib)" stroke="var(--status-done)" stroke-width="2.5"/>
+    <g stroke="var(--meta)" stroke-width="3"><line x1="640" y1="396" x2="640" y2="391"/><line x1="650" y1="396" x2="650" y2="386"/><line x1="660" y1="396" x2="660" y2="388"/></g>
+    <text class="meta" x="650" y="416" font-size="11" text-anchor="middle">delib · done</text>
+  </g>
+  <!-- node D — task (active) — THE WORKER (bright solid status ring) -->
+  <g>
+    <circle cx="850" cy="360" r="26" fill="var(--hue-task)" stroke="var(--status-active)" stroke-width="4"/>
+    <g stroke="var(--meta)" stroke-width="3"><line x1="838" y1="398" x2="838" y2="390"/><line x1="850" y1="398" x2="850" y2="382"/><line x1="862" y1="398" x2="862" y2="378"/></g>
+    <text class="title" x="850" y="418" font-size="11.5" text-anchor="middle" font-weight="700">task · worker actif</text>
+  </g>
+
+  <!-- model call LEAVES the machine (honesty hook): only the cognition request crosses -->
+  <path d="M880,352 H1298" fill="none" stroke="var(--meta)" stroke-width="2"
+        stroke-dasharray="7 5" marker-end="url(#ah-model)"/>
+  <text class="mono" x="1085" y="343" font-size="12" text-anchor="middle" fill="var(--body)">appel modèle →</text>
+  <text class="meta" x="1250" y="374" font-size="10.5" text-anchor="middle" transform="rotate(90 1250 374)">périmètre</text>
+
+  <!-- external model node (outside the perimeter) — request leaves; no record returns here -->
+  <rect x="1300" y="314" width="250" height="96" rx="12" fill="var(--surface)" stroke="var(--hairline)" stroke-width="1.5"/>
+  <text class="title" x="1316" y="344" font-size="15" font-weight="700">modèle</text>
+  <text class="meta"  x="1316" y="366" font-size="12">hébergé (Claude, API) ou local</text>
+  <text class="meta"  x="1316" y="384" font-size="12">(llama.cpp / Ollama)</text>
+  <text x="1316" y="402" font-size="11" fill="var(--vermilion)">la cognition sort du périmètre</text>
+
+  <!-- ============= BAND 3 — LE DISQUE .cosmon/ (source unique de vérité) ============= -->
+  <rect x="150" y="470" width="1000" height="256" rx="10" fill="var(--surface)" stroke="var(--hairline)" stroke-width="1.5"/>
+  <rect x="150" y="470" width="5" height="256" rx="2.5" fill="var(--green)"/>
+
+  <text class="idx" x="86" y="620" font-size="52">3</text>
+  <text class="title" x="176" y="502" font-size="17" font-weight="700">LE DISQUE <tspan class="mono">.cosmon/</tspan> — source unique de vérité</text>
+
+  <!-- files on disk -->
+  <g>
+    <use href="#file" x="190" y="536"/><text class="mono meta" x="177" y="596" font-size="11.5">state.json</text>
+    <use href="#file" x="300" y="536"/><text class="mono meta" x="290" y="596" font-size="11.5">prompt.md</text>
+    <use href="#file" x="410" y="536"/><text class="mono meta" x="398" y="596" font-size="11.5">briefing.md</text>
+    <use href="#file" x="520" y="536"/><text class="mono meta" x="505" y="596" font-size="11.5">events.jsonl</text>
+    <use href="#file" x="630" y="536"/><text class="mono meta" x="612" y="596" font-size="11.5">synthesis.md</text>
+    <path d="M726,540 h20 l7,9 h34 a5,5 0 0 1 5,5 v26 a5,5 0 0 1 -5,5 H726 a5,5 0 0 1 -5,-5 V545 a5,5 0 0 1 5,-5 Z"
+          fill="var(--surface2)" stroke="var(--hairline)" stroke-width="1.5"/>
+    <text class="mono meta" x="720" y="596" font-size="11.5">worktree/ (git)</text>
+  </g>
+
+  <!-- big annotation: the disk carries the content, there is no mailbox -->
+  <text class="title" x="906" y="560" font-size="16" font-weight="700">pas de boîte aux lettres</text>
+  <text class="body"  x="906" y="584" font-size="14">le disque porte le contenu ; le DAG dit seulement <tspan class="mono">quand</tspan></text>
+  <text class="meta"  x="906" y="606" font-size="12.5">état sur le disque, pas en RAM → un crash est une pause, pas une perte</text>
+
+  <!-- thick 3px DATA arrows straddling worker <-> disk, terminating in a ∴ seal -->
+  <path d="M834,404 V536" fill="none" stroke="var(--body)" stroke-width="3" marker-end="url(#ah-data)"/>
+  <text class="mono body" x="828" y="458" font-size="12" text-anchor="end">write ↓</text>
+  <path d="M872,536 V404" fill="none" stroke="var(--body)" stroke-width="3" marker-end="url(#ah-data)"/>
+  <text class="mono body" x="880" y="458" font-size="12">read ↑</text>
+  <text x="853" y="524" font-size="26" fill="var(--green)" text-anchor="middle">∴</text>
+
+  <!-- ∴ seal + verify note on disk (kept clear of the legend column) -->
+  <text x="910" y="672" font-size="30" fill="var(--green)">∴</text>
+  <text class="mono body" x="946" y="652" font-size="12.5">chaque pas scellé BLAKE3</text>
+  <text class="meta"      x="946" y="670" font-size="11.5">cs verify signale une retouche silencieuse</text>
+  <text class="meta"      x="946" y="686" font-size="11.5">tamper-evident, pas tamper-proof</text>
+
+  <!-- thesis callout: the whole claim is in the stroke width -->
+  <text class="body" x="176" y="704" font-size="13" font-style="italic">la thèse tient dans l'épaisseur du trait —
+    <tspan class="mono" fill="var(--meta)">1px</tspan> contrôle (1 bit)  ·
+    <tspan class="mono" fill="var(--body)" font-weight="700">3px</tspan> données (tout le contenu)</text>
+
+  <!-- ===================== BAND 4 — FÉDÉRATION ===================== -->
+  <text class="idx" x="86" y="884" font-size="52">4</text>
+  <text class="title" x="150" y="792" font-size="17" font-weight="700">FÉDÉRATION</text>
+  <text class="meta"  x="150" y="812" font-size="12.5">plusieurs machines coopèrent par partage de fichiers — sans propriétaire central</text>
+
+  <use href="#peer" x="120"  y="838"/>
+  <use href="#peer" x="635"  y="838"/>
+  <use href="#peer" x="1150" y="838"/>
+
+  <!-- thick 3px dashed double-headed shared-files arrows sit IN THE GAPS; middle stays empty -->
+  <path d="M456,908 H627" fill="none" stroke="var(--body)" stroke-width="3"
+        stroke-dasharray="9 7" marker-start="url(#ah-data)" marker-end="url(#ah-data)"/>
+  <path d="M971,908 H1142" fill="none" stroke="var(--body)" stroke-width="3"
+        stroke-dasharray="9 7" marker-start="url(#ah-data)" marker-end="url(#ah-data)"/>
+  <text class="mono body" x="541"  y="898" font-size="11.5" text-anchor="middle">fichiers partagés (git)</text>
+  <text class="mono body" x="1056" y="898" font-size="11.5" text-anchor="middle">fichiers partagés (git)</text>
+  <text class="meta" x="541"  y="930" font-size="11" text-anchor="middle">∅ pas de hub</text>
+  <text class="meta" x="1056" y="930" font-size="11" text-anchor="middle">∅ pas de hub</text>
+  <text class="meta" x="150" y="984" font-size="12.5">— milieu vide : aucun hub, aucun serveur, aucun broker · les pairs sont des égaux —</text>
+
+  <!-- ===================== LEGEND (right column) ===================== -->
+  <rect x="1300" y="470" width="250" height="256" rx="12" fill="none" stroke="var(--hairline)" stroke-width="1.5"/>
+  <text class="title" x="1318" y="498" font-size="14" font-weight="700">légende</text>
+
+  <line x1="1318" y1="520" x2="1352" y2="520" stroke="var(--green)" stroke-width="1"/>
+  <text class="meta" x="1360" y="524" font-size="11.5">trait fin 1px — contrôle (1 bit)</text>
+
+  <line x1="1318" y1="544" x2="1352" y2="544" stroke="var(--body)" stroke-width="3"/>
+  <text class="meta" x="1360" y="548" font-size="11.5">trait épais 3px — données</text>
+
+  <text x="1334" y="576" font-size="20" fill="var(--green)" text-anchor="middle">∴</text>
+  <text class="meta" x="1360" y="574" font-size="11.5">sceau BLAKE3 (tamper-evident)</text>
+
+  <circle cx="1334" cy="600" r="8" fill="var(--hue-task)" stroke="var(--status-active)" stroke-width="2"/>
+  <text class="meta" x="1360" y="604" font-size="11.5">fond = rôle · bordure = statut</text>
+
+  <g stroke="var(--meta)" stroke-width="2.5" transform="translate(1327,626)">
+    <line x1="0" y1="6" x2="0" y2="2"/><line x1="7" y1="6" x2="7" y2="-2"/><line x1="14" y1="6" x2="14" y2="-6"/>
+  </g>
+  <text class="meta" x="1360" y="636" font-size="11.5">▁▄█ — énergie (spark)</text>
+
+  <g transform="translate(1318,658)">
+    <circle cx="6"  cy="6" r="6" fill="var(--hue-idea)"/>
+    <circle cx="40" cy="6" r="6" fill="var(--hue-task)"/>
+    <circle cx="74" cy="6" r="6" fill="var(--hue-delib)"/>
+    <circle cx="108" cy="6" r="6" fill="var(--hue-decision)"/>
+    <circle cx="150" cy="6" r="6" fill="var(--hue-editor)"/>
+  </g>
+  <text class="meta" x="1318" y="688" font-size="10.5">idée · tâche · délib · décision · <tspan fill="var(--hue-editor)">éditeur</tspan></text>
+  <text class="meta" x="1318" y="704" font-size="10">l'émeraude rôle ≠ le vert d'identité (rationné)</text>
+  <text class="meta" x="1318" y="720" font-size="10">vermillon ◆ = pilote · pointillé = advisory</text>
+</svg>

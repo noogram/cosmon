@@ -1,0 +1,30 @@
+# `.cosmon/adapters/codex.toml` — codex Adapter version pin.
+#
+# Load-bearing config for the codex subprocess Adapter
+# (delib-20260518-5178 §S7). The runtime check in
+# `cosmon_transport::codex::CodexAdapter::new` parses this file at
+# construction time, runs `codex --version`, and refuses to spawn if
+# the values disagree (SF-7 binary_version_mismatch).
+#
+# Three pillars must be present for the pin to be more than decorative
+# (tolnay §Q3): this config file, the runtime check, and the Stuck
+# event that lands on `events.jsonl` when the versions disagree. The
+# file you are reading is the first pillar.
+#
+# To enable the pin in your cosmon project:
+#
+#     mkdir -p .cosmon/adapters
+#     cp docs/examples/codex-adapter.toml.example .cosmon/adapters/codex.toml
+#     # then edit the version below to match `codex --version`
+#
+# Check in `.cosmon/adapters/codex.toml`; the file is part of the
+# cognitive contract, not a per-machine local override.
+
+[codex]
+# The Cargo "=X.Y.Z" form is the precedent — the leading `=` is
+# optional and stripped before the equality check, so both
+#     version = "=0.49.2"
+#     version = "0.49.2"
+# resolve to the same pin. Bump this in lockstep with the codex
+# binary you have installed (`npm install -g @openai/codex@<X.Y.Z>`).
+version = "=0.49.2"

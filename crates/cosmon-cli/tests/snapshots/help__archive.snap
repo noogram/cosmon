@@ -1,0 +1,45 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
+
+Usage: cs archive [OPTIONS] <COMMAND>
+
+Commands:
+  list    List archived molecules (optionally filtered by year / month)
+  show    Show the manifest + artifact inventory for one archived molecule
+  verify  Verify artifact hashes — exits non-zero if tampered
+  prune   Apply the [archive.retention] policy; `--dry-run` shows the plan
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs archive list                         # every archived molecule, all months
+  cs archive list --year 2026             # scoped to one year
+  cs archive list --year 2026 --month 04  # scoped to one month
+  cs archive list --json                  # NDJSON for scripting
+  cs archive show <mol>                   # manifest + artifact inventory
+  cs archive verify <mol>                 # recompute hashes (exit 1 if tampered)
+  cs archive prune --dry-run              # what retention policy would delete
+  cs archive prune                        # execute the retention policy
+
+Operator view onto `.cosmon/state/archive/`. Terminal transitions
+(`cs done` / `cs collapse` / `cs freeze` / `cs stuck`) populate the
+archive when `[archive] enabled = true` in the project config. The
+archive outlives worktree teardown and branch deletion — a fresh
+clone sees every merged molecule's canonical snapshot.
+
+Retention is controlled by `[archive.retention]` in config.toml:
+  keep_all      (default true)  — safety switch; must be false to delete
+  max_age_days  (default 0)     — 0 disables the age rule
+  max_total_mb  (default 0)     — 0 disables the size rule
+  keep_kinds    (default decision, deliberation)
+
+Hash-chain integrity is enforced: a molecule referenced as parent
+(DecayedFrom / BlockedBy / MergedFrom) by a kept entry is never
+deleted.

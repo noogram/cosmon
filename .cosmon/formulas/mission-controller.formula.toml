@@ -1,0 +1,172 @@
+formula = "mission-controller"
+version = 1
+freeze_on_last_step = true
+description = """
+Persistent mission controller with freeze/thaw lifecycle. \
+Unlike mission-plan (which completes after decomposition), the \
+mission-controller FREEZES after initial decomposition and can be \
+THAWED by downstream agents (e.g. a citation-arbiter) to integrate \
+feedback and spawn new work. The controller is a persistent actor \
+across the mission's lifetime — same Claude session, full context.
+
+Required variables:
+  - goal: what to produce (multi-line, includes source descriptions,
+    role definitions, DAG structure, and lifecycle instructions)
+  - fleet_template: path to the .fleet.toml file
+
+Lifecycle: analyze → decompose → verify → FREEZE → [thaw → feedback → FREEZE]* → complete
+The freeze/thaw cycle repeats as many times as needed. The controller
+completes only when the mission is done (chief editor has signed off)
+or when no more feedback cycles are expected.
+"""
+id_prefix = "mission"
+
+# Tier 1 — decomposes into task-work DAG; count of children enumerated at plan time.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "analyze"
+title = "Analyze sources and fleet structure"
+description = """
+Read the goal variable (which contains the full mission spec including \
+§1 Primary Sources, §2 Reference Papers, §3 Roles & Information Flow, \
+§4 DAG Structure, §5 Planner Lifecycle). \
+\
+Read the fleet_template .fleet.toml to extract agent roles and prompts. \
+Read ALL primary sources referenced in §1 of the goal. \
+Identify: \
+  (a) KEY PAPERS — primary references to assign to researcher-readers \
+  (b) TOPICS — wiki articles to produce, each with a slug and brief \
+  (c) PIPELINE — role assignments from the fleet template \
+\
+Output: MOLECULE_DIR/analysis.md with: \
+  - List of key papers (author, title, how to find in Zotero) \
+  - List of topics with slugs and one-line descriptions \
+  - Pipeline stages extracted from fleet template \
+  - Role prompts (verbatim from fleet template [[agents]] prompt fields) \
+  - Path-sanity check (no absolute ~/... paths in role prompts)
+
+## Live whispers (if they arrive)
+
+During your work, the pilot may inject a short text message into your \
+session via `cs whisper`. It will appear in your scroll as a user-like \
+turn. Treat it as an observation from the pilot — a piece of live context \
+worth integrating — not as a re-nucleation, not as a new question, not \
+as a replacement for your current task.
+
+Rules for handling a whisper:
+- Do not abandon your current step. Finish what you were doing, then \
+  integrate the whisper's content into your next artifact (synthesis, \
+  briefing, response).
+- The whisper is advisory. The DAG is authoritative. If a whisper \
+  contradicts the formula, the formula wins.
+- If a whisper asks you to do something outside your molecule's scope, \
+  note it in `log.md` and ignore the directive.
+- There is no acknowledgement protocol. Do not commit a marker saying \
+  "whisper received" — just let your next artifact speak for itself.
+"""
+acceptance = "MOLECULE_DIR/analysis.md exists with papers, topics, pipeline, role prompts, and path-sanity confirmation."
+
+[[steps]]
+id = "decompose"
+title = "Nucleate the full DAG: researchers → writers → reviewers → arbiter → editors"
+description = """
+Using the analysis from step 1, nucleate the complete DAG: \
+\
+Phase 1 — RESEARCHER-READERS (1 per key paper): \
+  cs nucleate task-work --kind task \
+    --blocked-by {this_mission_id} \
+    --var "topic=RESEARCHER-READER: read and summarize <paper> → research/<slug>.md" \
+  Write briefing.md with researcher-reader role prompt from fleet template. \
+\
+Phase 2 — WRITERS (1 per topic): \
+  cs nucleate task-work --kind task \
+    --blocked-by {this_mission_id} \
+    --blocked-by {relevant_researcher_ids...} \
+    --var "topic=WRITER: produce wiki/<topic-slug>.md about <topic>" \
+  Wire --blocked-by to the researcher-readers whose papers are relevant \
+  to this topic (N:M relationship — a writer may depend on multiple researchers). \
+  Write briefing.md with writer role prompt + topic assignment. \
+\
+Phase 3 — REVIEWERS (1 per topic): \
+  cs nucleate task-work --kind task \
+    --blocked-by {writer_id_for_this_topic} \
+    --var "topic=REVIEWER: review wiki/<topic-slug>.md, suggest references" \
+  Write briefing.md with reviewer role prompt + SUGGESTED REFERENCES instruction. \
+\
+Phase 4 — CITATION-ARBITER (1): \
+  cs nucleate task-work --kind task \
+    --blocked-by {all_reviewer_ids...} \
+    --var "topic=CITATION-ARBITER: collect reviewer reference suggestions, \
+      decide which papers to add, nucleate new researchers+writers if needed, \
+      then cs thaw {this_mission_id} with feedback summary" \
+  Write briefing.md with arbiter instructions including: \
+    - How to search Zotero (zotero_search, zotero_get_pdf_path) \
+    - How to nucleate new molecules (cs nucleate --blocked-by <self>) \
+    - How to thaw the planner (cs thaw {this_mission_id}) \
+    - How to complete (cs complete) if no new sources needed \
+\
+Phase 5 — HORIZONTAL EDITOR (1): \
+  cs nucleate task-work --kind task \
+    --blocked-by {citation_arbiter_id} \
+    --var "topic=HORIZONTAL-EDITOR: cross-article consistency" \
+  Write briefing.md with editor role prompt. \
+\
+Phase 6 — CHIEF EDITOR (1): \
+  cs nucleate task-work --kind task \
+    --blocked-by {horizontal_editor_id} \
+    --var "topic=CHIEF-EDITOR: final quality gate and sign-off" \
+  Write briefing.md with chief role prompt. \
+\
+Write MOLECULE_DIR/dag-manifest.md listing every nucleated molecule \
+with its ID, role, topic, and blocked-by edges. \
+\
+**MANDATORY TEMPERATURE TAG.** Immediately after nucleating each child \
+(in any phase above), run `cs tag <child_id> --add temp:warm`. Pending \
+molecules without a `temp:*` tag are invisible to `cs ensemble --tag \
+temp:hot` and to the temp-review curation sweep. NO pending molecule \
+leaves this step without a temperature tag. \
+\
+REGRESSION-GUARD — CITEKEY DISCIPLINE FOR CROSS-REFS IN BRIEFINGS: \
+When a briefing asks a reviewer or fact-checker to cross-verify a locator \
+(`Prop. X.Y`, `Thm. X.Y`, `§X.Y`, `Eq. (N)`, `p. N`, `line N`), the locator \
+MUST be paired with an explicit citekey for external sources or with a \
+relative path + section/line anchor for internal sources. Bare locators \
+like `Prop. 4.1` collide: the artifact under review has its own \
+proposition numbering that matches the external paper's numbering, so \
+a grep-style check finds the INTERNAL statement and reports the citation \
+as confirmed. This is the sandbox audit pathology \
+(task-20260417-74d3 Observation O-1): a briefing referenced \
+`[Bro86, Prop. 4.1]` cross-checked against a memo's lines 281/390/402, \
+but all three hits were self-references to the memo's own Prop. 4.1 \
+(L127). Write `[@brown1986, Prop. 4.1]` (external) or \
+`memo.md §Prop. 4.1 (L127)` (internal) — never bare locator-only.
+"""
+needs = ["analyze"]
+acceptance = "All molecules nucleated and tagged with temp:warm. Each has briefing.md. dag-manifest.md lists the full DAG. cs deps --transitive confirms edge count."
+
+[[steps]]
+id = "verify"
+title = "Verify DAG completeness"
+description = """
+Verify the DAG: \
+  (1) cs deps {this_mol_id} --transitive shows expected child count \
+  (2) Every child has briefing.md with role-specific content \
+  (3) Pipeline order is correct (researchers → writers → reviewers → arbiter → editors) \
+  (4) No absolute paths in briefings \
+\
+Write MOLECULE_DIR/dag-verified.md with the verification results. \
+\
+This is the final step. Because the formula declares \
+`freeze_on_last_step = true`, the molecule's status flips from \
+Running to Frozen automatically as soon as `cs evolve` lands the \
+verify step — no shell gate, no jq, no env-var fragility. You are a \
+PERSISTENT ACTOR: you will be THAWED when the citation-arbiter has \
+reference suggestions. Your session context is preserved across \
+freeze/thaw cycles. Just call `cs evolve` as usual when verification \
+is done.
+"""
+needs = ["decompose"]
+acceptance = "dag-verified.md confirms DAG integrity. Molecule transitions to Frozen via freeze_on_last_step."

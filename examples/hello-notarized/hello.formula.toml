@@ -1,0 +1,30 @@
+formula = "hello"
+version = 1
+description = """
+Toy formula for the hello-notarized demo.
+
+Purpose: produce a minimal molecule whose commitment can be notarized
+without invoking an LLM worker. The single step exists only to give the
+commitment something shaped like a real briefing; the demo never tackles
+this molecule — it notarizes the pending commitment and ships the
+certificate alongside the artifact.
+
+This is the smallest shape that exercises the whole notary-release
+loop on a toy artifact. See examples/hello-notarized/README.md.
+"""
+id_prefix = "hello"
+
+# Tier 0 — leaf formula, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "present-artifact"
+title = "Present the toy artifact"
+description = """
+The artifact to notarize is the literal text passed via the `artifact`
+variable. No further work is required — the commitment binds the
+molecule's intent (topic + formula + time + key) to a BLAKE3 seal,
+which is what the Certificate attests.
+"""
+acceptance = "Artifact text embedded in prompt.md."

@@ -1,0 +1,33 @@
+# Mindguard `surface_visual` configuration.
+#
+# Drop this file at `~/.config/cosmon/mindguard-surface.toml` to override
+# the compiled-in defaults. A missing config is NOT silent — the same
+# defaults inscribed in `crates/cosmon-cli/src/mindguard/config.rs` apply
+# verbatim, so the gate fires identically on every host until you write
+# this file. Override here only when you need to widen / narrow the
+# surface coverage for a specific deployment.
+#
+# Loaded by `crate::mindguard::config::load()`. See
+# `docs/runbook/verify-surface.md` for the operator playbook.
+
+[surface]
+# Glob patterns (relative to project root) that, if matched by *any*
+# file in the molecule's diff against `origin/main` (then `main`, then
+# `HEAD`), promote the molecule to `surface=touched`. A surface-touched
+# `cs complete <MOL>` requires a sibling `verify-surface` molecule
+# landing GREEN in the preceding `T_max` window.
+paths = [
+    "poc/optix-modernization/lumen/web/**",
+    "wiki/**",
+    "**/*.html",
+    "**/*.css",
+    "**/*.js",
+]
+
+[verify]
+# Maximum age, in minutes, of a `verify-surface` molecule's GREEN
+# landing relative to the `cs complete` claim. Anti-drift: a
+# verification that ran an hour ago and a worker who edited the deck
+# since produces a GREEN that lies. Tighten to 15 minutes for
+# deployments where the surface churns fast.
+t_max_minutes = 60

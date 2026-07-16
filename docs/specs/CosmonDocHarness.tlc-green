@@ -1,0 +1,13 @@
+spec=CosmonDocHarness.tla
+blake3=e70b10f3d13444feb266eb5ba4d7414ad9d8a5e1cd147a6441e89acad2c933e1
+verified_at=2026-05-19T19:34:38Z
+config_tight=CosmonDocHarness.cfg
+config_tight_states_distinct=44383
+config_tight_states_generated=88639
+config_tight_depth=15
+config_safety=CosmonDocHarness_Safety.cfg
+config_safety_states_distinct=7007936
+config_safety_states_generated=17669309
+config_safety_depth=25
+java=openjdk@21
+tla2tools=2026.05.12.170007

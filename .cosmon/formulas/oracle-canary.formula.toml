@@ -1,0 +1,139 @@
+formula = "oracle-canary"
+version = 1
+description = """
+Oracle canary — the multi-provider access SMOKE ALARM (⚡ signal).
+
+A scheduled sweep that probes every wired model provider (claude / \
+mistral / local) and records three bits per provider:
+  - reachable   — the auth/API endpoint responds at all
+  - capable     — output well-formed; a long-context needle is
+                  retrieved; a structured `--json` assertion holds
+  - policy-open — no new geo / nationality / export refusal signature
+
+A flip of reachable→false or policy-open→false ON CLAUDE is the \
+export-order smoke alarm → page the operator at t=0. The same probe \
+run against mistral / local DOUBLES as the weekly warm-standby check \
+(a standby you never fire is cold the day you need it), surfaced as a \
+health note, not a page.
+
+WHY THIS EXISTS (parent delib-20260614-61f9). The Fable 5 / Mythos 5 \
+export order moved on verbal notice, same-day — there is no 90-day \
+wind-down. The reaction-time budget is ZERO. A plan-B that takes two \
+weeks to stand up is, against this boundary condition, equivalent to \
+no plan-B. The canary converts that zero budget into minutes-to-hours \
+by detecting the cutoff the instant it lands.
+
+SCOPE HONESTY (turing). This is a smoke alarm, NOT a weather forecast. \
+It decides the PRESENT access state, not the future order. It detects \
+an order at t=0 and buys failover head-start; it does NOT predict \
+whether/when Commerce issues one (undecidable against an adaptive \
+authority). Do not over-promise prediction.
+
+The decision core (which flip pages vs which is a standby note) is the \
+executable spec in `crates/cosmon-core/src/oracle_canary.rs` \
+(`flip_alerts`, `needs_paging`, `is_policy_block_signature`). This \
+formula's worker follows that spec; a future scheduler integration can \
+call it directly.
+
+SCHEDULING. Run as a recurring patrol via the existing scheduler \
+substrate (NOT a new daemon): add an entry to \
+`~/.config/cosmon/patrols.toml` that nucleates + tackles + reaps this \
+formula on a cadence. See `docs/guides/oracle-canary.md`.
+
+ARTIFACT PATHS — CRITICAL: all artifacts (reading.json, sweep.md) MUST \
+be written to the MOLECULE STATE DIRECTORY (the `molecule_dir` field \
+from `cs --json observe {mol_id}`), NEVER the worktree (destroyed by \
+`cs done`). The cross-run baseline lives at the STABLE path \
+`.cosmon/state/oracle-canary/last-reading.json` (data plane) so each \
+sweep can diff against the previous one.
+
+No variables required — the sweep operates on the project it is \
+nucleated in.
+"""
+id_prefix = "canary"
+freeze_on_last_step = false
+
+# Tier 0 — leaf signal sweep, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "probe"
+title = "Probe every wired provider"
+description = """
+Read the provider list from `.cosmon/config.toml` `[adapters]` (claude \
+/ mistral / local, plus any others wired). For EACH provider, run a \
+lightweight probe and record three independent bits:
+
+  1. reachable — does the auth/API endpoint answer at all? (a minimal
+     request, or the provider's health/models endpoint). HTTP/transport
+     failure or auth rejection → reachable = false.
+  2. capable — send a tiny capability probe: a long-context needle
+     ("repeat the token COSMON-<nonce> back to me") AND/OR a structured
+     `--json` request, and assert the output is well-formed and the
+     needle is retrieved. Garbled / truncated / wrong-shape → capable
+     = false. (Skip if unreachable — an endpoint that never answered
+     tells you nothing about capability.)
+  3. policy-open — scan the response text for a geo / nationality /
+     export refusal signature (see `is_policy_block_signature` in
+     `crates/cosmon-core/src/oracle_canary.rs` for the phrase shapes:
+     "not available in your region", "export control",
+     "based on your location", "sanctioned", "embargo", …). A match →
+     policy-open = false. This is the export-order shape.
+
+Keep probes CHEAP (smallest possible token spend) — this runs often.
+
+Write `MOLECULE_DIR/reading.json` as a `CanaryReading`:
+  { "readings": [
+      { "provider": "claude",  "bits": {"reachable":true,"capable":true,"policy_open":true}, "detail": "200 OK, needle ok, 0.4s" },
+      { "provider": "mistral", "bits": {...}, "detail": "..." },
+      { "provider": "local",   "bits": {...}, "detail": "..." }
+  ] }
+
+(`MOLECULE_DIR` is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — NEVER the worktree.)
+"""
+acceptance = "MOLECULE_DIR/reading.json written with one entry per wired provider, each carrying the three bits {reachable, capable, policy_open} and a detail string."
+
+[[steps]]
+id = "diff-and-page"
+title = "Diff against the last sweep and page on a Claude flip"
+description = """
+Load the previous baseline from the STABLE cross-run path \
+`.cosmon/state/oracle-canary/last-reading.json` (relative to the \
+galaxy root). If it does not exist, this is the FIRST sweep: establish \
+the baseline (copy this sweep's reading.json there), write a one-line \
+sweep.md noting "baseline established, no alarm", and stop — a first \
+sweep is silent by construction (no prior state to flip from).
+
+Otherwise diff the previous baseline against this sweep's reading.json \
+following the `flip_alerts` spec in \
+`crates/cosmon-core/src/oracle_canary.rs`:
+
+  - A flip of reachable→false or policy-open→false ON CLAUDE
+    (the critical provider) → SEVERITY: PAGE. Export-order smoke
+    alarm. Page the operator NOW:
+        cs notify "🚨 ORACLE CANARY: claude access flipped — <kind>. \
+        The lock may have closed. Execute the rehearsed cutover NOW." \
+        --title "oracle-canary"
+  - A flip on mistral / local → SEVERITY: STANDBY NOTE. The warm path
+    is colder than it should be. Record it in sweep.md; do NOT page.
+  - A recovery (any provider back toward open) → informational only.
+  - A new provider (present now, absent in baseline) → baseline, not a
+    flip. A vanished provider (probed before, not now) → not a flip.
+
+Write `MOLECULE_DIR/sweep.md`:
+  - A per-provider state table: provider | reachable | capable |
+    policy-open | state (open/degraded/blocked/down) | detail.
+  - The list of alerts this sweep produced, each with severity and the
+    one-line operator message.
+  - A clear headline: either "✅ all clear — no flip" or
+    "🚨 PAGED — claude <kind>" or "🌡️ standby note(s) only".
+
+Then PROMOTE this sweep's reading.json to the stable baseline path \
+(overwrite `.cosmon/state/oracle-canary/last-reading.json`) so the \
+NEXT sweep diffs against today, not against the day the canary was \
+born. Without this promotion the alarm would re-fire every sweep.
+"""
+needs = ["probe"]
+acceptance = "MOLECULE_DIR/sweep.md written with the per-provider state table, the alert list with severities, and a clear headline. On a claude reachable→false or policy-open→false flip, `cs notify` was invoked with the export-order page. The stable baseline `.cosmon/state/oracle-canary/last-reading.json` was updated to this sweep's reading."

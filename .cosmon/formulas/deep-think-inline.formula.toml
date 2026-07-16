@@ -1,0 +1,237 @@
+formula = "deep-think-inline"
+version = 1
+description = """
+Tier-0 inline-panel deliberation — the sanctioned way for a mission \
+or any Tier-1 controller to COMMISSION a deep-think panel without \
+violating the gödel ordinal stratification guard (smithy ADR-0021, \
+cosmon ADR-110 §I4).
+
+## Why this formula exists (the missing primitive)
+
+The canonical `deep-think` formula is **Tier 1**: its `outcomes` step \
+nucleates child task/idea molecules (heterogeneous decomposition). The \
+ordinal guard `ensure_tier_descends` permits a nucleating child \
+(β ≥ 1) only when its tier is STRICTLY below the parent's (β < α). A \
+`mission-controller` (Tier 1, α = 1) therefore CANNOT nucleate \
+`deep-think` (Tier 1, β = 1): 1 ≥ 1 ⇒ refused. The other escape — \
+declaring a panel formula Tier 2 (signed) — is blocked until \
+`cosmon-sign` lands (`TierError::Tier2Unsupported`).
+
+That left missions with a real gap: a mission that needs a \
+multi-perspective deliberation mid-flight (e.g. « should this DAG \
+branch be redesigned? ») had no sanctioned primitive to commission \
+one. The observed workaround (atlas-cours mission-20260611-fe9a) was to \
+run panels inline inside `task-work` T0 molecules — same substance, \
+same artefacts, but riding a formula whose contract says nothing about \
+panels.
+
+`deep-think-inline` closes the gap honestly. It is **Tier 0**: a leaf \
+that runs the panel inline (one worker, multiple personas via the \
+Agent tool) and produces a SYNTHESIS + RECOMMENDATION — it NEVER \
+nucleates child molecules. Because a leaf (β = 0) is the well-founded \
+base case, `ensure_tier_descends` permits ANY parent — including a \
+Tier-1 mission-controller — to nucleate it. The mission commands the \
+deliberation; the deliberation thinks and recommends; if the \
+recommendation calls for follow-up molecules, the MISSION (the \
+Tier-1 parent) nucleates them, not this leaf. Decomposition stays \
+where the ordinal contract puts it.
+
+## Relationship to deep-think (when to use which)
+
+- Use **`deep-think`** (Tier 1) when the panel is the ROOT of the work \
+  and is itself expected to decompose its conclusions into a child \
+  DAG (the operator tackles it directly: `cs nucleate deep-think …`).
+- Use **`deep-think-inline`** (Tier 0) when a Tier-1 controller \
+  (mission-controller, mission-plan, idea-to-plan, …) needs to \
+  commission a panel as a SUB-STEP of its own plan. The panel returns \
+  a recommendation; the controller decides what to nucleate next.
+
+The two formulas share the frame → dispatch → synthesize discipline \
+verbatim (strate-count, substitution hypotheses, frame-question \
+coverage table). They diverge only at the last step: deep-think \
+DECOMPOSES, deep-think-inline RECOMMENDS.
+
+⚠ ARTIFACT PATHS — CRITICAL: all artifacts (frame.md, responses/, \
+synthesis.md, outcomes.md) MUST be written to the MOLECULE STATE \
+DIRECTORY, NOT to the current working directory or the git worktree. \
+The molecule state directory is returned by `cs --json observe {mol_id}` \
+in the `molecule_dir` field. Typically: \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`. Files written to \
+the worktree (.worktrees/{mol_id}/) are DESTROYED when `cs done` tears \
+down the session.
+
+Panel selection uses the `panel` variable:
+  - panel="auto" (or unset): worker chooses 3-5 personas from its \
+    available Claude Code subagents based on the topic.
+  - panel="feynman,jobs,wheeler": explicit, comma-separated list of \
+    persona names — worker uses exactly those.
+
+Canonical persona source: `/srv/cosmon/workshop/personas/<name>/<name>.md`.
+"""
+id_prefix = "delib"
+
+# Tier 0 — leaf. Runs the panel inline and RECOMMENDS; never nucleates
+# children. This is exactly what lets a Tier-1 mission-controller
+# commission it (ensure_tier_descends: β = 0 is the well-founded base
+# case, always permitted regardless of parent tier).
+[tier]
+level = 0
+
+[[steps]]
+id = "frame"
+title = "Frame the question and select the panel"
+description = """
+Frame the question precisely. Identify the artifact under review (code, \
+design doc, ADR, product decision). Select 3-5 panel personas — either \
+from --var panel=<comma-separated list> or auto-selected from the worker's \
+available Claude Code subagents based on topic match. Draft a focused \
+prompt per persona that gives them the artifact, the question, and what \
+kind of answer is expected from their perspective.
+
+## Strate-count and substitution hypotheses (R2 — mandatory)
+
+Before drafting per-persona prompts, the frame MUST declare:
+
+1. **Strate-count** — how many distinct sub-questions (strates) the \
+   operator's prompt decomposes into. Number them Q1, Q2, … Qn. Each \
+   strate is a question that could in principle receive a different \
+   answer from a different persona. If the operator's single sentence \
+   contains two orthogonal properties, they are two strates, not one.
+
+2. **Per-persona substitution hypotheses** — for each selected panelist, \
+   state the most likely easier question they might answer instead of \
+   the hard one (based on the persona's known gravitational pull). \
+   These hypotheses are the falsifiers that the synthesize step (and \
+   any meta-auditor) will check against. Without them, silent \
+   substitution is undetectable.
+
+3. **Anti-substitution constraints** (optional but recommended) — for \
+   each strate, a sentence saying what the answer must NOT be. These \
+   are frame-level guardrails that prevent the panel from drifting into \
+   comfortable territory.
+
+Write these in frame.md before the per-persona prompt sections. \
+Origin: janis R2 from oxymake delib-20260527-1c64.
+
+## Commissioning context (inline-panel specific)
+
+When this molecule was nucleated by a Tier-1 controller (a mission), \
+the frame SHOULD name the commissioning parent and the decision the \
+parent is trying to make. Read the parent's relevant artefacts (its \
+analysis.md / dag-manifest.md / synthesis if any) so the panel answers \
+the mission's actual question, not a generic restatement. Resolve the \
+parent via the molecule's `--blocked-by` edge \
+(`cs --json observe {mol_id}` → links) or the briefing.md the parent \
+injected.
+
+## Live whispers (if they arrive)
+
+During your work, the pilot may inject a short text message into your \
+session via `cs whisper`. Treat it as an observation from the pilot — \
+a piece of live context worth integrating — not as a re-nucleation. \
+Finish your current step, then integrate the whisper into your next \
+artifact. The whisper is advisory; the DAG is authoritative. If a \
+whisper contradicts the formula, the formula wins.
+"""
+acceptance = "Panel chosen and per-persona prompts drafted in MOLECULE_DIR/frame.md (where MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` — NEVER the worktree .worktrees/). frame.md MUST contain: (a) strate-count with numbered Qn sub-questions, (b) per-persona substitution hypotheses."
+acceptance_artifacts = ["frame.md"]
+
+[[steps]]
+id = "dispatch"
+title = "Dispatch panel in parallel"
+description = """
+Invoke each panel member in parallel via the Agent tool with its \
+per-persona prompt. Collect raw responses into \
+molecule_dir/responses/<persona>.md — one file per persona, untouched.
+"""
+needs = ["frame"]
+acceptance = "N response files written to MOLECULE_DIR/responses/<persona>.md (MOLECULE_DIR from `cs --json observe {mol_id}`)"
+acceptance_artifacts = ["responses/"]
+
+[[steps]]
+id = "synthesize"
+title = "Synthesize convergences and divergences"
+description = """
+Read all responses. Identify convergences (where the panel agrees), \
+divergences (where they disagree — and why), and surprising insights. \
+Structure the output as markdown with a per-persona summary followed by \
+an integrated synthesis that calls out the decision-relevant tension \
+points.
+
+## Frame-question coverage checklist (R1 — mandatory)
+
+The synthesis MUST include a **frame-question coverage table** that \
+accounts for every Qn sub-question declared in the frame (step 1). \
+Each question gets exactly one mark:
+
+| Q frame | Treated | Substituted | Declined-with-rationale | Silent |
+|---------|---------|-------------|-------------------------|--------|
+| Q1 ...  |    ✓    |      —      |            —            |   —    |
+
+- **Treated**: the panel answered the actual question as framed.
+- **Substituted**: the panel answered an easier or adjacent question \
+  instead (mark with (*) and explain what was substituted and by whom).
+- **Declined-with-rationale**: deliberately out-of-scope for this round, \
+  with explicit reason stated.
+- **Silent**: no panelist addressed the question and no rationale was \
+  given. **This is the alarm signal.** Any `Silent` mark requires the \
+  synthesizer to flag it prominently and recommend a follow-up.
+
+Place this table near the end of synthesis.md. \
+Origin: janis R1 from oxymake delib-20260527-1c64.
+"""
+needs = ["dispatch"]
+acceptance = "MOLECULE_DIR/synthesis.md complete with per-persona summaries, integrated synthesis, AND frame-question coverage table (every Qn from the frame accounted for as treated/substituted/declined/silent) (MOLECULE_DIR from `cs --json observe {mol_id}`)"
+acceptance_artifacts = ["synthesis.md"]
+
+[[steps]]
+id = "recommend"
+title = "Produce a recommendation document (NO nucleation)"
+description = """
+Convert the synthesis into a standalone **recommendation document** at \
+MOLECULE_DIR/outcomes.md. This is the leaf's terminal artefact.
+
+⚠ TIER-0 CONTRACT — DO NOT NUCLEATE. This formula is a leaf. It MUST \
+NOT call `cs nucleate` / `cosmon_nucleate` in any step. If the synthesis \
+concludes that follow-up molecules are warranted, ENUMERATE them as \
+RECOMMENDATIONS in outcomes.md (proposed topic, kind, blocked-by edges, \
+temp tag) — but do not create them. The commissioning Tier-1 parent \
+(the mission-controller, mission-plan, or operator) reads outcomes.md \
+and nucleates the children itself, where the ordinal contract puts \
+decomposition. A leaf that nucleates is a Tier-0 violation \
+(`TierError::Tier0Nucleates`) and breaks the very guard this formula \
+exists to satisfy.
+
+Structure outcomes.md as:
+
+  # Recommendation — {topic}
+
+  **Commissioned by:** {parent_mission_id or operator}
+  **Panel:** {personas}
+
+  ## Verdict
+  {the one-paragraph decision-relevant conclusion}
+
+  ## Recommended follow-up molecules (for the parent to nucleate)
+  For each proposed child:
+    - topic / kind / formula
+    - blocked-by edges (which siblings or the parent)
+    - suggested temp tag (temp:warm default)
+    - a one-line briefing seed (the synthesis section that gives the
+      child its context — so the parent can inject it without re-reading
+      the whole synthesis)
+  If NO follow-up is warranted, say so explicitly and stop.
+
+REGRESSION GUARDS:
+- PORTABILITY: in all artefacts use paths RELATIVE to the project root \
+  (`src/lib.rs`, `docs/adr/001.md`), NEVER absolute paths.
+- CITEKEY DISCIPLINE: when a response or the recommendation cites a \
+  textual locator (`Prop. 4.1`, `Thm. 2.3`, `§3.2`, `Eq. (17)`, \
+  `line 281`, `p. 42`), pair it with the source's citekey \
+  (`[@brown1986, Prop. 4.1]`) or a relative path + section/line anchor \
+  (`q1a-algebraic-closure.md §Prop. 4.1 (L127)`) — never the bare \
+  locator (the task-20260417-74d3 self-reference false-positive).
+"""
+needs = ["synthesize"]
+acceptance = "MOLECULE_DIR/outcomes.md written as a recommendation document: verdict + (if warranted) an enumerated list of follow-up molecules for the commissioning parent to nucleate, each with topic/kind/blocked-by/temp/briefing-seed. NO molecules nucleated by this leaf."
+acceptance_artifacts = ["outcomes.md"]

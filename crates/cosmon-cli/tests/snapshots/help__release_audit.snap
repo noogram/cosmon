@@ -1,0 +1,52 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+`release-audit` — dry-run drift detector for the public distribution (analogue of `reconcile --check`)
+
+Usage: cs release-audit [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --dry-run        Simulate the `release-resync` transformation chain against the live working tree (no scratch clone) and report regressions. This is currently the only mode; the flag is accepted so the documented invocation `cs release-audit --dry-run` is exact
+      --repo <PATH>    Repository root to audit. Defaults to the toplevel discovered by `git rev-parse --show-toplevel` from the current directory
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+   cs release-audit --dry-run             # simulate the release chain on the live tree
+   cs release-audit --dry-run --json      # machine report for CI / jq
+   cs release-audit --repo /path/to/clone # audit an explicit repo root
+
+Dry-run drift detector for the public cosmon distribution — the release-side
+analogue of `cs reconcile --check`.
+
+PRIMARY MEMBRANE — deny-by-default allowlist (ADR-127). Ship nothing except
+positively-cleared paths: every tracked, non-purged path must carry a per-path
+permit in .cosmon/release-allowlist.toml, or it is a `path-not-permitted`
+regression. A new confidential file is caught BY CONSTRUCTION (new = unpermitted
+= refused), instead of slipping past a frozen denylist. Content-bound permits
+(with a blake3 `seal`) go `permit-stale` when the file changes — cleanliness-now,
+not freshness-at-t0. The membrane is ARMED by the presence of the allowlist
+file; absent it, the audit runs in legacy denylist mode and says so LOUDLY
+(a warning, never a silent pass). Bless paths with scripts/release/
+bless-allowlist.sh (a separate tool — the audit stays read-only).
+
+CONTENT BACKSTOP — the legacy detectors still run on permitted files:
+  - a private-sibling path dependency reappeared (the claudion vendoring case);
+  - a client name reintroduced in a tracked path the rename chain misses;
+  - a structural string the chain does not scrub (operator homeserver, etc.);
+  - a live instance oidc-identity.toml re-tracked under a non-purged path.
+The confidential detector literals live in the PRIVATE, purged-from-release
+.cosmon/release-rules.toml (Bucket-3) — not in the shipped source, so the
+detector is no longer its own leak. Absent that file the backstop is inert and
+the audit warns.
+
+Exit 0 if the distribution is clean, 1 if it would regress. One-shot, not a
+daemon; reports, does not remediate. See ADR-127.
+
+The audited repo may exempt structural strings that are intentionally public in
+it (e.g. a maintainer-contact domain) via .cosmon/release-audit.toml, each with
+a mandatory justification — the same exemption list its own forbid-strings CI
+gate should read, so both referees agree.

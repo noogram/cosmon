@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# fake-claude — stand-in for the `claude` CLI used by `cs tackle`.
+#
+# Selects behavior via FAKE_CLAUDE_MODE. The goal is to reproduce the
+# failure modes that showed up in production (task-4046 zombie, task-25c3
+# auth prompt, …) at the syscall/exit-code boundary, without depending on
+# the real Anthropic CLI or network.
+#
+# ── Modes (FAKE_CLAUDE_MODE=…) ─────────────────────────────────────────────
+#   exit-0          exit cleanly with status 0 (default)
+#   exit-42         exit immediately with status 42
+#   exit-delayed    sleep 2s, then exit 1 (mid-spawn death)
+#   hang            loop forever — simulate frozen worker
+#   segfault        kill -SIGSEGV $$ — simulate native crash
+#   auth-prompt     print "authentication required" to stderr, exit 1
+#   partial-output  write a couple of events.jsonl lines, then die
+#   echo-prompt     echo argv + stdin to stdout then exit 0
+#
+# ── Debug hooks ────────────────────────────────────────────────────────────
+#   PROMPT_ECHO=1            tee stdin + argv to $FAKE_CLAUDE_LOG before acting
+#   FAKE_CLAUDE_LOG=<path>   destination for PROMPT_ECHO (default stderr)
+#
+# Argv parsing is tolerant: we swallow flags we don't care about (e.g.
+# --permission-mode <mode>, --dangerously-skip-permissions) and treat
+# everything else as a positional no-op.
+
+set -u
+
+mode="${FAKE_CLAUDE_MODE:-exit-0}"
+log="${FAKE_CLAUDE_LOG:-/dev/stderr}"
+
+if [ -n "${PROMPT_ECHO:-}" ]; then
+    {
+        echo "fake-claude argv: $*"
+        echo "fake-claude mode: $mode"
+        echo "--- stdin ---"
+        if [ ! -t 0 ]; then
+            cat
+        fi
+        echo "--- /stdin ---"
+    } >> "$log"
+fi
+
+# Consume (ignore) flags before routing so agents can invoke us the same
+# way they invoke the real binary.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --permission-mode) shift 2 ;;
+        --dangerously-skip-permissions) shift ;;
+        --print|--append-system-prompt) shift ;;
+        --model) shift 2 ;;
+        --version)
+            echo "fake-claude 0.1.0 (cosmon spawn-matrix test fake)"
+            exit 0
+            ;;
+        --help|-h)
+            echo "fake-claude: stand-in for Anthropic's claude CLI."
+            echo "Set FAKE_CLAUDE_MODE to control behavior."
+            exit 0
+            ;;
+        *) shift ;;
+    esac
+done
+
+case "$mode" in
+    exit-0)
+        exit 0
+        ;;
+    exit-42)
+        exit 42
+        ;;
+    exit-delayed)
+        sleep 2
+        exit 1
+        ;;
+    hang)
+        # Sleep in small increments so the process is killable. A single
+        # `sleep 99999` would also work but makes graceful_exit tests slow
+        # when a kill-TERM handler has to interrupt it.
+        while true; do
+            sleep 1
+        done
+        ;;
+    segfault)
+        # SIGSEGV on self; child exit status reflects the signal (139).
+        kill -SEGV $$
+        # If SIGSEGV was caught (rare), still die.
+        exit 139
+        ;;
+    auth-prompt)
+        printf 'authentication required; please run `claude login`\n' >&2
+        exit 1
+        ;;
+    partial-output)
+        # Simulate a worker that emits a couple of NDJSON events before
+        # dying. The harness can grep for these in capture-pane output.
+        cat <<'EOF'
+{"type":"system","subtype":"init","message":"fake-claude starting"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}
+EOF
+        exit 1
+        ;;
+    echo-prompt)
+        echo "fake-claude echo-prompt argv: $*"
+        if [ ! -t 0 ]; then
+            cat
+        fi
+        exit 0
+        ;;
+    *)
+        echo "fake-claude: unknown FAKE_CLAUDE_MODE=$mode" >&2
+        exit 2
+        ;;
+esac

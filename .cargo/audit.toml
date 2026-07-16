@@ -1,0 +1,25 @@
+# cargo-audit configuration — supply-chain hygiene gate.
+#
+# Advisories listed here are *temporary* exceptions tracked separately
+# (see deny.toml [advisories.ignore] for the same set + rationale).
+# When the upstream fix lands, remove the entry from BOTH this file
+# and deny.toml. Drift between the two means one tool will start to
+# complain — that is the desired alarm.
+#
+# Reference: delib-20260425-39c1 §V (supply-chain sprint),
+# forgemaster.md §1 (cargo-audit pinning).
+
+[advisories]
+ignore = [
+    # bincode 1.x via tui-markdown→syntect — awaiting syntect bump.
+    "RUSTSEC-2025-0141",
+    # yaml-rust via tui-markdown→syntect — upstream migrating to yaml-rust2.
+    "RUSTSEC-2024-0320",
+    # paste proc-macro via candle-core→gemm — awaiting candle stack update.
+    "RUSTSEC-2024-0436",
+    # rand 0.9 unsoundness via candle-core — not reachable from cosmon code.
+    "RUSTSEC-2026-0097",
+    # lru 0.12 unsoundness via ratatui 0.29 — Stacked-Borrows IterMut bug,
+    # not reachable from cosmon TUI code (we never iter_mut this LRU).
+    "RUSTSEC-2026-0002",
+]

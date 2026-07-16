@@ -1,0 +1,59 @@
+name: Install lint
+
+# Guards the public install one-liner infra (infra/install/, child C3 of
+# delib-20260711-8d00). None of this is in the Rust workspace, so cargo's gates
+# never see it — a broken uname→target map or a shell-syntax slip in install.sh
+# would ship silently. This job makes the two most fragile things falsifiable:
+#
+#   1. install.sh parses (sh -n) and passes shellcheck;
+#   2. the platform-detection table (install.sh --self-test) is correct —
+#      revert a mapping line and this reddens;
+#   3. the apex Worker typechecks and its dry-run build bundles install.sh.
+#
+# It does NOT deploy, tag, or flip anything — pure verification. All third-party
+# Actions pinned by 40-char commit SHA (delib-20260425-39c1).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "infra/install/**"
+      - ".github/workflows/install-lint.yml"
+  pull_request:
+    paths:
+      - "infra/install/**"
+      - ".github/workflows/install-lint.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  installer:
+    name: install.sh — shellcheck + self-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Syntax check
+        run: sh -n infra/install/install.sh
+      - name: shellcheck
+        run: shellcheck -s sh infra/install/install.sh
+      - name: Platform-detection self-test
+        run: sh infra/install/install.sh --self-test
+
+  worker:
+    name: worker — typecheck + dry-run bundle
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: infra/install/worker
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b  # v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        run: npm install --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Dry-run build (bundles install.sh as text; no deploy)
+        run: npm run dry-run

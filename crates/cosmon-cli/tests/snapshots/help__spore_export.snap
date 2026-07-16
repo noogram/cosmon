@@ -1,0 +1,32 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Emit a content-addressed bundle id and an ASTRA descriptive layer (ADR-140 D6) for sharing the spore
+
+Usage: cs spore export [OPTIONS] <REF>
+
+Arguments:
+  <REF>  Path to a `spore.toml` manifest (or a directory containing one)
+
+Options:
+      --config <PATH>  Path to configuration file
+      --out <DIR>      Output directory for the ASTRA descriptive layer. Defaults to the manifest directory. The crate is always written here as `ro-crate-metadata.json` unless `[spore.astra].output` names a different (manifest-relative) path
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs spore export ./spore.toml             # bundle hash to stdout
+  cs spore export ./spore.toml --out dist/ # ASTRA into dist/
+  cs spore export ./bundle/ --json         # machine-readable
+
+Emits a content-addressed bundle id over the manifest and every recipe
+and seal file it references (BLAKE3, sorted paths), plus an
+ASTRA-compatible RO-Crate descriptive layer (ADR-140 D6) when
+[spore.astra].emit is true. The seal verdict is attached honestly: marked
+present/absent and never claimed verified. The bundle hash is stable: the
+same bundle content always yields the same id (content-addressing is the
+registry, ADR-039).
+
+SEE ALSO: cs spore run, ADR-140 D6, ADR-039.

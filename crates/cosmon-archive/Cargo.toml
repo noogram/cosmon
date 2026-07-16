@@ -1,0 +1,21 @@
+[package]
+name = "cosmon-archive"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Canonical archive writer for terminal Cosmon molecules (ADR-030 M2)"
+
+[dependencies]
+chrono = { workspace = true }
+cosmon-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,231 @@
+# ==========================================================================
+# spore-toml-annotated.toml
+#
+# DELIVERABLE B of ADR-140. The canonical, fully annotated `spore.toml`
+# schema. Derived from the workshop reference prototype
+# (grace-business-analysis) and extended with the four ADR-140 decisions:
+#
+#   D1  explicit node-kind taxonomy   (fixed / fanout / emergent)
+#   D2  emergent zones declare bounds (output_type, max_instances, stop)
+#   D5  the `deterministic` formula trait (content-addressable cache)
+#   D6  the [spore.astra] descriptive-emission stanza
+#
+# This is a SPEC, not an executable: it documents every section a parser
+# must accept. `cs spore run` is not yet built (see the impl DAG manifest).
+#
+# Outgoing-surface register: no em dashes; plain ASCII; reads alone.
+# ==========================================================================
+
+# --------------------------------------------------------------------------
+# [spore] : the header. Identity + the native verb.
+# --------------------------------------------------------------------------
+[spore]
+name        = "example-spore"
+version     = 1
+description = """
+One paragraph: what polymer this spore germinates into, and the verdict it
+closes on. Plain language; a stranger reads this first.
+"""
+verb = "germinate"   # spore -> polymer, the parallel of nucleate (formula -> molecule)
+
+# --------------------------------------------------------------------------
+# [spore.seal] : the proof. The strongest seal a spore can carry is a
+# TLC-checkable TLA+ module proving the FOUR properties below over the SPACE
+# of emergent topologies (not over one fixed DAG). Paths are RELATIVE to this
+# manifest (portability invariant). The seal-verification contract (ADR-140
+# D4) is: absent / present+checked / present+unchecked-honest. `cs spore run`
+# refuses by default to germinate a present-but-unverified seal; pass
+# --allow-unchecked-seal to opt into the risk explicitly. It NEVER claims a
+# seal is verified when it is not.
+# --------------------------------------------------------------------------
+[spore.seal]
+module = "spore.tla"
+config = "spore.cfg"
+properties = [
+    "Termination",                  # every germinated body has a bounded variant
+    "GateFailClosed",               # gates deny on ambiguity, never leak a pass
+    "DeterministicParametrization", # same spore + same params => same wiring
+    "NoResourceCollision",          # ADR-140 D2: bounded concurrency + worktree
+                                    # isolation => concurrent emergent children
+                                    # of one type never alias a resource
+]
+
+# --------------------------------------------------------------------------
+# [spore.params.*] : the ParamSchema. A recipient refines the spore by editing
+# THIS table, then re-sealing. Each param declares a type, whether it is
+# required, and a default. Determinism (seal property 3) means: same params
+# in => same polymer out. expand() validates params against this schema and
+# refuses to germinate on a missing required param or a type/enum mismatch.
+# --------------------------------------------------------------------------
+[spore.params.subject]
+type        = "string"
+required    = true
+description = "The primary input the polymer analyses (a name, a URL, a prose description)."
+
+[spore.params.axes]
+type        = "list<string>"
+description = "Drives the pre-determined fan-out: one germinated node per entry."
+default     = ["axis-a", "axis-b", "axis-c"]
+
+[spore.params.depth]
+type        = "enum"
+values      = ["quick", "full"]
+default     = "full"
+description = "quick = tight subset. full = every axis, full steelman, synthesis."
+
+# --------------------------------------------------------------------------
+# [spore.fleet] : the crew (an org chart of roles) the mission plan lays over.
+# concurrency_cap and isolation are the bounds the seal's NoResourceCollision
+# invariant quantifies over: at most `concurrency_cap` emergent children of a
+# given output_type run at once, and worktree isolation guarantees their
+# writes do not alias.
+# --------------------------------------------------------------------------
+[spore.fleet]
+name            = "default"
+concurrency_cap = 4
+isolation       = "worktree"
+
+# --------------------------------------------------------------------------
+# [spore.formulas.*] : the per-node recipe aliases. Each references a
+# .formula.toml relative to this manifest. The optional `deterministic` trait
+# (ADR-140 D5) declares the formula a PURE FUNCTION of its inputs:
+#
+#   deterministic = true  -> molecule is cachable by content. The runtime
+#                            computes cache_key = BLAKE3(formula_id ||
+#                            resolved_vars || sorted(input_artifact_hashes))
+#                            and SKIPS execution if the cache already holds an
+#                            output for that key. verify_requires_execution =
+#                            false. (Reuses ADR-043 input hashing.)
+#
+#   deterministic = false -> (default) the molecule's work is an LLM session,
+#                            not byte-reproducible. Sealed and re-executed,
+#                            never content-skipped. verify_requires_execution
+#                            = true. `cs verify` certifies the process.
+# --------------------------------------------------------------------------
+[spore.formulas.editorial-work]
+path          = "formulas/editorial-work.formula.toml"
+description   = "Agentic prose/analysis (draft -> review). LLM session."
+deterministic = false   # explicit for clarity; false is the default
+
+[spore.formulas.axis-analysis]
+path          = "formulas/axis-analysis.formula.toml"
+description   = "One analytical axis: read -> steelman -> graded verdict."
+deterministic = false
+
+[spore.formulas.regenerate-index]
+path          = "formulas/regenerate-index.formula.toml"
+description   = "Pure transform: rebuild an index from sources. Cachable."
+deterministic = true    # same sources in => same index bytes out => cache hit
+
+# --------------------------------------------------------------------------
+# [[spore.node]] : the DAG nodes. ADR-140 D1 requires an explicit `kind`:
+#
+#   kind = "fixed"    -> germinates exactly one molecule. for_each absent.
+#   kind = "fanout"   -> germinates one molecule per entry of a PARAM list.
+#                        Count known at germination; the param list is the
+#                        bound, so no [bounds] block is needed.
+#   kind = "emergent" -> germinates one molecule per item of a value an
+#                        UPSTREAM node produces at run time. Count unknown at
+#                        germination; MUST declare a [spore.node.bounds] block
+#                        or the spore fails to load.
+# --------------------------------------------------------------------------
+
+# --- a fixed node ---------------------------------------------------------
+[[spore.node]]
+id          = "frame"
+kind        = "fixed"
+formula     = "editorial-work"
+mission     = "mission-template.md"   # the refinable "what to produce" recipe
+description = "Note de cadrage: state the working thesis before any judgement."
+[spore.node.vars]
+subject = "${params.subject}"
+
+# --- a pre-determined fan-out node ----------------------------------------
+# One germinated molecule per entry of params.axes. ${axis} is bound per node.
+[[spore.node]]
+id          = "analyse-axis"
+kind        = "fanout"
+for_each    = "${params.axes}"
+formula     = "axis-analysis"
+description = "For one axis: framework reading, steelman, graded verdict."
+[spore.node.vars]
+subject = "${params.subject}"
+axis    = "${axis}"
+depth   = "${params.depth}"
+
+# --- an emergent zone -----------------------------------------------------
+# One verifier per finding the fan-out emitted AT RUN TIME. The cardinality of
+# ${nodes.analyse-axis.findings} is unknown until analyse-axis has run, so this
+# node is emergent and MUST declare its bounds. expand() emits a single fan-out
+# CONTROLLER node carrying these bounds; the controller performs the bounded
+# run-time fan-out once its upstream completes (dynamic-DAG foaming under a
+# declared ceiling). The [bounds] block is what the seal quantifies over.
+[[spore.node]]
+id          = "verify-finding"
+kind        = "emergent"
+for_each    = "${nodes.analyse-axis.findings}"
+formula     = "axis-analysis"
+description = "Adversarially refute each finding; downgrade any verdict that did not survive."
+[spore.node.bounds]
+output_type    = "finding"   # the type of item the upstream node emits
+max_instances  = 64          # hard ceiling on the fan-out: the foaming variant
+stop_condition = "every finding from analyse-axis consumed exactly once"
+[spore.node.vars]
+finding = "${finding}"
+
+# --- two more fixed nodes: the synthesis and the gate ---------------------
+[[spore.node]]
+id          = "synthesize"
+kind        = "fixed"
+formula     = "editorial-work"
+description = "Combine the verified axes; name the tension points."
+[spore.node.vars]
+subject = "${params.subject}"
+
+[[spore.node]]
+id          = "graded-verdict"
+kind        = "fixed"
+formula     = "editorial-work"
+description = "The fail-closed gate: emit the verdict ONLY if every finding survived verify-finding; else withhold."
+[spore.node.vars]
+subject = "${params.subject}"
+
+# --------------------------------------------------------------------------
+# [[spore.edge]] : the typed edges. type in {feeds, produces, verifies}.
+# expand() turns each into a Blocks/BlockedBy link replayed as
+# `cs nucleate ... --blocked-by ...`. A cycle is a hard error.
+# --------------------------------------------------------------------------
+[[spore.edge]]
+from = "frame"
+to   = "analyse-axis"
+type = "feeds"
+
+[[spore.edge]]
+from = "analyse-axis"
+to   = "verify-finding"
+type = "produces"
+
+[[spore.edge]]
+from = "verify-finding"
+to   = "synthesize"
+type = "feeds"
+
+[[spore.edge]]
+from = "synthesize"
+to   = "graded-verdict"
+type = "feeds"
+
+# --------------------------------------------------------------------------
+# [spore.astra] : ADR-140 D6. At SHARE time (`cs spore export`, and at mission
+# completion) the spore emits an ASTRA-compatible descriptive layer alongside
+# its content-addressed bundle. cosmon COMPOSES with the open ASTRA schema; it
+# does not reinvent a descriptive format. The spore header + ParamSchema + DAG
+# map onto ASTRA method/provenance; the seal verdict is attached as the proof
+# artifact; the germinated mission's per-node `cs verify` traces populate run
+# provenance. The moat is the proof (provable), not the openness alone.
+# --------------------------------------------------------------------------
+[spore.astra]
+emit    = true
+profile = "ro-crate"          # ASTRA is RO-Crate-compatible
+output  = "astra/ro-crate-metadata.json"
+attach_seal_verdict = true    # reference the D4 seal verdict as the proof artifact

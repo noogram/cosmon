@@ -1,0 +1,42 @@
+# Cloudflare Pages configuration for the Noogram documentation site
+# (docs.noogram.org).
+#
+# This is a STATIC SITE deploy (Cloudflare Pages), not a Worker. The site is
+# built by mdBook from docs/book/ into docs/book/book/, then published with:
+#
+#     wrangler pages deploy docs/book/book --project-name=cosmon-docs
+#
+# Because `pages_build_output_dir` is set below, a bare `wrangler pages deploy`
+# run from the repo root also picks up the right directory automatically.
+#
+# The single canonical hosting target is **docs.noogram.org** (delib-20260711-8d00,
+# topology A — supersedes the earlier docs.noogram.dev choice). The Cloudflare
+# Pages project keeps its internal name `cosmon-docs`; only the public custom
+# domain changed. cosmon.dev, cosmon.noogram.dev, and docs.noogram.dev are no
+# longer hosting targets for this site — noogram.dev is registered defensively
+# and 301-redirects to noogram.org (that redirect + the noogram.org apex are
+# configured by C2, not here).
+#
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLICATION GATE — read before deploying.
+#
+# Publishing docs.noogram.org is an OPERATOR GESTURE held behind the
+# membrane-repair gate (task-20260616-cc22). Deploying a page to PROD while
+# `git grep tenant-demo` (or any red-list term) still returns the client roster is a
+# PARTIAL PUBLIC FLIP. There is intentionally NO auto-deploy-on-push GitHub
+# Actions workflow for this site — merging these pages to main must NOT publish
+# them. The custom-domain attach (Cloudflare custom domain + CNAME + zero-trust
+# coverage) is done by the operator at deploy time, not by this config.
+#
+# Until the confidentiality scrub (Guard A) is audit-green, use PREVIEW-scoped
+# deploys only:
+#
+#     wrangler pages deploy docs/book/book --project-name=cosmon-docs --branch=preview
+#
+# The prod flip (`--branch=main` / promote-to-production) stays under the
+# operator's finger. See docs/book/src/public-release-readiness.md, Guard A.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name = "cosmon-docs"
+pages_build_output_dir = "docs/book/book"
+compatibility_date = "2026-06-16"

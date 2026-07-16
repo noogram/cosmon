@@ -1,0 +1,13 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List every adapter name the dispatch registry would accept (union of compile-time built-ins and `[adapters.<name>]` rows from `.cosmon/config.toml`)
+
+Usage: cs config adapters [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

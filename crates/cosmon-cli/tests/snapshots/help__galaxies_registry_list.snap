@@ -1,0 +1,22 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List every galaxy declared in the registry TOML.
+
+With `--json`, emits NDJSON (one entry per line) — the shape `cs ask` and other pilot agents can pipe into `jq` without extra envelope parsing.
+
+Usage: cs galaxies registry list [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

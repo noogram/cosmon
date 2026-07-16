@@ -1,0 +1,62 @@
+formula = "producer-work"
+version = 1
+description = """
+Build a producer — a runner, pipeline, harness, ingester, or measurement
+apparatus whose promised value is an output record.
+
+This formula closes the gap that ordinary build/lint/test gates cannot see:
+those gates can pass while the producer's dispatch is a stub. Its mandatory
+`smoke-dispatch` gate therefore executes the producer-controlled
+`./smoke-dispatch.sh` from the worker worktree. The script must exercise the
+same production dispatch path used by the deliverable (never a test-only
+stand-in) and must write at least one real output record to
+`$MOLECULE_DIR/dispatch-output/`.
+
+The output directory is a hard acceptance artifact: `cs evolve` refuses to
+advance when it is absent or empty. A producer that cannot make one record is
+blocked, not presented as ready. The smoke need be small (one draw, ledger
+line, ingest record, or emitted job), but it must be real; fail closed when a
+credential, provider, oracle, or runner needed for that path is unavailable.
+
+The worker must make `smoke-dispatch.sh` executable, keep it alongside the
+producer in the worktree, and have it exit non-zero on every failed dispatch.
+The script is deliberately a formula-owned invocation seam rather than an
+agent assertion: the gate executes it after implementation, before verify can
+be claimed.
+"""
+id_prefix = "task"
+
+[vars.topic]
+description = "The concrete producer to implement, including its real dispatch path and output record."
+required = true
+
+[tier]
+level = 0
+
+[[steps]]
+id = "implement"
+title = "Implement the producer"
+description = """
+Build the producer and its normal production dispatch path. Add an executable
+`smoke-dispatch.sh` that invokes that path for one minimal real unit and writes
+its produced record beneath `$MOLECULE_DIR/dispatch-output/`. Do not fabricate
+the record, call a test double, or merely validate preflight configuration.
+"""
+acceptance = "Producer implemented; smoke-dispatch.sh invokes its production path"
+
+[[steps]]
+id = "smoke-dispatch"
+title = "Prove one real dispatch"
+description = "Executed by Cosmon as a hard gate; its output artifact is required before verification."
+needs = ["implement"]
+command = "test -x ./smoke-dispatch.sh && ./smoke-dispatch.sh"
+timeout = 600
+acceptance_artifacts = ["dispatch-output/"]
+acceptance = "The production path exits 0 and writes at least one real output record"
+
+[[steps]]
+id = "verify"
+title = "Verify and validate"
+description = "Run the project's build, test, lint, and format gates. The prior smoke-dispatch gate is the functional proof; these gates establish code health."
+needs = ["smoke-dispatch"]
+acceptance = "cargo check + test + clippy + fmt all pass"

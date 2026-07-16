@@ -1,0 +1,30 @@
+{
+  "name": "cosmon",
+  "version": "0.0.0",
+  "description": "Stateless CLI giving AI agents an identity, a typed lifecycle, and crash-recovery",
+  "keywords": [
+    "agents",
+    "orchestration",
+    "ai",
+    "cli",
+    "workflow"
+  ],
+  "homepage": "https://docs.noogram.org",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/noogram/cosmon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/noogram/cosmon/issues"
+  },
+  "license": "AGPL-3.0-only",
+  "author": "Noogram",
+  "files": [
+    "README.md"
+  ],
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "private": false
+}

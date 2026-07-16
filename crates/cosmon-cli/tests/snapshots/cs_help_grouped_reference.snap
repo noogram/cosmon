@@ -1,0 +1,194 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+cs 0.1.0 — Cosmon agent orchestrator
+
+Usage: cs [OPTIONS] <COMMAND>
+
+Molecule lifecycle:
+  spark                Spark — capture a one-line operator intent into the Inbox (ADR-061)
+  drop                 Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
+  listen               Listen — voice → whisper.cpp → `cs nucleate spark` (MVP)
+  nucleate             Nucleate a new molecule from a formula template
+  observe              Observe a molecule's current state and history
+  evolve               Evolve a molecule to its next lifecycle state
+  complete             Complete a molecule — idempotent Active→Completed transition (worker-callable)
+  collapse             Collapse a molecule — terminate with final state recording
+  stuck                Stuck — freeze a molecule and record the blocker
+  await-operator       Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
+  freeze               Freeze a worker — suspend with state preservation (preemption)
+  thaw                 Thaw a worker — resume a frozen worker's Claude session
+  decay                Decay a molecule into child molecules (1 → N)
+  merge                Merge molecules into a synthesis (N → 1)
+  transform            Transform a molecule's kind (idea → task, etc.)
+  tag                  Tag — add or remove typed labels on a molecule
+
+Fleet management:
+  ensemble             Display ensemble status — observe the fleet at a glance
+  purge                Purge dead workers from fleet state (Stopped, Error, Stale)
+  kill                 Kill a worker — immediate termination (no state flush)
+  quench               Quench a worker — graceful shutdown with state preservation
+  teardown             Teardown a fleet — gracefully stop all fleet workers
+  resume               Resume — convenience alias for `cs patrol --propel --molecule <id>`
+  patrol               Patrol the fleet — health checks and anomaly detection
+  fleet                Fleet template discovery and initialization
+  wait                 Wait — block until a molecule reaches a terminal (or requested) status
+
+Execution:
+  tackle               Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+  done                 Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+  harvest              Harvest — close a completed-but-unmerged molecule by invoking `cs done`
+  run                  Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
+  spore                Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR-140)
+
+Project:
+  init                 Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
+  trust                Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
+  config               Config — inspect `.cosmon/config.toml` (`show adapters`, `adapters`)
+  status               Project pulse — quick DAG overview like git status
+  project              Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
+  reconcile            Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
+  scheduler            Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
+  daemons              Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
+  migrate              Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
+  deps                 Deps — show blocking dependencies for a molecule (upstream/downstream)
+  diverge              Diverge — structural agreement check between two sessions on a molecule (turing §5)
+  galaxies             Galaxies — inspect the four-family taxonomy
+  topology             Topology — structural maps of the workspace (wraps the `topon` CLI)
+
+Observability:
+  peek                 Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
+  tail                 Tail — live `notify`-driven reader over `events.jsonl` (fleet or `--all-galaxies`)
+  errors               Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
+  health               Health — read-only molecule-health anomaly catalog, federation-wide (ADR-137 §7)
+  pulse                Pulse — runtime-vitality reading: RPM tachometer, six-voyant strip (ADR-138 P1)
+  doctor               Doctor — diagnostic probes (whisper channel, …)
+
+Integrity & audit:
+  verify               Verify — walk a molecule's event hash chain (plumbing v2)
+  verify-trace         `verify-trace` — replay `events.jsonl` against the scheduler spec (Phase 3 CI gate)
+  verify-graph         `verify-graph` — Tarjan SCC check on the subgraph induced by a typed relation (substrate, ADR-016)
+  spec-audit           `spec-audit` — ledger audit against the TLA+ spec (catches c1cb `bypass_merge`)
+  release-audit        `release-audit` — dry-run drift detector for the public distribution (analogue of `reconcile --check`)
+  notarize             Notarize — issue or verify an operator-signed attestation for a molecule (ADR-056)
+  witness              Witness — Layer-2 witness-quorum seal for stress-test molecules (ADR-085 §3)
+  key                  Key — manage the operator's Ed25519 notary key (generate, show)
+
+Tools:
+  guide                Operator handbook
+  pilot                Pilot — interactive cognitive pilot REPL over a client-side model (--experimental). --remote pilots an avatar over the §8p wire (ADR-115)
+  prime                Prime the system — load .cosmon/config.toml and self-check gates
+  paths                Paths — project the write-path taxonomy (`--writes`), a pure derived view
+  archive              Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
+  session              Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+  inbox                Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
+  panel                Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
+  notify               Notify — push a one-line message to every configured operator channel
+  opt-in-share         Opt-in-share — first-run consent prompt for encrypted developer bundles
+  demo                 Demo — one-command end-to-end chatbot surface (first-contact experience)
+  whisper              Whisper — inject a perturbation payload into a live worker's tmux pane (v0)
+
+Global options:
+  --config <PATH>      Path to configuration file
+  --verbose, -v        Enable verbose output
+  --json               Output in JSON format
+
+Pilot workflow — the full cycle is nucleate → tackle → wait → done:
+  cs nucleate ...              # create molecule
+  cs tackle <id>               # spawn ONE worker (always leaf, no DAG walk)
+  cs wait <id> &               # background wait, get notified
+                               # pilot stays free for other work
+  cs done <id>                 # merge branch + teardown (required!)
+
+  For a DAG of N≥1 nodes (one node = leaf, N nodes = orchestration):
+  cs run <root> --poll-interval 5     # walks the DAG, dispatches each
+                                       # ready node via cs tackle, calls
+                                       # cs done on completion. Wrap in
+                                       # detached tmux to free the pilot:
+  tmux new -d -s runtime cs run <root>
+
+  cs tackle = one node (single worker, no DAG walk).
+  cs run    = N nodes (resident runtime, walks the DAG).
+  Picking the verb is the choice; --leaf and --force-runtime are gone.
+
+  Cross-galaxy edges (Phase 1, ADR-035):
+  cs nucleate ... --blocked-by <alias>:<mol_id>    # alias resolves via
+    cosmon-registry, ~/.cosmon/galaxy-aliases.toml, or /srv/cosmon/<alias>/
+  cs nucleate ... --blocks <alias>@<mol_id>        # `:` and `@` accepted
+    (one-writer-per-galaxy: edge recorded locally only; remote galaxy is
+     probed best-effort and a warning is printed if it cannot be reached)
+
+  Grafting onto a completed DAG? See docs/tutorials/graft-dag.md
+  One primitive, three patterns:       docs/handbook.md#one-primitive
+
+  NEVER poll 'cs observe' in a loop — use 'cs wait' instead.
+  NEVER skip 'cs done' — without it the branch never merges to main.
+
+Monitoring — the operator's toolkit (use these, not tmux/tail/cat):
+  cs peek                      # watchdog TUI — every unfinished molecule
+                               #   (running, pending, frozen, starved; the
+                               #   archive hidden by default; press A to
+                               #   cycle unfinished → all → unfinished, or
+                               #   pass --phase on the CLI)
+                               #   p = tmux pane capture, j/k = navigate
+                               #   b/l/e/s/r/N/g/T/v/X = briefing/log/events/
+                               #   synthesis/responses/notes/git/tree/verify/eXceptions
+                               #   +/-/= = zoom ville → immeuble → peau
+                               #   n/t/m/w/. = nucleate/tackle/done/whisper/note
+                               #           (docs/guides/peek-zoom.md)
+  cs peek --phase done,failed  # + the archive (completed + collapsed)
+                               #   --phase is the temporality axis and
+                               #   says nothing about the project scope
+  cs peek --all-galaxies       # the perimeter axis: same phases, every
+                               #   project (same word as cs tail)
+  cs peek --all                # sugar for --all-galaxies --phase all:
+                               #   everything, every project, archive
+                               #   included (multi-galaxy)
+  cs peek --snapshot           # byte-deterministic 120-col view
+                               #   (same bytes on any device, cf.
+                               #    docs/guides/peek-snapshot.md)
+                               #   --phase/--all widen the wheat-paste byte
+                               #   stream the same way.
+  cs peek --json               # machine view: status + heartbeat +
+                               #   last_activity per molecule. Raw core
+                               #   status, same word as cs observe --json.
+  cs ensemble --tag temp:hot   # actionable backlog snapshot
+  cs wait <id> &               # block on a worker (pilot stays responsive)
+
+  NEVER 'tmux attach' to a worker — use 'cs peek' + p.
+  NEVER 'watch cs observe' or 'while cs observe' — use 'cs wait'.
+  NEVER 'tail -f events.jsonl' by hand — use 'cs peek' event tab.
+
+Registering a service — two métiers, two tools:
+  cosmon-scheduler     the house's alarm clock. Periodic, short-lived gestures.
+                       TOML: ~/.config/cosmon/patrols.toml
+                       Operator view: cs scheduler status
+                       Use for: cron/interval fires (executor-pulse every 2h,
+                                chronicle-lint Sunday 09:00, WhatsApp sync 15min).
+
+  cosmon-daemon-supervisor   the night watchman. Long-running processes that must
+                             stay alive (Telegram bot, Emacs daemon, MCP servers).
+                             TOML: ~/.config/cosmon/daemons.toml
+                             Operator views: cs daemons list | status | logs | reload
+
+  Decision rule — does the command finish on its own?
+    Yes, and I want it re-fired on a cadence         -> scheduler (patrols.toml)
+    No, it runs forever and must be restarted if it dies -> supervisor (daemons.toml)
+
+  Both share one kill-switch: `touch ~/.cosmon/stand-down.lock` silences every
+  patrol and SIGTERMs every supervised daemon until the file is removed.
+
+  See 'cs help scheduler' and 'cs help daemons' for config examples, hot-reload,
+  and the canonical 'réveil / veilleur de nuit' image (chronicle
+  2026-04-19 'Deux métiers, deux outils').
+
+  Future: dynamic registration. Today both layers are TOML-edited by hand.
+  A planned design (see `cs ensemble --tag temp:warm | grep register`) will let
+  a service register itself at runtime via an event/API/molecule, no manual edit.
+  Until then, edit the TOML and the layer picks it up on its next tick (scheduler)
+  or via `cs daemons reload` (supervisor).
+
+Run 'cs help <command>' for detailed help on a specific command.
+Run 'cs help guide' for the operator handbook.
+Run 'cs help charter' to see the unified visual charter swatch.

@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Parked)"
+---
+variant=Parked
+label=parked
+glyph=💤
+ratatui_style=fg=Yellow mod=NONE
+needs_attention=false

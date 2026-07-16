@@ -1,0 +1,50 @@
+[package]
+name = "cosmon-provider"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+rust-version.workspace = true
+description = "Multi-LLM provider abstraction for cosmon — typed trait, error model, and adapters (Claude Code, Anthropic API, OpenAI, Gemini, Ollama)."
+
+[features]
+default = ["http"]
+# HTTP adapters (claude_api, ollama, openai, anthropic). Turning this off keeps
+# the crate lean for environments that only need the subprocess
+# ClaudeCodeProvider. `dep:futures-util` drives the reqwest `bytes_stream`
+# consumed by the OpenAI adapter's SSE accumulator (mode-C own-side tool-call
+# extraction, delib-20260707-df9b M2).
+http = ["dep:reqwest", "dep:tracing", "dep:futures-util"]
+# NOTE: the in-process llama.cpp adapter (`llama` / `mock-ffi` features + the
+# vendored `cosmon-llama` / `cosmon-llama-sys` crates) was removed in the
+# pre-publication scope trim (delib-20260622-187a B1 / ADR-126). The
+# `ProviderId::LlamaCpp` enum variant is kept for state back-compat (it still
+# deserialises legacy `state.json`) but `ensure_compiled()` now always reports
+# it as `FeatureNotCompiled`. A Rust-native local-model path for the
+# "local-first autonomy" story will be reconsidered separately.
+
+[dependencies]
+async-trait = "0.1"
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+cosmon-agent-harness = { workspace = true }
+cosmon-core = { workspace = true }
+cosmon-state = { workspace = true }
+cosmon-transport = { workspace = true }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"], optional = true }
+tracing = { version = "0.1", optional = true }
+# `StreamExt::next()` on the reqwest `bytes_stream` the OpenAI adapter reads
+# to accumulate SSE tool-call fragments own-side (mode-C fix). Mirrors
+# cosmon-remote's dependency choice; default-features off keeps the surface lean.
+futures-util = { version = "0.3", default-features = false, optional = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+wiremock = "0.6"

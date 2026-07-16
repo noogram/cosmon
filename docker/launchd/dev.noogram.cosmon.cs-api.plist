@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.noogram.cosmon.cs-api — LaunchAgent template for `cs-api`.
+
+  Long-lived local HTTP adapter exposing `cs session|whispers|inbox|
+  galaxies` to native pilots (mac-pilot menubar, ios-pilot, tablets on
+  the tailnet). Unlike `matrix-tick` (one-shot, launchd-as-alarm), this
+  agent runs **continuously**: `KeepAlive = true` so launchd re-spawns
+  it if it crashes, `RunAtLoad = true` so it starts at login/boot.
+
+  ADR-016 posture: `cs-api` is an adapter (a thin HTTP shell-out to the
+  `cs` CLI), not a daemon in the Transactional Core. It holds no state;
+  every request spawns a fresh `cs` process. Keeping it resident is an
+  operator convenience for pilots, not a regime shift.
+
+  This file is a TEMPLATE. It is NOT the plist that launchd loads —
+  `scripts/install-cs-api-launchagent.sh` substitutes the tokens below
+  and writes the rendered plist to
+  `~/Library/LaunchAgents/dev.noogram.cosmon.cs-api.plist`. The rendered
+  plist contains operator-specific bind addresses and absolute paths —
+  never commit it.
+
+  Placeholder tokens (leading + trailing double underscores):
+  HOME, BINARY, BIND, CS_PATH, COSMON_STATE, WHISPERS_INBOX,
+  GALAXIES_ROOT, VERBOSE_FLAG, WORKING_DIRECTORY, STDOUT_LOG, STDERR_LOG.
+
+  Install / uninstall:
+      scripts/install-cs-api-launchagent.sh --help
+      scripts/uninstall-cs-api-launchagent.sh --help
+
+  Governing docs: ADR-016 (no daemon in core; adapters are fine),
+  docs/guides/cs-api.md (endpoint surface + security invariants),
+  docs/guides/launchagent-cs-api.md (operator runbook).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.cs-api</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BINARY__</string>
+        <string>--bind</string>
+        <string>__BIND__</string>
+        <string>--cs-path</string>
+        <string>__CS_PATH__</string>
+        <string>--cosmon-state</string>
+        <string>__COSMON_STATE__</string>
+        <string>--whispers-inbox</string>
+        <string>__WHISPERS_INBOX__</string>
+        <string>--galaxies-root</string>
+        <string>__GALAXIES_ROOT__</string>
+        __VERBOSE_FLAG__
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>__STDOUT_LOG__</string>
+
+    <key>StandardErrorPath</key>
+    <string>__STDERR_LOG__</string>
+
+    <key>WorkingDirectory</key>
+    <string>__WORKING_DIRECTORY__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>cosmon_api=info,tower_http=warn,info</string>
+    </dict>
+</dict>
+</plist>

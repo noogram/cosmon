@@ -1,0 +1,79 @@
+---
+source: crates/cosmon-thin-cli/tests/help_snapshots.rs
+expression: body
+---
+cs-thin 0.1.0 — mechanical HTTP client for the §8p RPP-exposable cosmon verb subset
+
+Usage: cs-thin [OPTIONS] <COMMAND>
+
+TYPICAL WORKFLOW — JWT in, JSON out:
+  export JWT=$(curl -s $IDP/issue?... | jq -r .access_token)
+  export CS_THIN_BASE_URL=https://api.cosmon.example
+  cs-thin observe task-YYYYMMDD-xxxx          # GET, returns molecule JSON
+  cs-thin nucleate --formula task-work --var topic=hello --tag temp:warm
+  cs-thin tag <id> --add temp:hot --remove temp:warm
+
+Each invocation is a single HTTP round-trip — there is no daemon, no
+local state, and no JWT cache. The token lives in the env var or in
+--jwt-file and dies with the process.
+
+THE 7 VERBS — RPP-exposable (ADR-080 §8p):
+  avatar_audit GET    /v1/avatar/:instance_id/audit    scope: cosmon:world:observe
+  avatar_grant POST   /v1/avatar/:instance_id/grant    scope: cosmon:pilote:converse
+  avatar_incarnate POST   /v1/avatar/:instance_id/incarnate scope: cosmon:pilote:converse
+  avatar_mould_info GET    /v1/avatar/:instance_id/mould-info scope: cosmon:world:observe
+  avatar_status GET    /v1/avatar/:instance_id/status   scope: cosmon:world:observe
+  collapse   POST   /v1/molecules/:id/collapse       scope: cosmon:molecule:write
+  converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
+  ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
+  freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
+  nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
+  observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
+  run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn
+  stuck      POST   /v1/molecules/:id/stuck          scope: cosmon:molecule:write
+  tackle     POST   /v1/molecules/:id/tackle         scope: cosmon:molecule:write+cosmon:worker:spawn
+  tag        POST   /v1/molecules/:id/tags           scope: cosmon:molecule:write
+
+OPERATOR-ONLY VERBS — refused by §8p (see ADR-080 §5.1):
+  These verbs exist on local `cs` but DO NOT cross the wire. Their
+  blast-radius (worktree teardown, branch deletion, fleet kill) is
+  incompatible with a JWT-bearing remote principal. cs-thin will
+  never grow a sub-command for them — by design.
+
+  ⚠ done                   operator-only (ADR-080 §5.1)
+  ⚠ evolve                 operator-only (ADR-080 §5.1)
+  ⚠ complete               operator-only (ADR-080 §5.1)
+  ⚠ security activate      operator-only (ADR-080 §5.1)
+  ⚠ kill                   operator-only (ADR-080 §5.1)
+  ⚠ purge                  operator-only (ADR-080 §5.1)
+  ⚠ reconcile              operator-only (ADR-080 §5.1)
+  ⚠ verify                 operator-only (ADR-080 §5.1) — V2 candidate
+  ⚠ whisper                operator-only (ADR-080 §5.1)
+  ⚠ drop                   operator-only (ADR-080 §5.1)
+
+AUTHENTICATION:
+  --base-url <URL>            target endpoint (overrides CS_THIN_BASE_URL)
+  --jwt-from-env <NAME>       env var to read JWT from (default: JWT)
+  --jwt-file <PATH>           read JWT from disk (single-line ASCII)
+
+  Env: CS_THIN_BASE_URL, JWT (renameable via --jwt-from-env).
+  --jwt-from-env and --jwt-file are mutually exclusive.
+
+EXIT CODES:
+  0   success — JSON written to stdout
+  1   backend error (HTTP 4xx/5xx, validation, decode)
+  2   network error (DNS, TCP, TLS) — same shape as `curl 7`
+  3   JWT missing or empty
+
+COVERAGE REPORT — proof that every annotated verb has dispatch:
+  cs-thin --coverage-report --json   # machine-readable, CI gate
+  cs-thin verbs --check              # human-readable screenshot form
+
+SEE ALSO:
+  cs help              # the rich operator-side companion (local CLI)
+  cosmon-remote --help # the installed tenant binary (A2 fusion)
+  ADR-080 §5.1         # docs/adr/080-remote-pilot-port-https-oidc.md
+  Onboarding (FR)      # dist/tenant-demo-handover/docs/onboarding/cs-thin-quickstart.md
+
+Run 'cs-thin help <verb>' for detailed flags and arguments.
+Run 'cs-thin verbs' to list registered verbs (link-time slice).

@@ -1,0 +1,126 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+ensemble
+nucleate
+observe
+errors
+evolve
+collapse
+complete
+decay
+merge
+transform
+init
+inbox
+spark
+drop
+listen
+pilot
+kill
+quench
+fleet
+fleet list-templates
+fleet init
+fleet resolve
+galaxies
+galaxies list
+galaxies registry
+galaxies registry list
+galaxies registry resolve
+freeze
+thaw
+trust
+prime
+resume
+teardown
+purge
+migrate
+migrate to
+migrate verify
+migrate rollback
+migrate genre
+patrol
+health
+pulse
+project
+reconcile
+scheduler
+scheduler status
+scheduler validate
+session
+session start
+session note
+session end
+session promote
+session route
+session review
+daemons
+daemons list
+daemons status
+daemons reload
+daemons logs
+status
+tackle
+claim
+release
+tag
+tail
+paths
+done
+harvest
+stuck
+await-operator
+topology
+topology map
+topology outline
+topology symbols
+deps
+diverge
+peek
+wait
+run
+spore
+spore validate
+spore run
+spore export
+help
+verify
+validate
+verify-trace
+verify-graph
+spec-audit
+release-audit
+doctor
+doctor whisper
+doctor leaks
+doctor worktrees
+doctor mcp
+doctor deps
+doctor supervision
+doctor security
+demo
+whisper
+archive
+archive list
+archive show
+archive verify
+archive prune
+opt-in-share
+notarize
+notarize issue
+notarize verify
+panel
+panel convene
+panel decide
+witness
+witness attest
+notify
+key
+key generate
+key show
+config
+config show
+config show adapters
+config adapters

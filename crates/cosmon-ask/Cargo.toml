@@ -1,0 +1,23 @@
+[package]
+name = "cosmon-ask"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Conversational-ingress pipeline for Cosmon — rule-first parser, confidence gate, galaxy resolver for `cs ask`"
+
+[dependencies]
+cosmon-core.workspace = true
+cosmon-registry.workspace = true
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

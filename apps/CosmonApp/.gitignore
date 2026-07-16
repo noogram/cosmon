@@ -1,0 +1,7 @@
+# XcodeGen-managed project + transient build outputs.
+CosmonApp.xcodeproj/
+build/
+.build/
+.swiftpm/
+DerivedData/
+*.xcarchive

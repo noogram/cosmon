@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Release a pilot claim and return the molecule to the runtime frontier
+
+Usage: cs release [OPTIONS] <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID to claim or release
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs release <mol>               # let cs run consider it again
+
+Removes the durable `hold:pilot` tag. Idempotent: releasing an unclaimed
+molecule is safe.
+
+SEE ALSO: cs claim (reserve work), cs run (resident runtime).

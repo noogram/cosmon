@@ -1,0 +1,126 @@
+================================================================================
+ TLC model-check log — cs_pilot_interactive_fsm.tla  (ADR-115, task-20260531-14eb)
+================================================================================
+
+ Spec : specs/tla/cs_pilot_interactive_fsm.tla
+ Tool : tla2tools.jar (TLC2 Version 2026.04.18, rev c45c125), Java 17 (Homebrew)
+ Cmd  : JAVA=/opt/homebrew/opt/openjdk@17/bin/java
+        $JAVA -XX:+UseParallelGC -cp ../../docs/specs/tla2tools.jar tlc2.TLC \
+            -workers auto -config <cfg> cs_pilot_interactive_fsm.tla
+
+ Two runs are recorded:
+   RUN 1 (shipped cfg, AllowSilentTerminate = FALSE) — must PASS.
+   RUN 2 (adversarial, AllowSilentTerminate = TRUE)  — must FAIL with a
+         counterexample on InteractiveStopYields, proving the load-bearing
+         invariant is not vacuous.
+
+ Verdict: RUN 1 passed (no error, NoLivelock liveness checked); RUN 2 produced
+          the expected 4-state counterexample. Definition of Done met.
+
+================================================================================
+ RUN 1 — cs_pilot_interactive_fsm.cfg  (AllowSilentTerminate = FALSE) — PASS
+================================================================================
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 113 and seed -5768649918889346661 with 16 workers on 16 cores with 27300MB heap and 64MB offheap memory [pid: 55679] (Mac OS X 26.4.1 aarch64, Homebrew 17.0.19 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260531-14eb/specs/tla/cs_pilot_interactive_fsm.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/Naturals.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/TLC.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/TLCExt.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/Sequences.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-4189737025779318466/Integers.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module cs_pilot_interactive_fsm
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module cs_pilot_interactive_fsm
+Starting... (2026-06-01 00:11:32)
+Implied-temporal checking--satisfiability problem has 1 branches.
+Computing initial states...
+Finished computing initial states: 2 distinct states generated at 2026-06-01 00:11:32.
+Progress(16) at 2026-06-01 00:11:32: 58 states generated, 53 distinct states found, 0 states left on queue.
+Checking temporal properties for the complete state space with 53 total distinct states at (2026-06-01 00:11:32)
+Finished checking temporal properties in 00s at 2026-06-01 00:11:32
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 1.4E-17
+58 states generated, 53 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 16.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 2 and the 95th percentile is 2).
+Finished in 00s at (2026-06-01 00:11:32)
+
+================================================================================
+ RUN 2 — adversarial (AllowSilentTerminate = TRUE) — EXPECTED FAIL
+================================================================================
+ cfg used (not committed; inline here for reproducibility):
+   SPECIFICATION Spec
+   CONSTANTS MaxTurns = 3  MaxOperatorTurns = 2  AllowSilentTerminate = TRUE
+   INVARIANTS TypeOK InteractiveStopYields WorkerPathUnchanged TurnBounded WorkerNeverQuits
+   CHECK_DEADLOCK FALSE
+
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 20 and seed 904238420016989078 with 16 workers on 16 cores with 27300MB heap and 64MB offheap memory [pid: 61798] (Mac OS X 26.4.1 aarch64, Homebrew 17.0.19 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260531-14eb/specs/tla/cs_pilot_interactive_fsm.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/Naturals.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/TLC.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/TLCExt.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/Sequences.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-97539050758574329/Integers.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260531-14eb/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module cs_pilot_interactive_fsm
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module cs_pilot_interactive_fsm
+Starting... (2026-06-01 00:11:41)
+Computing initial states...
+Finished computing initial states: 2 distinct states generated at 2026-06-01 00:11:41.
+Error: Invariant InteractiveStopYields is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "interactive"
+/\ pc = "awaiting"
+/\ operator_quit = FALSE
+
+State 2: <OperatorSubmit line 98, col 5 to line 104, col 42 of module cs_pilot_interactive_fsm>
+/\ op_turns = 1
+/\ turn_count = 0
+/\ mode = "interactive"
+/\ pc = "sending"
+/\ operator_quit = FALSE
+
+State 3: <SendToModel line 122, col 5 to line 126, col 52 of module cs_pilot_interactive_fsm>
+/\ op_turns = 1
+/\ turn_count = 1
+/\ mode = "interactive"
+/\ pc = "decoding"
+/\ operator_quit = FALSE
+
+State 4: <SilentTerminate line 174, col 5 to line 179, col 49 of module cs_pilot_interactive_fsm>
+/\ op_turns = 1
+/\ turn_count = 1
+/\ mode = "interactive"
+/\ pc = "stopped"
+/\ operator_quit = FALSE
+
+64 states generated, 59 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 16.
+Finished in 00s at (2026-06-01 00:11:41)
+Trace exploration spec path: ./cs_pilot_interactive_fsm_TTrace_1780265501.tla

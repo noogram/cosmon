@@ -1,0 +1,154 @@
+formula = "spark-capture"
+version = 1
+description = """
+Meta-formula — scan recent cosmon activity for uncanalised SPARKS \
+(substrate affordances used repeatedly without a name) and propose \
+canalisation. Operationalises the discipline set by the 2026-04-14 \
+trilogy of chronicles (anthropic channels, resurrection, sparks & \
+P_external).
+
+A SPARK is a bit of system value that arrives from OUTSIDE the set of \
+pre-designed primitives. Three classes:
+
+  1. Internal (pilot) — an affordance of the substrate, used \
+     accidentally by the operator three times before it has a name.
+  2. Cognitive (worker) — a synthesis that exceeds the sum of its \
+     prompts; a pattern the inputs did not determine.
+  3. External (vetoer) — an observation signed by a non-insider; a \
+     truth the closed universe could not have generated.
+
+The spark-capture sweep is the counterpart to temp-review. Where \
+temp-review curates the BACKLOG (molecules on the shelf), \
+spark-capture curates the CONCEPTUAL FRONTIER (primitives being \
+re-used without a name). Both are Tier 0 — observe the system, \
+write artifacts, propose follow-ups, do not nucleate silently.
+
+When to run: weekly, or after an intense session where the operator \
+suspects hidden primitives accumulated. On-demand when a chronicle \
+mentions \"to canalise\" without a follow-up molecule.
+
+NOT for: routine changelog. If the candidate does not illuminate a \
+principle, it is not a spark — it is a feature request.
+
+ARTIFACT PATHS — all artifacts (scan.md, candidates.md, \
+capture-report.md) MUST be written to the MOLECULE STATE DIRECTORY \
+returned by `cs --json observe {mol_id}` in the `molecule_dir` field. \
+Files written to the worktree are destroyed by `cs done`.
+
+No variables required.
+"""
+id_prefix = "spark"
+freeze_on_last_step = false
+
+# Tier 0 — observation + proposals. Does not nucleate children silently;
+# if a candidate warrants action, the capture-report.md lists it and
+# the operator nucleates explicitly.
+[tier]
+level = 0
+
+[[steps]]
+id = "scan"
+title = "Scan recent activity for spark traces"
+description = """
+Gather the raw signal from three substrates and write a merged, \
+deduplicated inventory. MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — NEVER the worktree.
+
+SOURCES to scan (last 14 days unless otherwise noted):
+
+  a. EVENTS — across all fleets/molecules:
+       find .cosmon/state -name events.jsonl -mtime -14 \\
+         -exec jq -c '.' {} +
+     Look for: unexpected tool invocations, ad-hoc shell gestures \
+     repeated across molecules, workarounds recorded in logs (grep \
+     for \"workaround\", \"ad-hoc\", \"whisper\", \"paste\", \"nudge\", \
+     \"respawn\", \"resurrect\").
+
+  b. COMMITS — `git log --since=14.days --pretty=format:'%h %s' \
+       --all`. Flag subjects that name a gesture without a system \
+     verb (`fix paste`, `scripts/cs-*-nudge.sh`, `add workaround`).
+
+  c. CHRONICLES — `docs/lore/*.md` modified in the last 14 days. \
+     Parse frontmatter (title + date). Extract every bullet that \
+     mentions \"à canaliser\", \"to canalise\", \"not yet named\", \
+     \"primitive candidate\", \"affordance\".
+
+Write MOLECULE_DIR/scan.md with three tables:
+
+  Table A — events: file path, molecule id, excerpt (≤120 chars), \
+             recurrence count across molecules.
+  Table B — commits: hash, subject, author, date.
+  Table C — chronicles: path, date, quoted line that flags an \
+             uncanalised gesture.
+
+End with a summary: N candidate signals, rough clusters (group by \
+gesture: e.g. \"paste into running worker\" clusters whisper + \
+voyager + nudge).
+"""
+acceptance = "MOLECULE_DIR/scan.md written with three source tables and a clustered summary."
+
+[[steps]]
+id = "detect"
+title = "Detect uncanalised sparks"
+description = """
+From scan.md clusters, apply the three-criterion filter. A cluster is \
+a SPARK CANDIDATE iff ALL three hold:
+
+  1. RECURRENCE — the gesture appears ≥ 3 times across distinct \
+     molecules or commits (one-shots are not sparks, they are quirks).
+  2. NO NAME — the gesture has no dedicated `cs <verb>`, no formula \
+     step, no documented primitive. Cross-check against \
+     `cs help` + `.cosmon/formulas/` + `docs/handbook.md`.
+  3. ILLUMINATES A PRINCIPLE — the gesture, if named, would expose \
+     an invariant (a control/data-plane boundary, a regime, a new \
+     channel). Pure feature requests fail this test.
+
+For each candidate that passes, classify by class (internal / \
+cognitive / external) and write MOLECULE_DIR/candidates.md with, \
+per candidate:
+
+  - **Name-in-waiting** (proposed verb, kept tentative).
+  - **Why-it-is-a-spark** — one paragraph; cite the chronicle, \
+    event, or commit as evidence.
+  - **Canalisation sketch** — concrete next step: which CLI verb \
+    would absorb it, which formula step, which docs/ page needs the \
+    discipline, which chronicle records the moment.
+  - **Class** — internal / cognitive / external.
+
+If the sweep finds FEWER than three candidates, that is a valid \
+outcome — record it and move on. The anti-pattern is inventing \
+sparks to fill a quota.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/candidates.md written with ≥0 candidates, each stamped with name-in-waiting, why-it-is-a-spark, canalisation sketch, and class."
+
+[[steps]]
+id = "report"
+title = "Produce the capture report"
+description = """
+Write MOLECULE_DIR/capture-report.md summarising the sweep:
+
+  - N spark candidates detected, by class (internal / cognitive / \
+    external).
+  - Per-candidate table: name-in-waiting | class | evidence (file:\
+    line) | proposed canalisation (CLI / formula / doc / chronicle).
+  - Top recommendation — the single candidate the operator should \
+    canalise next, with justification (principle illuminated, \
+    downstream unblock).
+  - Anti-list — clusters that LOOKED like sparks but failed the \
+    three-criterion filter; one line each explaining why (feature \
+    request, one-shot, already named).
+  - Chronicle suggestion — if any candidate, once canalised, would \
+    illuminate a principle, propose a chronicle slug \
+    (`YYYY-MM-DD-<slug>.md`).
+
+End with a one-line recommendation of when the next sweep should run \
+(default: 7 days, or after the next chronicle mentioning \"to \
+canalise\").
+
+Follow-up nucleation is NOT automatic — the operator reads the \
+report, decides, and nucleates a task- or decision- molecule per \
+canalisation.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/capture-report.md written with per-candidate table, top recommendation, anti-list, chronicle suggestion, and next-sweep cadence."

@@ -1,0 +1,22 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_row(&i, false)"
+---
+INPUTS
+  status:        running
+  heartbeat:     Active
+  has_blockers:  false
+  ghost:         true
+  drift:         false
+  tags:          (none)
+  whisper_fresh: false
+
+RENDER
+  row_kind:       Ghost
+  label:          ghost
+  lifecycle_glyph 👻   style=fg=Red mod=BOLD
+  temp_glyph          style=fg=- mod=NONE
+  whisper_glyph       style=fg=- mod=NONE
+
+STRIP (what the operator sees)
+  [👻] [ ] [ ]

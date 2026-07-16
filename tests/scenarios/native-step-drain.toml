@@ -1,0 +1,36 @@
+# Four consecutive native steps must drain in a single run_root pass.
+# The molecule moves from pending → running → completed (4/4) without
+# any external nudge.
+
+[scenario]
+name = "native-step-drain"
+description = "Consecutive native steps drain in one pass."
+
+[binds]
+constitution_clause = "native-step-drain"
+foundry_proposition = "NativeStepDrain_maximal"
+
+[[given.molecules]]
+id = "M"
+kind = "task"
+steps = [
+  { name = "s1", native = "cosmon::test::noop" },
+  { name = "s2", native = "cosmon::test::record" },
+  { name = "s3", native = "cosmon::test::noop" },
+  { name = "s4", native = "cosmon::test::record" },
+]
+
+[[actions]]
+op = "run_root"
+target = "M"
+
+[[assert]]
+molecule = "M"
+status = "completed"
+
+[[assert]]
+molecule = "M"
+step = "4/4"
+
+[[assert]]
+property = "record_count_ge_1"

@@ -1,0 +1,231 @@
+formula = "cmb-verify"
+version = 1
+description = """
+The diagnosis-verify gate (ADR-143) as an executable formula — the \
+front half of `bug-closure`. When a relayed handoff artifact (a CMB \
+in docs/cmb/inbox/, a cross-galaxy issue, a sibling session's note) \
+carries a DIAGNOSIS — a causal claim that some defect in THIS galaxy \
+is caused by mechanism X at locus Y — this formula stops the receiver \
+from conflating the two epistemic classes it actually carries:
+
+  - the SYMPTOM is trusted evidence (the sender ran the command and \
+    read the wrong behaviour with its own eyes);
+  - the stated MECHANISM is an unverified hypothesis (the sender \
+    inferred it about code it does not own and cannot run under a \
+    debugger — confident, detailed prose raises persuasive weight \
+    WITHOUT raising truth-probability; that asymmetry is the hazard).
+
+A diagnosis is not a frame: acting on it WRITES A COMMIT. The founding \
+witness is the 2026-07-05 showroom CMB (`cs tackle --model` ignored): \
+its stated mechanism — \"cosmon reads the parent session's model and \
+overrides the flag\" — described a code path that DOES NOT EXIST. A \
+pilot who took it verbatim would have edited code that already behaves \
+as specified, shipped a non-fix, and closed the molecule green while \
+the field symptom lived on. The symptom was real; the mechanism was \
+refuted by a static code read.
+
+This formula walks ADR-143's four-step Decision: trust the symptom \
+(reproduce it if cheap), treat the mechanism as a hypothesis, verify \
+it against your own code before writing any fix, and — when \
+verification contradicts the note — follow the code, not the note, and \
+record the divergence cosmon-ward. Only a CONFIRMED causal path \
+licenses a fix; the fix itself is a SEPARATE molecule that exits \
+through `bug-closure`. This formula produces the verdict, not the fix.
+
+The gate is a COGNITIVE checkpoint, not an automated code gate: a \
+causal claim about arbitrary source cannot be machine-verified — the \
+only verifier is reproduction plus a reader of the code. Per \
+architectural-invariants §8b, it PROPOSES verification, it does not \
+pretend to ENFORCE it. It catches the lazy \"trust the confident note \
+and patch the named locus,\" not a determined self-deception.
+
+Variables:
+  - diagnosis_molecule_id : the molecule that carries the relayed \
+    diagnosis (the archived CMB note, the cross-galaxy issue, the \
+    delib that triggered the intake). The formula reads its prompt.md \
+    / body to extract the symptom and the stated mechanism.
+  - symptom : the observed wrong behaviour — the sender's \
+    authoritative, load-bearing contribution (e.g. \"worker env has \
+    ANTHROPIC_MODEL=claude-opus-4-8 where --model asked for \
+    claude-fable-5\").
+  - stated_mechanism : the sender's inferred cause + locus, verbatim \
+    (e.g. \"resolve_worker_model returns the parent model, overwriting \
+    the flag; crates/cosmon-cli/src/cmd/tackle.rs\"). Granted no \
+    authority beyond \"a good place to start looking.\"
+
+RECORDING THE REFUTATION — the DAG-native write-back. When the \
+receiver has ALREADY refuted the stated mechanism by a cheap static \
+read (the founding-witness case: the mechanism names a nonexistent \
+code path), nucleate this molecule WITH the typed refutation edge:
+
+    cs nucleate cmb-verify \\
+      --refutes <diagnosis_molecule_id> \\
+      --var diagnosis_molecule_id=<diagnosis_molecule_id> \\
+      --var symptom=\"...\" \\
+      --var stated_mechanism=\"...\"
+
+`--refutes` records a `Refutes` edge from this verify molecule to the \
+diagnosis, and a symmetric `RefutedBy` on the diagnosis — so a later \
+reader (or the CMB sender, closing its own calibration loop) can query \
+which relayed diagnoses held. The edge is a citation-class relation: \
+no progression semantics, no blocking, cycles permitted. It records a \
+FACT about a claim, it does not gate execution. When the mechanism is \
+still plausible at nucleation (not yet refuted), nucleate plainly and \
+add the edge only if step 3 lands a REFUTED verdict.
+
+ARTIFACT PATHS — all artifacts (reproduction.md, locus-read.md, \
+verdict.md, writeback.md) MUST be written to the MOLECULE STATE \
+DIRECTORY returned by `cs --json observe {mol_id}` in the \
+`molecule_dir` field. Files written to the worktree are destroyed by \
+`cs done`.
+
+NOT for: frame / patch / trace CMB content (ADR-091 §3-§4) — that \
+class stays advisory-as-is, its blast radius is minutes and it is \
+self-correcting; taxing it would negate the CMB channel's whole reason \
+to exist. The gate fires on exactly one shape, recognisable by a \
+single test: does acting on this note write a commit against a causal \
+claim? If no, no gate — do not nucleate this formula.
+"""
+id_prefix = "cmbverify"
+freeze_on_last_step = false
+
+# Tier 0 — verdict-producing leaf. No child nucleation: the FIX is a
+# separate molecule the operator dispatches through bug-closure after a
+# CONFIRMED verdict. This formula does not silently fan out.
+[tier]
+level = 0
+
+[[steps]]
+id = "reproduce-symptom"
+title = "Trust the symptom — reproduce it if cheap"
+description = """
+The observed behaviour is the sender's authoritative contribution. \
+START here, and where reproduction is inexpensive, reproduce it FIRST.
+
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe \
+{mol_id}` — NEVER the worktree.
+
+  1. Read the diagnosis molecule's evidence: `cs --json observe \
+     {{diagnosis_molecule_id}}` and \
+     `cat $(cs --json observe {{diagnosis_molecule_id}} | jq -r \
+     .molecule_dir)/prompt.md`. Extract the SYMPTOM (observed wrong \
+     behaviour) and, separately, the STATED MECHANISM (inferred cause \
+     + locus). Keep them apart — the good CMB already does (a \
+     \"repro exact\" section distinct from \"le diagnostic\").
+  2. Reproduce the symptom with the cheapest faithful command. Capture \
+     the actual observed output verbatim.
+  3. If the symptom does NOT reproduce, that is the FIRST FINDING, not \
+     a step error to swallow. A symptom you cannot reproduce may be \
+     environmental (cf. the mobilité / coupures réseau rule: a one-off \
+     symptom is not yet a structural bug). Record it and note that the \
+     mechanism-verification below is now conditional.
+
+Write MOLECULE_DIR/reproduction.md: the extracted symptom (verbatim), \
+the extracted stated-mechanism (verbatim), the reproduction command, \
+its captured output, and a REPRODUCED / NOT-REPRODUCED / ENVIRONMENTAL \
+verdict on the symptom alone.
+"""
+acceptance = "MOLECULE_DIR/reproduction.md written: symptom and stated-mechanism extracted separately (verbatim), reproduction attempted, and a REPRODUCED / NOT-REPRODUCED / ENVIRONMENTAL verdict recorded on the symptom."
+
+[[steps]]
+id = "read-locus"
+title = "Read the named locus — treat the mechanism as a hypothesis"
+description = """
+Grant the stated mechanism and locus NO authority beyond \"a good \
+place to start looking.\" Detail and confidence in the prose do not \
+raise their truth-probability.
+
+  1. Open the code path the diagnosis named (the locus from step 1). \
+     Read the ACTUAL resolution / control flow at HEAD.
+  2. Trace the real causal chain and write it out as a concrete \
+     sequence of call sites (file:line → file:line → …), the way \
+     ADR-143 traced the --model flag through resolve_model_selection → \
+     resolve_worker_model → the env injection.
+  3. Answer one question in writing: does the causal chain the CMB \
+     DESCRIBES actually exist in the code? Confirm or refute the \
+     stated mechanism specifically — not the symptom, the MECHANISM. \
+     If the described path does not exist (the founding-witness case), \
+     say so and point at where the true cause most plausibly lives \
+     instead (the place the CMB did NOT look).
+
+Write MOLECULE_DIR/locus-read.md: the real call chain at HEAD, an \
+explicit MECHANISM-EXISTS / MECHANISM-ABSENT judgement on the stated \
+mechanism, and — if ABSENT — the most plausible true locus to probe \
+next.
+"""
+needs = ["reproduce-symptom"]
+acceptance = "MOLECULE_DIR/locus-read.md written: the real call chain at HEAD traced as file:line steps, an explicit MECHANISM-EXISTS / MECHANISM-ABSENT judgement on the STATED mechanism, and (if ABSENT) the plausible true locus."
+
+[[steps]]
+id = "verify-or-refute"
+title = "Reproduce the cause down to the line — emit the verdict"
+description = """
+Collapse the symptom reproduction and the locus read into one verdict. \
+ONLY a confirmed causal path licenses a commit.
+
+Reproduce the defect down to the line: instrument, add a failing \
+test, or step the actual code path until you can point at the exact \
+line where the wrong behaviour originates. A plausible story is not a \
+confirmed cause.
+
+Write MOLECULE_DIR/verdict.md with, on the FIRST line, one of:
+
+  - `verdict: confirmed` — the stated mechanism holds: the causal \
+    chain exists as described and reproduces down to the line. The \
+    fix may proceed — as a SEPARATE molecule walked through \
+    `bug-closure` (this formula does not fix; it verifies).
+  - `verdict: refuted` — the stated mechanism does NOT hold: the \
+    described code path does not exist, or the true cause reproduces \
+    at a different line than the one named. The symptom is still real; \
+    the mechanism was wrong. Proceed to step 4.
+  - `verdict: inconclusive` — reproduction was not achievable cheaply \
+    (e.g. the symptom was ENVIRONMENTAL in step 1, or the repro needs \
+    hardware/accounts not available). Name exactly what evidence is \
+    missing and what would settle it.
+
+Below the first line: a justification citing reproduction.md and \
+locus-read.md, and — for `confirmed` — the true locus + a one-line \
+suggested prompt for the fix molecule that will exit through \
+bug-closure.
+"""
+needs = ["read-locus"]
+acceptance = "MOLECULE_DIR/verdict.md written with `verdict: confirmed | refuted | inconclusive` on the first line, a justification citing the prior artifacts, and (for confirmed) the true locus plus a suggested fix-molecule prompt."
+
+[[steps]]
+id = "record-divergence"
+title = "On divergence, follow the code and write back cosmon-ward"
+description = """
+Silent divergence is a bug in BOTH directions (same rule as \
+silent-ignore). When step 3's verdict is `refuted` (or the \
+reproduction contradicted the note in any way), the sender must learn \
+its inference was off — that write-back is what calibrates the \
+confidence of every future CMB.
+
+If verdict is `confirmed`: this step is a no-op beyond a one-line note \
+in writeback.md that the mechanism held and the fix molecule is handed \
+to bug-closure. Nothing to write back.
+
+If verdict is `refuted` or `inconclusive-with-divergence`:
+
+  1. Follow the CODE, not the note. State the true cause (or the \
+     honest \"cause not yet located, symptom real\" position).
+  2. Record the divergence cosmon-ward — a return CMB into the \
+     sender's galaxy (docs/cmb/inbox/), or a note on the diagnosis \
+     molecule. Say plainly: symptom CONFIRMED (thank the sender — it \
+     is the load-bearing gift), mechanism REFUTED (the named path does \
+     not exist / the cause is elsewhere), true cause = <…>.
+  3. Record the typed refutation edge if it is not already present. If \
+     this molecule was nucleated with `--refutes {{diagnosis_molecule_id}}` \
+     the `Refutes` / `RefutedBy` pair is already on the DAG — confirm \
+     it with `cs deps {{diagnosis_molecule_id}}` (the diagnosis should \
+     show a `RefutedBy` edge to this molecule) and cite it in the \
+     write-back. If it is absent (the mechanism was still plausible at \
+     nucleation), note that the refutation edge should be recorded so \
+     the calibration loop closes.
+
+Write MOLECULE_DIR/writeback.md: the true cause (or honest gap), the \
+cosmon-ward channel used, the exact text sent to the sender, and the \
+state of the `Refutes` edge (present / to-be-recorded).
+"""
+needs = ["verify-or-refute"]
+acceptance = "MOLECULE_DIR/writeback.md written: for a refuted verdict, the true cause (or honest gap), the cosmon-ward write-back text sent to the sender, and the `Refutes` edge state confirmed via `cs deps`; for a confirmed verdict, a one-line note handing the fix to bug-closure."

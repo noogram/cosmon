@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cosmon.invalid/specs/attestor-events.schema.json",
+  "title": "AttestorEventV1",
+  "description": "Typed NDJSON ledger consumed by the noogram spec auditors (MycelialGate, AttestorGraph, WitnessFreshness). One envelope per line. Schema version pinned at v=1; readers must reject other values. Source of truth: crates/cosmon-core/src/attestor_event_v1.rs. Parent deliberation: delib-20260516-5d97.",
+  "type": "object",
+  "required": ["seq", "ts", "kind"],
+  "properties": {
+    "v": {
+      "type": "integer",
+      "const": 1,
+      "default": 1,
+      "description": "Schema version. Currently 1 only."
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic per-ledger sequence number."
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Wall-clock time at which the row was written (RFC 3339 UTC). Distinct from the event's logical time `t`."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "attestor_enrol",
+        "attestor_expired",
+        "cluster_metadata",
+        "absorption",
+        "audit_outcome"
+      ]
+    }
+  },
+  "oneOf": [
+    {
+      "type": "object",
+      "title": "attestor_enrol",
+      "properties": {
+        "kind": { "const": "attestor_enrol" },
+        "attestor": { "$ref": "#/$defs/attestorId" },
+        "t": { "type": "string", "format": "date-time" }
+      },
+      "required": ["kind", "attestor", "t"]
+    },
+    {
+      "type": "object",
+      "title": "attestor_expired",
+      "properties": {
+        "kind": { "const": "attestor_expired" },
+        "attestor": { "$ref": "#/$defs/attestorId" },
+        "t": { "type": "string", "format": "date-time" }
+      },
+      "required": ["kind", "attestor", "t"]
+    },
+    {
+      "type": "object",
+      "title": "cluster_metadata",
+      "description": "Snapshot of an attestor's institutional cluster at time t. Snapshot, not permanent attribute — when an attestor moves institutions a new row is written.",
+      "properties": {
+        "kind": { "const": "cluster_metadata" },
+        "attestor": { "$ref": "#/$defs/attestorId" },
+        "t": { "type": "string", "format": "date-time" },
+        "institution": { "type": "string" },
+        "jurisdiction": { "type": "string" },
+        "funder": { "type": ["string", "null"] }
+      },
+      "required": ["kind", "attestor", "t", "institution", "jurisdiction"]
+    },
+    {
+      "type": "object",
+      "title": "absorption",
+      "description": "A paper was absorbed by `attestor` with the listed witnesses.",
+      "properties": {
+        "kind": { "const": "absorption" },
+        "absorption_id": { "$ref": "#/$defs/absorptionId" },
+        "attestor": { "$ref": "#/$defs/attestorId" },
+        "vertical": { "type": "string" },
+        "t": { "type": "string", "format": "date-time" },
+        "witnesses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/attestorId" }
+        },
+        "public_artefact_uri": { "type": "string", "format": "uri" }
+      },
+      "required": [
+        "kind",
+        "absorption_id",
+        "attestor",
+        "vertical",
+        "t",
+        "witnesses",
+        "public_artefact_uri"
+      ]
+    },
+    {
+      "type": "object",
+      "title": "audit_outcome",
+      "properties": {
+        "kind": { "const": "audit_outcome" },
+        "absorption_id": { "$ref": "#/$defs/absorptionId" },
+        "outcome": {
+          "type": "string",
+          "enum": ["ok", "entryist", "pending"]
+        },
+        "t": { "type": "string", "format": "date-time" }
+      },
+      "required": ["kind", "absorption_id", "outcome", "t"]
+    }
+  ],
+  "$defs": {
+    "attestorId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque attestor identifier."
+    },
+    "absorptionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Opaque absorption identifier."
+    }
+  }
+}

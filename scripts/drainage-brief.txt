@@ -1,0 +1,21 @@
+FULL DRAIN of the {GALAXY} galaxy molecule board — drive its pending to ZERO.
+
+Operator mandate (2026-06-24): completely drain every galaxy's board. No attenuation. The end state for {GALAXY} is ZERO pending molecules. Collapse is recoverable (archived on disk + in git), so be decisive.
+
+Work IN the galaxy: cd /srv/cosmon/{GALAXY} and operate on its board (cs uses walk-up discovery from there). DO NOT touch other galaxies except to receive a migration.
+
+PROCESS — for EVERY pending molecule in /srv/cosmon/{GALAXY}/.cosmon/state (read prompt.md if the state variables are empty), assign and EXECUTE exactly one disposition so that ZERO pending remain:
+
+1. COLLAPSE — the default for dormant/stale/superseded/one-off-that-led-nowhere/obsolete work, AND for valid-but-not-now ideas (collapse with reason "deferred — <why>"; it is recoverable, re-nucleate later). Use: cs collapse <id> --reason "<clear one-line>" --reason-kind manual_abort.
+
+2. MIGRATE — only if the molecule CLEARLY belongs to a different existing cosmon-managed galaxy under /srv/cosmon/. Re-nucleate it on that galaxy's board (cd /srv/cosmon/<target> && cs nucleate task-work --var topic="<title>", carry the original prompt as context, tag temp:warm), then cs collapse the {GALAXY} copy with reason "migrated to <target>:<new-id>".
+
+3. TACKLE — only for a SMALL set that is genuinely actionable RIGHT NOW and short. cs tag <id> --add temp:hot then cs tackle <id>. Prefer collapse-deferred over tackle for anything non-trivial — the goal is a drained board, not to do all the work tonight.
+
+4. FLAG-OPERATOR — for the genuinely irreversible/strategic few (a big new direction, a destructive choice). Do NOT auto-execute these; list them in the report. Keep this list SHORT.
+
+HARD RULE: a pending molecule left untouched is a failure. Every pending must end collapsed, migrated, tackled, or explicitly flagged. Drive to zero.
+
+DELIVERABLE: a drainage report (in the molecule dir or /srv/cosmon/{GALAXY}/.cosmon) — counts per disposition, the migrate targets, the flagged-for-operator shortlist, and the final pending count (target: 0 or only the flagged set). Run fully autonomously — flag, never block on the operator. No code changes. No just install.
+
+YOUR OWN LIFECYCLE (critical — perimeter discipline): advance your own steps with cs evolve and finish with cs complete, then STOP. DO NOT run cs done on yourself — cs done is the ORCHESTRATOR's job (the drainage daemon harvests you). A worker cannot cs done itself: cs done removes the very worktree and kills the very tmux session you are running in, so it would fail or self-destruct mid-run. So: drain {GALAXY} → write the report → cs complete → STOP. The daemon does the rest.

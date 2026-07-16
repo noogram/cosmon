@@ -1,0 +1,51 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Freeze a worker — suspend with state preservation (preemption)
+
+Usage: cs freeze [OPTIONS] <WORKER>
+
+Arguments:
+  <WORKER>
+          ID of the worker to freeze
+
+Options:
+      --by <BY>
+          ID of the worker that is preempting this one (optional metadata)
+
+      --config <PATH>
+          Path to configuration file
+
+      --reason <REASON>
+          Operator-supplied reason for the freeze, recorded on the event.
+          
+          Under ADR-052 §D3, `cs freeze --reason <str>` subsumes the former `cs quench` verb: "graceful shutdown with state preservation" is what freeze already does, and the reason is the missing metadata that distinguished quench's intent.
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --timeout <TIMEOUT>
+          Grace period in seconds before force-killing (default: 15)
+          
+          [default: 15]
+
+      --no-tmux
+          Skip tmux interaction (state-only transition, for testing)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs freeze worker-3                           # suspend, keep state for later thaw
+  cs freeze worker-3 --reason "rotating OOM"   # graceful shutdown with recorded intent
+
+`--reason <str>` is the canonical replacement for the former `cs quench`
+verb (ADR-052 §D3): graceful shutdown with state preservation IS freeze,
+and the reason captures operator intent on the audit event.
+
+SEE ALSO: cs thaw (resume a frozen worker), cs tackle (launch replacement
+  after freezing an incumbent — priority inversion = freeze + tackle).

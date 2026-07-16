@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-ghst\", \"running\", &i)"
+---
+row_kind=Ghost
+raw       = 👻 task-ghst [ ] running
+stripped  = ð» task-ghst [ ] running

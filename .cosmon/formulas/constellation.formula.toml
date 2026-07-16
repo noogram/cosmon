@@ -1,0 +1,92 @@
+formula = "constellation"
+version = 1
+description = """
+Fil-rouge artifact — names a pattern across N existing molecules that the \
+operator already sees. A constellation is the human-decides counterpart of \
+a deliberation: a deliberation assembles a panel to *discover* a pattern; \
+a constellation *records* a pattern already seen. It is the mechanism that \
+makes cognitive convergence survivable across session compaction.
+
+## Invocation
+
+```
+cs nucleate constellation --kind constellation \\
+    --var pattern="one-sentence description of the shared pattern" \\
+    --var citations="mol1,mol2,mol3"
+```
+
+or, equivalently, pass `--refines` explicitly:
+
+```
+cs nucleate constellation --kind constellation \\
+    --var pattern="..." \\
+    --refines mol1 --refines mol2 --refines mol3
+```
+
+At nucleation time, the CLI emits one `Refines` edge from the constellation \
+to each citation and a symmetric `RefinedBy` back-edge on each cited \
+molecule. `cs deps <constellation_id>` then surfaces the cited molecules \
+as downstream, and `cs deps <cited_mol>` surfaces the constellation under \
+upstream — the fil-rouge becomes a legible part of the DAG.
+
+## When to use
+
+Use a constellation when **you already see the pattern** connecting N \
+molecules and want to record it durably so it survives compaction and \
+becomes visible to future verifier/overseer formulas. Use a deliberation \
+(`deep-think`) when you want a panel of personas to **help you find** the \
+pattern.
+
+## Scope guards
+
+- A constellation does NOT decompose, does NOT decay, does NOT transform. \
+  Its single product is `constellation.md`.
+- No auto-detection of fil-rouges — the operator (or a `spark-capture`-like \
+  formula) decides the pattern. The system stores the decision, it does \
+  not guess it.
+- Citation edges carry no progression semantics. A constellation never \
+  blocks a cited molecule, and a cited molecule's completion does not \
+  affect the constellation's status.
+"""
+id_prefix = "const"
+
+# Tier 0 — leaf formula, single step, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "record-pattern"
+title = "Record the fil-rouge pattern"
+description = """
+Write `constellation.md` into the molecule state directory (from \
+`cs --json observe {mol_id}` → `molecule_dir`). The artifact MUST contain:
+
+1. **Pattern (one sentence)** — the shared pattern, named precisely. \
+   Use the value of `--var pattern`. Keep it to a single sentence; \
+   longer description goes in section 3.
+2. **Cited molecules** — a bullet list of the N citations with their \
+   molecule IDs, kinds (via emoji), one-line titles, and a relative \
+   pointer to each one's primary artifact (`synthesis.md`, `briefing.md`, \
+   or the parent molecule directory).
+3. **Why this pattern (paragraph)** — narrative context: what the operator \
+   noticed, why these molecules belong together, what convergence the \
+   constellation points at.
+
+The `Refines` edges were emitted at nucleation by `cs nucleate` from \
+`--var citations=...` or `--refines ...`. You do NOT need to create them \
+from within the step — only verify, in the exit criterion, that \
+`cs deps {mol_id} --json` lists every citation under `downstream`.
+
+## Live whispers
+
+During your work, the pilot may inject a short text message via \
+`cs whisper`. It appears as a user-like turn. Treat it as an observation \
+from the pilot — a piece of live context worth integrating into \
+`constellation.md` — not as a re-nucleation, not as a new question.
+
+Rules for handling a whisper:
+- Finish the step, then integrate the whisper into the narrative.
+- The whisper is advisory. The DAG is authoritative.
+- No acknowledgement protocol. Your next artifact speaks for itself.
+"""
+acceptance = "MOLECULE_DIR/constellation.md exists with sections (1) Pattern, (2) Cited molecules, (3) Why this pattern; `cs deps {mol_id} --json` lists every citation from `--var citations` under `downstream`."

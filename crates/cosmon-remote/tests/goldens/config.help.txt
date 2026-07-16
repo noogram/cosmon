@@ -1,0 +1,17 @@
+Profile and deployment config
+
+Usage: cosmon-remote config [OPTIONS] <COMMAND>
+
+Commands:
+  init  Initialise a new profile with just a host URL — the operator then sets `sub`, `aud`, `oidc-url` (or `install.sh` does it server-side via templating)
+  set   Set a single config key
+  show  Show the resolved profile (the values used for API calls)
+  use   Switch the default profile
+  list  List every known profile name
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+  -h, --help               Print help

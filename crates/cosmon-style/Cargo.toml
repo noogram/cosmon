@@ -1,0 +1,17 @@
+[package]
+name = "cosmon-style"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Unified visual charter for Cosmon — colors, glyphs, and semantic roles shared across CLI and dashboard surfaces."
+
+[dependencies]
+colored.workspace = true
+cosmon-core.workspace = true
+
+[lints]
+workspace = true

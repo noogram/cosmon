@@ -1,0 +1,22 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show help — all commands grouped, or detailed help for one command
+
+Usage: cs help [OPTIONS] [COMMAND]
+
+Arguments:
+  [COMMAND]  Command to show help for (delegates to `cs <command> --help`)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs help                         # grouped command reference
+  cs help tackle                  # detailed help for one command
+  cs help guide                   # embedded operator handbook
+  cs help charter                 # visual charter swatch

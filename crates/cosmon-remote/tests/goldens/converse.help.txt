@@ -1,0 +1,40 @@
+`POST /v1/avatar/converse` — Send a typed message to a bound avatar-tiers, canal (b) — on-by-binding, `request` hop-bounded server-side (ADR-0020 §5)
+
+Usage: cosmon-remote converse [OPTIONS] <AVATAR_ID> <MESSAGE>
+
+Arguments:
+  <AVATAR_ID>
+          Target avatar identifier within the caller's noyau. The server accepts the message only when an explicit operator binding exists for this avatar (refused `no_binding` otherwise)
+
+  <MESSAGE>
+          Message payload, sent as a JSON string. Pass `--message-json` to send structured JSON instead
+
+Options:
+      --message-json
+          Parse MESSAGE as JSON and send the structured value
+
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
+      --json
+          Render machine-readable JSON instead of human text where applicable
+
+      --kind <KIND>
+          Message kind. `request` expects a response and is hop-bounded server-side (L3 anti-cycle); `announce` is fire-and-forget and exempt
+
+          Possible values:
+          - request:  Synchronous conversation — expects a response, hop-bounded
+          - announce: Fire-and-forget notification — no response, no hop bound
+          
+          [default: request]
+
+      --hop <HOP>
+          Relay depth in a `request` chain. Originating messages send 0; relays increment. The server refuses the chain with `max_hops_exceeded` beyond the binding's bound
+          
+          [default: 0]
+
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+
+  -h, --help
+          Print help (see a summary with '-h')

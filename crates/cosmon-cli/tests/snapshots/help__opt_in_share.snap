@@ -1,0 +1,35 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Opt-in-share — first-run consent prompt for encrypted developer bundles
+
+Usage: cs opt-in-share [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --status         Print the current consent state (accepted / declined / none) and exit
+      --decline        Bypass the TTY prompt and persist a declined record (non-interactive)
+  -v, --verbose        Enable verbose output
+      --accept         Bypass the TTY prompt and persist an accepted record (non-interactive)
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs opt-in-share             # first-run prompt (once per user)
+  cs opt-in-share --status    # show current consent state
+  cs opt-in-share --decline   # non-interactive: record decline
+  cs opt-in-share --accept    # non-interactive: record acceptance
+  cs opt-in-share --json      # NDJSON output for scripting
+
+Deny-by-default. The first time `cs tackle` runs on a TTY, this prompt
+fires automatically (once) and the answer is persisted to
+~/.config/cosmon/consent.toml. No trace in your project's git log.
+
+The French prompt names the encryption (age), the sole recipient
+(the Noogram maintainer), and the no-trace-in-commits guarantee, then asks [o/N].
+Anything but an explicit yes is recorded as a decline. When stdin is
+not a TTY (CI, scripts, worker shells), the hook skips the prompt and
+records a decline without asking.
+
+SEE ALSO: cs tackle (the first-run hook site).

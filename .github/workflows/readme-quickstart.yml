@@ -1,0 +1,88 @@
+name: README Quickstart
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "scripts/quickstart-wikipedia.sh"
+      - "scripts/check-readme-quickstart.sh"
+      - "templates/wikipedia-production/**"
+      - "crates/cosmon-cli/**"
+      - ".github/workflows/readme-quickstart.yml"
+  pull_request:
+    paths:
+      - "README.md"
+      - "scripts/quickstart-wikipedia.sh"
+      - "scripts/check-readme-quickstart.sh"
+      - "templates/wikipedia-production/**"
+      - "crates/cosmon-cli/**"
+      - ".github/workflows/readme-quickstart.yml"
+
+concurrency:
+  group: readme-quickstart-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  block-gate:
+    name: Block syntax + drift (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Install cs
+        run: cargo install --path crates/cosmon-cli --locked --debug
+      - name: Validate README quickstart block
+        run: bash scripts/check-readme-quickstart.sh
+
+  end-to-end:
+    name: End-to-end quickstart (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Install tmux (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - name: Install tmux (macOS)
+        if: runner.os == 'macOS'
+        run: brew list tmux >/dev/null 2>&1 || brew install tmux
+      - name: Configure git identity
+        run: |
+          git config --global user.name  "quickstart-ci"
+          git config --global user.email "quickstart-ci@example.com"
+      - name: Install cs
+        run: cargo install --path crates/cosmon-cli --locked --debug
+      - name: Run quickstart end-to-end on a clean temp dir
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORK="$(mktemp -d -t quickstart-e2e.XXXXXX)"
+          trap 'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+          for n in a b c; do
+              printf '%%PDF-1.4\n%%dummy-%s\n' "$n" > "$WORK/$n.pdf"
+          done
+          scripts/quickstart-wikipedia.sh "$WORK/proj" \
+              "Neural audio codecs" \
+              "$WORK/a.pdf" "$WORK/b.pdf" "$WORK/c.pdf"
+          # Assert the bootstrap produced the expected shape.
+          test -d "$WORK/proj/.cosmon"
+          test -d "$WORK/proj/sources"
+          test -f "$WORK/proj/MISSION.md"

@@ -1,0 +1,175 @@
+formula = "drift-hub-to-project"
+version = 1
+description = """
+Drift-detection patrol #1 — *hub → project*.
+
+A `social-hub` galaxy exists to hold human conversation. The broken \
+promise (godin) is simple: the galaxy has silently become a code \
+project while still wearing a hub's label. The detection signal \
+(delib-20260419-5168 §4 Q8a): over a trailing 14-day window, *commits \
+on non-bot source code* exceed *conversational artefacts* \
+(human-co-signed molecules, messages, discussion chronicles).
+
+This patrol is on-demand — the operator runs it manually or via a \
+future scheduler. It nucleates ONE `issue` molecule per firing galaxy, \
+tagged `drift-detected`, with the raw numbers in the issue body. It \
+NEVER re-types the galaxy, collapses it, or renames it. Godin's rule: \
+a drift report is a permission to act, not an action.
+
+Neurion gate (task-20260419-f88a) — the patrol reads which galaxies \
+have `galaxy_kind = 'social-hub'` from the `repos` table via \
+`neurion.query_registry("SELECT name FROM repos WHERE galaxy_kind = \
+'social-hub'")`. Hard-coding galaxy names is forbidden.
+
+Threshold helper (pure Rust) — the numeric test lives in \
+`neurion_core::domain::drift::hub_to_project_drift`. The unit tests \
+there are the executable spec for this formula's firing rule. If the \
+formula and the helper disagree, **the helper wins**; fix the formula.
+
+ARTIFACT PATHS — all artefacts (scan.md, detect.md, report.md) MUST \
+go to MOLECULE_DIR returned by `cs --json observe {mol_id}` in the \
+`molecule_dir` field. NEVER the worktree (destroyed by `cs done`).
+
+No variables required — the sweep operates on the set of social-hub \
+galaxies declared in neurion.
+"""
+id_prefix = "drift-hub"
+freeze_on_last_step = false
+
+# Tier 1 — the detect step may nucleate up to one `issue` molecule per
+# firing social-hub galaxy. The count is bounded by the number of
+# social-hub galaxies in neurion, which is small in practice.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Scan social-hub galaxies and their 14-day window"
+description = """
+1. **Enumerate social-hub galaxies**. Query neurion:
+
+   ```
+   neurion.query_registry("SELECT name, path FROM repos WHERE \
+   galaxy_kind = 'social-hub'")
+   ```
+
+   If neurion is unreachable, fall back to \
+   `cs galaxies list --json | jq '.galaxies[] | select(.galaxy_kind \
+   == \"social-hub\") | .name'`. If both are empty, write \
+   `## No social-hub galaxies` in `MOLECULE_DIR/scan.md` and advance \
+   (zero fire is a legal outcome).
+
+2. **For each social-hub galaxy**, compute over a trailing 14-day \
+   window (today − 14 days → today):
+
+   - `code_commits` = `git -C <path> log --since=14.days.ago \
+     --pretty='%an|%s' | awk -F'|' '!($1 ~ /bot|claude|runtime/) && \
+     !($2 ~ /^(chore|chronicle|evolve|chore\\(state\\))/) {n++} END \
+     {print n+0}'`. The filter excludes bot authors (worker sessions) \
+     and bookkeeping subjects that do not represent human \
+     code-authorship. Feynman: we count commits where a human \
+     actually pushed a brick, not where the system glued state.
+   - `conversational_artefacts` = count of human-co-signed molecules \
+     AND chronicles touching the galaxy over the same 14 days. \
+     Approximation: `git -C <path> log --since=14.days.ago \
+     --pretty='%s' | grep -c 'chronicle\\|co-sign\\|human'` \
+     + `cs --json ensemble | jq '[.molecules[] | select(.created_at \
+     > (now - 1209600 | todate)) | .variables.topic] | length'` when \
+     ensemble is reachable.
+
+3. **Write** `MOLECULE_DIR/scan.md` with a table per galaxy:
+
+   | galaxy | path | code_commits_14d | conversational_artefacts_14d |
+   |--------|------|------------------|------------------------------|
+
+   Follow with a per-galaxy section reproducing the raw `git log` \
+   output (verbatim — Feynman's principle: if the reader wants to \
+   falsify the count, they can eyeball the subjects).
+"""
+acceptance = "MOLECULE_DIR/scan.md written with one row per social-hub galaxy: code_commits_14d and conversational_artefacts_14d. Empty state is allowed and explicitly reported."
+
+[[steps]]
+id = "detect"
+title = "Apply the hub → project threshold and emit issues"
+description = """
+For each galaxy in `scan.md`, apply the threshold from \
+`neurion_core::domain::drift::hub_to_project_drift`:
+
+  **Fire** when `code_commits > conversational_artefacts`.
+
+For EACH firing galaxy, emit ONE `issue` molecule via:
+
+```
+cs nucleate spark-capture \
+  --kind issue \
+  --var topic="drift-detected: hub-to-project — <galaxy> \
+(code_commits=<N> > conversational_artefacts=<M> over 14d)" \
+  --tag drift-detected \
+  --tag drift:hub-to-project \
+  --tag galaxy:<galaxy> \
+  --tag temp:warm
+```
+
+NOTES:
+  - `temp:warm` is MANDATORY (preventive curation — see CLAUDE.md); \
+    children without a `temp:*` tag become invisible to ensemble and \
+    temp-review sweeps.
+  - `spark-capture` is the minimal-stub formula used for typed \
+    signals that do not need their own workflow — same pattern as \
+    `chronicle-lint.formula.toml`. Replace with a dedicated \
+    `drift-report` formula if one lands later.
+  - Do NOT re-type, collapse, or rename the galaxy automatically. \
+    The verdict is a report; the operator decides.
+
+**Rate-limit guard**: if more than 5 galaxies fire in a single sweep, \
+STOP nucleating after the 5th and append a `## Overflow` section to \
+`MOLECULE_DIR/detect.md` with the uncounted galaxies and the raw \
+numbers. A flood-of-fires is itself a signal — the threshold, the \
+`code_commits` heuristic, or neurion's classification may be broken.
+
+**Write** `MOLECULE_DIR/detect.md` with:
+  - one row per galaxy: `galaxy | code_commits | conversational | \
+    verdict (fire / no-fire) | issue_molecule_id (blank if no-fire)`.
+  - raw reason string per fire (matches `DriftReport::reason`).
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detect.md written with per-galaxy verdict rows; up to 5 issue molecules nucleated with the full tag set (drift-detected, drift:hub-to-project, galaxy:<name>, temp:warm); overflow section when >5 fires."
+
+[[steps]]
+id = "report"
+title = "Produce the patrol report"
+description = """
+Write `MOLECULE_DIR/report.md` summarising the sweep. Required \
+sections:
+
+  ```
+  # Drift patrol — hub → project — {date}
+
+  ## Galaxies scanned
+  | galaxy | code_commits_14d | conversational_14d | verdict |
+  |--------|------------------|--------------------|---------|
+
+  ## Fires
+  For each fire: galaxy, numbers, issue molecule ID, one-line \
+  interpretation ("Showroom shipped more code this fortnight than it \
+  held conversations — the hub's promise is silently becoming a \
+  project's.").
+  If zero fires: "No hub → project drift detected in this window."
+
+  ## Non-actions (deliberate)
+  Restate that the patrol NEVER re-types or collapses a galaxy; the \
+  operator decides. This is here so future readers of the report do \
+  not mistake the silence for an omission.
+
+  ## Next sweep
+  Default: 14 days (match the window). Sooner if a chronicle flags a \
+  new hub emerging or a sister raises `infra-coupling` against a hub.
+  ```
+
+End with a one-line recommendation and a pointer to the threshold \
+helper (`neurion_core::domain::drift::hub_to_project_drift`) so a \
+future operator can reproduce the test on synthetic data.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/report.md written with galaxies-scanned table, per-fire interpretation, non-actions section (pull-only, operator-decides), and next-sweep cadence."

@@ -1,0 +1,26 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Resume — convenience alias for `cs patrol --propel --molecule <id>`
+
+Usage: cs resume [OPTIONS]
+
+Options:
+      --config <PATH>      Path to configuration file
+      --fleet <FLEET>      Only resume workers in this fleet
+      --agent <AGENT>      Only resume this specific agent (by name, across all fleets)
+  -v, --verbose            Enable verbose output
+  -c, --message <MESSAGE>  Custom resume message (default: standard RESUME signal)
+      --json               Output in JSON format
+  -h, --help               Print help
+
+EXAMPLES:
+  cs resume                   # nudge all idle workers
+  cs resume worker-3          # nudge one
+
+Convenience alias for `cs patrol --propel --molecule <id>` — maintains the
+Propelled regime by re-delivering the propulsion signal. Does NOT change
+state or advance molecules.
+
+SEE ALSO: cs patrol --propel (canonical command), cs thaw (frozen workers).

@@ -1,0 +1,555 @@
+formula = "voix-reply"
+version = 1
+description = """
+VOIX organ — v0 of the outbound channel. Draft-only, email-only, \
+permit-gated. The operator's `cs evolve` is the trigger that fires \
+the send; the worker NEVER auto-sends. Three steps: `draft` → \
+`permit` → `send`. Email is the only channel in v0; iMessage / \
+WhatsApp / Signal are deferred until mailroom ships their MCP \
+wrappers (`sec_send_imessage`, `sec_send_whatsapp`, `sec_send_signal`). \
+Cite parent delib-20260521-955f synthesis §5.2 step (3) and §5.4 \
+(invariants).
+
+WHY DRAFT-ONLY. Outbound is the highest-permission organ: every send \
+leaves an irreversible trace in another human's inbox. The panel \
+converged unanimously (jobs, kahneman, godin, godel, karpathy, \
+wheeler) on the draft-blocking discipline. The operator must always \
+be the one who decides to send.
+
+PARENT FLOW. `voix-reply` is a child molecule nucleated by the \
+`peau-morning-digest` verdict-door when the operator types `1` (or \
+`2`) against a tile that asks for a reply. The tile's pre-drafted \
+candidate (if present at \
+`~/.cosmon/state/morning/<morning_date>.drafts/<tile_id>.md`) is the \
+seed. The parent flow MUST link the new molecule via `SparkedBy` so \
+the causal trace from incoming WhatsApp → tile → draft → send is \
+queryable. This honors `§8m typed-provenance of prompt context` \
+(godel, parent synthesis §5.4) which lands in the sibling task \
+`task-20260522-069b` before VISAGE worker-read ships.
+
+ARTIFACT PATHS — CRITICAL. The draft lives in the worktree as \
+`voix-draft.md` because the operator reviews it from there. All \
+durable ledgers (permissions, audit, sent) live under \
+`.cosmon/state/voix/` so they survive `cs done` teardown of the \
+worktree. Operator-owned config lives under `~/.config/cosmon/` \
+(read-only from this formula's perspective).
+
+LOAD-BEARING INVARIANTS (restated per step for crash-proof reading):
+
+  (a) WORKER NEVER AUTO-SENDS. Step 3 (`send`) MUST NOT be advanced
+      by the worker after step 2 (`permit`) completes. The worker
+      stops at end of step 2 and exits cleanly. Step 3 only fires
+      when a fresh worker session picks up the molecule with the
+      operator-approved marker (`MOLECULE_DIR/operator-approved.flag`)
+      present. If any worker invocation of step 3 runs without that
+      marker, it MUST `cs stuck "voix-no-operator-approval"` and
+      leave the draft intact. This is the karpathy
+      `ADR-NEXT-embargo-structural` invariant.
+
+  (b) PERMISSION-LEDGER GATE. `.cosmon/state/voix/permissions.ndjson`
+      is operator-appended only. No row matching the target
+      (recipient, channel, scope=intent, granted_until > now) → hard
+      abort with `cs stuck "voix-no-permit <recipient>/<channel>"`.
+      The worker NEVER writes to permissions.ndjson — it is the
+      operator's signed declaration that a recipient is allowed.
+      Permission row schema (one JSON object per line):
+
+      { at: RFC3339 UTC, recipient: <email|phone|matrix-id>,
+        channel: <email|imessage|whatsapp|signal>,
+        scope: <reply|initial|nudge>,
+        granted_until: RFC3339 UTC,
+        granted_by: <operator-name>,
+        reason: <free text ≤200 chars> }
+
+  (c) EMBARGO-BEFORE-SEND. CLAUDE.md §Communication discipline +
+      the embargo-before-send chronicle (2026-04-27): if a confidentiality
+      constraint applies (`private`, `do not forward`, `pas pour
+      diffusion`), it MUST be folded into the draft body **before**
+      the operator reads. A post-send tightening is forbidden — it
+      reads as nervousness-after-the-fact and erodes the original
+      gesture. Step 1 (`draft`) is responsible for checking the
+      parent tile's frontmatter for an `embargo:` field and inlining
+      it. This makes embargo structural, not procedural.
+
+  (d) KITCHEN-WINDOW GUARD. `~/.config/cosmon/voix.toml` may declare
+      a `send_window = ["HH:MM", "HH:MM"]` (godin's invariant —
+      cosmon does not speak outside the operator's kitchen window).
+      Step 2 (`permit`) rejects sends outside the window with
+      `cs stuck "voix-outside-kitchen-window"`. If the config file
+      does not exist OR does not declare `send_window`, no window
+      constraint applies. The kitchen-window guard is fail-open by
+      design — config absence means "operator has not opted in",
+      not "operator has forbidden sending".
+
+  (e) KILL-SWITCH GENERALITY. Each step checks
+      `~/.cosmon/autopilot.off` at start. If present, the step
+      writes a one-line abort marker to `MOLECULE_DIR/abort.log`
+      and exits 0 cleanly without firing any side effect. Per
+      godin's generosity-preserving order, VOIX is the FIRST
+      organ silenced (then CŒUR, then PEAU) — the kill-switch
+      polled at the start of step 1 already kills the draft.
+
+  (f) AUDIT TRAIL. Every permit check (success OR fail) appends a
+      row to `.cosmon/state/voix/audit.ndjson`, fsynced before
+      step 2 returns. Row schema:
+
+      { at: RFC3339 UTC, mol_id: <this molecule>,
+        recipient, channel, scope,
+        result: <permit-ok|no-row|expired|outside-window|kill-switch|scope-mismatch>,
+        granted_by: <from matching row, or null> }
+
+      A `kill -9` mid-permit leaves a partial ledger that the
+      operator can read at breakfast — same worker-checkpoint
+      discipline as curate-patrol.
+
+  (g) SENT LEDGER. On successful send (step 3 only), a row is
+      appended to `.cosmon/state/voix/sent.ndjson` BEFORE the
+      molecule completes. Row schema:
+
+      { at: RFC3339 UTC, mol_id, to, channel, subject,
+        in_reply_to, msg_id: <from sec_send_email response>,
+        initiator: "Operator" }
+
+      The `initiator` field is hard-coded `Operator` because the
+      operator's `cs evolve` is what triggered the send (wheeler's
+      §-causal-attribution invariant, parent synthesis §5.4). The
+      formula is never the initiator for VOIX. An `events.jsonl`
+      row with `verb: voix.sent`, `initiator: Operator` is also
+      emitted (this matches the §-causal-attribution shape that
+      lands in sibling task-20260522-069b).
+
+  (h) CHANNEL RESTRICTION (v0). Only `email` is implemented. Any
+      other `channel` value (`imessage`, `whatsapp`, `signal`)
+      MUST cause step 3 to `cs stuck "voix-channel-not-implemented
+      <channel>"`. The draft and permit steps DO accept non-email
+      channels (so permissions can be pre-staged), but the send
+      refuses until mailroom ships the wrappers.
+
+  (i) MAIN IS SACRED. The draft file lives in the worktree (it is
+      not pushed to main). The sent ledger lives in
+      `.cosmon/state/voix/` which is gitignored by the standard
+      cosmon `.cosmon/state/` rule. Sent emails go through the
+      recipient's inbox via `sec_send_email`; the formula never
+      runs `git push` and never runs `cs done` itself.
+
+  (j) ONE INTENT IN v0 = `reply`. The `intent` variable accepts
+      `reply | initial | nudge` to make the permission scope
+      check honest, but the v0 formula is only invoked from the
+      verdict-door of `peau-morning-digest`, so the only intent
+      that actually flows is `reply`. Initiation (operator nucleates
+      a `voix-reply` cold, with no parent tile) is Rung 3 — the
+      formula refuses unknown intents with `cs stuck "voix-intent-not-implemented"`.
+
+KITCHEN-WINDOW CONFIG TEMPLATE (do not write this file from the \
+formula — document only; the operator opts in by hand):
+
+  # ~/.config/cosmon/voix.toml
+  # Kitchen-window guard for the VOIX organ (godin's invariant,
+  # delib-20260521-955f synthesis §5.4). The send_window declares
+  # the time-of-day band during which voix-reply may dispatch a
+  # send. Outside the window, step 2 (`permit`) hard-aborts with
+  # `cs stuck "voix-outside-kitchen-window"`. Times are local;
+  # absence of the key means no window constraint.
+  #
+  # Example: only allow sends 07:15–09:30 (kitchen window) and
+  # 12:00–13:30 (lunch window). Multiple windows allowed.
+  #
+  # send_window = ["07:15-09:30", "12:00-13:30"]
+
+PERMISSION SEED. v0 ships `.cosmon/state/voix/permissions.ndjson` \
+seeded with a self-test row (operator → operator's own email). This \
+proves the gate works end-to-end without requiring the operator to \
+hand-edit before the first real send.
+
+CROSS-REFS — delib-20260521-955f (parent, full design contract); \
+karpathy `ADR-NEXT-embargo-structural` (draft-blocking discipline); \
+kahneman (per-molecule kill-switch poll, embargo-before-send \
+promoted from chronicle to invariant); godin (kitchen-window guard, \
+generosity-preserving silencing order); godel (grounding rule — no \
+organ modifies the file that governs its own scope); jobs (one \
+ritual, ≤3 verdict tiles, demo is the operator tapping 1 and the \
+draft sliding into the inbox); wheeler (§-causal-attribution, sent \
+ledger carries `initiator: Operator`); siblings task-20260522-8bcd \
+(peau-morning-digest, provides the tile contract) and \
+task-20260522-069b (writes the §8m invariant that voix-reply will \
+honor via SparkedBy link from the parent tile).
+"""
+id_prefix = "voix"
+freeze_on_last_step = false
+
+# Tier 0 — leaf formula. Does NOT nucleate child molecules. The send
+# is a side effect (sec_send_email call); it is not a child cosmon
+# molecule. The parent verdict-door of peau-morning-digest is what
+# nucleates voix-reply itself — voix-reply is always downstream of
+# an operator gesture, never upstream.
+[tier]
+level = 0
+
+# ---------------------------------------------------------------------------
+# Inputs — read by every step from the molecule's variables block.
+# ---------------------------------------------------------------------------
+
+[vars.tile_id]
+description = "The morning-brief tile id this draft replies to. Used to locate the pre-draft candidate at `~/.cosmon/state/morning/<morning_date>.drafts/<tile_id>.md` and to build the `SparkedBy` provenance link to the parent tile."
+type = "string"
+required = true
+
+[vars.morning_date]
+description = "The morning brief date (YYYY-MM-DD) — joins with `tile_id` to locate the parent tile + pre-draft."
+type = "string"
+required = true
+
+[vars.recipient]
+description = "Destination identity. For email: an RFC-5322 address. For imessage/whatsapp/signal (deferred): a phone number or handle. The permit step checks this against `.cosmon/state/voix/permissions.ndjson`."
+type = "string"
+required = true
+
+[vars.channel]
+description = "Send channel. v0: `email` only (sec_send_email). `imessage | whatsapp | signal` are accepted by draft/permit but rejected by send until mailroom ships the MCP wrappers."
+type = "string"
+required = true
+
+[vars.subject]
+description = "Email subject line (channel=email only). Falls back to `Re: <tile-topic>` if absent."
+type = "string"
+required = false
+default = ""
+
+[vars.intent]
+description = "Permission scope. v0 ships with `reply` only; `initial | nudge` are accepted by the permission schema but the send step refuses them with `cs stuck \"voix-intent-not-implemented\"` (Rung 3)."
+type = "string"
+required = false
+default = "reply"
+
+# ---------------------------------------------------------------------------
+# Step 1 — draft
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "draft"
+title = "Compose voix-draft.md from the morning brief tile + pre-draft candidate (embargo folded in)"
+description = """
+Resolve MOLECULE_DIR from `cs --json observe {this_mol_id}` (the \
+`molecule_dir` field). The DRAFT lives in the worktree (not in \
+MOLECULE_DIR) because the operator reviews it from the worktree the \
+same way they review any other worker output.
+
+KILL-SWITCH CHECK. If `~/.cosmon/autopilot.off` exists, write one \
+line to `MOLECULE_DIR/abort.log` (`draft aborted: autopilot.off`) \
+and exit 0. Honored at the start of every step. VOIX is the FIRST \
+organ silenced — godin's generosity-preserving order.
+
+READ THE PARENT TILE. The tile lives at \
+`~/.cosmon/state/morning/<$VOIX_MORNING_DATE>.md`. The pre-draft \
+candidate, if present, lives at \
+`~/.cosmon/state/morning/<$VOIX_MORNING_DATE>.drafts/<$VOIX_TILE_ID>.md`. \
+Both are markdown with a frontmatter block. Required fields read \
+from the tile / pre-draft frontmatter:
+
+  - `topic`        — one-line summary of the incoming signal.
+  - `from`         — sender identity (for context, not used to
+                      auto-set recipient).
+  - `embargo`      — optional confidentiality constraint. If set,
+                      MUST be folded into the draft body BEFORE
+                      the operator reads (invariant (c)).
+  - `in_reply_to`  — message-id of the incoming signal (RFC 5322
+                      Message-ID for email; channel-specific id
+                      otherwise). Carried through to the sent
+                      ledger.
+  - `tile_topic`   — used as fallback subject if $VOIX_SUBJECT is
+                      empty (subject := \"Re: <tile_topic>\").
+
+If the pre-draft file is absent (operator may have skipped pre-draft \
+for this tile), write a minimal scaffold: a greeting line and a \
+TODO comment. The operator will replace the body during review.
+
+EMBARGO-BEFORE-SEND DISCIPLINE. If the tile's frontmatter declares \
+`embargo: <text>`, prepend the draft body with the embargo as a \
+short courtesy line in the operator's voice (e.g. \"À ne pas \
+faire circuler.\" or \"Strictly private — please do not \
+forward.\"). NEVER add the embargo as a separate trailing \
+postscript and NEVER as a separate follow-up message. This is the \
+karpathy + kahneman invariant (parent synthesis §5.4): embargo \
+folded into the message before send, never after. The check is \
+structural — the draft file carries the embargo from creation.
+
+WRITE THE DRAFT. The draft lives in the worktree (NOT in \
+MOLECULE_DIR — the operator reviews it via the worker's worktree, \
+same as any other worker output). Path:
+
+  <worktree-root>/voix-draft.md
+
+Frontmatter (4 to 6 fields, all required except `embargo`):
+
+  ---
+  to: <recipient from $VOIX_RECIPIENT>
+  channel: <email|imessage|whatsapp|signal>
+  subject: <Re: <tile-topic> if email and no $VOIX_SUBJECT; else $VOIX_SUBJECT>
+  in_reply_to: <from tile frontmatter, or `tile-<$VOIX_TILE_ID>` if absent>
+  tile: <$VOIX_MORNING_DATE>/<$VOIX_TILE_ID>
+  embargo: <if folded, the text verbatim; omit otherwise>
+  ---
+
+  <draft body — embargo folded into the first paragraph if applicable>
+
+The body MUST be readable as-is by `sec_send_email` (plain text or \
+HTML based on operator's preference; v0 uses plain text — the \
+`sec_send_email` call in step 3 defaults to `html: false`).
+
+TYPED PROVENANCE (godel §8m). Append one line to \
+`MOLECULE_DIR/provenance.ndjson` recording the SparkedBy link \
+to the parent tile:
+
+  { at: RFC3339 UTC, mol_id: <this>, link: SparkedBy,
+    source: \"~/.cosmon/state/morning/<$VOIX_MORNING_DATE>.md#<$VOIX_TILE_ID>\",
+    pre_draft: \"~/.cosmon/state/morning/<$VOIX_MORNING_DATE>.drafts/<$VOIX_TILE_ID>.md\"
+  }
+
+This honors the §8m invariant (parent synthesis §5.4) that every \
+durable file read into a worker prompt carries an explicit \
+SparkedBy / InformedBy link.
+
+APPEND + FSYNC discipline applies to provenance.ndjson — a kill -9 \
+mid-draft leaves a partial draft on disk AND a usable provenance \
+record that the next worker run can resume from.
+
+After the draft is written, the worker calls `cs evolve` to advance \
+to step 2.
+"""
+acceptance = """
+`<worktree-root>/voix-draft.md` exists with the required frontmatter \
+fields (to, channel, subject if email, in_reply_to, tile) and a \
+non-empty body. If the parent tile declared `embargo: <text>`, the \
+embargo is folded into the draft body as a leading courtesy line — \
+not appended as a postscript. `MOLECULE_DIR/provenance.ndjson` has \
+one SparkedBy row pointing at the parent tile. If \
+`~/.cosmon/autopilot.off` was present at step start, \
+`MOLECULE_DIR/abort.log` exists and the draft file was NOT written.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 2 — permit
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "permit"
+title = "Consult permissions.ndjson + kitchen-window guard; abort if no permit"
+description = """
+KILL-SWITCH CHECK (autopilot.off → write abort.log, exit 0). Honored \
+per-molecule per the kahneman invariant.
+
+PERMISSION LEDGER. Read `.cosmon/state/voix/permissions.ndjson` line \
+by line. The ledger is OPERATOR-APPENDED ONLY — this formula never \
+writes a row. Row schema:
+
+  { at: RFC3339 UTC, recipient, channel,
+    scope: <reply|initial|nudge>,
+    granted_until: RFC3339 UTC,
+    granted_by: <operator-name>,
+    reason: <free text ≤200 chars> }
+
+A row MATCHES the current molecule iff ALL of:
+
+  - row.recipient == $VOIX_RECIPIENT exactly (no glob, no domain
+    suffix — operator must grant per-address).
+  - row.channel   == $VOIX_CHANNEL exactly.
+  - row.scope     contains $VOIX_INTENT (scopes may be a comma-
+    separated list — `reply,nudge` is valid; v0 default is `reply`).
+  - row.granted_until >= now (UTC).
+
+FAILURE MODES — each writes one row to \
+`.cosmon/state/voix/audit.ndjson` (fsync before returning), then \
+hard-aborts:
+
+  (a) No matching row by (recipient, channel) →
+      audit `result: no-row` + `cs stuck \"voix-no-permit <recipient>/<channel>\"`.
+      The operator MUST manually append a row to permissions.ndjson
+      to unblock.
+
+  (b) Row matches (recipient, channel) but `granted_until < now` →
+      audit `result: expired` + `cs stuck \"voix-permit-expired <recipient>/<channel>\"`.
+
+  (c) Row matches (recipient, channel) but scope does not include
+      $VOIX_INTENT → audit `result: scope-mismatch` +
+      `cs stuck \"voix-permit-scope-mismatch <intent>\"`.
+
+KITCHEN-WINDOW GUARD. After the permission row matches, check \
+`~/.config/cosmon/voix.toml`. If the file exists and declares \
+`send_window = [\"HH:MM-HH:MM\", ...]`, compute now-local and \
+verify it falls within at least one declared window. If outside \
+every window:
+
+  audit `result: outside-window` + `cs stuck \"voix-outside-kitchen-window\"`.
+
+If the config file is absent OR `send_window` is unset, no window \
+constraint applies (fail-open by design — config absence means the \
+operator has not opted into the guard, not that the operator has \
+forbidden sending). This is godin's invariant in the synthesis §5.4.
+
+VALID PERMIT. If the row matches and the kitchen window admits the \
+current time, append `result: permit-ok` to audit.ndjson with the \
+matched row's `granted_by` field, then write \
+`MOLECULE_DIR/permit.ok` with one line `permit-ok <recipient> \
+<channel> <intent> <granted_until>` and call `cs evolve` to advance \
+to step 3.
+
+WORKER-CHECKPOINT DISCIPLINE. Append + fsync the audit row BEFORE \
+any side effect (the `cs stuck` call OR the `cs evolve` call). A \
+crash mid-permit leaves a usable audit trail that the operator can \
+read at breakfast — same discipline as curate-patrol step 2.
+
+STOP-AT-END-OF-PERMIT. The worker stops cleanly after calling \
+`cs evolve` to advance to step 3. It DOES NOT execute step 3 in the \
+same session. The molecule now sits at current_step=2 (step 2 done, \
+step 3 pending) awaiting the operator's review of voix-draft.md and \
+the operator-approved marker (see step 3). This is the karpathy \
+`ADR-NEXT-embargo-structural` invariant — the worker NEVER \
+auto-sends.
+"""
+needs = ["draft"]
+acceptance = """
+`.cosmon/state/voix/audit.ndjson` has at least one new row with \
+`mol_id` == this molecule's id and a `result` field set to one of \
+{`permit-ok`, `no-row`, `expired`, `outside-window`, `scope-mismatch`, \
+`kill-switch`}. If `result == permit-ok`, `MOLECULE_DIR/permit.ok` \
+exists. If `result != permit-ok`, the molecule is in `stuck` state \
+with the reason matching the failure mode and `voix-draft.md` is \
+STILL ON DISK (the draft survives the abort so the operator can \
+review and grant a permit row, then re-tackle). The worker did NOT \
+execute step 3 in this session.
+"""
+
+# ---------------------------------------------------------------------------
+# Step 3 — send
+# ---------------------------------------------------------------------------
+
+[[steps]]
+id = "send"
+title = "Dispatch via sec_send_email (operator-gated; worker NEVER auto-sends)"
+description = """
+KILL-SWITCH CHECK (autopilot.off → write abort.log, exit 0).
+
+OPERATOR-APPROVAL GATE — THE LOAD-BEARING DRAFT-BLOCKING INVARIANT. \
+This step MUST refuse to run unless `MOLECULE_DIR/operator-approved.flag` \
+exists AND was created AFTER `voix-draft.md`'s last mtime. The flag \
+is the operator's signed declaration that they reviewed the draft \
+and approved the send. The contract for the flag file:
+
+  - Created by the operator (or by an operator-gated tool, never by
+    this formula or its worker).
+  - Contents: one line — RFC3339 UTC timestamp of the approval +
+    optional free-text rationale. Example:
+      2026-05-22T07:42:11Z reviewed and approved
+  - mtime > voix-draft.md's mtime (so a stale flag from a prior
+    draft revision does not silently approve a fresh draft).
+
+IF THE FLAG IS ABSENT OR STALE → `cs stuck \"voix-no-operator-approval\"`. \
+Append one audit row (`result: no-operator-approval`). The draft \
+stays on disk; the operator can `touch operator-approved.flag` and \
+re-tackle. NEVER fire the send without the flag. If a future worker \
+invocation of this step runs without the flag, that is a structural \
+breach — file a bead immediately and abort with exit 1.
+
+CHANNEL CHECK. v0 implements `email` only.
+
+  - If $VOIX_CHANNEL != \"email\" →
+      `cs stuck \"voix-channel-not-implemented <channel>\"`. The
+      draft survives; permission row survives; this is a deferred-
+      implementation refusal, not a permit failure. Sibling task
+      in `/srv/cosmon/mailroom/` must ship `sec_send_imessage` /
+      `sec_send_whatsapp` / `sec_send_signal` before this branch
+      can be removed.
+
+  - If $VOIX_CHANNEL == \"email\":
+      Read `voix-draft.md` (frontmatter + body). Build the
+      `sec_send_email` call:
+
+        sec_send_email {
+          to:       <to from frontmatter>
+          subject:  <subject from frontmatter>
+          body:     <body, plain text>
+          html:     false  (v0 — explicit; rich HTML is Rung 2+)
+          from:     <operator's default; sec_send_email default>
+          in_reply_to: <in_reply_to from frontmatter, if present>
+        }
+
+      Call via the mailroom MCP tool (the worker has it in scope
+      because mailroom is registered in neurion). Capture the
+      response `msg_id` (RFC 5322 Message-ID or sec_send_email's
+      synthetic id).
+
+INTENT CHECK (Rung 3 deferred branch).
+
+  - If $VOIX_INTENT != \"reply\" →
+      `cs stuck \"voix-intent-not-implemented <intent>\"`.
+
+ON SUCCESS:
+
+  1. Append one row to `.cosmon/state/voix/sent.ndjson`, fsync:
+
+     { at: <now RFC3339 UTC>,
+       mol_id: <this>,
+       to: <recipient>,
+       channel: \"email\",
+       subject: <subject>,
+       in_reply_to: <in_reply_to or null>,
+       msg_id: <from response>,
+       initiator: \"Operator\" }
+
+     The `initiator: Operator` is hard-coded — the operator's
+     `cs evolve` + `operator-approved.flag` is what triggered this
+     send, never the worker's autonomous decision. This honors
+     wheeler's §-causal-attribution invariant (parent synthesis
+     §5.4).
+
+  2. Emit an events.jsonl row (via cosmon's normal event-emission
+     path) with `verb: voix.sent`, `initiator: Operator`,
+     `mol_id: <this>`, `to`, `channel`, `msg_id`.
+
+  3. Call `cs evolve` to advance to molecule completion.
+     The molecule then closes via the normal nucleate → tackle →
+     wait → done cycle (operator runs `cs done` after the worker
+     completes).
+
+ON FAILURE (sec_send_email returns non-zero):
+
+  1. Append one row to `.cosmon/state/voix/sent.ndjson` with a
+     `result: failed` field and the error text. Do NOT remove the
+     draft.
+
+  2. Append one row to audit.ndjson with `result: send-failed`.
+
+  3. DO NOT `cs stuck`. Operator may retry by re-tackling. The
+     draft and the operator-approved.flag survive so the operator
+     can re-run the send without a fresh approval gesture (the
+     intent has not changed).
+
+NEVER:
+
+  - Run `git push`.
+  - Run `cs done` (the operator runs `cs done` after completion).
+  - Run `cs purge`.
+  - Modify `voix-draft.md` (read-only from step 3's perspective).
+  - Modify `.cosmon/state/voix/permissions.ndjson` (operator-only).
+  - Modify `~/.config/cosmon/voix.toml` (operator-only).
+
+The only writes step 3 performs: sent.ndjson, audit.ndjson, the
+events.jsonl row, and the final `cs evolve` to complete the
+molecule.
+"""
+needs = ["permit"]
+acceptance = """
+For a successful send (channel=email, intent=reply, operator-approved \
+flag valid, sec_send_email succeeded): \
+`.cosmon/state/voix/sent.ndjson` has one new row with \
+`mol_id` matching this molecule, `initiator: \"Operator\"`, and a \
+non-empty `msg_id`. The molecule is in `completed` state. \
+`voix-draft.md` is still on disk (the draft is an artifact of \
+record, not consumed). \
+For a refused send (no operator-approved flag, channel != email, \
+or intent != reply): the molecule is in `stuck` state with a reason \
+matching the refusal, the draft is intact, and NO new row appears \
+in sent.ndjson. \
+For a kill-switch abort: `MOLECULE_DIR/abort.log` exists, no \
+sec_send_email call was made, no row appears in sent.ndjson.
+"""

@@ -1,0 +1,33 @@
+# cosmon-rpp-adapter — operator config for the V0 docker-compose deploy.
+#
+# Mounted read-only at `/cosmon/.config/cosmon/rpp.toml` inside the
+# adapter container. Paths use the in-container layout, NOT host paths.
+
+# Bind on every interface so the host's 8443 port-publish reaches the
+# adapter. The compose file pins host-side to `127.0.0.1:8443`, so the
+# tailnet exposure is mediated by `tailscale serve` (auditable).
+bind_addr = "0.0.0.0:8443"
+
+# V0 default — laxities (>15-min JWTs, etc.) are warned, not enforced.
+# Flip to "active" once tenant_auditor's IdP is wired up and short-lived JWTs
+# are the norm.
+posture = "prepared"
+
+# `cs` binary copied into the runtime image (see Dockerfile).
+cs_path = "/usr/local/bin/cs"
+
+# Writable named volume mount target (rpp-state in compose).
+state_dir = "/cosmon/.cosmon/state"
+
+# Keep the inbox under state_dir so it lives on the writable volume.
+# Default would be `<state_dir parent>/whispers/inbox` which lands
+# outside any volume on the read-only image FS.
+whispers_inbox_root = "/cosmon/.cosmon/state/whispers/inbox"
+
+# Bind-mounted tenant root — host `$HOME/galaxies` → container
+# `/cosmon/galaxies` per docker-compose.yml.
+galaxies_root = "/cosmon/galaxies"
+
+# 30 s ceiling — `cs observe` is bounded under a second; this is
+# headroom for cold-start subprocess spawn.
+subprocess_timeout_sec = 30

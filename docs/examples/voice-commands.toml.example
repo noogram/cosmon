@@ -1,0 +1,125 @@
+# voice-commands.toml — operator-editable grammar for `mailroom-voice-pilot`.
+#
+# Copy to ~/.config/cosmon/voice-commands.toml and reload the pilot
+# (no daemon; every invocation re-reads this file).
+#
+# Each [[command]] entry has four fields:
+#
+#   name     = stable id, used in logs and the response template
+#   match    = regex patterns tried in order, first full-match wins
+#              (case-insensitive; use (?P<name>…) for named captures)
+#   action   = shell-split template; {capture} markers are substituted
+#              from the matching regex
+#   response = optional template printed after `cs` returns
+#              ({stdout_last_line} holds the last non-empty stdout line)
+#
+# Keep regexes simple and French-first — Noogram's native register.
+# When in doubt, add an alternative to `match` rather than writing a
+# cleverer pattern.
+
+schema_version = 1
+
+# -------------------------------------------------------------------
+# Nucleation — create a new molecule of a given formula.
+# -------------------------------------------------------------------
+
+[[command]]
+name     = "nucleate-task"
+match    = [
+    '(?:nuclée|nucleate|nouvelle)\s+(?:une\s+)?(?:task|tâche)\s+(?:sur\s+)?(?P<topic>.+)',
+]
+action   = 'cs nucleate task-work --kind task --var topic="{topic}"'
+response = "Nucléée : {stdout_last_line}"
+
+[[command]]
+name     = "nucleate-deep-think"
+match    = [
+    '(?:nuclée|nucleate)\s+(?:un\s+)?deep[- ]?think\s+(?:sur\s+)?(?P<topic>.+)',
+    'délib[ée]re\s+(?:sur\s+)?(?P<topic>.+)',
+]
+action   = 'cs nucleate deep-think --kind deliberation --var question="{topic}"'
+response = "Délibération nucléée : {stdout_last_line}"
+
+[[command]]
+name     = "nucleate-idea-to-plan"
+match    = [
+    '(?:nuclée|nucleate)\s+(?:un\s+)?idea[- ]?to[- ]?plan\s+(?:sur\s+)?(?P<topic>.+)',
+    'plan\s+(?:sur\s+)?(?P<topic>.+)',
+]
+action   = 'cs nucleate idea-to-plan --kind idea --var topic="{topic}"'
+response = "Plan nucléé : {stdout_last_line}"
+
+# -------------------------------------------------------------------
+# Lifecycle — move a molecule through its states.
+# -------------------------------------------------------------------
+
+[[command]]
+name     = "tackle"
+match    = [
+    'tackle\s+(?P<id>[0-9a-f]{4,6})',
+    'lance\s+(?P<id>[0-9a-f]{4,6})',
+    'attaque\s+(?P<id>[0-9a-f]{4,6})',
+]
+action   = 'cs tackle {id}'
+
+[[command]]
+name     = "done"
+match    = [
+    'done\s+(?P<id>[0-9a-f]{4,6})',
+    '(?:termine|ferme)\s+(?P<id>[0-9a-f]{4,6})',
+]
+action   = 'cs done {id}'
+
+# -------------------------------------------------------------------
+# Observability — read-only peek into the fleet.
+# -------------------------------------------------------------------
+
+[[command]]
+name     = "status-hot"
+match    = [
+    '^status$',
+    "^qu'?est-ce qui attend.?$",
+    '^briefing$',
+]
+action   = 'cs ensemble --tag temp:hot'
+response = "{stdout_last_line}"
+
+[[command]]
+name     = "peek"
+match    = ['^peek$', "^montre(?:\\s+(?:l['’])?[ée]tat)?$"]
+action   = 'cs peek --once'
+
+# -------------------------------------------------------------------
+# Curation — tag / untag / promote / demote molecules.
+# -------------------------------------------------------------------
+
+[[command]]
+name     = "later"
+match    = [
+    'later\s+(?P<id>[0-9a-f]{4,6})',
+    'remets\s+(?P<id>[0-9a-f]{4,6})',
+]
+action   = 'cs tag {id} --add temp:warm --remove temp:hot'
+response = "Remis sur l'étagère : {id}"
+
+[[command]]
+name     = "promote"
+match    = ['promote\s+(?P<id>[0-9a-f]{4,6})', 'chauffe\s+(?P<id>[0-9a-f]{4,6})']
+action   = 'cs tag {id} --add temp:hot'
+response = "Promu hot : {id}"
+
+# -------------------------------------------------------------------
+# Kill switches — operator-scoped pauses.
+# -------------------------------------------------------------------
+
+[[command]]
+name     = "stand-down"
+match    = ['^stand[ -]?down$', '^pause\s+secrétariat$']
+action   = 'touch /Users/you/.mailroom/stand-down.lock'
+response = "Secrétariat en stand-down."
+
+[[command]]
+name     = "autopilot-off"
+match    = ['^auto[- ]?pilot\s+off$', '^coupe\s+l?auto[- ]?pilot$']
+action   = 'touch /Users/you/.cosmon/autopilot.off'
+response = "Auto-pilot coupé."

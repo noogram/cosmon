@@ -1,0 +1,106 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
+
+Usage: cs tackle [OPTIONS] <MOLECULE>
+
+Arguments:
+  <MOLECULE>
+          Molecule ID, prefix, or fuzzy name (e.g. "ADR-15", "idea-2026")
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --fleet <FLEET>
+          Fleet to use (default: molecule's fleet)
+
+  -v, --verbose
+          Enable verbose output
+
+      --workdir <WORKDIR>
+          Working directory override (default: .worktrees/{mol-id})
+
+      --json
+          Output in JSON format
+
+      --no-worktree
+          Skip git worktree creation (use current directory)
+
+      --dry-run
+          Skip tmux session — print the prompt to stdout instead
+
+      --permission-mode <PERMISSION_MODE>
+          Permission mode for Claude (default: based on molecule kind)
+
+      --force
+          Kill existing tmux session and respawn (instead of attaching)
+
+      --name <NAME>
+          Override the tmux session name. ASCII alphanumerics and hyphens are kept; everything else is replaced with `-`. Max 50 chars. Default: `{slug}-{shortid}` derived from the molecule topic + id
+
+      --bypass-seal
+          Override the ADR-085 stress-test seal at dispatch (Layer 1).
+          
+          Without this flag, `cs tackle` of a `--class stress-test` molecule refuses dispatch unless `prior.md` + `prior.b3` exist on disk and a matching `cs witness attest` event has been emitted. With it, the runtime writes a typed [`BypassReceipt`](cosmon_core::molecule_class::BypassReceipt) to `<molecule_dir>/bypass-receipt.json` and emits [`EventV2::SealBypassed`](cosmon_core::event_v2::EventV2::SealBypassed), then proceeds with dispatch. **Requires `--bypass-reason "<…>"`** — silent overrides are forbidden by ADR-085 §3.5.
+
+      --bypass-reason <TEXT>
+          One-line reason recorded in the [`BypassReceipt`](cosmon_core::molecule_class::BypassReceipt) when `--bypass-seal` is used.
+          
+          Free-text but non-empty; the runtime refuses a blank reason because the entire point of the receipt is to surface accountability for the override (ADR-085 §3.5).
+
+      --adapter <NAME>
+          Worker-Spawn Port Adapter to dispatch (ADR-097 / C6; ADR-108 Q5a chain).
+          
+          Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
+          
+          Every invocation (with or without the flag) emits an [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`) can answer "which Adapter ran for this molecule?" without parsing shell history.
+
+      --model <MODEL_ID>
+          Per-molecule model pin — the model sibling of `--adapter` (see ADR-097).
+          
+          Resolution order (highest priority first): this flag → formula-step `model = "<id>"` pin → `$COSMON_DEFAULT_MODEL` (else the legacy `$ANTHROPIC_MODEL`) env var → per-galaxy `.cosmon/config.toml::[adapters.<name>].default_model` → global `~/.config/cosmon/config.toml::[adapters.<name>].default_model` → **floor `None`** (cosmon pins no model; the adapter's own default applies — byte-identical to today's no-pin behaviour).
+          
+          **Strong is never inherited.** Every dispatch resolves the model fresh; a strong (frontier) model is reachable only from this flag or a formula-step pin — a positive per-molecule act — never from a config/env *default* that could silently make an entire fleet expensive (the `/model`-hack leak this axis exists to close).
+          
+          The id is carried **opaquely**: cosmon does not check that it is legal for the resolved adapter — the backend rejects an invalid `(adapter, model)` pair at launch (composition validation lands in C5). Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
+
+      --role-hint <ROLE>
+          Forensic-only role-of-origin hint propagated through to [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) (ADR-097 / C6).
+          
+          Cosmon does not interpret this value — it is the academy-shim's channel for preserving the driver's vocabulary (a `--role researcher` invocation on the driver side becomes `role_hint: "researcher"` on the cosmon event), so the role of origin survives the seam between driver (roles) and cosmon (adapters). Optional; absent for direct operator invocations.
+
+      --fallback-from-local <CAUSE>
+          Loud opt-in fallback from the local default to a remote oracle after a *decidable* local hard-failure (Q5b).
+          
+          Pass a [`LocalFailureCause`](cosmon_core::egress::LocalFailureCause) token — `crash`, `oom`, `timeout`, `connection-refused`, or any bespoke string (recorded verbatim as `Other`). This flag is the ONLY path from a local hard-failure to a remote oracle: there is no automatic in-loop fallback. It is meaningful only alongside a remote `--adapter` (claude / openai / anthropic / aider) — combining it with a local adapter is a contradiction and aborts the dispatch.
+          
+          When set, `cs tackle` mints an [`EventV2::LocalFallback`](cosmon_core::event_v2::EventV2::LocalFallback) line in the *same atom* as the `RemoteEgressOptIn` egress grant, so a remote call carrying a fallback cause can never reach the wire without a matching loud audit record — silent fallback is impossible by construction. Soft "the output looked bad" judgement is NOT a valid cause: that is undecidable (Rice) and belongs to acceptance tests, not this routing flag.
+
+      --by <ACTOR>
+          Actor class recording **who** dispatched this molecule — the anti-preemption lease.
+          
+          Accepts `human` (the default when the flag is absent — a direct operator invocation) or `runtime:<pid>` (the resident runtime `cs run` passes its own process id). The value is stamped onto the molecule's [`tackled_by`](cosmon_state::MoleculeData::tackled_by) field when the molecule flips to `Running`, so the walker can enforce "manual always wins": a human-claimed molecule is never raffled by the runtime, even if it briefly returns to `Pending` on a revision. This is `cs tackle`'s only role in the lease — recording the claim; honouring it is the walker's job.
+          
+          [default: human]
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs tackle task-example-0001        # worktree + tmux + Claude (one node)
+  cs tackle <mol> --dry-run           # print the bootstrap prompt
+  cs tackle <mol> --no-worktree       # reuse current directory
+
+`cs tackle` is ALWAYS leaf — it spawns one worker on the named node and
+never walks the DAG. To walk a DAG of N≥1 nodes (1 = leaf, N = full
+orchestration), use `cs run` instead. Human only. Workers never
+self-tackle. Pairs with `cs done`.
+
+The historical `--leaf` and `--force-runtime` flags are deprecated
+no-ops since the verb-unification: the routing decision is now the
+verb itself, not a flag on a polymorphic command.
+
+SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).

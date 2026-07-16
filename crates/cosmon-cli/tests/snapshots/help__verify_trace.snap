@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+`verify-trace` — replay `events.jsonl` against the scheduler spec (Phase 3 CI gate)
+
+Usage: cs verify-trace [OPTIONS] <TRACE>
+
+Arguments:
+  <TRACE>  Path to the `events.jsonl` trace. Use `-` to read from stdin
+
+Options:
+      --config <PATH>  Path to configuration file
+      --skip-unknown   Tolerate lines whose shape is not recognised by `EventV2` or the legacy migration helper — they are counted and skipped instead of failing the whole replay. Required when replaying historical fleet logs that pre-date the canonical schema
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

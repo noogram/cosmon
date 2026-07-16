@@ -1,0 +1,169 @@
+# Cosmon visual charter — single source of truth.
+#
+# This file is loaded by BOTH the ANSI renderer (cs watch, cs run,
+# cs ensemble, cs help charter) and the HTML renderer
+# (cosmon-cockpit-http /charter.css). Neither renderer may invent a
+# role or a status the other does not know. A new concept lands HERE
+# first; the renderers pick it up automatically.
+#
+# Design rules (mid-flight jr consultation, 2026-04-11):
+#
+# 1. HUE encodes ROLE (categorical). A molecule's worker role is what
+#    gives its row a color.
+# 2. STROKE (border language) encodes STATUS. Status never repaints
+#    the fill — it changes the border weight, dash, or opacity.
+# 3. Energy cost uses its own sparkline axis (▁▂▃▄▅▆▇█), independent
+#    of role and status.
+#
+# Daltonian note: the role palette is tuned for deuteranopia +
+# protanopia by keeping hue-pairs wide apart in Lab space. Verified
+# with Coblis / Sim Daltonism before landing.
+
+[meta]
+version = "1"
+# Rationale for the version bump: any renderer that parses this file
+# should refuse to run against a version it does not understand,
+# rather than silently drop concepts it cannot render.
+
+# ---------------------------------------------------------------------------
+# Roles — HUE axis
+# ---------------------------------------------------------------------------
+# Each role is a semantic slot with:
+#   hex        canonical 24-bit color, used verbatim by the HTML renderer
+#              and sent as ANSI TrueColor by the CLI.
+#   name       human-facing color name (used in `cs help charter`).
+#   maps_to    the cosmon-core::agent::AgentRole variant this visually
+#              represents. `null` if the role has no AgentRole peer
+#              (Patrol and Pilot are operational, not domain roles).
+
+[roles.writer]
+hex = "4C9AFF"
+name = "azure"
+maps_to = "Implementation"
+description = "Writes code — the worker tackling a task molecule."
+
+[roles.reviewer]
+hex = "F5A623"
+name = "amber"
+maps_to = "Validation"
+description = "Grades output — A-F review, CI gates."
+
+[roles.fact_checker]
+hex = "D946EF"
+name = "magenta"
+maps_to = "Research"
+description = "Investigates sources — verifies claims, hunts citations."
+
+[roles.editor]
+hex = "10B981"
+name = "emerald"
+maps_to = "Orchestration"
+description = "Coordinates other agents — mayor, mission planner."
+
+[roles.chief]
+hex = "E8E1C4"
+name = "parchment"
+maps_to = "Advisory"
+description = "Strategy and counsel — deliberation panels, elder advisors."
+
+[roles.patrol]
+hex = "94A3B8"
+name = "slate"
+maps_to = "Infrastructure"
+description = "Fleet health watchdog — patrol, propel, resume."
+
+[roles.pilot]
+hex = "EF4444"
+name = "vermilion"
+maps_to = ""
+description = "Human-in-the-loop — you. Also used as the stuck overlay."
+
+# ---------------------------------------------------------------------------
+# Statuses — STROKE axis
+# ---------------------------------------------------------------------------
+# Each status is rendered as a *border language* over the role's hue.
+# The fill stays the role color so operators can spot which crew owns
+# a molecule even at a glance. Only the edge changes.
+#
+#   glyph          Unicode bullet shown in CLI output.
+#   stroke_width   CSS border width in px (HTML only).
+#   stroke_dash    CSS border-style (solid | dashed).
+#   fill_opacity   0..1 multiplier applied to the role hue fill (HTML).
+#   sat_scale      saturation multiplier for the border color (HTML).
+#   overlay        optional role slot whose hue tints the border
+#                  (used by `stuck` to bleed vermilion over any row).
+#   maps_to        the cosmon-core::molecule::MoleculeStatus variant.
+
+[statuses.pending]
+glyph = "○"
+stroke_width = 1
+stroke_dash = "dashed"
+fill_opacity = 0.40
+sat_scale = 1.0
+overlay = ""
+maps_to = "Pending"
+description = "Molecule created, no worker assigned yet."
+
+[statuses.waiting]
+glyph = "◐"
+stroke_width = 2
+stroke_dash = "solid"
+fill_opacity = 1.0
+sat_scale = 0.35
+overlay = ""
+maps_to = "Queued"
+description = "Assigned but not actively running — drained, waiting its turn."
+
+[statuses.active]
+glyph = "●"
+stroke_width = 2
+stroke_dash = "solid"
+fill_opacity = 1.0
+sat_scale = 1.0
+overlay = ""
+maps_to = "Running"
+description = "Live work in progress — the only fully saturated state."
+
+[statuses.stuck]
+glyph = "◉"
+stroke_width = 2
+stroke_dash = "solid"
+fill_opacity = 1.0
+sat_scale = 1.0
+overlay = "pilot"
+maps_to = "Frozen"
+description = "Frozen with a blocker — vermilion overlay calls for the pilot."
+
+[statuses.completed]
+glyph = "◌"
+stroke_width = 1
+stroke_dash = "solid"
+fill_opacity = 0.60
+sat_scale = 0.8
+overlay = ""
+maps_to = "Completed"
+description = "Terminal success — dimmed to fade into background."
+
+[statuses.collapsed]
+glyph = "·"
+stroke_width = 0
+stroke_dash = "solid"
+fill_opacity = 0.15
+sat_scale = 0.5
+overlay = ""
+maps_to = "Collapsed"
+description = "Terminal failure — nearly invisible, recorded for history."
+
+# ---------------------------------------------------------------------------
+# Energy buckets — SPARKLINE axis
+# ---------------------------------------------------------------------------
+# Energy/token cost maps onto the 8 block-sparkline glyphs. The bucket
+# thresholds are the *upper bound* for the bucket in relative units
+# (0..1 across the observed range). Only glyph is needed — there is
+# no color dimension on this axis by design: if we painted cost red
+# it would collide with the stuck overlay.
+
+[energy]
+glyphs = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+thresholds = [0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+description = "Relative token cost rendered as a monochrome sparkline."

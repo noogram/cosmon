@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cosmon-chronicle-lint-weekly — syzygie gendarme (kill-switch preserved).
+
+  Fires once per week, Sunday 09:00 local time. On each fire:
+    1. Nucleates a `chronicle-lint` molecule in the cosmon repo.
+    2. Tackles it in a background tmux session (worker runs the
+       three-step sweep: scan → detect → report).
+    3. Waits on completion (blocks the LaunchAgent process, not the
+       operator — this runs unattended).
+    4. Calls `cs done` to merge the worker's branch and tear down.
+
+  If the lint finds vocabulary drift, it auto-nucleates
+  `bug:vocabulary-drift` molecules tagged `temp:warm`. The operator
+  sees them at the next `cs ensemble --tag temp:warm` sweep — the
+  gendarme never notifies, never escalates. It leaves a pile of bugs
+  for audit.
+
+  Godin quarterly-floor: 12 patrols per quarter ≫ floor of 1.
+
+  NOT auto-installed. The operator must:
+    cp scripts/launchd/cosmon-chronicle-lint-weekly.plist \
+       ~/Library/LaunchAgents/com.noogram.cosmon-chronicle-lint-weekly.plist
+    mkdir -p ~/.cosmon/logs
+    launchctl load ~/Library/LaunchAgents/com.noogram.cosmon-chronicle-lint-weekly.plist
+
+  See docs/guides/syzygie.md §Auto-activation for the full recipe
+  (install, uninstall, on-demand trigger, uninstall).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.noogram.cosmon-chronicle-lint-weekly</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>-lc</string>
+        <string>set -euo pipefail; cd "$HOME/dev/projects/cosmon"; ts=$(date -u +%Y%m%dT%H%M%SZ); log="$HOME/.cosmon/logs/chronicle-lint.log"; mkdir -p "$(dirname "$log")"; { echo "[$ts] chronicle-lint weekly fire"; mol=$(cs --json nucleate chronicle-lint | /usr/bin/awk -F'"' '/"molecule_id"/{print $4; exit}'); echo "[$ts] nucleated $mol"; cs tackle "$mol"; cs wait "$mol" --timeout 3600; cs done "$mol"; echo "[$ts] done $mol"; } &gt;&gt; "$log" 2&gt;&amp;1</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>0</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/you/.cosmon/logs/chronicle-lint.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/you/.cosmon/logs/chronicle-lint.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/you</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/.local/bin:/Users/you/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info</string>
+    </dict>
+</dict>
+</plist>

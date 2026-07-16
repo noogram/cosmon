@@ -1,0 +1,112 @@
+# Pathology: `cs run` exits on a collapsed mission-controller and orphans
+# the decomposed children, leaving them Pending forever.
+#
+# Shape:
+#   D  --Blocks-->  M  --Blocks-->  P
+#                   +--DecayProduct--> C1, C2
+#
+# M's step 2 fails (modeling a quality-gate collapse / mid-step crash).
+# A collapse RELEASES forward `Blocks` dependents rather than cascading
+# (task-20260706-4d1e — blocked-by releases on done, not on verdict), so P
+# is unblocked and runs to completion. C1/C2 are lateral artifacts that
+# must also drain because their work was already materialized by M's
+# decomposition.
+#
+# Post-fix (option B — see DIAGNOSIS-mission-collapse.md): C1 and C2 run
+# to completion. Pre-fix (Engine::decay_collapse_releases = false) they
+# stay Pending — the `inline_collapsed_mission_pre_fix_is_red` test in
+# crates/cosmon-scenario/tests/scenarios.rs pins that negative result.
+
+[scenario]
+name = "collapsed-mission-orphans-children"
+description = "Lateral decomposition children run even when their parent collapses."
+
+[binds]
+constitution_clause = "cs-run-drains-both-axes"
+foundry_proposition = "DecayChildrenReach_Terminal_UnderParentCollapse"
+
+# ---- Mission tree -----------------------------------------------------
+
+[[given.molecules]]
+id = "D"
+kind = "deliberation"
+steps = [ { name = "s1", native = "cosmon::test::noop" } ]
+
+[[given.molecules]]
+id = "M"
+kind = "task"
+# Step 1 succeeds (simulating decomposition having materialized C1, C2).
+# Step 2 fails (simulating the quality-gate collapse before M completes).
+steps = [
+  { name = "decompose",     native = "cosmon::test::noop" },
+  { name = "quality_gate",  native = "cosmon::test::fail" },
+]
+
+[[given.molecules]]
+id = "P"
+kind = "task"
+steps = [ { name = "compile", native = "cosmon::test::noop" } ]
+
+# Lateral decomposition children of M.
+[[given.molecules]]
+id = "C1"
+kind = "task"
+steps = [ { name = "work", native = "cosmon::test::noop" } ]
+
+[[given.molecules]]
+id = "C2"
+kind = "task"
+steps = [ { name = "work", native = "cosmon::test::noop" } ]
+
+# ---- Links -----------------------------------------------------------
+
+[[given.links]]
+from = "D"
+to = "M"
+kind = "Blocks"
+
+[[given.links]]
+from = "M"
+to = "P"
+kind = "Blocks"
+
+[[given.links]]
+from = "M"
+to = "C1"
+kind = "DecayProduct"
+
+[[given.links]]
+from = "M"
+to = "C2"
+kind = "DecayProduct"
+
+# ---- Action ----------------------------------------------------------
+
+[[actions]]
+op = "run_root"
+target = "P"
+
+# ---- Assertions ------------------------------------------------------
+
+# Forward axis: D completed, M collapsed, P released and run to completion
+# (collapse releases, does not cascade — task-20260706-4d1e).
+[[assert]]
+molecule = "D"
+status = "completed"
+
+[[assert]]
+molecule = "M"
+status = "collapsed"
+
+[[assert]]
+molecule = "P"
+status = "completed"
+
+# Lateral axis (the fix): DecayProduct children still drain.
+[[assert]]
+molecule = "C1"
+status = "completed"
+
+[[assert]]
+molecule = "C2"
+status = "completed"

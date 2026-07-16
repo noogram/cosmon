@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Attest a stress-test molecule's prior seal — emit `SealAttested`
+
+Usage: cs witness attest [OPTIONS] <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID (or prefix) to attest. Must be a stress-test class molecule (ADR-085 §1); standard-class molecules are refused so a witness cannot accidentally lend weight to a tactical deliberation
+
+Options:
+      --config <PATH>      Path to configuration file
+      --prior-path <PATH>  Path to the operator-sealed prior. Defaults to `<molecule_dir>/prior.md`. The witness opens this file, computes its BLAKE3 hash, and records that hash in the [`EventV2::SealAttested::prior_b3`](cosmon_core::event_v2::EventV2::SealAttested) field. **The witness never inspects the file's content beyond the bytes-to-hash transformation.**
+  -v, --verbose            Enable verbose output
+      --witness-id <ID>    Override the witness identity. Defaults to the [`cosmon_runtime::resolve_witness_id`] heuristic (`$TMUX` first, then `<host>-<pid>`). Useful for `LaunchAgent` / CI invocations that want a deterministic identity
+      --json               Output in JSON format
+  -h, --help               Print help

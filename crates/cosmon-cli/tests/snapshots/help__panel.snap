@@ -1,0 +1,42 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
+
+Usage: cs panel [OPTIONS] <COMMAND>
+
+Commands:
+  convene  Seat the panel deterministically from the artifact hash and print it
+  decide   Tally ballots from the seated panel, emit verdict, inscribe role-log
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  git diff main | cs panel convene                   # seat the panel from the staged diff
+  cs panel convene --diff change.patch               # seat from a diff file
+  cs panel convene --diff change.patch --json        # NDJSON for scripting
+  cs panel decide --diff change.patch \
+    --vote wheeler=approve --vote torvalds=refuse:breaks I1 \
+    --vote feynman=approve --vote shannon=approve \
+    --vote jobs=approve --out panel.role-log.json    # tally + inscribe role-log
+
+Convene a hash-pinned supermajority panel to gate a *constitutional*
+amendment — anything operator-uncapturable, a forbid_operator_* lint, or a
+new operator_* field. The cost of amendment rises from O(1 PR) to
+O(panel convocation): what was legislative becomes constitutional.
+
+A panel is a fixed constitutional CORE (default wheeler,torvalds,feynman,
+shannon) plus rotating SEAT(S) drawn from a POOL by hashing the diff. The
+rotating seat is a pure function of the diff, so the convener cannot pick a
+friendly judge after seeing the test (audience-after-the-test, delib
+20260503-5a74). `decide` refuses ballots from non-panelists and refuses to
+rule until every seat has voted. Verdict needs a 4/5 supermajority (--rule).
+
+EXIT CODES (decide): 0 approve, 2 refuse, 1 error.
+
+SEE ALSO: cs notarize (operator Ed25519 attestation), cs witness (quorum seal).

@@ -1,0 +1,35 @@
+TLC2 Version 2026.04.18.033656 (rev: c45c125)
+Running breadth-first search Model-Checking with fp 77 and seed 6979048509796431585 with 1 worker on 16 cores with 27300MB heap and 64MB offheap memory [pid: 75532] (Mac OS X 26.4.1 aarch64, Homebrew 17.0.18 64bit, MSBDiskFPSet, DiskStateQueue).
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/CosmonRunXGalaxy.tla
+Parsing file /srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/CosmonRun.tla
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/_TLCTrace.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/_TLCTrace.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/Naturals.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Naturals.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/FiniteSets.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/FiniteSets.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/Sequences.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Sequences.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/TLC.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLC.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/TLCExt.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/TLCExt.tla)
+Parsing file /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/tlc-2322568059902841405/Integers.tla (jar:file:/srv/cosmon/cosmon/.worktrees/task-20260419-29f1/docs/specs/tla2tools.jar!/tla2sany/StandardModules/Integers.tla)
+Semantic processing of module Naturals
+Semantic processing of module Sequences
+Semantic processing of module FiniteSets
+Semantic processing of module TLC
+Semantic processing of module CosmonRun
+Semantic processing of module Integers
+Semantic processing of module TLCExt
+Semantic processing of module _TLCTrace
+Semantic processing of module CosmonRunXGalaxy
+Linting of module CosmonRun
+Linting of module TLCExt
+Linting of module _TLCTrace
+Linting of module CosmonRunXGalaxy
+Starting... (2026-04-19 22:55:17)
+Computing initial states...
+Finished computing initial states: 1 distinct state generated at 2026-04-19 22:55:17.
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 5.9E-13
+10105 states generated, 1224 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 14.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 9 and the 95th percentile is 3).
+Finished in 00s at (2026-04-19 22:55:17)

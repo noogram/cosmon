@@ -1,0 +1,169 @@
+formula = "session-route"
+version = 1
+description = """
+Tier-1 regex classifier over session carnet notes (ADR-072). For each \
+note in `.cosmon/state/sessions/session-*.md`, compute \
+`body_hash = blake3(body)`, apply the regex cascade in \
+`crates/cosmon-cli/src/cmd/route.rs`, and emit one sidecar at \
+`.cosmon/state/sessions/.route/<sid>/blake3-<hash>.json`. High-\
+confidence proposals are auto-staged as `temp:proposed` molecules; \
+low-confidence notes land as `tier4_pending` awaiting operator \
+verdict (verdict-door is `task-20260424-69c1`).
+
+This formula **supersedes** `session-to-spark` as the load-bearing \
+path from carnet to molecule. The `!spark ` prefix lives on as one \
+regex rule inside Tier 1 — existing operator muscle memory keeps \
+working. Tiers 2–4 (local LLM, cloud LLM, human verdict-door) are \
+future work; v0 ships Tier 1 + sidecar infrastructure.
+
+**Mechanism is shell-thin.** The only glue is \
+`scripts/session-route-tick.sh`, a LaunchAgent-friendly wrapper over \
+`cs session route --all --json`. All classification, hashing, \
+sidecar writing, and molecule nucleation live in the Rust \
+implementation — type-checked, unit-tested against the 11-note \
+benchmark corpus, and reachable from both the tick and \
+`cs session route` directly.
+
+**Idempotent** (invariant I2). A note whose `blake3(body)` already \
+has a matching sidecar at the current `router_version` is skipped \
+with no I/O. Re-running the formula at the same version is a no-op.
+
+**Append-only** (invariant I3). Bumping `router_version` (currently \
+`route-v1-2026-04-24`) does not overwrite existing sidecars — new \
+runs write alongside the old file with a version-suffixed name so \
+history is a trace, not a tombstone.
+
+**Carnet untouched** (invariant I4). The session `*.md` file is \
+never opened for write. BLAKE3 seal stays valid forever. All routing \
+metadata lives on sidecars.
+
+**Respects §8b (seal-as-trace), §8j (ingress), §8f (data-plane).** \
+The DAG carries 1 bit per note (routed / not); the filesystem \
+carries the sidecar + optional staged molecule. No mailboxes, no \
+message queue.
+
+**ARTIFACT PATHS** — all artifacts (`scan.md`, `report.md`) MUST be \
+written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files \
+written to the worktree (`.worktrees/{mol_id}/`) are destroyed by \
+`cs done`.
+
+Variables (all optional):
+  - `session`    — restrict to one session (file stem or path); \
+                     default: every session-*.md.
+  - `dry_run`    — set to `"1"` to classify without writing sidecars \
+                     or nucleating molecules.
+  - `no_stage`   — set to `"1"` to write sidecars only; skip \
+                     `temp:proposed` molecule nucleation.
+"""
+id_prefix = "task"
+freeze_on_last_step = false
+
+# Tier 0 — leaf formula. Each proposed molecule is a child emitted via
+# `cs nucleate` through the normal path, tagged `temp:proposed` (not
+# `temp:hot`). The operator promotes via the verdict-door.
+[tier]
+level = 0
+
+[vars.session]
+description = "Restrict to one session (file stem or absolute path)."
+required = false
+default = ""
+
+[vars.dry_run]
+description = "Set to `1` to classify without writing sidecars or staging."
+required = false
+default = "0"
+
+[vars.no_stage]
+description = "Set to `1` to write sidecars only, skip molecule nucleation."
+required = false
+default = "0"
+
+[[steps]]
+id = "scan"
+title = "Scan the session notes (dry-run classification)"
+description = """
+List every note in every session file under \
+`.cosmon/state/sessions/session-*.md` (or just the one named by the \
+`session` variable). For each note, record: session_id, note_ts, \
+body_hash, tier1 verdict (axes + proposed_action), terminal flag, \
+and whether a sidecar is already on disk.
+
+Delegate to `cs session route --all --dry-run --json` (or with \
+`<session>` when the `session` variable is set). Capture the NDJSON \
+and render a table into MOLECULE_DIR/scan.md:
+
+  | session_id | note_ts | body_hash | proposed_action | terminal | sidecar_exists |
+
+End with a one-line summary: N notes found, K already routed, M \
+pending classification.
+
+MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — never the worktree.
+
+This step performs NO state mutation. It is the dry-run of step 2.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with the tier-1 classification preview."
+
+[[steps]]
+id = "route"
+title = "Route each note, write sidecars, stage temp:proposed molecules"
+description = """
+For every note whose `blake3(body)` sidecar is not yet on disk at the \
+current `router_version`:
+
+  1. Classify via Tier-1 regex.
+  2. Write a sidecar at \
+     `.cosmon/state/sessions/.route/<sid>/blake3-<hash>.json` with \
+     the full schema from ADR-072 §3 (note_id, body_hash, \
+     router_version, prompt_version, axes, confidences, \
+     proposed_action, decided_by, decided_at).
+  3. If `min(confidence) >= 0.75` and `proposed_action` nucleates a \
+     formula, call `cs nucleate spark` with tags `temp:proposed`, \
+     `source:session`, `stream:session-route`, \
+     `session-note:<sid>@<ts>`, and `--no-parent`.
+  4. If the classifier escalates, write a `tier4_pending` sidecar \
+     with `axes: null` — the verdict-door (task-20260424-69c1) will \
+     surface these for operator review.
+
+**Preferred implementation**: delegate to \
+`cs session route --all --json` (or with `<session>` from the \
+variable). The Rust implementation handles the full pipeline.
+
+If the `dry_run` variable is `"1"`, pass `--dry-run`. If the \
+`no_stage` variable is `"1"`, pass `--no-stage`.
+
+Record the NDJSON stdout in MOLECULE_DIR/tick.ndjson (one line per \
+processed note + one `tick_complete` summary).
+"""
+needs = ["scan"]
+acceptance = """
+MOLECULE_DIR/tick.ndjson exists. Every note in scan.md is either \
+(a) referenced by a sidecar on disk with matching router_version, \
+(b) logged as `note_skipped` with reason `already_routed` or \
+`empty_body`, or (c) logged as `stage_failed` with the nucleate \
+error stderr. No note is silently lost.
+"""
+
+[[steps]]
+id = "report"
+title = "Produce the report"
+description = """
+Synthesize MOLECULE_DIR/report.md from scan.md + tick.ndjson:
+
+  - **Top-line counts**: found / emitted / staged / skipped / empty / \
+    stage_failed — copied from the `tick_complete` NDJSON line.
+  - **Per-staged-molecule table**: mol_id | session | note_ts | \
+    proposed_action | body excerpt (≤ 80 chars).
+  - **Tier-4 pending table** (if any): sidecar path | session@note_ts \
+    | excerpt — these are what the verdict-door will show.
+  - **Skipped / failed table** (if any): session@note_ts | reason.
+  - **Next tick recommendation**: when active under LaunchAgent, \
+    `every 300s`; when manual, `cs session route --all`.
+
+Keep the file short — one page. Operator scans it, acknowledges, \
+moves on.
+"""
+needs = ["route"]
+acceptance = "MOLECULE_DIR/report.md written with top-line counts, per-staged and tier-4 pending tables."

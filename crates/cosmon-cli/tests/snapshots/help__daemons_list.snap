@@ -1,0 +1,13 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List declared daemons (reads `daemons.toml`, no state)
+
+Usage: cs daemons list [OPTIONS]
+
+Options:
+      --config <PATH>  Path to the daemons config file. Defaults to `~/.config/cosmon/daemons.toml`
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

@@ -1,0 +1,243 @@
+formula = "retrospective"
+version = 1
+description = """
+Self-referential retrospective sweep — cosmon observes its own event \
+log and backlog, detects dysfunctions, and nucleates follow-up task \
+molecules. The system watches itself learn, then learns from what \
+it watched. IT FROM BIT applied to operations.
+
+Scope. A retrospective reads the authoritative signals a cosmon \
+project already emits — the `events.jsonl` chain, the current \
+ensemble snapshot, the patrol diagnostic — and classifies deviations \
+into a small, typed set of dysfunctions. For each distinct \
+dysfunction, it proposes a concrete fix as a `task-work` child \
+molecule, tagged `temp:warm` (so it appears in ensemble sweeps and \
+temp-review without being silently escalated to hot).
+
+Rationale. Cosmon already encodes the substrate primitives for \
+retrospection (`cs events stats|validate|query`, `cs patrol --json`, \
+`cs ensemble --json`). What was missing was the formula that \
+*composes them into a cognitive loop* — analyse, propose, report. \
+This formula closes that loop without adding a new command: it is a \
+pure formula over existing primitives, obeying the composability \
+principle (extend by formula, not by new infrastructure).
+
+Non-goals. This sweep does NOT fix dysfunctions automatically; it \
+proposes them as tagged tasks for human triage. It does NOT enforce \
+thresholds beyond the simple heuristics below — a smarter analyser \
+can land later as a successor formula. It does NOT replace \
+`cs patrol` for health-checking; patrol is real-time, this is \
+retrospective (post-hoc over the event log).
+
+Interface note. The task brief originally described a `cs analyze \
+--json` command that does not exist in the current binary. This \
+formula substitutes the composition of the three real primitives \
+above, emitted into a single `findings.json` artifact under the \
+molecule directory. If a future `cs analyze` lands, the analyse step \
+can collapse to a single invocation without changing the rest of the \
+formula.
+
+ARTIFACT PATHS — all artifacts (findings.json, report.md) MUST be \
+written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field (typically \
+`.cosmon/state/fleets/default/molecules/{mol_id}/`). Files written \
+to the worktree are DESTROYED when `cs done` tears the session down.
+
+No variables required — the sweep operates on the project it is \
+nucleated in.
+"""
+id_prefix = "retro"
+freeze_on_last_step = false
+
+# Tier 1 — the nucleate step may create `task-work` child molecules
+# (one per distinct dysfunction finding, hard-capped at 10 per run by
+# the rate-limit guard). Bounded count, not unbounded growth.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "analyze"
+title = "Analyse the event log and ensemble state"
+description = """
+Gather diagnostic signal from the three substrate primitives and \
+write a single structured findings document. MOLECULE_DIR is the \
+`molecule_dir` field from `cs --json observe {mol_id}` — NEVER the \
+worktree.
+
+Primitives to compose:
+
+  a. **Event log statistics** — `cs events stats --json`. Read the \
+     per-variant counts and timestamp window. Derive ratios:
+       - `completed / nucleated` — molecule completion rate.
+       - `collapsed / nucleated` — mortality rate.
+       - `stuck / nucleated` — stuck rate (any > 0 is suspicious).
+       - `killed / spawned` — worker violent-death rate.
+
+  b. **Event log validation** — `cs events validate --json`. Any \
+     non-empty `errors` array is a finding — the chain has schema \
+     or sequencing violations that break retrospection itself.
+
+  c. **Patrol snapshot** — `cs patrol --json`. Extract \
+     `stalled_workers`, `error_workers`, `orphaned_molecules`, and \
+     the `recommendations` list. Each non-empty array is a finding.
+
+  d. **Ensemble snapshot** — `cs ensemble --json`. Count pending \
+     molecules older than 72h with no `temp:*` tag (untagged \
+     sediment per the temp-review contract). Count any molecule \
+     whose `updated_at` is older than 14 days and still pending \
+     (long-tail stalls).
+
+Classification. Emit one **finding** per distinct dysfunction. Each \
+finding is a record with this minimum shape:
+
+```
+{
+  \"id\": \"short-slug\",
+  \"category\": \"event_chain\" | \"worker_health\" | \"backlog_hygiene\" | \"throughput\",
+  \"severity\": \"low\" | \"medium\" | \"high\",
+  \"title\": \"one-line description\",
+  \"evidence\": { … counts, ratios, molecule ids … },
+  \"suggested_fix\": \"one or two sentences of concrete next action\"
+}
+```
+
+Write `MOLECULE_DIR/findings.json` as a JSON document with shape:
+
+```
+{
+  \"generated_at\": \"<ISO8601>\",
+  \"project\": \"<repo name>\",
+  \"window\": { \"first_event\": \"…\", \"last_event\": \"…\" },
+  \"findings\": [ … ],
+  \"summary\": {
+    \"total\": N,
+    \"by_severity\": { \"high\": H, \"medium\": M, \"low\": L },
+    \"by_category\": { … }
+  }
+}
+```
+
+Baseline heuristics (keep them simple; a smarter analyser can land \
+later as a successor formula):
+
+  - `completed / nucleated < 0.5`  → finding (throughput / medium).
+  - `collapsed / nucleated > 0.3`  → finding (throughput / medium).
+  - `stuck > 0`                    → finding (worker_health / high).
+  - `killed / spawned > 0.1`       → finding (worker_health / medium).
+  - any `events validate` error    → finding (event_chain / high).
+  - any stalled/error/orphaned     → one finding each (worker_health / medium).
+  - untagged pending > 72h         → one finding (backlog_hygiene / low).
+  - pending updated_at > 14d       → one finding per molecule (backlog_hygiene / low).
+
+If the analyser finds ZERO dysfunctions, that is a valid outcome — \
+record a single `\"status\": \"clean\"` finding with severity `low` \
+so the downstream steps have something to report and the operator \
+has positive evidence of health. NEVER emit an empty findings array.
+"""
+acceptance = "MOLECULE_DIR/findings.json written with a well-formed JSON document: generated_at, window, findings array (≥1, including the clean-sentinel if no dysfunctions detected), and summary counts by severity and category."
+
+[[steps]]
+id = "nucleate"
+title = "Nucleate a task-work molecule per finding"
+description = """
+Read `MOLECULE_DIR/findings.json` from the previous step. For each \
+finding whose severity is `medium` or `high` AND whose `id` is not \
+`status-clean`, nucleate a `task-work` child molecule with a \
+structured topic.
+
+Nucleation template (concrete CLI call):
+
+```
+cs nucleate task-work \\
+  --var topic=\"retrospective/<finding.id>: <finding.title> — fix: <finding.suggested_fix>\"
+```
+
+Immediately after each `cs nucleate`, apply the preventive-curation \
+tags (CLAUDE.md rule — any decomposition step MUST auto-tag its \
+children):
+
+```
+cs tag <child_id> --add temp:warm
+cs tag <child_id> --add retro:<finding.category>
+```
+
+The `retro:<category>` tag is the retrospective-scoped label so a \
+later `cs ensemble --tag retro:event_chain` (etc.) surfaces only \
+the follow-ups of this sweep without conflating them with unrelated \
+tasks.
+
+Findings with severity `low` are NOT auto-nucleated — they are \
+logged to the report but left for the operator to triage. This \
+prevents backlog flooding from low-signal sediment.
+
+Rate-limit guard — if the step would nucleate more than 10 molecules \
+in a single run, STOP at 10 and write an explicit `## Overflow` \
+section to the report (step 3): *N findings eligible, only first 10 \
+nucleated — re-run after addressing the first batch.* This prevents \
+a broken heuristic or a pathological state from flooding the \
+backlog. Same guard as chronicle-lint.
+
+Record every nucleated molecule's id alongside its source finding \
+id in the running notes so step 3 can produce the decisions table. \
+A convenient convention: append one line per nucleation to \
+`MOLECULE_DIR/nucleations.log` of the form `<finding.id>\\t<child_id>`.
+"""
+needs = ["analyze"]
+acceptance = "For each medium/high finding in findings.json (up to 10), a task-work child molecule has been nucleated and tagged `temp:warm` + `retro:<category>`. Nucleated molecule ids are recorded in MOLECULE_DIR/nucleations.log with their source finding ids. Low-severity and clean-sentinel findings are NOT nucleated."
+
+[[steps]]
+id = "report"
+title = "Produce the retrospective report"
+description = """
+Write `MOLECULE_DIR/report.md` (MOLECULE_DIR from `cs --json observe \
+{mol_id}` — NEVER the worktree) summarising the sweep. Required \
+sections:
+
+```
+# Retrospective — {date}
+
+## Project pulse
+- Window: {first_event} → {last_event}
+- Total events: N
+- Findings: T total (H high, M medium, L low)
+- Nucleated: K child molecules (capped at 10)
+
+## Findings table
+| Finding ID | Category | Severity | Title | Evidence | Nucleated molecule |
+|------------|----------|----------|-------|----------|--------------------|
+| … | … | … | … | … | … (or `—` for low / skipped) |
+
+## Suggested fixes
+Per medium/high finding, a short paragraph pairing the evidence to \
+the suggested fix and the child molecule id. Keep each paragraph to \
+three lines or fewer — the operator scans this, the child molecule \
+carries the full brief.
+
+## Overflow (optional)
+Present ONLY if the rate-limit guard fired. Cite the total eligible \
+finding count and the batch that was nucleated; recommend the \
+operator close the batch before re-running.
+
+## Trends (optional but recommended)
+If a previous `retrospective` report exists in the project (look for \
+the most recent `retro-*` molecule with a `report.md` in its \
+molecule_dir), compare: which findings are recurring, which were \
+resolved, which are new. One sentence per trend.
+
+## Next sweep
+Recommend a cadence — default: run again in 14 days, or sooner if a \
+high-severity finding lands before then.
+```
+
+Non-goals to reaffirm in the report epilogue:
+
+  - This sweep does NOT fix dysfunctions. It proposes, tags, and \
+    reports; the operator (or downstream agents) resolve.
+  - This sweep is retrospective. Real-time health belongs to \
+    `cs patrol`.
+  - Low-severity findings are intentionally NOT nucleated — they \
+    live in the report for operator judgment.
+"""
+needs = ["nucleate"]
+acceptance = "MOLECULE_DIR/report.md written with: project pulse, findings table with Nucleated-molecule column, per-finding suggested-fix paragraphs, overflow section iff the guard fired, optional trends, and next-sweep cadence."

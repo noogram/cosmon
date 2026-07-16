@@ -1,0 +1,198 @@
+formula = "session-to-spark"
+version = 1
+description = """
+Convert qualifying notes from session carnets \
+(`.cosmon/state/sessions/session-*.md`) into `spark` molecules. This \
+is the session-side sibling of `whisper-to-spark`: same mechanism, \
+different ingress channel. Where whispers arrive from Matrix, session \
+notes come from the operator's own carnet — same §8j ingress, same \
+spark target.
+
+**Two selection modes** (the tick script handles both):
+  1. **Prefix syntactic** — any note whose body begins with `!spark ` \
+     is auto-promoted, prefix stripped, on every run. Run via the \
+     LaunchAgent for passive automation, or manually with \
+     `bash scripts/session-to-spark-tick.sh`.
+  2. **Explicit list** — `cs session promote <note_ts>` (or a \
+     `--promote-notes <session_id>@<ts>,...` flag on the tick script) \
+     promotes specific notes regardless of prefix. Used when the \
+     operator decides after-the-fact that a plain note is actually a \
+     task.
+
+**Mechanism is shell-only.** The heavy lifting lives in \
+`scripts/session-to-spark-tick.sh` — parse YAML frontmatter, emit \
+ASCII-US-separated records per note, invoke `cs nucleate spark`, write \
+a sidecar marker. No LLM is required for a single tick. The LaunchAgent \
+companion (`scripts/launchd/dev.noogram.cosmon.session-to-spark.plist`) \
+fires the same script every 5 minutes with `--all-spark-prefix`; this \
+formula is the manual / semantically-tracked entry point.
+
+**Idempotent.** Sessions are sealed (BLAKE3, §8b) and MUST NOT be \
+mutated. Promotion markers live in a **sidecar** directory: \
+`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md`. Presence of \
+the sidecar = "already promoted, skip". Sidecar body records the spark \
+id, promoted_at, and nucleon — a self-contained audit record.
+
+**Respects §8j (ingress).** The session is the operator's human-carnet \
+ingress port; this formula converts a note into a typed spark molecule \
+with full `source:session` + `stream:session-to-spark` + \
+`session-note:<sid>@<ts>` traceability. `nucleon_id` propagates from \
+the session frontmatter's `operator` field — same §8j discipline as \
+whispers propagating `sender_nucleon_id`.
+
+**Respects §8b (seal is a trace).** Sessions are BLAKE3-sealed at \
+`cs session end`. We NEVER rewrite the session file to record a \
+promotion — that would silently invalidate the seal and erase the \
+trace. Sidecar-only.
+
+**Respects ADR-016 (no daemon in core).** One-shot formula, fired on \
+demand by the operator or on a cadence by an external scheduler \
+(LaunchAgent). Between ticks, nothing runs.
+
+**ARTIFACT PATHS** — all artifacts (`scan.md`, `report.md`) MUST be \
+written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files written \
+to the worktree (`.worktrees/{mol_id}/`) are destroyed by `cs done`.
+
+Variables (all optional):
+  - `session`        — restrict to one session (file stem or path); \
+                        default: every session-*.md under sessions/.
+  - `promote_notes`  — comma-separated `<session_id>@<ts>` pairs \
+                        (or plain `<ts>` shorthand when `session` is \
+                        set). These notes are promoted regardless of \
+                        the `!spark ` prefix.
+  - `all_spark_prefix` — set to `"1"` (default when both `session` \
+                          and `promote_notes` are empty) to promote \
+                          every note beginning with `!spark `.
+"""
+id_prefix = "task"
+freeze_on_last_step = false
+
+# Tier 0 — leaf formula. Each spark molecule emitted IS a child
+# molecule, but it is emitted via the normal `cs spark` path (through
+# `cs nucleate spark` in the tick) with its own `nucleon_id` and
+# traceability tags — not as a silent decay product of this formula.
+# `temp:hot` is applied to each spark at birth so the operator sees
+# them immediately in `cs inbox`.
+[tier]
+level = 0
+
+[vars.session]
+description = "Restrict to one session (file stem or absolute path)."
+required = false
+default = ""
+
+[vars.promote_notes]
+description = "Comma-separated <session_id>@<ts> (or just <ts> when `session` is set)."
+required = false
+default = ""
+
+[vars.all_spark_prefix]
+description = "Set to `1` to promote every !spark-prefixed note (default)."
+required = false
+default = "1"
+
+[[steps]]
+id = "scan"
+title = "Scan the session notes"
+description = """
+List every note in every session file under \
+`.cosmon/state/sessions/session-*.md` (or just the one named by the \
+`session` variable). For each note, record: session_id, note_ts, \
+tag, body excerpt (≤ 80 chars), has_!spark_prefix, \
+already_promoted (sidecar presence), will_promote (given the \
+selection mode).
+
+Delegate to `bash scripts/session-to-spark-tick.sh --dry-run --json` \
+with the worker's `--var` flags forwarded as `--session`, \
+`--promote-notes`, and `--all-spark-prefix`. Capture the NDJSON and \
+render a table into MOLECULE_DIR/scan.md:
+
+  | session_id | note_ts | tag | has_prefix | already_promoted | will_promote | excerpt |
+
+End with a one-line summary: N notes found, K already promoted, \
+M pending materialization.
+
+MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}` — never the worktree.
+
+This step performs NO state mutation. It is the dry-run of step 2.
+"""
+acceptance = "MOLECULE_DIR/scan.md written with the note inventory and dry-run outcome."
+
+[[steps]]
+id = "materialize"
+title = "Nucleate a spark per selected note, write sidecars"
+description = """
+For each note selected by the selection mode (prefix and/or explicit \
+list), and whose sidecar under \
+`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md` does NOT yet \
+exist:
+
+  1. Parse the note heading (ts, tag) and body.
+  2. Strip the `!spark ` prefix from the body (if present).
+  3. Invoke `cs nucleate spark` with:
+       --var topic=<stripped_body>
+       --var nucleon_id=<from session frontmatter `operator` field>
+       --var session_source=<session file path>
+       --var session_id=<session_id>
+       --var note_timestamp=<HH:MM:SS>
+       --var note_tag=<tag>  (only when non-empty)
+       --tag temp:hot
+       --tag source:session
+       --tag stream:session-to-spark
+       --tag session-note:<session_id>@<HH-MM-SS>
+       --no-parent
+  4. Write sidecar `<session_id>/<HH-MM-SS>.md` with frontmatter \
+     (spark_id, promoted_at, nucleon_id, source=prefix|explicit).
+
+**Preferred implementation**: delegate to \
+`bash scripts/session-to-spark-tick.sh --json` (run from the project \
+root). The script already implements the loop; the worker only needs \
+to invoke it and capture the NDJSON. Forward `session`, \
+`promote_notes`, and `all_spark_prefix` vars as `--session`, \
+`--promote-notes`, `--all-spark-prefix` flags.
+
+If the shell script is unavailable or the worker wants a dry-run first \
+(see step 1), the loop can also be implemented step-by-step. Either \
+way, keep the TAG list above exactly as specified — downstream \
+consumers (`cs ensemble --tag source:session`) depend on it.
+
+Record the NDJSON stdout in MOLECULE_DIR/tick.ndjson (one line per \
+processed note + one `tick_complete` summary line).
+"""
+needs = ["scan"]
+acceptance = """
+MOLECULE_DIR/tick.ndjson exists. Every note that was selected in \
+scan.md is now either (a) referenced by a fresh spark molecule tagged \
+`source:session` AND has a sidecar under \
+`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md`, or (b) logged \
+as a `note_rejected` / `note_failed` / `note_skipped` line with a \
+reason.
+"""
+
+[[steps]]
+id = "report"
+title = "Produce the report"
+description = """
+Synthesize MOLECULE_DIR/report.md from scan.md + tick.ndjson:
+
+  - **Top-line counts**: found / sparked / skipped / failed — copied \
+    verbatim from the `tick_complete` NDJSON line.
+  - **Per-spark table**: spark_id | session | note_ts | tag | body \
+    excerpt (≤ 80 chars).
+  - **Skipped table** (if any): session@note_ts | reason \
+    (`already_promoted`).
+  - **Rejected/failed table** (if any): session@note_ts | reason | \
+    stderr excerpt.
+  - **Selection mode summary**: which of `prefix` / `explicit` / `both` \
+    was active this tick.
+  - **Next tick recommendation**: when active under LaunchAgent, \
+    `every 300s with --all-spark-prefix`; when manual, `cs session \
+    promote <ts>` per note.
+
+Keep the file short — one page. Operator scans it, acknowledges, \
+moves on.
+"""
+needs = ["materialize"]
+acceptance = "MOLECULE_DIR/report.md written with top-line counts, per-spark table, and selection-mode summary."

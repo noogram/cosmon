@@ -1,0 +1,28 @@
+[package]
+name = "apps-transport-http"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "HTTP-on-Tailscale transport primitives for native apps in the local cluster (axum helpers)."
+
+[dependencies]
+axum = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = "0.1"
+chrono = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+axum-test = "17"
+tokio = { workspace = true, features = ["full", "macros", "rt-multi-thread"] }
+tower = { workspace = true }
+http-body-util = { workspace = true }
+reqwest = { workspace = true }
+
+[lints]
+workspace = true

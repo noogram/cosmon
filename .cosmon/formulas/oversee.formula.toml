@@ -1,0 +1,189 @@
+formula = "oversee"
+version = 2
+description = """
+Autonomous mission overseer (v2, per delib-20260413-490a). \
+Monitor a running mission in a remote galaxy, diagnose dysfunctions, \
+intervene if needed, wait for drain. One-shot deployment. \
+\
+Evaluate and absorb are SEPARATE concerns — use the absorb formula \
+after oversee completes if mutations are worth absorbing. \
+\
+Safety guardrails: \
+  - DEGRADED: unilateral intervention (collapse orphans, kill ghosts) \
+  - CRITICAL: human-gated (requires operator approval before kill+fix+relaunch) \
+  - Anti-psychosis: max 2 CRITICAL interventions per mission \
+  - Monotone progress: each intervention must reduce pathology count \
+  - No recursive oversight (meta_level=1 — overseers cannot oversee overseers) \
+  - Minimum mission size: N >= 8 molecules (below this, overseer is net loss) \
+\
+Tier 1 pathologies (automate, no LLM): orphan, ghost, tombstone \
+Tier 2 pathologies (automate + oracle): stalled, sediment, convoy \
+Tier 3 (human backstop): quality, root-cause diagnosis \
+\
+Required variables: \
+  - galaxy: absolute path to the remote project \
+  - mission_id: molecule ID of the mission to oversee (use 'auto' if \
+    bootstrapping — the overseer will nucleate the mission and fill this in) \
+\
+Optional variables (for bootstrap mode): \
+  - goal: full mission goal text (if present AND mission_id='auto', the \
+    overseer bootstraps the galaxy before observing) \
+  - fleet_setup: instructions for writing fleet.toml and CLAUDE.md \
+  - sources_from: path to copy source materials from (e.g. a previous wiki)
+"""
+id_prefix = "oversee"
+
+# Tier 0 — observes and intervenes on existing molecules, does not nucleate.
+[tier]
+level = 0
+
+[[steps]]
+id = "bootstrap"
+title = "Bootstrap the remote galaxy if needed"
+description = """
+Check whether the remote galaxy at {{galaxy}} needs bootstrapping: \
+\
+IF mission_id != 'auto': \
+  Galaxy is already set up. Write MOLECULE_DIR/bootstrap-decision.md: \
+  'SKIP — mission already exists ({{mission_id}}).' \
+  Proceed to observe. \
+\
+IF mission_id == 'auto' (bootstrap mode): \
+  The galaxy exists (cs init already done) but needs project setup. \
+  \
+  1. cd {{galaxy}} \
+  2. Write CLAUDE.md with project-specific conventions from {{fleet_setup}} \
+     (cross-linking discipline, wiki writing rules, etc.) \
+  3. Write fleet.toml with enriched role prompts from {{fleet_setup}} \
+  4. Copy formulas if needed (mission-controller, task-work are from cs init) \
+  5. If {{sources_from}} is set, copy/link source materials \
+  6. Nucleate the mission: \
+     cd {{galaxy}} && cs nucleate mission-controller \
+       --var goal='{{goal}}' \
+       --var fleet_template=fleet.toml \
+  7. Record the mission_id from cs nucleate output \
+  8. Tackle the mission: cs tackle <mission_id> \
+  9. Write MOLECULE_DIR/bootstrap-decision.md with: \
+     - mission_id created \
+     - files written (CLAUDE.md, fleet.toml, sources) \
+     - fleet deployed \
+\
+The overseer now holds the mission_id for subsequent steps. \
+Use this mission_id wherever {{mission_id}} appears in later steps.
+"""
+acceptance = "bootstrap-decision.md exists. If bootstrap mode: mission nucleated and tackled, mission_id recorded."
+
+[[steps]]
+id = "observe"
+title = "Monitor the remote mission — mechanical + interpretive"
+description = """
+Two-phase observation of the remote galaxy at {{galaxy}}: \
+\
+PHASE A — MECHANICAL (Tier 1, no LLM needed): \
+  cd {{galaxy}} \
+  1. cs ensemble --json — snapshot fleet state \
+  2. cs deps {{mission_id}} --transitive — map the full DAG \
+  3. For each running molecule, check tmux session liveness: \
+     tmux -L <socket> has-session -t <session> \
+  4. Classify Tier 1 pathologies mechanically: \
+     - ORPHAN: status=running AND tmux dead \
+     - GHOST: status=completed AND tmux alive \
+     - TOMBSTONE: tmux session exists with no matching molecule \
+  5. Count: total, running, pending, completed, collapsed, frozen \
+\
+PHASE B — INTERPRETIVE (Tier 2, LLM judgment): \
+  6. For each running molecule with live tmux, capture last 10 lines: \
+     tmux capture-pane → check for rate-limit messages, login prompts, \
+     error screens, idle prompts (stalled detection) \
+  7. Check events.jsonl for recent errors or stuck transitions \
+  8. Assess sediment risk: pending molecules older than 1 hour with \
+     no active path to dispatch \
+  9. Assess convoy risk: stale molecules in DAG scope that a greedy \
+     cs run would resurrect \
+\
+Produce MOLECULE_DIR/observation-report.md: \
+  - Fleet health summary (counts) \
+  - Tier 1 pathology inventory (each with molecule ID + evidence) \
+  - Tier 2 pathology inventory (each with molecule ID + evidence) \
+  - Mermaid DAG diagram showing status colors \
+  - Verdict: HEALTHY / DEGRADED / CRITICAL \
+  - If DEGRADED: list of auto-fixable interventions \
+  - If CRITICAL: recommended kill scope + root cause hypothesis
+"""
+needs = ["bootstrap"]
+acceptance = "observation-report.md exists with verdict, pathology inventories (Tier 1 + Tier 2), and mermaid DAG diagram."
+
+[[steps]]
+id = "triage"
+title = "Intervene based on verdict — auto or human-gated"
+description = """
+Based on the observation report verdict: \
+\
+IF HEALTHY: \
+  Write MOLECULE_DIR/triage-decision.md: 'HEALTHY — no intervention.' \
+  Proceed to wait. \
+\
+IF DEGRADED (unilateral — safe interventions only): \
+  - Collapse all ORPHAN molecules (status=running, tmux dead): \
+    cs collapse <id> --reason 'overseer: orphan (running + dead tmux)' \
+  - Kill all GHOST tmux sessions (completed + tmux alive): \
+    tmux -L <socket> kill-session -t <session> \
+  - Kill all TOMBSTONE tmux sessions (no matching molecule): \
+    tmux -L <socket> kill-session -t <session> \
+  - Clear assigned_worker on completed molecules with stale workers \
+  - Log every action in MOLECULE_DIR/intervention-log.md \
+  - Do NOT kill the mission. Do NOT edit fleet.toml or formulas. \
+  - Do NOT re-nucleate. These are SAFE, SURGICAL fixes. \
+\
+IF CRITICAL (human-gated — STOP and ask): \
+  IMPORTANT: Do NOT proceed autonomously. Write: \
+  - MOLECULE_DIR/critical-alert.md describing: \
+    what is broken, proposed fix, estimated blast radius, \
+    which molecules to collapse, what to edit \
+  - Print to stdout: '⚠️ CRITICAL: human approval required. \
+    Read MOLECULE_DIR/critical-alert.md and respond.' \
+  - WAIT for human approval before proceeding \
+  - If approved: execute the fix (collapse + edit + relaunch) \
+  - If rejected: log rejection reason, proceed to wait as-is \
+  - Anti-psychosis: this is intervention #N of max 2 CRITICAL per mission. \
+    If N >= 2, REFUSE further CRITICAL intervention — escalate to human \
+    with full audit trail. \
+  - Monotone progress: if pathology count did NOT decrease since last \
+    CRITICAL intervention, REFUSE — the fix made things worse. \
+\
+Produce MOLECULE_DIR/triage-decision.md with verdict + actions taken.
+"""
+needs = ["observe"]
+acceptance = "triage-decision.md exists. If DEGRADED: intervention-log.md exists. If CRITICAL: critical-alert.md exists."
+
+[[steps]]
+id = "wait"
+title = "Wait for the remote mission to drain"
+description = """
+Wait for the remote mission DAG to fully drain: \
+  cd {{galaxy}} && cs wait {{mission_id}} --timeout 7200 \
+\
+During the wait, monitor periodically (every 5 min): \
+  - Quick Tier 1 check: any new orphans? (tmux has-session on running mols) \
+  - If a new orphan appears, apply DEGRADED fix (collapse it) \
+  - Log incidents in MOLECULE_DIR/drain-log.md with timestamps \
+\
+If timeout (2 hours): \
+  - Re-run observation (Phase A + B from step 1) \
+  - If verdict changed from HEALTHY to DEGRADED/CRITICAL, re-enter triage \
+  - If still HEALTHY but just slow, extend wait \
+\
+If drained: \
+  Write final summary in MOLECULE_DIR/drain-log.md: \
+  - Total drain time \
+  - Incidents during drain (orphans fixed, stalls detected) \
+  - Final molecule counts \
+  - Overseer declares mission complete. \
+\
+NOTE: evaluate and absorb are NOT part of oversee v1. \
+  They are separate formulas (absorb.formula.toml) to run after \
+  oversee completes, if the operator judges mutations worth absorbing. \
+  The overseer observes and maintains — it does not judge quality.
+"""
+needs = ["triage"]
+acceptance = "Remote mission DAG is fully drained. drain-log.md exists with timeline and final counts."

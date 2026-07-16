@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Transform a molecule's kind (idea → task, etc.)
+
+Usage: cs transform [OPTIONS] --to <TO> --reason <REASON> <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID to transform
+
+Options:
+      --config <PATH>    Path to configuration file
+      --to <TO>          Target kind: idea, task, decision, issue
+      --reason <REASON>  Reason for the transform
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+  -h, --help             Print help
+
+EXAMPLES:
+  cs transform <mol> --to task          # idea → task
+  cs transform <mol> --to decision
+
+Preserves molecule ID; rewrites kind + formula bindings.

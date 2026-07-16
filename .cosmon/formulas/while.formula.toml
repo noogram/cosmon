@@ -1,0 +1,156 @@
+formula = "while"
+version = 1
+description = """
+Iterative pattern — repeatedly nucleate a body formula until a \
+condition is satisfied or `max_iterations` is exhausted.
+
+This formula is the canonical cosmon realization of the WHILE \
+pattern (Dust's `while` block, imperative while-loop). It is NOT a \
+new molecule kind and NOT a new Rust type — it is a TOML formula \
+that leverages the dynamic-DAG property of cosmon: a worker can \
+nucleate a child while executing a step, wait for it via \
+`cs wait`, observe its outcome, then decide whether to iterate \
+again. Each iteration produces a typed `DecayedFrom` edge, so the \
+DAG faithfully records the loop lineage.
+
+Required variables:
+  - condition_check   How to evaluate the loop condition. One of:
+                        - "shell:<command>" — shell predicate; exit 0
+                          means "continue looping", non-zero means
+                          "exit loop". Example:
+                          `shell:test -s .cosmon/state/.../queue.json`
+                        - "formula:<name>" — evaluates by nucleating
+                          `<name>` as a check-molecule each iteration
+                          and reading its `condition.md` output
+                          (first line: "true" or "false").
+  - body_formula      Formula to nucleate as the body of each
+                      iteration (e.g. `task-work`). Must exist.
+
+Optional variables:
+  - body_vars         JSON object of `--var key=value` pairs to pass
+                      to every body iteration (e.g.
+                      `{"topic": "refine the plan"}`). Defaults to
+                      empty.
+  - max_iterations    Safety bound. Default 10. If the condition is
+                      still true after `max_iterations`, this
+                      molecule collapses with reason
+                      "while: max_iterations exhausted" — a fatal
+                      error, not a benign exit. This prevents
+                      runaway loops, which is the primary safety
+                      concern with a WHILE primitive.
+
+ARTIFACT PATHS — MOLECULE_DIR is the `molecule_dir` field from \
+`cs --json observe {mol_id}`.
+
+Why Tier 1 with measure = "iterations"? The measure bound is \
+`max_iterations`, which is finite and declared up-front. A future \
+verifier can inspect the body trace in MOLECULE_DIR/iterations.md \
+and confirm the loop terminated within bound. Tier 2 (unbounded \
+general recursion) is reserved for formulas gated by \
+`cosmon-sign`; while-with-safety-bound does not need that.
+"""
+id_prefix = "while"
+
+# Tier 1 — nucleates up to `iterations` children, bounded by
+# max_iterations. Each iteration is one body nucleation (optionally
+# plus one condition-check nucleation for the "formula:" variant).
+[tier]
+level = 1
+measure = "iterations"
+
+[[steps]]
+id = "init"
+title = "Initialize the loop"
+description = """
+Read variables. Parse `max_iterations` (default 10). Create \
+MOLECULE_DIR/iterations.md with a header table:
+
+  | iter | child_id | body_formula | status | condition_after |
+
+Record the chosen `condition_check` and `body_formula` in the \
+header. Set the internal counter to 0.
+
+SAFETY CHECK: if `max_iterations` ≤ 0 or > 100, collapse with \
+reason "while: invalid max_iterations bound". The 100 ceiling is a \
+hard limit even for operators; a legitimately longer loop should \
+be redesigned as a dag-run or a dedicated formula.
+"""
+acceptance = "MOLECULE_DIR/iterations.md initialized with header and counter=0."
+
+[[steps]]
+id = "loop"
+title = "Iterate until condition false or bound exhausted"
+description = """
+Execute this pseudocode:
+
+    iter = 0
+    while iter < max_iterations:
+        cond = evaluate({{condition_check}})
+        append row to iterations.md with current cond
+        if not cond:
+            break           # natural exit
+        child_id = cs nucleate {{body_formula}} \\
+                     --decayed-from {{this_mol_id}} \\
+                     --tag temp:warm \\
+                     --tag while-iter:<iter> \\
+                     [--var k=v ...from body_vars]
+        cs tackle child_id
+        cs wait child_id     # block until child is terminal
+        update iterations.md row with child_id + status
+        iter += 1
+    else:
+        # loop fell through max_iterations without breaking
+        cs collapse {{this_mol_id}} \\
+          --reason "while: max_iterations exhausted"
+
+MANDATORY rules (same discipline as map):
+  1. Every iteration's child carries `--decayed-from
+     {{this_mol_id}}` — typed lineage, not textual.
+  2. Every child gets `--tag temp:warm` and
+     `--tag while-iter:<iter>` for curation + auditability.
+  3. Condition evaluation is AT THE TOP of each iteration — the
+     first iteration runs only if the initial condition is true.
+     This matches the classical `while` semantics and makes
+     zero-iteration runs cheap.
+
+EVALUATION VARIANTS:
+  - "shell:<command>" — the worker runs `sh -c "<command>"` and
+    reads the exit code. Exit 0 → continue, non-zero → exit loop.
+    Keep the command idempotent and side-effect-free (it may be
+    called up to `max_iterations+1` times).
+  - "formula:<name>" — the worker nucleates `<name>` per-iteration
+    with `--decayed-from {{this_mol_id}}` and `--tag
+    while-cond:<iter>`, waits, then reads
+    `<cond_mol_dir>/condition.md` — its first non-empty line must
+    be `true` or `false`. Anything else collapses this while with
+    reason "while: malformed condition output".
+
+REGRESSION GUARDS:
+  - NEVER let the loop dispatch a new body iteration while the
+    previous is still running — always `cs wait` first. Parallel
+    iterations are map's job, not while's.
+  - NEVER skip the max_iterations check — a runaway loop can
+    exhaust the fleet's budget in minutes.
+"""
+needs = ["init"]
+acceptance = "Loop terminated. MOLECULE_DIR/iterations.md records every iteration with child_id, status, and condition_after. Natural exit (condition false) or fatal exhaustion (collapse), never silent."
+
+[[steps]]
+id = "report"
+title = "Produce the loop trace report"
+description = """
+Write MOLECULE_DIR/synthesis.md summarizing the loop:
+
+  - Total iterations executed (k of max_iterations).
+  - Exit reason: natural (condition flipped to false),
+    exhausted (collapsed), or abnormal (child collapsed mid-loop).
+  - Per-iteration one-liner: `iter N: <body_formula> →
+    <child_id> (<status>) — condition_after=<true|false>`.
+  - Final state summary: what the fixed point looks like, or
+    which iteration last made progress if the loop exhausted.
+
+This synthesis is the primary reducible artifact if a parent \
+`reduce` molecule wants to interpret the trace.
+"""
+needs = ["loop"]
+acceptance = "MOLECULE_DIR/synthesis.md written with iteration count, exit reason, per-iteration trace, and final-state summary."

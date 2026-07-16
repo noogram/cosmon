@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-frlw\", \"frozen\", &i)"
+---
+row_kind=Frozen
+raw       = 🧊 task-frlw [ ] frozen
+stripped  = ð§ task-frlw [ ] frozen

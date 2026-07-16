@@ -1,0 +1,29 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Tail — live `notify`-driven reader over `events.jsonl` (fleet or `--all-galaxies`)
+
+Usage: cs tail [OPTIONS]
+
+Options:
+      --all-galaxies                 Scan every project under `$COSMON_CLUSTER_ROOT`. Opt-in — cross-project reach is never implicit
+      --config <PATH>                Path to configuration file
+  -f, --follow                       Stay attached and stream new events via `notify`
+  -v, --verbose                      Enable verbose output
+      --json                         Output in JSON format
+      --since <SINCE>                Only show events at or after this timestamp. Accepts ISO-8601 (`2026-04-24T12:00:00Z`) or relative (`-5m`, `-1h`, `-2d`). `allow_hyphen_values` lets the relative form be written without `--since=`
+      --kind <KIND>                  Only show events whose `type` tag matches (e.g. `molecule_nucleated`)
+  -n, --tail <TAIL>                  Number of most-recent lines to print before follow (like `tail -n`) [default: 20]
+      --cluster-root <CLUSTER_ROOT>  Override the cluster root used by `--all-galaxies`
+  -h, --help                         Print help
+
+EXAMPLES:
+  cs tail                     # live tail of the current galaxy events.jsonl
+  cs tail --all-galaxies      # multiplex all known galaxies
+
+Live `notify`-driven reader over `events.jsonl`. Default scope is the
+current fleet; --all-galaxies multiplexes across the registered
+cosmon roots.
+
+SEE ALSO: cs events (one-shot dump), cs ensemble (snapshot view).

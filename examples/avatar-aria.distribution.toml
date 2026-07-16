@@ -1,0 +1,74 @@
+# avatar-aria.distribution.toml — the canonical cosmon distribution profile.
+#
+# A distribution profile is an ASSEMBLY MANIFEST: it pins one kernel commit and
+# selects a set of plugins, each integrating over a sanctioned ADR-132 seam
+# (S1-S4). A build-time assembler (build-distribution.sh) reads this file to
+# produce a runnable image + compose stack. The profile is DATA the assembler
+# reads at build time, NOT a runtime plugin-loader — cosmon ships no dlopen
+# registry (ADR-132 §4).
+#
+# This "aria" profile is the reference template. Downstream deployment profiles
+# (e.g. smithy's distro/avatar-tenant-demo.distribution.toml) DERIVE from it.
+#
+# Full schema + rationale: docs/distribution-mechanism.md.
+
+schema_version = "1"
+
+# ── The kernel ───────────────────────────────────────────────────────────────
+# The public cosmon kernel, pinned by commit. This is the AGPL product closure
+# (43 crates). The kernel image's PID 1 is the cosmon ingress server
+# (cosmon-rpp-adapter / RPP). The kernel is ALWAYS pinned by commit, never
+# floating.
+[kernel]
+source = "git"
+repo   = "https://github.com/noogram/cosmon"
+# CANDIDATE pin — the manifest's anchor commit (43 crates, zero plugin). It is
+# re-figé on the commit the FIRST real avatar build validates, before any
+# tenant delivery. No silent drift: the reservation lives here in the comment.
+rev    = "eac7537184598519424497f11b1a9073938c07ab"
+
+# Reserved kernel ports (FLAG 1 / FLAG 3). Informational to a reader,
+# authoritative to the assembler: a plugin `port` that collides with one of
+# these is a BUILD ERROR, never a runtime "address already in use".
+# cosmon-rpp-adapter is KERNEL-SIDE (ADR-080/§8j), NOT a plugin — it gets no
+# [[plugins]] entry by design (FLAG 3); the manifest does not lie by omission.
+[kernel.reserved_ports]
+rpp_ingress = 8080      # cosmon-rpp-adapter — the §8j HTTPS+OIDC secure-delivery door
+
+# ── Plugins ──────────────────────────────────────────────────────────────────
+# llama — local sovereign inference, integrated over seam S1 (network provider):
+# a llama-server the kernel's openai/ollama adapter POSTs to via base_url.
+# Inference never leaves the deployment boundary.
+[[plugins]]
+name = "llama"
+seam = "S1"
+
+# Interim source: a pinned local archive until the dedicated llama plugin repo
+# exists (ADR-132 §3 lifecycle). At the target regime this becomes
+# source="git" + repo + rev, exactly like the kernel; the rest of the mount
+# does not move.
+source      = "archive"
+archive_rev = "7df0613b3"     # cosmon-private grenier (interim plugin source)
+
+# REQUIRED (FLAG 1). Any port-binding plugin declares its port EXPLICITLY —
+# there is no implicit :8080 default. :8081 is chosen because :8080 is a
+# reserved kernel port (the RPP ingress, above). The assembler rejects a
+# value that collides with a reserved kernel port or another plugin port.
+port     = 8081
+base_url = "http://localhost:8081/v1"
+
+# Supervision (FLAG 2). "compose-sibling" is the CANONICAL model: llama-server
+# runs as its own service in the compose stack, on the deployment's private
+# network; the kernel IMAGE stays single-process (one PID 1). The kernel
+# reaches it over localhost:8081 (compose network) — the S1 contract.
+# "in-image" (a downstream assembler supplying its own minimal supervisor as
+# the image CMD) is the explicitly non-canonical escape hatch cosmon does not
+# ship. Default and recommendation: compose-sibling.
+supervision = "compose-sibling"
+
+# ── Notes ────────────────────────────────────────────────────────────────────
+# The avatar embeds llama ONLY. Plugins evaluated then excluded (traceability,
+# not silence): almanac (aria-specific Sci-Hub index), mcp-neurion (operator
+# infra registry, not a tenant concern), voice/foundry/ga (out of avatar scope).
+# Forgejo is NOT a plugin — it is a sibling service of the compose runtime
+# (sibling container + OIDC IdP), the same shape a server-plugin uses.

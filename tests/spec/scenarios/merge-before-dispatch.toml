@@ -1,0 +1,24 @@
+
+# Scenario: merge-before-dispatch
+#
+# Binds the Constitution clause "merge-before-dispatch" (CLAUDE.md §
+# Architectural Invariants) to an executable scenario.
+#
+# Invariant: when a molecule completes (`on_complete`), `cs done` merges
+# the molecule's branch into main BEFORE any dependent molecule is
+# dispatched via `cs tackle`. Downstream workers therefore see the
+# predecessor's committed output in their own worktree.
+#
+# Status: SKELETON. The scenario harness (`cs test` execution engine)
+# lands in a follow-up molecule; for now this TOML is consumed only by
+# `cs test --binding-report` to enumerate known bindings.
+
+name = "merge-before-dispatch"
+clause = "merge-before-dispatch"
+description = "Predecessor branch merged before dependent dispatched."
+foundry_proposition = ""  # TODO: Lean proposition MergeBeforeDispatch_monotone
+
+[expect]
+# Observable: dependent's worktree HEAD must contain predecessor's
+# completion commit before dependent's worker is spawned.
+kind = "ordering"

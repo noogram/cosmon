@@ -1,0 +1,5 @@
+# TLC model-checker scratch — regenerated on every run.
+CosmonRun_TTrace_*
+states/
+*.bak
+*.toolbox/

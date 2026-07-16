@@ -1,0 +1,40 @@
+\documentclass[tikz,border=0pt]{standalone}
+\usepackage{fontspec}
+\setmainfont{TeX Gyre Heros}
+\setsansfont{TeX Gyre Heros}
+\usepackage{amssymb}
+\usetikzlibrary{arrows.meta,positioning}
+\input{_common.tex}
+
+\begin{document}
+\begin{tikzpicture}[x=1cm,y=1cm]
+  \useasboundingbox (0,0) rectangle (16,6.6);
+
+  \draw[cosmon frame] (.55,1.55) rectangle (12.65,5.95);
+  \node[cosmon label, anchor=west] at (.92,5.53) {YOUR MACHINE};
+
+  \node[cosmon title, anchor=center] (pilot) at (2.05,3.72) {\PilotGlyph};
+  \node[cosmon micro, anchor=north] at (2.05,3.34) {pilot};
+
+  \node[cosmon molecule] (a1) at (4.00,3.72) {};
+  \node[cosmon molecule] (a2) at (5.22,3.72) {};
+  \node[cosmon molecule] (a3) at (6.44,3.72) {};
+  \draw[cosmon dependency] (2.55,3.72) -- (a1);
+  \draw[cosmon dependency] (a1) -- (a2);
+  \draw[cosmon dependency] (a2) -- (a3);
+  \node[cosmon micro, anchor=north] at (5.22,3.34) {agent mission};
+
+  \draw[cosmon panel] (7.65,2.58) rectangle (11.62,4.82);
+  \node[cosmon small, font=\sffamily\bfseries\fontsize{9}{10.5}\selectfont, anchor=west]
+    at (8.06,4.18) {.cosmon/};
+  \node[cosmon micro, anchor=west] at (8.06,3.58) {plain files on disk};
+  \node[cosmon title, anchor=east] at (11.20,3.69) {\TraceGlyph};
+  \draw[cosmon dependency] (a3) -- (7.65,3.72);
+
+  \draw[cosmon outbound] (12.65,3.72) -- (15.30,3.72);
+  \node[cosmon small, text=CosmonAccent, anchor=south] at (13.98,3.91) {model call};
+
+  \node[cosmon small, anchor=center, text width=15cm, align=center]
+    at (8,.72) {long AI-agent missions on your machine --- every step kept as plain files you own};
+\end{tikzpicture}
+\end{document}

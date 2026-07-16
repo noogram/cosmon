@@ -1,0 +1,41 @@
+# Cloudflare Worker — Noogram apex install endpoints (noogram.org/<tool>/install.sh).
+#
+# STAGED. Deploying this Worker and attaching the apex custom domain are BOTH
+# operator gestures held behind the publication gate (CLAUDE.md). Nothing here
+# goes live on merge — there is intentionally no auto-deploy workflow, and the
+# `PUBLISHED` var defaults to "false" so even a deployed Worker serves an honest
+# 503 "coming soon" until the operator flips it. See RUNBOOK.md for activation.
+
+name = "noogram-apex"
+main = "src/index.ts"
+compatibility_date = "2026-06-16"
+
+# Bundle *.sh files as text so `import COSMON_INSTALL_SH from "../../install.sh"`
+# resolves to the single canonical infra/install/install.sh (no second copy).
+# `fallthrough = true` lets other module rules still apply.
+[[rules]]
+type = "Text"
+globs = ["**/*.sh"]
+fallthrough = true
+
+# Staging gate. "false" ⇒ /cosmon/install.sh returns 503 coming-soon.
+# The operator sets this to "true" (via `wrangler deploy` after editing here, or
+# `wrangler secret`/dashboard var) ONLY once noogram/cosmon is public and the
+# first release is tagged. This is the single flip that turns the door on.
+[vars]
+PUBLISHED = "false"
+
+# ── Apex custom domain — OPERATOR GESTURE, deliberately commented out. ────────
+# Uncommenting + `wrangler deploy` attaches noogram.org to this Worker and
+# creates the proxied apex record (this REPLACES the STAGING placeholder that
+# infra/cloudflare/noogram-dns.tf holds — delete that placeholder when you
+# attach here, per the C2 runbook). Do NOT uncomment until the zone is Active
+# and you intend to serve the apex from this Worker.
+#
+# routes = [
+#   { pattern = "noogram.org/*", zone_name = "noogram.org" },
+# ]
+#
+# Preview (safe, no apex): `wrangler deploy` with routes commented gives a
+# *.workers.dev URL that serves the coming-soon (PUBLISHED=false). Use
+# `wrangler dev` for a local run.

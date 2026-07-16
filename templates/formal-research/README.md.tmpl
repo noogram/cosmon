@@ -1,0 +1,49 @@
+# <CHANGE_ME_PROJECT> — the proof memory
+
+> <CHANGE_ME_TAGLINE>
+
+## Two-track ambition
+
+**Track A — Proof Kernel.** A minimal implementation of <CHANGE_ME_TYPE_THEORY>
+in Rust. The kernel is the Trusted Computing Base (TCB): ~<CHANGE_ME_TCB_BUDGET> lines,
+`#![forbid(unsafe_code)]`, exhaustively tested. Everything outside the kernel
+is untrusted.
+
+**Track B — LLM Proof Search.** An LLM-powered probe that searches for
+proof terms, submitting candidates to the kernel for verification. The LLM
+generates; the kernel decides. This separation is the **LLM firewall** — the
+central architectural invariant.
+
+## LLM firewall
+
+The probe (LLM) may construct proof terms. The kernel (Rust, no LLM) decides
+whether they are valid. No LLM output ever bypasses the kernel. No LLM
+authors a verdict. This is not a policy — it is a structural invariant
+enforced by the type system and the crate boundary.
+
+## Crate structure
+
+| Crate | Role | TCB? |
+|-------|------|------|
+| `<CHANGE_ME_CORE_PKG>` | Domain types: Term, Context, Level, Judgment, Error | Yes |
+| `<CHANGE_ME_KERNEL_PKG>` | Type-checking rules of inference | Yes |
+| `<CHANGE_ME_PROBE_PKG>` | LLM proof-search engine | No |
+| `<CHANGE_ME_SYNTAX_PKG>` | Syntax parsing and pretty-printing | No |
+
+## Phase-0 falsifiability
+
+The project is designed to fail fast. Phase-0 success criterion: the kernel
+can check a proof constructed by an LLM probe, with the kernel under
+<CHANGE_ME_TCB_BUDGET> lines. If this fails, the architecture is wrong.
+
+## Building
+
+```sh
+cargo check --workspace
+cargo test --workspace
+cargo clippy --workspace -- -D warnings
+```
+
+## License
+
+Dual-licensed under MIT and Apache 2.0.

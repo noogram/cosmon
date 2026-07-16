@@ -1,0 +1,37 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Thaw a worker — resume a frozen worker's Claude session
+
+Usage: cs thaw [OPTIONS] <WORKER>
+
+Arguments:
+  <WORKER>
+          ID of the worker to thaw
+
+Options:
+  -c, --continue <CONTINUE_MSG>
+          Custom message to send after respawn instead of the default resume prompt.
+          
+          Useful for hot-restart scenarios: e.g. "A new MCP server X is now available. Continue your work on molecule Y."
+
+      --config <PATH>
+          Path to configuration file
+
+      --no-tmux
+          Skip tmux interaction (state-only transition, for testing)
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs thaw worker-3            # resume a previously frozen worker
+
+SEE ALSO: cs freeze (counterpart), cs resume (nudge idle workers).

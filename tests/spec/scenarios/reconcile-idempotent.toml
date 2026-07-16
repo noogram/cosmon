@@ -1,0 +1,17 @@
+
+# Scenario: reconcile-idempotent
+#
+# Binds the Constitution clause "reconcile idempotence" to an executable
+# scenario. `cs reconcile` is a pure projection from state onto
+# surfaces; running it twice must equal running it once.
+#
+# Status: SKELETON — see scenarios/merge-before-dispatch.toml.
+
+name = "reconcile-idempotent"
+clause = "reconcile idempotence"
+description = "Running `cs reconcile` twice produces identical surfaces."
+foundry_proposition = ""  # TODO: Lean proposition Reconcile_idempotent
+
+[expect]
+kind = "idempotence"
+command = "cs reconcile"

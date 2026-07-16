@@ -1,0 +1,7 @@
+---
+source: crates/cosmon-cli/tests/ensemble_snapshot.rs
+expression: "render_ensemble_row(\"task-fztg\", \"pending\", &i)"
+---
+row_kind=Idle
+raw       = 💤 task-fztg [🧊] pending
+stripped  = ð¤ task-fztg [ð§] pending

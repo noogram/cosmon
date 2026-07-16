@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Hot)"
+---
+variant=Hot
+label=hot
+glyph=🔥
+ratatui_style=fg=LightRed mod=BOLD
+needs_attention=false

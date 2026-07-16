@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Terminal)"
+---
+variant=Terminal
+label=terminal
+glyph=◌
+ratatui_style=fg=DarkGray mod=DIM
+needs_attention=false

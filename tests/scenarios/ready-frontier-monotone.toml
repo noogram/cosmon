@@ -1,0 +1,61 @@
+# Property: across every tick, a molecule leaves ready_frontier only by
+# becoming terminal. Three molecules in a chain (A → B → C) exercise
+# successive admissions to the frontier.
+
+[scenario]
+name = "ready-frontier-monotone"
+description = "ready_frontier(t) loses members only via termination."
+
+[binds]
+constitution_clause = "ready-frontier-monotone"
+foundry_proposition = "ReadyFrontier_monotone"
+
+[[given.molecules]]
+id = "A"
+kind = "task"
+steps = [ { name = "s1", native = "cosmon::test::noop" } ]
+
+[[given.molecules]]
+id = "B"
+kind = "task"
+steps = [ { name = "s1", native = "cosmon::test::noop" } ]
+
+[[given.molecules]]
+id = "C"
+kind = "task"
+steps = [ { name = "s1", native = "cosmon::test::noop" } ]
+
+[[given.links]]
+from = "A"
+to = "B"
+kind = "Blocks"
+
+[[given.links]]
+from = "B"
+to = "C"
+kind = "Blocks"
+
+[[actions]]
+op = "snapshot_frontier"
+
+[[actions]]
+op = "run_root"
+target = "C"
+
+[[actions]]
+op = "snapshot_frontier"
+
+[[assert]]
+molecule = "A"
+status = "completed"
+
+[[assert]]
+molecule = "B"
+status = "completed"
+
+[[assert]]
+molecule = "C"
+status = "completed"
+
+[[assert]]
+property = "ready_frontier_monotone"

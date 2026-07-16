@@ -1,0 +1,81 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
+
+Usage: cs scheduler [OPTIONS] <COMMAND>
+
+Commands:
+  status    Show the last-known state of every patrol the scheduler has observed
+  validate  Lint `patrols.toml` without firing anything — the safe pre-flight when adding or editing a patrol (success criterion (i) of the autopilot primitive). Zero side-effects: no state read, no dispatch, no kill-switch touch. Exits 0 when the file parses and validates, 1 otherwise — so it doubles as a CI gate. Mirrors `cosmon-scheduler validate`
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+IMAGE:
+  cosmon-scheduler is the house's alarm clock. It looks at the wall
+  clock every 60s, reads its tablet (`~/.config/cosmon/patrols.toml`),
+  and asks: 'was anything supposed to ring now?'. If yes, it fires a
+  short-lived command, the command finishes, it dies. Cron-like.
+
+  (See the seven-clocks chronicle and the '2026-04-19 — Deux métiers,
+  deux outils' chronicle for the full réveil/veilleur-de-nuit image.)
+
+WHEN TO USE THE SCHEDULER:
+  - periodic gesture, short burst (executor-pulse every 2h, mailroom-sync
+    every 15min, chronicle-lint every Sunday morning)
+  - fire-and-forget: the command finishes on its own
+  - no persistent connection to maintain
+  If the command must stay alive between fires, use `cs daemons` instead.
+
+EXAMPLES — operator-facing (cs scheduler):
+  cs scheduler status                   # pretty table of patrol last-fires
+  cs scheduler status --json            # NDJSON, one object per patrol
+  cs scheduler status --log-lines 20    # also tail last 20 log lines
+  cs scheduler status --state-file /tmp/state.json
+  cs scheduler validate                 # lint ~/.config/cosmon/patrols.toml
+  cs scheduler validate --config cand.toml   # pre-flight a candidate file
+
+CARDINAL PATROLS (copy-ready reference): docs/guides/patrols-cardinal.md
+  cosmon-ward-mayor, reading-club-tick, leaks-watchdog,
+  backlog-frontier-rot, digest-personnel — one [[patrol]] block each.
+
+MINIMAL patrols.toml (~/.config/cosmon/patrols.toml):
+  [scheduler]
+  state_file            = "~/.cosmon/scheduler.state.json"
+  log_file              = "~/.cosmon/scheduler.log"
+  kill_switch           = "~/.cosmon/stand-down.lock"
+  tick_interval_seconds = 60
+
+  [[patrol]]
+  name             = "executor-pulse"
+  interval_seconds = 7200               # cadence: every 2h
+  command          = ["mailroom", "executor-pulse"]
+  enabled          = true
+
+  [[patrol]]
+  name        = "chronicle-lint-weekly"
+  cron        = "0 9 * * 0"            # cadence: Sundays 09:00
+  command     = ["cs", "nucleate", "chronicle-lint"]
+  working_dir = "/srv/cosmon/example-project"
+  enabled     = true
+
+HOT-RELOAD:
+  The scheduler re-reads `patrols.toml` on every tick (default 60s). Edit
+  the file, save it, and the change takes effect within one tick — no
+  signal, no reload command. Add a patrol = it fires on the next tick;
+  disable one = it stops.
+
+KILL-SWITCH:
+  `touch ~/.cosmon/stand-down.lock` — the scheduler observes the lock at
+  the next tick and quietly skips every patrol until the file is
+  removed. No child is killed; already-firing patrols finish on their
+  own. Same lock convention as cs daemons (one lockfile silences both
+  worlds).
+
+SEE ALSO:
+  cs daemons (long-running processes), ADR-050 (unified patrol scheduler).

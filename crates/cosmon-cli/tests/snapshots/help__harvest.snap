@@ -1,0 +1,49 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Harvest — close a completed-but-unmerged molecule by invoking `cs done`
+
+Usage: cs harvest [OPTIONS] --molecule <MOLECULE>
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --molecule <MOLECULE>
+          Molecule to harvest. Required — `cs harvest` operates on one molecule per invocation. Use `cs patrol --harvest` for the sweep variant
+
+      --dry-run
+          Print what `cs harvest` would do without exec'ing `cs done`
+
+  -v, --verbose
+          Enable verbose output
+
+      --from-pane-died
+          Flag the invocation as caused by a tmux `pane-died` hook.
+          
+          ADR-052 child #4 (I4 + I8 + I10): the probe must emit its observation before acting on it. When set, `cs harvest` first appends a [`EventV2::WorkerExited`] event to `events.jsonl` (reason = `pane_died`) and *then* runs the normal harvest logic. Absent this flag, no `WorkerExited` is emitted — periodic `cs patrol --harvest` sweeps observe via witness, not via the kernel-level pane-died channel.
+          
+          [`EventV2::WorkerExited`]: cosmon_core::event_v2::EventV2::WorkerExited
+
+      --json
+          Output in JSON format
+
+      --exit-code <EXIT_CODE>
+          Exit code reported by tmux `#{pane_dead_status}` when the pane died.
+          
+          Only meaningful together with `--from-pane-died`. Accepts any signed 32-bit integer so the wait-status (which may encode signals) survives round-trip. Strings that fail to parse are treated as "no information" (`None` in the emitted event).
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs harvest --molecule task-example-0001      # DEPRECATED — see below
+
+DEPRECATED (ADR-052 §D3): use `cs done --if-completed <mol>` instead.
+The canonical path carries byte-identical semantics: silent no-op when
+the molecule is not `Completed` or already merged; full teardown
+otherwise. This alias will be removed after one release cycle.
+
+SEE ALSO: cs done --if-completed (canonical), cs patrol --harvest
+(belt-and-suspenders sweep).

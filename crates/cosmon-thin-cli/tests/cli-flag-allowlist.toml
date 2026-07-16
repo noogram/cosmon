@@ -1,0 +1,846 @@
+# cs ↔ cs-thin clap surface allowlist (T-CS-THIN-TEST-COVERAGE-GAP).
+# ----------------------------------------------------------------------
+# Every divergence between the cs and cs-thin clap surfaces is either
+# listed here (with a written reason + ADR ref when applicable) or fails
+# `flag_parity::flag_sets_match_modulo_allowlist`. There is no
+# "ignore-everything-that-differs" escape hatch.
+#
+# Sections:
+#
+#   [[verb_absent_from_thin]]   — cs verb that cs-thin does not model.
+#   [[verb_only_in_thin]]       — cs-thin verb that has no cs counterpart.
+#   [[flag_only_in_cs]]         — flag present in `cs <verb> --help` but
+#                                 absent from `cs-thin <verb> --help`.
+#   [[flag_only_in_thin]]       — flag present in cs-thin but absent
+#                                 from cs (for the same verb).
+#
+# `verb = "*"` matches every cs verb (used for global-flag carve-outs
+# like `--config`, `--verbose`, `--json`).
+
+# ─────────────────────────────────────────────────────────────────────
+# Verbs absent from cs-thin — split between operator-only (ADR-080
+# §5.1) and out-of-scope (the §8p subset strict — most cs verbs are
+# not RPP-exposable by design).
+# ─────────────────────────────────────────────────────────────────────
+
+# Operator-only (ADR-080 §5.1) — exhaustive list mirrors
+# `cosmon_thin_cli::coverage::OPERATOR_ONLY`.
+[[verb_absent_from_thin]]
+verb = "done"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "merge-and-teardown is local-only (worktree, tmux); no RPP shape."
+
+[[verb_absent_from_thin]]
+verb = "evolve"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "worker-callable only; the worker invokes cs from inside its own worktree."
+
+[[verb_absent_from_thin]]
+verb = "complete"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "worker-callable only — same rationale as cs evolve."
+
+[[verb_absent_from_thin]]
+verb = "await-operator"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1 (ADR-123)"
+reason = "worker-internal block-on-operator (ADR-123); emitted by a live worker inside its worktree at an irreversible boundary — same NEVER-on-the-wire class as cs evolve / cs complete."
+
+[[verb_absent_from_thin]]
+verb = "run"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "resident-runtime entry point — long-lived; not a one-shot HTTP call."
+
+[[verb_absent_from_thin]]
+verb = "spore"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1 / ADR-140 N5"
+reason = "germinate a polymer from a spore.toml template (validate/run/export); run nucleates a whole DAG against the operator's local store, same operator-only orchestration family as cs run — no one-shot HTTP shape."
+
+[[verb_absent_from_thin]]
+verb = "stitch"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "fleet-locked sequential merge of a mission DAG into base (added in ADR-110 §I2) — local git + trunk lock, operator-only; no RPP/HTTP shape (same family as cs done / cs run)."
+
+[[verb_absent_from_thin]]
+verb = "kill"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "process-level kill on the operator's machine."
+
+[[verb_absent_from_thin]]
+verb = "purge"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "fleet-state surgery — operator only."
+
+[[verb_absent_from_thin]]
+verb = "paths"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "pure projection of the cosmon_core::paths::CosmonPath write-path taxonomy (B7 collapse, task-20260607-7f58) — local audit/generator surface (gitignore stanza, ADR-030 archive manifest), reads nothing, no remote act."
+
+[[verb_absent_from_thin]]
+verb = "reconcile"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "deprecated alias for project; surface stays operator-only."
+
+[[verb_absent_from_thin]]
+verb = "release-audit"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "dry-run distribution drift detector (analogue of reconcile --check) — local read-only CI/operator inspection, no RPP exposure."
+
+[[verb_absent_from_thin]]
+verb = "verify"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "ledger walk — V2 candidate, not on RPP yet."
+
+[[verb_absent_from_thin]]
+verb = "verify-graph"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "Tarjan SCC audit on a typed-relation subgraph (substrate primitive, task-20260509-75cc) — local read-only inspection, no RPP exposure."
+
+[[verb_absent_from_thin]]
+verb = "whisper"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "perturbation port — local tmux pane injection."
+
+[[verb_absent_from_thin]]
+verb = "drop"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "Inbox capture — local-host hotkey gesture (ADR-061)."
+
+# `cs security activate` is the §5.1 entry; matched on the head verb here.
+[[verb_absent_from_thin]]
+verb = "security"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "binary-posture toggle (prepared ↔ active) is operator-only by construction."
+
+# ─────────────────────────────────────────────────────────────────────
+# Out-of-scope — cs verbs that §8p does not project onto the RPP
+# surface. Not refused for safety, just not modelled (informational,
+# fleet-management, voice-only, …). Adding any of these to cs-thin
+# requires an ADR amendment.
+# ─────────────────────────────────────────────────────────────────────
+
+[[verb_absent_from_thin]]
+verb = "events"
+class = "out_of_scope"
+reason = "EventV2 inspection — local-only debug surface."
+
+[[verb_absent_from_thin]]
+verb = "claim"
+class = "out_of_scope"
+reason = "pilot hold on a pending molecule — arbitrates the local Pending→Active race between a human `cs tackle` and a resident `cs run` walker on THIS node. The hold means nothing to a remote tenant with no walker to defer to."
+
+[[verb_absent_from_thin]]
+verb = "release"
+class = "out_of_scope"
+reason = "drops the pilot hold written by `cs claim` and returns the molecule to the local runtime frontier — same local writer-arbitration family as `cs claim`, and meaningless without it."
+
+[[verb_absent_from_thin]]
+verb = "trust"
+class = "out_of_scope"
+reason = "the `direnv allow` of cosmon: grants THIS repository permission to run its own formulas/hooks. The consent gesture guards against repo-supplied shell, so it must be made by the human at the local machine — exposing it on the wire would let a caller grant itself the very shell execution the gate exists to withhold."
+
+[[verb_absent_from_thin]]
+verb = "validate"
+class = "out_of_scope"
+reason = "deliberate heavyweight project-milestone gate — long-running local check over the operator's checkout, no one-shot HTTP shape (same family as `cs run`)."
+
+[[verb_absent_from_thin]]
+verb = "local-worker"
+class = "out_of_scope"
+reason = "internal transport plumbing — execs a detached Ollama-backed worker process on this machine. Not an operator verb at all (hidden from `cs --help`); it is the local-inference callee, never a wire-callable gesture."
+
+[[verb_absent_from_thin]]
+verb = "decay"
+class = "out_of_scope"
+reason = "DAG topology mutation — not in V0 §8p subset."
+
+[[verb_absent_from_thin]]
+verb = "merge"
+class = "out_of_scope"
+reason = "synthesis (N→1) — not in V0 §8p subset."
+
+[[verb_absent_from_thin]]
+verb = "transform"
+class = "out_of_scope"
+reason = "kind transmutation — not in V0 §8p subset."
+
+[[verb_absent_from_thin]]
+verb = "init"
+class = "out_of_scope"
+reason = "bootstrap a project-local .cosmon/ — local filesystem only."
+
+[[verb_absent_from_thin]]
+verb = "inbox"
+class = "out_of_scope"
+reason = "Inbox display — local-only operator surface."
+
+[[verb_absent_from_thin]]
+verb = "spark"
+class = "out_of_scope"
+reason = "operator intent capture — local-only (ADR-061)."
+
+[[verb_absent_from_thin]]
+verb = "listen"
+class = "out_of_scope"
+reason = "voice → whisper.cpp — local-only audio path."
+
+[[verb_absent_from_thin]]
+verb = "ask"
+class = "out_of_scope"
+reason = "experimental conversational ingress — not in V0 §8p subset."
+
+[[verb_absent_from_thin]]
+verb = "quench"
+class = "out_of_scope"
+reason = "graceful worker shutdown — local fleet management."
+
+[[verb_absent_from_thin]]
+verb = "fleet"
+class = "out_of_scope"
+reason = "fleet-template discovery — local filesystem operation."
+
+[[verb_absent_from_thin]]
+verb = "galaxies"
+class = "out_of_scope"
+reason = "galaxy taxonomy view — operator informational."
+
+[[verb_absent_from_thin]]
+verb = "mur"
+class = "out_of_scope"
+reason = "morning fresque — terminal-rich operator view."
+
+[[verb_absent_from_thin]]
+verb = "motion"
+class = "out_of_scope"
+reason = "live cluster motion view — local TUI."
+
+[[verb_absent_from_thin]]
+verb = "prime"
+class = "out_of_scope"
+reason = "config self-check — local startup path."
+
+[[verb_absent_from_thin]]
+verb = "resume"
+class = "out_of_scope"
+reason = "alias for `cs patrol --propel`; both operator-side."
+
+[[verb_absent_from_thin]]
+verb = "resurrect"
+class = "out_of_scope"
+reason = "fleet-revive operation — operator only."
+
+[[verb_absent_from_thin]]
+verb = "teardown"
+class = "out_of_scope"
+reason = "fleet teardown — operator only."
+
+[[verb_absent_from_thin]]
+verb = "migrate"
+class = "out_of_scope"
+reason = "memory migration — local filesystem operation."
+
+[[verb_absent_from_thin]]
+verb = "patrol"
+class = "out_of_scope"
+reason = "fleet health checks — operator scheduler-driven."
+
+[[verb_absent_from_thin]]
+verb = "health"
+class = "out_of_scope"
+reason = "read-only molecule-health Witness (ADR-137 P1) over local `.cosmon/` state, federation-wide — operator/CI snapshot, mutates nothing, no RPP shape."
+
+[[verb_absent_from_thin]]
+verb = "project"
+class = "out_of_scope"
+reason = "ledger projection (STATUS.md, ISSUES.md) — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "scheduler"
+class = "out_of_scope"
+reason = "patrols.toml inspector — operator informational."
+
+[[verb_absent_from_thin]]
+verb = "session"
+class = "out_of_scope"
+reason = "operator carnet — local append-only journal."
+
+[[verb_absent_from_thin]]
+verb = "daemons"
+class = "out_of_scope"
+reason = "daemons.toml supervisor view — operator informational."
+
+[[verb_absent_from_thin]]
+verb = "status"
+class = "out_of_scope"
+reason = "DAG overview — local TUI / operator view."
+
+[[verb_absent_from_thin]]
+verb = "tail"
+class = "out_of_scope"
+reason = "live events.jsonl reader — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "note"
+class = "out_of_scope"
+reason = "operator audit-trail note — could move to RPP later (V1+)."
+
+[[verb_absent_from_thin]]
+verb = "harvest"
+class = "out_of_scope"
+reason = "wraps cs done — operator-only by transitivity."
+
+[[verb_absent_from_thin]]
+verb = "heartbeat"
+class = "out_of_scope"
+reason = "worker liveness signal — worker-internal."
+
+[[verb_absent_from_thin]]
+verb = "topology"
+class = "out_of_scope"
+reason = "topon CLI wrapper — local code-graph tool."
+
+[[verb_absent_from_thin]]
+verb = "deps"
+class = "out_of_scope"
+reason = "blocking-dep inspector — could move later (V1+)."
+
+[[verb_absent_from_thin]]
+verb = "diverge"
+class = "out_of_scope"
+reason = "structural agreement check — turing §5; operator-only."
+
+[[verb_absent_from_thin]]
+verb = "peek"
+class = "out_of_scope"
+reason = "fractal TUI portal — local terminal."
+
+[[verb_absent_from_thin]]
+verb = "pulse"
+class = "out_of_scope"
+reason = "vitality heartbeat / drainage-cadence monitoring projection (ADR-138 fuel proxy); local operator view, same family as cs status / cs peek, no RPP shape."
+
+[[verb_absent_from_thin]]
+verb = "wait"
+class = "out_of_scope"
+reason = "blocking poll — pilot-side helper, not a transition."
+
+[[verb_absent_from_thin]]
+verb = "replay"
+class = "out_of_scope"
+reason = "D3 timeline — local browser-driven view."
+
+[[verb_absent_from_thin]]
+verb = "verify-trace"
+class = "out_of_scope"
+reason = "TLA+ replay gate — local CI tool."
+
+[[verb_absent_from_thin]]
+verb = "spec-audit"
+class = "out_of_scope"
+reason = "ledger audit against TLA+ spec — local CI tool."
+
+[[verb_absent_from_thin]]
+verb = "test"
+class = "out_of_scope"
+reason = "spec-suite entry — local binding audits."
+
+[[verb_absent_from_thin]]
+verb = "doctor"
+class = "out_of_scope"
+reason = "diagnostic probes — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "demo"
+class = "out_of_scope"
+reason = "first-contact chatbot surface — local end-to-end."
+
+[[verb_absent_from_thin]]
+verb = "presence"
+class = "out_of_scope"
+reason = "live-session registry — local FS / FUSE projection."
+
+[[verb_absent_from_thin]]
+verb = "archive"
+class = "out_of_scope"
+reason = "durable terminal snapshots — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "opt-in-share"
+class = "out_of_scope"
+reason = "first-run consent prompt — local interactive flow."
+
+[[verb_absent_from_thin]]
+verb = "notarize"
+class = "out_of_scope"
+reason = "Ed25519 attestation — operator key custody."
+
+[[verb_absent_from_thin]]
+verb = "key"
+class = "out_of_scope"
+reason = "operator notary key management — local key custody."
+
+[[verb_absent_from_thin]]
+verb = "inspect"
+class = "out_of_scope"
+reason = "path classifier — local filesystem (ADR-057)."
+
+[[verb_absent_from_thin]]
+verb = "artifacts"
+class = "out_of_scope"
+reason = "artifact-map operator view — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "cluster"
+class = "out_of_scope"
+reason = "machine-level cluster topology — operator-only (ADR-066)."
+
+[[verb_absent_from_thin]]
+verb = "apps"
+class = "out_of_scope"
+reason = "Tailscale daemon view — operator-only."
+
+[[verb_absent_from_thin]]
+verb = "witness"
+class = "out_of_scope"
+reason = "ADR-085 §3 Layer-2 witness-quorum seal — local same-tmux refusal heuristic; LaunchAgent path (M6) is deferred."
+
+[[verb_absent_from_thin]]
+verb = "notify"
+class = "out_of_scope"
+reason = "operator notification fan-out — local channel mappings (Mac notifs / Element)."
+
+[[verb_absent_from_thin]]
+verb = "tokens"
+class = "out_of_scope"
+reason = "IFBDD aggregator over local token-meter NDJSON sink — local filesystem."
+
+[[verb_absent_from_thin]]
+verb = "sensorium"
+class = "out_of_scope"
+reason = "Five-organ vital-strip reader (ADR-107) over local `.cosmon/state/sensorium/` files — local filesystem, per-galaxy body."
+
+[[verb_absent_from_thin]]
+verb = "config"
+class = "out_of_scope"
+reason = "local `.cosmon/config.toml` inspector — operator-only."
+
+[[verb_absent_from_thin]]
+verb = "errors"
+class = "out_of_scope"
+reason = "IFBDD failure-lens aggregation over local `MoleculeCollapsed` events — local view."
+
+[[verb_absent_from_thin]]
+verb = "vllm-mlx"
+class = "out_of_scope"
+reason = "local-inference sidecar diagnostics (Path B, delib-20260519-f6c3) — operator-only."
+
+[[verb_absent_from_thin]]
+verb = "pilot"
+class = "out_of_scope"
+adr_ref = "ADR-115; ADR-080 §8p"
+reason = "interactive cognitive-pilot REPL, not a mechanical RPP molecule op — the REPL is never an HTTP verb. Its --remote mode is a cosmon-ops-tools tool BACKEND that REUSES the existing observe/ensemble/nucleate/tackle §8p routes (task-20260601-4997); it adds no thin-cli route. cf. docs/guides/api-cli-coverage.md cs pilot row."
+
+[[verb_absent_from_thin]]
+verb = "panel"
+class = "operator_only"
+adr_ref = "ADR-080 §5.1"
+reason = "convenes a hash-pinned supermajority governance panel to gate a constitutional amendment — an operator-only deliberation gesture, no RPP shape."
+
+# ─────────────────────────────────────────────────────────────────────
+# Verbs in cs-thin that have no cs counterpart.
+# ─────────────────────────────────────────────────────────────────────
+
+[[verb_only_in_thin]]
+verb = "verbs"
+reason = "cs-thin self-introspection meta verb (registry + coverage rapport)."
+
+[[verb_only_in_thin]]
+verb = "avatar"
+reason = "D-AVATAR instance lifecycle — cs-thin only (wire-side); cs CLI does not model avatar subcommands yet."
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-verb flag asymmetries.
+# ─────────────────────────────────────────────────────────────────────
+#
+# `flag_only_in_cs` lists every flag present in `cs <verb>` (or cs
+# globally with verb="*") that cs-thin intentionally does not surface.
+# `flag_only_in_thin` lists the symmetric case. Both sides are
+# necessary — without them the test would either over- or under-fail.
+
+# Global cs flags absent from cs-thin globals.
+[[flag_only_in_cs]]
+verb = "*"
+flag = "--config"
+reason = "cs-thin is stateless — no config file path to honour."
+
+[[flag_only_in_cs]]
+verb = "*"
+flag = "--verbose"
+reason = "cs-thin uses tracing env vars (RUST_LOG); no -v switch needed."
+
+# `--json` is cs's opt-in for JSON output; cs-thin emits JSON natively
+# for every dispatch verb. The flag is accepted as a no-op at the
+# global Cli level so habit-typing doesn't error out (operator_ux.rs
+# pins this behaviour); per-verb help still does not surface it.
+# (This is allowlisted at "*" level because cs injects --json into
+# every per-verb help via its global Args.)
+[[flag_only_in_cs]]
+verb = "*"
+flag = "--json"
+reason = "cs-thin is JSON-native for dispatch verbs; --json is a no-op at top level."
+
+# ─────────────────────────────────────────────────────────────────────
+# observe — cs has a list-mode surface; cs-thin is single-id only.
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--all"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--formula"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--notes"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--search"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--status"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--tag"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+[[flag_only_in_cs]]
+verb = "observe"
+flag = "--worker"
+reason = "list-mode filter — cs-thin observe is single-id only."
+
+# ─────────────────────────────────────────────────────────────────────
+# nucleate — cs has a richer surface (--from, --blocks, --blocked-by,
+# --decayed-from, --refines, …); cs-thin only mirrors the rpp-adapter's
+# POST body. cs takes formula as a positional arg; cs-thin takes
+# `--formula <NAME>` (server-side resolution constraint).
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--assign"
+reason = "explicit worker assignment — local fleet concern."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--blocked-by"
+reason = "DAG-edge syntax not yet exposed on /v1/molecules POST body."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--blocks"
+reason = "DAG-edge syntax not yet exposed on /v1/molecules POST body."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--decayed-from"
+reason = "DecayProduct edge — not in V0 §8p subset."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--expires-at"
+reason = "expiry timestamp — not in V0 §8p subset."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--expiry-policy"
+reason = "expiry policy — not in V0 §8p subset."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--fleet"
+reason = "fleet selector — local concern; rpp-adapter scopes by Noyau."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--formulas-dir"
+reason = "formulas-dir override — local filesystem concern."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--from"
+reason = "TOML hydration is local-only; cs-thin sends a single inline body."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--no-parent"
+reason = "auto-DecayProduct contract is a worker-side concern; cs-thin treats every nucleation as a fresh root."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--refines"
+reason = "Refines edge — not in V0 §8p subset."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--refutes"
+reason = "Refutes edge — not in V0 §8p subset (same class as --refines/--blocks)."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--role"
+reason = "role override — local fleet concern."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--store-dir"
+reason = "state-dir override — local filesystem concern."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--ttl"
+reason = "TTL — not in V0 §8p subset."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--class"
+reason = "ADR-085 §M4 — operational class declaration (standard | stress-test | infra). Stress-test class requires the local seal protocol; rpp-adapter does not yet model the BypassReceipt envelope."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--energy-budget"
+reason = "THESIS Part XI per-molecule step-counter circuit-breaker — local fleet concern; rpp-adapter does not yet expose the energy ledger."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--interaction-mode"
+reason = "typed InteractionMode discriminant (operator-required vs background, task-20260503-6a65) — local fleet/worker concern not yet on the rpp-adapter wire."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--may-block-on-operator"
+reason = "operator-block capability grant (ADR-123) — folds to the op-block:<boundary> tag; a worker/fleet-side guard not yet on the rpp-adapter wire."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
+flag = "--require-galaxy"
+reason = "local galaxy-guard for nucleation (vg-20260603-b12f) — operator-side precondition check, not part of the rpp-adapter dispatch surface."
+
+[[flag_only_in_thin]]
+verb = "nucleate"
+flag = "--formula"
+reason = "cs takes formula as a positional arg; cs-thin takes --formula because the rpp-adapter resolves server-side via canonical name."
+
+# ─────────────────────────────────────────────────────────────────────
+# ensemble — cs has --all, --cluster (cluster-scope walk), cs-thin has
+# rpp-adapter filter set (status/kind/fleet).
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "ensemble"
+flag = "--all"
+reason = "cs --all lifts the running-only watchdog; cs-thin uses JWT-scope as the filter axis."
+
+[[flag_only_in_cs]]
+verb = "ensemble"
+flag = "--cluster"
+reason = "cluster-level expansion — local TopoMap (ADR-066), not RPP."
+
+[[flag_only_in_cs]]
+verb = "ensemble"
+flag = "--cluster-root"
+reason = "cluster-level path — same rationale as --cluster."
+
+[[flag_only_in_thin]]
+verb = "ensemble"
+flag = "--status"
+reason = "cs-thin mirrors GET /v1/molecules query params: cs uses local filtering only and doesn't wire --status today."
+
+[[flag_only_in_thin]]
+verb = "ensemble"
+flag = "--kind"
+reason = "rpp-adapter filter param; cs ensemble doesn't expose --kind today."
+
+[[flag_only_in_thin]]
+verb = "ensemble"
+flag = "--fleet"
+reason = "rpp-adapter filter param; cs ensemble has --fleet only via examples documentation, not as a flag today."
+
+# ─────────────────────────────────────────────────────────────────────
+# collapse — cs has --ops-dir; otherwise the surfaces match.
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--ops-dir"
+reason = "ops-dir override — local filesystem concern; rpp-adapter resolves paths server-side."
+
+[[flag_only_in_cs]]
+verb = "collapse"
+flag = "--reason-kind"
+reason = "typed CollapseReasonKind discriminant — local cataloguing concern; rpp-adapter accepts free-form reason text only."
+
+# ─────────────────────────────────────────────────────────────────────
+# tackle — cs has rich local plumbing (worktree, tmux, adapter, fleet,
+# bypass-seal). cs-thin does not surface tackle at all (operator_only,
+# ADR-080 §5.1) — these flags are only listed for completeness because
+# `verb_absent_from_thin` does not gate per-flag.
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--adapter"
+reason = "adapter selector — local fleet plumbing; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--by"
+reason = "anti-preemption lease owner (human | runtime:<pid>, task-20260531-a12f) — local-dispatch plumbing. Over RPP the dispatcher identity IS the JWT sub, so --by is intentionally cs-only."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--bypass-reason"
+reason = "bypass-seal audit field — local merge-gate plumbing; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--bypass-seal"
+reason = "merge-gate bypass switch (operator-only) — local; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--dry-run"
+reason = "tackle dry-run preview — local; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--fallback-from-local"
+reason = "Q5b loud-fallback opt-in (task-20260530-c089) — mints the local_fallback + remote_egress_opt_in atom at local spawn; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--fleet"
+reason = "fleet selector — local concern; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--force"
+reason = "force-retackle override — local; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--model"
+reason = "per-molecule model pin (delib-20260704-b476 C1) — sibling of --adapter, resolved at the local spawn boundary; cs-thin never tackles. Over RPP the model is a server/formula concern, not a tenant flag."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--name"
+reason = "worker name override — local fleet concern; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--no-worktree"
+reason = "worktree suppression — local plumbing; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--permission-mode"
+reason = "claude-code permission-mode passthrough — local plumbing; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--role-hint"
+reason = "worker role hint — local fleet concern; cs-thin never tackles."
+
+[[flag_only_in_cs]]
+verb = "tackle"
+flag = "--workdir"
+reason = "worktree workdir override — local plumbing; cs-thin never tackles."
+
+# ─────────────────────────────────────────────────────────────────────
+# freeze — cs has --by, --no-tmux, --timeout (worker-process plumbing);
+# cs-thin only mirrors the rpp-adapter freeze contract.
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "freeze"
+flag = "--by"
+reason = "freeze attribution — local concern; rpp-adapter records the principal from the JWT."
+
+[[flag_only_in_cs]]
+verb = "freeze"
+flag = "--no-tmux"
+reason = "tmux suppression flag — local worker plumbing."
+
+[[flag_only_in_cs]]
+verb = "freeze"
+flag = "--timeout"
+reason = "freeze timeout — local worker plumbing."
+
+# ─────────────────────────────────────────────────────────────────────
+# thaw — cs has --continue, --no-tmux (worker-process plumbing).
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_cs]]
+verb = "thaw"
+flag = "--continue"
+reason = "continue-after-thaw flag — local worker plumbing."
+
+[[flag_only_in_cs]]
+verb = "thaw"
+flag = "--no-tmux"
+reason = "tmux suppression flag — local worker plumbing."
+
+# ─────────────────────────────────────────────────────────────────────
+# stuck / tag — surfaces are tight; only globals diverge (handled at
+# `verb = "*"`).
+# ─────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────
+# cs-thin globals absent from cs.
+# ─────────────────────────────────────────────────────────────────────
+
+[[flag_only_in_thin]]
+verb = "*"
+flag = "--base-url"
+reason = "cs-thin needs an HTTP target; cs has direct disk access."
+
+[[flag_only_in_thin]]
+verb = "*"
+flag = "--jwt-from-env"
+reason = "cs-thin reads bearer JWTs from env; cs is local-only."
+
+[[flag_only_in_thin]]
+verb = "*"
+flag = "--jwt-file"
+reason = "cs-thin alternative to --jwt-from-env; cs has no JWT concept."
+
+[[flag_only_in_thin]]
+verb = "*"
+flag = "--coverage-report"
+reason = "cs-thin self-description rapport — has no cs equivalent."

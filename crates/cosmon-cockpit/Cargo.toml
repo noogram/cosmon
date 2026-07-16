@@ -1,0 +1,29 @@
+[package]
+name = "cosmon-cockpit"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Dashboard view ports and adapters for Cosmon fleet observation"
+
+[dependencies]
+cosmon-core.workspace = true
+cosmon-state.workspace = true
+cosmon-filestore.workspace = true
+chrono.workspace = true
+clap.workspace = true
+ctrlc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[[bin]]
+name = "cockpit-probe"
+path = "src/bin/cockpit_probe.rs"
+
+[lints]
+workspace = true

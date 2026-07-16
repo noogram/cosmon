@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Inspect the stateless galaxy-name registry (`~/.config/cosmon/galaxies.toml`) used by `cs ask`
+
+Usage: cs galaxies registry [OPTIONS] <COMMAND>
+
+Commands:
+  list     List every galaxy declared in the registry TOML
+  resolve  Resolve a single galaxy by name. Exits with status 1 if the name is not registered, so scripts can use it as a gate
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

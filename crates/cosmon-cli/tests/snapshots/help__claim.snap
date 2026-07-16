@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Claim a molecule for the pilot; the runtime defers until it is released
+
+Usage: cs claim [OPTIONS] <MOLECULE_ID>
+
+Arguments:
+  <MOLECULE_ID>  Molecule ID to claim or release
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs claim <mol>                 # reserve before cs tackle <mol>
+
+Writes the durable `hold:pilot` tag. The resident runtime defers to a
+claimed molecule unconditionally, so a pilot can reserve pending work before
+tackling it. Idempotent: claiming an already-claimed molecule is safe.
+
+SEE ALSO: cs release (return work to the runtime), cs tackle (start work).

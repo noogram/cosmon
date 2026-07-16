@@ -1,0 +1,33 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Notify — push a one-line message to every configured operator channel
+
+Usage: cs notify [OPTIONS] <MESSAGE>
+
+Arguments:
+  <MESSAGE>  The notification message (positional, single line)
+
+Options:
+      --config <PATH>           Path to configuration file
+      --title <TITLE>           Optional title prefix. Channels render it as the first line / header [default: cosmon]
+      --channel <CHANNEL>       Override the configured channel set. May be repeated. Recognised values: `macos`, `file-drop`, `element`, `telegram`. When omitted, every channel declared in `.cosmon/config.toml` is used
+  -v, --verbose                 Enable verbose output
+      --json                    Output in JSON format
+      --molecule <MOLECULE_ID>  Optional molecule id the notification is *about*. Surfaces in the JSON output and the file-drop body
+      --level <LEVEL>           Severity tag (advisory). One of `info`, `warn`, `alert`. Channels that support it (file-drop) pass it through; others ignore [default: info]
+      --dry-run                 Treat dispatch as a dry-run: log what *would* be sent without invoking any side-effecting transport. Equivalent to setting `COSMON_NOTIFY_DRY_RUN=1`
+  -h, --help                    Print help
+
+EXAMPLES:
+  cs notify "v1.2.1 tenant-demo deploy ok"                    # default channels
+  cs notify "worker quartz silent 240s" --level warn --molecule cs-20260426-a7e6
+  cs notify "hello" --channel macos --channel file-drop      # override channels
+  cs notify "automata gen 4096" --channel telegram          # Telegram DM
+  cs notify "dry test" --dry-run                              # don't dispatch
+
+Pushes one line to every channel in [notify].channels of .cosmon/config.toml
+(macos | file-drop | element | telegram). Best-effort: a single channel failure is
+logged but the others still fire. Closes the silent-24h gap by giving the
+fleet a primitive to reach the operator's attention surface.

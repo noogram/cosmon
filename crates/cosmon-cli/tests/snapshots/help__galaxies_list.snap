@@ -1,0 +1,13 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List every galaxy grouped by its `galaxy_kind` family
+
+Usage: cs galaxies list [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

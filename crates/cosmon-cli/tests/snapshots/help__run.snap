@@ -1,0 +1,107 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
+
+Usage: cs run [OPTIONS] [MOLECULE]
+
+Arguments:
+  [MOLECULE]
+          Root molecule ID (supports prefix matching like other commands).
+          
+          Required for the legacy DAG-policy mode. With `--resident` the loop walks the whole ensemble, so this argument is optional (any value, including `_`, is accepted and ignored).
+          
+          [default: ""]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --policy <POLICY>
+          Scheduling policy to use
+          
+          [default: dag]
+          [possible values: dag, noop]
+
+      --timeout <TIMEOUT>
+          Maximum seconds before the runtime exits. 0 means no timeout (default)
+          
+          [default: 0]
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --poll-interval <POLL_INTERVAL>
+          Seconds between runtime ticks. Lower values are more responsive but increase store I/O
+          
+          [default: 1]
+
+      --no-teardown
+          Skip automatic teardown of completed molecules after the run
+
+      --sweep-every <SWEEP_EVERY>
+          ADR-038 Limit 1: re-walk the store every N ticks to absorb descendants nucleated dynamically by workers (mission-controller decompose, deep-think step 4, etc.) that are not reachable from the runtime's root via pre-existing typed links. Zero disables the sweep (default) — the scope is frozen at compile-plan time, which is the pre-2026-04-14 behavior
+          
+          [default: 0]
+
+      --force-runtime
+          Override the ADR-048 backlog-sanity guard on runtime bootstrap.
+          
+          When a dirty backlog would normally refuse runtime bootstrap (sediment ≥ threshold, default 5), `--force-runtime` bypasses the refusal and writes a `runtime_guard_override` audit event to `events.jsonl` so the override leaves a durable trail.
+
+      --max-actions <MAX_ACTIONS>
+          B3 — decreasing action budget (moussage bounds). Each applied runtime action costs one unit; when the budget floor is reached the loop exits with the NAMED reason `budget_exhausted` (exit code 90) instead of dispatching further. This is the well-founded measure that makes an unbounded moussage total. 0 = unbounded (default, operator-local behaviour unchanged). Server-side callers (the tenant drain path) pass the binding-derived value — the bound is never client-writable
+          
+          [default: 0]
+
+      --max-depth <MAX_DEPTH>
+          B1 — maximum DAG depth (longest dependency chain, in molecules). Checked at compile-plan time, BEFORE the loop starts: a plan deeper than the bound is refused with the NAMED error `max_depth_exceeded` (exit code 92), never started. 0 = unbounded (default)
+          
+          [default: 0]
+
+      --max-molecules <MAX_MOLECULES>
+          B2 — maximum molecules tolerated in the fleet while draining. Checked at compile-plan time AND on every loop tick (so mid-run nucleations count); exceeding it exits with the NAMED reason `molecule_quota_exceeded` (exit code 91). 0 = unbounded (default)
+          
+          [default: 0]
+
+      --resident
+          **ADR-095** — switch to the fully event-sourced Resident Runtime loop.
+          
+          When set, the legacy in-process `DagPolicy` is bypassed and the new [`cosmon_runtime::RuntimeLoop`] takes over. The loop:
+          
+          - Shells out to `cs ensemble --json`, `cs tackle`, `cs done` exactly as a human operator would (RR-1). - Wakes on FS changes under `.cosmon/state/` (notify backend) plus a `--poll-interval` heartbeat. - Writes an NDJSON trace line per loop iteration to `.cosmon/state/runtime-trace.jsonl` (RR-5). - Exits cleanly on SIGTERM / Ctrl-C. - Drains when the ensemble has no `pending` and no `running`.
+          
+          Does not require `<molecule>` — the loop walks the whole ensemble. The positional argument is accepted but ignored in resident mode; pass `_` if you have nothing to name.
+
+      --affinity
+          **ADR-145** — model-affinity ordering of the ready frontier.
+          
+          On a single-resident-model local oracle (`ollama-g5`: 48 GB ≈ one 120 B model in VRAM), an alternating frontier reloads the model (~40 GB off disk) on every dispatch. With `--affinity` the runtime clusters same-model molecules contiguously and drains the resident model first, so a same-model batch pays the load cost once. The per-molecule model is PRE-RESOLVED from each molecule's formula-step `model =` pin (the ADR-142 Incarnation model), since a pending frontier molecule has no `ModelSelected` event yet.
+          
+          Off by default: cloud dispatch (many models, no resident constraint) keeps pure critical-path order. The reorder is a permutation — the DAG semantics and the set of dispatched molecules are unchanged; only the order within a ready batch differs. Legacy DAG-policy mode only (not `--resident`).
+
+      --resident-model <RESIDENT_MODEL>
+          Model already warm in the oracle's VRAM at runtime start, so the affinity reorder drains its bucket first with no reload. Only read when `--affinity` is set; a cold start (unset) simply pays one extra load for the first bucket
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  tmux new -d -s runtime cs run <root> --poll-interval 5
+  cs run <leaf-id>                   # also valid: 1-node DAG = single dispatch
+  cs run <root> --force-runtime      # bypass the ADR-048 backlog-sanity guard
+
+Resident runtime — walks a DAG of N≥1 nodes. Calls `cs tackle` for each
+ready node and `cs done` automatically as predecessors complete. The
+single-node case (1 = leaf) is the same code path as the N-node case;
+`cs tackle <id>` is the no-walk equivalent if the operator wants exactly
+one worker without any runtime ceremony.
+
+NEVER run `cs run` in the foreground; always detach via tmux so the
+pilot stays responsive.
+
+SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.

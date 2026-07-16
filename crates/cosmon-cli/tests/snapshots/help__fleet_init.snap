@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Initialize a fleet from a template (copies to .cosmon/fleet.toml)
+
+Usage: cs fleet init [OPTIONS] <TEMPLATE>
+
+Arguments:
+  <TEMPLATE>  Template name (from `cs fleet list-templates`)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -o, --output <PATH>  Output path (default: .cosmon/fleet.toml)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

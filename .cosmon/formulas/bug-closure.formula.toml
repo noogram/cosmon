@@ -1,0 +1,205 @@
+formula = "bug-closure"
+version = 1
+description = """
+Meta-formula — the discipline that prevents fix-demi-cuit. When a bug \
+fix lands, walk the bug's entire semantic surface (help text, tests, \
+docs, hooks, callers, invariants, chronicles) and emit a verdict: \
+CLOSED (every surface is covered) or REOPEN (name what is still \
+missing). Closes the streak where a verb is "repaired" N times because \
+each fix touched only half its surface.
+
+Rationale — an internal chronicle and spark-20260421-3c99 (candidate 4). The cosmon \
+incident that birthed this formula: 5× `fix(done):` commits in 36 \
+hours preceding the 2026-04-21 false-positive `already_merged` that \
+almost dropped 491 insertions. Each prior fix addressed one surface \
+(the probe, the flush, the escalation, the purge) but none walked the \
+verb's FULL surface — so the verb stayed half-cooked and regressed on \
+the next edge case.
+
+The formula is NOT a replacement for the fix itself. It is the \
+companion ritual: every structural bug that alters the semantics of a \
+verb must exit through this formula. If a candidate surface is missing \
+coverage, the verdict is `reopen_with_missing_surfaces` and the named \
+gaps become child molecules the operator tackles next.
+
+Meta-application (honouring the "example execution" principle from the \
+spark-capture report): the first bug that exits through bug-closure \
+is the `cs done --strict-ancestry` fix itself. If bug-closure says \
+CLOSED with confidence, the binôme is shipped. If it lists gaps, the \
+discipline has earned its keep on its own first use.
+
+Variables:
+  - bug_molecule_id : the id of the 🐛 molecule that carries the bug \
+    being closed. The formula reads this molecule's prompt.md, \
+    briefing.md, and synthesis/log artifacts to infer the verb and \
+    surface.
+  - verb : the CLI verb or subsystem whose semantics the bug touched \
+    (e.g. \"cs done\", \"cs evolve\", \"events.jsonl append path\"). \
+    Used to scope surface enumeration.
+
+ARTIFACT PATHS — all artifacts (surfaces.md, coverage.md, verdict.md) \
+MUST be written to the MOLECULE STATE DIRECTORY returned by \
+`cs --json observe {mol_id}` in the `molecule_dir` field. Files \
+written to the worktree are destroyed by `cs done`.
+
+NOT for: feature additions (this is a closure ritual, not a design \
+discipline), trivial typo fixes, or bugs whose semantic surface is \
+strictly local (a single-file arithmetic error with no help text and \
+no public contract).
+"""
+id_prefix = "bug-closure"
+freeze_on_last_step = false
+
+# Tier 0 — audit + verdict. No child nucleation unless the verdict is
+# `reopen_with_missing_surfaces`, in which case the operator nucleates
+# per named gap explicitly. The formula does not silently fan out.
+[tier]
+level = 0
+
+[[steps]]
+id = "surface-enumeration"
+title = "Enumerate the verb's semantic surface"
+description = """
+List every surface the bug's verb touches. A SURFACE is any place in \
+the codebase or operator-facing artifact that encodes the verb's \
+contract — if a fix leaves one surface stale, the verb is \
+half-repaired.
+
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe \
+{mol_id}` — NEVER the worktree.
+
+Read the bug molecule's evidence first:
+  - `cs --json observe {bug_molecule_id}` → extract state, variables, \
+    completed steps.
+  - `cat $(cs --json observe {bug_molecule_id} | jq -r \
+    .molecule_dir)/prompt.md` → the operator's description of the \
+    incident.
+  - Optional: skim the bug's events.jsonl for escalations or \
+    re-attempts.
+
+Then walk the SIX canonical surface classes for the verb named by the \
+`verb` variable. For each class, list the concrete files/symbols that \
+would need an update if the verb's semantics changed:
+
+  1. IMPLEMENTATION — the primary Rust module(s) in \
+     crates/cosmon-cli/src/cmd/ (or the relevant crate). Plus any \
+     helper modules the verb delegates to (cosmon-state, \
+     cosmon-filestore, cosmon-transport).
+  2. TESTS — unit tests (same file, `mod tests`), integration tests \
+     (crates/cosmon-cli/tests/*.rs), property tests if any. Include \
+     doc tests in public API (`cargo test --doc`).
+  3. CLI HELP — clap doc comments on Args, `cs help <verb>`, and the \
+     man page (crates/cosmon-cli/man/*.1). The \"CLI doc sync\" \
+     invariant applies: help and man must move together.
+  4. OPERATOR DOCS — docs/handbook.md, CLAUDE.md (both the project \
+     root and the user-global copy mentions if any), the verb's own \
+     README section if any.
+  5. INVARIANTS + ADRs — docs/architectural-invariants.md entries \
+     that bind the verb, docs/adr/*.md decisions that cite it. If \
+     the fix landed a new invariant, it should be numbered and \
+     referenced here.
+  6. CALLERS + HOOKS — other cosmon commands that call this verb \
+     (grep for the function name and CLI string), formula steps that \
+     invoke it (.cosmon/formulas/*.toml), hook scripts \
+     (.cosmon/hooks/**/*), LaunchAgent plists that depend on its \
+     exit codes.
+
+Write MOLECULE_DIR/surfaces.md with one section per class. For each \
+surface, list:
+  - Concrete path (file + symbol or heading).
+  - One-line note on what the verb's contract-as-encoded-here asserts \
+    (what a reader of this surface would believe about the verb).
+  - Whether the bug's fix touched this surface (answered in the next \
+    step, stubbed here as \"TBD\").
+
+Closing remark — state the bug's \"semantic scope\": is it a change \
+to the verb's pre-condition, post-condition, side-effects, error \
+handling, or exit contract? That classification shapes which of the \
+six surfaces is MANDATORY vs optional. A pre-condition change \
+mandates help + invariants + tests; a side-effect change mandates \
+callers + hooks + operator docs.
+"""
+acceptance = "MOLECULE_DIR/surfaces.md written with all six classes enumerated, each surface tagged with its concrete path and one-line contract, and the bug's semantic scope stated."
+
+[[steps]]
+id = "coverage-audit"
+title = "Audit each surface against the fix"
+description = """
+Walk MOLECULE_DIR/surfaces.md and, for each entry, determine whether \
+the bug's fix (as landed on the current branch or main) actually \
+covered it.
+
+For each surface:
+  a. Open the concrete file and re-read the relevant passage.
+  b. Compare to the bug's semantic scope (from step 1's closing \
+     remark). Is the surface consistent with the new contract, or \
+     does it still reflect the old (broken) behaviour?
+  c. Classify: COVERED / STALE / NOT_APPLICABLE.
+       - COVERED — the surface reflects the fix. Example: the clap \
+         doc comment now mentions the new flag or invariant.
+       - STALE — the surface still reads as if the bug were never \
+         fixed. Help text says one thing, implementation does \
+         another.
+       - NOT_APPLICABLE — the surface is unrelated to the semantic \
+         scope. Document the reasoning so a future audit can verify.
+
+Write MOLECULE_DIR/coverage.md with a table:
+
+  | Surface | Class | Verdict | Evidence | Gap (if STALE) |
+
+For STALE surfaces, the `Gap` column names the concrete follow-up \
+(e.g. \"update man page: cs.1:120 still describes the HEAD-based \
+probe\", \"regression test missing for the worktree-invocation case\").
+
+If the audit finds ZERO stale surfaces, state so explicitly — that \
+outcome is the discipline working, not a sign it was unnecessary.
+
+Cross-reference check: if the fix landed a new invariant in \
+docs/architectural-invariants.md, verify the regression test that \
+pins it actually fails when reverted. A claimed invariant with no \
+executable gate is a decoration.
+"""
+needs = ["surface-enumeration"]
+acceptance = "MOLECULE_DIR/coverage.md written with the full six-class table, each row classified COVERED / STALE / NOT_APPLICABLE with evidence, and cross-reference check performed on any new invariant."
+
+[[steps]]
+id = "close-or-reopen"
+title = "Emit the verdict"
+description = """
+Collapse the coverage audit into a single verdict and write \
+MOLECULE_DIR/verdict.md.
+
+Two possible verdicts:
+
+  1. CLOSED — every mandatory surface is COVERED, the regression \
+     test exists and was run green, the new invariant (if any) is \
+     pinned by an executable gate. The bug may now be collapsed via \
+     `cs collapse {bug_molecule_id}` or the bug's own task-work \
+     formula completed normally.
+  2. REOPEN_WITH_MISSING_SURFACES — one or more mandatory surfaces \
+     are STALE. The verdict names each gap as a discrete follow-up \
+     (future child molecule). The operator reads the verdict and \
+     nucleates one task- or decision-molecule per gap, then \
+     re-invokes bug-closure on the bug once those children land.
+
+Write MOLECULE_DIR/verdict.md with:
+  - Verdict: CLOSED or REOPEN_WITH_MISSING_SURFACES.
+  - Justification: one paragraph citing the coverage table.
+  - If REOPEN: numbered list of named gaps, each with proposed \
+    molecule kind (task / decision / adjustment) and suggested \
+    prompt text.
+  - If CLOSED: the chronicle hook — one sentence the operator may \
+    paste into docs/lore/CHRONICLES.md if the fix illuminated a \
+    principle worth recording.
+  - Exit signal for callers (`verdict: closed` | `verdict: \
+    reopen_with_missing_surfaces`) on the first line of the file so \
+    hooks can grep it.
+
+This formula is INFORMATIONAL — it does not itself collapse or \
+nucleate. The operator holds the dispatch authority. The formula's \
+value is the verdict + the named gaps; downstream automation may \
+read the first line of verdict.md to decide whether to chain \
+`cs done --if-completed {bug_molecule_id}` or to wait.
+"""
+needs = ["coverage-audit"]
+acceptance = "MOLECULE_DIR/verdict.md written with CLOSED or REOPEN_WITH_MISSING_SURFACES on the first line, a justification citing the coverage table, and (if REOPEN) a numbered list of named gaps with suggested molecule kinds."

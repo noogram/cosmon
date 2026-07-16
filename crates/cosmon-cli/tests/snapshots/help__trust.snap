@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
+
+Usage: cs trust [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --status         Report the current trust status without changing anything
+      --revoke         Revoke this repository's trust grant
+  -v, --verbose        Enable verbose output
+      --dir <DIR>      Operate on this directory instead of the current working directory
+      --json           Output in JSON format
+  -h, --help           Print help

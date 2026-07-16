@@ -1,0 +1,52 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
+
+Usage: cs reconcile [OPTIONS]
+
+Options:
+      --check
+          Dry-run: check if surfaces are up to date without writing
+
+      --config <PATH>
+          Path to configuration file
+
+      --fetch
+          Fetch current GitHub Issue state before comparing (detect remote edits)
+
+  -v, --verbose
+          Enable verbose output
+
+      --force
+          Deprecated no-op. Surfaces are always overwritten from authoritative state (derived-view semantics), so there is no longer a non-force mode to override. Accepted for backward compatibility
+
+      --json
+          Output in JSON format
+
+      --no-escalate
+          Deprecated no-op. Surface conflicts no longer escalate or write git-style conflict blocks — surfaces are derived views and are always regenerated. Accepted for backward compatibility
+
+      --wait
+          Deprecated no-op. Reconcile never nucleates resolver molecules, so there is nothing to wait for. Accepted for backward compatibility
+
+      --heal-invariants
+          Heal the `archived ⇒ status.is_terminal()` invariant on disk.
+          
+          Default reconcile is a *pure projection* onto surfaces and never mutates molecule state (architectural-invariants.md). This flag opts into a one-shot migration: every molecule that is archived but carries a non-terminal status (a *ghost*, e.g. `{archived: true, status: running}`) is rewritten to `status = Collapsed` with reason `archived-but-alive heal`, and a `MoleculeStatusChanged` + `MoleculeCollapsed` event pair is appended so the heal survives a cache rebuild from `events.jsonl`.
+          
+          Idempotent: once healed, a second `--heal-invariants` pass finds nothing to do. Detect the violations first with `cs verify --invariants`.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs reconcile                # DEPRECATED — see below
+
+DEPRECATED (ADR-052 §D3): use `cs project` instead. The new verb reads
+as "materialize views from the ledger"; `reconcile` read as "patch
+something that drifted", which is the framing ADR-052 retires. This
+alias will be removed after one release cycle.
+
+SEE ALSO: cs project (canonical).

@@ -1,0 +1,53 @@
+# Overlay appended to the auto-generated homeserver.yaml by the
+# synapse-e2e-demo.sh script. Purpose: flip registration off for the
+# public API, enable the admin HMAC register endpoint via a shared
+# secret, suppress federation noise, and keep the server purely local.
+#
+# Values are deliberately hard-coded — this config is test-only, never
+# federated, and bound to 127.0.0.1. The shared secret is overwritten
+# by the driver script (see `__SHARED_SECRET__` sentinel).
+
+suppress_key_server_warning: true
+enable_registration: false
+registration_requires_token: false
+registration_shared_secret: "__SHARED_SECRET__"
+
+# Federation hard off — this homeserver exists only for the demo.
+federation_domain_whitelist: []
+allow_public_rooms_over_federation: false
+allow_public_rooms_without_auth: false
+
+# Lean the rate limiter way back so the demo does not trip it.
+rc_message:
+  per_second: 1000
+  burst_count: 1000
+rc_registration:
+  per_second: 1000
+  burst_count: 1000
+rc_login:
+  address:
+    per_second: 1000
+    burst_count: 1000
+  account:
+    per_second: 1000
+    burst_count: 1000
+  failed_attempts:
+    per_second: 1000
+    burst_count: 1000
+rc_admin_redaction:
+  per_second: 1000
+  burst_count: 1000
+rc_joins:
+  local:
+    per_second: 1000
+    burst_count: 1000
+  remote:
+    per_second: 1000
+    burst_count: 1000
+
+# Disable presence to reduce sync payload.
+presence:
+  enabled: false
+
+# No delegation — pin the homeserver at the configured base URL.
+serve_server_wellknown: false

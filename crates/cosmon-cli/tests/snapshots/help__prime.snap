@@ -1,0 +1,23 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Prime the system — load .cosmon/config.toml and self-check gates
+
+Usage: cs prime [OPTIONS] [MOLECULE]
+
+Arguments:
+  [MOLECULE]  Molecule ID to prime (optional — auto-detects from running molecule)
+
+Options:
+      --config <PATH>  Path to configuration file
+      --hook           Check hook and prime if work is assigned
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs prime                    # load .cosmon/config.toml, report gates
+
+Boot-time self-check. No network calls; verifies the local project is
+well-formed.

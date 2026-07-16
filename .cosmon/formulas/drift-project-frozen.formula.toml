@@ -1,0 +1,173 @@
+formula = "drift-project-frozen"
+version = 1
+description = """
+Drift-detection patrol #5 — *project → frozen*.
+
+A project galaxy has reached thermodynamic quasi-equilibrium \
+(carnot) when:
+  - `exergy → 0` — no new principles crystallised, no new artefacts \
+    shipped, AND
+  - `flux → 0` — the commit + chronicle pulse has stopped, AND
+  - `artefacts_consulted > 0` — readers are still pulling value from \
+    the existing output.
+
+The third condition distinguishes *frozen* from *dead*. A dead \
+project is a candidate for archival; a frozen project is a reference \
+— retained, tagged, never deleted (delib-20260419-5168 §4 Q8e).
+
+Threshold helper — \
+`neurion_core::domain::drift::project_to_frozen_drift`. Pure Rust, \
+unit-tested. The verdict instructs tagging `status:frozen`, not \
+deletion.
+
+Neurion gate — reads `galaxy_kind = 'project'` from `repos`.
+
+ARTIFACT PATHS — MOLECULE_DIR from `cs --json observe {mol_id}`; \
+NEVER the worktree.
+
+Skip galaxies already tagged `status:frozen` — they have been \
+correctly labelled; re-firing would be noise.
+
+No variables required.
+"""
+id_prefix = "drift-frozen"
+freeze_on_last_step = false
+
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "scan"
+title = "Compute exergy, flux, and consultation per project galaxy"
+description = """
+1. **Enumerate project galaxies** via neurion:
+
+   ```
+   neurion.query_registry("SELECT name, path FROM repos WHERE \
+   galaxy_kind = 'project'")
+   ```
+
+   Exclude galaxies already carrying `status:frozen` (via `cs galaxies \
+   list --json` + tag scan).
+
+2. **Reporting window**: 30 days trailing (longer than hub or \
+   editorial because projects move slower).
+
+3. **Compute three metrics** per galaxy:
+
+   - `exergy` (principles·deliverables):
+     - principles = count of files under `docs/lore/` modified in the \
+       window that contain a top-level `#` heading with `principle`, \
+       `chronicle`, or a dated slug.
+     - deliverables = count of git tags matching `release/*`, \
+       `v*.*.*`, `publish/*`, or `ship/*` created in the window.
+     - `exergy = principles * deliverables` (double product, synthesis \
+       §6). Zero if either factor is zero.
+   - `flux` (commit + chronicle pulse):
+     - `git -C <path> log --since=30.days.ago --pretty=%h | wc -l` \
+       + count of `docs/lore/*.md` touched in the window.
+   - `artefacts_consulted` — the hardest to measure honestly. \
+     Proxies (pick whichever is most reliable for the galaxy):
+     - `git log --since=60.days.ago --all --source -- <frozen_dir>` \
+       (reads touching artefact directories).
+     - Number of references to the galaxy's chronicle file paths in \
+       other galaxies' chronicles (grep across sister `docs/lore/`).
+     - Access logs if the galaxy exposes them.
+     Default when no proxy is reliable: `artefacts_consulted = 1` so \
+     the `> 0` condition does not gate the drift on a measurement \
+     we cannot honestly make (carnot: measurement ceiling).
+
+4. **Write** `MOLECULE_DIR/scan.md`:
+
+   | galaxy | path | exergy | flux | artefacts_consulted | evidence |
+"""
+acceptance = "MOLECULE_DIR/scan.md with per-galaxy row: exergy, flux, artefacts_consulted + evidence; frozen-tagged galaxies explicitly skipped."
+
+[[steps]]
+id = "detect"
+title = "Apply the frozen-project threshold and emit issues"
+description = """
+Per galaxy, call `project_to_frozen_drift(name, FrozenObservation { \
+exergy, flux, artefacts_consulted })`.
+
+Fire condition (from the helper):
+  - `exergy == 0` AND `flux == 0` AND `artefacts_consulted > 0`.
+
+The triple conjunction is deliberate: it distinguishes *frozen* \
+(retained, useful) from *dead* (candidate for archival — a different \
+decision).
+
+For EACH fire, nucleate:
+
+```
+cs nucleate spark-capture \
+  --kind issue \
+  --var topic="drift-detected: project-to-frozen — <galaxy> \
+(exergy=0, flux=0, artefacts_consulted=<N>) — suggest tag status:frozen" \
+  --tag drift-detected \
+  --tag drift:project-to-frozen \
+  --tag galaxy:<galaxy> \
+  --tag suggest-tag:status-frozen \
+  --tag temp:warm
+```
+
+`temp:warm` MANDATORY.
+
+**Do NOT** apply `status:frozen` automatically. Freezing a project \
+is a human decision that changes how future sweeps treat the galaxy \
+(this formula skips `status:frozen`); the verdict is a suggestion, \
+not an action.
+
+**Rate-limit guard**: more than 5 fires triggers `## Overflow`. A \
+mass-freeze usually means the window has slipped past a vacation \
+block; the operator extends the window or waits.
+
+**Write** `MOLECULE_DIR/detect.md`:
+  - one row per galaxy: `galaxy | exergy | flux | reads | verdict | \
+    issue_id`.
+  - explicit zero-fire line when applicable.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/detect.md with per-galaxy verdict rows; up to 5 issues nucleated with suggest-tag:status-frozen + temp:warm; overflow if >5."
+
+[[steps]]
+id = "report"
+title = "Produce the patrol report"
+description = """
+Write `MOLECULE_DIR/report.md`:
+
+  ```
+  # Drift patrol — project → frozen — {date}
+
+  ## Galaxies scanned
+  | galaxy | exergy | flux | artefacts_consulted | verdict |
+
+  ## Fires
+  Per fire: galaxy, numbers, issue ID, carnot-framed interpretation \
+  ("Exergy → 0 AND flux → 0 AND readers still consulting — the \
+  project has reached quasi-equilibrium. Tag `status:frozen`; do NOT \
+  delete.").
+  If zero fires: "No project has reached quasi-equilibrium in this \
+  window."
+
+  ## Frozen vs Dead
+  Remind the reader: a project with zero exergy, zero flux, AND zero \
+  consultation is NOT frozen — it is a candidate for archival, \
+  tracked elsewhere (synthesis §5 cross-cutting tags). This patrol \
+  only fires on *retained-yet-inert*.
+
+  ## Non-actions
+  The patrol does NOT apply `status:frozen`, delete the galaxy, \
+  archive it, or remove its `galaxy_kind`. It emits an issue; the \
+  operator decides.
+
+  ## Next sweep
+  Default: 30 days. Sooner after a project publishes a final release.
+  ```
+
+Pointer: `project_to_frozen_drift` + `FrozenObservation` in \
+neurion-core.
+"""
+needs = ["detect"]
+acceptance = "MOLECULE_DIR/report.md with galaxies-scanned, per-fire interpretation, Frozen vs Dead section (MANDATORY), non-actions, next-sweep cadence."

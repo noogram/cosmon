@@ -1,0 +1,53 @@
+formula = "sov-pipeline"
+version = 1
+description = """
+Sovereign inference pipeline — 5 checkpointed oracle stages, model-independent.
+
+Each step queries the LOCAL oracle (Ollama / llama-cpp / any sovereign model),
+appends the answer to the molecule state file, then calls `cs evolve`. The
+per-step git auto-commit performed by `cs evolve` IS the checkpoint: a crash
+after step N is resumed from step N+1 with no redundant oracle calls, because
+the step counter (state.json) and the appended answer are both durably
+committed. This is the crash-recovery primitive that makes a long sovereign
+pipeline safe to run under real-world interruption. Reference: C5 reprise-
+sur-crash experiment (task-20260705-8aa4), outcomes.md.
+"""
+id_prefix = "sov"
+
+# Tier 0 — leaf pipeline, no child nucleation.
+[tier]
+level = 0
+
+[[steps]]
+id = "draft"
+title = "Oracle: draft"
+description = "Query local oracle for an initial draft; append to state; cs evolve (checkpoint)."
+acceptance = "Draft answer appended and step committed."
+
+[[steps]]
+id = "critique"
+title = "Oracle: critique"
+description = "Query local oracle to critique the draft; append; cs evolve (checkpoint)."
+needs = ["draft"]
+acceptance = "Critique appended and step committed."
+
+[[steps]]
+id = "revise"
+title = "Oracle: revise"
+description = "Query local oracle to revise per critique; append; cs evolve (checkpoint)."
+needs = ["critique"]
+acceptance = "Revision appended and step committed."
+
+[[steps]]
+id = "verify"
+title = "Oracle: verify"
+description = "Query local oracle to verify the revision; append; cs evolve (checkpoint)."
+needs = ["revise"]
+acceptance = "Verification appended and step committed."
+
+[[steps]]
+id = "finalize"
+title = "Oracle: finalize"
+description = "Query local oracle for the final answer; append; cs evolve (checkpoint)."
+needs = ["verify"]
+acceptance = "Final answer appended and step committed."

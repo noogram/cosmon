@@ -1,0 +1,41 @@
+[package]
+name = "cosmon-core"
+publish.workspace = true
+version = "0.2.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# AGPL-3.0-only per operator decision 2026-06-21 (delib-ca76): the kernel
+# IS the moat; copyleft closes the strip-mine hole at the source.
+license = "AGPL-3.0-only"
+description = "Pure domain types, state machines, and trait definitions for Cosmon"
+
+[features]
+# Exposes the `harness` module (mock CommandRunner / Clock) to *other* crates'
+# tests. Off by default so the harness — which ships `.expect("mock lock")` —
+# never enters a normal published build. Enabled via dev-dependencies by
+# sibling crates running hermetic scenario tests (e.g. cosmon-runtime).
+test-harness = []
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+cosmon-graph.workspace = true
+cosmon-hash.workspace = true
+rand.workspace = true
+regex.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+sha2.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+trybuild = "1"
+
+[lints]
+workspace = true

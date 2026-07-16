@@ -1,0 +1,27 @@
+
+# Scenario: events-jsonl-merge
+#
+# Regression binding for the `cs done` merge-conflict auto-resolver on
+# append-only JSONL files (see docs/events-jsonl-merge.md).
+#
+# Invariant: when both `main` and a feature branch append new entries to
+# `.cosmon/state/events.jsonl` (or `interactions.jsonl`), `cs done` must
+# merge cleanly — producing a union of both sides' entries sorted by
+# timestamp — instead of aborting with a textual conflict.
+#
+# Status: SKELETON. The executable regression lives as a Rust unit test
+# (`test_merge_branch_auto_resolves_events_jsonl_conflict` in
+# `crates/cosmon-cli/src/cmd/done.rs`); this TOML records the binding for
+# `cs test --binding-report`.
+
+name = "events-jsonl-merge"
+clause = "events-jsonl-auto-merge"
+description = "Append-only JSONL conflicts during `cs done` auto-resolve by union + timestamp sort."
+foundry_proposition = ""  # TODO: Lean proposition EventsJsonlMerge_union
+
+[expect]
+# Observable: after `cs done` on a branch whose only divergence from main
+# is an appended line in events.jsonl (while main also appended), the
+# post-merge file contains both entries in timestamp order and no
+# MERGE_HEAD remains.
+kind = "merge-resolution"

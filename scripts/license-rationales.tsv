@@ -1,0 +1,98 @@
+# crate<TAB>tier<TAB>license<TAB>rationale
+# ----------------------------------------------------------------------
+# Hand-curated mapping consumed by scripts/license-table.sh. Adding a new
+# crate to the workspace REQUIRES adding a row here in the same PR; the
+# CI gate (`license-table.sh --check`) refuses to merge otherwise.
+#
+# Two tiers (see ADR-092):
+#   - core      → AGPL-3.0-only   (runtime, daemons, end-to-end binaries,
+#                                  MCP servers — anything that boots and
+#                                  talks to the outside world).
+#   - frontier  → Apache-2.0      (pure libs / SDKs / type crates /
+#                                  trait families a third party might
+#                                  `cargo add` to build on top of cosmon).
+#
+# Placement test (ADR-092 §3):
+#   « Un tiers ferait-il `cargo add cosmon-X` sans vouloir tout
+#     AGPL-iser son projet ? » Yes → frontier ; No → core.
+#
+# If unsure, choose core (safe default — preserves the
+# flèche-non-inversée invariant). Park the doubt in
+# docs/license/temp-warm-list.md for the next operator audit.
+# ----------------------------------------------------------------------
+
+# --- Core (AGPL-3.0-only) ---------------------------------------------
+# --- Core (AGPL-3.0-only) ---------------------------------------------
+almanac	core	AGPL-3.0-only	almanac MCP server
+cosmon	core	AGPL-3.0-only	name-reservation crate (publish=true) — ships product metadata, AGPL
+cosmon-agent-harness	core	AGPL-3.0-only	agent harness — layer ④ engine (delib-ca76)
+cosmon-api	core	AGPL-3.0-only	API — code-links AGPL core/state/filestore, not pure-network (delib-ca76)
+cosmon-archive	core	AGPL-3.0-only	archive binary
+cosmon-ask	core	AGPL-3.0-only	ask binary
+cosmon-bridge-claude	core	AGPL-3.0-only	Claude bridge — layer ④ engine, code-links core (delib-ca76)
+cosmon-cli	core	AGPL-3.0-only	end-to-end CLI binary `cs`
+cosmon-cockpit	core	AGPL-3.0-only	TUI cockpit
+cosmon-cockpit-http	core	AGPL-3.0-only	HTTP cockpit
+cosmon-core	core	AGPL-3.0-only	kernel — the moat; AGPL closes the strip-mine hole (delib-ca76)
+cosmon-crashtest	core	AGPL-3.0-only	crash test harness
+cosmon-daemon	core	AGPL-3.0-only	long-lived daemon
+cosmon-daemon-supervisor	core	AGPL-3.0-only	daemon supervisor
+cosmon-filestore	core	AGPL-3.0-only	filestore backend — layer ② persistance (delib-ca76)
+cosmon-fuzz	core	AGPL-3.0-only	fuzzer
+cosmon-graph	core	AGPL-3.0-only	DAG primitives — layer ① noyau (delib-ca76)
+cosmon-hash	core	AGPL-3.0-only	hash primitives — layer ① noyau (delib-ca76)
+cosmon-llama	core	AGPL-3.0-only	llama inference wrapper — AGPL Rust binding (off by default)
+cosmon-matrix-tick	core	AGPL-3.0-only	Matrix bridge runtime
+cosmon-mcp	core	AGPL-3.0-only	MCP server
+cosmon-notary	core	AGPL-3.0-only	notary primitives — layer ② (delib-ca76)
+cosmon-observability	core	AGPL-3.0-only	observability — layer ⑥ (delib-ca76)
+cosmon-oidc-testkit	core	AGPL-3.0-only	OIDC test kit binary
+cosmon-ops-tools	core	AGPL-3.0-only	ops tools — layer ③ product harness (delib-ca76)
+cosmon-pilot	core	AGPL-3.0-only	pilot UX — layer ⑥ cockpit (delib-ca76)
+cosmon-provider	core	AGPL-3.0-only	provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76)
+cosmon-registry	core	AGPL-3.0-only	registry — code-links AGPL core (delib-ca76)
+cosmon-remote	core	AGPL-3.0-only	remote CLI — code-links AGPL core+surface-canon, not pure-network (delib-ca76)
+cosmon-rpp-adapter	core	AGPL-3.0-only	RPP adapter binary
+cosmon-runtime	core	AGPL-3.0-only	resident runtime
+cosmon-saas	core	AGPL-3.0-only	SaaS endpoint
+cosmon-scenario	core	AGPL-3.0-only	scenario runner
+cosmon-scheduler	core	AGPL-3.0-only	scheduler engine
+cosmon-state	core	AGPL-3.0-only	state store trait — crash-recovery wedge, layer ② (delib-ca76)
+cosmon-style	core	AGPL-3.0-only	UI primitives — layer ⑥ cockpit (delib-ca76)
+cosmon-surface	core	AGPL-3.0-only	surface projection — layer ② (delib-ca76)
+cosmon-surface-canon	core	AGPL-3.0-only	surface canon — layer ② (delib-ca76)
+cosmon-transport	core	AGPL-3.0-only	transport trait — layer ② (delib-ca76)
+cosmon-verify	core	AGPL-3.0-only	verification — layer ③ product harness (delib-ca76)
+cosmon-voice-bridge	core	AGPL-3.0-only	voice bridge runtime
+foundry-mcp	core	AGPL-3.0-only	foundry MCP server
+neurion-mcp	core	AGPL-3.0-only	neurion MCP server
+noogram-mycelial-monitor	core	AGPL-3.0-only	runtime monitor
+schedulerd	core	AGPL-3.0-only	scheduler daemon
+topon-mcp	core	AGPL-3.0-only	topon MCP server
+
+# --- Frontier (Apache-2.0) --------------------------------------------
+apps-transport-http	frontier	Apache-2.0	HTTP-on-Tailscale transport — vendored sibling-galaxy lib, Apache ⑦
+almanac-identifier-graph	frontier	Apache-2.0	citation identifier graph data structure (ADR-091 §D3) — pure lib, NDJSON wire format
+almanac-materialize	frontier	Apache-2.0	abstract citation graph trait family (ADR-091 §D6) — explicit open-extensibility seam
+almanac-resolver	frontier	Apache-2.0	citekey resolver lib
+almanac-scihub-index	frontier	Apache-2.0	read-only Bloom + columnstore lookup lib (ADR-091 §D7) — no network, no binary
+claudion	frontier	Apache-2.0	session-energy probe lib (vendored in-tree)
+cosmon-bridge-gastown	frontier	Apache-2.0	GasTown bridge lib
+cosmon-client	frontier	Apache-2.0	client SDK
+cosmon-llama-sys	frontier	Apache-2.0	raw FFI over vendored llama.cpp (MIT) — Apache wrapper, vendored ⑦
+cosmon-thin-cli	frontier	Apache-2.0	thin CLI lib
+cosmon-thin-macro	frontier	Apache-2.0	thin proc-macro
+foundry-core	frontier	Apache-2.0	formal-methods core
+foundry-kernel	frontier	Apache-2.0	foundry kernel
+foundry-lean-syntax	frontier	Apache-2.0	Lean syntax adapter
+foundry-probe	frontier	Apache-2.0	foundry probe lib
+ga-core	frontier	Apache-2.0	GA primitives
+ga-island	frontier	Apache-2.0	GA island model
+ga-operators	frontier	Apache-2.0	GA operators
+ga-proof-search	frontier	Apache-2.0	GA proof search
+neurion-core	frontier	Apache-2.0	neurion core lib
+mailroom-voice-core	frontier	Apache-2.0	voice core lib
+mailroom-voice-gridco	frontier	Apache-2.0	gridco adapter
+mailroom-voice-tts	frontier	Apache-2.0	tts adapter
+mailroom-voice-whisper	frontier	Apache-2.0	whisper adapter
+topon-core	frontier	Apache-2.0	topon core lib

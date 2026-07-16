@@ -1,0 +1,60 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
+
+Usage: cs migrate [OPTIONS] [COMMAND]
+
+Commands:
+  to        Perform a residence migration: seal manifest → stage next tree → verify staged tree → atomic rename pair to flip
+  verify    Verify the pre-migration BLAKE3 manifest against the current state. Exit codes mirror `cs verify`: `0` match, `1` divergence, `2` no manifest on record
+  rollback  Roll back the last migration by re-materializing `state.prev/`
+  genre     Apply a residence to every tracked path classified under a single genre (ADR-057 artifact-map). Composes artifact-map + git-side migration
+
+Options:
+      --config <PATH>  Path to configuration file
+      --dry-run        Legacy mode: preview what would be migrated without moving anything
+      --cleanup        Legacy mode: remove the legacy `ops/molecules/` directory after migration
+  -v, --verbose        Enable verbose output
+      --archive-past   Legacy mode: backfill the archive for existing terminal molecules (`Completed`, `Collapsed`, `Frozen`). Idempotent: molecules already carrying `archived = true` are skipped
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs migrate                           # legacy flat→fleet migration (pre-residence galaxies)
+  cs migrate to solo                   # atomic data+git migration to solo residence
+  cs migrate to team                   # move to team residence (seal → stage → verify → flip + git-side)
+  cs migrate to team --dry-run         # seal manifest, print plan, touch no state
+  cs migrate to solo --no-git          # skip the git-side half (data only — outside a git repo)
+  cs migrate to solo --no-commit       # stage git-side changes, let operator commit
+  cs migrate verify                    # re-walk state, compare against sealed manifest
+  cs migrate rollback                  # inverse rename + restore git index / ignore files
+  cs migrate rollback --dry-run        # preview the rename pair, touch nothing
+  cs migrate genre github-surface --to solo --yes    # scoped: apply solo to one genre (ADR-057)
+  cs migrate genre chronicle --to team --yes         # seed orphan branch cosmon/chronicle
+  cs migrate genre github-surface --to solo --dry-run  # preview the plan, touch nothing
+
+RESIDENCE VALUES:
+  solo       local, single operator (default layout) — state goes into .git/info/exclude
+  team       local, shared via git (cosmon-le-repo)  — state goes into .gitignore
+  encrypted  local, encrypted at rest                — same gitignore rule as team
+  remote     server-backed, network transport        — same gitignore rule as team
+
+EXIT CODES (cs migrate verify, mirrors cs verify):
+  0  manifest matches current state (A_pre ⊆ A_post, seal intact)
+  1  divergence: offending entries listed on stderr
+  2  no manifest on record (pre-migration galaxy or stale state)
+
+The residence migration writes migration-manifest.pre.json at the galaxy
+root before touching any state, then stages the new tree alongside as
+state.next/, verifies it against the manifest, performs two atomic
+rename(2) calls to flip, and finally runs the git-side half:
+`git rm -r --cached` on the state directory, appends the state path to
+the residence's ignore file (.git/info/exclude for solo, .gitignore for
+team-class), and commits `chore(cosmon): migrate to <residence>
+residence (git-side)` unless --no-commit is passed. state.prev/ is kept
+as the rollback anchor; the pre-migration manifest also carries a
+snapshot of the git HEAD and ignore files so rollback restores the git
+side byte-for-byte. Orphan files (not tied to any molecule) are carried
+in a distinct bucket and never silently discarded.

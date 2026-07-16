@@ -1,0 +1,22 @@
+# Lefthook config — shareable git hooks
+# Install: lefthook install (or: brew install lefthook && lefthook install)
+#
+# Supply-chain hooks (delib-20260425-39c1 §V): cargo-deny + cargo-audit
+# fire on Cargo.lock / deny.toml changes only, so commits that don't
+# touch dependencies cost nothing.
+
+pre-commit:
+  commands:
+    recompile-paper:
+      glob: "docs/paper/*.{tex,bib}"
+      run: |
+        latexmk -pdf -output-directory=docs/paper docs/paper/cosmon-paper.tex &&
+        git add docs/paper/cosmon-paper.pdf
+
+    cargo-deny:
+      glob: "{Cargo.toml,Cargo.lock,deny.toml}"
+      run: cargo deny check
+
+    cargo-audit:
+      glob: "Cargo.lock"
+      run: cargo audit --deny warnings

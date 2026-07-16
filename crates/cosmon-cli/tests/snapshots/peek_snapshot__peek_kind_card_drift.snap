@@ -1,0 +1,9 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_kind_card(RowKind::Drift)"
+---
+variant=Drift
+label=drift
+glyph=⚠
+ratatui_style=fg=Red mod=BOLD
+needs_attention=true

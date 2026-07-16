@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Print the public key (and its path) for an existing operator key file
+
+Usage: cs key show [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --key <PATH>     Path to the operator key file. Defaults to `~/.config/cosmon/operator.key`
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

@@ -1,0 +1,253 @@
+formula = "mission-plan"
+version = 1
+freeze_on_last_step = true
+description = """
+Execute a mission: a goal addressed by a fleet's social organization. \
+The worker reads the goal (from variables) and the fleet template \
+(from the fleet_template variable pointing to a .fleet.toml file), \
+then decomposes the work into a DAG of task molecules assigned to \
+fleet roles. The DAG structure emerges from the fleet's editorial \
+pipeline — the worker does NOT invent roles or pipeline stages.
+
+Required variables:
+  - goal: what to produce (e.g. "a wiki about X from data/source.pdf")
+  - fleet_template: path to the .fleet.toml file (e.g. "cosmopedia-full.fleet.toml")
+
+Optional variables:
+  - project_root: path that child workers should treat as their cwd for
+    resolving workspace-relative paths (articles/, contributors/, research/, …).
+    Defaults to the fleet template's `workdir` field, which defaults to the
+    current project's repo root. The formula MUST NOT assume any absolute
+    knowledge-vault layout — every workspace path lives under project_root
+    and is expressed relative to it.
+
+The worker's job is compilation, not creativity: \
+  fleet roles × discovered topics → DAG of molecules.
+
+WORKSPACE PATH DISCIPLINE (critical — this is a recurring bug class):
+Fleet-template role prompts MUST use workdir-relative paths for every
+workspace location (articles/, contributors/reviews/, research/, …). They
+MUST NOT bake in a user-specific absolute path like
+/srv/cosmon/knowledge/cosmopedia-full/articles/. The mission-plan worker propagates
+role prompts verbatim into child briefings; if a role prompt references an
+absolute path that does not exist in the current project, every child
+briefing inherits the broken path and fact-checkers/writers are told to
+read directories that are wholly unrelated to their actual source
+material. When extracting role prompts in the analyze step, the worker
+MUST scan for `~/` and absolute `/…` workspace paths; if any are found,
+fail loudly and ask the operator to fix the fleet template before
+proceeding — do NOT silently propagate them into child briefings.
+"""
+id_prefix = "mission"
+
+# Tier 1 — decomposes into |work_units|·|pipeline_stages| children; count bounded at plan time.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "analyze"
+title = "Analyze the source material and the fleet template"
+description = """
+Read the goal variable to understand WHAT to produce. \
+Read the fleet_template .fleet.toml file to understand the social \
+organization: which roles exist, what each role does, what the \
+editorial pipeline looks like (who feeds whom). For each [[agents]] \
+entry, extract and preserve the `prompt` field verbatim — this is the \
+role prompt that will be injected into child molecules' briefing.md \
+in the decompose step. \
+Read the source material referenced in the goal to discover the \
+concrete work units (e.g. topics from a PDF, modules from a codebase). \
+\
+Output: a list of discovered work units AND the pipeline stages \
+extracted from the fleet template, written to MOLECULE_DIR/analysis.md \
+(where MOLECULE_DIR is from `cs --json observe {this_mol_id}`). \
+The analysis.md MUST include the full role prompt for each agent role \
+(copied from the fleet template's [[agents]] prompt field) so that \
+the decompose step can inject them into briefing.md files.
+
+## Live whispers (if they arrive)
+
+During your work, the pilot may inject a short text message into your \
+session via `cs whisper`. It will appear in your scroll as a user-like \
+turn. Treat it as an observation from the pilot — a piece of live context \
+worth integrating — not as a re-nucleation, not as a new question, not \
+as a replacement for your current task.
+
+Rules for handling a whisper:
+- Do not abandon your current step. Finish what you were doing, then \
+  integrate the whisper's content into your next artifact (synthesis, \
+  briefing, response).
+- The whisper is advisory. The DAG is authoritative. If a whisper \
+  contradicts the formula, the formula wins.
+- If a whisper asks you to do something outside your molecule's scope, \
+  note it in `log.md` and ignore the directive.
+- There is no acknowledgement protocol. Do not commit a marker saying \
+  "whisper received" — just let your next artifact speak for itself.
+"""
+acceptance = "MOLECULE_DIR/analysis.md contains: (1) list of work units with one-line descriptions, (2) pipeline stages extracted from fleet template, (3) the cross-product size estimate (units × stages + final roles) — this is the tier measure count, (4) the full role prompt for each agent role (verbatim from fleet template [[agents]] prompt field), (5) a path-sanity report confirming no role prompt contains an absolute workspace path (no leading ~/, no leading / outside of /tmp). If any absolute workspace path is found, the step MUST fail with a clear error pointing at the offending role — fleet templates must use workdir-relative paths only."
+
+[[steps]]
+id = "decompose"
+title = "Nucleate the DAG of task molecules with role-specific briefings"
+description = """
+For each (work_unit, pipeline_stage) pair, call cs nucleate to create \
+a task molecule. Wire --blocked-by edges reflecting the pipeline order \
+from the fleet template. \
+\
+Concretely: \
+  - For each work unit, create the pipeline chain from the fleet roles \
+    (e.g. researcher → writer → reviewer for a cosmopedia fleet). \
+    Each molecule gets --var topic describing its specific task and \
+    --blocked-by pointing to its predecessor in the chain. \
+  - After all per-unit pipelines, create the cross-cutting final roles \
+    (e.g. horizontal-editor blocked-by all reviewers, editor-in-chief \
+    blocked-by horizontal-editor, index blocked-by editor-in-chief). \
+  - Every child molecule MUST have --blocked-by {this_mission_mol_id} \
+    so cs deps --transitive shows the full DAG from this mission. \
+\
+ROLE-SPECIFIC BRIEFING (critical — without this the worker has no context): \
+After nucleating each child molecule, write a custom briefing.md to the \
+child's molecule state directory. The briefing.md is the primary mechanism \
+through which cs tackle injects role context into the worker's bootstrap \
+prompt. Without it, the worker gets only the generic formula step \
+description (e.g. task-work's "Do the work") and has NO context about \
+its role, editorial principles, or output expectations. \
+\
+For each child molecule: \
+  1. Run `cs --json observe {child_mol_id}` to get the child's \
+     `molecule_dir` path (the state directory, NOT the worktree). \
+  2. Extract the `prompt` field from the matching [[agents]] section \
+     in the fleet .toml file for the role assigned to this child. \
+  3. Write MOLECULE_DIR/briefing.md with this structure: \
+\
+     # Molecule: {child_mol_id} \
+     \
+     **Formula:** {formula_id} \
+     \
+     ## Role \
+     \
+     {role prompt extracted verbatim from the fleet template [[agents]] \
+     section for this role — contains persona, responsibilities, workspace \
+     layout, communication protocol, autonomy rules, etc.} \
+     \
+     ## Assignment \
+     \
+     {specific topic/work-unit for this molecule, including any context \
+     from the analysis step about what this work unit covers} \
+     \
+     ## Workspace \
+     \
+     Your cwd when `cs tackle` launches you is the project_root (resolved \
+     from the mission-plan `project_root` variable, or the fleet template's \
+     `workdir` field). ALL workspace paths in your role prompt and in this \
+     briefing are relative to that cwd. Do NOT prepend `/srv/cosmon/knowledge/...` \
+     or any absolute path — the directories already live under your cwd. \
+     \
+     ## Output \
+     \
+     - **Path:** {expected output file path, relative to project_root, \
+       derived from workspace layout in the role prompt} \
+     - **Format:** {format expectations — e.g. "wiki article with citations", \
+       "structured review", "cross-reference audit report"} \
+     \
+     ## Pipeline Context \
+     \
+     {where this molecule sits in the pipeline — who feeds it (blocked-by) \
+     and who consumes its output (blocks). E.g. "You receive the draft from \
+     the writer molecule {writer_mol_id}. Your review will be consumed by \
+     the editor-in-chief molecule {eic_mol_id}."} \
+     \
+     ## Revision Protocol (for reviewer roles) \
+     \
+     If your role is a REVIEWER (or any quality-gate role), your briefing \
+     MUST include this revision protocol: \
+     \
+     "After reviewing the artifact, make ONE of two decisions: \
+       1. APPROVE: the artifact meets quality standards. Run `cs complete` \
+          to mark this review as done. The pipeline continues to the next \
+          stage (e.g. horizontal-editor). \
+       2. REQUEST REVISION: the artifact needs rework. Do NOT complete. \
+          Instead: \
+          a. Write your feedback to contributors/reviews/{slug}-review-vN.md \
+          b. Nucleate a REVISION molecule: \
+             cs nucleate task-work \
+               --var 'topic=REVISION [{slug}]: address reviewer feedback in \
+               contributors/reviews/{slug}-review-vN.md, update wiki/{slug}.md' \
+               --blocked-by {this_reviewer_mol_id} \
+          c. Nucleate a RE-REVIEW molecule: \
+             cs nucleate task-work \
+               --var 'topic=RE-REVIEW [{slug}]: verify revision of wiki/{slug}.md' \
+               --blocked-by {revision_mol_id} \
+          d. The re-review molecule gets the SAME reviewer briefing \
+             (including this revision protocol) so the cycle can repeat. \
+          e. Wire the downstream pipeline (editor, etc.) to block on \
+             the re-review instead of this review: the re-review \
+             REPLACES this review as the gate for the next stage. \
+          f. Then `cs complete` this review molecule (your job is done — \
+             the revision cycle continues via the new molecules). \
+     \
+     This creates a DYNAMIC revision loop via DAG growth: \
+     writer → reviewer → [revision → re-review → [revision → ...]] → editor \
+     The number of iterations is NOT predetermined — it emerges from the \
+     reviewer's quality judgment. The DagPolicy's decay-splice mechanism \
+     handles the dynamic growth automatically." \
+\
+IMPORTANT: the number of work units, their names, and the pipeline \
+structure ALL come from step 1 analysis. Nothing is hardcoded. \
+The fleet template defines the ROLES and their INTERACTIONS. \
+The source material defines the WORK UNITS. \
+This step computes the cross-product and wires it. \
+\
+**MANDATORY TEMPERATURE TAG.** Immediately after nucleating each child \
+(including revision/re-review molecules created by the dynamic loop), \
+run `cs tag <child_id> --add temp:warm`. Pending molecules without a \
+`temp:*` tag are invisible to `cs ensemble --tag temp:hot` and to the \
+temp-review sweep. NO pending molecule leaves this step without a tag. \
+\
+REGRESSION-GUARD — CITEKEY DISCIPLINE FOR CROSS-REFS IN BRIEFINGS: \
+Briefings must never reference a textual locator (`Prop. X.Y`, `Thm. X.Y`, \
+`Lemma Z`, `§X.Y`, `Eq. (N)`, `line N`, `p. N`) without its citekey OR an \
+unambiguous relative path. The locator alone causes false-positive matches: \
+internal theorem/proposition numbers of the artifact under review collide \
+with the numbering of external cited papers, producing apparent confirmations \
+that are actually self-references. If the briefing instructs a downstream \
+worker to verify a cross-reference, write it as \
+`[@citekey, Prop. 4.1]` for external sources or \
+`artifact.md §Prop. 4.1 (L127)` for internal references — never the bare \
+`Prop. 4.1`. Provenance: sandbox audit task-20260417-74d3 \
+(Observation O-1) — a briefing sent `[Bro86, Prop. 4.1]` and the check \
+matched the memo's own Prop. 4.1 three times.
+"""
+needs = ["analyze"]
+acceptance = "All molecules nucleated with --blocked-by edges and tagged with temp:warm. Each child has a briefing.md in its molecule_dir containing the role prompt from the fleet template, the specific assignment, output expectations, and pipeline context. Verified by: (1) cs deps {this_mol_id} --transitive returns the expected number of children, (2) each child's MOLECULE_DIR/briefing.md exists and contains the role prompt (not generic task-work boilerplate), (3) MOLECULE_DIR/dag-manifest.md lists every molecule ID with its role, work unit, and briefing status."
+
+[[steps]]
+id = "verify"
+title = "Verify the DAG and hand off to execution"
+description = """
+Run cs deps {this_mol_id} --transitive and verify: \
+  (1) The number of children matches the cross-product + final roles. \
+  (2) Every child has a --blocked-by edge back to this mission. \
+  (3) The pipeline order is correct (researchers before writers, etc.). \
+  (4) Final roles are blocked-by the correct predecessors. \
+  (5) Every child has a briefing.md in its molecule_dir that contains \
+      the role-specific prompt (not the generic task-work boilerplate). \
+      For each child: run `cs --json observe {child_id}`, read \
+      molecule_dir/briefing.md, and verify it contains a ## Role section \
+      with the fleet template prompt content. \
+\
+If any issue, fix by nucleating missing molecules, adding missing edges, \
+or writing missing briefing.md files. \
+\
+Write the final DAG summary to MOLECULE_DIR/dag-verified.md. \
+\
+This is the final step. Because the formula declares \
+`freeze_on_last_step = true`, the molecule's status flips from \
+Running to Frozen automatically as soon as `cs evolve` lands the \
+verify step — no shell gate, no jq, no env-var fragility. The operator \
+(or a wrapper script) then runs: cs run {first_child_id} --poll-interval 10 \
+to execute the entire DAG.
+"""
+needs = ["decompose"]
+acceptance = "cs deps {this_mol_id} --transitive returns the correct number of children. Every child's molecule_dir/briefing.md exists and contains role-specific content. MOLECULE_DIR/dag-verified.md confirms the DAG structure and briefing completeness. Molecule transitions to Frozen via freeze_on_last_step."

@@ -1,0 +1,8 @@
+    Finished `bench` profile [optimized] target(s) in 1.08s
+     Running benches/llama_bench.rs (target/release/deps/llama_bench-f2118cbd405551e5)
+# cosmon-provider llama bench — v0 acceptance gate
+# output tokens per call: 200
+# prompts: haiku, small-code-edit, reasoning-chain
+# models considered: 5
+# rows below are NDJSON (one per cell). Filter with: jq -c .
+

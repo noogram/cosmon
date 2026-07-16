@@ -1,0 +1,9 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+//
+// This file is part of Cosmon (core / runtime / end-to-end binaries / MCP
+// servers). Cosmon is distributed under the GNU Affero General Public
+// License, Version 3, only — see the LICENSE file at the repository root,
+// or https://www.gnu.org/licenses/agpl-3.0.html.
+//
+// Per-crate partition fixed by ADR-092
+// (docs/adr/092-license-bascule-mpl-to-agpl.md).

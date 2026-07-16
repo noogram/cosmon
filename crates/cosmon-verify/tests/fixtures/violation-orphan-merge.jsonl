@@ -1,0 +1,2 @@
+{"seq":0,"timestamp":"2026-04-14T10:00:00Z","type":"molecule_nucleated","molecule_id":"cs-20260414-bbbb","formula_id":"task-work"}
+{"seq":1,"timestamp":"2026-04-14T10:00:01Z","type":"merge_completed","molecule":"cs-20260414-bbbb","branch":"feat/x","result":"ok"}

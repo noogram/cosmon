@@ -1,0 +1,35 @@
+# Cosmon surface projections — internal state → standard files.
+# See THESIS Part XVI (Surface Observability).
+
+[[surface]]
+referent = "project.status"
+kind = "markdown"
+path = "STATUS.md"
+
+[[surface]]
+referent = "project.issues"
+kind = "markdown"
+path = "ISSUES.md"
+molecule_kinds = ["task", "issue"]
+
+[[surface]]
+referent = "project.ideas"
+kind = "markdown"
+path = "IDEAS.md"
+molecule_kinds = ["idea"]
+
+[[surface]]
+referent = "project.deliberations"
+kind = "markdown"
+path = "DELIBERATIONS.md"
+molecule_kinds = ["deliberation"]
+
+[[surface]]
+referent = "project.decisions"
+kind = "directory"
+path = "docs/adr/"
+
+[[surface]]
+referent = "project.issues"
+kind = "github-issues"
+repo = "noogram/cosmon"

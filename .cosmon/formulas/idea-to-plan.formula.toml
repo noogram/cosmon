@@ -1,0 +1,38 @@
+formula = "idea-to-plan"
+version = 1
+description = "Evolve an idea into an actionable plan"
+id_prefix = "idea"
+
+# Tier 1 — plan step may nucleate task-work children; count-bounded.
+[tier]
+level = 1
+measure = "count"
+
+[[steps]]
+id = "capture"
+title = "Capture the idea"
+description = "Document the idea with context, motivation, and initial scope."
+acceptance = "Idea documented with clear description"
+
+[[steps]]
+id = "evaluate"
+title = "Evaluate feasibility"
+description = "Assess technical feasibility, effort, and alignment with project goals."
+needs = ["capture"]
+acceptance = "Feasibility assessment completed"
+
+[[steps]]
+id = "plan"
+title = "Create actionable plan"
+description = """
+Convert the idea into concrete tasks or an ADR. The count of child \
+molecules nucleated must be small and finite (tier measure: count). \
+\
+**MANDATORY TEMPERATURE TAG.** If this step nucleates child task \
+molecules, immediately tag each one with `cs tag <child_id> --add \
+temp:warm`. Untagged pendings are invisible to `cs ensemble --tag \
+temp:hot` and to temp-review sweeps. NO pending molecule leaves this \
+step without a temperature tag.
+"""
+needs = ["evaluate"]
+acceptance = "Plan created with clear next steps. Any nucleated child molecules are tagged with temp:warm."

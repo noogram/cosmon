@@ -1,0 +1,25 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Audit MCP servers registered in the configured service registry
+
+Usage: cs doctor mcp [OPTIONS]
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --registry <REGISTRY>
+          Override the path to the service registry database.
+          
+          Defaults to the platform data dir used by the service registry.
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+  -h, --help
+          Print help (see a summary with '-h')

@@ -1,0 +1,62 @@
+formula = "query-demo"
+version = 1
+description = """
+Reference formula for the typed `[steps.query]` step kind
+(delib-20260426-1bcd #5). Demonstrates how to extract a value from a
+molecule's state without a `cs --json observe … | jq …` shell-out.
+
+The historical pattern used a `command = "..."` step that piped
+`cs observe` through `jq`. In zsh that pattern silently swallowed the
+exit code via `set -euo pipefail` interactions and a reserved `status`
+variable, leaving the formula to "succeed" on a broken extraction.
+The native query step removes the shell entirely — a Rust evaluator
+runs against the JSON document and emits a `QueryStepEvaluated`
+event with the resolved value.
+
+Usage:
+    cs nucleate query-demo --var topic="hello"
+    cs tackle <mol_id>
+
+After completion, `cs observe <mol_id>` shows two extra variables:
+`my_id` (the molecule's own id) and `my_topic` (whatever was passed
+in `topic`).
+"""
+
+[vars.topic]
+description = "Topic the demo formula will echo back via a query step."
+required = true
+
+# Step 1: extract the molecule's id into a variable.
+# Replaces `cs --json observe ${this} | jq -r .id`.
+[[steps]]
+id = "extract-id"
+title = "Extract molecule id (typed query)"
+description = """
+Read the current molecule's `state.json` and bind `id` into the
+`my_id` variable. No shell, no jq — the runtime evaluates a
+dot-path expression and writes the result back into the molecule's
+variable map.
+"""
+acceptance = "Molecule variables now contain `my_id` matching the molecule id."
+
+[steps.query]
+expr = ".id"
+source = "state"
+output_var = "my_id"
+
+# Step 2: extract the operator-supplied topic via the same mechanism.
+# Replaces `jq -r '.variables.topic'`.
+[[steps]]
+id = "extract-topic"
+title = "Extract topic (typed query)"
+description = """
+Bind `variables.topic` into the `my_topic` variable. Demonstrates
+nested field access through the dot-path evaluator.
+"""
+needs = ["extract-id"]
+acceptance = "Molecule variables now contain `my_topic` matching the input topic."
+
+[steps.query]
+expr = ".variables.topic"
+source = "state"
+output_var = "my_topic"

@@ -1,0 +1,5 @@
+{"seq":0,"timestamp":"2026-04-14T10:00:00Z","type":"molecule_nucleated","molecule_id":"cs-20260414-aaaa","formula_id":"task-work"}
+{"seq":1,"timestamp":"2026-04-14T10:00:01Z","type":"molecule_status_changed","molecule_id":"cs-20260414-aaaa","from":"pending","to":"running"}
+{"seq":2,"timestamp":"2026-04-14T10:00:02Z","type":"molecule_step_completed","molecule_id":"cs-20260414-aaaa","step":0,"total":2}
+{"seq":3,"timestamp":"2026-04-14T10:00:03Z","type":"molecule_step_completed","molecule_id":"cs-20260414-aaaa","step":1,"total":2}
+{"seq":4,"timestamp":"2026-04-14T10:00:04Z","type":"molecule_completed","molecule_id":"cs-20260414-aaaa","reason":"ok"}

@@ -1,0 +1,72 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Drop — universal Inbox gesture (hotkey / zsh widget / menubar) → `cs spark`
+
+Usage: cs drop [OPTIONS] [TEXT]...
+
+Arguments:
+  [TEXT]...
+          The drop text itself. When absent or empty, the text is read from stdin — supports `cs drop < file` and pipe chains.
+          
+          Multiple words are joined with single spaces so callers can pass raw command-line tokens (`cs drop hello there`) without quoting. Leading/trailing whitespace is trimmed.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --galaxy <NAME>
+          Galaxy name to drop into. Resolved via `~/.config/cosmon/galaxies.toml` ([`TomlGalaxyIndex`](cosmon_registry::TomlGalaxyIndex)).
+          
+          When set, the resolved `Galaxy.path` becomes the store root (`<path>/.cosmon/state/`) for this nucleation. Without it, cosmon's usual walk-up discovery picks the galaxy from the current working directory.
+
+      --kind <KIND>
+          Molecule kind override. Defaults to `idea` — same as `cs spark`.
+          
+          The briefing names `spark | idea | task` as common choices; any valid [`cosmon_core::kind::MoleculeKind`] token is accepted (validated in `nucleate`).
+          
+          [default: idea]
+
+  -v, --verbose
+          Enable verbose output
+
+      --json
+          Output in JSON format
+
+      --tag <TAG>
+          Additional tag to attach (repeatable). `temp:hot` and `source:drop` are always added; `--tag` extends the list.
+          
+          Callers use this to stamp the drop's origin surface (e.g. `--tag source:shortcut` from the iPhone SSH wrapper, which supplements rather than replaces `source:drop`).
+
+      --fleet <FLEET>
+          Fleet to nucleate into. Defaults to `default`
+          
+          [default: default]
+
+      --nucleon <NUCLEON>
+          Override the auto-derived `nucleon_id` (drop author identity). Same semantics as `cs spark --nucleon`
+
+      --sparked-by <SESSION_ID>
+          Currently-open pilot-session molecule id (ADR-061 §`SparkedBy`). Same semantics as `cs spark --sparked-by`
+
+      --formula <FORMULA>
+          Override the formula name (defaults to `spark`). Exists for tests and exotic deployments; normal callers leave this unset
+          
+          [default: spark]
+
+      --formulas-dir <DIR>
+          Path to the formulas directory (default: walk-up discovery)
+
+      --store-dir <DIR>
+          Path to the state store root (default: walk-up discovery, or the galaxy-registry lookup when `--galaxy` is set)
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs drop                     # universal Inbox gesture — captures whatever is in scope
+
+Equivalent of `cs spark` reachable from hotkey / zsh widget / menubar.
+
+SEE ALSO: cs spark (canonical), cs nucleate spark (formula form).

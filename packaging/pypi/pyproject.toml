@@ -1,0 +1,29 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cosmon"
+version = "0.0.0"
+description = "Stateless CLI giving AI agents an identity, a typed lifecycle, and crash-recovery"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "AGPL-3.0-only" }
+authors = [{ name = "Noogram" }]
+keywords = ["agents", "orchestration", "ai", "cli", "workflow"]
+
+[project.urls]
+Homepage = "https://docs.noogram.org"
+Repository = "https://github.com/noogram/cosmon"
+Releases = "https://github.com/noogram/cosmon/releases"
+
+# Pure name-hold: this distribution ships NO Python code (cosmon's product is
+# the `cs` binary on GitHub Releases, not a pip-installable tool). With no
+# module to discover, hatchling would fail wheel selection, so we build a
+# metadata-only wheel explicitly. If a real Python launcher is ever wanted
+# (mirroring oxymake's pypi launcher), it replaces this in a future minor.
+[tool.hatch.build.targets.wheel]
+bypass-selection = true
+
+[tool.hatch.build.targets.sdist]
+include = ["README.md", "pyproject.toml"]

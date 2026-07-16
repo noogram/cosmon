@@ -1,0 +1,28 @@
+---
+source: crates/cosmon-observability/tests/canonical_snapshot.rs
+assertion_line: 25
+expression: out
+---
+COSMON FLEET SNAPSHOT v1                                                                                                
+========================================================================================================================
+~ 00  . . . . . . . . . .   @ <galaxy>   = 0 notes   > 0 awaiting                                                       
+                                                                                                                        
+## MOLECULES                                                                                                            
+  MOLECULE                 TITLE                KIND         STATUS     WORKER             SESSION            ENERGY    
+------------------------------------------------------------------------------------------------------------------------
+  mol-alpha                Alpha task           task         running    w-alpha            cosmon-alpha       1.5K      
+  mol-beta                 Beta issue           issue        pending    w-beta             cosmon-beta        0         
+                                                                                                                        
+## WORKERS                                                                                                              
+  WORKER                   MOLECULE                 SESSION              LIVE         TOKENS       COST                 
+------------------------------------------------------------------------------------------------------------------------
+  w-alpha                  mol-alpha                cosmon-alpha         working      1.5K         $0.0000              
+  w-beta                   mol-beta                 cosmon-beta          idle         0            $0.0000              
+                                                                                                                        
+## SESSIONS                                                                                                             
+  SESSION                  SOCKET                                     MOLECULE               WORKER                     
+------------------------------------------------------------------------------------------------------------------------
+  cosmon-alpha             /private/tmp/tmux-501/default              mol-alpha              w-alpha                    
+  cosmon-beta              /private/tmp/tmux-501/fleet-b              mol-beta               w-beta                     
+========================================================================================================================
+molecules: 2    workers: 2    sessions: 2

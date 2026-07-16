@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  dev.noogram.cosmon.matrix-tick — LaunchAgent template for `matrix-echo-tick`.
+
+  One-shot Matrix → cosmon ingress bridge. launchd owns the clock
+  (ADR-064 §2.1 — "no daemon, launchd is the alarm"; ADR-016 — no
+  daemon in core). The binary reads `sync_once` once per invocation,
+  materialises admitted events into `.cosmon/whispers/inbox/<room>/`,
+  then exits. Between ticks nothing runs.
+
+  This file is a TEMPLATE. It is NOT the plist that launchd loads —
+  `scripts/install-matrix-tick-launchagent.sh` substitutes the
+  tokens below and writes the rendered plist to
+  `~/Library/LaunchAgents/dev.noogram.cosmon.matrix-tick.plist`. The
+  rendered plist contains operator-specific URLs, MXIDs, and absolute
+  paths — never commit it.
+
+  Placeholder tokens are documented in the install script header —
+  run `scripts/install-matrix-tick-launchagent.sh --help`. The
+  substitutions are: HOME, BINARY, HOMESERVER, USER, CREDENTIALS_FILE,
+  ROOM, INBOX_DIR, STATE_DIR, COSMON_STATE, HEARTBEAT_FILE,
+  TRUSTED_HOMESERVERS, WORKING_DIRECTORY, START_INTERVAL, STDOUT_LOG,
+  STDERR_LOG (each wrapped by leading + trailing double underscores).
+
+  Install / uninstall:
+      scripts/install-matrix-tick-launchagent.sh --help
+      scripts/uninstall-matrix-tick-launchagent.sh --help
+
+  Governing docs: ADR-064 (bridge isolation), ADR-016 (no daemon in
+  core), docs/guides/launchagent-matrix-tick.md (operator runbook),
+  docs/guides/matrix-bridge-walkthrough.md (credentials + room setup).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.matrix-tick</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__BINARY__</string>
+        <string>--homeserver</string>
+        <string>__HOMESERVER__</string>
+        <string>--user</string>
+        <string>__USER__</string>
+        <string>--credentials-file</string>
+        <string>__CREDENTIALS_FILE__</string>
+        <string>--room</string>
+        <string>__ROOM__</string>
+        <string>--inbox</string>
+        <string>__INBOX_DIR__</string>
+        <string>--state</string>
+        <string>__STATE_DIR__</string>
+        <string>--cosmon-state</string>
+        <string>__COSMON_STATE__</string>
+        <string>--trusted-homeservers</string>
+        <string>__TRUSTED_HOMESERVERS__</string>
+        <string>--heartbeat-file</string>
+        <string>__HEARTBEAT_FILE__</string>
+    </array>
+
+    <key>StartInterval</key>
+    <integer>__START_INTERVAL__</integer>
+
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>__STDOUT_LOG__</string>
+
+    <key>StandardErrorPath</key>
+    <string>__STDERR_LOG__</string>
+
+    <key>WorkingDirectory</key>
+    <string>__WORKING_DIRECTORY__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>RUST_LOG</key>
+        <string>info,matrix_sdk=warn</string>
+    </dict>
+</dict>
+</plist>

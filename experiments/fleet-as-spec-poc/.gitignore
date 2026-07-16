@@ -1,0 +1,5 @@
+# TLC output: trace files and states/ dir are regenerated on every run.
+# The canonical log (tlc-out.log) is tracked.
+WikiCore_TTrace_*.tla
+WikiCore_TTrace_*.bin
+states/

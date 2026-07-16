@@ -1,0 +1,35 @@
+[package]
+name = "cosmon-cockpit-http"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "HTTP dashboard binary for Cosmon fleet observation"
+
+[[bin]]
+name = "cosmon-cockpit"
+path = "src/main.rs"
+
+[dependencies]
+cosmon-cockpit.workspace = true
+cosmon-core.workspace = true
+cosmon-observability.workspace = true
+cosmon-style.workspace = true
+cosmon-state.workspace = true
+cosmon-filestore.workspace = true
+cosmon-transport.workspace = true
+axum.workspace = true
+chrono.workspace = true
+tokio = { workspace = true, features = ["full"] }
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body-util = { workspace = true }
+tempfile.workspace = true
+
+[lints]
+workspace = true

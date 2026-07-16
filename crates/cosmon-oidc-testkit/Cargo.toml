@@ -1,0 +1,54 @@
+[package]
+name = "cosmon-oidc-testkit"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "Test infrastructure for §8j HTTPS+OIDC adapters: in-memory JWKS endpoint, JWT issuance, tenant-cwd workspace fixtures (ADR-080 §3.5 clause (e))."
+
+# `fake-cs` is a stand-in for the real `cs` binary, mirroring the
+# subset of `cs --json observe <id>` that the RPP route exercises so a
+# tenant subprocess isolation test can run without rebuilding the full
+# cosmon-cli. It is compiled once by `build.rs` directly via rustc and
+# placed in `OUT_DIR/fake-cs`; downstream crates retrieve the path via
+# [`fake_cs_path`]. We deliberately avoid `[[bin]]` for `fake-cs`
+# because Cargo only sets `CARGO_BIN_EXE_<name>` for the *defining*
+# crate's integration tests, which would prevent
+# `cosmon-rpp-adapter`'s tests from locating the binary. The
+# standalone `cs-oidc-mock` binary below has no such constraint — it
+# is never consumed via env-var path discovery, only by `docker run`.
+build = "build.rs"
+
+# `cs-oidc-mock` — V0 demo IdP shipped as a runnable binary. Promoted
+# from the dev-only [`OidcMock`] axum harness so the §8j HTTPS+OIDC
+# adapter can be exercised live (tenant_auditor cURL flow), without staging a
+# Keycloak instance. NOT a production IdP — the signing key is the
+# same RSA test key embedded in this crate's test PEMs.
+[[bin]]
+name = "cs-oidc-mock"
+path = "src/bin/cs-oidc-mock.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+axum = { workspace = true }
+chrono = { workspace = true }
+clap = { workspace = true }
+jsonwebtoken = "9"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+reqwest = { workspace = true }
+tower = { workspace = true }
+
+[lints]
+workspace = true

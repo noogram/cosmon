@@ -1,0 +1,576 @@
+/* noogram-charte.css — thème « charte noogram sobre » pour la doc cosmon.
+ *
+ * Aligne docs.noogram.org sur le SOCLE SOBRE partagé avec la landing hybride
+ * (délib-20260714-4ff8 : shift phosphor → sobre). Retour opérateur
+ * 2026-07-15 : les docs paraissaient « trop petites / pas assez modernes ».
+ * La cause racine était structurelle : mdBook pose `html { font-size: 62.5% }`
+ * (donc 1rem = 10px), or l'ancien fichier reprenait tel quel le `1.0625rem` de
+ * la landing — qui, dans le socle 16px de la landing, vaut 17px, mais rendait
+ * ici ~10,6px. Ce fichier RÉ-ANCRE toutes les tailles sur le rem=10px de mdBook
+ * (corps 1.7rem = 17px) et REMONTE l'échelle des titres + la largeur de la
+ * colonne pour que les docs RESSEMBLENT à la landing — même produit, même
+ * respiration.
+ *
+ * ── SOCLE VERROUILLÉ + DIALECTE `docs` ───────────────────────────────────────
+ * La landing et les docs partagent type et accent. La palette sauge des docs
+ * est une divergence de surface approuvée : la landing l'emploie inline mais
+ * son fichier tokens.css conserve encore son socle clair neutre.
+ *
+ *   • MOTION off — aucun reveal ni mouvement ambiant ; Conway est un papier
+ *     peint statique, calculé et dessiné une seule fois.
+ *   • DENSITÉ docs — colonne large et AÉRÉE (lecture longue), pas la maquette
+ *     cramponnée de mdBook (750px, interligne 1.45).
+ *
+ * Palette (miroir landing) :
+ *   - DARK  (coal, défaut) → near-black #08090c, encre neutre bleutée.
+ *   - LIGHT (light, opt-in) → SAUGE #e8efe7 (analogue désaturé du vert accent :
+ *     ni blanc pur, ni crème Anthropic, ni gris neutre).
+ * Le vert (#3fb950 / #176d2b) est RATIONNÉ aux accents : liens, chapitre actif,
+ * filet-preuve gauche de pre/blockquote, marqueur de recherche, sceau ∴.
+ * Le corps est ENCRE NEUTRE — le vert ne le touche jamais.
+ */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap');
+
+/* ════════════════ SOCLE — TYPE + LAYOUT + DIALECTE `docs` ════════════════
+ * Tokens invariants au thème (couleur mise à part), RÉ-ANCRÉS sur le rem=10px
+ * de mdBook. C'est ici que se répare le « docs trop petites ». */
+:root {
+  /* ── Type (socle partagé, valeurs en rem=10px de mdBook) ────────────── */
+  --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI",
+          "Helvetica Neue", Arial, sans-serif;         /* corps + titres */
+  --mono: "JetBrains Mono", "SF Mono", ui-monospace, Menlo, Monaco,
+          "Courier New", monospace;                    /* code + commandes + ∴ */
+  --mono-font: var(--mono);                            /* override token mdBook */
+  --prompt-glyph: "∴";   /* U+2234 therefore — le « donc » logique, jamais $ */
+
+  /* Corps 17px (1.7rem @ rem=10px) — parité avec la landing (1.0625rem @ 16px).
+   * C'est la remontée de taille demandée par l'opérateur. */
+  --base-size: 1.7rem;
+  --body-line: 1.7;
+  --track-body: -0.003em;                              /* letter-spacing landing */
+  --code-font-size: 0.9em;                             /* override token mdBook */
+
+  /* ── Layout `docs` — colonne LARGE + AÉRÉE (pas les 750px cramponnés) ── */
+  --content-max-width: 980px;   /* override token mdBook (défaut 750px) — colonne large */
+  --page-padding: 20px;         /* override token mdBook (défaut 15px)  */
+
+  /* ── Dialecte `docs` — MOTION (near-zero, pas de reveal) ───────────── */
+  --hover-dur:   120ms;
+
+  /* ── Dialecte `docs` — RYTHME (aéré : lecture longue moderne) ───────── */
+  --rhythm-section: clamp(2.8rem, 5vw, 4.2rem);   /* avant un titre de section */
+  --rhythm-block:   1.4rem;                        /* titre → corps */
+}
+
+/* ════════════════ SOCLE — COULEUR (dark = défaut, thème coal) ════════════════
+ * Identité stealth near-black. Le texte est NEUTRE (bleuté-gris), jamais
+ * vert-teinté : le vert ne touche plus le corps. */
+html.coal {
+  --bg:          #08090c;   /* near-black, à peine bleuté */
+  --surface:     #12151a;   /* cartes, blocs de code, blockquote, sidebar popup */
+  --text:        #d7dce3;   /* corps — NEUTRE, jamais vert */
+  --text-strong: #f2f5f9;   /* titres, wordmark, code inline */
+  --dim:         #828c9a;   /* méta, sidebar, légendes */
+  --faint:       #1c2128;   /* filets, hairlines, bordures */
+  --accent:      #3fb950;   /* github-green sobre */
+  --accent-2:    #56d364;   /* hover / focus, plus clair */
+
+  --fg: var(--text);        /* mdBook : couleur de page */
+  color-scheme: dark;
+}
+
+/* ── Thème CLAIR (light) — SAUGE #e8efe7, miroir exact de la landing. PAS
+ * blanc pur, PAS crème Anthropic : un analogue désaturé du vert accent, plus
+ * doux et cohérent avec l'identité. ── */
+html.light {
+  --bg:          #e8efe7;   /* sauge très pâle */
+  --surface:     #dde6db;   /* cartes, blocs de code, blockquote */
+  --text:        #171d18;   /* encre neutre — variante claire */
+  --text-strong: #0a0f0b;
+  --dim:         #566058;
+  --faint:       #d3ddd1;
+  --accent:      #176d2b;   /* 5.50:1 sur sauge, 5.13:1 sous une cellule à 5 % */
+  --accent-2:    #125f24;   /* 6.68:1 sur sauge ; reste AA au survol */
+
+  --fg: var(--text);
+  color-scheme: light;
+}
+
+/* ── Mapping des variables mdBook — identique pour les deux thèmes via le socle.
+ * Le vert n'apparaît QUE sur les rôles rationnés : liens, chapitre actif,
+ * icône hover, marqueur de recherche. Le reste est neutre. ── */
+html.coal, html.light {
+  --sidebar-bg:             var(--bg);      /* même fond que la page… */
+  --sidebar-fg:             var(--dim);
+  --sidebar-non-existant:   var(--faint);
+  --sidebar-active:         var(--accent);
+  --sidebar-spacer:         var(--faint);
+  --scrollbar:              var(--dim);
+  --icons:                  var(--dim);
+  --icons-hover:            var(--accent);
+  --links:                  var(--accent);
+  --inline-code-color:      var(--text-strong);   /* code NEUTRE, pas néon */
+  --theme-popup-bg:         var(--surface);
+  --theme-popup-border:     var(--faint);
+  --theme-hover:            var(--faint);
+  --quote-bg:               var(--surface);
+  --quote-border:           var(--faint);         /* bord plein SUBTIL (le vert vit dans le filet gauche) */
+  --table-border-color:     var(--faint);
+  --table-header-bg:        var(--surface);
+  --table-alternate-bg:     var(--surface);
+  --searchbar-border-color: var(--faint);
+  --searchbar-bg:           var(--surface);
+  --searchbar-fg:           var(--text);
+  --searchbar-shadow-color: var(--faint);
+  --searchresults-header-fg:var(--dim);
+  --searchresults-border-color: var(--faint);
+  --search-mark-bg:         var(--accent);        /* marqueur = braise verte */
+}
+
+/* ════════════════ CHROME — corps de page + barre + sidebar en Inter ════════════════
+ * mdBook habille la chrome en Open Sans par défaut ; on repasse TOUT en Inter
+ * pour que la barre du haut, le sommaire et la recherche soient de la même
+ * étoffe que la landing. */
+html { background: var(--bg); }
+body {
+  font-family: var(--sans);
+  background: var(--bg);
+  color: var(--text);
+  letter-spacing: var(--track-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ════════════════ CONTENU — corps 17px, colonne aérée ════════════════ */
+.coal .content, .light .content {
+  font-family: var(--sans);
+  color: var(--text);
+  font-size: var(--base-size);
+  line-height: var(--body-line);
+  letter-spacing: var(--track-body);
+}
+/* ── Layout : contenu ALIGNÉ À GAUCHE (colle à la sidebar, comme Dask), pas
+ *    centré — supprime le grand vide à gauche que laissait le margin:auto. ── */
+.content main {
+  margin-left: clamp(1.6rem, 4.5vw, 4.5rem) !important;
+  margin-right: auto !important;
+  max-width: var(--content-max-width);
+  overflow-wrap: break-word;
+}
+/* garde-fous overflow : rien ne dépasse la colonne (bandeau, code, tables, img). */
+.content pre, .content blockquote, .content table, .content img { max-width: 100%; }
+.content pre { overflow-x: auto; }
+.content figure { margin: var(--rhythm-block) 0; }
+
+/* mdBook cramponne l'interligne des paragraphes/listes à 1.45 — on l'aère. */
+.content p, .content ol, .content ul, .content li {
+  line-height: var(--body-line);
+}
+.content p { margin: 0 0 var(--rhythm-block); }
+.content ul, .content ol { margin: 0 0 var(--rhythm-block); }
+.content li { margin: 0.25rem 0; }
+
+/* ── Titres MODERNES (dialecte docs) — Inter poids lourd, encre NEUTRE forte
+ * (jamais vert), tracking négatif, GROS h1/h2, espacement généreux. C'est la
+ * « échelle de titres moderne » demandée : on remonte franchement les tailles
+ * et on ouvre l'air au-dessus de chaque section. ── */
+.coal .content h1, .light .content h1,
+.coal .content h2, .light .content h2,
+.coal .content h3, .light .content h3,
+.coal .content h4, .light .content h4,
+.coal .content h5, .light .content h5,
+.coal .content h6, .light .content h6 {
+  font-family: var(--sans);
+  color: var(--text-strong);
+  line-height: 1.16;
+}
+/* h1 — le grand titre de chapitre : lourd, tracking serré, ample. */
+.coal .content h1, .light .content h1 {
+  font-weight: 800;
+  font-size: clamp(2.9rem, 2.2rem + 2.4vw, 3.8rem);   /* 29 → 38px */
+  letter-spacing: -0.024em;
+  margin: 0 0 calc(var(--rhythm-block) * 1.2);
+}
+.coal .content h2, .light .content h2 {
+  font-weight: 800;
+  font-size: clamp(2.2rem, 1.8rem + 1.4vw, 2.8rem);   /* 22 → 28px */
+  letter-spacing: -0.02em;
+  margin: var(--rhythm-section) 0 var(--rhythm-block);
+  line-height: 1.2;
+}
+.coal .content h3, .light .content h3 {
+  font-weight: 700;
+  font-size: 1.95rem;                                 /* ~19.5px */
+  letter-spacing: -0.015em;
+  margin: calc(var(--rhythm-section) * 0.72) 0 var(--rhythm-block);
+}
+.coal .content h4, .light .content h4,
+.coal .content h5, .light .content h5,
+.coal .content h6, .light .content h6 {
+  font-weight: 700;
+  font-size: 1.6rem;                                  /* 16px, ≥ corps */
+  letter-spacing: -0.01em;
+  margin: calc(var(--rhythm-section) * 0.55) 0 var(--rhythm-block);
+}
+
+/* ── Liens — accent rationné, transition gated sous reduced-motion ──── */
+.coal .content a, .light .content a,
+.coal .content a:visited, .light .content a:visited {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  transition: color var(--hover-dur) ease, text-decoration-thickness var(--hover-dur) ease;
+}
+.coal .content a:hover, .light .content a:hover {
+  color: var(--accent-2);
+  text-decoration-thickness: 2px;
+}
+.coal .content strong, .light .content strong { color: var(--text-strong); font-weight: 700; }
+
+/* ── Code — JetBrains Mono confiné ici. pre porte un filet-preuve gauche
+ * (accent vert discret). ── */
+.coal pre, .light pre,
+.coal pre > code, .light pre > code,
+.coal code:not(pre code), .light code:not(pre code) {
+  font-family: var(--mono);
+}
+.coal pre, .light pre {
+  background: var(--surface);
+  border: 1px solid var(--faint);
+  border-inline-start: 3px solid var(--accent);   /* accent-preuve, bord gauche */
+  border-radius: 8px;
+  line-height: 1.55;
+}
+html.coal pre > code, html.light pre > code {
+  background: transparent;
+  color: var(--text);
+}
+.coal code:not(pre code), .light code:not(pre code) {
+  color: var(--text-strong);   /* NEUTRE, pas néon */
+  background: var(--surface);
+  border: 1px solid var(--faint);
+  border-radius: 4px;
+  padding: 0.06em 0.4em;
+  font-size: 0.9em;
+}
+
+/* ── Blockquote — filet-preuve gauche accent, corps atténué, aéré ────── */
+.coal blockquote, .light blockquote {
+  border: 1px solid var(--faint);              /* bord plein subtil, pas vert */
+  border-inline-start: 4px solid var(--accent);/* filet-preuve vert à gauche */
+  background: var(--surface);
+  color: var(--text);                          /* callout lisible, pas dim */
+  border-radius: 10px;                         /* coins arrondis partout, moderne */
+  padding: 1rem 1.5rem;
+}
+.content blockquote { margin: var(--rhythm-block) 0; }
+/* Le callout d'intro (première blockquote, en gras) lit comme un chapô : encre
+ * forte, taille remontée — la promesse de la landing, à l'ouverture du livre. */
+.coal .content blockquote strong, .light .content blockquote strong {
+  color: var(--text-strong);
+}
+
+/* ── Séparateurs & tables — hairlines sobres ─────────────────────────── */
+.content hr { border: 0; border-top: 1px solid var(--faint); margin: var(--rhythm-section) 0; }
+.content table { border-collapse: collapse; }
+.content table td, .content table th { border: 1px solid var(--faint); }
+
+/* À la largeur téléphone, chaque ligne devient une fiche libellée. Cela garde
+ * toute l'information visible sans compresser trois colonnes en fragments de
+ * mots ni introduire un défilement horizontal cachant la dernière colonne. */
+@media (max-width: 620px) {
+  .content table.responsive-table,
+  .content table.responsive-table tbody,
+  .content table.responsive-table tr,
+  .content table.responsive-table td {
+    box-sizing: border-box;
+    display: block;
+    width: 100%;
+  }
+  .content table.responsive-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+  .content table.responsive-table { border: 0; }
+  .content table.responsive-table tr {
+    margin-block: 0 1rem;
+    border: 1px solid var(--faint);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+  .content table.responsive-table td {
+    display: grid;
+    grid-template-columns: minmax(7rem, 34%) minmax(0, 1fr);
+    gap: 0.8rem;
+    border: 0;
+    border-bottom: 1px solid var(--faint);
+    overflow-wrap: break-word;
+  }
+  .content table.responsive-table td:last-child { border-bottom: 0; }
+  .content table.responsive-table td::before {
+    content: attr(data-label);
+    color: var(--text-strong);
+    font-weight: 700;
+  }
+  .content table.responsive-table code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
+  /* La place centrale reste un spacer entre les contrôles gauche et droit.
+   * Masquer son texte évite l'ellipse « … », visuellement confondue avec une
+   * cinquième action dans la barre mobile. */
+  .menu-title { color: transparent !important; text-overflow: clip; }
+  .menu-title::before { content: none !important; }
+}
+
+/* ════════════════ CHROME mdBook — barre, sommaire, icônes en SOBRE ════════════════ */
+
+/* ── Barre du haut : fond socle, hairline bas, aucune ombre lourde. ── */
+.coal .menu-bar, .light .menu-bar { background: var(--bg); }
+.coal #menu-bar.sticky, .light #menu-bar.sticky,
+.coal .menu-bar.sticky, .light .menu-bar.sticky {
+  border-bottom: 1px solid var(--faint);
+  box-shadow: none;
+}
+/* icônes de la barre (hamburger, pinceau, recherche, print, github, edit) —
+ * dim au repos, braise verte au survol. Minimalisme cohérent landing. */
+.coal .menu-bar .icon-button, .light .menu-bar .icon-button,
+.coal .menu-bar i, .light .menu-bar i,
+.coal .nav-chapters, .light .nav-chapters {
+  color: var(--dim);
+  transition: color var(--hover-dur) ease;
+}
+.coal .menu-bar .icon-button:hover, .light .menu-bar .icon-button:hover,
+.coal .menu-bar i:hover, .light .menu-bar i:hover,
+.coal .nav-chapters:hover, .light .nav-chapters:hover {
+  color: var(--accent);
+}
+
+/* ── Sommaire (sidebar) : fond socle, hairline droite, items dim, chapitre
+ * actif en vert. Inter, interligne resserré (densité docs). ── */
+.coal .sidebar, .light .sidebar {
+  font-family: var(--sans);
+  border-inline-end: 1px solid var(--faint);
+}
+.coal .chapter, .light .chapter { line-height: 1.5; }
+.coal .chapter li.chapter-item, .light .chapter li.chapter-item { margin-top: 0.35rem; }
+.coal .chapter li.chapter-item a.active,
+.light .chapter li.chapter-item a.active {
+  color: var(--accent);
+  font-weight: 600;
+}
+.coal .chapter li.chapter-item a:hover,
+.light .chapter li.chapter-item a:hover { color: var(--text-strong); }
+
+/* ── Sceau ∴ noogram sur le titre de la sidebar : le ∴ (seul glyphe mono
+ * sanctionné) est le sceau logique « therefore », en braise verte. ── */
+.coal .menu-title, .light .menu-title {
+  font-family: var(--sans);
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+.coal .menu-title::before, .light .menu-title::before {
+  content: "∴ ";
+  font-family: var(--mono);
+  color: var(--accent);
+}
+
+/* ── Recherche : champ sobre en Inter, cohérent avec la barre. ── */
+.coal #searchbar, .light #searchbar,
+.coal .searchbar-outer, .light .searchbar-outer {
+  font-family: var(--sans);
+}
+
+/* ── Motion : aucune animation ambiante ne tourne. On neutralise les
+ * transitions de hover sous prefers-reduced-motion. ── */
+@media (prefers-reduced-motion: reduce) {
+  .coal .content a, .light .content a,
+  .coal .menu-bar .icon-button, .light .menu-bar .icon-button,
+  .coal .nav-chapters, .light .nav-chapters { transition: none; }
+}
+
+/* ════════════════ CHAMP CONWAY — papier peint figé ════════════════
+ * Le canvas #noogram-field est DERRIÈRE tout ; html porte le fond socle, le
+ * reste est transparent pour laisser voir la trame. Le contenu passe au-dessus. */
+html.coal, html.light { background: var(--bg); }
+#noogram-field { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+body, .page-wrapper, .page, #content, .content, .menu-bar, .sidebar-scrollbox {
+  background: transparent;
+}
+.page-wrapper, .page, #content, .content, .menu-bar { position: relative; z-index: 1; }
+/* la sidebar GARDE son position:fixed mdBook — on ne touche QUE son empilement
+ * (au-dessus du champ Conway). La forcer en position:relative la faisait
+ * disparaître (régression). */
+.sidebar { z-index: 40; }
+/* la sidebar garde un voile discret du socle pour la lisibilité du sommaire */
+.coal .sidebar, .light .sidebar { background: color-mix(in srgb, var(--bg) 78%, transparent); }
+.menu-bar { background: color-mix(in srgb, var(--bg) 70%, transparent); backdrop-filter: blur(3px); }
+
+/* ════════════════ TOC DE PAGE À DROITE (façon Dask) ════════════════ */
+/* NB : mdBook pose html{font-size:62.5%} → 1rem = 10px. Tailles ci-dessous
+ * ré-ancrées sur ce rem (corps TOC ≈ 13px). */
+.page-toc {
+  position: fixed; top: 5.2rem; right: 2.4rem;
+  width: 20rem; max-height: 76vh; overflow-y: auto;
+  z-index: 1; padding-left: 1.2rem;
+  border-left: 1px solid var(--faint);
+  font-family: var(--sans); font-size: 1.3rem; line-height: 1.4;
+}
+.page-toc-title {
+  margin: 0 0 0.8rem; text-transform: uppercase;
+  letter-spacing: 0.1em; font-size: 1.05rem; font-weight: 600; color: var(--dim);
+}
+.page-toc-link {
+  display: block; color: var(--dim); text-decoration: none;
+  padding: 0.35rem 0 0.35rem 1.2rem; margin-left: -1.2rem;
+  border-left: 2px solid transparent; transition: color var(--hover-dur) ease, border-color var(--hover-dur) ease;
+}
+.page-toc-link.lvl-h3 { padding-left: 2.4rem; font-size: 0.94em; }
+.page-toc-link:hover { color: var(--text); }
+.page-toc-link.active { color: var(--accent); border-left-color: var(--accent); }
+/* Le TOC suit l'espace réel : sans sidebar dès 1201 px, avec la sidebar
+ * seulement quand ses 300 px laissent une vraie colonne de lecture. Réduire
+ * max-width plutôt qu'ajouter une marge de 230 px limite le saut au seuil. */
+.page-toc { display: none; }
+@media (min-width: 1201px) {
+  html:not(.sidebar-visible) .page-toc { display: block; }
+  html:not(.sidebar-visible) .content main {
+    max-width: min(var(--content-max-width), calc(100% - 25rem));
+  }
+}
+@media (min-width: 1501px) {
+  html.sidebar-visible .page-toc { display: block; }
+  html.sidebar-visible .content main {
+    max-width: min(var(--content-max-width), calc(100% - 25rem));
+  }
+}
+
+/* ════════════════ Sommaire — liens chapitre GRIS par défaut, VERT sur .active
+ * ET au :hover uniquement (même discipline que la TOC de page à droite). ════════════════ */
+.sidebar .chapter li.chapter-item > a { color: var(--dim); }
+.sidebar .chapter li.chapter-item > a:hover { color: var(--accent); }
+.sidebar .chapter li.chapter-item > a.active,
+.sidebar .chapter li.chapter-item.active > a,
+.sidebar .chapter li.chapter-item > a[aria-current="page"],
+.sidebar .chapter li.chapter-item > a:not([href]) {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* les intertitres de section (Tutorials, How-to guides…) restent neutres */
+.sidebar .chapter li.part-title { color: var(--dim); }
+/* le logo « ∴ Noogram » devient un lien vers le site principal → curseur main */
+.menu-title a { cursor: pointer; }
+
+/* Sélecteur de thème explicite, regroupé avec print / GitHub / edit. Le menu
+ * mdBook reste intact : seul son déclencheur devient lisible au premier coup
+ * d'œil au lieu de dépendre de l'icône pinceau. */
+.theme-control {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  margin: 0;
+}
+.right-buttons {
+  display: flex;
+  align-items: center;
+}
+.menu-bar .theme-control #theme-toggle {
+  width: auto;
+  height: auto;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--dim);
+  line-height: var(--menu-bar-height);
+}
+/* picker restreint aux thèmes CALIBRÉS : Light (sauge) + Coal (dark).
+ * rust / navy / ayu ne sont pas stylés par notre charte → cachés. */
+#theme-list button#default_theme,
+#theme-list button#rust,
+#theme-list button#navy,
+#theme-list button#ayu { display: none !important; }
+.menu-bar .theme-control #theme-toggle:hover,
+.menu-bar .theme-control #theme-toggle[aria-expanded="true"] {
+  color: var(--accent);
+}
+.theme-control #theme-toggle .fa { color: inherit; }
+.theme-control .theme-popup {
+  left: auto;
+  right: 0;
+}
+
+/* ════════════════ Bouton « copier » des blocs de code — MODERNISÉ (style landing) ════════════════
+ * Remplace l'icône FontAwesome bleue par défaut de mdBook par un bouton sobre
+ * carré, icône neutre → verte au hover, cohérent avec le bouton copie de la landing. */
+pre > .buttons { top: 0.5rem; right: 0.5rem; }
+.clip-button {
+  color: var(--dim) !important;
+  background: var(--surface) !important;
+  border: 1px solid var(--faint) !important;
+  border-radius: 8px !important;
+  padding: 0.5rem !important;
+  width: auto !important; height: auto !important;
+  cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: color var(--hover-dur) ease, border-color var(--hover-dur) ease, background var(--hover-dur) ease;
+}
+.clip-button:hover { color: var(--accent) !important; border-color: var(--accent) !important; }
+.clip-button svg { width: 15px; height: 15px; fill: currentColor; stroke: currentColor; }
+.clip-button i.fa, .clip-button .fa { color: inherit !important; }
+/* tooltip « Copy to clipboard » sobre */
+.tooltiptext {
+  background: var(--surface) !important; color: var(--text) !important;
+  border: 1px solid var(--faint); border-radius: 6px;
+  font-family: var(--sans); font-size: 1.1rem; box-shadow: none !important;
+}
+
+/* ════════════════ IMPRESSION / PDF ════════════════ */
+@media print {
+  #noogram-field, .page-toc { display: none !important; }
+  html, body, .page-wrapper, .page, #content, .content, .content main {
+    background: #fff !important;
+    color: #111 !important;
+  }
+  body { font-size: 9pt; letter-spacing: 0; }
+  .coal .content, .light .content {
+    color: #111 !important;
+    font-size: 9pt;
+    line-height: 1.3;
+  }
+  .content main {
+    max-width: none !important;
+    margin: 0 !important;
+  }
+  .content p, .content ol, .content ul, .content li { line-height: 1.3; }
+  .content p, .content ul, .content ol { margin-bottom: 5pt; }
+  .coal .content h1, .light .content h1 { font-size: 20pt; margin: 0 0 8pt; }
+  .coal .content h2, .light .content h2 { font-size: 15pt; margin: 13pt 0 5pt; }
+  .coal .content h3, .light .content h3 { font-size: 12pt; margin: 10pt 0 4pt; }
+  .coal .content h4, .light .content h4,
+  .coal .content h5, .light .content h5,
+  .coal .content h6, .light .content h6 { font-size: 10pt; margin: 8pt 0 4pt; }
+  h1, h2, h3, h4, h5, h6 { break-after: avoid-page; }
+  p, li, blockquote { orphans: 3; widows: 3; }
+  pre, blockquote, table, figure, img { break-inside: avoid-page; }
+  .content blockquote { margin: 6pt 0; padding: 5pt 8pt; }
+  .coal pre, .light pre { background: #f4f4f4 !important; }
+  a, a:visited { color: #111 !important; text-decoration: underline; }
+}
+
+/* ════════════════ Diagrammes TikZ — theme-aware (light par défaut/sauge, dark si toggle) ════════════════ */
+.diag { max-width: 100%; height: auto; display: block; margin: 1.6rem auto; }
+.diag-dark { display: none; }
+html.coal .diag-light, html.navy .diag-light, html.ayu .diag-light, html.rust .diag-light { display: none; }
+html.coal .diag-dark,  html.navy .diag-dark,  html.ayu .diag-dark,  html.rust .diag-dark  { display: block; }

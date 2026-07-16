@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Errors — aggregate molecule-collapse events into one failure overview: what is breaking the fleet, and which molecules are hit
+
+Usage: cs errors [OPTIONS]
+
+Options:
+      --config <PATH>      Path to configuration file
+      --since <SINCE>      Time window — accepts a relative duration (`<N>d`, `<N>h`, `<N>m`, `<N>s`) or an RFC-3339 absolute timestamp. Defaults to 7 days [default: 7d]
+      --kind <VARIANT>     Filter to one `CollapseReason` variant. Accepts the on-wire strings: `worker_crashed`, `gate_failed`, `blocker_stuck`, `manual_abort`, `resource_exhausted`. Any other value is treated as a substring match on the free-form `Other` payload
+  -v, --verbose            Enable verbose output
+      --reason <TEXT>      Substring match on the free-form `reason` text. Case-sensitive
+      --top <TOP>          Maximum number of variant rows to display in the summary [default: 10]
+      --ops-dir <OPS_DIR>  Path to the state store root (overrides walk-up discovery)
+      --json               Emit JSON instead of the tabular summary. The global `--json` flag also enables this
+  -h, --help               Print help

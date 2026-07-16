@@ -1,0 +1,31 @@
+# coverage-baselines.toml — per-crate line-coverage baselines.
+#
+# Recorded by the L1 coverage lane of delib-20260711-9928 (cosmon full-review),
+# task-20260712-e146, on 2026-07-12 with cargo-llvm-cov 0.8.5, toolchain stable
+# (aarch64-apple-darwin), llvm-tools from the rustc sysroot.
+#
+# These are BASELINES, not floors. scripts/coverage-ratchet.sh fails a GATE
+# crate only when its measured line-% drops below `baseline − EPSILON`
+# (default 0.3 pts). Absolute targets are intentionally NOT encoded — the L1
+# lane rejected the aspirational-absolute gate (old ≥85% of coverage-report.md).
+#
+# Measurement scope per crate (see the ratchet script header for WHY):
+#   core    → `--lib`  (trybuild compile-fail harnesses never terminate under
+#                        instrumentation and yield zero coverage signal)
+#   graph   → whole-package
+#   hash    → whole-package
+#   state   → whole-package
+#   surface → whole-package
+#
+# Modes: core/graph/hash = gate (regression fails) · state/surface = sweep
+# (regression is advisory only). Re-record with `coverage-ratchet.sh --update`.
+
+[line_pct]
+core    = 93.88
+graph   = 98.15
+hash    = 93.41
+state   = 90.33
+surface = 85.19
+
+# For the record, region-% at baseline (not gated on; line-% is the ratchet axis):
+#   core 93.93 · graph 98.55 · hash 93.52 · state 90.96 · surface 84.70

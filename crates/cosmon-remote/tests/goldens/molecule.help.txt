@@ -1,0 +1,23 @@
+Molecule lifecycle (the §8p frozen surface)
+
+Usage: cosmon-remote molecule [OPTIONS] <COMMAND>
+
+Commands:
+  nucleate  `POST /v1/molecules` — create a molecule
+  list      `GET /v1/molecules` — ensemble list with optional filters
+  get       `GET /v1/molecules/{id}`
+  result    `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
+  tackle    `POST /v1/molecules/{id}/tackle` [coûteux]
+  run       `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream
+  collapse  `POST /v1/molecules/{id}/collapse`
+  freeze    `POST /v1/molecules/{id}/freeze`
+  thaw      `POST /v1/molecules/{id}/freeze` with `state: "active"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)
+  stuck     `POST /v1/molecules/{id}/stuck`
+  tag       `POST /v1/molecules/{id}/tags`
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+  -h, --help               Print help

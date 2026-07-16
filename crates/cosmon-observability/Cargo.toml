@@ -1,0 +1,26 @@
+[package]
+name = "cosmon-observability"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third party would `cargo add` this without
+# wanting AGPL — keep on Apache-2.0 to preserve permissive boundary.
+license = "AGPL-3.0-only"
+description = "Shared fleet observability queries for Cosmon (cs peek TUI + cockpit HTTP)"
+
+[dependencies]
+chrono = { workspace = true }
+claudion = { workspace = true }
+cosmon-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+ratatui = { version = "0.29", default-features = false }
+insta = { workspace = true }
+
+[lints]
+workspace = true

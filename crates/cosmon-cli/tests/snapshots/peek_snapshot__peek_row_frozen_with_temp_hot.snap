@@ -1,0 +1,22 @@
+---
+source: crates/cosmon-cli/tests/peek_snapshot.rs
+expression: "render_row(&i, false)"
+---
+INPUTS
+  status:        frozen
+  heartbeat:     none
+  has_blockers:  false
+  ghost:         false
+  drift:         false
+  tags:          temp:hot
+  whisper_fresh: false
+
+RENDER
+  row_kind:       Frozen
+  label:          frozen
+  lifecycle_glyph 🧊   style=fg=Cyan mod=NONE
+  temp_glyph      🔥   style=fg=Red mod=NONE
+  whisper_glyph       style=fg=- mod=NONE
+
+STRIP (what the operator sees)
+  [🧊] [🔥] [ ]

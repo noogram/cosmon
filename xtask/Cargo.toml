@@ -1,0 +1,13 @@
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+publish = false
+description = "Repo tooling — `cargo xtask gen-api-ref` projects the §8p surface canon into the smithy API reference"
+
+[dependencies]
+# The ONE parser of the surface canon and the ONE scope→effect map
+# (task-20260610-06a4 / A3) — the generated doc derives from the same
+# source as the adapter router and the tenant binary.
+cosmon-surface-canon = { path = "../crates/cosmon-surface-canon" }

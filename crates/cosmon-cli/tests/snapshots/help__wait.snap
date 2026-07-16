@@ -1,0 +1,31 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Wait — block until a molecule reaches a terminal (or requested) status
+
+Usage: cs wait [OPTIONS] <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule ID to wait on. Must be an exact ID — we never want a prefix to match the wrong molecule under a long-running wait
+
+Options:
+      --config <PATH>                  Path to configuration file
+      --for <FOR>                      Statuses to wait for, comma-separated. Defaults to the terminal set so `cs tackle M && cs wait M && cs done M` just works [default: completed,collapsed]
+      --timeout <TIMEOUT>              Maximum seconds to wait before giving up [default: 600]
+  -v, --verbose                        Enable verbose output
+      --json                           Output in JSON format
+      --poll-interval <POLL_INTERVAL>  Seconds between polls. Clamped internally to the remaining budget, so setting this larger than `--timeout` still terminates on time [default: 5]
+      --quiet                          Suppress per-poll progress lines — only emit the final result. Implied when `--json` is set
+  -h, --help                           Print help
+
+EXAMPLES:
+  cs wait <mol>                           # block until terminal
+  cs wait <mol> --timeout 600             # 10-minute cap
+  cs wait <mol> --status Completed        # custom target set
+  cs wait <mol> &                         # background wait, notified on exit
+
+This is kubectl-wait, not kubectl-watch. One molecule, bounded poll,
+exits on target. Never poll `cs observe` in a shell loop.
+
+SEE ALSO: cs observe (snapshot), cs peek (live fleet view).

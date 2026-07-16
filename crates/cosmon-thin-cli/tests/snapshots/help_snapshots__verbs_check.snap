@@ -1,0 +1,37 @@
+---
+source: crates/cosmon-thin-cli/tests/help_snapshots.rs
+expression: body
+---
+cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
+
+✓ avatar_audit   GET    /v1/avatar/:instance_id/audit
+✓ avatar_grant   POST   /v1/avatar/:instance_id/grant
+✓ avatar_incarnate POST   /v1/avatar/:instance_id/incarnate
+✓ avatar_mould_info GET    /v1/avatar/:instance_id/mould-info
+✓ avatar_status  GET    /v1/avatar/:instance_id/status
+✓ collapse       POST   /v1/molecules/:id/collapse
+✓ converse       POST   /v1/avatar/converse
+✓ ensemble       GET    /v1/molecules
+✓ freeze         POST   /v1/molecules/:id/freeze
+✓ nucleate       POST   /v1/molecules
+✓ observe        GET    /v1/molecules/:id
+✓ run            POST   /v1/molecules/:id/run
+✓ stuck          POST   /v1/molecules/:id/stuck
+✓ tackle         POST   /v1/molecules/:id/tackle
+✓ tag            POST   /v1/molecules/:id/tags
+
+⚠ done           OPERATOR-ONLY (ADR-080 §5.1)
+⚠ evolve         OPERATOR-ONLY (ADR-080 §5.1)
+⚠ complete       OPERATOR-ONLY (ADR-080 §5.1)
+⚠ security activate OPERATOR-ONLY (ADR-080 §5.1)
+⚠ kill           OPERATOR-ONLY (ADR-080 §5.1)
+⚠ purge          OPERATOR-ONLY (ADR-080 §5.1)
+⚠ reconcile      OPERATOR-ONLY (ADR-080 §5.1)
+⚠ verify         OPERATOR-ONLY (ADR-080 §5.1) — V2 candidate
+⚠ whisper        OPERATOR-ONLY (ADR-080 §5.1)
+⚠ drop           OPERATOR-ONLY (ADR-080 §5.1)
+
+─────────────────────────────────────────────────
+15/15 RPP-exposable verbs covered.
+10 operator-only verbs by design (see ADR-080 §5.1).
+Status: COMPLETE.

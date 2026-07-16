@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Search symbols by name across a Rust project
+
+Usage: cs topology symbols [OPTIONS] <PATH> <QUERY>
+
+Arguments:
+  <PATH>   Path to the project root
+  <QUERY>  Search query (case-insensitive substring match)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

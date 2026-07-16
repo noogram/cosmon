@@ -1,0 +1,128 @@
+# fleet-review v0 — observation-only scan
+# v1: + parametric suggestions with falsifiable predictions (after 5+ useful scans)
+# v2: + patrol-triggered invocation + EMA damping (after 10+ accepted suggestions)
+# v3: + autonomous adjustment (never without explicit ADR — Hawking chronology protection)
+
+formula = "fleet-review"
+version = 1
+description = """
+Periodic metabolism scan — the galaxy observes itself. Reads events.jsonl \
+and molecule state from the last N days, computes vital-sign metrics \
+(collapse rate, duration/step, energy utilization, backlog pressure, \
+completed ratio), and produces a human-readable markdown report with \
+at most 5 observations.
+
+v0 is observation-only: ZERO suggestions, ZERO fleet.toml changes, ZERO \
+new Rust types. The report is a single markdown file in MOLECULE_DIR. \
+The pilot runs this manually when they want a health check.
+
+Wheeler: "The configuration should be a consequence of observation, \
+not of convention."
+"""
+id_prefix = "review"
+freeze_on_last_step = false
+
+# Tier 0 — pure observation, no child nucleation.
+[tier]
+level = 0
+
+[vars.galaxy_path]
+description = "Path to the .cosmon root (default: walk-up discovery from cwd)"
+type = "string"
+required = false
+
+[vars.lookback_days]
+description = "Number of days to look back for events and state changes"
+type = "string"
+required = false
+default = "7"
+
+[vars.max_observations]
+description = "Maximum number of observations in the report (Shannon cap)"
+type = "string"
+required = false
+default = "5"
+
+[[steps]]
+id = "scan"
+title = "Scan galaxy state and compute metrics"
+description = """
+Read events.jsonl files and state.json for all molecules modified in the \
+last {lookback_days} days. Compute the following vital-sign metrics:
+
+1. **Collapse rate per formula** — count of collapsed molecules / total \
+   molecules per formula (e.g. deep-think 5%, task-work 12%).
+2. **Duration/step ratio** — average wall-clock time per step, per \
+   formula (from events.jsonl timestamps).
+3. **Energy utilization** — token estimates from events.jsonl (look for \
+   claudion probe entries if present, otherwise estimate from event \
+   counts as a proxy).
+4. **Pending > 48h count** — number of molecules in pending status \
+   older than 48h, with temp:* tag distribution.
+5. **Collapsed/completed ratio** — overall galaxy health indicator.
+
+Data sources (in priority order):
+  - `.cosmon/state/fleets/*/molecules/*/events.jsonl` — timestamped events
+  - `.cosmon/state/fleets/*/molecules/*/state.json` — current molecule state
+  - claudion probes (if present in events) — actual token counts
+
+CRITICAL CONSTRAINTS:
+  - If events.jsonl is empty or contains <10 events in the lookback \
+    window, write a one-line report: "Insufficient data for meaningful \
+    review. Run more molecules first." and STOP.
+  - Silence = valid response. Empty galaxy = zero signal, not default \
+    assumptions.
+  - Declare any missing observables (e.g. "claudion probes not found \
+    for N workers").
+
+Write raw metrics to MOLECULE_DIR/scan-data.md (MOLECULE_DIR from \
+`cs --json observe {mol_id}` — NEVER the worktree).
+"""
+acceptance = "MOLECULE_DIR/scan-data.md written with raw metrics for all 5 vital signs, or a one-line insufficient-data notice."
+
+[[steps]]
+id = "report"
+title = "Generate fleet review report"
+description = """
+Using scan-data.md from the previous step, generate the final report \
+at MOLECULE_DIR/fleet-review.md with the following sections:
+
+```
+# Fleet Review — {galaxy_name} — {date}
+
+## Vital Signs
+| Metric | Value | Trend (vs previous review) | Signal |
+|--------|-------|---------------------------|--------|
+| Collapse rate | ...% | ↑/↓/→ (±Npp) | ✅/⚠️/❌ |
+| Duration/step | ...s avg | ↑/↓/→ (±N%) | ✅/⚠️/❌ |
+| Energy util. | ...k tokens/mol | ↑/↓/→ | ✅/⚠️/❌ |
+| Pending > 48h | N molecules | ↑/↓/→ (±N) | ✅/⚠️/❌ |
+| Completed ratio | ...% | ↑/↓/→ | ✅/⚠️/❌ |
+
+## Top Observations (max {max_observations})
+1. **observation title** — 2-3 sentence explanation...
+2. ...
+
+## Missing Observables
+- list of data sources that were expected but absent
+
+## Raw Data (appendix)
+- Total molecules scanned: N
+- Lookback window: {lookback_days}d
+- Previous review: {date or "none"}
+```
+
+CONSTRAINTS:
+  - MAX {max_observations} observations (Shannon pilot bandwidth cap).
+  - Each observation in 2-3 sentences max.
+  - Trend compared to previous review if one exists in state (look for \
+    a prior fleet-review molecule's fleet-review.md). If none found, \
+    write "first review" for all trends.
+  - Signal levels: ✅ (healthy), ⚠️ (attention), ❌ (action needed) — \
+    3 levels only.
+  - "Missing Observables" section is MANDATORY — the scan declares its \
+    own blind spots (Gödel safety).
+  - ZERO suggestions for changes. This is v0: observation only.
+"""
+needs = ["scan"]
+acceptance = "MOLECULE_DIR/fleet-review.md written with all 5 sections: Vital Signs table, Top Observations, Missing Observables, Raw Data."

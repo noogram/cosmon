@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cosmon-letter-monday — godin ship-moment #1 (delib-20260423-95fe §5).
+
+  Fires `scripts/cosmon-letter-monday.sh` every Monday at 08:30 local
+  time. The script composes one plaintext email ("what your fleet did
+  last week, one promise to revisit, today's priority") and sends it
+  via osascript + Mail.app to dev@noogram.dev. Mechanical templating,
+  no LLM, no retry. Idempotent: a second fire on the same day is a
+  no-op unless `--force` is passed.
+
+  Why a standalone LaunchAgent and not a `patrols.toml` entry: the
+  letter is a weekly gift independent of the cosmon-scheduler
+  lifecycle. If the scheduler is paused (e.g. `~/.cosmon/stand-down.lock`
+  touched to silence patrols), the Monday letter must still arrive —
+  it is the permission argument, not a patrol. See
+  `scripts/cosmon-letter-monday.sh` header.
+
+  Placeholders substituted by
+  `scripts/install-cosmon-letter-launchagent.sh` at install time:
+    __HOME__         the operator's home directory.
+    __COSMON_ROOT__  the absolute path of the cosmon galaxy root.
+
+  StartCalendarInterval — Monday (Weekday=1), 08:30 local time. launchd
+  treats missed calendar fires as queued iff the machine was asleep at
+  T; we accept one missed Monday = silence (by design, briefing §"Delivery").
+
+  Not auto-installed. Operator runs:
+      scripts/install-cosmon-letter-launchagent.sh install
+      scripts/install-cosmon-letter-launchagent.sh status
+      scripts/install-cosmon-letter-launchagent.sh uninstall
+
+  Governing provenance:
+    - delib-20260423-95fe (panel: jobs, niel, godin, jr, architect)
+    - task-20260423-e9cf (this molecule)
+    - briefing §"Anti-patterns" (no HTML, no dashboard link, no chain)
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>dev.noogram.cosmon.letter-monday</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__COSMON_ROOT__/scripts/cosmon-letter-monday.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>8</integer>
+        <key>Minute</key>
+        <integer>30</integer>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-letter-monday.out</string>
+
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.cosmon/logs/cosmon-letter-monday.err</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>WorkingDirectory</key>
+    <string>__COSMON_ROOT__</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>__HOME__</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:__HOME__/.local/bin:__HOME__/.cargo/bin</string>
+        <key>COSMON_ROOT_OVERRIDE</key>
+        <string>__COSMON_ROOT__</string>
+    </dict>
+</dict>
+</plist>

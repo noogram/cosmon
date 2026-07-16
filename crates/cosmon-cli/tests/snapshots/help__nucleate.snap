@@ -1,0 +1,161 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Nucleate a new molecule from a formula template
+
+Usage: cs nucleate [OPTIONS] [FORMULA]
+
+Arguments:
+  [FORMULA]
+          Formula name (looks for `{name}.formula.toml` in the formulas directory).
+          
+          Required unless `--from` is supplied.
+
+Options:
+      --config <PATH>
+          Path to configuration file
+
+      --from <PATH>
+          Hydrate molecule(s) from a TOML declaration file or directory.
+          
+          When `PATH` is a directory, every `*.toml` file inside (non-recursive, sorted) is loaded as a [`MoleculeDeclaration`]. The positional `formula` argument is ignored in this mode — each declaration carries its own `formula` field.
+
+      --blocks <MOLECULE_REF>
+          Target molecule(s) that this new molecule blocks — each target cannot progress until this one completes.
+          
+          Accepts two forms: - `<molecule-id>` — same-galaxy edge. Adds `Blocks` here and a symmetric `BlockedBy` on the target. Targets must already exist. - `<galaxy-alias>:<molecule-id>` (or `<galaxy-alias>@<molecule-id>`) — cross-galaxy edge (Phase 1, ADR-035). The remote target is resolved best-effort via configured galaxy aliases or the cluster root. The reciprocal edge is **not** filed on the target galaxy (one-writer-per-galaxy, ADR-052) — the edge is recorded locally and a stderr warning is emitted if the target is unreachable.
+
+  -v, --verbose
+          Enable verbose output
+
+      --blocked-by <MOLECULE_REF>
+          Source molecule(s) that block this new molecule — this new molecule cannot progress until each source completes.
+          
+          Same syntax as `--blocks`, including the `<alias>:<mol_id>` cross-galaxy form (Phase 1, ADR-035).
+
+      --json
+          Output in JSON format
+
+      --decayed-from <MOLECULE_ID>
+          Declare that the new molecule decayed from `PARENT_ID` — an information edge (not a progression edge): the parent is the cognitive source this molecule emerged from, but the parent is free to keep advancing independently. Symmetric counterpart: the parent gains a `DecayProduct` link to the new molecule.
+          
+          This is the explicit form of the auto-parent contract: when a worker `cs tackle`s a molecule, `COSMON_PARENT_MOL_ID` is injected into its environment, and any subsequent `cs nucleate` from that worker auto-populates this flag unless one of `--blocks`, `--blocked-by`, `--decayed-from`, or `--no-parent` is already set. Passing it explicitly wins over the env var.
+
+      --no-parent
+          Disable the env-driven auto-parent contract for this invocation.
+          
+          When set, the `COSMON_PARENT_MOL_ID` environment variable is ignored and no `DecayedFrom` edge is synthesized. Use this for legitimate orphan nucleations (e.g., a worker that intentionally spawns an unrelated top-level molecule).
+
+      --refines <MOLECULE_ID>
+          Cited molecule(s) that this new molecule refines (semantic citation edge — does NOT carry progression semantics, unlike `--blocks`).
+          
+          For every target, the new molecule gets a `Refines` link and the target gets a symmetric `RefinedBy` link. Intended for [`Constellation`](cosmon_core::kind::MoleculeKind::Constellation) molecules that name a fil-rouge across N existing molecules. Repeat the flag per citation; targets must already exist.
+          
+          Also auto-populated for `--kind constellation` from a comma-separated `--var citations=mol1,mol2,mol3`.
+
+      --refutes <MOLECULE_ID>
+          Diagnosis molecule(s) that this new molecule refutes (semantic refutation edge — no progression semantics, unlike `--blocks`).
+          
+          For every target, the new molecule gets a `Refutes` link and the target gets a symmetric `RefutedBy` link. This is the DAG-native form of the ADR-143 diagnosis-verify gate: a `cmb-verify` molecule that reproduces a relayed symptom but finds the stated *mechanism* describes a nonexistent code path records the divergence by refuting the diagnosis molecule. Repeat the flag per refuted diagnosis; targets must already exist.
+
+      --fleet <FLEET>
+          Fleet to nucleate the molecule into (default: "default")
+          
+          [default: default]
+
+      --kind <KIND>
+          Molecule kind: idea, task, decision, issue, signal, deliberation, constellation (see `docs/guides/constellation-pattern.md`)
+
+      --class <CLASS>
+          Operational class — `standard` (default), `stress-test`, or `infra` (ADR-085 §1).
+          
+          `stress-test` opts the molecule into the two-layer pre-commitment seal at dispatch (Layer 1 runtime precondition + Layer 2 witness-quorum, ADR-085 §2-§3) and out of autopilot drain. The remaining classes are gate-equivalent to the legacy default; this flag is a marker, not a runtime mode.
+
+      --assign <ASSIGN>
+          Assign a worker to the new molecule
+
+      --var <KEY=VALUE>
+          Set a variable (repeatable: --var key=value)
+
+      --formulas-dir <DIR>
+          Path to the formulas directory (default: ./formulas)
+
+      --role <ROLE>
+          Agent role for the worker that will tackle this molecule.
+          
+          Valid roles: orchestration, research, implementation, infrastructure, advisory, validation. When set, `cs tackle` uses this role instead of the default `implementation`.
+
+      --store-dir <DIR>
+          Path to the state store root (default: .cosmon)
+
+      --tag <TAG>
+          Typed label to attach to the new molecule (repeatable).
+          
+          Format: `key` or `key:value`. Keys are kebab-case; values exclude whitespace and `:`. Duplicate tags are deduplicated.
+
+      --interaction-mode <MODE>
+          Static interaction-mode discriminant posed at nucleation.
+          
+          One of `operator-required` or `background`. Recorded as the `interaction-mode:<mode>` tag. Posed by the molecule's author — often an agent — and read at dispatch ; survives the operator's present state. *Default explicit, not implicit* : when absent, the tag is simply not set, and consumers (the graceful degradation controller, in particular) decide what to do.
+          
+          Conflicts with `--tag interaction-mode:*` to keep the discriminant single-sourced.
+
+      --may-block-on-operator <BOUNDARY>
+          Grant the operator-block capability at an irreversibility boundary (ADR-123 Q5).
+          
+          One of `signature`, `external-send`, `publish`, `authoritative-value`. Recorded as the `op-block:<boundary>` tag. A worker reads this single typed capability to decide whether it MAY pause for an operator (`cs await-operator`) at that boundary — or, when absent, MUST surface-and-continue. The capability is granted here at nucleation and never self-asserted by the worker.
+          
+          Conflicts with `--tag op-block:*` to keep the grant single-sourced.
+
+      --ttl <DURATION>
+          Relative TTL — deadline is now + duration (ADR-029).
+          
+          Grammar: `<N><unit>` where unit ∈ {s,m,h,d,w}. Examples: `7d`, `24h`, `2w`. Mutually exclusive with `--expires-at`.
+
+      --expires-at <WHEN>
+          Absolute expiry instant (ADR-029).
+          
+          Accepts RFC3339 (`2026-07-02T00:00:00Z`) or a plain `YYYY-MM-DD` date (anchored at end-of-day 23:59:59Z). Mutually exclusive with `--ttl`.
+
+      --expiry-policy <POLICY>
+          Expiry policy — what to do when `expires_at` is in the past.
+          
+          One of `warn`, `collapse`, `escalate`. Defaults to the per-kind default from config (or `warn`) when unset. Only meaningful when `--ttl` or `--expires-at` is also provided.
+
+      --energy-budget <N>
+          Per-molecule step counter circuit breaker (THESIS Part XI).
+          
+          `cs evolve` decrements this once per step. At zero, the next attempt transitions the molecule to `Frozen` with reason `"energy-exhausted"`. Default comes from `.cosmon/config.toml` `[energy] default_step_budget` (100 if absent). Pass `0` to disable the breaker for this molecule.
+
+      --require-galaxy
+          Refuse to nucleate into the host-global `~/.cosmon/state` fleet.
+          
+          By default, running `cs nucleate` from a directory with no `.cosmon/config.toml` in cwd or any ancestor falls back to the host-global state dir (`$HOME/.cosmon/state`) and prints a warning to stderr — the molecule is born into a fleet invisible to every galaxy. `--require-galaxy` turns that warning into a hard error (exit ≠ 0), so scripts and tooling that must write galaxy-scoped state can fail fast instead of silently leaking orphans.
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+EXAMPLES:
+  cs nucleate task-work --var topic="refactor CLI help"
+  cs nucleate deep-think --kind deliberation --var question="..."
+  cs nucleate patrol --blocks root-mol         # add a DAG edge
+  cs nucleate constellation --kind constellation \
+      --var pattern="three molecules re-invent the same missing primitive" \
+      --var citations="delib-example-0001,task-example-0002,idea-example-0003"
+  cs nucleate --from molecules/               # hydrate from TOML declarations
+
+KINDS (--kind):
+  idea 💡, task 🔧, decision 📐, issue 🐛, signal ⚡,
+  deliberation 🧠 (use with the deep-think formula),
+  constellation 🌌 (fil-rouge artifact; see cs help guide).
+
+LINK FLAGS:
+  --blocks <id>       DAG progression edge (target cannot advance until this one completes)
+  --blocked-by <id>   symmetric counterpart of --blocks
+  --decayed-from <id> information edge: parent this molecule emerged from
+  --refines <id>      citation edge (no progression semantics), auto-populated
+                      from --var citations for --kind constellation
+
+SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
+          docs/guides/constellation-pattern.md (when to use 🌌 vs 🧠).

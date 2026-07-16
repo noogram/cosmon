@@ -1,0 +1,39 @@
+Cosmon — open-core license map
+===============================
+
+Cosmon ships under an open-core split (operator decision 2026-06-21,
+delib-20260620-ca76; doctrine in docs/adr/092-license-bascule-mpl-to-agpl.md):
+
+  • The kernel, persistence/ports, product CLI & runtime, agent engine,
+    cockpit/UX, and the multi-tenant federation SERVER are licensed under
+    the GNU Affero General Public License, version 3 only (AGPL-3.0-only).
+    Full text: ./LICENSE-AGPL  —  https://www.gnu.org/licenses/agpl-3.0.html
+
+  • The pure network SDK that third parties link to *talk to* a cosmon
+    instance over the wire (cosmon-thin-cli, cosmon-thin-macro,
+    cosmon-client) — and the vendored third-party / sibling-galaxy crates —
+    are licensed under the Apache License, version 2.0 (Apache-2.0).
+    Full text: ./LICENSE-APACHE  —  http://www.apache.org/licenses/LICENSE-2.0
+
+The governing rule — the "network-boundary doctrine" — is:
+
+    A crate may stay Apache-2.0 IFF its real `[dependencies]` closure
+    contains zero AGPL crates, i.e. it reaches the AGPL core only over the
+    network (HTTP/IPC), never by code-linking. Any Apache crate that
+    code-links an AGPL crate is a license contradiction and must flip to
+    AGPL.
+
+Each crate declares its own `license` in its Cargo.toml (SPDX expression),
+and every first-party `.rs` source file carries a matching
+`// SPDX-License-Identifier:` header. The authoritative per-crate
+partition and the rationale live in:
+
+  • docs/adr/092-license-bascule-mpl-to-agpl.md  (doctrine)
+  • NOTICE                                        (vendored attributions)
+  • deny.toml + .github/workflows/deny.yml        (CI license gate)
+
+Vendored third-party and sibling-galaxy code retains its upstream license;
+see NOTICE for the enumeration.
+
+Copyright (c) 2026 Noogram (noogram.dev). All rights reserved where not
+otherwise granted by the licenses above.

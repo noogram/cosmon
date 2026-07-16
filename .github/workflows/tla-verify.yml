@@ -1,0 +1,169 @@
+name: TLA+ Verify
+
+# Mechanical re-verification of ADR-052's invariants via TLC.
+#
+# Fires whenever the TLA+ spec or any model config changes. Runs TLC in a
+# matrix, one job per .cfg, and compares the actual outcome against a
+# hard-coded expected verdict. Two of the six configs must pass; four must
+# fail, each with a specific violated-invariant. The "must-fail" cases —
+# especially CosmonRun_I9Counterexample — encode a continuous proof of the
+# Gödel sentence: if the counterexample ever stops being reachable, the
+# bypass action was silently removed and the closed-environment hypothesis
+# is no longer honest. The gate fails in both directions.
+#
+# See docs/specs/VALIDATION-REPORT.md for the reference one-shot run
+# (2026-04-19, molecule task-20260419-af4c) and the frontier discussion.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/specs/*.tla'
+      - 'docs/specs/*.cfg'
+      - 'docs/specs/tla2tools.jar'
+      - '.github/workflows/tla-verify.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/specs/*.tla'
+      - 'docs/specs/*.cfg'
+      - 'docs/specs/tla2tools.jar'
+      - '.github/workflows/tla-verify.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tlc:
+    name: TLC ${{ matrix.config }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - config: CosmonRun_InBand
+            expect: pass
+          - config: CosmonRun_Crashes
+            expect: pass
+          - config: CosmonRun_OutOfBand
+            expect: fail
+            violation: I9_BranchMergedOnlyIfCompleted
+          - config: CosmonRun_CrashesI3
+            expect: fail
+            violation: I3_FleetMirrorsSession
+          - config: CosmonRun_CrashesI4
+            expect: fail
+            violation: I4_SessionImpliesLiveProcess
+          - config: CosmonRun_I9Counterexample
+            expect: fail
+            violation: I9_BranchMergedOnlyIfCompleted
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Java (Temurin 17)
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9  # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # setup-java caches the JDK archive itself; tla2tools.jar is
+          # vendored in docs/specs/ so it needs no separate cache.
+
+      - name: Verify tla2tools.jar is vendored
+        run: |
+          set -euo pipefail
+          if [ ! -f docs/specs/tla2tools.jar ]; then
+            echo "::error::docs/specs/tla2tools.jar is missing — the vendored TLC jar is required."
+            exit 1
+          fi
+          ls -lh docs/specs/tla2tools.jar
+
+      - name: Run TLC on ${{ matrix.config }}.cfg
+        id: tlc
+        working-directory: docs/specs
+        run: |
+          set +e
+          java -XX:+UseParallelGC \
+               -cp tla2tools.jar tlc2.TLC \
+               -workers auto \
+               -config ${{ matrix.config }}.cfg \
+               CosmonRun.tla \
+               2>&1 | tee tlc-${{ matrix.config }}.log
+          # Grab TLC's exit code *before* the tee-cooked one.
+          tlc_exit=${PIPESTATUS[0]}
+          echo "tlc_exit=${tlc_exit}" >> "$GITHUB_OUTPUT"
+          # Never fail this step on TLC's exit code — the next step
+          # interprets the log against the expected verdict. TLC exits
+          # non-zero both on a genuine violation (which may be expected)
+          # and on tooling errors (which are not).
+          exit 0
+
+      - name: Check expected verdict
+        working-directory: docs/specs
+        env:
+          EXPECT: ${{ matrix.expect }}
+          VIOLATION: ${{ matrix.violation }}
+          CONFIG: ${{ matrix.config }}
+        run: |
+          set -euo pipefail
+          log="tlc-${CONFIG}.log"
+
+          pass_marker='Model checking completed. No error has been found.'
+          violated_marker="Invariant ${VIOLATION} is violated."
+
+          actual=""
+          if grep -qF "${pass_marker}" "${log}"; then
+            actual="pass"
+          elif grep -qE 'Invariant [A-Za-z0-9_]+ is violated\.' "${log}"; then
+            actual="fail"
+          else
+            actual="tooling-error"
+          fi
+
+          echo "config=${CONFIG} expect=${EXPECT} actual=${actual}"
+
+          case "${EXPECT}:${actual}" in
+            pass:pass)
+              echo "OK — closed-environment model ${CONFIG} still holds every checked invariant."
+              exit 0
+              ;;
+            pass:fail)
+              echo "::error file=docs/specs/${CONFIG}.cfg::Expected all invariants to hold for ${CONFIG}, but TLC found a violation."
+              echo "::error::A previously proved property is now broken. Either the spec changed or the invariant needs to be re-classified."
+              grep -E 'Invariant [A-Za-z0-9_]+ is violated\.' "${log}" || true
+              exit 1
+              ;;
+            fail:fail)
+              if grep -qF "${violated_marker}" "${log}"; then
+                echo "OK — ${CONFIG} still exhibits the expected violation of ${VIOLATION}."
+                echo "This is the continuous proof: the counterexample remains reachable."
+                exit 0
+              fi
+              echo "::error file=docs/specs/${CONFIG}.cfg::TLC reported a violation, but not of ${VIOLATION}."
+              echo "::error::A different invariant broke. The model semantics may have shifted."
+              grep -E 'Invariant [A-Za-z0-9_]+ is violated\.' "${log}" || true
+              exit 1
+              ;;
+            fail:pass)
+              echo "::error file=docs/specs/${CONFIG}.cfg::Expected ${VIOLATION} to be violated by ${CONFIG}, but TLC found no counterexample."
+              echo "::error::This means the bypass action or the frontier semantics was silently removed."
+              echo "::error::The Gödel-sentence contract of ADR-052 requires the counterexample to remain reachable; without it, the closed-environment hypothesis is untestable."
+              exit 1
+              ;;
+            *)
+              echo "::error file=docs/specs/${CONFIG}.cfg::TLC did not produce an interpretable result for ${CONFIG}."
+              echo "::error::Neither the pass marker nor a 'Invariant ... is violated.' line was found in the output. Likely a tooling failure."
+              tail -n 60 "${log}" || true
+              exit 1
+              ;;
+          esac
+
+      - name: Upload TLC log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tlc-${{ matrix.config }}
+          path: docs/specs/tlc-${{ matrix.config }}.log
+          retention-days: 14
