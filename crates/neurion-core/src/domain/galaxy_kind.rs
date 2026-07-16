@@ -140,10 +140,6 @@ mod tests {
             Some(GalaxyKind::Project)
         );
         assert_eq!(
-            classify_known_galaxy("showroom"),
-            Some(GalaxyKind::SocialHub)
-        );
-        assert_eq!(
             classify_known_galaxy("demo-squad"),
             Some(GalaxyKind::SocialHub)
         );
@@ -155,10 +151,10 @@ mod tests {
 
     #[test]
     fn classify_covers_every_named_galaxy_in_delib_5168() {
-        // delib-20260419-5168 §4 Q2 enumerates 11 galaxy names; the
-        // briefing's summary says "10" because it folds cosmon into the
-        // infra column. The test pins the full 11 so a future drift
-        // in this table shows up loud.
+        // delib-20260419-5168 §4 Q2 enumerates the named galaxies; the
+        // neutralization folded two of them onto one placeholder, so the
+        // public table pins 10 distinct names. The test keeps future drift
+        // in this table loud.
         let known = [
             "cosmon",
             "showroom",
@@ -168,7 +164,6 @@ mod tests {
             "mailroom",
             "sandbox",
             "peerco-integration",
-            "showroom",
             "demo-squad",
             "chancery",
         ];
@@ -176,7 +171,7 @@ mod tests {
             .iter()
             .filter(|n| classify_known_galaxy(n).is_some())
             .count();
-        assert_eq!(classified, 11, "all 11 named galaxies must classify");
+        assert_eq!(classified, 10, "all 10 named galaxies must classify");
     }
 
     #[test]
