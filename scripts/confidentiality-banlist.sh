@@ -55,8 +55,12 @@ cd "$REPO_ROOT" || exit 2
 #   • fund — accented AND ascii.
 #   • operator homeserver domain.
 #   • operator username / home-path fragment.
+# The operator given-name fragment is ASSEMBLED at runtime (ADR-127 §6 — the
+# committed detector must not carry the confidential identity as a clear-text
+# byte; assembly defeats a naive grep of the tree while keeping the gate real).
+OP_GIVEN="Emm""anuel"
 BANLIST=(
-  'Noogram S[ée]ri[ée]'
+  "${OP_GIVEN} S[ée]ri[ée]"
   '[ÉE]pinoia'
   'serie\.dev'
   '(^|/)eserie([/[:space:]]|$)'
@@ -87,12 +91,13 @@ if [ "${1:-}" = "--self-test" ]; then
   ep_ascii="E""pinoia Research"          # ascii fund name, assembled at runtime
   hs_dom="serie"".dev"                   # homeserver domain, assembled at runtime
   echo "confidentiality-banlist self-test:"
-  check 'authored by Noogram'                       clean
-  check 'authored by Noogram'                 hit
+  un="e""serie"                          # operator username, assembled at runtime
+  check 'authored by Noogram'                        clean
+  check "authored by ${OP_GIVEN} Serie"              hit
   check "a fund called ${ep_ascii}"                  hit
   check 'a fund called Épinoia Research'             hit
   check "homeserver matrix.${hs_dom}"                hit
-  check '/srv/cosmon/cosmon'            hit
+  check "/Users/${un}/galaxies/cosmon"               hit
   check 'The Noogram authors, noogram.dev'           clean
   check 'compose, pilot and audit AI missions'       clean
   if [ "$fails" -eq 0 ]; then echo "self-test: PASS"; exit 0
@@ -116,7 +121,7 @@ if [ "$whole_repo" -eq 1 ]; then
             ':!scripts/confidentiality-banlist.sh' \
             ':!scripts/confidentiality-banlist.test.sh' \
             ':!.mailmap' 2>/dev/null \
-          | grep -viE '@serie""\.dev' || true)"
+          | grep -viE "@serie"'\.dev' || true)"
   if [ -z "$hits" ]; then
     echo "confidentiality-banlist: WHOLE-REPO CLEAN — no operator/fund term found."
     exit 0

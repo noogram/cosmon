@@ -578,12 +578,12 @@ mod tests {
         let file = dir.join("corpus.txt");
         fs::write(
             &file,
-            "# header comment\n\nexample tenant secret  # IP label\nsk-ant-\n\n  # trailing\n",
+            "# header comment\n\nwidget secret  # IP label\nsk-ant-\n\n  # trailing\n",
         )
         .unwrap();
         let parsed = load_corpus(&file).unwrap();
         let pats: Vec<_> = parsed.iter().map(|(p, _)| p.as_str()).collect();
-        assert_eq!(pats, vec!["Tenant-Demo secret", "sk-ant-"]);
+        assert_eq!(pats, vec!["widget secret", "sk-ant-"]);
     }
 
     #[test]

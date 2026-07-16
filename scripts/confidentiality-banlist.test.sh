@@ -52,7 +52,10 @@ seed README.md '# Cosmon — a stateless CLI'
   || bad "clean publishable surface should exit 0"
 
 # ── 2b. re-leak into the book surface → 1 ────────────────────────────────────
-seed docs/book/src/leak.md 'Written by Noogram.'
+# The operator given name is assembled at runtime so this committed test does
+# not inline the confidential literal (ADR-127 §6 — same discipline as 3b).
+nm="Emm""anuel"
+seed docs/book/src/leak.md "Written by ${nm} Serie."
 [ "$(run)" = "1" ] && ok "operator name in docs/book/src → exit 1" \
   || bad "operator name on public surface should exit 1"
 unseed docs/book/src/leak.md
@@ -66,7 +69,7 @@ seed README.md '# Cosmon — a project of Épinoia Research'
 seed README.md '# Cosmon — a stateless CLI'   # restore clean
 
 # ── 3. whole-repo advisory: internal doc naming operator → 1 ─────────────────
-seed docs/adr/001-example.md 'Decision recorded by Noogram.'
+seed docs/adr/001-example.md "Decision recorded by ${nm} Serie."
 [ "$(run --whole-repo)" = "1" ] && ok "internal doc with operator name → --whole-repo exit 1" \
   || bad "--whole-repo should flag the internal doc"
 [ "$(run)" = "0" ] && ok "same internal doc does NOT trip the publishable gate" \
