@@ -1,0 +1,200 @@
+[project]
+project_id = "cosmon-9de1"
+
+# Cosmon project configuration.
+# All sections are optional — missing values use defaults.
+#
+# Note: the Claude-default override now lives in the global
+# ~/.config/cosmon/config.toml (machine-wide), not here.
+
+[worker]
+# What a worker does after completing its molecule.
+# Options: "commit" (default), "commit+push", "commit+push+pr"
+on_complete = "commit"
+
+[surfaces]
+# Run `cs reconcile` automatically after state-mutating operations.
+auto_reconcile = false
+
+[documentation]
+# Enable documentation generation in worker prompts.
+enabled = true
+
+# Public-attribution source of truth (ADR-128, delib-20260617-62ff).
+# The canonical maker name every shipped/public artifact must carry, in ONE
+# place so it is never re-typed per project. `cs tackle` folds a one-line
+# directive built from `public_name` + `public_url` into the worker bootstrap
+# prompt — positive supply that fills the attribution vacuum at the source, so
+# the model has the right name in hand before it reaches a "built by" slot and
+# would otherwise enrich it from the operator's PRIVATE fund context.
+# Empty `public_name` is a no-op (prompt byte-identical to a pre-attribution
+# cosmon). Downstream leak-detection consumes this block as its closed codebook.
+[attribution]
+public_name      = "Noogram"
+public_url       = "noogram.dev"
+footer           = "© 2026 Noogram · noogram.dev"
+readme_byline    = "Built by Noogram — open agent infrastructure and AI tooling."
+repo_description = "Maintained by Noogram (noogram.dev). Open tooling for AI agent fleets."
+# OPERATOR ATOMIC QUESTION (do NOT ship a placeholder — godin): confirm a real
+# non-fund contact address exists before populating these. The injected worker
+# directive only needs name + url, so the primitive is already live without them.
+# contact      = "hello@noogram.dev"
+# authors_line = "Noogram <hello@noogram.dev>"
+
+[hooks]
+# Run after `cs done` successfully merges a worker branch.
+# Keeps the `cs` binary on disk in sync with the freshly-landed code.
+post_merge = "just install"
+
+[gates]
+# Verification gates that `cs tackle` injects into every worker prompt.
+# Language-agnostic: each field is an opaque shell command. Cosmon itself
+# is a Rust workspace, so we configure the cargo invocations that match
+# the Definition of Done in CLAUDE.md.
+build_command  = "cargo check --workspace"
+test_command   = "cargo test --workspace"
+lint_command   = "cargo clippy --workspace -- -D warnings"
+format_command = "cargo fmt --all -- --check"
+
+# Archive — durable proof-of-work trail (ADR-030 + ADR-052)
+[archive]
+enabled = true
+
+# Operator notification channels (task-20260426-a7e6, delib-20260426-1bcd #3).
+# `cs notify` and `cs patrol --silence-detect` push to every channel listed
+# below. Set COSMON_NOTIFY_DRY_RUN=1 to skip transports in CI.
+[notify]
+channels = ["macos", "file-drop"]
+
+[notify.macos]
+sound = "default"
+
+[notify.file-drop]
+path = "~/.local/state/cosmon/notifications/"
+
+# [notify.element]
+# webhook_url = "https://your.element.host/_matrix/client/..."
+
+# Telegram channel — POST to api.telegram.org/bot<token>/sendMessage.
+# Outbound-only: sendMessage needs no long-poll, so the bot_token may be the
+# same one an existing long-poll notification service already uses.
+# chat_id is the numeric DM user id (private) or a group/channel id.
+# The automata HashLife fleet (mission-20260607-239c) pushes checkpoints here.
+# [notify.telegram]
+# bot_token = "123456789:ABCdefGhIJKlmNoPQRsTUVwxyz"
+# chat_id = "100000000"
+
+# Git remote blocklist — structural anti-leak guard (delib-20260426-7cfc, R1).
+# `cs done` aborts before merging if a worktree carries a remote whose URL
+# contains any of these substrings. This is the structural answer to R1
+# (PR leak from cosmon → a private dependency): a tired-3am-agent who adds the
+# public mirror as a remote cannot push private code through the merge gate.
+# Discipline alone is not the floor; this gate is.
+[git_remote_blocklist]
+forbidden_substrings = [
+  "github.com:example/private-dependency",
+  "github.com/example/private-dependency",
+  # `ggml-org/llama.cpp` is internalised under
+  # `crates/cosmon-llama-sys/vendor/llama.cpp/` (curated snapshot, no `.git/`).
+  # See `crates/cosmon-llama-sys/vendor/llama.cpp/VENDOR.md` for the upstream
+  # SHA. A worktree that acquires the public upstream as a remote is a
+  # structural leak — `cs done` aborts. Same gesture as the entry above.
+  "github.com:ggml-org/llama.cpp",
+  "github.com/ggml-org/llama.cpp",
+  # `ggerganov/llama.cpp` is the historical pre-org alias of the same
+  # upstream; block it for the same reason so a hand-typed remote URL
+  # using the old slug does not bypass the snapshot+blocklist gesture
+  # (task-20260519-2e1e additive contribution after canonical wave 4 #1
+  # landed via task-20260519-6a29).
+  "github.com:ggerganov/llama.cpp",
+  "github.com/ggerganov/llama.cpp",
+]
+
+# Publish-identity gate — D7 publish-closure widening (ADR-128 §V1,
+# task-20260617-4bce). `cs done` scans the git author/committer identity of
+# the commits a merge would publish (`<base>..<branch>`) and aborts before
+# the merge if a confidential identity rides them. This closes shannon's
+# confirmed residual past V0's file-content gate: the operator email is
+# stamped into EVERY commit and is invisible to any content grep.
+#
+# Two layers, both empty here ON PURPOSE: cosmon is an INTERNAL galaxy, so
+# the operator identity is legitimate on cosmon's own commits and must NOT be
+# flagged. The machinery is substrate — an external-facing galaxy inherits it
+# via `.cosmon/config.toml` and turns it on, e.g.:
+#
+#   [publish_identity]
+#   allowed_emails = ["bot@noogram.dev"]          # closed-codebook whitelist
+#   forbidden_substrings = ["<operator-email>", "<operator-domain>", "<fund-name>"]
+#
+# `allowed_emails` is the inversion that matters (shannon): when set, ANY
+# author/committer email not in the codebook is a violation by construction
+# (recall → 1 on the git-identity slot). `forbidden_substrings` is the
+# defense-in-depth blacklist over names and commit messages.
+[publish_identity]
+allowed_emails = []
+forbidden_substrings = []
+
+# Confidential-content publish gate — D7 attribution-vacuum floor
+# (delib-20260617-62ff, ADR-128; federation-merge by task-20260622-7207).
+# Sibling of [git_remote_blocklist]: that guard inspects worktree *remotes*,
+# this one inspects the *content* of publish-bound files. `cs done` reads
+# every file matched by the effective globs in the merged tree, case-folds it,
+# and ABORTS the merge (before the post-merge push/deploy hook) if any
+# forbidden substring appears.
+#
+# WHY: the fleet keeps stamping the operator's confidential fund name into
+# external boilerplate (a README, a footer, an index page, a paper colophon) —
+# the leak is a VACUUM, not a collision: the attribution slot is obligatory
+# and, with no authorized public name supplied, Type-1 retrieval emits the
+# highest-activation associate. A negative per-molecule guard ("don't say the
+# name") fails by construction; this deterministic gate in the core, which the
+# worker cannot edit/skip/persuade, is the structural floor.
+#
+# FEDERATION SOURCE (task-20260622-7207): confidential operator context is
+# shared across projects, so it is NOT typed here (this file is
+# git-tracked and ships with the open-core repo — naming the fund here would
+# itself be the leak). It lives ONCE in the operator's machine-wide
+# `~/.config/cosmon/config.toml::[confidential_blocklist]`, and `cs done`
+# union-merges that into this per-galaxy block for EVERY galaxy. The block
+# below stays empty: cosmon inherits the federation secret like every other
+# galaxy. Add per-galaxy substrings here only for names specific to THIS
+# galaxy that are NOT operator-wide.
+#
+# DEFAULT GLOBS: with `publish_globs` omitted, the gate scans the built-in
+# DEFAULT_PUBLISH_GLOBS (cosmon-core::config) — READMEs, sites, footers AND
+# paper deliverables (`*.tex`, colophon / AUTHORS / CITATION, `paper.md`).
+# The qfa leak (spark-20260621-f55e) was a paper author block the old
+# README/site-only globs never scanned.
+#
+# RESIDUAL RISK (undecidable — do NOT over-promise): this gate blocks the
+# literal name, its aliases, the operator domain, and email. It does NOT
+# detect paraphrase, implication, encoded, or composed disclosure — those
+# remain human-review's job. The gate reduces the *realized* failure class
+# to zero; it does not reduce the *semantic* failure class.
+[confidential_blocklist]
+forbidden_substrings = []
+publish_globs = []
+
+# EU-sovereign Mistral Large warm standby (task-20260614-62bc, parent
+# delib-20260614-61f9 — posture "diversify-now").
+#
+# WHY: the cheap, reversible hedge against a US export-control order of the
+# Fable-5/Mythos-5 shape (2026-06-12). Mistral is EU-domiciled → outside US
+# EAR reach → the natural sovereign hedge, and the second remote frontier leg
+# that makes "switch provider" a credible pre-wired threat.
+#
+# HOW: Mistral's API is OpenAI-compatible, so it is reached through the
+# EXISTING `openai` adapter with `base_url` overridden — ZERO new adapter,
+# ZERO new spawn arm. The egress classifier follows this base_url and stamps
+# `api.mistral.ai` on the RemoteEgressOptIn audit atom (cosmon-core::egress
+# resolve_remote_endpoint), so the audit is honest about the sovereign leg.
+#
+# This is a WARM STANDBY: the fleet default stays `claude` (global
+# ~/.config/cosmon/config.toml), so this only activates on an explicit
+# `cs tackle --adapter openai`. Activate by exporting MISTRAL_API_KEY;
+# revert the whole hedge by deleting this block (reversible in seconds —
+# carnot's audit).
+[adapters.openai]
+api_key_env = "MISTRAL_API_KEY"
+base_url = "https://api.mistral.ai"
+default_model = "mistral-large-latest"
