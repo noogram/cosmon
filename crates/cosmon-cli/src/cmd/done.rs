@@ -2329,12 +2329,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 actual.display(),
             ));
         } else {
+            // Native attribution (task-20260717-c873): stamp a `Co-Authored-By`
+            // trailer built from the project's `[attribution]` block plus the
+            // REAL adapter that ran this molecule, folded from the durable event
+            // log (`latest_model_selection` carries the honest `adapter_name`,
+            // never a guess). Empty `coauthor_email` ⇒ no trailers ⇒ commit
+            // message byte-identical to a pre-attribution cosmon, so this is a
+            // zero-cost default for every galaxy that has not opted in.
+            let attribution_cfg = cosmon_filestore::load_project_config(
+                &super::resolve_config_from_context(ctx),
+            )
+            .unwrap_or_else(|_| ProjectConfig::default());
+            let real_adapter =
+                cosmon_state::ops::model_attribution::latest_model_selection(&state_dir, &mol_id)
+                    .map(|attr| attr.adapter_name);
+            let coauthor_trailers = attribution_cfg
+                .attribution
+                .coauthor_trailers(real_adapter.as_deref());
             match commit_molecule_artifacts(
                 &repo_root,
                 &mol_dir,
                 &events_path,
                 &mol_id,
                 &short_topic,
+                &coauthor_trailers,
             ) {
                 Ok(true) => actions.push("committed_artifacts".to_owned()),
                 Ok(false) => { /* nothing to commit — silent */ }
@@ -5297,6 +5315,7 @@ fn commit_molecule_artifacts(
     events_path: &Path,
     mol_id: &MoleculeId,
     short_topic: &str,
+    coauthor_trailers: &[String],
 ) -> anyhow::Result<bool> {
     // Stage the molecule directory (prompt.md, briefing.md, log.md, …).
     if mol_dir.is_dir() {
@@ -5376,8 +5395,16 @@ fn commit_molecule_artifacts(
     };
 
     // Scope the commit to the molecule dir + events log so it records ONLY
-    // those paths, never the whole staged index.
-    let mut commit_args: Vec<String> = vec!["commit".into(), "-m".into(), msg, "--".into()];
+    // those paths, never the whole staged index. When attribution trailers are
+    // configured, they ride in a *single* extra `-m` so git renders them as one
+    // contiguous trailer paragraph (a `Co-Authored-By` block must not be split
+    // by blank lines, so all trailers share one `-m`, separated by `\n`).
+    let mut commit_args: Vec<String> = vec!["commit".into(), "-m".into(), msg];
+    if !coauthor_trailers.is_empty() {
+        commit_args.push("-m".into());
+        commit_args.push(coauthor_trailers.join("\n"));
+    }
+    commit_args.push("--".into());
     for p in &pathspecs {
         commit_args.push(p.to_string_lossy().into_owned());
     }
@@ -8653,7 +8680,8 @@ mod tests {
         let events_path = repo.join(".cosmon/state/events.jsonl");
         std::fs::write(&events_path, "{\"event\":\"nucleated\"}\n").unwrap();
 
-        let result = commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "test topic");
+        let result =
+            commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "test topic", &[]);
         assert!(result.is_ok(), "commit should succeed: {result:?}");
         assert!(result.unwrap(), "should have committed something");
 
@@ -8680,7 +8708,7 @@ mod tests {
 
         // Neither mol_dir nor events_path exist — nothing to commit.
         let result =
-            commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "no artifacts");
+            commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "no artifacts", &[]);
         assert!(result.is_ok());
         assert!(!result.unwrap(), "should report nothing committed");
     }
@@ -8700,7 +8728,7 @@ mod tests {
 
         let events_path = repo.join(".cosmon/state/events.jsonl");
 
-        let result = commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "");
+        let result = commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "", &[]);
         assert!(result.is_ok());
         assert!(result.unwrap());
 
@@ -8714,6 +8742,57 @@ mod tests {
         assert!(
             !msg.contains("()"),
             "empty topic should not produce empty parens: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_commit_artifacts_stamps_coauthor_trailers() {
+        // Native attribution (task-20260717-c873): the trailers passed in ride
+        // the artifact commit as a contiguous Co-Authored-By block, separated
+        // from the subject by a blank line so git parses them as trailers.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let mol_id = MoleculeId::new("task-20260717-attr").unwrap();
+        let mol_dir = repo
+            .join(".cosmon/state/fleets/default/molecules")
+            .join(mol_id.as_str());
+        std::fs::create_dir_all(&mol_dir).unwrap();
+        std::fs::write(mol_dir.join("prompt.md"), "# Prompt\n").unwrap();
+        let events_path = repo.join(".cosmon/state/events.jsonl");
+        std::fs::write(&events_path, "{\"event\":\"done\"}\n").unwrap();
+
+        let trailers = vec![
+            "Co-Authored-By: Noogram <noreply@noogram.org>".to_owned(),
+            "Co-Authored-By: Claude <claude@noogram.org>".to_owned(),
+        ];
+        let result =
+            commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "attr", &trailers);
+        assert!(result.is_ok(), "commit should succeed: {result:?}");
+        assert!(result.unwrap());
+
+        // Full commit body — both trailers present, subject intact.
+        let log = git(repo, &["log", "-1", "--format=%B"]);
+        let body = String::from_utf8_lossy(&log.stdout);
+        assert!(
+            body.contains("chore(state): track artifacts for task-20260717-attr (attr)"),
+            "subject missing: {body}"
+        );
+        assert!(
+            body.contains("Co-Authored-By: Noogram <noreply@noogram.org>"),
+            "maker trailer missing: {body}"
+        );
+        assert!(
+            body.contains("Co-Authored-By: Claude <claude@noogram.org>"),
+            "adapter trailer missing: {body}"
+        );
+        // git recognises them as real trailers (blank-line-separated block).
+        let interpreted = git(repo, &["log", "-1", "--format=%(trailers:key=Co-Authored-By)"]);
+        let trailers_out = String::from_utf8_lossy(&interpreted.stdout);
+        assert!(
+            trailers_out.contains("Noogram") && trailers_out.contains("Claude"),
+            "git did not parse the co-author trailers: {trailers_out}"
         );
     }
 
@@ -8777,7 +8856,8 @@ mod tests {
         let events_path = repo.join(".cosmon/state/events.jsonl");
         std::fs::write(&events_path, "{\"event\":\"done\"}\n").unwrap();
 
-        let result = commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "mission");
+        let result =
+            commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "mission", &[]);
         assert!(result.is_ok(), "commit should succeed: {result:?}");
         assert!(result.unwrap(), "should have committed the artifacts");
 

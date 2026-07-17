@@ -35,6 +35,15 @@ public_url       = "noogram.dev"
 footer           = "© 2026 Noogram · noogram.dev"
 readme_byline    = "Built by Noogram — open agent infrastructure and AI tooling."
 repo_description = "Maintained by Noogram (noogram.dev). Open tooling for AI agent fleets."
+# Automatic Co-Authored-By trailer (task-20260717-c873). `cs done`'s
+# worker-produced commits are stamped with `Co-Authored-By: <coauthor_name>
+# <coauthor_email>` PLUS a second co-author for the REAL adapter that ran the
+# molecule (claude/gemini/…, folded from the durable event log). The verified
+# noogram-agents identity below is what the public bootstrap commits already
+# carry by hand — this automates it. `coauthor_email` is load-bearing: blank ⇒
+# no trailer ⇒ commit byte-identical to a pre-attribution cosmon.
+coauthor_name    = "Noogram"
+coauthor_email   = "noreply@noogram.org"
 # OPERATOR ATOMIC QUESTION (do NOT ship a placeholder — godin): confirm a real
 # non-fund contact address exists before populating these. The injected worker
 # directive only needs name + url, so the primitive is already live without them.
