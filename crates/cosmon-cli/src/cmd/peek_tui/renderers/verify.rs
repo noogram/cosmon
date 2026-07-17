@@ -133,6 +133,7 @@ mod tests {
             last_activity: None,
             last_progress_at: None,
             topic: None,
+            mission_description: None,
             formula: String::new(),
             tier_badge: String::new(),
             kind: String::new(),

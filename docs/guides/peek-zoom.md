@@ -68,7 +68,7 @@ The mouse-capture toggle (previously `m`) is now `M` — same logic.
 | Key | Pane               |
 |-----|--------------------|
 | `p` / `Space` | tmux pane capture |
-| `b` | briefing.md        |
+| `b` | mission context + briefing.md |
 | `l` | log.md             |
 | `e` | events.jsonl       |
 | `s` | synthesis.md       |
@@ -117,7 +117,10 @@ hashes, exact bytes. When a detail pane is active (`b`, `l`, `s`,
 detail pane is active, peau falls back to `briefing.md` (or
 `prompt.md` if the briefing has not been rendered yet) — the same
 artifact any worker reads when it wakes up. The operator sees exactly
-what the agent sees.
+what the agent sees. The briefing pane puts the molecule's nucleated
+`topic` and `description` first, before the formula's shared briefing
+template, so its purpose remains visible even when many molecules share
+one formula.
 
 ## Continuous transitions
 

@@ -257,6 +257,10 @@ pub(crate) struct RowView {
     /// `variables["topic"]` of the underlying molecule — the one-liner the
     /// nucleator typed. `None` when the formula doesn't bind `topic`.
     pub(crate) topic: Option<String>,
+    /// `variables["description"]` from nucleation, if present. Unlike the
+    /// formula's generic step text, this is the operator's molecule-specific
+    /// mission context and is shown above the briefing template.
+    pub(crate) mission_description: Option<String>,
     /// Formula id (e.g. `task-work`). Empty if detail-load failed.
     pub(crate) formula: String,
     /// Tier badge (e.g. `T0`, `T1`, `T2`). Empty if formula could not be
@@ -335,6 +339,7 @@ pub(crate) fn whisper_fresh_within(
 #[derive(Clone)]
 struct CachedEnrichment {
     topic: Option<String>,
+    mission_description: Option<String>,
     formula: String,
     tier_badge: String,
     kind: String,
@@ -788,6 +793,8 @@ fn ensemble_scalar(v: &serde_json::Value) -> String {
 /// Apply cached enrichment fields to a row, avoiding disk I/O.
 fn apply_cached_enrichment(row: &mut RowView, cached: &CachedEnrichment) {
     row.topic.clone_from(&cached.topic);
+    row.mission_description
+        .clone_from(&cached.mission_description);
     row.formula.clone_from(&cached.formula);
     row.tier_badge.clone_from(&cached.tier_badge);
     row.kind.clone_from(&cached.kind);
@@ -1538,6 +1545,11 @@ impl App {
                     current_step = Some(mol.current_step);
                     row.last_progress_at = mol.last_progress_at;
                     row.topic = mol.display_topic().map(ToString::to_string);
+                    row.mission_description = mol
+                        .variables
+                        .get("description")
+                        .filter(|description| !description.is_empty())
+                        .cloned();
                     row.formula = mol.formula_id.to_string();
                     row.kind = mol
                         .kind
@@ -1600,6 +1612,7 @@ impl App {
                                 mtime,
                                 CachedEnrichment {
                                     topic: row.topic.clone(),
+                                    mission_description: row.mission_description.clone(),
                                     formula: row.formula.clone(),
                                     tier_badge: row.tier_badge.clone(),
                                     kind: row.kind.clone(),
@@ -4057,6 +4070,7 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 last_activity: None,
                 last_progress_at: None,
                 topic: None,
+                mission_description: None,
                 formula: String::new(),
                 tier_badge: String::new(),
                 kind: String::new(),
@@ -4212,6 +4226,7 @@ fn row_view_from(
         // `state.json` and populates this field on cache miss.
         last_progress_at: None,
         topic: None,
+        mission_description: None,
         formula: String::new(),
         tier_badge: String::new(),
         kind: String::new(),
@@ -5208,6 +5223,7 @@ mod tests {
             last_activity: None,
             last_progress_at: None,
             topic: None,
+            mission_description: None,
             formula: String::new(),
             tier_badge: String::new(),
             kind: String::new(),
@@ -5990,6 +6006,7 @@ mod tests {
         let mut row = row_with("running", HeartbeatTier::Active);
         let cached = CachedEnrichment {
             topic: Some("test topic".into()),
+            mission_description: Some("test description".into()),
             formula: "task-work".into(),
             tier_badge: "T1".into(),
             kind: "task".into(),
@@ -6004,6 +6021,7 @@ mod tests {
         };
         super::apply_cached_enrichment(&mut row, &cached);
         assert_eq!(row.topic, Some("test topic".into()));
+        assert_eq!(row.mission_description, Some("test description".into()));
         assert_eq!(row.formula, "task-work");
         assert_eq!(row.tier_badge, "T1");
         assert_eq!(row.kind, "task");

@@ -1025,6 +1025,7 @@ impl App {
             last_activity: None,
             last_progress_at: None,
             topic: Some(row.topic.clone()),
+            mission_description: None,
             formula: String::new(),
             tier_badge: String::new(),
             kind: row
