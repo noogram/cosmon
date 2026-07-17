@@ -48,9 +48,25 @@ const RPP_API_REQUEST_ENV: &str = "COSMON_API_REQUEST";
 pub fn netns_available() -> bool {
     #[cfg(target_os = "linux")]
     {
+        // The two /proc knobs miss newer hardenings: Ubuntu ≥23.10 restricts
+        // unprivileged userns through AppArmor
+        // (kernel.apparmor_restrict_unprivileged_userns), where the clone
+        // itself succeeds and the uid_map write then fails EPERM — exactly
+        // what GitHub runners exhibit. Keep the knob check as the cheap
+        // fast-negative, then ask the kernel the only truthful way: attempt
+        // the exact namespace setup the jail wrapper uses.
         let unpriv = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok();
         let max_ns = std::fs::read_to_string("/proc/sys/user/max_user_namespaces").ok();
-        userns_permitted(unpriv.as_deref(), max_ns.as_deref())
+        if !userns_permitted(unpriv.as_deref(), max_ns.as_deref()) {
+            return false;
+        }
+        std::process::Command::new("unshare")
+            .args(["--net", "--user", "--map-root-user", "true"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
     }
     #[cfg(not(target_os = "linux"))]
     {
