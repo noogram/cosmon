@@ -26,11 +26,17 @@
 # can check with tools already on the box).
 #
 # CONFIG (all optional; environment overrides):
-#   COSMON_INSTALL_REPO   GitHub owner/repo to install from   (default: noogram/cosmon)
-#   COSMON_VERSION        pin a release tag, e.g. v0.1.0      (default: latest)
-#   COSMON_INSTALL_DIR    where to put `cs`                   (default: ~/.local/bin)
-#   COSMON_UNAME_S        override `uname -s` (testing only)
-#   COSMON_UNAME_M        override `uname -m` (testing only)
+#   COSMON_INSTALL_REPO     GitHub owner/repo to install from (default: noogram/cosmon)
+#   COSMON_VERSION          pin a release tag, e.g. v0.1.0    (default: latest)
+#   COSMON_INSTALL_DIR      where to put `cs`                 (default: ~/.local/bin)
+#   COSMON_RELEASE_BASE_URL fetch SHA256SUMS + tarball from this base instead of
+#                           github.com/<repo>/releases/... . A private release
+#                           mirror, or a local fixture (`file://<dir>`) so CI can
+#                           exercise the full resolve→verify→unpack→install path
+#                           for every triple with no published release — see the
+#                           `fixture` job in .github/workflows/install-lint.yml.
+#   COSMON_UNAME_S          override `uname -s` (testing only)
+#   COSMON_UNAME_M          override `uname -m` (testing only)
 #
 # FLAGS:
 #   --version <tag>   same as COSMON_VERSION
@@ -52,6 +58,7 @@ set -eu
 REPO="${COSMON_INSTALL_REPO:-noogram/cosmon}"
 VERSION="${COSMON_VERSION:-}"        # empty ⇒ latest
 INSTALL_DIR="${COSMON_INSTALL_DIR:-}" # empty ⇒ resolved after arg parse
+BASE_URL="${COSMON_RELEASE_BASE_URL:-}" # empty ⇒ github.com/<repo>/releases/...
 
 # ── pretty output (fall back to plain if not a tty / no color) ───────────────
 if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -79,7 +86,8 @@ Options:
   --print-target    print the release target for this host and exit
   -h, --help        show this help
 
-Environment: COSMON_INSTALL_REPO, COSMON_VERSION, COSMON_INSTALL_DIR
+Environment: COSMON_INSTALL_REPO, COSMON_VERSION, COSMON_INSTALL_DIR,
+             COSMON_RELEASE_BASE_URL (mirror or file:// fixture base)
 USAGE
 }
 
@@ -136,13 +144,25 @@ self_test() {
 
 # ── download helper — curl or wget, always fail-closed ───────────────────────
 fetch() { # fetch <url> <dest>
-    if have curl; then
-        curl -fSL --proto '=https' --tlsv1.2 -o "$2" "$1"
-    elif have wget; then
-        wget -qO "$2" "$1"
-    else
-        die "need curl or wget to download"
-    fi
+    case "$1" in
+        # Local fixture / on-disk mirror (COSMON_RELEASE_BASE_URL=file://<dir>).
+        # `cp` fails closed if the source is missing, exactly like a 404 would.
+        # The `--proto '=https'` hardening below stays intact for every network
+        # URL — this branch is only reached for an explicit file:// base.
+        file://*)
+            _src="${1#file://}"
+            cp "$_src" "$2"
+            ;;
+        *)
+            if have curl; then
+                curl -fSL --proto '=https' --tlsv1.2 -o "$2" "$1"
+            elif have wget; then
+                wget -qO "$2" "$1"
+            else
+                die "need curl or wget to download"
+            fi
+            ;;
+    esac
 }
 
 # ── checksum verify — fail closed on any doubt ───────────────────────────────
@@ -163,9 +183,14 @@ verify_sha256() { # verify_sha256 <file> <expected-hex>
 main() {
     target="$(detect_target)"
 
-    # Release base URL. `latest/download/<asset>` resolves the newest release;
-    # a pinned version uses the tag path. GitHub redirects both to the asset.
-    if [ -n "$VERSION" ]; then
+    # Release base URL. An explicit COSMON_RELEASE_BASE_URL wins (private mirror
+    # or a `file://` fixture); otherwise `latest/download/<asset>` resolves the
+    # newest release and a pinned version uses the tag path. GitHub redirects
+    # both to the asset.
+    if [ -n "$BASE_URL" ]; then
+        base="$BASE_URL"
+        say "Installing cs (${target}) from ${base}"
+    elif [ -n "$VERSION" ]; then
         case "$VERSION" in v*) tag="$VERSION" ;; *) tag="v$VERSION" ;; esac
         base="https://github.com/${REPO}/releases/download/${tag}"
         say "Installing cs ${tag} (${target}) from ${REPO}"

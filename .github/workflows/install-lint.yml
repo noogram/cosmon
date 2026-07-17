@@ -3,18 +3,35 @@ name: Install lint
 # Guards the public install one-liner infra (infra/install/, child C3 of
 # delib-20260711-8d00). None of this is in the Rust workspace, so cargo's gates
 # never see it — a broken uname→target map or a shell-syntax slip in install.sh
-# would ship silently. This job makes the fragile things falsifiable:
+# would ship silently. This workflow makes the fragile things falsifiable:
 #
-#   1. install.sh parses (sh -n) and passes shellcheck;
+#   1. install.sh parses (sh -n) and passes shellcheck — `installer`;
 #   2. the platform-detection table (install.sh --self-test) is correct —
-#      revert a mapping line and this reddens;
-#   3. the apex Worker typechecks and its dry-run build bundles install.sh;
-#   4. the REAL one-liner installs `cs` end-to-end from the latest published
-#      release on linux-x64 AND macOS, and `cs --version` runs — the `live`
-#      job below. This is the gate that was MISSING when a uname→target triple
-#      mismatch (Linux resolved `unknown-linux-gnu` while every release ships
-#      `unknown-linux-musl`) shipped and broke install for every Linux user:
-#      lint-only checks never exercised the script against a real release.
+#      revert a mapping line and this reddens — `installer`;
+#   3. the apex Worker typechecks and its dry-run build bundles install.sh —
+#      `worker`;
+#   4. the FULL resolve→verify→unpack→install path runs for ALL FOUR release
+#      triples against a freshly-built local fixture, on every run, with nothing
+#      to skip — `fixture`. This is the non-skippable floor: it needs no
+#      published release and no network, so it stays green-or-honest during the
+#      pre-publication window where the `live` job below is deliberately blind;
+#   5. install.sh's resolvable triples stay in lockstep with the release build
+#      matrix and the packaging surfaces — `triples`. Editing release.yml's
+#      matrix or the brew formula without updating install.sh reddens here (this
+#      is why the triggers below include release.yml + packaging/**);
+#   6. the REAL one-liner installs `cs` end-to-end from the latest PUBLISHED
+#      release on linux-x64 AND macOS — `live`. This catches a binary that does
+#      not run, but only once a public release exists (it self-skips before
+#      then; `fixture` covers that window for the installer logic);
+#   7. the hosted `curl https://noogram.org/cosmon/install.sh | sh` endpoint
+#      actually serves a runnable installer once it is live — `endpoint`
+#      (schedule / manual only; self-skips while the Worker serves coming-soon).
+#
+# The original bug this hardening answers: a uname→target mismatch (Linux
+# resolved `unknown-linux-gnu` while every release ships `unknown-linux-musl`)
+# shipped and broke install for every Linux user, because the only checks were
+# lint-only and never exercised the script against real assets. `fixture` +
+# `triples` now catch that class BEFORE any release exists.
 #
 # It does NOT deploy, tag, or flip anything — pure verification. All third-party
 # Actions pinned by 40-char commit SHA (delib-20260425-39c1).
@@ -25,12 +42,23 @@ on:
     paths:
       - "infra/install/**"
       - ".github/workflows/install-lint.yml"
+      # Release-side + packaging surfaces: a triple added/removed here must stay
+      # in lockstep with install.sh (the `triples` job), and packaging drift is
+      # otherwise only caught by the weekly schedule after publication.
+      - ".github/workflows/release.yml"
+      - "packaging/**"
   pull_request:
     paths:
       - "infra/install/**"
       - ".github/workflows/install-lint.yml"
+      - ".github/workflows/release.yml"
+      - "packaging/**"
+  # Manual trigger — chiefly to run the hosted-`endpoint` smoke on demand once
+  # the operator flips the Worker live.
+  workflow_dispatch:
   # Weekly: catch release-SIDE drift (a new release that stops matching what
-  # install.sh resolves) even when no PR touches infra/install/.
+  # install.sh resolves) and re-probe the hosted endpoint even when no PR
+  # touches the install surfaces.
   schedule:
     - cron: "0 12 * * 1"
 
@@ -67,6 +95,132 @@ jobs:
         run: npm run typecheck
       - name: Dry-run build (bundles install.sh as text; no deploy)
         run: npm run dry-run
+
+  # ── the non-skippable floor ──────────────────────────────────────────────────
+  # Build a local release fixture (a SHA256SUMS + one tarball per release triple)
+  # from scratch, then drive install.sh through its FULL path —
+  # resolve→verify→unpack→install→run — once per triple, forcing the host via
+  # COSMON_UNAME_* and pointing the installer at the on-disk fixture. No network,
+  # no published release, nothing to skip: this is exactly the window in which
+  # the `live` job below is deliberately blind (SHA256SUMS not yet public).
+  #
+  # A stub `cs` stands in for the real binary on purpose: this job verifies the
+  # INSTALLER (does every triple resolve to a real asset, checksum-match, unpack,
+  # and install?), not the binary's runtime — that is release.yml's own smoke
+  # job. Because the stub is a portable sh script it runs on any host, so
+  # `cs --version` is exercised for all four triples on a single runner. Had the
+  # original gnu/musl mismatch been present, install.sh would resolve a triple
+  # with no matching tarball and `die` here — red, before any release exists.
+  fixture:
+    name: install.sh — all-triple fixture install (offline, non-skippable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Build fixture + install every triple from it
+        run: |
+          set -euo pipefail
+          fixture="$(mktemp -d)"
+          stubdir="$(mktemp -d)"
+          # Portable stub binary — answers --version on any host.
+          cat > "${stubdir}/cs" <<'CS'
+          #!/bin/sh
+          [ "${1:-}" = "--version" ] && { echo "cs 9.9.9-fixture"; exit 0; }
+          exit 0
+          CS
+          chmod +x "${stubdir}/cs"
+
+          ver="9.9.9"
+          # The release triples. Kept honest against release.yml by the `triples`
+          # job — if that set changes, this list must change with it (and the
+          # `triples` job reddens until it does).
+          triples="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
+          for t in $triples; do
+            tar -czf "${fixture}/cosmon-${ver}-${t}.tar.gz" -C "${stubdir}" cs
+          done
+          # sha256sum on Linux emits the exact two-space format install.sh greps.
+          ( cd "${fixture}" && sha256sum cosmon-*.tar.gz > SHA256SUMS )
+          echo "::group::fixture SHA256SUMS"; cat "${fixture}/SHA256SUMS"; echo "::endgroup::"
+
+          # host uname_s : uname_m : expected-triple
+          for row in \
+            "Darwin:arm64:aarch64-apple-darwin" \
+            "Darwin:x86_64:x86_64-apple-darwin" \
+            "Linux:x86_64:x86_64-unknown-linux-musl" \
+            "Linux:aarch64:aarch64-unknown-linux-musl"; do
+            s="${row%%:*}"; rest="${row#*:}"; m="${rest%%:*}"; want="${rest##*:}"
+            dest="$(mktemp -d)"
+
+            got="$(COSMON_UNAME_S="$s" COSMON_UNAME_M="$m" sh infra/install/install.sh --print-target)"
+            if [ "$got" != "$want" ]; then
+              echo "::error::install.sh resolves ${s}/${m} → ${got} (expected ${want})"
+              exit 1
+            fi
+
+            COSMON_UNAME_S="$s" COSMON_UNAME_M="$m" \
+            COSMON_RELEASE_BASE_URL="file://${fixture}" \
+              sh infra/install/install.sh --dir "$dest"
+
+            if [ ! -x "${dest}/cs" ]; then
+              echo "::error::${want}: cs was not installed"
+              exit 1
+            fi
+            out="$("${dest}/cs" --version)"
+            case "$out" in
+              "cs "*) echo "✓ ${want} → installed, ${out}" ;;
+              *) echo "::error::${want}: unexpected --version output: ${out}"; exit 1 ;;
+            esac
+          done
+          echo "All four release triples resolve, verify, unpack, install, and run."
+
+  # ── cross-surface triple consistency ─────────────────────────────────────────
+  # install.sh, the release build matrix, and the packaging surfaces each carry
+  # a copy of the target-triple set. They MUST agree, or a user's host resolves a
+  # triple no release ships (the gnu/musl class). This job is the single seam
+  # that reddens when they drift — which is why the triggers above fire on
+  # release.yml + packaging/** changes, not just infra/install/**.
+  triples:
+    name: cross-surface triple consistency (install.sh ↔ release.yml ↔ packaging)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Compare install.sh, release matrix, and brew formula triples
+        run: |
+          set -euo pipefail
+
+          # What install.sh resolves for every supported host.
+          installer="$(for row in Darwin:arm64 Darwin:x86_64 Linux:x86_64 Linux:aarch64; do
+            s="${row%%:*}"; m="${row#*:}"
+            COSMON_UNAME_S="$s" COSMON_UNAME_M="$m" sh infra/install/install.sh --print-target
+          done | sort -u)"
+
+          # What the release build matrix actually produces.
+          release="$(grep -E '^ *- target: ' .github/workflows/release.yml \
+            | awk '{print $3}' | sort -u)"
+
+          echo "::group::triple sets"
+          echo "installer:"; echo "$installer"
+          echo "release:";   echo "$release"
+          echo "::endgroup::"
+
+          if [ "$installer" != "$release" ]; then
+            echo "::error::install.sh and release.yml build-matrix triples have drifted."
+            echo "Every host install.sh resolves must have a matching release asset, and vice-versa."
+            diff <(printf '%s\n' "$installer") <(printf '%s\n' "$release") || true
+            exit 1
+          fi
+
+          # The homebrew formula may serve a SUBSET (no aarch64-linux tap today),
+          # but every triple it serves must be one install.sh can resolve.
+          brew="$(grep -oE '(aarch64|x86_64)-(apple-darwin|unknown-linux-(musl|gnu))' \
+            packaging/homebrew-tap/Formula/cosmon.rb | sort -u)"
+          echo "brew serves: ${brew//$'\n'/ }"
+          for t in $brew; do
+            if ! printf '%s\n' "$installer" | grep -qx "$t"; then
+              echo "::error::brew formula serves ${t}, but install.sh never resolves it"
+              exit 1
+            fi
+          done
+          echo "install.sh ↔ release.yml identical; brew ⊆ installer. No drift."
 
   # ── the gate that was missing ────────────────────────────────────────────────
   # Exercise the REAL one-liner end-to-end against the latest PUBLISHED release,
@@ -119,3 +273,56 @@ jobs:
           set -eu
           export PATH="${HOME}/.local/bin:${PATH}"
           cs --version
+
+  # ── the literal hosted path ──────────────────────────────────────────────────
+  # `live` runs install.sh from the checkout; `fixture` runs it against a local
+  # fixture. Neither is the byte-for-byte `curl https://noogram.org/cosmon/install.sh | sh`
+  # a stranger actually types — the Cloudflare Worker could serve a stale or
+  # broken script and both would stay green. This job fetches the HOSTED bytes
+  # and runs them. It self-skips while the Worker serves the 503 coming-soon
+  # (staging), so it never false-reds before the endpoint is live; once live it
+  # is the only guard on the real doorbell. Schedule / manual only — on a PR it
+  # would only ever skip (the endpoint is external), so it does not run there.
+  endpoint:
+    name: hosted one-liner endpoint smoke
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    env:
+      # The public doorbell. Overridable for a staging Worker URL.
+      COSMON_INSTALL_ENDPOINT: https://noogram.org/cosmon/install.sh
+    steps:
+      - name: Gate on a live (non-coming-soon) endpoint
+        id: gate
+        run: |
+          set -eu
+          code="$(curl -s -o body.sh -w '%{http_code}' --proto '=https' --tlsv1.2 "$COSMON_INSTALL_ENDPOINT" || echo 000)"
+          echo "endpoint returned HTTP ${code}"
+          # Live iff 200 AND the body is the real installer. Staging returns a 503
+          # coming-soon shim; a placeholder 200 would lack this sentinel.
+          if [ "$code" = "200" ] && grep -q 'detect_target' body.sh; then
+            echo "Hosted endpoint serves the real installer — smoking it."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Endpoint not live yet (staging / coming-soon) — skipping."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Hosted installer runs (offline self-test over the real bytes)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -eu
+          # The exact `curl … | sh` path a stranger runs, stopped at --self-test
+          # so it proves the endpoint serves a RUNNABLE installer without needing
+          # a published release.
+          curl -fsSL --proto '=https' --tlsv1.2 "$COSMON_INSTALL_ENDPOINT" | sh -s -- --self-test
+      - name: Full hosted install (only when a public release also exists)
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -eu
+          sums="https://github.com/noogram/cosmon/releases/latest/download/SHA256SUMS"
+          if curl -fsSL --proto '=https' --tlsv1.2 -o /dev/null "$sums"; then
+            curl -fsSL --proto '=https' --tlsv1.2 "$COSMON_INSTALL_ENDPOINT" | sh -s -- --dir "${HOME}/.local/bin"
+            export PATH="${HOME}/.local/bin:${PATH}"
+            cs --version
+          else
+            echo "No public release yet — the hosted self-test above is the endpoint's live proof."
+          fi

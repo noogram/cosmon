@@ -51,6 +51,24 @@ shellcheck -s sh install.sh
 cd worker && npm install && npm run typecheck && npm run dry-run
 ```
 
+The `--self-test` above only checks the uname→triple *mapping* in isolation. To
+exercise the **full** resolve→verify→unpack→install path against a throwaway
+release without any published assets, point the installer at a `file://`
+fixture via `COSMON_RELEASE_BASE_URL` (the same seam CI's non-skippable
+`fixture` job uses — see [`../../.github/workflows/install-lint.yml`](../../.github/workflows/install-lint.yml)):
+
+```sh
+d=$(mktemp -d); printf '#!/bin/sh\necho "cs 9.9.9"\n' > "$d/cs"; chmod +x "$d/cs"
+tar -czf "$d/cosmon-9.9.9-$(sh install.sh --print-target).tar.gz" -C "$d" cs
+( cd "$d" && sha256sum cosmon-*.tar.gz > SHA256SUMS )   # shasum -a 256 on macOS
+COSMON_RELEASE_BASE_URL="file://$d" sh install.sh --dir "$(mktemp -d)"
+```
+
+That path — plus the cross-surface `triples` job that keeps install.sh, the
+`release.yml` build matrix, and the packaging formulas in lockstep — is what
+catches a uname→triple drift (the gnu/musl class) **before** any release exists,
+rather than only via the post-publication weekly schedule.
+
 ## Scope
 
 This child produces **config + script**, not a deploy. It does **not** flip the
