@@ -49,6 +49,7 @@ cosmon-observability	core	AGPL-3.0-only	observability — layer ⑥ (delib-ca76)
 cosmon-oidc-testkit	core	AGPL-3.0-only	OIDC test kit binary
 cosmon-ops-tools	core	AGPL-3.0-only	ops tools — layer ③ product harness (delib-ca76)
 cosmon-pilot	core	AGPL-3.0-only	pilot UX — layer ⑥ cockpit (delib-ca76)
+cosmon-process-witness	core	AGPL-3.0-only	process-identity witness for adapters — same kernel tier as the adapters it guards
 cosmon-provider	core	AGPL-3.0-only	provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76)
 cosmon-registry	core	AGPL-3.0-only	registry — code-links AGPL core (delib-ca76)
 cosmon-remote	core	AGPL-3.0-only	remote CLI — code-links AGPL core+surface-canon, not pure-network (delib-ca76)

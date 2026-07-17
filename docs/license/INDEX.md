@@ -37,11 +37,11 @@ added without a curated row in `scripts/license-rationales.tsv`.
 <!-- BEGIN LICENSE TABLE -->
 ## Per-crate partition (machine-generated — do not edit by hand)
 
-_Last generated: 2026-07-14, 43 crates._
+_Last generated: 2026-07-17, 44 crates._
 
 _Run `bash scripts/license-table.sh --write` to refresh._
 
-### Core (AGPL-3.0-only) — 36 crates
+### Core (AGPL-3.0-only) — 37 crates
 
 | Crate | Tier | Licence | Rationale |
 |-------|------|---------|-----------|
@@ -67,6 +67,7 @@ _Run `bash scripts/license-table.sh --write` to refresh._
 | `cosmon-oidc-testkit` | core | AGPL-3.0-only | OIDC test kit binary |
 | `cosmon-ops-tools` | core | AGPL-3.0-only | ops tools — layer ③ product harness (delib-ca76) |
 | `cosmon-pilot` | core | AGPL-3.0-only | pilot UX — layer ⑥ cockpit (delib-ca76) |
+| `cosmon-process-witness` | core | AGPL-3.0-only | process-identity witness for adapters — same kernel tier as the adapters it guards |
 | `cosmon-provider` | core | AGPL-3.0-only | provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76) |
 | `cosmon-registry` | core | AGPL-3.0-only | registry — code-links AGPL core (delib-ca76) |
 | `cosmon-remote` | core | AGPL-3.0-only | remote CLI — code-links AGPL core+surface-canon, not pure-network (delib-ca76) |
