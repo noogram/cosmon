@@ -254,6 +254,9 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      - name: Checkout (release-notes preamble lives in the repo)
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
       - name: Resolve version
         id: version
         shell: bash
