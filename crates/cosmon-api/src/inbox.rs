@@ -82,7 +82,7 @@ pub(crate) async fn list_inbox(
                     )
                 })?;
             // Most recently touched first — useful default for the iOS list.
-            molecules.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            molecules.sort_by_key(|x| std::cmp::Reverse(x.updated_at.clone()));
             if let Some(limit) = q.limit {
                 molecules.truncate(limit);
             }

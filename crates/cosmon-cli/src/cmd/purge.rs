@@ -241,8 +241,7 @@ fn classify_sweep<B: TransportBackend>(
         .map(|mid| {
             let terminal = store
                 .load_molecule(&mid)
-                .map(|m| m.status.is_terminal())
-                .unwrap_or(false);
+                .is_ok_and(|m| m.status.is_terminal());
             (mid, terminal)
         })
         .collect();

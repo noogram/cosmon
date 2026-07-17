@@ -495,7 +495,7 @@ impl HabilitationMap {
             return Ok(out);
         }
         for entry in std::fs::read_dir(&root)?.flatten() {
-            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            if !entry.file_type().is_ok_and(|t| t.is_dir()) {
                 continue;
             }
             let dir = entry.path();

@@ -1799,16 +1799,13 @@ fn cleanup_legacy(state_dir: &Path, legacy_root: &Path) -> anyhow::Result<()> {
     if !legacy_root.is_dir() {
         return Ok(());
     }
-    let is_empty = fs::read_dir(legacy_root)
-        .map(|mut entries| entries.next().is_none())
-        .unwrap_or(false);
+    let is_empty = fs::read_dir(legacy_root).is_ok_and(|mut entries| entries.next().is_none());
     if is_empty {
         fs::remove_dir_all(legacy_root)?;
         let ops_dir = state_dir.join("ops");
         if ops_dir.is_dir() {
-            let ops_empty = fs::read_dir(&ops_dir)
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(false);
+            let ops_empty =
+                fs::read_dir(&ops_dir).is_ok_and(|mut entries| entries.next().is_none());
             if ops_empty {
                 fs::remove_dir_all(&ops_dir)?;
             }

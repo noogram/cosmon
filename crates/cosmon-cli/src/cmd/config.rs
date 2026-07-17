@@ -333,16 +333,14 @@ fn resolve_openai(adapters_cfg: Option<&AdaptersConfig>) -> AdapterRow {
             // would have tried first" hint.
             let scanned = OPENAI_ENV_SCAN
                 .iter()
-                .find(|(name, _)| std::env::var(name).map(|v| !v.is_empty()).unwrap_or(false))
+                .find(|(name, _)| std::env::var(name).is_ok_and(|v| !v.is_empty()))
                 .map(|(name, _)| (*name).to_owned());
             match scanned {
                 Some(name) => (name, Source::Env),
                 None => ("OPENAI_API_KEY".to_owned(), Source::Default),
             }
         };
-    let api_key_present = std::env::var(&api_key_env)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    let api_key_present = std::env::var(&api_key_env).is_ok_and(|v| !v.is_empty());
 
     // base_url precedence: config > env OPENAI_BASE_URL > vendor default
     // associated with the scanned env-var (when api_key_source == Env)
@@ -399,9 +397,7 @@ fn resolve_anthropic(adapters_cfg: Option<&AdaptersConfig>) -> AdapterRow {
         Some(env_name) => (env_name.to_owned(), Source::Config),
         None => (ANTHROPIC_DEFAULT_KEY_ENV.to_owned(), Source::Default),
     };
-    let api_key_present = std::env::var(&api_key_env)
-        .map(|v| !v.is_empty())
-        .unwrap_or(false);
+    let api_key_present = std::env::var(&api_key_env).is_ok_and(|v| !v.is_empty());
 
     let (base_url, base_url_source) = if let Some(url) = entry.and_then(|e| e.base_url.clone()) {
         (url, Source::Config)

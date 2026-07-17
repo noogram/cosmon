@@ -420,7 +420,7 @@ pub fn seed_nucleons(state_dir: &Path, seed_dir: Option<&Path>) -> StepOutcome {
     };
     let mut copied = 0_usize;
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let src_dir = entry.path();
@@ -465,7 +465,7 @@ fn nucleons_has_binding(root: &Path) -> bool {
         return false;
     };
     for entry in entries.flatten() {
-        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
             continue;
         }
         let Ok(idents) = std::fs::read_dir(entry.path()) else {

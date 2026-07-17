@@ -165,7 +165,7 @@ fn run_ls(ctx: &Context, args: &LsArgs) -> anyhow::Result<()> {
         rows.retain(|p| &p.galaxy == galaxy);
     }
     // Stable order, oldest heartbeat last.
-    rows.sort_by(|a, b| b.heartbeat_at.cmp(&a.heartbeat_at));
+    rows.sort_by_key(|x| std::cmp::Reverse(x.heartbeat_at));
 
     if args.json || ctx.json {
         let mut out = std::io::stdout().lock();

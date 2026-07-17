@@ -81,7 +81,7 @@ pub fn run_selfcheck(
     let mut observables = Vec::new();
 
     // 1. molecule_count
-    let dashboard_mol_count = view.molecules(None).map(|m| m.len()).unwrap_or(0);
+    let dashboard_mol_count = view.molecules(None).map_or(0, |m| m.len());
     observables.push(ObservableCheck {
         name: "molecule_count".to_owned(),
         dashboard: dashboard_mol_count.to_string(),
@@ -117,7 +117,7 @@ pub fn run_selfcheck(
     });
 
     // 4. fleet_worker_count
-    let dashboard_worker_count = view.fleet().map(|f| f.worker_count).unwrap_or(0);
+    let dashboard_worker_count = view.fleet().map_or(0, |f| f.worker_count);
     observables.push(ObservableCheck {
         name: "fleet_worker_count".to_owned(),
         dashboard: dashboard_worker_count.to_string(),

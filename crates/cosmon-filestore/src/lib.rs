@@ -252,7 +252,7 @@ impl FileStore {
                         ),
                     });
                 }
-                eprintln!("cosmon: waiting for trunk lock held by {holder} (cs cmd: {cmd_hint})",);
+                eprintln!("cosmon: waiting for trunk lock held by {holder} (cs cmd: {cmd_hint})");
                 lock_file
                     .lock_exclusive()
                     .map_err(|e| CosmonError::LockFailed {

@@ -911,8 +911,7 @@ fn process_salt() -> u128 {
         }
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(1);
+            .map_or(1, |d| d.as_nanos());
         nanos
             .wrapping_mul(0xDEAD_BEEF_CAFE_BABE_F00D_BA11_BEEF_CAFE_u128)
             .wrapping_add(u128::from(std::process::id()))
@@ -940,8 +939,7 @@ fn generate_marker() -> String {
     }
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_nanos());
     let pid = u128::from(std::process::id());
     let ctr = u128::from(COUNTER.fetch_add(1, Ordering::Relaxed));
     let mix = nanos

@@ -1998,7 +1998,7 @@ impl CosmonService {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.sort_by_key(|e| std::cmp::Reverse(e.0));
 
         let results: Vec<serde_json::Value> = scored
             .into_iter()
@@ -2077,9 +2077,9 @@ impl CosmonService {
         let descending = params.order.as_deref().unwrap_or("desc") == "desc";
 
         match sort_by {
-            "created_at" => molecules.sort_by(|a, b| a.created_at.cmp(&b.created_at)),
-            "status" => molecules.sort_by(|a, b| a.status.to_string().cmp(&b.status.to_string())),
-            _ => molecules.sort_by(|a, b| a.updated_at.cmp(&b.updated_at)),
+            "created_at" => molecules.sort_by_key(|a| a.created_at),
+            "status" => molecules.sort_by_key(|a| a.status.to_string()),
+            _ => molecules.sort_by_key(|a| a.updated_at),
         }
 
         if descending {

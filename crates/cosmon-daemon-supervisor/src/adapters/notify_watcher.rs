@@ -135,10 +135,7 @@ fn debounce_loop(
 
         // Drain any follow-up events within the debounce window.
         let deadline = Instant::now() + DEBOUNCE_WINDOW;
-        loop {
-            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
-                break;
-            };
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
             match raw_rx.recv_timeout(remaining) {
                 Ok(_ev) => {
                     // Stay in the burst — we keep draining until the

@@ -321,10 +321,7 @@ pub(crate) fn harvest_one(
     let status = cmd.status();
 
     let events_path = state_dir.join("events.jsonl");
-    let success = status
-        .as_ref()
-        .map(std::process::ExitStatus::success)
-        .unwrap_or(false);
+    let success = status.as_ref().is_ok_and(std::process::ExitStatus::success);
 
     let _ = event_log::emit_one(
         &events_path,

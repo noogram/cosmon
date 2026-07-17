@@ -413,7 +413,7 @@ impl InMemorySealVerdictCache {
     /// Number of cached verdicts.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|m| m.len()).unwrap_or(0)
+        self.entries.lock().map_or(0, |m| m.len())
     }
 
     /// Whether the cache holds no verdicts.
@@ -475,7 +475,7 @@ impl FakeTlcRunner {
     /// How many times [`check`](TlcRunner::check) was invoked.
     #[must_use]
     pub fn run_count(&self) -> u32 {
-        self.runs.lock().map(|g| *g).unwrap_or(0)
+        self.runs.lock().map_or(0, |g| *g)
     }
 }
 

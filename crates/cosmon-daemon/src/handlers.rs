@@ -214,7 +214,7 @@ async fn list_molecules(
     }
 
     // Newest first.
-    all.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    all.sort_by_key(|e| std::cmp::Reverse(e.updated_at));
     let molecules = all.into_iter().map(DaemonMoleculeSummary::from).collect();
     Ok(Json(MoleculesResponse {
         galaxy: entry.name,
@@ -339,9 +339,7 @@ fn parse_status_filter(input: Option<&str>) -> Vec<String> {
 
 fn count_running(state_dir: &std::path::Path) -> usize {
     let view = FileCockpitView::new(state_dir.to_path_buf());
-    view.molecules(Some(STATUS_RUNNING))
-        .map(|m| m.len())
-        .unwrap_or(0)
+    view.molecules(Some(STATUS_RUNNING)).map_or(0, |m| m.len())
 }
 
 /// Build a [`GalaxyRow`] by reading the molecule list once.

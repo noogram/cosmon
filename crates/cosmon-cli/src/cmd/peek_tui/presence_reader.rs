@@ -80,7 +80,7 @@ pub(crate) fn scan(state_dir: &Path) -> Vec<PresenceEntry> {
             out.push(p);
         }
     }
-    out.sort_by(|a, b| b.heartbeat_at.cmp(&a.heartbeat_at));
+    out.sort_by_key(|x| std::cmp::Reverse(x.heartbeat_at));
     out
 }
 
@@ -103,7 +103,7 @@ pub(crate) fn scan_all_galaxies() -> Vec<PresenceEntry> {
             out.extend(scan(&state));
         }
     }
-    out.sort_by(|a, b| b.heartbeat_at.cmp(&a.heartbeat_at));
+    out.sort_by_key(|x| std::cmp::Reverse(x.heartbeat_at));
     out
 }
 

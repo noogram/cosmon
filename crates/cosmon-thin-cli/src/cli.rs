@@ -631,7 +631,7 @@ fn run_verbs<W: std::io::Write>(cli: &Cli, args: &VerbsArgs, out: &mut W) -> Res
     let mut verbs: Vec<_> = crate::registry::all().iter().collect();
     verbs.sort_by_key(|d| d.name);
     for d in &verbs {
-        writeln!(out, "{:<12} {} {}", d.name, d.method, d.path,)
+        writeln!(out, "{:<12} {} {}", d.name, d.method, d.path)
             .map_err(|e| CliError::Local(e.to_string()))?;
     }
     Ok(())

@@ -298,11 +298,11 @@ pub fn aggregate_motion(
 
     // Stable sort so the UI renders deterministically. Newest first
     // where a timestamp is available.
-    running.sort_by(|a, b| b.last_evolve_at.cmp(&a.last_evolve_at));
-    commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
-    whispers.sort_by(|a, b| b.received_at.cmp(&a.received_at));
-    sparks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    workers.sort_by(|a, b| b.last_heartbeat.cmp(&a.last_heartbeat));
+    running.sort_by_key(|x| std::cmp::Reverse(x.last_evolve_at.clone()));
+    commits.sort_by_key(|x| std::cmp::Reverse(x.timestamp.clone()));
+    whispers.sort_by_key(|x| std::cmp::Reverse(x.received_at.clone()));
+    sparks.sort_by_key(|x| std::cmp::Reverse(x.created_at.clone()));
+    workers.sort_by_key(|x| std::cmp::Reverse(x.last_heartbeat.clone()));
 
     Ok(serde_json::json!({
         "timestamp": iso8601(now),

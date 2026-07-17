@@ -484,7 +484,7 @@ pub(crate) fn detect(
         }
     }
 
-    findings.sort_by(|a, b| b.gravity.cmp(&a.gravity));
+    findings.sort_by_key(|x| std::cmp::Reverse(x.gravity));
     findings
 }
 

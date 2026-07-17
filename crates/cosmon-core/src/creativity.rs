@@ -261,7 +261,7 @@ impl CreativeTemperature {
     pub fn indicator(self) -> String {
         let filled = self.level() as usize;
         let empty = 5 - filled;
-        format!("{}{}", "◆".repeat(filled), "◇".repeat(empty),)
+        format!("{}{}", "◆".repeat(filled), "◇".repeat(empty))
     }
 
     /// Human-readable label for this temperature.

@@ -733,7 +733,7 @@ fn emit_report(ctx: &Context, rows: &[StitchRow]) {
         mol_w = mol_w,
         status_w = status_w
     );
-    println!("{}  {}  -------", "-".repeat(mol_w), "-".repeat(status_w),);
+    println!("{}  {}  -------", "-".repeat(mol_w), "-".repeat(status_w));
     for row in rows {
         let detail = if row.conflict_files.is_empty() {
             row.note.clone()

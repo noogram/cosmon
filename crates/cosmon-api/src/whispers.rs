@@ -89,7 +89,7 @@ pub(crate) async fn list_whispers(
                 )
             })?;
             // Newest first — `received_at` is ISO-8601 UTC so lexical sort is chronological.
-            whispers.sort_by(|a, b| b.received_at.cmp(&a.received_at));
+            whispers.sort_by_key(|x| std::cmp::Reverse(x.received_at.clone()));
             whispers.truncate(limit);
             Ok(Json(serde_json::json!({ "whispers": whispers })))
         },

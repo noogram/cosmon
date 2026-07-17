@@ -227,7 +227,7 @@ impl InMemoryMoleculeCache {
     /// Number of entries currently held.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.lock().map(|m| m.len()).unwrap_or(0)
+        self.entries.lock().map_or(0, |m| m.len())
     }
 
     /// Whether the cache holds no entries.

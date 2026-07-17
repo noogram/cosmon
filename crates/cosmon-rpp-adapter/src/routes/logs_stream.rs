@@ -444,8 +444,7 @@ fn build_spark(
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX);
     let nucleon_map = state.nucleon_map.load();

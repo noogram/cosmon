@@ -456,9 +456,9 @@ fn find_nearest_ancestor_cosmon(path: &Path) -> Option<PathBuf> {
         if candidate.is_dir() && candidate.join("config.toml").is_file() {
             return Some(candidate);
         }
-        match cursor.parent() {
-            Some(p) => cursor = p,
-            None => return None,
+        {
+            let p = cursor.parent()?;
+            cursor = p;
         }
     }
 }

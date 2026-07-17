@@ -49,9 +49,7 @@ use cosmon_state::event_log::{emit_one, resolve_events_log_path};
 /// (ADR-047): emission is best-effort, opt-out is best-effort, the
 /// hot path proceeds either way.
 fn emission_disabled() -> bool {
-    std::env::var("COSMON_NO_OPERATOR_EVENTS")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
+    std::env::var("COSMON_NO_OPERATOR_EVENTS").is_ok_and(|v| !v.is_empty())
 }
 
 /// Best-effort emit of [`EventV2::OperatorPresent`].

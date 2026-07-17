@@ -1450,8 +1450,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let final_status = if adapter_completes_inline(&adapter) {
         store
             .load_molecule(&mol_id)
-            .map(|m| m.status)
-            .unwrap_or(updated.status)
+            .map_or(updated.status, |m| m.status)
     } else {
         updated.status
     };
@@ -2088,7 +2087,7 @@ fn execute_llm(
         RunOutcome::Stalled { .. }
         | RunOutcome::ProviderAborted { .. }
         | RunOutcome::TotalBudgetExceeded { .. } => {
-            let reason = format!("llm step failed after {attempt} attempt(s): {outcome:?}",);
+            let reason = format!("llm step failed after {attempt} attempt(s): {outcome:?}");
             let mut updated2 = store.load_molecule(&mol_id)?;
             updated2.status = MoleculeStatus::Collapsed;
             updated2.collapse_reason = Some(reason.clone());

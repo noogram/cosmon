@@ -247,7 +247,7 @@ fn render_per_kind(tenant: &str, events: &[TokenUsage], json: bool) -> anyhow::R
         entry.cost_micros_estimated += ev.cost_micros_estimated;
     }
     let mut rows: Vec<KindRow> = by_kind.into_values().collect();
-    rows.sort_by(|a, b| b.invocations.cmp(&a.invocations));
+    rows.sort_by_key(|x| std::cmp::Reverse(x.invocations));
 
     if json {
         let mut out = std::io::stdout().lock();

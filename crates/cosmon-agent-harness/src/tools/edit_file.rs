@@ -480,8 +480,7 @@ fn write_via_rename(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let nonce = {
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let pid = u128::from(std::process::id());
         nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(pid)
     };

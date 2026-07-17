@@ -230,7 +230,7 @@ fn print_report(path: &Path, events: &[EngineCallEntered]) {
         .into_iter()
         .filter(|(_, callers)| callers.len() >= 2)
         .collect();
-    promotion.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    promotion.sort_by_key(|x| std::cmp::Reverse(x.1.len()));
     if promotion.is_empty() {
         println!("(none — every (verb, args) used by exactly one caller)");
     }

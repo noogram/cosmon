@@ -52,7 +52,7 @@ impl DetailRenderer for ErrorsRenderer {
             .collect();
 
         // Most recent first.
-        records.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        records.sort_by_key(|x| std::cmp::Reverse(x.timestamp));
 
         if records.is_empty() {
             return Text::raw("<no collapses recorded>");

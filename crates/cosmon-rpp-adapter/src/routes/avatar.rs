@@ -181,7 +181,7 @@ pub async fn converse(
     // 6. Accept the message. Persistence is spec'd in d958 but the
     //    storage layer is deferred — the endpoint accepts and returns
     //    the envelope so the wire contract is frozen.
-    let message_id = format!("msg-{}", &spark.request_id);
+    let message_id = format!("msg-{}", spark.request_id);
     let resp = ConverseResponse {
         message_id,
         accepted: true,
@@ -315,7 +315,7 @@ pub async fn perceive(
     // 6. Append to perception log. The storage backend is spec'd in
     //    d958 but deferred — the endpoint accepts and returns the
     //    envelope so the wire contract is frozen.
-    let perception_id = format!("prc-{}", &spark.request_id);
+    let perception_id = format!("prc-{}", spark.request_id);
     let resp = PerceiveResponse {
         perception_id,
         accepted: true,
@@ -375,8 +375,7 @@ fn build_spark(state: &Arc<AppState>, jwt: &ValidatedJwt, verb: Verb) -> Result<
     let now_ms = i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX);
     let nucleon_map = state.nucleon_map.load();

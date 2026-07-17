@@ -150,8 +150,7 @@ pub async fn get_quota(
     let now_ms = i64::try_from(
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX);
 
@@ -226,8 +225,7 @@ pub fn snapshot_for_jwt(state: &Arc<AppState>, jwt: &ValidatedJwt) -> Option<Rat
     let now_ms = i64::try_from(
         SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0),
+            .map_or(0, |d| d.as_millis()),
     )
     .unwrap_or(i64::MAX);
     let sub_hash = hash_sub(&jwt.sub);

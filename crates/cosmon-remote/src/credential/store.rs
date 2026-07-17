@@ -680,13 +680,11 @@ fn session_bus_present() -> bool {
 /// failure) → `false`. Never writes; reads a sentinel account only.
 #[cfg(all(target_os = "linux", not(target_env = "musl")))]
 fn keyring_secret_service_answers() -> bool {
-    let entry = match keyring::Entry::new(KEYRING_SERVICE, KEYRING_PROBE_ACCOUNT) {
-        Ok(e) => e,
-        Err(_) => return false,
+    let Ok(entry) = keyring::Entry::new(KEYRING_SERVICE, KEYRING_PROBE_ACCOUNT) else {
+        return false;
     };
     match entry.get_password() {
-        Ok(_) => true,
-        Err(keyring::Error::NoEntry) => true,
+        Ok(_) | Err(keyring::Error::NoEntry) => true,
         Err(_) => false,
     }
 }

@@ -53,8 +53,7 @@ pub trait GuardMemory {
 impl GuardMemory for crate::config::ProfileStore {
     fn acknowledged(&self) -> bool {
         self.read_top()
-            .map(|t| t.credit_guard_acknowledged.unwrap_or(false))
-            .unwrap_or(false)
+            .is_ok_and(|t| t.credit_guard_acknowledged.unwrap_or(false))
     }
 
     fn remember(&mut self) -> Result<()> {

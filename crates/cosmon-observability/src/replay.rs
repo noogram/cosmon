@@ -69,7 +69,7 @@ pub fn build_events(state_dir: &Path) -> std::io::Result<Vec<ReplayMolecule>> {
         .map(|mol| project(&mol, &mol_events))
         .collect();
 
-    out.sort_by(|a, b| a.nucleated_at.cmp(&b.nucleated_at));
+    out.sort_by_key(|a| a.nucleated_at);
     Ok(out)
 }
 

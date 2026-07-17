@@ -291,8 +291,7 @@ fn compute_teardown_plan(
     let store = FileStore::new(&state_dir);
     let worker_registered = store
         .load_fleet()
-        .map(|f| f.workers.contains_key(&wid))
-        .unwrap_or(false);
+        .is_ok_and(|f| f.workers.contains_key(&wid));
 
     // Compute effective flags.
     let effective_no_branch_delete = if args.no_merge && !args.no_branch_delete && !args.force {
@@ -1394,8 +1393,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let session_alive = backend_probe.is_alive(&wid).unwrap_or(false);
     let worker_registered = store
         .load_fleet()
-        .map(|f| f.workers.contains_key(&wid))
-        .unwrap_or(false);
+        .is_ok_and(|f| f.workers.contains_key(&wid));
     let nothing_left = !branch_exists(&repo_root, &branch_name)
         && !worktree_path.exists()
         && !session_alive
@@ -4447,7 +4445,7 @@ fn workspace_package_dirs(metadata: &CargoMetadata) -> Vec<(PathBuf, String)> {
             })
         })
         .collect();
-    dirs.sort_by(|a, b| b.0.as_os_str().len().cmp(&a.0.as_os_str().len()));
+    dirs.sort_by_key(|d| std::cmp::Reverse(d.0.as_os_str().len()));
     dirs
 }
 
@@ -5832,7 +5830,7 @@ mod tests {
             (PathBuf::from("/repo/packages/engine"), "engine".to_owned()),
             (PathBuf::from("/repo/app"), "app".to_owned()),
         ];
-        dirs.sort_by(|a, b| b.0.as_os_str().len().cmp(&a.0.as_os_str().len()));
+        dirs.sort_by_key(|x| std::cmp::Reverse(x.0.as_os_str().len()));
         assert_eq!(
             owning_package(Path::new("/repo/packages/engine/src/lib.rs"), &dirs),
             Some("engine"),
@@ -5858,7 +5856,7 @@ mod tests {
             (PathBuf::from("/repo/outer"), "outer".to_owned()),
             (PathBuf::from("/repo/outer/inner"), "inner".to_owned()),
         ];
-        dirs.sort_by(|a, b| b.0.as_os_str().len().cmp(&a.0.as_os_str().len()));
+        dirs.sort_by_key(|x| std::cmp::Reverse(x.0.as_os_str().len()));
         assert_eq!(
             owning_package(Path::new("/repo/outer/inner/src/lib.rs"), &dirs),
             Some("inner"),

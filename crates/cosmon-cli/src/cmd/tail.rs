@@ -85,7 +85,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
     buf.retain(|(_, l)| accept(l, since.as_ref(), args.kind.as_deref()));
-    buf.sort_by(|a, b| a.1.ts.cmp(&b.1.ts));
+    buf.sort_by_key(|a| a.1.ts);
     let start = buf.len().saturating_sub(args.tail);
     let mut out = std::io::stdout().lock();
     for (raw, line) in &buf[start..] {
@@ -250,7 +250,7 @@ fn resolve_sources(ctx: &Context, args: &Args) -> Vec<(PathBuf, String)> {
     };
     let mut out = Vec::new();
     for entry in iter.flatten() {
-        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
             continue;
         }
         let candidate = entry

@@ -954,14 +954,13 @@ pub fn compile_plan(
                         }
                     }
                 }
-                MoleculeLink::DecayProduct { id: child } => {
+                MoleculeLink::DecayProduct { id: child }
                     // Decay products are children of this molecule — emit
                     // (parent, child) so the child waits for the parent in
                     // the DAG. Only if both endpoints are in the closure.
-                    if loaded.contains_key(child) {
+                    if loaded.contains_key(child) => {
                         edges.push((id.clone(), child.clone()));
                     }
-                }
                 _ => {}
             }
         }

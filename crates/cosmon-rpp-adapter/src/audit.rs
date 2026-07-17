@@ -34,8 +34,7 @@ pub fn new_request_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_millis());
     let mut buf = [0u8; 8];
     getrandom_or_zero(&mut buf);
     let mut hex = String::with_capacity(buf.len() * 2);

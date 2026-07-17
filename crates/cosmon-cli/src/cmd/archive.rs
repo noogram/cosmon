@@ -267,8 +267,7 @@ fn run_list(ctx: &Context, args: &ListArgs) -> anyhow::Result<()> {
             entries.retain(|e| {
                 fs::metadata(&e.path)
                     .and_then(|m| m.modified())
-                    .map(|t| t >= cutoff)
-                    .unwrap_or(true)
+                    .map_or(true, |t| t >= cutoff)
             });
         }
     }
@@ -529,7 +528,7 @@ fn run_verify(ctx: &Context, args: &VerifyArgs) -> anyhow::Result<()> {
     // that the archive writer did not hash.
     if responses_dir.is_dir() {
         for ent in fs::read_dir(&responses_dir)?.flatten() {
-            if ent.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if ent.file_type().is_ok_and(|t| t.is_file()) {
                 let name = ent.file_name().to_string_lossy().into_owned();
                 if !manifest.response_hashes.contains_key(&name) {
                     checks.push((

@@ -779,7 +779,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .iter()
             .map(|(name, count)| format!("{count} {name}"))
             .collect();
-        println!("  {} {}", "👻 Ghosts:".red().bold(), parts.join(", ").red(),);
+        println!("  {} {}", "👻 Ghosts:".red().bold(), parts.join(", ").red());
     }
 
     if mol_summary.total > 0 {
@@ -886,7 +886,7 @@ fn print_fleet_subtotal(
         return;
     }
     let rule_width = w_input + w_output + w_cost + 2;
-    println!("  {:>pad$} {}", "", "─".repeat(rule_width).dimmed(),);
+    println!("  {:>pad$} {}", "", "─".repeat(rule_width).dimmed());
     println!(
         "  {:>pad$} {:>w_input$} {:>w_output$} {:>w_cost$}",
         "fleet total".bold(),

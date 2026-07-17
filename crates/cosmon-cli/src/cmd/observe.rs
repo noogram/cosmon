@@ -92,7 +92,7 @@ fn run_list(ctx: &Context, store: &dyn StateStore, args: &Args) -> anyhow::Resul
         molecules.retain(|m| m.status.is_alive() && !m.archived);
     }
 
-    molecules.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    molecules.sort_by_key(|x| std::cmp::Reverse(x.updated_at));
 
     if ctx.json {
         let rows: Vec<_> = molecules.iter().map(molecule_to_row).collect();
@@ -187,7 +187,7 @@ fn run_detail(
     }
 
     // Header
-    println!("{} {}", "Molecule:".bold(), mol.id.to_string().bold(),);
+    println!("{} {}", "Molecule:".bold(), mol.id.to_string().bold());
     println!();
 
     // ADR-052 ghost marker — surface drift immediately at the top of the
@@ -233,7 +233,7 @@ fn run_detail(
     if mol.status == MoleculeStatus::Collapsed {
         if let Some(ref reason) = mol.collapse_reason {
             println!();
-            println!("  {:<16} {}", "Collapse reason:".bold(), reason.red(),);
+            println!("  {:<16} {}", "Collapse reason:".bold(), reason.red());
         }
         if let Some(step) = mol.collapsed_step {
             println!("  {:<16} {step}", "Collapsed at:".bold());
@@ -280,7 +280,7 @@ fn run_detail(
         let recent = super::note::load_recent(&notes_dir, notes_limit);
         if !recent.is_empty() {
             println!();
-            println!("  {} (last {})", "Notes:".bold(), recent.len(),);
+            println!("  {} (last {})", "Notes:".bold(), recent.len());
             for n in &recent {
                 let header = format!(
                     "#{seq} {author} {ts}",

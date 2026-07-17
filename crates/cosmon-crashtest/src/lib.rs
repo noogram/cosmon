@@ -219,11 +219,7 @@ pub fn run(
     let mut state = fleet.load()?;
     let mut steps_executed: usize = 0;
 
-    loop {
-        let Some(id) = pick_ready(dag, &state) else {
-            break;
-        };
-
+    while let Some(id) = pick_ready(dag, &state) {
         let status = state.status.entry(id.clone()).or_insert(Lifecycle::Pending);
         if *status == Lifecycle::Pending {
             *status = Lifecycle::Active;

@@ -411,7 +411,7 @@ fn collect_molecule_groups(
     let mut groups: Vec<StatusGroup> = by_status
         .into_iter()
         .map(|(status, mut rows)| {
-            rows.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+            rows.sort_by_key(|x| std::cmp::Reverse(x.updated_at.clone()));
             let total_rows = rows.len();
             rows.truncate(sample_cap);
             StatusGroup {
