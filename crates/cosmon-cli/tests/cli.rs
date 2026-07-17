@@ -2070,8 +2070,22 @@ fn test_init_does_not_run_git_init() {
         .status()
         .expect("git init failed");
     assert!(init.success(), "user's git init should succeed");
+    // Hermetic identity: a bare CI runner has no global git user, and this
+    // assert is about cs staying out of git's way, not about the runner's
+    // dotfiles.
     let commit = Command::new("git")
-        .args(["commit", "--allow-empty", "-m", "initial commit"])
+        .args([
+            "-c",
+            "user.name=cosmon-test",
+            "-c",
+            "user.email=test@cosmon.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "initial commit",
+        ])
         .current_dir(&target)
         .output()
         .expect("git commit failed");
