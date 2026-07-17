@@ -31,12 +31,50 @@ The public `noogram/cosmon` product closure contains both service components:
 | `cosmon-rpp-adapter` | The HTTP fente and `/v1/...` service surface. | AGPL-3.0-only |
 | `cosmon-remote` | Thin client that drives the service. | AGPL-3.0-only |
 
+The two host-side binaries — `cosmon-rpp-adapter` (the fente) and `cs-oidc-mock`
+(the demo IdP used in Step 2) — ship as a signed `cosmon-service-<version>-<target>.tar.gz`
+release asset per target, alongside the `cs` CLI tarball. Step 1 therefore has
+two routes: **download the signed release bundle** (no Rust toolchain required),
+or **build from source**. Prefer the download route unless you need an unreleased
+revision.
+
 The service delegates work to `cs tackle`; it is not a second scheduler. On
 the host, `cs` resolves the selected worker adapter. For this setup it uses the
 built-in `local` adapter: an in-process Ollama `/v1` client. No Node.js,
 Claude runtime, or tmux session is required for that worker leg.
 
-## Step 1: Build and prepare the remote galaxy
+## Step 1: Get the binaries and prepare the remote galaxy
+
+You need three binaries on the host: `cosmon-rpp-adapter`, `cs-oidc-mock`, and a
+compatible `cs`. Get them the signed-release way (no toolchain) or build them
+from source.
+
+First, make the target directory on the host. This guide calls it `$COSMON_HOME`.
+
+```sh
+ssh <remote> "mkdir -p '$COSMON_HOME/bin' '$COSMON_HOME/state/security' '$COSMON_HOME/galaxies'"
+```
+
+### Route A — download the signed release bundle (recommended)
+
+Each release ships a `cosmon-service-<version>-<target>.tar.gz` (the fente + demo
+IdP) next to the `cs` CLI tarball. Pick the target matching the host — a static
+Linux box uses `x86_64-unknown-linux-musl` or `aarch64-unknown-linux-musl`. Both
+tarballs are cosign-signed and Rekor-anchored; verify them as in
+[Verify the binary's provenance](./verify-the-binary.md).
+
+```sh
+ver=0.1.0
+target=x86_64-unknown-linux-musl
+base="https://github.com/noogram/cosmon/releases/download/v${ver}"
+curl -fsSLO "${base}/cosmon-service-${ver}-${target}.tar.gz"   # cosmon-rpp-adapter + cs-oidc-mock
+curl -fsSLO "${base}/cosmon-${ver}-${target}.tar.gz"           # cs
+tar xzf "cosmon-service-${ver}-${target}.tar.gz"
+tar xzf "cosmon-${ver}-${target}.tar.gz"
+scp cosmon-rpp-adapter cs-oidc-mock cs <remote>:$COSMON_HOME/bin/
+```
+
+### Route B — build from source
 
 Build a static musl release on your development machine. `cargo-zigbuild` uses
 Zig as the cross-linker, so this works without a Linux container. Install its
@@ -50,11 +88,9 @@ cargo zigbuild --release --target x86_64-unknown-linux-musl \
   -p cosmon-oidc-testkit --bin cs-oidc-mock
 ```
 
-Copy the resulting binaries, plus a compatible `cs` binary, to a directory you
-control on the remote host. This guide calls it `$COSMON_HOME`.
+Copy the resulting binaries, plus a compatible `cs` binary, to `$COSMON_HOME/bin`.
 
 ```sh
-ssh <remote> "mkdir -p '$COSMON_HOME/bin' '$COSMON_HOME/state/security' '$COSMON_HOME/galaxies'"
 scp target/x86_64-unknown-linux-musl/release/cosmon-rpp-adapter \
     target/x86_64-unknown-linux-musl/release/cs-oidc-mock \
     /path/to/compatible/cs <remote>:$COSMON_HOME/bin/

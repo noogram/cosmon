@@ -38,6 +38,8 @@ carries:
 | `cosmon-<v>-<target>`               | the raw `cs` binary (so you can verify what's on your `PATH`) |
 | `cosmon-<v>-<target>.sig` / `.pem`  | cosign signature + cert over the raw binary |
 | `cosmon-<v>-<target>.spdx.json`     | SPDX SBOM (dependency closure) |
+| `cosmon-service-<v>-<target>.tar.gz`         | the `cosmon-rpp-adapter` + `cs-oidc-mock` service binaries (see [Run cosmon as a remote service](./deploy-remote-service.md)) |
+| `cosmon-service-<v>-<target>.tar.gz.sig` / `.pem` | cosign signature + cert over the service tarball |
 | `SHA256SUMS`                        | one digest per shipped artifact |
 
 ## Verify — 3 layers, weakest to strongest

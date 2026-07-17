@@ -24,6 +24,14 @@ cosign verify-blob \
 # exits 0 on a green signature
 ```
 
+### Self-host the remote service
+
+Each target also ships a `cosmon-service-<version>-<target>.tar.gz` bundle
+containing the `cosmon-rpp-adapter` (HTTP fente) and `cs-oidc-mock` (demo IdP)
+binaries — signed and Rekor-anchored like the `cs` tarball. The
+[Run cosmon as a remote service](https://github.com/noogram/cosmon/blob/main/docs/book/src/how-to/deploy-remote-service.md)
+how-to deploys directly from this bundle; no Rust toolchain required.
+
 Full operator instructions:
 [`docs/guides/release-verification.md`](https://github.com/noogram/cosmon/blob/main/docs/guides/release-verification.md).
 

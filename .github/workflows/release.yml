@@ -148,10 +148,20 @@ jobs:
           # the output does not depend on the runner's checkout directory.
           # strip=symbols drops the symbol table (smaller, deterministic).
           export RUSTFLAGS="-C strip=symbols --remap-path-prefix=${PWD}=/cosmon --remap-path-prefix=${HOME}=/home"
+          # Three binaries ship per target:
+          #   cs                  — the CLI (Homebrew `cs` install channel).
+          #   cosmon-rpp-adapter  — the fente/HTTP service (self-hosted remote).
+          #   cs-oidc-mock        — the demo IdP that makes the documented
+          #                         remote-service auth path reproducible.
+          # Shipping the latter two as signed release assets closes the gap
+          # (task-20260717-c487) where the "Run cosmon as a remote service"
+          # how-to documented deploying binaries no release provided — forcing
+          # a Rust toolchain and contradicting the self-hostable promise.
+          BINS="--bin cs --bin cosmon-rpp-adapter --bin cs-oidc-mock"
           if [ "${{ runner.os }}" = "Linux" ]; then
-            cargo zigbuild --release --locked --bin cs --target ${{ matrix.target }}
+            cargo zigbuild --release --locked $BINS --target ${{ matrix.target }}
           else
-            cargo build --release --locked --bin cs --target ${{ matrix.target }}
+            cargo build --release --locked $BINS --target ${{ matrix.target }}
           fi
 
       - name: Package + checksum
@@ -164,8 +174,14 @@ jobs:
           stem="cosmon-${version}-${target}"
           bindir="target/${target}/release"
 
+          # Service bundle stem: same version+target coordinates as the CLI
+          # tarball, distinct prefix so it sorts and downloads separately.
+          svc_stem="cosmon-service-${version}-${target}"
+
           mkdir -p dist
           cp "${bindir}/cs" "dist/cs"
+          cp "${bindir}/cosmon-rpp-adapter" "dist/cosmon-rpp-adapter"
+          cp "${bindir}/cs-oidc-mock" "dist/cs-oidc-mock"
           # Deterministic tarball: pinned mtime (SOURCE_DATE_EPOCH), sorted
           # entries, no owner/group metadata, GNU format.
           # The deterministic flags (--sort/--owner/--group/--numeric-owner/
@@ -173,26 +189,38 @@ jobs:
           # (installed via the macOS step below); the Linux runners already
           # have GNU tar as `tar`.
           TAR="$(command -v gtar || command -v tar)"
+          # CLI tarball — the lean `cs`-only artifact brew installs.
           "$TAR" \
             --sort=name \
             --mtime="@${SOURCE_DATE_EPOCH}" \
             --owner=0 --group=0 --numeric-owner \
             --format=gnu \
             -C dist -czf "dist/${stem}.tar.gz" cs
+          # Service tarball — the fente + demo IdP the remote-service how-to
+          # deploys. Same deterministic flags so it is reproducible too.
+          "$TAR" \
+            --sort=name \
+            --mtime="@${SOURCE_DATE_EPOCH}" \
+            --owner=0 --group=0 --numeric-owner \
+            --format=gnu \
+            -C dist -czf "dist/${svc_stem}.tar.gz" cosmon-rpp-adapter cs-oidc-mock
 
           cd dist
-          # sha256 over the tarball (what brew pins) and the raw binary.
+          # sha256 over the tarballs (what brew / a self-hoster pins) and the
+          # raw `cs` binary (what release-verification.md verifies via cosign).
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
-            sha256sum cs > "${stem}.bin.sha256"
+            SHA="sha256sum"
           else
-            shasum -a 256 "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
-            shasum -a 256 cs > "${stem}.bin.sha256"
+            SHA="shasum -a 256"
           fi
+          $SHA "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
+          $SHA cs > "${stem}.bin.sha256"
+          $SHA "${svc_stem}.tar.gz" > "${svc_stem}.tar.gz.sha256"
           mv cs "${stem}"   # name the raw binary by target for the release
           echo "stem=${stem}" >> "$GITHUB_OUTPUT"
-          echo "Packaged ${stem}.tar.gz"
-          cat "${stem}.tar.gz.sha256"
+          echo "svc_stem=${svc_stem}" >> "$GITHUB_OUTPUT"
+          echo "Packaged ${stem}.tar.gz + ${svc_stem}.tar.gz"
+          cat "${stem}.tar.gz.sha256" "${svc_stem}.tar.gz.sha256"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
@@ -203,10 +231,11 @@ jobs:
         run: |
           set -euo pipefail
           stem="${{ steps.package.outputs.stem }}"
+          svc_stem="${{ steps.package.outputs.svc_stem }}"
           # Keyless signing: cosign mints a short-lived cert from the GitHub
           # OIDC token, signs, and uploads the entry to the public Rekor log by
           # default. --yes skips the interactive confirmation in CI.
-          for blob in "${stem}.tar.gz" "${stem}"; do
+          for blob in "${stem}.tar.gz" "${stem}" "${svc_stem}.tar.gz"; do
             cosign sign-blob --yes \
               --output-signature "${blob}.sig" \
               --output-certificate "${blob}.pem" \
@@ -238,6 +267,10 @@ jobs:
             dist/${{ steps.package.outputs.stem }}.pem
             dist/${{ steps.package.outputs.stem }}.bin.sha256
             dist/${{ steps.package.outputs.stem }}.spdx.json
+            dist/${{ steps.package.outputs.svc_stem }}.tar.gz
+            dist/${{ steps.package.outputs.svc_stem }}.tar.gz.sig
+            dist/${{ steps.package.outputs.svc_stem }}.tar.gz.pem
+            dist/${{ steps.package.outputs.svc_stem }}.tar.gz.sha256
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
