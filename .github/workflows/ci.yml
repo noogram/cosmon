@@ -372,11 +372,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
       - name: Install system libdbus (Linux keyring backend)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
-        with:
-          fetch-depth: 0
       - name: Check for removed test assertions
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
@@ -523,11 +523,11 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
       - name: Install system libdbus (Linux keyring backend)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
-        with:
-          fetch-depth: 0
       - name: Validate merge commits against ledger
         run: bash scripts/check-provenance.sh
       - name: Self-test the gate against the c1cb pathology
