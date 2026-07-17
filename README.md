@@ -99,7 +99,16 @@ issues filed there are read by people, not only by machines.
 
 ## Install
 
-Cosmon ships a single binary, `cs`. The one-line install builds it straight
+Cosmon ships a single binary, `cs`. On **Linux (glibc)** the build links the
+Secret Service keyring backend through `libdbus`, so install the system
+headers first (macOS and Windows need nothing extra):
+
+```bash
+sudo apt-get install -y libdbus-1-dev pkg-config   # Debian/Ubuntu
+# Fedora: sudo dnf install dbus-devel pkgconf-pkg-config
+```
+
+The one-line install builds `cs` straight
 from the repository (this command is exercised in CI by
 `.github/workflows/front-door.yml`):
 

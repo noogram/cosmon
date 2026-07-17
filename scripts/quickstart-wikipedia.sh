@@ -121,6 +121,10 @@ done
 mkdir -p "$PROJECT_DIR"
 cd "$PROJECT_DIR"
 
+# cs leaves git alone (its own onboarding says "Initialize git yourself"),
+# and the commit at the end of this script needs a repository — own it here.
+git rev-parse --git-dir >/dev/null 2>&1 || git init -q
+
 cs init --yes
 
 # Copy template contents (dotfiles included).

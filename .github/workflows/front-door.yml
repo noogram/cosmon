@@ -50,6 +50,11 @@ jobs:
       contents: read
     steps:
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - name: Install the documented Linux prerequisite
+        # Mirrors the README §Install prerequisite line a stranger runs first:
+        # the glibc build links the Secret Service keyring backend via libdbus.
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
       - name: Install cs the way a stranger does
         # The literal README front-door command. No checkout — a stranger has
         # no local clone. If this fails, the public install path is broken.
