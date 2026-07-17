@@ -5,6 +5,8 @@
 > kernel, **cosmon**, is a stateless CLI that gives each agent an identity, a
 > lifecycle, and crash-recovery.
 
+[**noogram.org**](https://noogram.org) — home · [**docs.noogram.org**](https://docs.noogram.org) — documentation
+
 Cosmon is the open-source kernel distributed with Noogram. Its command-line
 tool, `cs`, runs multi-step work across several agents and models while keeping
 the operational state and history in files on disk. You can also adopt cosmon
