@@ -52,7 +52,7 @@ pub enum BackendStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackendHealth {
     /// Backend identifier (`"anthropic"`, `"ollama"`, …) — same
-    /// stringly-typed key used by [`crate::routes::backend_health`]
+    /// stringly-typed key used by `crate::routes::backend_health`
     /// and by `cosmon-state::token_meter`.
     pub name: String,
     /// Aggregated status — see [`BackendStatus`].

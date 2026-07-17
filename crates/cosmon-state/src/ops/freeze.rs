@@ -3,7 +3,7 @@
 //! `freeze` — `Running → Frozen` molecule-level transition.
 //!
 //! Mutation verb extracted under `cosmon_state::ops`. Symmetric pair
-//! with [`super::thaw`].
+//! with [`super::thaw`](fn@super::thaw).
 //!
 //! `freeze` operates on the **molecule** lifecycle (status transition),
 //! not on a worker session. The cs-cli `cs freeze <worker>` subcommand
@@ -76,7 +76,7 @@ impl OpsError for FreezeError {
 #[derive(Debug, Clone, Default)]
 pub struct FreezeRequest {
     /// Optional reason recorded in the molecule log; the lib path itself
-    /// does not persist a free-form `freeze_reason` on the [`MoleculeData`]
+    /// does not persist a free-form `freeze_reason` on the `MoleculeData`
     /// (that field is reserved for `cs stuck`'s `StuckReason` event), but
     /// the value flows into `MoleculeFrozen` for traceability.
     pub reason: Option<String>,

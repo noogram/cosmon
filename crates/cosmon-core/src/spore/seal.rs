@@ -2,7 +2,7 @@
 
 //! The seal-verification contract (ADR-140 D4, N4).
 //!
-//! Per ADR-139 D3 a spore's TLA+ seal must gate [`expand`](super::expand) and
+//! Per ADR-139 D3 a spore's TLA+ seal must gate [`expand`](mod@super::expand) and
 //! **fail closed**. But the machine running a germination may not have a JRE /
 //! TLC available (the workshop prototype's seal has never been TLC-checked for
 //! exactly this reason). This module makes the three states **honest and

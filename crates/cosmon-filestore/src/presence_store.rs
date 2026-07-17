@@ -10,7 +10,7 @@
 //! The accompanying `<session_id>.log` file (whisper pull-channel) and
 //! `<session_id>.seek` pointer are owned by the whisper/presence-poll
 //! path; this module only knows about the `.json` snapshot. Naming lives
-//! in [`log_path`] so both sides share a typed path helper (closing the
+//! in `log_path` so both sides share a typed path helper (closing the
 //! string-level contract flagged in `cmd/presence.rs`).
 
 use std::fs;

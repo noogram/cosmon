@@ -83,7 +83,7 @@ const SAMPLE_LIMIT: usize = 5;
 pub struct SedimentReport {
     /// Total number of sediment molecules observed.
     pub count: usize,
-    /// Up to [`SAMPLE_LIMIT`] molecule IDs, for operator-facing messages.
+    /// Up to `SAMPLE_LIMIT` molecule IDs, for operator-facing messages.
     pub sample: Vec<MoleculeId>,
     /// Threshold in force when the scan ran.
     pub threshold: usize,
@@ -270,7 +270,7 @@ impl SealReport {
         self.prior_md_present && self.prior_b3_present && self.attestation_found
     }
 
-    /// First failing condition encountered, or [`SEAL_OK`] when the
+    /// First failing condition encountered, or `SEAL_OK` when the
     /// report passes. Stable strings — the CLI surfaces them in
     /// `BypassReceipt.bypassed_condition` for forensic audit.
     #[must_use]

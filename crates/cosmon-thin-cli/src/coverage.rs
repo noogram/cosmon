@@ -18,7 +18,7 @@
 //! from compile-time data: the link-time [`crate::registry::VERBS`] slice
 //! (mechanical) and the [`OPERATOR_ONLY`] static list (manual, kept in
 //! sync with ADR-080 §5.1 by the
-//! [`tests::operator_only_in_sync_with_adr`] integration test).
+//! `tests::operator_only_in_sync_with_adr` integration test).
 //!
 //! # Why duplicated metadata is intentional
 //!

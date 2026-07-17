@@ -27,7 +27,7 @@
 //! found seven defects. Each is structurally foreclosed here:
 //!
 //! 1. **Control-plane detection, never pane glyphs.** Every input is folded into
-//!    [`MoleculeHealthView`] / [`HealGuardView`], neither of which has a field
+//!    `MoleculeHealthView` / [`HealGuardView`], neither of which has a field
 //!    for rendered scrollback. A worker cannot trip the Deacon by *printing* the
 //!    glyphs of the rule meant to police it (the SEV-1 `grep 'cs done'` bug).
 //! 2. **No collapse-on-kill orphan.** P3 never kills a `Running` session: the

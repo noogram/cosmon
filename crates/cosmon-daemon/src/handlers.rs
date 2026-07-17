@@ -136,7 +136,7 @@ pub struct MoleculeDetailResponse {
     pub collapse_reason: Option<String>,
     pub created_at: f64,
     pub updated_at: f64,
-    /// Last [`LOG_TAIL_BYTES`] of `log.md`, or `None` if the file is
+    /// Last `LOG_TAIL_BYTES` of `log.md`, or `None` if the file is
     /// missing or unreadable.
     pub log_tail: Option<String>,
     pub log_truncated: bool,

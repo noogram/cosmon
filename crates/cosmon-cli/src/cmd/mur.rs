@@ -269,7 +269,7 @@ struct Galaxy {
 }
 
 /// Read every classified galaxy (`galaxy_kind IS NOT NULL`) from the
-/// neurion `repos` table. Shape mirrors [`super::galaxies::load_galaxies`]
+/// neurion `repos` table. Shape mirrors `super::galaxies::load_galaxies`
 /// but narrows to the classified set — the Mur only paints the four
 /// families.
 fn load_classified_galaxies() -> anyhow::Result<Vec<Galaxy>> {

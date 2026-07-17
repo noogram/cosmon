@@ -9,7 +9,7 @@
 //!
 //! 1. **DAG readiness** — all `BlockedBy` predecessors are in a terminal
 //!    state (computed from [`crate::MoleculeData::typed_links`] via the
-//!    runtime's [`Plan`]).
+//!    runtime's `Plan`).
 //! 2. **Predecessor branch merged** — `cs done` has fast-forwarded or
 //!    three-way-merged the predecessor's feature branch back onto `main`
 //!    (enforced only by the temporal ordering of the runtime loop:
@@ -118,7 +118,7 @@ impl Frontier {
 /// This is the canonical **single-state** reducer: it inspects each
 /// molecule's `status` and `merged_at` in the same pass, so there is no
 /// two-phase check. Callers
-/// that already hold a [`crate::FleetSnapshot`] should use this function
+/// that already hold a `crate::FleetSnapshot` should use this function
 /// directly to avoid reloading the store. Persistence callers should use
 /// [`compute`] which wraps this reducer with a [`StateStore::list_molecules`]
 /// read and stamps `computed_at`.

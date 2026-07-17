@@ -134,7 +134,7 @@ pub struct CollapseView {
     /// `true` iff the molecule was already collapsed and the call was a
     /// no-op.
     pub already_collapsed: bool,
-    /// `true` iff [`previous_status`] is `Frozen` *and* the prior
+    /// `true` iff `previous_status` is `Frozen` *and* the prior
     /// transition to `Frozen` was via `cs stuck` (not `cs freeze`).
     /// Read from `MoleculeData.stuck_at`. Drives
     /// the wire-level `previous_status: "stuck"` rendering in

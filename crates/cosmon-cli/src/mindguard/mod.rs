@@ -40,11 +40,11 @@ use std::fmt;
 /// Errors emitted by mindguard gates.
 ///
 /// Two distinct semantics: [`Refused`](MindguardError::Refused) means the
-/// gate fired (the evidence was checked and missing); [`Unavailable`]
+/// gate fired (the evidence was checked and missing); `Unavailable`
 /// means the gate machinery itself could not run (state store unreachable,
 /// git diff failed, config corrupt). Both are fail-closed by default —
 /// only an explicit `--override-mindguard-down` with a justification
-/// (logged to the ledger) is allowed to bypass [`Unavailable`].
+/// (logged to the ledger) is allowed to bypass `Unavailable`.
 #[derive(Debug)]
 pub enum MindguardError {
     /// The gate ran and refused: required evidence is missing.

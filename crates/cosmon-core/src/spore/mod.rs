@@ -10,7 +10,7 @@
 //! ```
 //!
 //! This module parses the ADR-140 `spore.toml` schema into the [`Spore`]
-//! domain type. The companion [`expand`] submodule turns a parsed spore plus
+//! domain type. The companion [`expand`](mod@expand) submodule turns a parsed spore plus
 //! a parameter binding into the ordered list of `cs nucleate` calls (N3, ADR-140
 //! D3); the parser itself is the pure, I/O-free front end that turns manifest
 //! bytes into a validated value, or refuses with a precise [`SporeError`].

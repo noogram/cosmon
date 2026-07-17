@@ -2955,7 +2955,7 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
 /// refused rather than degraded to an unconfined passthrough shell.
 ///
 /// `env_lookup` is injected so the predicate is unit-testable without mutating
-/// the process environment (same seam as [`tackle_env`]'s helpers).
+/// the process environment (same seam as `tackle_env`'s helpers).
 fn egress_launch_is_exposed<F>(env_lookup: F) -> bool
 where
     F: Fn(&str) -> Option<String>,
@@ -3150,7 +3150,7 @@ pub(super) fn create_worktree(
 /// worker (ADR-097 / C8). Pre-TS-0 (ADR-099) this was a `&str`; the
 /// [`ValidatedAdapterName`] newtype now forces every caller to thread
 /// the value through `validate_adapter_name`, so the byte sequence
-/// carried by the emitted [`EventV2::WorkerSpawned`] is the same one
+/// carried by the emitted `EventV2::WorkerSpawned` is the same one
 /// that traversed the validation gate — the cat-test cross-reference
 /// `adapter_selected.adapter_name == worker_spawned.adapter_name` is
 /// satisfied by construction, not by convention.
@@ -3503,7 +3503,7 @@ fn spawn_llama_session(
 /// step of the post-spawn pipeline:
 /// - [`install_harvest_hook`] (only invoked for tmux-backed adapters)
 /// - the post-spawn liveness re-check (`backend.is_alive` + readiness
-///   probe) at the [`tackle`] call site
+///   probe) at the `tackle` call site
 ///
 /// The pre-fix tmux-everywhere assumption was inscribed when Claude
 /// Code was the only citizen of `spawn_and_prompt`; ADR-100 R2 broke
@@ -3855,7 +3855,7 @@ fn record_model_selection(mol_state_dir: &std::path::Path, value: &serde_json::V
 /// Runs `claude --model <model> -p <trivial-prompt>` (print mode: one
 /// turn, then exit) under the resolved `CLAUDE_CONFIG_DIR`, bounded by
 /// [`MODEL_PROBE_TIMEOUT`]. Verdict:
-/// - exit 0 → [`ProbeOutcome::Available`];
+/// - exit 0 → `ProbeOutcome::Available`;
 /// - non-zero exit → unavailable, carrying the trimmed stderr tail as
 ///   the cause (e.g. the `model_not_found` message);
 /// - timeout (killed) → unavailable, the false-active symptom itself;
@@ -3943,7 +3943,7 @@ fn probe_claude_model(
 /// # Readiness
 ///
 /// Liveness is asserted through the **same** substrate-agnostic
-/// [`LiveProbe`] contract the Claude path uses — here the aider
+/// `LiveProbe` contract the Claude path uses — here the aider
 /// implementation [`cosmon_transport::readiness::AiderProbe`], which
 /// demands *evidence* aider actually printed its banner (or settled on
 /// its `>` REPL prompt) before declaring the worker live. This replaces
@@ -4035,7 +4035,7 @@ fn spawn_aider_and_prompt(
 ///
 /// # Interactive by default (task-20260711-246d)
 ///
-/// The default mode is now [`codex::CodexMode::Interactive`] — the
+/// The default mode is now `codex::CodexMode::Interactive` — the
 /// steerable TUI, **parity with the claude adapter**: the pane stays open
 /// after the task, the worker is driveable by `cs whisper`, and the prompt
 /// is injected into the composer *after* readiness (mirroring
@@ -4047,7 +4047,7 @@ fn spawn_aider_and_prompt(
 /// # Readiness
 ///
 /// Liveness is asserted through the **same** substrate-agnostic
-/// [`LiveProbe`] contract every adapter uses — here
+/// `LiveProbe` contract every adapter uses — here
 /// [`cosmon_transport::readiness::CodexProbe`], which demands *evidence*
 /// codex actually printed its banner (the interactive TUI banner and the
 /// `exec` preamble both name codex) before declaring the worker live. This
@@ -4158,7 +4158,7 @@ fn spawn_codex_and_prompt(
 /// # Readiness
 ///
 /// Liveness is asserted through the **same** substrate-agnostic
-/// [`LiveProbe`] contract every adapter uses — here
+/// `LiveProbe` contract every adapter uses — here
 /// [`cosmon_transport::readiness::OpencodeProbe`], which demands *evidence*
 /// opencode actually printed its run preamble before declaring the worker
 /// live. This is the surface-lie guard applied to opencode: an
@@ -4382,7 +4382,7 @@ fn spawn_openai_session(
 }
 
 /// Default Ollama OpenAI-compat host root. The harness loop appends
-/// `/v1/chat/completions` (see [`OpenAIProvider::one_turn`]), so the
+/// `/v1/chat/completions` (see `OpenAIProvider::one_turn`), so the
 /// host root is the bare `http://localhost:11434` — *not* the `…/v1`
 /// form. Override via `[adapters.local].base_url`,
 /// `COSMON_LOCAL_BASE_URL`, or `OPENAI_BASE_URL`.
@@ -5236,7 +5236,7 @@ pub(super) fn install_harvest_hook(
     backend.install_pane_died_hook(session_name, &command)
 }
 
-/// Emit a forensic [`EventV2::SF6SupervisionSetupFailed`] receipt to
+/// Emit a forensic `EventV2::SF6SupervisionSetupFailed` receipt to
 /// the local events.jsonl when a post-spawn supervision step fails
 /// after the worker has already produced a real artefact on disk.
 ///
@@ -5382,7 +5382,7 @@ fn cleanup_partial_tackle(
 /// (`readiness::TRUST_PROMPT_ALT`) — renders *after* 2 s, so the
 /// postcondition timed out, tore the tmux session down, and surfaced as
 /// `503 tackle_unavailable` at the adapter. The detector was never the
-/// problem; the window was. The second-stage [`wait_ready`] budget is
+/// problem; the window was. The second-stage `wait_ready` budget is
 /// already 30 s, so only this first proof-of-life gate was hardcoded
 /// too tight. See ADR-093 (Alternative D, reversed by this evidence).
 const DEFAULT_SPAWN_POSTCONDITION_SECS: u64 = 12;

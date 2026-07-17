@@ -84,7 +84,7 @@ SEE ALSO: cs spark (canonical), cs nucleate spark (formula form).
 
 ###### **Options:**
 
-* `--galaxy <NAME>` — Galaxy name to drop into. Resolved via `~/.config/cosmon/galaxies.toml` ([`TomlGalaxyIndex`](cosmon_registry::TomlGalaxyIndex)).
+* `--galaxy <NAME>` — Galaxy name to drop into. Resolved via `~/.config/cosmon/galaxies.toml` ([`TomlGalaxyIndex`]).
 
    When set, the resolved `Galaxy.path` becomes the store root (`<path>/.cosmon/state/`) for this nucleation. Without it, cosmon's usual walk-up discovery picks the galaxy from the current working directory.
 * `--kind <KIND>` — Molecule kind override. Defaults to `idea` — same as `cs spark`.
@@ -544,7 +544,7 @@ EXAMPLES:
   Default value: `task`
 * `--reason <REASON>` — Reason for the decay
 * `--chain` — Wire consecutive decay products with Blocks/BlockedBy links (A→B→C)
-* `--blocks <BLOCKS>` — Explicit Blocks edges: product[i] blocks the given molecule IDs. Repeatable; applied to each product in order
+* `--blocks <BLOCKS>` — Explicit Blocks edges: the i-th product blocks the given molecule IDs. Repeatable; applied to each product in order
 
 
 

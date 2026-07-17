@@ -338,7 +338,7 @@ const GALAXY_NAME_MAX: usize = 18;
 /// silence rule (`responses/jr.md`): unchanged state → unchanged bytes.
 ///
 /// The returned string is ≤ [`STRIP_VISIBLE_WIDTH`] chars long and is
-/// pure 7-bit ASCII. Callers wrap it with [`push_padded_line`] (or any
+/// pure 7-bit ASCII. Callers wrap it with `push_padded_line` (or any
 /// equivalent trailing-pad) to align with the canonical line width.
 #[must_use]
 pub fn render_vital_strip(s: &Sensorium) -> String {

@@ -131,11 +131,11 @@ pub fn write(
 ///
 /// The optional field is intentionally owned by the terminal command rather
 /// than [`MoleculeData`]: warnings describe the archival operation, not the
-/// molecule's domain state. Callers without warnings should use [`write`].
+/// molecule's domain state. Callers without warnings should use [`write`](fn@write).
 ///
 /// # Errors
 ///
-/// Returns the same I/O errors as [`write`].
+/// Returns the same I/O errors as [`write`](fn@write).
 pub fn write_with_warnings(
     state_root: &Path,
     mol_dir: &Path,

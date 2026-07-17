@@ -2,7 +2,7 @@
 
 //! Cross-galaxy federation provenance — ADR-105 (I9') machinery.
 //!
-//! ADR-105 ([`docs/adr/105-i9-prime-federation-provenance.md`]) names the
+//! ADR-105 (`docs/adr/105-i9-prime-federation-provenance.md`) names the
 //! **second Gödel sentence of cosmon**: any cross-galaxy merge into
 //! `cosmon-main` must be traceable back to its source galaxy's ledger.
 //! The doctrine without machinery is exactly the failure pattern the

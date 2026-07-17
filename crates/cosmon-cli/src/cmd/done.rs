@@ -392,7 +392,7 @@ fn is_branch_merged(repo_root: &Path, branch: &str) -> bool {
 /// `👻 unnamed-merge` ghost that no repeat `cs done` and no `cs reconcile`
 /// can ever clear.
 ///
-/// The terminus is [`MoleculeStatus::Collapsed`] — semantically honest, since
+/// The terminus is `MoleculeStatus::Collapsed` — semantically honest, since
 /// no work completed; *not* `Completed`, which would corrupt completion and
 /// energy accounting. We reuse the existing terminal variant (no new variant,
 /// no ADR) and tag the cause `Manual` with reason `forced-teardown`.
@@ -3780,7 +3780,7 @@ enum GateOutcome {
 }
 
 /// Fold the post-merge [`GateOutcome`] and the merge-escalation retry count into
-/// the **single** durable [`MergeResult`] `cs done` emits for a successful merge.
+/// the **single** durable `MergeResult` `cs done` emits for a successful merge.
 ///
 /// PR-B invariant (task-20260714-aa2e): the merge-completed event is written
 /// **once**, **after** the gate, so it can never record a bare `Ok` the gate has
@@ -3918,7 +3918,7 @@ fn refuse_post_merge_and_rollback(
 /// The outcome of the cargo-metadata auto-detect rung (rung 2 of the cascade).
 /// Distinct from [`GateOutcome`] because "cargo does not resolve from this repo
 /// root" is not a *verdict* — it is a signal to try the next cascade rung
-/// ([`GatesConfig::build_command`]), not a loud `Unverified` in its own right.
+/// (`GatesConfig::build_command`), not a loud `Unverified` in its own right.
 /// Only after every rung declines does the cascade mint the terminal
 /// `Unverified`. Keeping the fall-through in the type (rather than sniffing a
 /// reason string) is what lets the cascade stay honest.
@@ -3928,7 +3928,7 @@ enum CargoGate {
     /// produced a real verdict for the caller to honor as-is.
     Resolved(GateOutcome),
     /// The cargo auto-detect rung **declines** to produce a terminal verdict, so
-    /// the cascade must try [`GatesConfig::build_command`] (rung 3) before giving
+    /// the cascade must try `GatesConfig::build_command` (rung 3) before giving
     /// up. Three conditions decline:
     ///
     /// - no Cargo workspace cargo can resolve from the repo root; or
@@ -4087,7 +4087,7 @@ fn run_delegated_command(
 /// metadata` and every `cargo check` draw from it (finding 4032). A
 /// documentation-only diff short-circuits to [`GateOutcome::NothingToVerify`]
 /// **before** any metadata cost is paid (finding 3793). A repo cargo cannot
-/// resolve from the root returns [`CargoGate::NotACargoWorkspace`] so the cascade
+/// resolve from the root returns `CargoGate::NotACargoWorkspace` so the cascade
 /// falls through to the declaration fallback — the auto-detect *declining* is a
 /// fall-through, not a verdict.
 fn run_cargo_autodetect(

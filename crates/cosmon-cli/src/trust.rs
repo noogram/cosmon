@@ -33,7 +33,7 @@
 //! hash of the repo's *shell surface* — its `.cosmon/config.toml` and every
 //! `.cosmon/formulas/*.toml`. If that surface changes after trust was granted
 //! (e.g. a `git pull` lands a new hostile `post_merge` hook), the grant reads
-//! as [`TrustStatus::Stale`] and the operator must re-grant. This is a
+//! as `TrustStatus::Stale` and the operator must re-grant. This is a
 //! conservative superset: a docstring-only formula edit also re-prompts. For
 //! a security gate, fail-closed-on-change is the correct bias.
 //!
@@ -43,7 +43,7 @@
 //! the *target* when the shell surface delegates: `post_merge = "bash
 //! scripts/deploy.sh"`, a gate `build_command = "python ci/build.py"`, a
 //! formula `command = "./gate.sh"`. The pointer never changes while the pointed-
-//! at script is rewritten — so a grant would keep reading [`TrustStatus::Trusted`]
+//! at script is rewritten — so a grant would keep reading `TrustStatus::Trusted`
 //! while the code that actually runs was swapped under it. That is a full
 //! RCE-by-clone bypass of the gate.
 //!
@@ -154,7 +154,7 @@ pub fn store_dir() -> PathBuf {
 /// Uses `git rev-parse --git-common-dir` (worktree-stable — from a linked
 /// worktree it points at the *main* repo's `.git`) and returns its parent.
 /// Returns `None` when `start` is not inside a git repository; callers then
-/// fall back to a canonicalized path (see [`key_root_or_fallback`]).
+/// fall back to a canonicalized path (see `key_root_or_fallback`).
 pub fn repo_key_root(start: &Path) -> Option<PathBuf> {
     let out = Command::new("git")
         .arg("-C")

@@ -17,7 +17,7 @@
 //!
 //! # Single-writer hazard
 //!
-//! `state.json` is written via [`crate::FileStore::save_molecule`] which
+//! `state.json` is written via `crate::FileStore::save_molecule` which
 //! uses the canonical tempfile + rename pattern (`atomic_write`). On
 //! POSIX, `rename` is atomic at the filesystem level — readers always see
 //! either the old or the new file, never a torn one. Two concurrent
@@ -135,7 +135,7 @@ pub struct TagDelta {
 /// removing a tag that is not present is a no-op.
 ///
 /// `subject_kind` is the V0 placeholder for the future
-/// [`Subject`] type that T-SUBJECT will introduce. V0 vocabulary:
+/// `Subject` type that T-SUBJECT will introduce. V0 vocabulary:
 /// `"operator"` for the trusted CLI subject, `"jwt:<sub>"` once
 /// T-RPP-V0 wires JWT-bearing callers, `"absent"` when no
 /// authentication context is available. The value flows through to

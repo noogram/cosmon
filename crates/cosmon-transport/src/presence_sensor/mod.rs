@@ -9,7 +9,7 @@
 //! I/O (INV-DOMAIN-PURE-NO-IO, ADR-082).
 //!
 //! The no-cloning discipline documented on the core trait is enforced by
-//! [`coupling_lint`] — a source-text scan over every shipped sensor impl. It
+//! `coupling_lint` — a source-text scan over every shipped sensor impl. It
 //! is a **coupling lint**, not a purity audit: it proves a sensor reads from
 //! a substrate cosmon does not write (it bans `.cosmon/state` reads and
 //! direct `File::open`), while deliberately permitting the `ioreg` process

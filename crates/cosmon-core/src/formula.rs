@@ -554,7 +554,7 @@ pub struct Formula {
     /// artifacts yield the same output bytes (a build, a schema regen, a
     /// deterministic transform). Such a molecule is **cachable by content**
     /// (see [`crate::det_cache`]) and its
-    /// [`verify_requires_execution`](Formula::verify_requires_execution) bit
+    /// `verify_requires_execution` bit
     /// is `false`.
     ///
     /// When `false` (the default, every agentic formula today), the
@@ -628,19 +628,19 @@ pub struct Step {
     /// The string is a registry key (e.g. `"cosmon::smoke::cargo_check"`).
     /// When present, `cs tackle` calls the registered function directly —
     /// no shell, no tmux, no worktree. Sub-millisecond dispatch overhead.
-    /// Mutually exclusive with [`command`](Self::command).
+    /// Mutually exclusive with `command`.
     pub native: Option<String>,
     /// Timeout in seconds for gate/native step execution.
     ///
-    /// Only meaningful when [`command`](Self::command) or [`native`](Self::native)
+    /// Only meaningful when `command` or `native`
     /// is `Some`. Defaults to 300 seconds.
     pub timeout: Option<u64>,
     /// Wall-clock budget for the *worker* progressing through this step,
     /// expressed in minutes. Consumed by the stall-detection layer
     /// (`cs peek` heartbeat, `cs patrol --nudge`) to classify a row as
-    /// [`MoleculeHealth::Stalled`] once `now - last_progress_at` exceeds
+    /// `MoleculeHealth::Stalled` once `now - last_progress_at` exceeds
     /// this budget. Absence means "use the project default" (30 minutes).
-    /// Distinct from [`timeout`](Self::timeout), which only applies to
+    /// Distinct from `timeout`, which only applies to
     /// gate/native steps.
     pub timeout_minutes: Option<u32>,
     /// When `true`, child molecules nucleated while this step is active
@@ -662,8 +662,8 @@ pub struct Step {
     /// resolves [`QuerySpec::source`], evaluates [`QuerySpec::expr`] over
     /// the JSON document, and binds the result into the molecule's variable
     /// map under [`QuerySpec::output_var`]. Mutually exclusive with
-    /// [`command`](Self::command), [`native`](Self::native), and
-    /// [`llm`](Self::llm).
+    /// `command`, `native`, and
+    /// `llm`.
     pub query: Option<QuerySpec>,
     /// Optional checkpointed LLM call.
     ///
@@ -672,8 +672,8 @@ pub struct Step {
     /// to disk on a checkpoint cadence. On per-checkpoint timeout, the
     /// runtime emits an `ExternalChannelTimeout` event and retries from
     /// the last checkpoint up to [`LlmSpec::max_retries`] times before
-    /// failing the step. Mutually exclusive with [`command`](Self::command),
-    /// [`native`](Self::native), and [`query`](Self::query).
+    /// failing the step. Mutually exclusive with `command`,
+    /// `native`, and `query`.
     pub llm: Option<LlmSpec>,
     /// Worker-Spawn Port Adapter this step pins, overriding the galaxy
     /// default.
@@ -1088,7 +1088,7 @@ impl Formula {
     /// Whether `cs verify` must re-execute the molecule to certify it
     /// (ADR-140 D5).
     ///
-    /// This is the inverse of [`deterministic`](Formula::deterministic): a
+    /// This is the inverse of `deterministic`: a
     /// deterministic formula is a pure function of its inputs, so its output
     /// is certifiable by a content hash and never needs re-execution; an
     /// agentic formula (`deterministic = false`) is an LLM session whose
@@ -1333,7 +1333,7 @@ fn build_tier(raw: Option<RawTier>) -> Result<Tier, TierError> {
 ///   least one step description (syntactic presence check — it signals the
 ///   guard/decrement discipline without inspecting the step action AST,
 ///   which does not yet exist).
-/// - Tier 2 is handled at construction time via [`build_tier`] and is
+/// - Tier 2 is handled at construction time via `build_tier` and is
 ///   unreachable here until `cosmon-sign` ships.
 ///
 /// # Errors

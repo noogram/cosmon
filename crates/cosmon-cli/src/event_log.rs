@@ -25,7 +25,7 @@
 //!   intact.
 //!
 //! Watch-specific concerns (propel cadence, `Deadlines`, `Tier`) stay in
-//! [`crate::cmd::watch`]; run-specific concerns (runtime dispatch, Ctrl-C
+//! `crate::cmd::watch`; run-specific concerns (runtime dispatch, Ctrl-C
 //! wiring) stay in [`crate::cmd::run`]. Only the rendering contract is
 //! shared.
 

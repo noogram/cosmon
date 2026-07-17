@@ -8,7 +8,7 @@
 //! seal. This module is the **shell** over the pure core: it loads the
 //! manifest, coerces `--var k=v` strings into the declared TOML types,
 //! gates on the seal (D4), and replays the
-//! [`expand`](cosmon_core::spore::expand)ed call list against the live
+//! [`expand`](fn@cosmon_core::spore::expand)ed call list against the live
 //! state store via the canonical `cs nucleate` persistence path. It is a
 //! declarative front end over an existing verb, not a new scheduler and
 //! not a new molecule type.
@@ -357,7 +357,7 @@ fn load_spore(reference: &Path) -> anyhow::Result<(Spore, PathBuf)> {
 }
 
 /// Coerce raw `--var key=value` strings into the declared `ParamSchema`
-/// TOML types so the pure [`expand`] sees properly-typed values. An
+/// TOML types so the pure [`expand`](fn@expand) sees properly-typed values. An
 /// undeclared key is passed through as a string and rejected by `expand`
 /// (which owns the unknown-param error), keeping a single source of truth.
 fn coerce_vars(spore: &Spore, raw: &[String]) -> anyhow::Result<BTreeMap<String, toml::Value>> {

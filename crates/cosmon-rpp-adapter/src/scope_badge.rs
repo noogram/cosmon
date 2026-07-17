@@ -48,7 +48,7 @@
 //!
 //! - Computing a `galaxy-seed`. That is `cosmon_hash::galaxy_seed`
 //!   (smithy G2): the badge *carries* a precomputed [`GalaxyRef::digest`]
-//!   as an opaque [`Hash`]; it never recomputes it.
+//!   as an opaque `Hash`; it never recomputes it.
 //! - Revocation lists. Revocation is **passive** (ADR-0023 §D5): short
 //!   `not_after`, renewed by re-signing. There is no CRL.
 //! - Any `ForgeFed` / `ActivityPub` type. The badge references no transport

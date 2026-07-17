@@ -87,7 +87,7 @@ pub fn label_of(body: &serde_json::Value) -> Option<&str> {
 /// *the next gesture*. A failure message does not narrate the past — it
 /// poses the next move.
 ///
-/// `name` is the invoked binary name ([`crate::invoked_name`]); never
+/// `name` is the invoked binary name (`crate::invoked_name`); never
 /// hardcode `cosmon-remote` in an actionable string (C6). `age_secs` is
 /// the client-computed elapsed time (since tackle / last sign of life),
 /// rendered only when known.

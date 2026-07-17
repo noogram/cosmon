@@ -61,7 +61,7 @@ pub const VOLATILE_GENESIS_FIELDS: &[&str] = &["timestamp", "ts", "sid"];
 ///
 /// Parses `genesis_line` as a JSON object and hashes its
 /// [`canonical_serialize`](crate::canonical_serialize) form. This is the
-/// recipe a [`ScopeBadge`] anchors to: robust to key reordering, whitespace,
+/// recipe a `ScopeBadge` anchors to: robust to key reordering, whitespace,
 /// and line-ending normalization, and independent of the reader's struct
 /// schema.
 ///

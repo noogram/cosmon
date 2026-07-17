@@ -49,7 +49,7 @@ pub struct AdapterTelemetry {
     /// own class constant (e.g. `OpenAIProvider` → `"openai"`).
     ///
     /// **Why this exists.** The built-in `local` floor reuses
-    /// [`OpenAIProvider`] against an Ollama OpenAI-compat endpoint
+    /// `OpenAIProvider` against an Ollama OpenAI-compat endpoint
     /// (`spawn_local_session`). Without this override the provider
     /// stamps `adapter_name = "openai"` on `events.jsonl`, which (a)
     /// breaches the ADR-099 cat-test invariant `adapter_selected ==
@@ -68,7 +68,7 @@ impl AdapterTelemetry {
     /// stamps its own class constant. Override it with
     /// [`Self::with_adapter_name`] when the provider is reused under a
     /// different validated adapter identity (the `local` floor reuses
-    /// [`OpenAIProvider`]).
+    /// `OpenAIProvider`).
     #[must_use]
     pub fn new(
         mol_id: MoleculeId,

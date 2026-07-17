@@ -30,7 +30,7 @@
 //! - `POST /whisper/{mol_id}`          — shell out to `cs whisper` (outbound)
 //! - `GET  /inbox`                     — molecules across every fleet
 //! - `GET  /molecules/{id}`            — observe (in-process state read,
-//!   library-first via [`cosmon_state::ops::observe`])
+//!   library-first via [`cosmon_state::ops::observe`](fn@cosmon_state::ops::observe))
 //! - `POST /molecules/{id}/tackle`     — shell out to `cs tackle`
 //! - `POST /molecules/{id}/tag`        — shell out to `cs tag --add/--remove`
 //! - `GET  /galaxies`                  — every `.cosmon/`-bearing project

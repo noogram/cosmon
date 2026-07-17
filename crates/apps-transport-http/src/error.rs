@@ -4,7 +4,7 @@
 //!
 //! Every cluster daemon should return errors as JSON
 //! `{"error": "...", "code": "...", "detail": "..."}` so the Swift
-//! [`AppsTransportHTTP`] client can route them uniformly to typed cases:
+//! `AppsTransportHTTP` client can route them uniformly to typed cases:
 //!
 //! - 400 `bad_request` — caller sent something malformed.
 //! - 404 `not_found` — resource does not exist.

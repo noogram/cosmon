@@ -28,7 +28,7 @@
 //!
 //! 1. **Grammar-constrained decoding** — makes a malformed structured output
 //!    *impossible*, not merely unlikely. This half lives in the provider
-//!    adapter ([`cosmon_provider::CompletionRequest::format`]) because it is an
+//!    adapter (`cosmon_provider::CompletionRequest::format`) because it is an
 //!    on-the-wire concern (ollama's native `format` / JSON-schema); it is *not*
 //!    in this module. Named here so the leverage ordering reads in one place.
 //! 2. **Structural completion gate** — [`CompletionGate`]. Completion is

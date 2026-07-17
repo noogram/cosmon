@@ -5,7 +5,7 @@
 //! Five free functions, one per [`EventV2`] variant, that adapters call
 //! to emit the IFBDD trail for the Worker-Spawn perimeter. Today the
 //! only adapter is the claude-tmux path in
-//! [`cosmon_transport::claude`]; a future adapter (`aider`, an API
+//! `cosmon_transport::claude`; a future adapter (`aider`, an API
 //! adapter, …) will call the same helpers without forcing a change to
 //! the adapter's own surface — that is the callsite-stability
 //! discipline.
@@ -101,7 +101,7 @@ pub fn reset_emit_error_counters_for_tests() {
 /// runs, the operator can read the IFBDD trail without any
 /// cosmon-specific tool — just `cat` and `jq`:
 ///
-/// ```ignore
+/// ```text
 /// // The shell-level cat-test:
 /// //   cat .cosmon/state/fleets/default/molecules/<mol_id>/events.jsonl \
 /// //     | jq -c 'select(.type | startswith("worker_spawn") or
@@ -437,7 +437,7 @@ pub fn emit_sf7_binary_version_mismatch(
 ///
 /// The hot path must not fail because telemetry is unhappy: write
 /// errors degrade to the sidecar log and the in-memory counter (see
-/// [`write_event`]).
+/// `write_event`).
 pub fn emit_worker_spawn_failed(
     state_dir: &Path,
     mol_id: &MoleculeId,
@@ -469,7 +469,7 @@ pub fn emit_worker_spawn_failed(
 ///
 /// The hot path must not fail because telemetry is unhappy: write
 /// errors degrade to the sidecar log and the in-memory counter (see
-/// [`write_event`]).
+/// `write_event`).
 pub fn emit_worker_spawn_rolled_back(
     state_dir: &Path,
     mol_id: &MoleculeId,

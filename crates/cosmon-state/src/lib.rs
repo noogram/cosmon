@@ -84,7 +84,7 @@ impl Fleet {
     /// consistent untouched.
     ///
     /// Legacy `fleet.json` files predate the explicit `worker_role` field;
-    /// [`default_worker_role`] returns `Cognition` for those entries, so we
+    /// `default_worker_role` returns `Cognition` for those entries, so we
     /// upgrade them here. Entries saved by a new writer already carry the
     /// correct role but running the heuristic a second time is idempotent
     /// (it only promotes Cognition → Runtime when the derivation demands
@@ -290,12 +290,12 @@ pub struct MoleculeData {
     pub collapse_cause: Option<cosmon_core::molecule::CollapseCause>,
     /// Operator-facing collapse classification picked at `cs collapse --kind`.
     ///
-    /// Distinct from [`collapse_cause`](Self::collapse_cause): this is the
+    /// Distinct from `collapse_cause`: this is the
     /// failure-shape (`worker_crashed`, `gate_failed`, `blocker_stuck`,
     /// `manual_abort`, `resource_exhausted`, `Other(String)`) the operator
     /// or runtime tagged the collapse with so `cs errors` can aggregate
     /// over it without re-parsing free-form prose. `None` for legacy
-    /// molecules — `cs errors` falls them into [`CollapseReason::Other`].
+    /// molecules — `cs errors` falls them into `CollapseReason::Other`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub collapse_reason_kind: Option<cosmon_core::event_v2::CollapseReason>,
     pub collapsed_step: Option<usize>,
@@ -307,7 +307,7 @@ pub struct MoleculeData {
     pub kind: Option<MoleculeKind>,
     /// Operational class of this molecule (ADR-085).
     ///
-    /// Orthogonal to [`kind`](Self::kind): a `Deliberation` may be a
+    /// Orthogonal to `kind`: a `Deliberation` may be a
     /// tactical exploration ([`MoleculeClass::Standard`]) or a
     /// stress-test of a pre-committed prior ([`MoleculeClass::StressTest`]).
     /// Stress-test molecules opt out of autopilot drain and require the
@@ -371,7 +371,7 @@ pub struct MoleculeData {
     ///
     /// `None` means no TTL — indefinite retention, today's default.
     /// Evaluated by `cs expire` / `cs patrol --expire` against the wall
-    /// clock; an expired molecule triggers [`expiry_policy`](Self::expiry_policy).
+    /// clock; an expired molecule triggers `expiry_policy`.
     /// Legacy state files without this field deserialize to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<DateTime<Utc>>,
@@ -523,7 +523,7 @@ pub struct MoleculeData {
     /// in sync by hand. Disagreement between those three was the
     /// **phantom-worker class**; after
     /// this fold-in the trio's two side-channels are derived
-    /// projections of [`MoleculeProcess`] and the disagreement cannot
+    /// projections of `MoleculeProcess` and the disagreement cannot
     /// occur at the data-structure level.
     ///
     /// Lifecycle:
@@ -539,7 +539,7 @@ pub struct MoleculeData {
     ///   back to it transparently.
     ///
     /// Invariant tested by the proptest in
-    /// [`tests::proptests`](crate::tests::proptests): a `MoleculeData`
+    /// `tests::proptests`: a `MoleculeData`
     /// in [`MoleculeStatus::Pending`] never carries a `process`, and
     /// any `process` that is `Some` has a non-empty `tmux_session`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -596,7 +596,7 @@ pub struct MoleculeData {
     /// missing datum that closes the convoy-cascade-class race where the
     /// runtime, polling every few seconds, raffles a molecule a human just
     /// reached for. `assigned_worker` records *which* worker;
-    /// [`TackledBy`](cosmon_core::tackle::TackledBy) records *who dispatched*.
+    /// `TackledBy` records *who dispatched*.
     ///
     /// `Some(Runtime { pid })` records a runtime-owned dispatch and does
     /// **not** block re-dispatch — only human claims are sticky ("manual
@@ -683,7 +683,7 @@ impl MoleculeData {
     ///
     /// This is the upstream-dependency walk: `self` cannot progress
     /// until these molecules complete. Symmetric counterpart of
-    /// [`blocks`](Self::blocks).
+    /// `blocks`.
     #[must_use]
     pub fn blocked_by(&self) -> Vec<&MoleculeId> {
         self.typed_links
@@ -723,7 +723,7 @@ impl MoleculeData {
 
     /// Returns the molecule IDs that refine (cite) this molecule — i.e.
     /// the sources of its `RefinedBy` typed links. Symmetric counterpart
-    /// of [`refines`](Self::refines).
+    /// of `refines`.
     #[must_use]
     pub fn refined_by(&self) -> Vec<&MoleculeId> {
         self.typed_links
@@ -770,7 +770,7 @@ impl MoleculeData {
             .or(self.session_name.as_deref())
     }
 
-    /// Bind a fresh [`MoleculeProcess`] to this molecule and mirror
+    /// Bind a fresh `MoleculeProcess` to this molecule and mirror
     /// the relevant fields on the legacy trio for backwards
     /// compatibility.
     ///

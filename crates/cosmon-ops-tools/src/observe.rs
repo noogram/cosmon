@@ -2,10 +2,10 @@
 
 //! `observe` operation tool — read-only single-molecule state projection.
 //!
-//! Wraps the [`cosmon_state::ops::observe`] verb as a
+//! Wraps the [`cosmon_state::ops::observe`](fn@cosmon_state::ops::observe) verb as a
 //! [`cosmon_agent_harness::Tool`]. The model emits
 //! `{"molecule_id": "task-…"}`; the tool loads the project's
-//! [`FileStore`] in-process and returns the byte-stable
+//! `FileStore` in-process and returns the byte-stable
 //! [`cosmon_state::ops::ObserveJson`] projection — the *same* JSON shape
 //! `cs observe <id> --json` prints, so a model that learned the `cs`
 //! surface reads the tool output unchanged.

@@ -60,8 +60,8 @@ use super::{ApiMessage, ContentBlock, MessageContent, SYSTEM_PROMPT};
 /// system prompt OUT of the `messages` array (it goes at the
 /// top-level `system` field of the request body). The
 /// [`crate::anthropic::AnthropicProvider`] `Provider::one_turn` impl
-/// reads it via [`AnthropicLog::system_prompt`] and the messages via
-/// [`AnthropicLog::messages`].
+/// reads it via `AnthropicLog::system_prompt` and the messages via
+/// `AnthropicLog::messages`.
 #[derive(Debug, Clone)]
 pub struct AnthropicLog {
     /// Top-level `system` field of the wire envelope. Always present

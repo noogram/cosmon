@@ -22,7 +22,7 @@
 //! - [`access_log_layer`] — tracing middleware emitting one structured line
 //!   per request (`request_id`, `method`, `path`, `status`, `latency_ms`,
 //!   `peer_ip`, `peer_hostname`).
-//! - [`ApplicationError`] + [`error_response`] — canonical error type with
+//! - [`ApplicationError`] + `error_response` — canonical error type with
 //!   400/404/409/422/500 mappings and a stable JSON shape
 //!   `{"error", "code", "detail"}`.
 //! - [`v1`] — URL versioning helper (`/v1/<resource>`).

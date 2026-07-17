@@ -13,13 +13,13 @@
 //! `cosmon_state::ops::*` directly. Remotely — a thin CLI installed *outside*
 //! an avatar (e.g. tenant-demo) — the *identical* tool name + declaration is
 //! backed by a call to [`cosmon_remote::Client`], which speaks the ADR-080
-//! §8j HTTPS+JWT wire to the avatar's [`cosmon-rpp-adapter`]. The model runs
+//! §8j HTTPS+JWT wire to the avatar's `cosmon-rpp-adapter`. The model runs
 //! **client-side** (the operator's own Ollama / API on the tenant-demo box); the
 //! avatar stays a pure orchestrator with no inbound LLM compute, honouring
 //! the RPP one-way topology.
 //!
 //! Because the model sees the same tool *names* and *schemas* regardless of
-//! backend, the REPL ([`cosmon-pilot`]) is byte-identical across local and
+//! backend, the REPL (`cosmon-pilot`) is byte-identical across local and
 //! remote — it never learns which backend it drives. That is the clean
 //! hexagonal port the ADR calls for.
 //!
@@ -59,7 +59,7 @@
 //! [`cosmon_agent_harness::Tool::execute`] is **synchronous**;
 //! [`cosmon_remote::Client`] is **async** (reqwest). The REPL itself runs on
 //! a *current-thread* runtime, so neither `block_in_place` nor a nested
-//! `Handle::block_on` is available. [`run_blocking`] therefore runs each
+//! `Handle::block_on` is available. `run_blocking` therefore runs each
 //! request on its own isolated current-thread runtime hosted on a
 //! short-lived scoped OS thread, building the reqwest-backed client *inside*
 //! that runtime — so there is never a cross-runtime reactor mismatch. The
@@ -85,7 +85,7 @@ use crate::{io_err, parse_args};
 ///
 /// Cheap to clone (`Arc<Profile>` + an `Option<String>` token) so the
 /// registry builders can hand one to each tool. The `cosmon_remote::Client`
-/// is **not** stored — it is rebuilt per call inside [`run_blocking`]'s
+/// is **not** stored — it is rebuilt per call inside `run_blocking`'s
 /// isolated runtime to avoid binding a reqwest connection pool to a runtime
 /// that is gone by the time the next synchronous `execute` fires.
 #[derive(Debug, Clone)]

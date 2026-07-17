@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Patrol dispatcher — converts a fired [`Decision::WouldFire`] into an
+//! Patrol dispatcher — converts a fired `Decision::WouldFire` into an
 //! actual subprocess.
 //!
 //! ## Two dispatch modes

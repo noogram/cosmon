@@ -213,7 +213,7 @@ impl Capabilities {
     ///
     /// Composes [`Self::degradation_tier`] with [`reliability_at`]. For
     /// [`VerbClass::LongContext`], the tier table is additionally
-    /// floored by [`LONG_CONTEXT_FLOOR`]: a backend whose window cannot
+    /// floored by `LONG_CONTEXT_FLOOR`: a backend whose window cannot
     /// even reach the floor is [`Reliability::Unavailable`] regardless
     /// of how it scores on the other axes.
     #[must_use]

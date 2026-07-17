@@ -9,7 +9,7 @@
 //! `cs expire`, `cs patrol --expire`), never by an autonomous loop.
 //!
 //! The state store embeds `expires_at` and `expiry_policy` on
-//! [`cosmon_state::MoleculeData`]; this module holds the pure types and
+//! `cosmon_state::MoleculeData`; this module holds the pure types and
 //! the transition function so both the CLI and the surface renderers can
 //! share one evaluator.
 //!

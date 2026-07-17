@@ -685,8 +685,8 @@ pub enum StepOutcome {
 /// # Worker path untouched
 ///
 /// [`run_loop`] is unchanged in behaviour — it is the proven autonomy
-/// path and shares only the *helpers* ([`dispatch_tool_calls`],
-/// [`maybe_compact`]) with this struct, never its control flow. The TLA+
+/// path and shares only the *helpers* (`dispatch_tool_calls`,
+/// `maybe_compact`) with this struct, never its control flow. The TLA+
 /// `WorkerPathUnchanged` invariant is honoured by construction: the
 /// worker never visits the `awaiting`/`yield` states because it never
 /// constructs an `InteractiveSession`.
@@ -846,7 +846,7 @@ impl<P: Provider> InteractiveSession<P> {
     /// This is the one place the `InteractiveStopYields` invariant is
     /// realised in code: `step()` has no return path to a terminal
     /// `stopped`. The compaction trigger and I3 in-loop check are
-    /// identical to [`run_loop`]'s (shared via [`maybe_compact`]).
+    /// identical to [`run_loop`]'s (shared via `maybe_compact`).
     ///
     /// # Errors
     ///
@@ -969,7 +969,7 @@ impl<P: Provider> InteractiveSession<P> {
     ///
     /// [`Self::step`] already compacts *automatically* once the log
     /// crosses the threshold (identical semantics to [`run_loop`] via
-    /// [`maybe_compact`]). This method lets the operator request a
+    /// `maybe_compact`). This method lets the operator request a
     /// compaction *now*, between turns, without waiting for the threshold
     /// — the manual counterpart to that automatic trigger. It calls the
     /// same [`MessageLog::compact`] the spine uses, so the I4

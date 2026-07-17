@@ -14,7 +14,7 @@
 //! and reusable from `cosmon-filestore`, `cosmon-core`, future
 //! `cosmon-sign`, and `cs verify`. Keeping it isolated forbids accidental
 //! coupling to domain types and lets us swap algorithms behind the
-//! [`Hash`] newtype if we ever need to.
+//! [`Hash`](struct@Hash) newtype if we ever need to.
 //!
 //! # Canonical serialization
 //!
@@ -115,7 +115,7 @@ impl fmt::Display for Hash {
     }
 }
 
-/// Error parsing a [`Hash`] from a hex string.
+/// Error parsing a [`Hash`](struct@Hash) from a hex string.
 #[derive(Debug, thiserror::Error)]
 pub enum ParseHashError {
     /// Hex string was not exactly 64 characters.
@@ -188,7 +188,7 @@ pub fn hash_value<T: Serialize>(value: &T) -> Result<Hash, CanonicalError> {
 /// uses for commit objects — copy it, don't reinvent it.
 ///
 /// `event` is anything that serializes; in practice it is the
-/// [`cosmon_core::event::Envelope`] *minus* its own `prev_hash`/`hash`
+/// `cosmon_core::event::Envelope` *minus* its own `prev_hash`/`hash`
 /// fields (the chain inputs and outputs are kept off the hashed payload
 /// to avoid circularity). Callers are responsible for stripping those
 /// fields before passing the value in.

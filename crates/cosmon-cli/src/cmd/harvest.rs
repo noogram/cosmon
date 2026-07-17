@@ -178,7 +178,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 ///    event-driven liveness witness).
 /// 3. Project the hard-death witness onto `MoleculeProcess.status` via
 ///    the two-coup scale
-///    ([`project_process_status`](cosmon_core::process::project_process_status)):
+///    ([`project_process_status`]):
 ///    a kernel-observed `Dead` condemns to
 ///    [`WorkerStatus::Stale`](cosmon_core::worker::WorkerStatus::Stale) in
 ///    one coup. This is the **missing writer** behind the "status stays

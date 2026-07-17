@@ -95,7 +95,7 @@ pub(crate) struct TuiOptions {
     pub all_projects: bool,
     /// Which molecule phases the table surfaces — see
     /// [`crate::cmd::peek::PhaseFilter`]. The default
-    /// ([`PhaseFilter::unfinished`]) hides the archive; `--phase all` (or
+    /// (`PhaseFilter::unfinished`) hides the archive; `--phase all` (or
     /// its sugar `--all`) lifts every phase. The interactive `A` key
     /// cycles the presets (unfinished → all → unfinished) at runtime.
     pub phase_filter: super::peek::PhaseFilter,
@@ -296,8 +296,8 @@ pub(crate) struct RowView {
     /// operator sees how close a molecule is to the runaway-loop guard.
     pub(crate) energy_budget: Option<(u32, u32)>,
     /// Honest, retrospective adapter/model attribution folded from this
-    /// molecule's `events.jsonl` ([`EventV2::AdapterSelected`] /
-    /// [`EventV2::ModelSelected`]). Powers the ADAPTER column and the
+    /// molecule's `events.jsonl` (`EventV2::AdapterSelected` /
+    /// `EventV2::ModelSelected`). Powers the ADAPTER column and the
     /// expanded detail line. Default (empty) for legacy or never-tackled
     /// molecules — the reasoning effort is **never** inferred from the
     /// current config (see [`cosmon_core::adapter_attribution`]).
@@ -1115,7 +1115,7 @@ struct App {
     filter_input_mode: bool,
     /// Which molecule phases the table surfaces — see
     /// [`crate::cmd::peek::PhaseFilter`]. Default
-    /// ([`PhaseFilter::unfinished`]) hides the archive and nothing else.
+    /// (`PhaseFilter::unfinished`) hides the archive and nothing else.
     /// The `A` key cycles the presets at runtime (unfinished → all →
     /// unfinished); the CLI flag `--phase` (or its sugar `--all`) seeds
     /// the initial value. Rationale (operator, 2026-04-27): the archive drowns the
@@ -3578,7 +3578,7 @@ fn cable_line(from: &RowView, to: &RowView) -> Line<'static> {
 /// unrecorded attribution renders a single dim placeholder. Reasoning effort
 /// (magenta `@effort`) appears **only** when the honest fold carried one —
 /// never inferred from the current config (task-20260712-6609). The plain
-/// text of this cell is [`AdapterAttribution::compact_cell`], the shared
+/// text of this cell is `AdapterAttribution::compact_cell`, the shared
 /// drift-proof source of truth both the TUI and the HTTP surface render.
 fn adapter_cell(att: &cosmon_core::adapter_attribution::AdapterAttribution) -> Line<'static> {
     use cosmon_core::adapter_attribution::EMPTY_CELL;
@@ -4636,7 +4636,7 @@ fn populate_snapshot(
     }
 }
 
-/// Drop molecules from `snap` whose phase the [`PhaseFilter`] does not
+/// Drop molecules from `snap` whose phase the `PhaseFilter` does not
 /// surface. Used by `cs peek --snapshot --phase done` (and the default) to
 /// project the wheat-paste byte stream through the requested phase
 /// slice. Workers and sessions are untouched — the wheat-paste's

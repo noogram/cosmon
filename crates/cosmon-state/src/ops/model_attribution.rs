@@ -4,7 +4,7 @@
 //!
 //! C2 promoted the per-molecule **model** attribution from a
 //! `model-selection.json` sidecar onto a typed
-//! [`EventV2::ModelSelected`](cosmon_core::event_v2::EventV2::ModelSelected)
+//! `EventV2::ModelSelected`
 //! line on `events.jsonl`. C3 is the observability half: this module folds
 //! that log into a per-molecule [`ModelAttribution`] so `cs ensemble` and
 //! `cs observe` can answer *"which model ran for this molecule, and why?"*
@@ -26,7 +26,7 @@ use cosmon_core::id::MoleculeId;
 use crate::event_log::resolve_events_log_path;
 
 /// The model attribution for one molecule, projected from the latest
-/// [`EventV2::ModelSelected`](cosmon_core::event_v2::EventV2::ModelSelected)
+/// `EventV2::ModelSelected`
 /// on `events.jsonl`.
 ///
 /// Carries the resolved `(adapter, model, source)` bundle plus the wall-clock

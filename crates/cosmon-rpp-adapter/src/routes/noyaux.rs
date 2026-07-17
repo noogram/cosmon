@@ -11,7 +11,7 @@
 //! Pipeline:
 //!
 //! 1. Extract `Authorization: Bearer <jwt>`; 401 if missing.
-//! 2. Validate JWT (clause a) → [`ValidatedJwt`].
+//! 2. Validate JWT (clause a) → `ValidatedJwt`.
 //! 3. **No scope check.** A valid JWT is the whole gate — discovery
 //!    surface, not a state-mutating verb (same class as
 //!    `/v1/auth/me`).

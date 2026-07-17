@@ -144,7 +144,7 @@ impl CredentialStore {
     /// 1. `$COSMON_REMOTE_TOKEN` set and non-empty → [`BackendKind::Env`]
     ///    (static bearer, CI).
     /// 2. `$COSMON_REMOTE_CRED_BACKEND` override (`keyring` | `file`).
-    /// 3. keyring reachable (bounded probe — see [`keyring_backend_available`]) →
+    /// 3. keyring reachable (bounded probe — see `keyring_backend_available`) →
     ///    [`BackendKind::Keyring`].
     /// 4. otherwise the 0600 file → [`BackendKind::File`].
     ///

@@ -996,7 +996,7 @@ pub enum EventV2 {
     /// - What is the success / failure ratio per backend?
     /// - Which molecules concentrate the traffic?
     ///
-    /// `tenant` is the [`NucleonId`]-as-string of the principal
+    /// `tenant` is the `NucleonId`-as-string of the principal
     /// (V0: `"operator"` for trusted-CLI flows; JWT-mapped nucleon
     /// for remote pilots — kept stringly for the same wire-stability
     /// rationale as [`Self::ExternalChannelTimeout::provider`]).
@@ -1078,7 +1078,7 @@ pub enum EventV2 {
     /// The operator is observed present on a session.
     ///
     /// Emitted by interactive `cs` invocations at the moment the CLI
-    /// runs. Carries a [`PresenceSource`] so a downstream consumer
+    /// runs. Carries a `PresenceSource` so a downstream consumer
     /// gating a destructive action can apply the no-cloning theorem:
     /// only `source.is_exogenous() == true`
     /// readouts are valid for that purpose. `Internal` here means
@@ -2942,7 +2942,7 @@ pub enum AdapterSelectionSource {
 /// ghost guards (C4) can refuse a *strong* model reachable from anything
 /// but a positive per-molecule act (`Flag` / `FormulaPin`).
 ///
-/// The variants exhaust the chain [`resolve_model_selection`] walks:
+/// The variants exhaust the chain `resolve_model_selection` walks:
 ///
 /// 1. [`ModelSelectionSource::Flag`] — `cs tackle --model <id>` (the
 ///    operator's in-the-moment choice; always wins).

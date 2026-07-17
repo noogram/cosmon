@@ -11,7 +11,7 @@
 //! `cs nucleate`):
 //!
 //! - **capability present** ⇒ **block**: write `blocked_on.json` to the
-//!   molecule dir, emit [`EventV2::WorkerBlockedOnOperator`], stamp
+//!   molecule dir, emit `EventV2::WorkerBlockedOnOperator`, stamp
 //!   `temp:awaiting-op` + the boundary's alert tag, and tell the worker
 //!   to **yield**. The molecule stays `Running`.
 //! - **capability absent** ⇒ **surface-and-continue**: write the options

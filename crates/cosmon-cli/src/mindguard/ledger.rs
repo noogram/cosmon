@@ -13,7 +13,7 @@
 //! - `gate` — which gate was bypassed (currently `"surface_visual"`).
 //! - `molecule_id` — the molecule whose claim was forced through.
 //! - `justification` — operator-supplied free-form rationale.
-//! - `underlying_error` — the [`MindguardError::Unavailable`] payload
+//! - `underlying_error` — the `MindguardError::Unavailable` payload
 //!   that triggered the override (so the audit reader can see *why*
 //!   the gate was unreachable, not just *that* it was bypassed).
 

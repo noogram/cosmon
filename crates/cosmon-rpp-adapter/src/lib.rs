@@ -386,7 +386,7 @@ impl AppState {
 /// (`POST /v1/molecules/:id/tackle`,
 /// [`tackle_molecule`](`crate::routes::molecules::tackle_molecule`)).
 /// Any addition is a §8p violation that must trip
-/// [`tests::api_surface_freeze`].
+/// `tests::api_surface_freeze`.
 ///
 /// Layers (outer → inner):
 /// - [`TraceLayer`] for `tracing` integration;

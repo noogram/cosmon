@@ -23,7 +23,7 @@
 //! [`VisualToken`] is the only handle renderers pass around. A CLI log
 //! line and an HTML badge render the same token through different code
 //! paths but the same data. Adding a new concept (e.g. a new status)
-//! means editing [`visual.toml`] — not touching the renderers.
+//! means editing `visual.toml` — not touching the renderers.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -352,7 +352,7 @@ pub struct EnergySpec {
     description: String,
 }
 
-/// Parsed charter — what [`VISUAL_TOML`] turns into at startup.
+/// Parsed charter — what `VISUAL_TOML` turns into at startup.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Charter {
     /// Roles keyed by slug.

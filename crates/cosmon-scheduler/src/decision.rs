@@ -26,7 +26,7 @@ pub enum Decision {
     /// The patrol's `[patrol.sunset]` rule converged — the dispatcher should
     /// run the sunset action (launchctl unload advisory + event emission) and
     /// record `sunset_decided_at` in state. Subsequent ticks short-circuit
-    /// via [`WouldSkip`] with reason `"already sunsetted"`.
+    /// via `WouldSkip` with reason `"already sunsetted"`.
     WouldSunset {
         /// Human-readable reason describing which predicate fired (e.g.
         /// `"variance-threshold converged"`, `"sample-count reached 100"`).

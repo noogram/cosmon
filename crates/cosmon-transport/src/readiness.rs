@@ -12,7 +12,7 @@
 //! separates the two:
 //!
 //! 1. **Claude-TUI-specific layer** — [`SessionStatus`], [`classify_output`],
-//!    the [`markers`] string table, [`detect_status`] and [`wait_ready`].
+//!    the `markers` string table, [`detect_status`] and [`wait_ready`].
 //!    These parse Claude Code's terminal output (`Loading` / trust prompt /
 //!    `❯` ready chevron / `⏺` tool-use / permission prompt) and auto-answer
 //!    the TUI's blocking dialogs. They assume TUI-typical *seconds*-scale
@@ -336,7 +336,7 @@ impl std::fmt::Display for Liveness {
 /// rely on this: they convert anything that is not `Live` into a torn-down
 /// spawn with a truthful diagnostic.
 ///
-/// The reusable contract check [`assert_probe_refuses_dead_worker`] (under
+/// The reusable contract check `assert_probe_refuses_dead_worker` (under
 /// the `test-support` feature) lets every implementor's test suite assert
 /// this property against a worker that never started.
 pub trait LiveProbe {
@@ -611,7 +611,7 @@ mod codex_markers {
 ///
 /// Pure function — no I/O. The codex counterpart of [`aider_output_is_live`].
 /// Matching is **case-insensitive** because codex's preamble casing has
-/// drifted across releases; a single [`codex_markers`] hit anywhere in the
+/// drifted across releases; a single `codex_markers` hit anywhere in the
 /// captured scrollback is enough. As with aider, the evidence survives in the
 /// pane scrollback even after a fast `codex exec` run has already exited, so a
 /// completed run still reads as `Live`.
@@ -707,7 +707,7 @@ mod opencode_markers {
 /// Pure function — no I/O. The opencode counterpart of
 /// [`codex_output_is_live`]. Matching is **case-insensitive** because
 /// opencode's preamble casing has drifted across releases; a single
-/// [`opencode_markers`] hit anywhere in the captured scrollback is enough.
+/// `opencode_markers` hit anywhere in the captured scrollback is enough.
 /// As with codex, the evidence survives in the pane scrollback even after a
 /// fast `opencode run` has already exited, so a completed run still reads as
 /// `Live`.

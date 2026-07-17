@@ -196,7 +196,7 @@ pub fn render_deliberations_content(
     render_deliberations(molecules, formulas, branding)
 }
 
-/// Filter molecules by the kinds listed in a [`Surface`] config.
+/// Filter molecules by the kinds listed in a `Surface` config.
 ///
 /// Returns all molecules if the surface has no `molecule_kinds` filter.
 #[must_use]

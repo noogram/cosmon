@@ -128,7 +128,7 @@ pub const PREFERRED_MODEL: &str = DEFAULT_MODEL_CHAIN[0];
 /// never escalate to a strong, expensive model. The strong cost class is
 /// cosmon's intrinsic [`DEFAULT_STRONG_MODELS`] union the operator's
 /// `extra_strong` set (`delib-20260704-b476` T1). See
-/// [`is_strong_class`].
+/// `is_strong_class`.
 ///
 /// ```
 /// use cosmon_core::model_chain::build_chain;

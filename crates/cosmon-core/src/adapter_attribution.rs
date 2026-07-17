@@ -18,8 +18,8 @@
 //!
 //! [`AdapterAttribution::reasoning_effort`] is surfaced **only** when a past
 //! event honestly recorded it. Cosmon does not persist reasoning/thinking
-//! effort on any spawn-time event today ([`crate::event_v2::AdapterSelected`]
-//! and [`crate::event_v2::ModelSelected`] carry no effort field), so a fold
+//! effort on any spawn-time event today (`crate::event_v2::AdapterSelected`
+//! and `crate::event_v2::ModelSelected` carry no effort field), so a fold
 //! always yields `None` for effort. It is **never** back-filled from the
 //! current `.cosmon/config.toml` or a live `ModelSpec` — attributing today's
 //! setting to yesterday's run would be a lie the operator cannot detect. The

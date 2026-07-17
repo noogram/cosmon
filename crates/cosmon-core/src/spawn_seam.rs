@@ -384,7 +384,7 @@ pub fn built_in_adapter_names() -> &'static [&'static str] {
 /// - `LoopOwnership` — who runs the agent loop.
 ///
 /// For built-in names the axes are resolved against the in-code
-/// [`BUILT_IN_AXES`] table. For caller-supplied names (TOML adapters
+/// `BUILT_IN_AXES` table. For caller-supplied names (TOML adapters
 /// not shipped in-tree) the axes default to
 /// `(SupervisionMode::TmuxPane, LoopOwnership::External)` — the
 /// legacy pre-ADR-100 contract preserved so hand-authored

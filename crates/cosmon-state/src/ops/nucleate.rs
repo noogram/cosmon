@@ -18,7 +18,7 @@
 //! persists `state.json` via the store, writes the proof-of-work
 //! artefacts (`briefing.md`, `prompt.md`, `log.md`), emits the canonical
 //! `MoleculeNucleated` event, seals `prompt.md`, and emits an
-//! [`AuthzDecisionEvaluated`] like the other verbs. No DAG edges, no
+//! `AuthzDecisionEvaluated` like the other verbs. No DAG edges, no
 //! cross-galaxy refs, no symmetric-link maintenance — those stay in
 //! cs-cli until a follow-up promotes them.
 

@@ -379,7 +379,7 @@ fn backfill_formulas(root: &Path, seed_dir: Option<&Path>) -> StepOutcome {
 
 /// Boot bootstrap — copy the image-baked default nucleon binding(s) from
 /// `seed_dir` into `<state_dir>/nucleons/` **only when no binding exists
-/// yet**. Symmetric to [`backfill_formulas`], but the no-clobber rule is
+/// yet**. Symmetric to `backfill_formulas`, but the no-clobber rule is
 /// stricter: a single existing `*/oidc-identity*.toml` anywhere under
 /// `nucleons/` means a real binding is already provisioned (operator gesture
 /// or a prior boot), so the seed is skipped wholesale. The seed only ever

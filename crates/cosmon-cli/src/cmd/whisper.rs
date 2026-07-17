@@ -8,7 +8,7 @@
 //! reflogged to `MOLECULE_DIR/whispers.jsonl` with the full payload
 //! content-addressed at `MOLECULE_DIR/whispers/<ts>-<sha16>.txt`.
 //!
-//! Safety is not optional — see [`validate_target`], [`SIZE_LIMIT_BYTES`]
+//! Safety is not optional — see `validate_target`, [`SIZE_LIMIT_BYTES`]
 //! and [`RATE_LIMIT_SECONDS`]. A whisper that cannot be safely delivered
 //! exits with a non-zero status and writes nothing.
 //!
@@ -375,7 +375,7 @@ fn read_payload(args: &Args) -> anyhow::Result<Vec<u8>> {
 
 /// Run the pane-signature gate (ADR-097 PR-2 / ADR-038 §5/§6).
 ///
-/// Builds the allowlist from the in-code [`PaneSignatureRegistry`] union'd
+/// Builds the allowlist from the in-code `PaneSignatureRegistry` union'd
 /// with the legacy `[whisper].allowed_commands` config entry (so an
 /// operator override remains effective during the C3 → C6 transition).
 /// Queries the live pane via [`pane_current_command`], emits an

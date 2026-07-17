@@ -130,9 +130,9 @@ pub enum CommandRunnerError {
 ///
 /// The runtime and CLI layers should hold `Box<dyn CommandRunner>` instead
 /// of calling [`std::process::Command`] directly. Tests inject
-/// [`MockCommandRunner`] to assert on the exact sequence of calls
-/// ([`MockCommandRunner::calls`]) and to script canned outputs
-/// ([`MockCommandRunner::script`]).
+/// `MockCommandRunner` to assert on the exact sequence of calls
+/// (`MockCommandRunner::calls`) and to script canned outputs
+/// (`MockCommandRunner::script`).
 ///
 /// The trait is object-safe: all parameters are concrete types and the
 /// return type is a `Result<CommandOutput, CommandRunnerError>`.
@@ -202,7 +202,7 @@ struct MockInner {
 
 #[cfg(any(test, feature = "test-harness"))]
 impl MockCommandRunner {
-    /// Build an empty mock runner. Calls return [`CommandOutput::ok("")`]
+    /// Build an empty mock runner. Calls return `CommandOutput::ok("")`
     /// until something is pushed into the script queue.
     #[must_use]
     pub fn new() -> Self {
@@ -269,7 +269,7 @@ impl CommandRunner for MockCommandRunner {
 // ---------------------------------------------------------------------------
 
 /// Injectable wall clock. Production uses [`RealClock`] which wraps
-/// [`Utc::now`]; tests use [`FixedClock`] or [`AdvancingClock`] to get
+/// [`Utc::now`]; tests use `FixedClock` or `AdvancingClock` to get
 /// deterministic timestamps on event records.
 pub trait Clock: Send + Sync {
     /// Return the current UTC time as seen by this clock.

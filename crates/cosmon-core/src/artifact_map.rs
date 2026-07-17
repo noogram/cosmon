@@ -3,7 +3,7 @@
 //! Genre classification for tracked artifacts (ADR-057).
 //!
 //! Given a `.cosmon/artifact-map.toml` file, this module classifies any
-//! path in a galaxy into a [`Genre`], deriving the [`Audience`] and
+//! path in a galaxy into a `Genre`, deriving the [`Audience`] and
 //! [`Residence`] from it. The TOML surface is deliberately minimal: one
 //! table per genre, two fields (`location`, `audience`). Glob matching
 //! uses longest-fixed-character-count as the specificity measure, with

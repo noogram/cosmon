@@ -309,7 +309,7 @@ fn cross_galaxy_status_hint(cgr: &CrossGalaxyRef) -> String {
 
 /// Render a short status suffix for a molecule ID in the dependency list.
 /// If the molecule can be loaded, returns `" [status]"`; otherwise a
-/// " [missing]" marker to flag dangling references the user should fix.
+/// " `missing`" marker to flag dangling references the user should fix.
 fn status_hint(store: &dyn StateStore, id: &MoleculeId) -> String {
     match store.load_molecule(id) {
         Ok(m) => {

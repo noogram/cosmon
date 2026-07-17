@@ -148,7 +148,7 @@ impl Allowlist {
     /// # Errors
     ///
     /// Returns the underlying `toml::de::Error` if the document fails
-    /// to parse against [`AllowlistFile`].
+    /// to parse against `AllowlistFile`.
     pub fn from_toml_str(s: &str) -> Result<Self, toml::de::Error> {
         let file: AllowlistFile = toml::from_str(s)?;
         Ok(Self {

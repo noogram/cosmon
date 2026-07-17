@@ -53,7 +53,7 @@ pub const DEBOUNCE_WINDOW: Duration = Duration::from_millis(200);
 /// Implements [`ConfigWatchPort`] with a **blocking** `next()` so the same
 /// trait works for synchronous tests and the real tokio event loop (which
 /// wraps the blocking call inside `spawn_blocking`). An async helper
-/// [`NotifyConfigWatchPort::recv_async`] is also provided for the event
+/// `NotifyConfigWatchPort::recv_async` is also provided for the event
 /// loop itself so we don't need to park a blocking thread per select
 /// iteration.
 pub struct NotifyConfigWatchPort {

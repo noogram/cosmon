@@ -279,15 +279,15 @@ fn truncate_evidence(line: &str) -> String {
 ///
 /// The decision order encodes the safety invariants (most-severe wins):
 ///
-/// 1. **Money dominates.** If any [`MONEY_MARKERS`] entry is present anywhere,
+/// 1. **Money dominates.** If any `MONEY_MARKERS` entry is present anywhere,
 ///    the verdict is [`DialogueClass::MoneyStake`] — full stop. A permission
 ///    prompt that also mentions a spend limit is a money decision.
-/// 2. **Permission, but only if clean.** A [`PERMISSION_MARKERS`] hit with no
-///    money marker *and* no [`RISKY_MARKERS`] hit yields
+/// 2. **Permission, but only if clean.** A `PERMISSION_MARKERS` hit with no
+///    money marker *and* no `RISKY_MARKERS` hit yields
 ///    [`DialogueClass::Permission`] (the auto-confirmable class).
 /// 3. **Risky-but-permission-shaped ⇒ Unknown.** A permission marker sitting
 ///    next to a destructive action is *not* safe to auto-accept.
-/// 4. **Generic block ⇒ Unknown.** Any [`BLOCKING_MARKERS`] hit with nothing
+/// 4. **Generic block ⇒ Unknown.** Any `BLOCKING_MARKERS` hit with nothing
 ///    safer resolves to [`DialogueClass::Unknown`] (alert, never act).
 /// 5. **Otherwise `None`.**
 ///

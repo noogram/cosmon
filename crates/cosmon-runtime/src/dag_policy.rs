@@ -738,7 +738,7 @@ impl Policy for DagPolicy {
         actions
     }
 
-    /// Return `true` if a splice in [`Self::absorb_terminal`] asked the
+    /// Return `true` if a splice in `Self::absorb_terminal` asked the
     /// runtime to reload the edge set from disk. The runtime clears the
     /// flag by calling [`Self::recompile`].
     fn needs_recompile(&self) -> bool {
@@ -752,7 +752,7 @@ impl Policy for DagPolicy {
     /// `BlockedBy` links between siblings exist on disk but have never been
     /// touched by the policy, so the rebuilt plan would incorrectly mark
     /// every sibling ready at once. This method re-walks the store from
-    /// [`Self::known_molecules`] via [`compile_plan`], replaces the edge
+    /// `Self::known_molecules` via [`compile_plan`], replaces the edge
     /// list with the fresh closure, and rebuilds the plan with the
     /// preserved `completed` skip-set. The `needs_recompile` flag is
     /// cleared on success.
@@ -774,7 +774,7 @@ impl Policy for DagPolicy {
         Ok(())
     }
 
-    /// A molecule is in `DagPolicy` scope iff it is in [`Self::known_molecules`]
+    /// A molecule is in `DagPolicy` scope iff it is in `Self::known_molecules`
     /// — the compile-time DAG closure plus any decay products spliced in
     /// mid-run. This is what scopes the runtime's `cs done` / drain / liveness
     /// passes to the root's connected component, instead of letting them storm
@@ -847,7 +847,7 @@ impl Policy for DagPolicy {
 /// # Errors
 ///
 /// Propagates [`CosmonError`] from the underlying store on any load failure,
-/// and [`CosmonError::InvalidState`] if the derived graph contains a cycle
+/// and `CosmonError::InvalidState` if the derived graph contains a cycle
 /// (returned as a string-wrapped [`CycleError`] for caller readability).
 ///
 /// [`Plan<MoleculeId>`]: cosmon_graph::Plan

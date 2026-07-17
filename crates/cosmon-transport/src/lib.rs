@@ -4,7 +4,7 @@
 //!
 //! Provides concrete implementations of [`cosmon_core::transport::TransportBackend`]:
 //! - [`TmuxBackend`] — spawns agents in tmux sessions
-//! - [`MockBackend`] — in-memory fake for unit tests of higher layers
+//! - `MockBackend` — in-memory fake for unit tests of higher layers
 //!
 //! Plus standalone functions for adapter-driven worker sessions,
 //! beads CLI, and dispatch:
@@ -16,7 +16,7 @@
 //!   via tmux — the external-CLI sibling of [`codex`] (ADR-125)
 //! - [`beads`] — shell out to `bd` for issue tracking
 //! - [`dispatch`] — create beads and nudge targets for task dispatch
-//! - [`spawn`] — the [`Spawn`](spawn::Spawn) trait extracted against
+//! - [`spawn`] — the `Spawn` trait extracted against
 //!   both Adapters (ADR-097 / PR-4)
 
 #![forbid(unsafe_code)]

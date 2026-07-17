@@ -111,7 +111,7 @@ fn signature_matches(signature: &str, pane_cmd: &str) -> bool {
 /// Static lookup table from adapter name → registered
 /// `pane_current_command` signatures.
 ///
-/// Insertion order is irrelevant — the lookup is by [`signature_matches`]
+/// Insertion order is irrelevant — the lookup is by `signature_matches`
 /// against each registered signature (exact, trailing-`*` prefix glob, or
 /// the [`VERSION_SENTINEL`]). Cloning is cheap (one small `HashMap`) so
 /// call sites that need a snapshot of `signatures_of` should clone the
@@ -145,7 +145,7 @@ impl PaneSignatureRegistry {
     /// the empty `pane_cmd` (a tmux query that returned nothing is not
     /// a match — the worker pane may have died).
     ///
-    /// Each registered signature is evaluated with [`signature_matches`],
+    /// Each registered signature is evaluated with `signature_matches`,
     /// so a literal (`claude`), a trailing-`*` prefix glob (`claude*`),
     /// and the [`VERSION_SENTINEL`] all participate in the check.
     #[must_use]
@@ -313,8 +313,8 @@ pub fn default_registry() -> PaneSignatureRegistry {
 /// failed tmux call to `observed = "<missing>"`.
 ///
 /// This helper exists at the transport layer so both the propulsion
-/// gate ([`cosmon_cli::cmd::patrol`]) and the whisper gate
-/// ([`cosmon_cli::cmd::whisper`]) share one implementation. Both used
+/// gate (`cosmon_cli::cmd::patrol`) and the whisper gate
+/// (`cosmon_cli::cmd::whisper`) share one implementation. Both used
 /// to shell out to tmux independently; the duplication was the
 /// silent-skew risk forgemaster §8 names.
 #[must_use]

@@ -1,19 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 
-//! `cosmon-thin-macro` — proc-macro layer for [`cosmon-thin-cli`].
+//! `cosmon-thin-macro` — proc-macro layer for `cosmon-thin-cli`.
 //!
 //! Exposes a single attribute, [`macro@verb`], which sits on a function and
 //! emits two artefacts:
 //!
 //! 1. A request/response struct pair derived from the function signature
 //!    (today: opaque placeholders; T-CST-V0 will wire real fields).
-//! 2. An entry in a compile-time global registry (via the [`linkme`] crate)
-//!    so that [`cosmon_thin_cli::registry::all`] can enumerate every verb
+//! 2. An entry in a compile-time global registry (via the `linkme` crate)
+//!    so that `cosmon_thin_cli::registry::all` can enumerate every verb
 //!    the binary knows about, with its HTTP method, path, and principal.
 //!
 //! The macro deliberately performs **no** HTTP work, **no** JSON
 //! manipulation, and **no** I/O. It is a metadata generator. Runtime
-//! plumbing lives in [`cosmon-thin-cli`].
+//! plumbing lives in `cosmon-thin-cli`.
 //!
 //! # Why a separate crate?
 //!

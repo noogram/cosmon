@@ -9,7 +9,7 @@
 //! * [`ValidationMode::MTime`] — fast path: compare input mtimes, no hashing.
 //!   Cheap, non-cryptographic, appropriate for dev/iterative loops.
 //! * [`ValidationMode::Blake3`] — cryptographic default. Reuses the
-//!   crate-level [`Hash`](crate::Hash) (BLAKE3-256).
+//!   crate-level [`Hash`](struct@crate::Hash) (BLAKE3-256).
 //! * [`ValidationMode::Sha256`] — SHA-256 for interoperability with SLSA,
 //!   Sigstore, git object names, and external systems.
 //!

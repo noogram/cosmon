@@ -14,7 +14,7 @@
 //! | L1 | Operator-attested | Operator cross-references provider dashboard |
 //! | L2 | Provider-signed | Cryptographic signature from API provider |
 //!
-//! L0 exists today via [`EnergyRecord`]. L1 is the v0 target: the operator
+//! L0 exists today via `EnergyRecord`. L1 is the v0 target: the operator
 //! independently verifies claims and signs with HMAC-SHA256. L2 is specified
 //! but not implemented (no provider offers signed receipts yet).
 //!

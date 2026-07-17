@@ -8,7 +8,7 @@
 //! ## Hydration from declarations
 //!
 //! With `--from <PATH>`, the command hydrates molecules from git-trackable
-//! [`MoleculeDeclaration`](cosmon_core::declaration::MoleculeDeclaration)
+//! [`MoleculeDeclaration`]
 //! TOML files. `PATH` may be a single `.toml` file or a directory (all
 //! `.toml` files inside are loaded). Each declaration references a formula
 //! by name; the command resolves it in the usual formulas directory.
@@ -572,7 +572,7 @@ fn resolve_decayed_from(
     resolve_decayed_from_explicit(args, !blocks.is_empty(), !blocked_by.is_empty(), env_reader)
 }
 
-/// Same logic as [`resolve_decayed_from`] but parameterised on the
+/// Same logic as `resolve_decayed_from` but parameterised on the
 /// boolean "any explicit edge?" so cross-galaxy edges (which do not
 /// fit the `Vec<MoleculeId>` shape) can also silence the env layer.
 fn resolve_decayed_from_explicit(
@@ -818,7 +818,7 @@ fn parse_molecule_ids(raw: &[String], flag: &str) -> anyhow::Result<Vec<Molecule
 /// molecule IDs and cross-galaxy references (Phase 1 of ADR-035).
 ///
 /// A token containing `:` or `@` is interpreted as `<alias>:<mol_id>`
-/// and parsed via [`CrossGalaxyRef::from_str`]. A token with neither
+/// and parsed via `CrossGalaxyRef::from_str`. A token with neither
 /// separator is treated as a local [`MoleculeId`]. This mirrors the
 /// way `git remote` accepts both `origin` and `git@host:repo` in the
 /// same flag — the operator does not have to flip a CLI mode to point
@@ -1037,7 +1037,7 @@ pub(crate) fn load_formula_at_path(path: &Path) -> anyhow::Result<Formula> {
 
 /// One spore-driven nucleation (`cs spore run`).
 ///
-/// `cs spore run` replays an [`expand`](cosmon_core::spore::expand)ed call
+/// `cs spore run` replays an [`expand`](fn@cosmon_core::spore::expand)ed call
 /// list against the live state store. Each
 /// [`NucleateCall`](cosmon_core::spore::NucleateCall) becomes one molecule
 /// via [`nucleate_for_spore`], which reuses the exact persistence path the

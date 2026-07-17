@@ -12,7 +12,7 @@
 //! # Architectural posture
 //!
 //! This module deliberately does **not** introduce a
-//! [`crate::registry::SupervisionMode::Subprocess`] variant. The
+//! `crate::registry::SupervisionMode::Subprocess` variant. The
 //! existing [`crate::registry::SupervisionMode::TmuxPane`] satisfies
 //! the codex spawn path verbatim — the binary runs in a tmux pane and
 //! cosmon's standard `pane-died` hook is the supervisor. The
@@ -30,7 +30,7 @@
 //! 1. **Config** — `.cosmon/adapters/codex.toml` carries
 //!    `codex.version = "=0.49.2"` (the Cargo "=X.Y.Z" form is the
 //!    precedent).
-//! 2. **Runtime check** — [`CodexAdapter::new`] parses `codex --version`
+//! 2. **Runtime check** — `CodexAdapter::new` parses `codex --version`
 //!    and refuses construction if it does not match.
 //! 3. **Telemetry** — the mismatch is emitted as an
 //!    [`EventV2::AdapterLivenessProbed`](cosmon_core::event_v2::EventV2::AdapterLivenessProbed)
@@ -67,7 +67,7 @@ pub const ADAPTER_NAME: &str = "codex";
 
 /// Default config-file path for the version pin (relative to the
 /// cosmon project root). Operator may override per-call via
-/// [`CodexAdapter::new_with_config_path`].
+/// `CodexAdapter::new_with_config_path`.
 pub const DEFAULT_PIN_PATH: &str = ".cosmon/adapters/codex.toml";
 
 /// Parsed shape of `.cosmon/adapters/codex.toml`.
@@ -273,7 +273,7 @@ pub struct CodexSessionConfig {
 
 /// Assemble the shell command string handed to the tmux backend for a
 /// codex worker — the pure, unit-testable seam (mirror of
-/// [`cosmon_cli::tackle_env::build_claude_command`]).
+/// `cosmon_cli::tackle_env::build_claude_command`).
 ///
 /// - [`CodexMode::Exec`] → `codex exec '<prompt>'` (byte-identical to the
 ///   pre-interactive behaviour; the prompt is single-quote escaped).

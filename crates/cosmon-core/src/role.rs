@@ -13,7 +13,7 @@
 //!
 //! - **Layer 1** — Cargo `cfg(feature)` (compile-time, not in types).
 //! - **Layer 2** — [`Clearance`](crate::clearance::Clearance) +
-//!   [`Capability`](crate::capability::Capability) (runtime, per-agent).
+//!   [`Capability`] (runtime, per-agent).
 //! - **Layer 3** — [`FeatureFlags`](crate::feature_flags::FeatureFlags)
 //!   (dynamic config).
 //!

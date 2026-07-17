@@ -286,7 +286,7 @@ fn classify(prev: AccessBits, curr: AccessBits) -> Option<FlipKind> {
 ///   against an empty `prev`, silent by construction).
 /// - A provider that vanished from `curr` produces no alert — the probe simply
 ///   did not run it this sweep; absence of a reading is not a flip.
-/// - Only material bit changes ([`classify`]) produce alerts.
+/// - Only material bit changes (`classify`) produce alerts.
 ///
 /// The result is ordered to match `curr.readings`, so the report reads in the
 /// same provider order the probe emitted.

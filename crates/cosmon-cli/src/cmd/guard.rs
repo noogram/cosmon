@@ -31,20 +31,20 @@ use thiserror::Error;
 /// These codes are part of the CLI's public contract. Adding a new guard
 /// should reserve a new code rather than reusing one.
 pub(crate) mod exit_code {
-    /// [`GuardError::MissingParentLink`] — b22c.
+    /// `GuardError::MissingParentLink` — b22c.
     pub const MISSING_PARENT_LINK: i32 = 10;
-    /// [`GuardError::DecayHomogeneousCount`] — f4e1.
+    /// `GuardError::DecayHomogeneousCount` — f4e1.
     pub const DECAY_HOMOGENEOUS_COUNT: i32 = 11;
-    /// [`GuardError::DirtyBacklogRuntimeRefusal`] — ADR-048.
+    /// `GuardError::DirtyBacklogRuntimeRefusal` — ADR-048.
     pub const DIRTY_BACKLOG_REFUSAL: i32 = 12;
-    /// [`GuardError::BrokerSpawnRefusal`] — Gödel self-reference.
+    /// `GuardError::BrokerSpawnRefusal` — Gödel self-reference.
     pub const BROKER_SPAWN_REFUSAL: i32 = 13;
-    /// [`GuardError::DepthLimitExceeded`] — Gödel depth guard.
+    /// `GuardError::DepthLimitExceeded` — Gödel depth guard.
     pub const DEPTH_LIMIT_EXCEEDED: i32 = 14;
-    /// [`GuardError::TierDoesNotDescend`] — ordinal stratification
+    /// `GuardError::TierDoesNotDescend` — ordinal stratification
     /// (smithy ADR-0021).
     pub const TIER_NO_DESCENT: i32 = 15;
-    /// [`GuardError::BrieflessDispatch`] — briefless-molecule guard
+    /// `GuardError::BrieflessDispatch` — briefless-molecule guard
     /// (task-20260711-919a). Aliased to the shared cross-crate contract in
     /// [`cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH`] so the resident
     /// runtime (which reads this exit code to park a briefless molecule
@@ -400,7 +400,7 @@ pub fn ensure_parent_link_when_required(
 /// Ordinal stratification — enforce a strictly descending nucleation
 /// tier (smithy ADR-0021; cosmon ADR-110 §I4).
 ///
-/// The ordinal of a molecule *is* the [`Tier`] of its formula. A worker
+/// The ordinal of a molecule *is* the `Tier` of its formula. A worker
 /// executing a parent of tier `α` may nucleate a *decomposing* child
 /// (tier `β ≥ 1`) only when `β < α`. Creating a *leaf* (`β = 0`) is always
 /// permitted — it is the well-founded base case. The refusal therefore

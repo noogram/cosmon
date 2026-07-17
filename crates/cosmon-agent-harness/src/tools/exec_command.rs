@@ -46,7 +46,7 @@
 //! ```
 //!
 //! The shell can die between turns (oom, `exit`, segfault). The next
-//! `execute()` call detects the dead session via [`ExecSession::is_dead`],
+//! `execute()` call detects the dead session via `ExecSession::is_dead`,
 //! transparently respawns, and prepends `[shell restarted]` to that
 //! turn's output. Choice (a) of the briefing — transparent restart
 //! preserves the single-tool-call abstraction the model sees.

@@ -39,7 +39,7 @@
 //!
 //! Jobs' binary: **5 days out of 7 without opening Claude Code to pilot**.
 //! Niel's companion: **token ratio pilote/worker below 10:1**. The
-//! 7-day trial protocol is documented in [`docs/guides/inbox-trial.md`].
+//! 7-day trial protocol is documented in `docs/guides/inbox-trial.md`.
 
 #![allow(clippy::too_many_lines)]
 

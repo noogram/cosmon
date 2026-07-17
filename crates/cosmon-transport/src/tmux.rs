@@ -12,13 +12,13 @@
 //! across parallel `send_input` calls. The invariant this module now
 //! enforces is:
 //!
-//! > Every paste-buffer is minted by [`TmuxBackend::load_buffer`] with a
+//! > Every paste-buffer is minted by `TmuxBackend::load_buffer` with a
 //! > name derived from `WorkerId` + PID + an atomic counter, and is handed
-//! > back inside a [`TmuxBuffer`] RAII handle. The handle carries the
-//! > target session name; [`TmuxBackend::paste_buffer`] pastes into that
+//! > back inside a `TmuxBuffer` RAII handle. The handle carries the
+//! > target session name; `TmuxBackend::paste_buffer` pastes into that
 //! > session and consumes the handle. Drop deletes any unconsumed buffer.
 //!
-//! Because [`TmuxBuffer`] is `pub(crate)` and only [`TmuxBackend::load_buffer`]
+//! Because `TmuxBuffer` is `pub(crate)` and only `TmuxBackend::load_buffer`
 //! constructs one, cross-wiring a `(buffer, session)` pair is not just
 //! unlikely — it does not type-check.
 

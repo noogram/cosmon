@@ -17,7 +17,7 @@ Options:
           Path to configuration file
 
       --galaxy <NAME>
-          Galaxy name to drop into. Resolved via `~/.config/cosmon/galaxies.toml` ([`TomlGalaxyIndex`](cosmon_registry::TomlGalaxyIndex)).
+          Galaxy name to drop into. Resolved via `~/.config/cosmon/galaxies.toml` ([`TomlGalaxyIndex`]).
           
           When set, the resolved `Galaxy.path` becomes the store root (`<path>/.cosmon/state/`) for this nucleation. Without it, cosmon's usual walk-up discovery picks the galaxy from the current working directory.
 

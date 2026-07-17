@@ -3,7 +3,7 @@
 //! `ensemble` — read-only listing of molecules with optional filters.
 //!
 //! Fourth verb extracted under `cosmon_state::ops`. Read-only sibling
-//! of [`super::observe`]: where
+//! of [`super::observe`](fn@super::observe): where
 //! `observe` projects a single molecule, `ensemble` projects a filtered
 //! slice of the fleet's molecules.
 //!
@@ -72,7 +72,7 @@ impl OpsError for EnsembleError {
 ///
 /// Each field maps to a query parameter on `GET /v1/molecules`:
 ///
-/// - `status` → `?status=running` (parsed via [`MoleculeStatus::from_str`]).
+/// - `status` → `?status=running` (parsed via `MoleculeStatus::from_str`).
 /// - `kind` → `?kind=task` (parsed via [`MoleculeKind`]).
 /// - `tag_globs` → repeated `?tag=temp:hot&tag=deferred:*` (each entry is
 ///   a glob pattern matched against the molecule's tag set).

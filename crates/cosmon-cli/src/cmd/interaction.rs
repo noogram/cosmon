@@ -40,7 +40,7 @@ pub struct DecayArgs {
     /// Wire consecutive decay products with Blocks/BlockedBy links (A→B→C).
     #[arg(long)]
     chain: bool,
-    /// Explicit Blocks edges: product[i] blocks the given molecule IDs.
+    /// Explicit Blocks edges: the i-th product blocks the given molecule IDs.
     /// Repeatable; applied to each product in order.
     #[arg(long)]
     blocks: Vec<String>,

@@ -540,7 +540,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// The propel tier is deliberately omitted: `cs run` owns dispatch
 /// through the runtime, so propel nudges would double-fire.
 ///
-/// [`cs watch`]: crate::cmd::watch
+/// `cs watch` — see `crate::cmd::watch`
 fn render_loop(state_dir: &PathBuf, stop: &AtomicBool) -> anyhow::Result<()> {
     let store = FileStore::new(state_dir);
     let mut stdout = std::io::stdout();

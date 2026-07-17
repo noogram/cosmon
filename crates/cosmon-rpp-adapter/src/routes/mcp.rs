@@ -49,7 +49,7 @@
 //! Each of those is a distinct seam tracked back to delib-20260709-943e.
 //!
 //! **Per-tool scope enforcement has landed (F3-1, task-20260712-0294).**
-//! [`require_valid_bearer`] now classifies every request by its JSON-RPC
+//! `require_valid_bearer` now classifies every request by its JSON-RPC
 //! method + tool name and requires the *same* scope the REST twin does:
 //! `cosmon:molecule:write` for the mutating tool partition
 //! (`nucleate`/`freeze`/`thaw`/`collapse`/`decay`/`merge`/`transform`) and
@@ -82,7 +82,7 @@ use crate::AppState;
 use crate::RppRejectReason;
 
 /// Build the gated `/mcp` sub-router: the [`cosmon_mcp`] Streamable-HTTP
-/// service behind [`require_valid_bearer`].
+/// service behind `require_valid_bearer`.
 ///
 /// Mounted by [`crate::router`] with `.nest("/mcp", mcp_router(state))`.
 /// axum strips the `/mcp` prefix before the inner service sees the request;

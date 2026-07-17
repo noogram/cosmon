@@ -6,14 +6,14 @@
 //! to `events.jsonl` on every interactive invocation. Two pairings the
 //! downstream patrol cares about:
 //!
-//! - [`OperatorPresent`] / [`OperatorAbsent`] — chalk-mark for sessions
+//! - `OperatorPresent` / `OperatorAbsent` — chalk-mark for sessions
 //!   touching the CLI; carries [`PresenceSource`] so destructive-action
 //!   gating can apply the no-cloning theorem (ADR §F3).
-//! - [`OperatorSpark`] / [`OperatorVerdict`] — joined by `spark_id` to
+//! - `OperatorSpark` / `OperatorVerdict` — joined by `spark_id` to
 //!   derive **latency** of operator attention. The single most
 //!   important liveness property (einstein §4).
 //!
-//! Plus [`OperatorSigned`] for destructive verbs (`cs done`, `cs collapse`,
+//! Plus `OperatorSigned` for destructive verbs (`cs done`, `cs collapse`,
 //! `cs purge`, …) — observed today, gated tomorrow if the 2-week Mach
 //! test confirms the proxy works.
 //!
@@ -132,7 +132,7 @@ pub fn emit_operator_signed(
 /// asks the system for a verdict (`cs ask`, `cs spark`, inbound
 /// whisper, …).
 ///
-/// Pairs with [`emit_operator_verdict`] / [`emit_operator_refused`]
+/// Pairs with `emit_operator_verdict` / `emit_operator_refused`
 /// via `spark_id` so a downstream consumer can derive the
 /// spark→verdict latency. `content_hash` should be a content-
 /// addressed digest (BLAKE3 hex prefix is the conventional shape);

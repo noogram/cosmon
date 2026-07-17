@@ -4,7 +4,7 @@
 //!
 //! Today this binds one subcommand: `audit`. Walks `git ls-files` from
 //! the galaxy root, classifies every tracked path through
-//! [`ArtifactMap`], and reports per-genre counts plus any paths that
+//! `ArtifactMap`, and reports per-genre counts plus any paths that
 //! fail to classify.
 //!
 //! Exit codes:

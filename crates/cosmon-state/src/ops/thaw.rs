@@ -2,7 +2,7 @@
 
 //! `thaw` — `Frozen → Running` molecule-level transition.
 //!
-//! Symmetric pair with [`super::freeze`]. Idempotent in the
+//! Symmetric pair with [`super::freeze`](fn@super::freeze). Idempotent in the
 //! `Running → Running` direction (returns `already_thawed = true`),
 //! rejects molecules that are not Frozen and not Running.
 

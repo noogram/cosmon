@@ -58,7 +58,7 @@ pub struct Args {
 
     /// Galaxy name to drop into. Resolved via
     /// `~/.config/cosmon/galaxies.toml`
-    /// ([`TomlGalaxyIndex`](cosmon_registry::TomlGalaxyIndex)).
+    /// ([`TomlGalaxyIndex`]).
     ///
     /// When set, the resolved `Galaxy.path` becomes the store root
     /// (`<path>/.cosmon/state/`) for this nucleation. Without it,

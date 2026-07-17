@@ -27,7 +27,7 @@
 //!    `MessagesResponse`, `ToolSpec`) — the *Schema* word from the
 //!    ADR-102 four-word closure, deliberately not extracted to the
 //!    spine.
-//! 2. The [`AnthropicProvider`] HTTP adapter + its [`Spawn`] impl
+//! 2. The [`AnthropicProvider`] HTTP adapter + its `Spawn` impl
 //!    (in-process sentinel socket, ADR-100 dispatch-site contract).
 //! 3. The [`AnthropicLog`] `MessageLog` impl carrying I4 through the
 //!    Anthropic tool_use / tool_result content-block envelope (lives
@@ -48,7 +48,7 @@
 //!
 //! # Pattern: structural twin of [`crate::openai`]
 //!
-//! The module's shape (in-process HTTP, [`Spawn`] trait, IFBDD
+//! The module's shape (in-process HTTP, `Spawn` trait, IFBDD
 //! telemetry on `events.jsonl`) mirrors [`crate::openai`] verbatim.
 //! The differences are entirely HTTP-envelope:
 //!
@@ -208,7 +208,7 @@ pub(crate) fn fence_tool_result(tool_name: &str, content: &str) -> String {
 
 /// Errors the in-process agent loop surfaces. Each variant maps 1:1 to one of
 /// the silent-failure modes named in ADR-100 §5; the Stuck-event mapping in
-/// [`emit_silent_failure`] is the canonical IFBDD trail.
+/// `emit_silent_failure` is the canonical IFBDD trail.
 ///
 /// `#[non_exhaustive]` — keeps future
 /// SF classes additive without a major bump.
@@ -223,7 +223,7 @@ pub enum AnthropicError {
     ///
     /// Distinct from [`Self::QuotaExceeded`]: a rate-limit clears with
     /// time, a quota breach needs operator action. The classifier in
-    /// [`classify_anthropic_failure`] parses the response body to
+    /// `classify_anthropic_failure` parses the response body to
     /// disambiguate.
     #[error("anthropic rate limited (retry_after={retry_after:?})")]
     RateLimited {

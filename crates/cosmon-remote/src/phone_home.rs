@@ -145,7 +145,7 @@ fn write_jsonl<T: Serialize>(path: &Path, items: &[T]) {
 ///
 /// - any 503 (the universal first-tackle wall — Claude not logged);
 /// - any 502 (the PKCE/token-exchange failure class);
-/// - the [`BURST_MIN`]-th 4xx within [`BURST_WINDOW_SECS`] (the
+/// - the `BURST_MIN`-th 4xx within `BURST_WINDOW_SECS` (the
 ///   Jordan rafale — `recent_4xx` includes the current failure).
 #[must_use]
 pub fn is_abandon_predictor(status: u16, recent_4xx: usize) -> bool {

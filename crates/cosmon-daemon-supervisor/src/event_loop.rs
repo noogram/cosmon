@@ -22,7 +22,7 @@
 //!
 //! ## Supervised child table
 //!
-//! Inside the loop we keep a per-name [`ChildRecord`] — a flat enum over
+//! Inside the loop we keep a per-name `ChildRecord` — a flat enum over
 //! the typestate. The `Child<S>` typestate is great for compile-time
 //! transition checks, but a `HashMap<String, Child<S>>` can't be built
 //! (heterogeneous `S`). So we store the type-erased enum and materialize
@@ -190,7 +190,7 @@ impl Supervisor {
     /// Construct the supervisor from the paths the binary resolved.
     ///
     /// Performs first-boot state recovery (R3 mitigation) and opens every
-    /// adapter. The real event loop is driven by [`Self::run`].
+    /// adapter. The real event loop is driven by `Self::run`.
     ///
     /// # Errors
     ///

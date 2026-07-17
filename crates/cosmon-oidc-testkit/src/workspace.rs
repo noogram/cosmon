@@ -205,14 +205,14 @@ pub struct TenantPath {
 
 impl TenantPath {
     /// Plant a molecule that the library-direct
-    /// [`cosmon_state::ops::observe`] verb will resolve when called
+    /// `cosmon_state::ops::observe` verb will resolve when called
     /// against this tenant's `<state_dir>`.
     ///
     /// The state JSON is written to
     /// `<state_dir>/fleets/default/molecules/<id>/state.json` so the
-    /// production [`cosmon_filestore::FileStore::load_molecule`] walks
+    /// production `cosmon_filestore::FileStore::load_molecule` walks
     /// it without any fleet enumeration shortcut. The body is the
-    /// canonical [`MoleculeData`] shape — a minimal-but-decodable
+    /// canonical `MoleculeData` shape — a minimal-but-decodable
     /// envelope with sensible defaults — merged with any fields supplied
     /// in `state_value`. Most tests pass `{}` and rely on the defaults;
     /// the few that need to override (`status`, `formula`, `kind`) can
@@ -242,7 +242,7 @@ impl TenantPath {
     /// library-direct nucleate path can resolve it.
     ///
     /// `body` is the raw TOML text. Most tests pass the minimal
-    /// single-step formula returned by [`minimal_task_work_formula`].
+    /// single-step formula returned by `minimal_task_work_formula`.
     pub fn insert_formula(&self, name: &str, body: &str) -> std::io::Result<PathBuf> {
         let formulas_dir = self.root.join(".cosmon").join("formulas");
         std::fs::create_dir_all(&formulas_dir)?;

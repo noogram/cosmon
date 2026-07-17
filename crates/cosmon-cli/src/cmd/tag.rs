@@ -6,7 +6,7 @@
 //! removing a tag that is not present is a no-op.
 //!
 //! Library-first promotion: the CLI is a thin wrapper over
-//! [`cosmon_state::ops::tag`]. Both `cs tag` and the cs-api
+//! [`cosmon_state::ops::tag`](fn@cosmon_state::ops::tag). Both `cs tag` and the cs-api
 //! `POST /molecules/{id}/tag` route share the same in-process code path,
 //! so behaviour stays identical across surfaces and there is a single
 //! call site to audit for the single-writer hazard.

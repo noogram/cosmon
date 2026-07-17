@@ -175,7 +175,7 @@ pub struct ProjectConfig {
     pub attribution: AttributionConfig,
 }
 
-/// Per-project defaults for the molecule-level [`StepBudget`] circuit breaker
+/// Per-project defaults for the molecule-level `StepBudget` circuit breaker
 /// (THESIS Part XI).
 ///
 /// `cs nucleate` stamps the new molecule with a budget equal to
@@ -1657,7 +1657,7 @@ pub struct AdapterEntry {
     /// that forwards completions over HTTP — the `local` / `ollama` floor
     /// today (task-20260707-7d27, academy banc Mode C, hole #3).
     ///
-    /// Background: [`cosmon_provider::OpenAIProvider`] hard-codes a 60 s
+    /// Background: `cosmon_provider::OpenAIProvider` hard-codes a 60 s
     /// per-request timeout in every constructor, and the `local` floor
     /// spawn path never overrode it. On a single-GPU oracle
     /// (`ollama-g5`: 48 GB ≈ one 120 B model), a **cold** load of a
@@ -1775,7 +1775,7 @@ pub struct AdapterEntry {
     /// model-specific tool-fence selectors).
     ///
     /// Plumbed end-to-end from `.cosmon/config.toml` down to
-    /// [`cosmon_llama::Model::apply_chat_template_with_kwargs`]. The
+    /// `cosmon_llama::Model::apply_chat_template_with_kwargs`. The
     /// llama.cpp `llama_chat_apply_template` C API is **not** a Jinja
     /// interpreter (`include/llama.h`: "does not use a jinja parser"),
     /// so the FFI cannot consume these kwargs natively — but the

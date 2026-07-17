@@ -341,7 +341,7 @@ impl LoopbackServer {
     ///
     /// The whole loop is bounded by `timeout` (a browser that never returns does
     /// not hang the CLI forever), and each individual connection is read under
-    /// [`PER_CONNECTION_READ_TIMEOUT`] so a silent preconnect cannot wedge it.
+    /// `PER_CONNECTION_READ_TIMEOUT` so a silent preconnect cannot wedge it.
     ///
     /// A genuine authorization-server error redirect (`?error=…&state=<valid>`)
     /// terminates fast with [`OidcError::Server`]; a state that does not verify

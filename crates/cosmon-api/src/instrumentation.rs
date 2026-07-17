@@ -28,7 +28,7 @@
 //!   `cosmon_api::engine_call` target — picked up by whatever subscriber
 //!   the binary configured (the production binary uses
 //!   `tracing-subscriber` with an `EnvFilter`).
-//! - When [`AppState::resolve_instrumentation_path`] returns `Some`, the
+//! - When `AppState::resolve_instrumentation_path` returns `Some`, the
 //!   event is also appended as a single JSON line to that file. The
 //!   intended use is the empirical mini-rapport in `observations.md`:
 //!   point the path at a tempfile, exercise the API, then post-process
@@ -44,7 +44,7 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 
 /// How the cosmon engine was reached for this call. Today every route
-/// in `cs-api` is either a subprocess shell-out via [`crate::run_cs`]
+/// in `cs-api` is either a subprocess shell-out via `crate::run_cs`
 /// or a direct read of `.cosmon/state/...` JSON files; no in-process
 /// write of cosmon state happens (T3 introduces the first via `tag`
 /// promotion).

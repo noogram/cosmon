@@ -381,7 +381,7 @@ fn resolve_jwt(cli: &Cli) -> Result<String, CliError> {
     Ok(trimmed)
 }
 
-/// Errors surfaced by [`run`] / [`run_with`].
+/// Errors surfaced by `run` / [`run_with`].
 ///
 /// The variants map one-to-one onto the documented exit codes (see
 /// [`CliError::exit_code`]). The wire-shape callers rely on those

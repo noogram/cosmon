@@ -4,8 +4,8 @@
 //!
 //! ## Default mode (`--spec cosmon-run`, the historical behaviour)
 //!
-//! Reads `events.jsonl`, projects each [`EventV2`] envelope to an
-//! [`Action`] via [`cosmon_core::audit::Action::from_event`], replays
+//! Reads `events.jsonl`, projects each `EventV2` envelope to an
+//! `Action` via `cosmon_core::audit::Action::from_event`, replays
 //! the sequence through the pure [`cosmon_core::spec::SpecState`],
 //! and reports any drift between what the ledger claims happened and
 //! what the TLA+ `CosmonRun` spec sanctioned. Catches the c1cb
@@ -20,7 +20,7 @@
 //!
 //! * `cosmon-run` (default) — historical behaviour above.
 //! * `mycelial-gate` — witness diversity gate on
-//!   [`AttestorEventV1::Absorption`].
+//!   `AttestorEventV1::Absorption`.
 //! * `attestor-graph` — temporal sanity on the attestor lifecycle.
 //! * `witness-freshness` — `ClusterMetadata` snapshot freshness window.
 //!

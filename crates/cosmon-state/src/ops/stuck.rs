@@ -7,7 +7,7 @@
 //! non-terminal molecule to `Frozen` and emits a `MoleculeStuck` event
 //! with the operator-supplied reason.
 //!
-//! Distinct from [`super::freeze`]: `stuck` always records a `reason`
+//! Distinct from [`super::freeze`](fn@super::freeze): `stuck` always records a `reason`
 //! (mandatory) and emits a `MoleculeStuck` event; `freeze` is the
 //! symmetric pair with `thaw` and the reason is optional.
 

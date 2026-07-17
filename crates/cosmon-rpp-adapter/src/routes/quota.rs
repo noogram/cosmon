@@ -20,7 +20,7 @@
 //!
 //! # Anti-amplification
 //!
-//! [`IngressRateLimiter::current_state`] is a pure read — calling
+//! `IngressRateLimiter::current_state` is a pure read — calling
 //! `/v1/quota` does **not** consume a token. The route is, however,
 //! still gated by the standard admission boundary (clauses a–d) so a
 //! tenant who is globally killed or denied still gets the expected
@@ -287,7 +287,7 @@ fn _unused() {
 /// - re-validates the JWT through [`JwtVerifier::validate`] — the cost
 ///   is a signature verify against an in-RAM JWKS, well under a
 ///   millisecond,
-/// - on success, queries [`IngressRateLimiter::current_state`]
+/// - on success, queries `IngressRateLimiter::current_state`
 ///   (a pure read — see the no-amplification invariant pinned by
 ///   `current_state_does_not_consume`),
 /// - injects the three headers into the response.

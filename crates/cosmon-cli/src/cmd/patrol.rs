@@ -7,7 +7,7 @@
 //! molecules, and emits a [`PatrolReport`] with corrective recommendations.
 //!
 //! When `--respawn` is passed, patrol doesn't just mark stale workers — it
-//! actually re-creates their tmux sessions via [`spawn_claude_session`],
+//! actually re-creates their tmux sessions via `spawn_claude_session`,
 //! bringing dead workers back to life.
 //!
 //! See THESIS.md Part VII for the two-layer patrol design rationale.

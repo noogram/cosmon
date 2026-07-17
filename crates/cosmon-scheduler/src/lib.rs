@@ -20,7 +20,7 @@
 //!
 //! - The TOML schema ([`Config`], [`SchedulerConfig`], [`Patrol`]) with
 //!   XOR validation on `interval_seconds` vs `cron`.
-//! - A pure [`tick`] evaluator that returns one [`Decision`] per patrol.
+//! - A pure [`tick`](tick()) evaluator that returns one [`Decision`] per patrol.
 //! - **Interval accounting** + **POSIX 5-field cron matching**
 //!   ([`CronExpr`]) gated on the prior [`SchedulerState`].
 //! - **Atomic [`SchedulerState`] I/O** (write-to-`.tmp` + rename).

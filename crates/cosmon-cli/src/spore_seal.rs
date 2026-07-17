@@ -8,18 +8,18 @@
 //! implementations the core declares as traits, so `cs spore run` (N5) can wire
 //! a real TLC run and a persistent verdict cache:
 //!
-//! * [`RealTlcRunner`] - locates a JRE + `tla2tools.jar` and runs TLC against
+//! * `RealTlcRunner` - locates a JRE + `tla2tools.jar` and runs TLC against
 //!   the seal's `.tla` module and `.cfg` config. **Detection is honest**: when
-//!   no JRE or no `tla2tools.jar` is found, [`available`](RealTlcRunner::available)
+//!   no JRE or no `tla2tools.jar` is found, `available`
 //!   returns `false`, the core reports the seal as unchecked, and the default
 //!   gate refuses - it never silently passes.
-//! * [`FileSealVerdictCache`] - persists the `proof_hash -> passed` verdict
+//! * `FileSealVerdictCache` - persists the `proof_hash -> passed` verdict
 //!   under `.cosmon/cache/seal/<hash>`, keyed by the BLAKE3 of the proof content
 //!   so an edited proof is a cache miss by construction.
 //!
 //! Locating `tla2tools.jar`, in order: the `TLA2TOOLS_JAR` environment variable
 //! (a full path to the jar), else the common install paths probed by
-//! [`locate_tla2tools`]. The JRE is found via the `JAVA_HOME` environment
+//! `locate_tla2tools`. The JRE is found via the `JAVA_HOME` environment
 //! variable or a `java` binary on `PATH`.
 
 use std::path::{Path, PathBuf};
@@ -78,9 +78,9 @@ fn locate_tla2tools() -> Option<PathBuf> {
 
 /// A [`TlcRunner`] that spawns a real JRE + TLC.
 ///
-/// Constructed via [`detect`](RealTlcRunner::detect), which resolves the JRE and
+/// Constructed via `detect`, which resolves the JRE and
 /// `tla2tools.jar` once. If either is missing the runner reports
-/// [`available`](RealTlcRunner::available) `= false` and the core stays honest:
+/// `available` `= false` and the core stays honest:
 /// the seal is reported unchecked, never verified.
 #[derive(Debug, Clone)]
 pub struct RealTlcRunner {

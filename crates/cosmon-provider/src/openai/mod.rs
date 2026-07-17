@@ -25,7 +25,7 @@
 //!    `ToolCall`, `ChatResponse`, …) — the *Schema* word from the
 //!    ADR-102 four-word closure, deliberately not extracted to the
 //!    spine until a third schema (Gemini, Mistral) lands.
-//! 2. The [`OpenAIProvider`] HTTP adapter + its [`Spawn`] impl
+//! 2. The [`OpenAIProvider`] HTTP adapter + its `Spawn` impl
 //!    (in-process sentinel socket, ADR-100 dispatch-site contract).
 //! 3. The [`OpenAILog`] `MessageLog` impl carrying I4 through the
 //!    OpenAI `role:"tool"` envelope (now factored into the
@@ -43,7 +43,7 @@
 //! # Two-shape impedance
 //!
 //! Unlike `claude` / `aider` (subprocess + tmux session), this adapter
-//! runs the agent loop **in-process**. The [`Spawn`] trait was drawn
+//! runs the agent loop **in-process**. The `Spawn` trait was drawn
 //! against tmux semantics; this module fits into it by exposing a
 //! sentinel `socket = "openai-inprocess"` on the returned
 //! [`WorkerHandle`], which is the structural marker the tackle dispatch
@@ -71,7 +71,7 @@
 //! reveals which silent-failure class actually fired. The mapping
 //! lives in [`run_agent_loop`] — the spine returns a typed
 //! [`cosmon_agent_harness::HarnessError`], the wrapper maps each
-//! variant onto its SF class and calls [`emit_silent_failure`].
+//! variant onto its SF class and calls `emit_silent_failure`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -294,7 +294,7 @@ fn retry_hint_and_reason(err: &OpenAiError) -> (Option<Duration>, &'static str) 
 
 /// Errors the in-process agent loop surfaces. Each variant maps 1:1 to one of
 /// the silent-failure modes named in ADR-100 §5; the Stuck-event mapping in
-/// [`emit_silent_failure`] is the canonical IFBDD trail.
+/// `emit_silent_failure` is the canonical IFBDD trail.
 ///
 /// `#[non_exhaustive]` — keeps future
 /// SF classes additive without a major bump.
@@ -341,7 +341,7 @@ pub enum OpenAiError {
     ///
     /// Distinct from [`Self::QuotaExceeded`]: a rate-limit clears with
     /// time, a quota breach needs operator action. The classifier in
-    /// [`classify_openai_failure`] parses the response body to
+    /// `classify_openai_failure` parses the response body to
     /// disambiguate.
     #[error("openai rate limited (retry_after={retry_after:?})")]
     RateLimited {
@@ -353,7 +353,7 @@ pub enum OpenAiError {
     /// `exceeded_current_quota_error` (Moonshot), `insufficient_quota`
     /// (OpenAI), `account_suspended`, `billing_hard_limit_reached`, or
     /// the message text carries one of the equivalent textual signals
-    /// (see [`is_quota_signal`]).
+    /// (see `is_quota_signal`).
     ///
     /// Operator-action required: retry loops must not re-dispatch on
     /// this variant. The harness spine surfaces this through
@@ -432,7 +432,7 @@ pub enum OpenAiError {
     /// # DEPRECATED — scheduled removal (delib-20260707-df9b M4)
     ///
     /// Since M2 landed own-side streaming tool-call extraction
-    /// ([`ChatRequest::stream`] is now always `true`), ollama performs **no**
+    /// (`ChatRequest::stream` is now always `true`), ollama performs **no**
     /// server-side tool-call parse, so it can no longer emit the mode-C HTTP
     /// 500 that produces this variant. The variant and its recovery arm
     /// (`is_tool_parse_error_signal` / `tool_parse_correction_message` in
@@ -488,7 +488,7 @@ impl OpenAiError {
 /// **Fields are sealed.**
 /// `api_key` is a [`Secret`] so every implicit `{:?}` / `{}` format
 /// site prints `"<redacted>"`; `base_url`, `model`, and `timeout` are
-/// private so a caller cannot bypass [`normalize_base_url`] by
+/// private so a caller cannot bypass `normalize_base_url` by
 /// field-mutating `base_url` directly. The builder API (`new` /
 /// `with_base_url` / `with_timeout`) is the only mutation path.
 #[derive(Clone)]
@@ -613,9 +613,9 @@ impl OpenAIProvider {
 
     /// Override the tool declarations advertised to the model.
     ///
-    /// Builder-style, single mutation path (the [`tools`](Self::tools)
+    /// Builder-style, single mutation path (the `tools`
     /// field is private). The cs-pilot driver passes
-    /// [`cosmon_ops_tools::read_only_registry`]`().declarations()` so the
+    /// `cosmon_ops_tools::read_only_registry``().declarations()` so the
     /// local model is advertised the read-only cosmon-ops tools it will be
     /// allowed to call — keeping advertisement and the
     /// [`cosmon_agent_harness::InteractiveSession`]'s dispatch registry in
@@ -674,7 +674,7 @@ impl OpenAIProvider {
     }
 
     /// Borrow the configured base URL. Read-only — mutation goes
-    /// through [`Self::with_base_url`] so [`normalize_base_url`] stays
+    /// through [`Self::with_base_url`] so `normalize_base_url` stays
     /// authoritative.
     #[must_use]
     pub fn base_url(&self) -> &str {
@@ -1372,7 +1372,7 @@ fn tool_specs_from(decls: &[ToolDeclaration]) -> Vec<ToolSpec<'static>> {
 /// chunk with U+FFFD before it can be joined to its continuation. That is a
 /// documented cause of tool-call parse failures.
 ///
-/// This reader buffers the *raw bytes* instead. Each [`push`](Self::push)
+/// This reader buffers the *raw bytes* instead. Each `push`
 /// appends the chunk, splits on the **last** `\n` byte, decodes only the
 /// complete prefix — which always ends on a codepoint boundary because `\n`
 /// (0x0A) can never appear inside a multibyte UTF-8 sequence — and retains the
@@ -1712,7 +1712,7 @@ async fn consume_chat_completion(
 /// 2. POSTs with [`reqwest::Client`].
 /// 3. Parses the envelope; on tool calls, the harness executes
 ///    whitelisted tools against `work_dir` and re-injects results
-///    through [`OpenAILog::append_tool_result`].
+///    through `OpenAILog::append_tool_result`.
 /// 4. Loops until `finish_reason == "stop"` (or the LOC-budget cap of 8
 ///    iterations — a loud upper bound, not a silent rate-limiter).
 ///

@@ -139,7 +139,7 @@ const STRIP_VARS_ARR: [&str; STRIP_VARS_LEN] = assemble_strip_vars();
 /// next build; there is no second list to keep in sync. The
 /// adapter-only leg (galaxy / molecule / capability / instrumentation
 /// vars the resolver knows nothing about) lives in
-/// [`ADAPTER_LOCAL_STRIP_VARS`].
+/// `ADAPTER_LOCAL_STRIP_VARS`.
 ///
 /// **Pass-through.** Three vars are deliberately absent — they are
 /// *set* by the envelope: `COSMON_API_REQUEST`,

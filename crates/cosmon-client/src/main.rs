@@ -32,7 +32,7 @@ use tracing_subscriber::EnvFilter;
 #[derive(Debug, Parser)]
 #[command(name = "cs-client", version, about = "Thin cosmon client over HTTPS")]
 struct Cli {
-    /// Remote cosmon-saas server URL (e.g. https://cosmon-demo.democorp.dev).
+    /// Remote cosmon-saas server URL (e.g. `https://cosmon-demo.democorp.dev`).
     #[arg(long, global = true)]
     server: Option<String>,
 

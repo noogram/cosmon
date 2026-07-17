@@ -64,7 +64,7 @@ struct AwaitParams {
 /// Registered **only** for capability-bearing molecules (see
 /// [`crate::tool::default_registry_with_operator_block`]). Carries the
 /// `cs` binary name so tests can inject a stub; production uses
-/// [`DEFAULT_CS_BIN`].
+/// `DEFAULT_CS_BIN`.
 #[derive(Debug, Clone)]
 pub struct AwaitOperator {
     cs_bin: String,

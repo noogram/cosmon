@@ -7,7 +7,7 @@
 //! canon this crate's registry is bijection-tested against).
 //!
 //! This crate is the runtime half of the iso-verb pair (the proc-macro half is
-//! [`cosmon-thin-macro`]). It exposes:
+//! `cosmon-thin-macro`). It exposes:
 //!
 //! - The [`IsoVerb`] trait — the compile-time contract a function annotated
 //!   with `#[verb]` adheres to.

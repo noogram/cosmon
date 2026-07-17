@@ -2,7 +2,7 @@
 
 //! `ensemble` operation tool — read-only filtered backlog snapshot.
 //!
-//! Wraps the [`cosmon_state::ops::ensemble`] verb as a
+//! Wraps the [`cosmon_state::ops::ensemble`](fn@cosmon_state::ops::ensemble) verb as a
 //! [`cosmon_agent_harness::Tool`]. The model emits an optional filter
 //! (`status` / `kind` / `tags` / `fleet`); the tool returns the
 //! byte-stable [`cosmon_state::ops::EnsembleJson`] index — the slim

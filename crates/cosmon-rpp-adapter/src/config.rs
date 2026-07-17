@@ -267,7 +267,7 @@ impl RppConfig {
     ///    `tackle-503` fix that re-poses `COSMON_STATE_DIR` for the `cs`
     ///    subprocess.
     /// 2. The `state_dir` key from `rpp.toml`.
-    /// 3. `$HOME/.cosmon/state` ([`default_state_dir`]).
+    /// 3. `$HOME/.cosmon/state` (`default_state_dir`).
     ///
     /// The helper is passive: when `COSMON_STATE_DIR` is unset (or empty)
     /// the resolved path is byte-identical to the legacy `rpp.toml`/default
@@ -288,7 +288,7 @@ impl RppConfig {
             .unwrap_or_else(default_state_dir)
     }
 
-    /// Which layer supplied the resolved [`resolved_state_dir`], as a
+    /// Which layer supplied the resolved `resolved_state_dir`, as a
     /// static label for the `boot.paths` diagnostic. The `state_dir`
     /// divergence was originally diagnosed by reading that log line and
     /// noticing it disagreed with the compose env; surfacing the winning

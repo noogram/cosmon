@@ -11,9 +11,9 @@
 //!
 //! - [`ProviderId`] remains the persisted discriminant (matched on for
 //!   routing, quota accounting, audit logs).
-//! - [`claude_code`], [`claude_api`], [`gemini`], [`ollama`], [`llama`]
+//! - `claude_code`, [`claude_api`], [`gemini`], [`ollama`], `llama`
 //!   (feature-gated) are the concrete adapters.
-//! - [`degradation`] answers *"which cosmon verb-classes can I trust this
+//! - `degradation` answers *"which cosmon verb-classes can I trust this
 //!   backend with?"* — pure query methods on [`Capabilities`], the
 //!   executable twin of the ADR-118 graceful-degradation matrix.
 //!

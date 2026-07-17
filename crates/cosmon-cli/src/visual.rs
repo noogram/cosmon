@@ -16,7 +16,7 @@
 //! - **♥ (MH) column — LIFECYCLE.** Where the molecule is in its own life:
 //!   running, pending, blocked, frozen, terminal, ghost, drift. Computed
 //!   here via [`classify`]; depends only on the status's
-//!   [`Phase`](cosmon_core::molecule::Phase), `heartbeat`, `has_blockers`,
+//!   [`Phase`], `heartbeat`, `has_blockers`,
 //!   and the structural alarm flags `ghost`/`drift`. `classify` reads the
 //!   phase rather than re-deciding the status alphabet for itself — it is
 //!   one of six sites that each used to own a private classification of
@@ -135,7 +135,7 @@ impl RowKind {
     /// glance without reading text: 💤 means dormant-in-lifecycle (a
     /// pending molecule at rest in its own cycle), 👻 means ghost,
     /// 🧊 means frozen. Monospace-safe widths are respected by
-    /// [`crate::cmd::peek_tui::pad_to_visible_width`] downstream.
+    /// `crate::cmd::peek_tui::pad_to_visible_width` downstream.
     ///
     /// Note: the deprecated `Parked` / `Hot` variants still carry
     /// transitional glyphs for back-compat but are never produced by

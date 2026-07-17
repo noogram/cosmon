@@ -7,7 +7,7 @@
 //! Pipeline:
 //!
 //! 1. Extract `Authorization: Bearer <jwt>`; 401 if missing.
-//! 2. Validate JWT (clause a) → [`ValidatedJwt`].
+//! 2. Validate JWT (clause a) → `ValidatedJwt`.
 //! 3. **No scope check.** A valid JWT is the whole gate — this is the
 //!    counterpart of `cs whoami`, not a state-mutating verb.
 //! 4. Resolve `(iss, sub) → noyau` via the sealed nucleon map. Absent

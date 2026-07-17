@@ -6,7 +6,7 @@
 //! state. It is serialized as TOML and stored in `.cosmon/molecules/`, where
 //! it can be committed to git. When a collaborator clones the repo and runs
 //! `cs nucleate --from .cosmon/molecules/`, the declarations are hydrated
-//! into runtime [`MoleculeData`](cosmon_state::MoleculeData) instances.
+//! into runtime `MoleculeData` instances.
 //!
 //! This separation follows the thesis principle: "Desired state is persisted;
 //! observed state is derived from reality."

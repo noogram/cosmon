@@ -45,7 +45,7 @@
 //!   `.cosmon/state/runtime-trace.jsonl` *before* the side-effect, so an
 //!   audit can reconstruct what the loop saw and what it decided. The four
 //!   `RuntimeReadDecideWrite` / `RuntimeShelledOut` / `RuntimeMergeDispatched`
-//!   / `RuntimeWorktreeClaimed` variants from [`cosmon_core::EventV2`]
+//!   / `RuntimeWorktreeClaimed` variants from `cosmon_core::EventV2`
 //!   travel through the same trace stream.
 //!
 //! [adr]: https://github.com/noogram/cosmon/blob/main/docs/adr/095-resident-runtime-ifbdd-path.md
@@ -90,7 +90,7 @@ pub enum ResidentError {
 
     /// `cs tackle` refused to dispatch a **briefless** molecule (exit
     /// [`cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH`], the
-    /// task-20260711-919a guard). Unlike a generic [`CsInvocation`] failure,
+    /// task-20260711-919a guard). Unlike a generic `CsInvocation` failure,
     /// this refusal is **permanent**: the molecule carries no operator intent
     /// (its formula's required, default-free variables are missing or blank),
     /// so `cs tackle` will refuse it identically on every retry. The resident
@@ -400,11 +400,11 @@ pub trait ResidentScheduler: Send {
     /// [`next_decisions`](Self::next_decisions) optimistically records a
     /// molecule as dispatched *the moment it emits the decision*, so that
     /// re-ticking on the same (up-to-one-poll-stale) snapshot does not
-    /// double-dispatch. But the loop sits a [`recheck_tackle_candidate`] gate
+    /// double-dispatch. But the loop sits a `recheck_tackle_candidate` gate
     /// **between** the decision and the shell-out (anti-preemption lease),
     /// and that gate can *skip* the dispatch — on a human
     /// claim, a status flip, or, under CPU contention, a transient
-    /// `cs observe` spawn/read failure ([`TackleRecheck::SkipReadFailed`]).
+    /// `cs observe` spawn/read failure (`TackleRecheck::SkipReadFailed`).
     /// The `cs tackle` shell-out itself can also fail transiently.
     ///
     /// Without a way to retract the optimistic mark, a skipped molecule is

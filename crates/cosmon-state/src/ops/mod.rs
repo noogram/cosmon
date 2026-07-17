@@ -10,8 +10,8 @@
 //!
 //! Today the namespace contains the V0 read-only + V1 mutation cuts
 //! exposed over the §8j RPP boundary:
-//! [`observe`], [`tag`], [`nucleate`],
-//! [`ensemble`] / [`collapse`] / [`freeze`] / [`thaw`] / [`stuck`].
+//! [`observe`](fn@observe), [`tag`](fn@tag), [`nucleate`](fn@nucleate),
+//! [`ensemble`](fn@ensemble) / [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) / [`stuck`](fn@stuck).
 //!
 //! Every verb-level error implements [`error::OpsError`] — the wire
 //! contract that lets the cs-cli, the cs-api, and the out-of-process

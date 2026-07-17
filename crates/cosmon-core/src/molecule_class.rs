@@ -2,9 +2,9 @@
 
 //! Molecule class — operational tier of a molecule.
 //!
-//! Orthogonal to [`MoleculeKind`](crate::kind::MoleculeKind) (the
+//! Orthogonal to `MoleculeKind` (the
 //! cognitive nature — *what* a molecule represents) and to
-//! [`Formula`](crate::formula::Formula) (the execution recipe — *how*
+//! `Formula` (the execution recipe — *how*
 //! it runs). Class names the *audit posture* under which the molecule
 //! is dispatched.
 //!
@@ -25,7 +25,7 @@ use crate::id::MoleculeId;
 /// or a stress-test of a pre-committed prior ([`StressTest`]); the same
 /// formula runs under different audit postures depending on this flag.
 ///
-/// Defaults to [`Standard`](Self::Standard) for legacy molecules and any
+/// Defaults to `Standard` for legacy molecules and any
 /// nucleation that does not pass `--class`.
 ///
 /// [`Standard`]: Self::Standard
@@ -91,13 +91,13 @@ impl FromStr for MoleculeClass {
 ///
 /// Replaces the historical free-text `dispatch-decision.md` with a
 /// structured record linked to the event log via
-/// [`EventV2::SealBypassed`](crate::event_v2::EventV2::SealBypassed).
+/// `EventV2::SealBypassed`.
 /// Persisted at `<molecule_dir>/bypass-receipt.json`.
 ///
 /// The receipt is **permanent** — re-running a molecule whose lineage
 /// contains a bypass receipt triggers cross-galaxy escalation (Layer 3,
 /// ADR-085 §4). It is a *trace*, not a lock, in the same sense as
-/// [`BriefingSeal`](cosmon_state::BriefingSeal): no chmod, no PKI. The
+/// `BriefingSeal`: no chmod, no PKI. The
 /// audit value comes from the event-log chain, not from the JSON file
 /// alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,7 +119,7 @@ pub struct BypassReceipt {
     /// Identifier of the layer-1 precondition that was bypassed
     /// (e.g. `"prior-seal-missing"`). Stringly-typed for the same
     /// wire-stability rationale as
-    /// [`MergeResult::Other`](crate::event_v2::MergeResult::Other).
+    /// `MergeResult::Other`.
     pub bypassed_condition: String,
 }
 
