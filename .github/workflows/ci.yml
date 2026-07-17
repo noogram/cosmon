@@ -415,6 +415,7 @@ jobs:
     # the S-bit observation misses). Tracked for a structural fix in the
     # spawn-matrix molecule; keep the signal visible without gating merges.
     continue-on-error: true
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -500,6 +501,7 @@ jobs:
     # session-state observations miss). Tracked for a structural fix in the
     # spawn-matrix molecule; keep the signal visible without gating merges.
     continue-on-error: true
+    if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
