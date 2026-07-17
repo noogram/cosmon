@@ -50,7 +50,7 @@ fn setup_project(tmp: &std::path::Path, config_body: &str) -> std::path::PathBuf
     state_dir
 }
 
-/// Two vendor-default seats that both resolve to the OpenAI family — the
+/// Two vendor-default seats that both resolve to the `OpenAI` family — the
 /// committee *names* two readers but delivers one endpoint. Floor of 2 is not
 /// met; `--check` must fail closed.
 const COLLIDING_CONFIG: &str = "\
@@ -68,7 +68,7 @@ additional_readers = [\"reader_a\", \"reader_b\"]
 min_distinct_provider_endpoints = 2
 ";
 
-/// Two seats resolving to genuinely distinct families (Anthropic + OpenAI) —
+/// Two seats resolving to genuinely distinct families (`Anthropic` + `OpenAI`) —
 /// the committee is diverse, the lint stays green.
 const DISTINCT_CONFIG: &str = "\
 [project]

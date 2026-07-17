@@ -474,8 +474,10 @@ mod tests {
         // mounts the persistent volume at another and exports
         // COSMON_STATE_DIR to match. The env must win so state lands on
         // the mounted volume, not the baked (ephemeral/RO) path.
-        let mut cfg = RppConfig::default();
-        cfg.state_dir = Some(PathBuf::from("/cosmon/.cosmon/state"));
+        let cfg = RppConfig {
+            state_dir: Some(PathBuf::from("/cosmon/.cosmon/state")),
+            ..Default::default()
+        };
         let resolved = cfg.resolved_state_dir_from(Some(PathBuf::from("/var/lib/cosmon-state")));
         assert_eq!(resolved, PathBuf::from("/var/lib/cosmon-state"));
     }
@@ -484,8 +486,10 @@ mod tests {
     fn state_dir_falls_back_to_rpp_toml_when_env_absent() {
         // Passive helper: no COSMON_STATE_DIR → byte-identical to the
         // legacy rpp.toml behaviour (aligned deployments are unaffected).
-        let mut cfg = RppConfig::default();
-        cfg.state_dir = Some(PathBuf::from("/cosmon/.cosmon/state"));
+        let cfg = RppConfig {
+            state_dir: Some(PathBuf::from("/cosmon/.cosmon/state")),
+            ..Default::default()
+        };
         let resolved = cfg.resolved_state_dir_from(None);
         assert_eq!(resolved, PathBuf::from("/cosmon/.cosmon/state"));
     }

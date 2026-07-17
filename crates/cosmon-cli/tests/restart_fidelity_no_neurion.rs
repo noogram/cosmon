@@ -287,21 +287,33 @@ fn copy_dir(from: &Path, to: &Path) {
 fn neurion_paths_outside_sandbox(sandbox: &Path) -> Vec<PathBuf> {
     let mut hits = Vec::new();
     if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        let neurion_dir = home.join(".local/share/neurion");
-        let hint = neurion_dir.join("auto-register.jsonl");
+        let hint = PathBuf::from(home)
+            .join(".local/share/neurion")
+            .join("auto-register.jsonl");
+        // The real-home hint file is SHARED global state: on Linux
+        // `dirs::data_dir()` is `~/.local/share`, so any sibling test in the
+        // same `cargo test` job that runs `cs` unsandboxed pre-creates it.
+        // Flagging on mere existence made this test a false-positive on that
+        // pollution (it never fired on macOS, where data_dir is elsewhere).
+        //
+        // Attribute precisely instead: a leak from THIS test's cs invocations
+        // would append a hint line whose `local_path` points inside OUR
+        // sandbox. Match on that; a sibling's hint (a different sandbox / the
+        // repo) is correctly ignored.
         let canonical_sandbox = sandbox
             .canonicalize()
             .unwrap_or_else(|_| sandbox.to_path_buf());
-        if hint.exists() {
-            // The file may pre-exist on the developer's host. We only
-            // flag it as a leak if its mtime moved during this test
-            // run — but that signal is brittle. Instead, just record
-            // the path; the assertion site decides what to do.
-            if let Ok(canonical_hint) = hint.canonicalize() {
-                if !canonical_hint.starts_with(&canonical_sandbox) {
-                    hits.push(canonical_hint);
-                }
+        let needles = [
+            sandbox.to_string_lossy().into_owned(),
+            canonical_sandbox.to_string_lossy().into_owned(),
+        ];
+        if let Ok(content) = fs::read_to_string(&hint) {
+            if content.lines().any(|line| {
+                needles
+                    .iter()
+                    .any(|n| !n.is_empty() && line.contains(n.as_str()))
+            }) {
+                hits.push(hint);
             }
         }
     }
