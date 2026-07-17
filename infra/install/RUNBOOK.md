@@ -34,14 +34,15 @@ Nothing installs until there is a public release to install *from*.
    gh release view v0.1.0 --repo noogram/cosmon --json assets \
      --jq '.assets[].name' | sort
    # expect: SHA256SUMS + cosmon-0.1.0-{aarch64-apple-darwin,x86_64-apple-darwin,
-   #         x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu}{,.tar.gz} (+ .sig/.pem/.spdx.json)
+   #         x86_64-unknown-linux-musl,aarch64-unknown-linux-musl}{,.tar.gz} (+ .sig/.pem/.spdx.json)
    ```
 
-> `linux-arm64` (`aarch64-unknown-linux-gnu`) is **cross-compiled** on the
-> x86_64 ubuntu runner (the workflow installs `gcc-aarch64-linux-gnu` and points
-> cargo's linker at it). This leg is exercised for the first time by the first
-> real tag push — watch that matrix leg on the first release and confirm its
-> tarball is in `SHA256SUMS`.
+> The Linux legs are **static musl** (`*-unknown-linux-musl`) — no glibc/libdbus
+> runtime dep, portable to any Linux. `linux-arm64` (`aarch64-unknown-linux-musl`)
+> is **cross-compiled** on the x86_64 ubuntu runner via `cargo-zigbuild` (zig is
+> both the C toolchain and the aarch64 cross-linker). This leg is exercised for
+> the first time by the first real tag push — watch that matrix leg on the first
+> release and confirm its tarball is in `SHA256SUMS`.
 
 At this point `install.sh` already works against the release directly — you can
 smoke it before the Worker is even deployed:

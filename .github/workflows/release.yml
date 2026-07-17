@@ -347,7 +347,7 @@ jobs:
           owner="${{ github.repository_owner }}"
 
           declare -A sha
-          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-gnu; do
+          for target in aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl; do
             f="$(find artifacts -name "cosmon-${version}-${target}.tar.gz.sha256" | head -1)"
             sha[$target]="$(awk '{print $1}' "$f")"
           done
@@ -358,7 +358,7 @@ jobs:
             --owner   "$owner" \
             --sha-arm-macos    "${sha[aarch64-apple-darwin]}" \
             --sha-x86-macos    "${sha[x86_64-apple-darwin]}" \
-            --sha-x86-linux    "${sha[x86_64-unknown-linux-gnu]}" \
+            --sha-x86-linux    "${sha[x86_64-unknown-linux-musl]}" \
             > tap/Formula/cosmon.rb
           echo "::group::Rendered formula"
           cat tap/Formula/cosmon.rb

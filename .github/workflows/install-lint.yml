@@ -3,12 +3,18 @@ name: Install lint
 # Guards the public install one-liner infra (infra/install/, child C3 of
 # delib-20260711-8d00). None of this is in the Rust workspace, so cargo's gates
 # never see it — a broken uname→target map or a shell-syntax slip in install.sh
-# would ship silently. This job makes the two most fragile things falsifiable:
+# would ship silently. This job makes the fragile things falsifiable:
 #
 #   1. install.sh parses (sh -n) and passes shellcheck;
 #   2. the platform-detection table (install.sh --self-test) is correct —
 #      revert a mapping line and this reddens;
-#   3. the apex Worker typechecks and its dry-run build bundles install.sh.
+#   3. the apex Worker typechecks and its dry-run build bundles install.sh;
+#   4. the REAL one-liner installs `cs` end-to-end from the latest published
+#      release on linux-x64 AND macOS, and `cs --version` runs — the `live`
+#      job below. This is the gate that was MISSING when a uname→target triple
+#      mismatch (Linux resolved `unknown-linux-gnu` while every release ships
+#      `unknown-linux-musl`) shipped and broke install for every Linux user:
+#      lint-only checks never exercised the script against a real release.
 #
 # It does NOT deploy, tag, or flip anything — pure verification. All third-party
 # Actions pinned by 40-char commit SHA (delib-20260425-39c1).
@@ -23,6 +29,10 @@ on:
     paths:
       - "infra/install/**"
       - ".github/workflows/install-lint.yml"
+  # Weekly: catch release-SIDE drift (a new release that stops matching what
+  # install.sh resolves) even when no PR touches infra/install/.
+  schedule:
+    - cron: "0 12 * * 1"
 
 permissions:
   contents: read
@@ -57,3 +67,55 @@ jobs:
         run: npm run typecheck
       - name: Dry-run build (bundles install.sh as text; no deploy)
         run: npm run dry-run
+
+  # ── the gate that was missing ────────────────────────────────────────────────
+  # Exercise the REAL one-liner end-to-end against the latest PUBLISHED release,
+  # on both Linux x64 and macOS. install.sh resolves a target triple from uname,
+  # then requires a matching tarball in the release's SHA256SUMS (install.sh
+  # line ~193: `die "no ${target} tarball in this release's SHA256SUMS"`). If the
+  # resolved triple does not match what the release actually ships, THIS reddens
+  # — reproducing exactly the stranger failure the lint-only jobs above cannot.
+  #
+  # Gated on a *publicly fetchable* latest release so it stays green during the
+  # staging window (repo still private / no release yet): the gate uses the same
+  # unauthenticated path install.sh itself uses, so it only runs the live install
+  # when a real stranger could — no false reds, no false greens.
+  live:
+    name: install.sh — live install from latest release (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      # Repo whose GitHub Releases the one-liner installs from. Defaults to this
+      # repo so CI exercises our own release; override to noogram/cosmon if the
+      # public releases live elsewhere post-flip.
+      COSMON_INSTALL_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Gate on a publicly-fetchable latest release
+        id: gate
+        run: |
+          set -eu
+          url="https://github.com/${COSMON_INSTALL_REPO}/releases/latest/download/SHA256SUMS"
+          if curl -fsSL --proto '=https' --tlsv1.2 -o /dev/null "$url"; then
+            echo "Latest release SHA256SUMS is publicly fetchable — running live install."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No publicly-fetchable latest release for ${COSMON_INSTALL_REPO} (staging/private) — skipping live install."
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Install cs via the real one-liner
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -eu
+          target="$(sh infra/install/install.sh --print-target)"
+          echo "Host resolves to release target: ${target}"
+          sh infra/install/install.sh --dir "${HOME}/.local/bin"
+      - name: cs --version works
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          set -eu
+          export PATH="${HOME}/.local/bin:${PATH}"
+          cs --version

@@ -93,7 +93,7 @@ detect_target() {
     _arch="${COSMON_UNAME_M:-$(uname -m)}"
     case "$_os" in
         Darwin) _os_part="apple-darwin" ;;
-        Linux)  _os_part="unknown-linux-gnu" ;;
+        Linux)  _os_part="unknown-linux-musl" ;;
         *) die "unsupported OS: $_os (cosmon ships macOS and Linux binaries)" ;;
     esac
     case "$_arch" in
@@ -114,10 +114,10 @@ self_test() {
         "Darwin|arm64|aarch64-apple-darwin" \
         "Darwin|aarch64|aarch64-apple-darwin" \
         "Darwin|x86_64|x86_64-apple-darwin" \
-        "Linux|x86_64|x86_64-unknown-linux-gnu" \
-        "Linux|amd64|x86_64-unknown-linux-gnu" \
-        "Linux|aarch64|aarch64-unknown-linux-gnu" \
-        "Linux|arm64|aarch64-unknown-linux-gnu"
+        "Linux|x86_64|x86_64-unknown-linux-musl" \
+        "Linux|amd64|x86_64-unknown-linux-musl" \
+        "Linux|aarch64|aarch64-unknown-linux-musl" \
+        "Linux|arm64|aarch64-unknown-linux-musl"
     do
         _s=$(printf '%s' "$_row" | cut -d'|' -f1)
         _m=$(printf '%s' "$_row" | cut -d'|' -f2)

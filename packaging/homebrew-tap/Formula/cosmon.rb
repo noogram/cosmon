@@ -31,7 +31,7 @@ class Cosmon < Formula
 
   on_linux do
     on_intel do
-      url "https://github.com/noogram/cosmon/releases/download/v0.1.0/cosmon-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://github.com/noogram/cosmon/releases/download/v0.1.0/cosmon-0.1.0-x86_64-unknown-linux-musl.tar.gz"
       sha256 "2222222222222222222222222222222222222222222222222222222222222222"
     end
   end
