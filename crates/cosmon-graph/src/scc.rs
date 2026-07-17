@@ -142,10 +142,8 @@ fn find_sccs(adj: &[Vec<usize>]) -> Vec<Vec<usize>> {
                         on_stack[w] = true;
                         work.push(Frame { v: w, next: 0 });
                     }
-                    Some(wi) if on_stack[w] => {
-                        if wi < lowlinks[v] {
-                            lowlinks[v] = wi;
-                        }
+                    Some(wi) if on_stack[w] && wi < lowlinks[v] => {
+                        lowlinks[v] = wi;
                     }
                     _ => {}
                 }
