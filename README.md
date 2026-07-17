@@ -1,4 +1,4 @@
-# noogram / cosmon
+# cosmon
 
 > **Noogram is an open, federated system for running long AI-agent missions
 > inside your own perimeter — every step kept as plain files you own.** Its
