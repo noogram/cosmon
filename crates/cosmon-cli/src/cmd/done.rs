@@ -2336,10 +2336,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // never a guess). Empty `coauthor_email` ⇒ no trailers ⇒ commit
             // message byte-identical to a pre-attribution cosmon, so this is a
             // zero-cost default for every galaxy that has not opted in.
-            let attribution_cfg = cosmon_filestore::load_project_config(
-                &super::resolve_config_from_context(ctx),
-            )
-            .unwrap_or_else(|_| ProjectConfig::default());
+            let attribution_cfg =
+                cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
+                    .unwrap_or_else(|_| ProjectConfig::default());
             let real_adapter =
                 cosmon_state::ops::model_attribution::latest_model_selection(&state_dir, &mol_id)
                     .map(|attr| attr.adapter_name);
@@ -8788,7 +8787,10 @@ mod tests {
             "adapter trailer missing: {body}"
         );
         // git recognises them as real trailers (blank-line-separated block).
-        let interpreted = git(repo, &["log", "-1", "--format=%(trailers:key=Co-Authored-By)"]);
+        let interpreted = git(
+            repo,
+            &["log", "-1", "--format=%(trailers:key=Co-Authored-By)"],
+        );
         let trailers_out = String::from_utf8_lossy(&interpreted.stdout);
         assert!(
             trailers_out.contains("Noogram") && trailers_out.contains("Claude"),
