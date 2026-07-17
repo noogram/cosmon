@@ -31,7 +31,10 @@ FAKES_DIR="$REPO/tests/fakes"
 CS_BIN="$(smoke_resolve_cs_bin "$REPO")" || exit 2
 
 OUTDIR="${SMOKE_OUTDIR:-$REPO/target/smoke-exit42-$$}"
-SCRATCH="$OUTDIR/project"
+# The scratch project lives OUTSIDE the repo: the public tree ships
+# .cosmon/config.toml (project-root marker), and cs init refuses to
+# nest a galaxy under an existing one — walk-up discovery would break.
+SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/cosmon-smoke-XXXXXX")/project"
 FAKE_TMUX_STATE="$OUTDIR/fake-tmux"
 mkdir -p "$SCRATCH" "$FAKE_TMUX_STATE"
 

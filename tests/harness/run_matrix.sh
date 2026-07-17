@@ -159,7 +159,12 @@ run_row() {
     # Isolated scratch project per row. Each gets its own git repo, own
     # .cosmon/, own FAKE_TMUX_DIR. Nothing the row does touches the
     # cosmon repo being tested.
-    local scratch="$row_dir/project"
+    #
+    # The scratch lives OUTSIDE the repo: the public tree ships
+    # .cosmon/config.toml (project-root marker) and cs init refuses to
+    # nest a galaxy under an existing one.
+    local scratch
+    scratch="$(mktemp -d "${TMPDIR:-/tmp}/cosmon-matrix-${row_name}-XXXXXX")/project"
     mkdir -p "$scratch"
     (
         cd "$scratch" || exit 1
