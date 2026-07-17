@@ -79,7 +79,8 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-14         # Apple Silicon
           - target: x86_64-apple-darwin
-            os: macos-13         # Intel mac
+            os: macos-14         # cross-compiled on Apple Silicon (Intel mac
+                                 # runners are being retired + queue for ~30min+)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest      # static musl — no libdbus/glibc runtime dep
           - target: aarch64-unknown-linux-musl
