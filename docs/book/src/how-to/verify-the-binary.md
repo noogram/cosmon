@@ -27,7 +27,7 @@ after that you trust the binary, not the download.
 ## What a release carries
 
 For each platform target (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
-`x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`) the GitHub Release
+`x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`) the GitHub Release
 carries:
 
 | File | What it is |

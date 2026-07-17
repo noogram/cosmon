@@ -103,7 +103,12 @@
     a.style.textDecoration = 'none';
     a.style.display = 'inline-flex';
     a.style.alignItems = 'baseline';
-    while (mt.firstChild) a.appendChild(mt.firstChild);
+    // The top-bar wordmark is "noogram" alone (the ∴ seal comes from the
+    // .menu-title::before CSS). The browser-tab <title> stays the full
+    // "noogram / cosmon" because it is rendered server-side from book.toml,
+    // untouched here — cosmon named in the tab, noogram on the shelf.
+    while (mt.firstChild) mt.removeChild(mt.firstChild);
+    a.textContent = 'noogram';
     mt.appendChild(a);
   }
   if (document.readyState === 'loading')

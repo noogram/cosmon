@@ -25,7 +25,7 @@ the download.
 ## What you get on a release
 
 For each platform target (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
-`x86_64-unknown-linux-gnu`) the GitHub Release carries:
+`x86_64-unknown-linux-musl`) the GitHub Release carries:
 
 | File | What it is |
 |------|-----------|
