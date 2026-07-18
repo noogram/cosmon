@@ -414,7 +414,8 @@ impl AdapterAttribution {
                     if current_adapter.as_deref() != Some(adapter_name.as_str()) {
                         continue;
                     }
-                    if let (Some(obs_w), Some(cur_w)) = (worker_id.as_ref(), current_worker.as_ref())
+                    if let (Some(obs_w), Some(cur_w)) =
+                        (worker_id.as_ref(), current_worker.as_ref())
                     {
                         if obs_w != cur_w {
                             continue;

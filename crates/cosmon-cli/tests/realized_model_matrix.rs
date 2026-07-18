@@ -17,9 +17,7 @@
 //!   completed unobserved, and a structurally-mute adapter's silence.
 
 use cosmon_core::adapter_attribution::{AdapterAttribution, Realized};
-use cosmon_core::event_v2::{
-    AdapterSelectionSource, EventV2, ModelSelectionSource,
-};
+use cosmon_core::event_v2::{AdapterSelectionSource, EventV2, ModelSelectionSource};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
     realized_model_from_provider_response, realized_models_from_claude_jsonl,

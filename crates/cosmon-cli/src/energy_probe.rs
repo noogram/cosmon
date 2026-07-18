@@ -558,9 +558,7 @@ mod tests {
         let att = fold_from_log(state.path(), &mol);
         assert_eq!(
             att.realized,
-            cosmon_core::adapter_attribution::Realized::Observed(vec![
-                "gpt-5.6-terra".to_string()
-            ]),
+            cosmon_core::adapter_attribution::Realized::Observed(vec!["gpt-5.6-terra".to_string()]),
         );
         // No pin, but a model was observed → shown after adapter with `~>`.
         assert_eq!(att.compact_cell(), "codex~>gpt-5.6-terra [cli]");

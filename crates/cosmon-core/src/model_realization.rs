@@ -526,7 +526,9 @@ mod tests {
     fn provider_response_echoes_model() {
         let body = r#"{"id":"chatcmpl-1","model":"gpt-4o-2024-11-20","choices":[]}"#;
         assert_eq!(
-            realized_model_from_provider_response(body).unwrap().as_str(),
+            realized_model_from_provider_response(body)
+                .unwrap()
+                .as_str(),
             "gpt-4o-2024-11-20"
         );
     }

@@ -444,10 +444,7 @@ fn recorded_model_observations(
                 adapter_name: ref a,
                 ref model,
                 ..
-            } if m == mol_id
-                && a == adapter_name
-                && worker_matches(w.as_ref(), worker_id) =>
-            {
+            } if m == mol_id && a == adapter_name && worker_matches(w.as_ref(), worker_id) => {
                 cosmon_core::model_realization::ModelId::new(model)
             }
             _ => None,
