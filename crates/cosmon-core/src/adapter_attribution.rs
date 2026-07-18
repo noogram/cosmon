@@ -487,8 +487,7 @@ mod tests {
             mol_id: mid(),
             adapter_name: "claude".to_string(),
             model: model.to_string(),
-            observed_source:
-                crate::model_realization::ModelObservationSource::ClaudeStreamJson,
+            observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,
             observed_at: Utc::now(),
         }
     }
@@ -665,7 +664,10 @@ mod tests {
             ])
         );
         // Pin == head of trajectory → drop the head; show only the drift target.
-        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8~>claude-sonnet-5 [cli]");
+        assert_eq!(
+            a.compact_cell(),
+            "claude/claude-opus-4-8~>claude-sonnet-5 [cli]"
+        );
         assert!(a
             .detail_line()
             .contains("realized: claude-opus-4-8->claude-sonnet-5 (observed)"));

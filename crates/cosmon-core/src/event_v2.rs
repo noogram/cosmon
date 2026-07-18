@@ -3898,8 +3898,7 @@ mod tests {
                 mol_id: mid("cs-20260411-aaaa"),
                 adapter_name: "claude".to_owned(),
                 model: "claude-sonnet-5".to_owned(),
-                observed_source:
-                    crate::model_realization::ModelObservationSource::ClaudeStreamJson,
+                observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,
                 observed_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),

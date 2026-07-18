@@ -15,9 +15,7 @@ use std::path::{Path, PathBuf};
 use cosmon_core::energy::{TokenCost, TokenCount};
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
-use cosmon_core::model_realization::{
-    realized_models_from_claude_jsonl, ModelObservationSource,
-};
+use cosmon_core::model_realization::{realized_models_from_claude_jsonl, ModelObservationSource};
 
 /// Per-worker aggregated energy values.
 #[derive(Clone, Copy, Debug, Default)]

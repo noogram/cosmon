@@ -33,8 +33,8 @@ use cosmon_core::event_v2::{
     AdapterHandleState, AdapterProbeKind, AdapterProbeResult, AdapterSelectionSource, EventV2,
     LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
 };
-use cosmon_core::model_realization::ModelObservationSource;
 use cosmon_core::id::{MoleculeId, WorkerId};
+use cosmon_core::model_realization::ModelObservationSource;
 use cosmon_core::spawn_seam::LoopOwnership;
 
 use crate::event_log::{emit_one, resolve_events_log_path};

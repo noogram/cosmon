@@ -275,15 +275,27 @@ mod tests {
 
     #[test]
     fn provider_response_without_model_is_none() {
-        assert_eq!(realized_model_from_provider_response(r#"{"choices":[]}"#), None);
+        assert_eq!(
+            realized_model_from_provider_response(r#"{"choices":[]}"#),
+            None
+        );
         assert_eq!(realized_model_from_provider_response("not json"), None);
     }
 
     #[test]
     fn observation_source_tags_are_stable() {
-        assert_eq!(ModelObservationSource::ClaudeStreamJson.tag(), "claude_stream_json");
-        assert_eq!(ModelObservationSource::CodexSessionMeta.tag(), "codex_session_meta");
-        assert_eq!(ModelObservationSource::ProviderResponse.tag(), "provider_response");
+        assert_eq!(
+            ModelObservationSource::ClaudeStreamJson.tag(),
+            "claude_stream_json"
+        );
+        assert_eq!(
+            ModelObservationSource::CodexSessionMeta.tag(),
+            "codex_session_meta"
+        );
+        assert_eq!(
+            ModelObservationSource::ProviderResponse.tag(),
+            "provider_response"
+        );
     }
 
     #[test]

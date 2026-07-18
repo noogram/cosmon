@@ -6657,7 +6657,10 @@ mod tests {
         let mut att = claude_attribution();
         att.realized = Realized::Observed(vec!["claude-sonnet-5".into()]);
         let cell = adapter_cell(&att);
-        assert_eq!(line_text(&cell), "claude/claude-opus-4-8~>claude-sonnet-5 [cli]");
+        assert_eq!(
+            line_text(&cell),
+            "claude/claude-opus-4-8~>claude-sonnet-5 [cli]"
+        );
         // The drift span is yellow (distinct from the dim-gray pin).
         let drift = cell
             .spans
