@@ -1,5 +1,6 @@
 #!/bin/sh
-# install.sh — the public one-liner installer for cosmon's `cs` binary.
+# install.sh — the public one-liner installer for cosmon's laptop binaries:
+# the `cs` CLI and the `cosmon-remote` remote-service connector.
 #
 #     curl -fsSL https://noogram.org/cosmon/install.sh | sh
 #
@@ -17,7 +18,8 @@
 #      GitHub Releases of the public repo (default: noogram/cosmon);
 #   4. verify the tarball's sha256 against SHA256SUMS (fail closed on mismatch);
 #   5. unpack, `chmod +x`, install `cs` into ~/.local/bin (fallback
-#      /usr/local/bin), and print the PATH hint + next steps.
+#      /usr/local/bin) — plus `cosmon-remote` (the remote-service connector)
+#      when the tarball carries it — and print the PATH hint + next steps.
 #
 # It carries NO secret and needs NO privilege beyond writing to the install
 # dir. Everything it downloads is a signed, publicly auditable release asset
@@ -249,6 +251,23 @@ main() {
     mv "${tmp}/cs" "${dir}/cs" || die "failed to move cs into ${dir}"
     ok "installed cs → ${dir}/cs"
 
+    # The client tarball also carries `cosmon-remote` — the thin connector the
+    # "Run cosmon as a remote service" how-to drives (cosmon-remote config /
+    # auth me / do / artifact get). Both are laptop tools, so the one-liner
+    # places both: install cosmon-remote whenever the tarball contains it.
+    # It is OPTIONAL on purpose — this installer must still succeed against an
+    # older release whose tarball predates the connector (backward-compatible),
+    # so a missing cosmon-remote is a note, never a `die`.
+    if [ -f "${tmp}/cosmon-remote" ]; then
+        chmod +x "${tmp}/cosmon-remote"
+        mv "${tmp}/cosmon-remote" "${dir}/cosmon-remote" \
+            || die "failed to move cosmon-remote into ${dir}"
+        ok "installed cosmon-remote → ${dir}/cosmon-remote"
+    else
+        warn "tarball did not contain cosmon-remote — installing cs only"
+        warn "(older release? the connector ships with cosmon >= 0.3)"
+    fi
+
     # PATH hint — only if the dir isn't already on PATH.
     case ":${PATH}:" in
         *":${dir}:"*) : ;;
@@ -264,6 +283,9 @@ main() {
     printf '    cs --version\n' >&2
     printf '    cs help guide      # what cosmon is, in five minutes\n' >&2
     printf '    cs nucleate --help # start your first molecule\n' >&2
+    if [ -x "${dir}/cosmon-remote" ]; then
+        printf '    cosmon-remote --version   # the remote-service connector\n' >&2
+    fi
 }
 
 # ── arg parse ────────────────────────────────────────────────────────────────

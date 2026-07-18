@@ -94,8 +94,11 @@ here is the whole of it. The installer:
    on the box all abort the install rather than proceeding. Nothing is written
    to your `PATH` before the digest matches.
 5. **Unpacks and installs** `cs` into `~/.local/bin`, falling back to
-   `/usr/local/bin` if that directory is not writable. If the install directory
-   is not on your `PATH`, it says so and prints the `export PATH=…` line to add.
+   `/usr/local/bin` if that directory is not writable. The tarball also carries
+   `cosmon-remote` — the connector for driving a remote cosmon service — and the
+   installer places it in the same directory, so one command gives you both
+   laptop tools. If the install directory is not on your `PATH`, it says so and
+   prints the `export PATH=…` line to add.
 
 It carries no secret and needs no privilege beyond writing to that one
 directory.

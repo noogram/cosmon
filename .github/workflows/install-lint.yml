@@ -128,6 +128,14 @@ jobs:
           exit 0
           CS
           chmod +x "${stubdir}/cs"
+          # The client tarball also carries cosmon-remote — stub it too so the
+          # fixture exercises install.sh placing the connector beside cs.
+          cat > "${stubdir}/cosmon-remote" <<'CR'
+          #!/bin/sh
+          [ "${1:-}" = "--version" ] && { echo "cosmon-remote 9.9.9-fixture"; exit 0; }
+          exit 0
+          CR
+          chmod +x "${stubdir}/cosmon-remote"
 
           ver="9.9.9"
           # The release triples. Kept honest against release.yml by the `triples`
@@ -135,7 +143,7 @@ jobs:
           # `triples` job reddens until it does).
           triples="aarch64-apple-darwin x86_64-apple-darwin x86_64-unknown-linux-musl aarch64-unknown-linux-musl"
           for t in $triples; do
-            tar -czf "${fixture}/cosmon-${ver}-${t}.tar.gz" -C "${stubdir}" cs
+            tar -czf "${fixture}/cosmon-${ver}-${t}.tar.gz" -C "${stubdir}" cosmon-remote cs
           done
           # sha256sum on Linux emits the exact two-space format install.sh greps.
           ( cd "${fixture}" && sha256sum cosmon-*.tar.gz > SHA256SUMS )
@@ -169,8 +177,18 @@ jobs:
               "cs "*) echo "✓ ${want} → installed, ${out}" ;;
               *) echo "::error::${want}: unexpected --version output: ${out}"; exit 1 ;;
             esac
+            # The connector must land beside cs from the same tarball.
+            if [ ! -x "${dest}/cosmon-remote" ]; then
+              echo "::error::${want}: cosmon-remote was not installed"
+              exit 1
+            fi
+            rout="$("${dest}/cosmon-remote" --version)"
+            case "$rout" in
+              "cosmon-remote "*) echo "✓ ${want} → connector installed, ${rout}" ;;
+              *) echo "::error::${want}: unexpected cosmon-remote --version output: ${rout}"; exit 1 ;;
+            esac
           done
-          echo "All four release triples resolve, verify, unpack, install, and run."
+          echo "All four release triples resolve, verify, unpack, install cs + cosmon-remote, and run."
 
   # ── cross-surface triple consistency ─────────────────────────────────────────
   # install.sh, the release build matrix, and the packaging surfaces each carry

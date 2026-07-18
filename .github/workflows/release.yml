@@ -148,16 +148,24 @@ jobs:
           # the output does not depend on the runner's checkout directory.
           # strip=symbols drops the symbol table (smaller, deterministic).
           export RUSTFLAGS="-C strip=symbols --remap-path-prefix=${PWD}=/cosmon --remap-path-prefix=${HOME}=/home"
-          # Three binaries ship per target:
-          #   cs                  — the CLI (Homebrew `cs` install channel).
-          #   cosmon-rpp-adapter  — the fente/HTTP service (self-hosted remote).
-          #   cs-oidc-mock        — the demo IdP that makes the documented
-          #                         remote-service auth path reproducible.
-          # Shipping the latter two as signed release assets closes the gap
-          # (task-20260717-c487) where the "Run cosmon as a remote service"
-          # how-to documented deploying binaries no release provided — forcing
-          # a Rust toolchain and contradicting the self-hostable promise.
-          BINS="--bin cs --bin cosmon-rpp-adapter --bin cs-oidc-mock"
+          # Four binaries ship per target, split across two tarballs by side:
+          #   LAPTOP / client tarball (cosmon-<v>-<t>.tar.gz):
+          #     cs             — the CLI (Homebrew + install.sh channel).
+          #     cosmon-remote  — the thin client the "Run cosmon as a remote
+          #                      service" how-to drives (cosmon-remote config /
+          #                      auth me / do / artifact get). It is a laptop
+          #                      tool, so it rides beside cs: one install gesture
+          #                      gives a user everything to PILOT cosmon, local
+          #                      or against a remote fente.
+          #   HOST / service tarball (cosmon-service-<v>-<t>.tar.gz):
+          #     cosmon-rpp-adapter — the fente/HTTP service (self-hosted remote).
+          #     cs-oidc-mock       — the demo IdP that makes the documented
+          #                          remote-service auth path reproducible.
+          # c487 shipped the two host-side binaries so a user could BE an avatar;
+          # this leg (task-20260718-ff92) adds cosmon-remote so a user can also
+          # CONNECT to one — previously the how-to told users to run cosmon-remote
+          # but no release, tarball, or install.sh ever placed it.
+          BINS="--bin cs --bin cosmon-remote --bin cosmon-rpp-adapter --bin cs-oidc-mock"
           if [ "${{ runner.os }}" = "Linux" ]; then
             cargo zigbuild --release --locked $BINS --target ${{ matrix.target }}
           else
@@ -178,8 +186,14 @@ jobs:
           # tarball, distinct prefix so it sorts and downloads separately.
           svc_stem="cosmon-service-${version}-${target}"
 
+          # Raw-binary stem for the connector, mirroring the raw `cs` binary
+          # (${stem}) so a user can `cosign verify-blob` cosmon-remote on its own
+          # exactly as release-verification.md walks them through for cs.
+          remote_stem="cosmon-remote-${version}-${target}"
+
           mkdir -p dist
           cp "${bindir}/cs" "dist/cs"
+          cp "${bindir}/cosmon-remote" "dist/cosmon-remote"
           cp "${bindir}/cosmon-rpp-adapter" "dist/cosmon-rpp-adapter"
           cp "${bindir}/cs-oidc-mock" "dist/cs-oidc-mock"
           # Deterministic tarball: pinned mtime (SOURCE_DATE_EPOCH), sorted
@@ -189,13 +203,16 @@ jobs:
           # (installed via the macOS step below); the Linux runners already
           # have GNU tar as `tar`.
           TAR="$(command -v gtar || command -v tar)"
-          # CLI tarball — the lean `cs`-only artifact brew installs.
+          # Client tarball — the laptop artifact brew + install.sh place. Carries
+          # the `cs` pilot AND the `cosmon-remote` connector: one fetch equips a
+          # user to drive cosmon locally or against a remote fente. Entries are
+          # listed sorted so the deterministic --sort=name order is explicit.
           "$TAR" \
             --sort=name \
             --mtime="@${SOURCE_DATE_EPOCH}" \
             --owner=0 --group=0 --numeric-owner \
             --format=gnu \
-            -C dist -czf "dist/${stem}.tar.gz" cs
+            -C dist -czf "dist/${stem}.tar.gz" cosmon-remote cs
           # Service tarball — the fente + demo IdP the remote-service how-to
           # deploys. Same deterministic flags so it is reproducible too.
           "$TAR" \
@@ -215,11 +232,14 @@ jobs:
           fi
           $SHA "${stem}.tar.gz" > "${stem}.tar.gz.sha256"
           $SHA cs > "${stem}.bin.sha256"
+          $SHA cosmon-remote > "${remote_stem}.bin.sha256"
           $SHA "${svc_stem}.tar.gz" > "${svc_stem}.tar.gz.sha256"
-          mv cs "${stem}"   # name the raw binary by target for the release
+          mv cs "${stem}"                    # name the raw binaries by target
+          mv cosmon-remote "${remote_stem}"  # for the release + cosign parity
           echo "stem=${stem}" >> "$GITHUB_OUTPUT"
           echo "svc_stem=${svc_stem}" >> "$GITHUB_OUTPUT"
-          echo "Packaged ${stem}.tar.gz + ${svc_stem}.tar.gz"
+          echo "remote_stem=${remote_stem}" >> "$GITHUB_OUTPUT"
+          echo "Packaged ${stem}.tar.gz (cs + cosmon-remote) + ${svc_stem}.tar.gz"
           cat "${stem}.tar.gz.sha256" "${svc_stem}.tar.gz.sha256"
 
       - name: Install cosign
@@ -232,10 +252,14 @@ jobs:
           set -euo pipefail
           stem="${{ steps.package.outputs.stem }}"
           svc_stem="${{ steps.package.outputs.svc_stem }}"
+          remote_stem="${{ steps.package.outputs.remote_stem }}"
           # Keyless signing: cosign mints a short-lived cert from the GitHub
           # OIDC token, signs, and uploads the entry to the public Rekor log by
           # default. --yes skips the interactive confirmation in CI.
-          for blob in "${stem}.tar.gz" "${stem}" "${svc_stem}.tar.gz"; do
+          # ${remote_stem} is the raw cosmon-remote binary, signed on its own
+          # like ${stem} (raw cs); the connector's bytes inside the client
+          # tarball are additionally covered by the ${stem}.tar.gz signature.
+          for blob in "${stem}.tar.gz" "${stem}" "${remote_stem}" "${svc_stem}.tar.gz"; do
             cosign sign-blob --yes \
               --output-signature "${blob}.sig" \
               --output-certificate "${blob}.pem" \
@@ -267,6 +291,10 @@ jobs:
             dist/${{ steps.package.outputs.stem }}.pem
             dist/${{ steps.package.outputs.stem }}.bin.sha256
             dist/${{ steps.package.outputs.stem }}.spdx.json
+            dist/${{ steps.package.outputs.remote_stem }}
+            dist/${{ steps.package.outputs.remote_stem }}.sig
+            dist/${{ steps.package.outputs.remote_stem }}.pem
+            dist/${{ steps.package.outputs.remote_stem }}.bin.sha256
             dist/${{ steps.package.outputs.svc_stem }}.tar.gz
             dist/${{ steps.package.outputs.svc_stem }}.tar.gz.sig
             dist/${{ steps.package.outputs.svc_stem }}.tar.gz.pem
@@ -448,6 +476,15 @@ jobs:
           case "$out" in
             cs\ *) : ;;   # expected: "cs X.Y.Z"
             *) echo "unexpected --version output: $out" >&2; exit 1 ;;
+          esac
+          # The connector rides in the same tarball; assert it installed and runs
+          # too, so a broken/absent cosmon-remote reddens the release the same way
+          # a broken cs would (task-20260718-ff92).
+          remote_out="$(cosmon-remote --version)"
+          echo "cosmon-remote --version => ${remote_out}"
+          case "$remote_out" in
+            cosmon-remote\ *) : ;;   # expected: "cosmon-remote X.Y.Z"
+            *) echo "unexpected cosmon-remote --version output: $remote_out" >&2; exit 1 ;;
           esac
           if [ "$elapsed" -gt 30 ]; then
             echo "::warning::install took ${elapsed}s (> 30s budget)"
