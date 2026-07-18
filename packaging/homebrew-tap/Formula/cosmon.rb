@@ -37,10 +37,16 @@ class Cosmon < Formula
   end
 
   def install
+    # The client tarball carries both laptop tools: the `cs` pilot and the
+    # `cosmon-remote` connector (the thin client the remote-service how-to
+    # drives). Installing both means one `brew install` equips a user to pilot
+    # cosmon locally or against a remote fente.
     bin.install "cs"
+    bin.install "cosmon-remote"
   end
 
   test do
     assert_match "cs ", shell_output("#{bin}/cs --version")
+    assert_match "cosmon-remote ", shell_output("#{bin}/cosmon-remote --version")
   end
 end

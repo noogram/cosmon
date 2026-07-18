@@ -29,11 +29,13 @@ For each platform target (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
 
 | File | What it is |
 |------|-----------|
-| `cosmon-<v>-<target>.tar.gz`        | the `cs` binary, tarred (what brew downloads) |
+| `cosmon-<v>-<target>.tar.gz`        | the client tarball: the `cs` binary **and** `cosmon-remote` (what brew + install.sh download) |
 | `cosmon-<v>-<target>.tar.gz.sig`    | cosign signature over the tarball |
 | `cosmon-<v>-<target>.tar.gz.pem`    | the short-lived signing certificate |
 | `cosmon-<v>-<target>`               | the raw `cs` binary (so you can verify what's on your PATH) |
 | `cosmon-<v>-<target>.sig` / `.pem`  | cosign signature + cert over the raw binary |
+| `cosmon-remote-<v>-<target>`        | the raw `cosmon-remote` connector binary (verify the client too) |
+| `cosmon-remote-<v>-<target>.sig` / `.pem` | cosign signature + cert over the raw connector binary |
 | `cosmon-<v>-<target>.spdx.json`     | SPDX SBOM (dependency closure) |
 | `SHA256SUMS`                        | one digest per shipped artifact |
 
