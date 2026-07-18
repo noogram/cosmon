@@ -201,6 +201,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Brew formula renderer contract (snapshot ↔ renderer, all four triples)
+        run: ./scripts/release/render-brew-formula.test.sh
       - name: Compare install.sh, release matrix, and brew formula triples
         run: |
           set -euo pipefail
@@ -227,8 +229,9 @@ jobs:
             exit 1
           fi
 
-          # The homebrew formula may serve a SUBSET (no aarch64-linux tap today),
-          # but every triple it serves must be one install.sh can resolve.
+          # The homebrew formula serves all four release triples today, but the
+          # contract is only brew ⊆ installer: every triple it serves must be one
+          # install.sh can resolve (a future narrowing stays legal here).
           brew="$(grep -oE '(aarch64|x86_64)-(apple-darwin|unknown-linux-(musl|gnu))' \
             packaging/homebrew-tap/Formula/cosmon.rb | sort -u)"
           echo "brew serves: ${brew//$'\n'/ }"
