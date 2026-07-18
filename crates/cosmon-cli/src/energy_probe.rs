@@ -405,4 +405,236 @@ mod tests {
         assert_eq!(o, 50);
         assert!((c - 0.25).abs() < f64::EPSILON);
     }
+
+    // ---- F-01/F-06 end-to-end: completion-seam capture -------------------
+    //
+    // fixture session file on disk → `capture_realized_from_cwd` (the real
+    // completion seam) → `ModelObserved` on `events.jsonl` → retrospective
+    // fold → `compact_cell`. Exercised for claude and codex, which resolve
+    // their session by the worker's cwd. HOME is swapped to a fixture root;
+    // the swap is serialized so a parallel test never sees the borrowed HOME.
+
+    use std::sync::Mutex;
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn seed_dispatch(state_dir: &Path, mol: &MoleculeId, adapter: &str, worker: &str) {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: mol.clone(),
+                adapter_name: adapter.to_owned(),
+                selected_at: chrono::Utc::now(),
+                selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                    flag: adapter.to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: WorkerId::new(worker).unwrap(),
+                molecule: Some(mol.clone()),
+                session_name: "sess".to_owned(),
+                role: "polecat".to_owned(),
+                adapter_name: adapter.to_owned(),
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    fn fold_from_log(
+        state_dir: &Path,
+        mol: &MoleculeId,
+    ) -> cosmon_core::adapter_attribution::AdapterAttribution {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        let events: Vec<EventV2> = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event.molecule_id() == Some(mol))
+            .map(|e| e.event)
+            .collect();
+        cosmon_core::adapter_attribution::AdapterAttribution::fold(&events)
+    }
+
+    #[test]
+    fn capture_at_completion_claude_end_to_end() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Claude wrote a session log under projects/{sanitize(cwd)}/.
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            concat!(
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"claude-sonnet-5"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-c1a1").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+        // Intention pinned opus.
+        cosmon_state::events::worker_spawn::emit_model_selected(
+            state.path(),
+            &mol,
+            "claude",
+            Some("claude-opus-4-8"),
+            cosmon_core::event_v2::ModelSelectionSource::Flag {
+                flag: "claude-opus-4-8".to_owned(),
+            },
+        );
+
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string(),
+                "claude-sonnet-5".to_string(),
+            ]),
+        );
+        // A real quota fallback surfaces as drift in the compact cell.
+        assert_eq!(
+            att.compact_cell(),
+            "claude/claude-opus-4-8~>claude-sonnet-5 [cli]"
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_at_completion_codex_end_to_end() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Codex wrote a date-bucketed rollout log; session_meta.payload.cwd is
+        // the only join key back to the worker's worktree.
+        let sess = codex_sessions_dir().join("2026").join("07").join("18");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(
+            sess.join("rollout-x.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"s"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"gpt-5.6-terra"}}}}"#,
+                    "\n",
+                ),
+                cwd = cwd.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-c0de").unwrap();
+        seed_dispatch(state.path(), &mol, "codex", "worker-1");
+
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "gpt-5.6-terra".to_string()
+            ]),
+        );
+        // No pin, but a model was observed → shown after adapter with `~>`.
+        assert_eq!(att.compact_cell(), "codex~>gpt-5.6-terra [cli]");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_is_idempotent_across_repeated_completion_reads() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-1de1").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+
+        // Two capture passes must emit the observation exactly once.
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let n_observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(n_observed, 1, "idempotent: one observation, not two");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_skips_in_process_provider_adapters() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // An openai dispatch: the completion seam must NOT read a session file
+        // (there is none) — the provider emitted at its own response seam.
+        let mol = MoleculeId::new("task-20260718-0a11").unwrap();
+        seed_dispatch(state.path(), &mol, "openai", "worker-1");
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let n_observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(n_observed, 0, "completion seam is a no-op for openai");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
 }
