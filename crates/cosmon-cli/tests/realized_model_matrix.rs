@@ -151,7 +151,7 @@ fn claude_fixture_to_compact_cell() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "claude",
         &observed,
         ModelObservationSource::ClaudeStreamJson,
@@ -187,7 +187,7 @@ fn codex_turn_context_fixture_to_compact_cell() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "codex",
         &observed,
         ModelObservationSource::CodexSessionMeta,
@@ -218,7 +218,7 @@ fn provider_response_fixture_to_compact_cell() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "openai",
         &observed,
         ModelObservationSource::ProviderResponse,
@@ -245,7 +245,7 @@ fn adapter_change_does_not_inherit_prior_realization() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,
@@ -271,7 +271,7 @@ fn re_tackle_same_adapter_shows_only_last_attempt() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,
@@ -283,7 +283,7 @@ fn re_tackle_same_adapter_shows_only_last_attempt() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-2").unwrap()),
+        &WorkerId::new("worker-2").unwrap(),
         "claude",
         &ids(&["claude-sonnet-5"]),
         ModelObservationSource::ClaudeStreamJson,
@@ -307,7 +307,7 @@ fn late_observation_from_dead_worker_is_ignored() {
     emit_new_model_observations(
         dir.path(),
         &m,
-        Some(&WorkerId::new("worker-1").unwrap()),
+        &WorkerId::new("worker-1").unwrap(),
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,

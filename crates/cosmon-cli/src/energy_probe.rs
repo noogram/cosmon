@@ -135,11 +135,75 @@ pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
     capture_realized_from_cwd(state_dir, mol_id, &cwd);
 }
 
-/// The `cwd`-parameterised core of [`capture_realized_at_completion`], split out
-/// so tests can drive it with a fixture directory instead of the process cwd.
+/// **Runtime realized-model capture** (round-3 / F-01) — called from the poll
+/// tick of a live surface (`cs wait`, `cs run`) *while the worker is still
+/// running*, so `ModelObserved` lands on `events.jsonl` at the **first**
+/// model-bearing turn, not at teardown. This is what makes the observation
+/// durable across a worker crash that never reaches `cs complete` (D4:
+/// "premier assistant turn, pas au teardown").
+///
+/// Unlike [`capture_realized_at_completion`] the polling process does **not**
+/// share the worker's cwd (the operator runs `cs wait` from the repo root),
+/// so the worker's working directory is resolved live from its tmux pane
+/// (`#{pane_current_path}`). The rest of the chain is the same
+/// [`capture_realized_from_cwd`] core: session-log resolution by cwd, typed
+/// parse, first-observation + on-change dedup, worker-scoped emission.
+///
+/// Best-effort and cheap to call repeatedly: once the trajectory is on the
+/// wire, re-capture emits nothing (idempotent), and a dead pane / missing
+/// session resolves to a silent no-op.
+pub fn capture_realized_runtime(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    backends: &[cosmon_transport::TmuxBackend],
+) {
+    // Fail-closed scoping (F-02): no resolvable worker → no emission.
+    let Some(worker) = last_worker_for(state_dir, mol_id) else {
+        return;
+    };
+    let Some(cwd) = resolve_tmux_pane_cwd(backends, &worker) else {
+        return;
+    };
+    capture_realized_from_cwd(state_dir, mol_id, &cwd);
+}
+
+/// The live working directory of a worker's tmux pane
+/// (`#{pane_current_path}`), probing every socket in `backends`. `None` when
+/// no pane answers — the worker is dead or was never tmux-hosted.
+fn resolve_tmux_pane_cwd(
+    backends: &[cosmon_transport::TmuxBackend],
+    worker_id: &WorkerId,
+) -> Option<PathBuf> {
+    for be in backends {
+        let Ok(output) = std::process::Command::new("tmux")
+            .args(["-L", be.socket(), "display-message", "-t"])
+            .arg(worker_id.as_str())
+            .args(["-p", "#{pane_current_path}"])
+            .output()
+        else {
+            continue;
+        };
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+    None
+}
+
+/// The `cwd`-parameterised core of [`capture_realized_at_completion`] and
+/// [`capture_realized_runtime`], split out so tests can drive it with a
+/// fixture directory instead of a process cwd / live pane.
 pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Path) {
     let adapter = last_adapter_for(state_dir, mol_id);
-    let worker = last_worker_for(state_dir, mol_id);
+    // Fail-closed worker scoping (round-3 / F-02): every new observation must
+    // be attached to the worker that produced it. No resolvable worker → no
+    // emission — an unscoped line would be ambiguous forever.
+    let Some(worker) = last_worker_for(state_dir, mol_id) else {
+        return;
+    };
     let (observed, source) = match adapter.as_deref() {
         // Subprocess adapters whose model lives in a session log on disk.
         Some("claude") | None => (
@@ -166,7 +230,7 @@ pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Pa
     cosmon_state::events::worker_spawn::emit_new_model_observations(
         state_dir,
         mol_id,
-        worker.as_ref(),
+        &worker,
         adapter_name,
         &observed,
         source,
@@ -562,6 +626,273 @@ mod tests {
         );
         // No pin, but a model was observed → shown after adapter with `~>`.
         assert_eq!(att.compact_cell(), "codex~>gpt-5.6-terra [cli]");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // ---- COND-1 (round-3 / F-01): runtime capture + crash durability ------
+    //
+    // The normative cadence (D4) is "first assistant turn, not teardown". The
+    // runtime consumer rides the poll tick of `cs wait` / `cs run`
+    // (`wait_for_status_with_metrics_probed` / `Runtime::with_tick_probe`), so
+    // the observation is on `events.jsonl` while the worker is still running.
+    // These tests drive the REAL wait loop against a real `FileStore` and the
+    // real capture core, then crash the worker (WorkerExited, never
+    // `MoleculeCompleted`) and prove the observation is durable — with
+    // `cs peek` never involved.
+
+    fn seed_running_molecule(state_dir: &Path, mol: &MoleculeId) -> cosmon_filestore::FileStore {
+        use std::collections::{BTreeSet, HashMap};
+        let store = cosmon_filestore::FileStore::new(state_dir);
+        let data = cosmon_state::MoleculeData {
+            id: mol.clone(),
+            fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
+            formula_id: cosmon_core::id::FormulaId::new("task-work").unwrap(),
+            status: cosmon_core::molecule::MoleculeStatus::Running,
+            variables: HashMap::new(),
+            assigned_worker: Some(WorkerId::new("worker-1").unwrap()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            total_steps: 1,
+            current_step: 0,
+            completed_steps: vec![],
+            collapse_reason: None,
+            collapse_cause: None,
+            collapse_reason_kind: None,
+            collapsed_step: None,
+            links: Vec::new(),
+            kind: None,
+            class: cosmon_core::molecule_class::MoleculeClass::default(),
+            typed_links: Vec::new(),
+            project_id: None,
+            assigned_role: None,
+            session_name: None,
+            tags: BTreeSet::new(),
+            escalations: Vec::new(),
+            freeze_on_last_step: false,
+            expires_at: None,
+            expiry_policy: None,
+            originating_branch: None,
+            pending_step: None,
+            merged_at: None,
+            prompt_seal: None,
+            briefing_seals: Vec::new(),
+            bootstrap_seals: Vec::new(),
+            archived: false,
+            last_progress_at: None,
+            last_output_at: None,
+            nudge_count: 0,
+            last_nudged_at: None,
+            process: None,
+            energy_budget: None,
+            stuck_at: None,
+            tackled_by: None,
+            tackled_at: None,
+        };
+        use cosmon_state::StateStore as _;
+        store.save_molecule(mol, &data).unwrap();
+        store
+    }
+
+    fn crash_worker(state_dir: &Path, mol: &MoleculeId) {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::WorkerExited {
+                molecule_id: mol.clone(),
+                exit_code: Some(137),
+                reason: "pane_died".to_owned(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    /// Claude: the FIRST model-bearing turn is captured by the runtime poll
+    /// (real `cs wait` loop, probed per tick) → the worker crashes before any
+    /// `cs complete` → the observation is durable and the fold renders it.
+    #[test]
+    fn runtime_first_turn_observation_survives_claude_crash_before_complete() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // The worker has produced exactly ONE model-bearing turn so far — the
+        // session is mid-run, nowhere near teardown.
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-11f1").unwrap();
+        let store = seed_running_molecule(state.path(), &mol);
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+
+        // Drive the REAL runtime seam: the wait poll loop, with the capture as
+        // its per-poll probe (exactly what `cs wait` wires). The molecule
+        // stays Running, so the wait times out — but the probe has fired
+        // during the run.
+        let err = cosmon_state::wait::wait_for_status_with_metrics_probed(
+            &store,
+            state.path(),
+            &mol,
+            &[cosmon_core::molecule::MoleculeStatus::Completed],
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(1),
+            || capture_realized_from_cwd(state.path(), &mol, cwd.path()),
+        )
+        .expect_err("worker is still running — the wait must time out");
+        assert!(matches!(err, cosmon_state::wait::WaitError::Timeout { .. }));
+
+        // The observation landed DURING the run, before any completion.
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let events = cosmon_state::event_log::read_all(&log).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+                .count(),
+            1,
+            "first model-bearing turn must be observed during the run"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event, EventV2::MoleculeCompleted { .. })),
+            "no completion ever happened — D4: not at teardown"
+        );
+
+        // The worker crashes. `cs complete` never runs, `cs peek` never opens.
+        crash_worker(state.path(), &mol);
+
+        // The observation is durable: the retrospective fold still renders it.
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string()
+            ]),
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// Codex: same crash-durability property through the codex session-log
+    /// resolution (`session_meta.payload.cwd` join).
+    #[test]
+    fn runtime_first_turn_observation_survives_codex_crash_before_complete() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let sess = codex_sessions_dir().join("2026").join("07").join("18");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(
+            sess.join("rollout-x.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"s"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"gpt-5.6-terra"}}}}"#,
+                    "\n",
+                ),
+                cwd = cwd.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-11f2").unwrap();
+        let store = seed_running_molecule(state.path(), &mol);
+        seed_dispatch(state.path(), &mol, "codex", "worker-1");
+
+        let err = cosmon_state::wait::wait_for_status_with_metrics_probed(
+            &store,
+            state.path(),
+            &mol,
+            &[cosmon_core::molecule::MoleculeStatus::Completed],
+            std::time::Duration::ZERO,
+            std::time::Duration::from_millis(1),
+            || capture_realized_from_cwd(state.path(), &mol, cwd.path()),
+        )
+        .expect_err("worker is still running — the wait must time out");
+        assert!(matches!(err, cosmon_state::wait::WaitError::Timeout { .. }));
+
+        crash_worker(state.path(), &mol);
+
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec!["gpt-5.6-terra".to_string()]),
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// Round-3 / F-02 fail-closed at the emitter: a dispatch with NO
+    /// `WorkerSpawned` on the journal must not emit an unscoped observation —
+    /// no worker, no line.
+    #[test]
+    fn capture_without_worker_boundary_emits_nothing() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-11f3").unwrap();
+        // AdapterSelected only — no WorkerSpawned boundary.
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: mol.clone(),
+                adapter_name: "claude".to_owned(),
+                selected_at: chrono::Utc::now(),
+                selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                    flag: "claude".to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let n_observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(n_observed, 0, "no worker boundary → no unscoped emission");
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

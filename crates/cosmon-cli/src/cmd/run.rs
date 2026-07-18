@@ -423,9 +423,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         max_molecules: (args.max_molecules > 0)
             .then(|| usize::try_from(args.max_molecules).unwrap_or(usize::MAX)),
     };
+    // Realized-model runtime consumer (round-3 / F-01): every tick, probe the
+    // live claude/codex session of each in-scope Running molecule and emit
+    // `ModelObserved` at the first model-bearing turn — durable on the journal
+    // even if the worker crashes before `cs complete`.
+    let probe_state_dir = state_dir.clone();
+    let probe_backends = crate::energy_probe::discover_fleet_backends(
+        &probe_state_dir,
+        &super::tmux_socket_name(ctx),
+    );
+    let tick_probe: Box<dyn FnMut(&cosmon_core::id::MoleculeId)> = Box::new(move |mol_id| {
+        crate::energy_probe::capture_realized_runtime(&probe_state_dir, mol_id, &probe_backends);
+    });
     let mut runtime = Runtime::new(store_box, policy, executor, config)
         .with_liveness_check(liveness)
-        .with_run_bounds(bounds);
+        .with_run_bounds(bounds)
+        .with_tick_probe(tick_probe);
 
     // Wire Ctrl-C to the shutdown signal so the loop stops gracefully.
     let handle = runtime.shutdown_handle();

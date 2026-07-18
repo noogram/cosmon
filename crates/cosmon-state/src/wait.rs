@@ -238,6 +238,7 @@ pub fn wait_for_status(
         timeout,
         poll_interval,
         std::thread::sleep,
+        || {},
     )
 }
 
@@ -268,7 +269,45 @@ pub fn wait_for_status_with_metrics(
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<WaitOutcome, WaitError> {
-    let mut outcome = wait_for_status(store, id, target, timeout, poll_interval)?;
+    wait_for_status_with_metrics_probed(store, state_dir, id, target, timeout, poll_interval, || {})
+}
+
+/// [`wait_for_status_with_metrics`] with a **per-poll runtime probe** —
+/// the seam the realized-model capture rides (delib-20260718-c70e / D4,
+/// round-3 F-01).
+///
+/// `on_poll` is invoked once per poll iteration, *while the worker is still
+/// running*. The canonical pilot cycle is `cs tackle → cs wait → cs done`, so
+/// the wait loop is the one cosmon process reliably alive during a
+/// subprocess-adapter run (claude/codex in tmux): a probe here can read the
+/// worker's live session log and emit `ModelObserved` at the **first**
+/// model-bearing turn — durable on `events.jsonl` even if the worker later
+/// crashes before `cs complete`. The probe must be best-effort and cheap-ish
+/// (it runs every `poll_interval`); it takes no arguments and returns nothing
+/// so the wait loop stays I/O-free with respect to what the probe does.
+///
+/// # Errors
+///
+/// Identical to [`wait_for_status`].
+#[allow(clippy::too_many_arguments)]
+pub fn wait_for_status_with_metrics_probed<F: FnMut()>(
+    store: &dyn StateStore,
+    state_dir: &Path,
+    id: &MoleculeId,
+    target: &[MoleculeStatus],
+    timeout: Duration,
+    poll_interval: Duration,
+    on_poll: F,
+) -> Result<WaitOutcome, WaitError> {
+    let mut outcome = wait_for_status_with_sleep(
+        store,
+        id,
+        target,
+        timeout,
+        poll_interval,
+        std::thread::sleep,
+        on_poll,
+    )?;
     outcome.metrics.energy = collect_molecule_energy(state_dir, id);
     Ok(outcome)
 }
@@ -380,17 +419,21 @@ fn make_outcome(
 }
 
 /// Internal variant that lets tests inject a fake sleep — avoids real time
-/// in unit tests while keeping the public API sleep-free.
-pub(crate) fn wait_for_status_with_sleep<F>(
+/// in unit tests while keeping the public API sleep-free. `on_poll` is the
+/// per-iteration runtime probe (see [`wait_for_status_with_metrics_probed`]);
+/// it fires after every store read, including the final in-target one.
+pub(crate) fn wait_for_status_with_sleep<F, P>(
     store: &dyn StateStore,
     id: &MoleculeId,
     target: &[MoleculeStatus],
     timeout: Duration,
     poll_interval: Duration,
     mut sleep: F,
+    mut on_poll: P,
 ) -> Result<WaitOutcome, WaitError>
 where
     F: FnMut(Duration),
+    P: FnMut(),
 {
     let start = Instant::now();
     let mut poll_count: u32 = 0;
@@ -400,6 +443,7 @@ where
     loop {
         let mol = load_molecule(store, id)?;
         poll_count = poll_count.saturating_add(1);
+        on_poll();
         // The status observed on the *previous* iteration — captured before
         // we overwrite `previous_status`, so the confirmation gate below can
         // tell a fresh transition into the target set from a status that was
@@ -658,6 +702,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_secs(5),
             |_| *sleep_calls.borrow_mut() += 1,
+            || (),
         )
         .expect("should return immediately");
         assert_eq!(outcome.reached, MoleculeStatus::Completed);
@@ -688,6 +733,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(1),
             |_| *sleep_calls.borrow_mut() += 1,
+            || (),
         )
         .expect("should reach completed");
         assert_eq!(outcome.reached, MoleculeStatus::Completed);
@@ -703,6 +749,40 @@ mod tests {
         assert_eq!(
             outcome.metrics.transitions, 1,
             "Running→Completed is one transition; the confirmation re-read sees the same status"
+        );
+    }
+
+    /// Round-3 / F-01: the per-poll runtime probe fires on EVERY store poll,
+    /// including while the molecule is still Running — this is the seam the
+    /// realized-model capture rides so `ModelObserved` lands during the run,
+    /// not at teardown.
+    #[test]
+    fn test_on_poll_probe_fires_on_every_poll() {
+        let store = ScriptedStore::new(
+            "task-20260718-prb1",
+            vec![
+                MoleculeStatus::Running,
+                MoleculeStatus::Running,
+                MoleculeStatus::Completed,
+            ],
+        );
+        let probe_calls = RefCell::new(0usize);
+        let outcome = wait_for_status_with_sleep(
+            &store,
+            &store.id.clone(),
+            &[MoleculeStatus::Completed],
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            |_| (),
+            || *probe_calls.borrow_mut() += 1,
+        )
+        .expect("should reach completed");
+        assert_eq!(outcome.reached, MoleculeStatus::Completed);
+        assert!(
+            *probe_calls.borrow() >= 2,
+            "the probe must fire on the Running polls, while the worker is live \
+             (got {} calls)",
+            *probe_calls.borrow()
         );
     }
 
@@ -726,6 +806,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(1),
             |_| (),
+            || (),
         )
         .expect("should reach completed");
         assert_eq!(
@@ -759,6 +840,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(1),
             |_| *sleep_calls.borrow_mut() += 1,
+            || (),
         )
         .expect("should reach the settled completed");
         assert_eq!(outcome.reached, MoleculeStatus::Completed);
@@ -780,6 +862,7 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(1),
             std::thread::sleep,
+            || (),
         )
         .expect_err("should time out");
         match err {
@@ -800,6 +883,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_secs(1),
             |_| panic!("must not sleep when molecule is missing"),
+            || (),
         )
         .expect_err("missing molecule should fail fast");
         match err {
@@ -820,6 +904,7 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_secs(1),
             |d| observed_sleep.borrow_mut().push(d),
+            || (),
         )
         .expect_err("should still time out");
         assert!(matches!(err, WaitError::Timeout { .. }));
@@ -845,6 +930,7 @@ mod tests {
             Duration::from_secs(60),
             Duration::from_millis(1),
             |_| (),
+            || (),
         )
         .expect("collapsed should satisfy");
         assert_eq!(outcome.reached, MoleculeStatus::Collapsed);

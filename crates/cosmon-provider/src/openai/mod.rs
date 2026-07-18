@@ -1953,7 +1953,7 @@ fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
     cosmon_state::events::worker_spawn::emit_new_model_observations(
         &t.state_dir,
         &t.mol_id,
-        Some(&t.worker_id),
+        &t.worker_id,
         t.adapter_name.as_deref().unwrap_or(ADAPTER_NAME),
         std::slice::from_ref(&id),
         cosmon_core::model_realization::ModelObservationSource::ProviderResponse,

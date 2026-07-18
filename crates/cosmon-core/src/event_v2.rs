@@ -1598,9 +1598,12 @@ pub enum EventV2 {
         /// scoping key (delib-20260718-c70e, F-02). A model id is only
         /// meaningful *inside the run that produced it*: after a re-tackle the
         /// fold must attribute a stale observation to the attempt that emitted
-        /// it, never to the new one. `None` on legacy lines predating this
-        /// field (`#[serde(default)]`), which the fold treats as
-        /// unscoped/best-effort.
+        /// it, never to the new one. **Mandatory for new lines** (round-3): the
+        /// emit helpers require a concrete `WorkerId`, so `None` occurs only on
+        /// legacy lines predating this field (`#[serde(default)]`). The fold
+        /// treats such unscoped lines **fail-closed** — they never match an
+        /// attempt that recorded a worker boundary, and the dedup never lets
+        /// them suppress a scoped observation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         worker_id: Option<WorkerId>,
         /// Adapter the observation is scoped to (a model id only has meaning
