@@ -10,10 +10,14 @@
 //! energy spent by every active worker.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cosmon_core::energy::{TokenCost, TokenCount};
-use cosmon_core::id::WorkerId;
+use cosmon_core::event_v2::EventV2;
+use cosmon_core::id::{MoleculeId, WorkerId};
+use cosmon_core::model_realization::{
+    realized_models_from_claude_jsonl, ModelObservationSource,
+};
 
 /// Per-worker aggregated energy values.
 #[derive(Clone, Copy, Debug, Default)]
@@ -107,6 +111,94 @@ pub fn probe_worker_energy(
     })
 }
 
+/// Best-effort **realized-model capture** for one live claude worker
+/// (delib-20260718-c70e).
+///
+/// Resolves the worker's Claude Code session `*.jsonl` (the same
+/// pid → session → jsonl chain as [`probe_worker_energy`]), parses the realized
+/// model trajectory (`message.model` per assistant turn), and emits an
+/// [`EventV2::ModelObserved`] for every model **not already recorded** for the
+/// molecule — the first-observation + on-change cadence, idempotent under the
+/// repeated reloads a live TUI performs.
+///
+/// This is *opportunistic* capture: `cs peek` is the live observer that already
+/// pays the cost of reading the session for energy, so folding the realized-id
+/// out of the same bytes is nearly free. It is best-effort and trace-not-lock —
+/// any I/O failure yields no observation, never an error. (A future always-on
+/// emitter in the supervision loop would capture even when nothing is watching;
+/// until then, the observer that looks is the one that records.)
+pub fn capture_realized_for_worker(
+    backends: &[cosmon_transport::TmuxBackend],
+    state_dir: &Path,
+    worker_id: &WorkerId,
+    mol_id: &MoleculeId,
+) {
+    let Some(pid) = resolve_tmux_pid(backends, worker_id) else {
+        return;
+    };
+    let Some((session_id, cwd)) = read_claude_pid_file(pid) else {
+        return;
+    };
+    let jsonl_path = claude_projects_dir()
+        .join(sanitize_path(&cwd))
+        .join(format!("{session_id}.jsonl"));
+    let Ok(content) = std::fs::read_to_string(&jsonl_path) else {
+        return;
+    };
+    let observed = realized_models_from_claude_jsonl(&content);
+    if observed.is_empty() {
+        return;
+    }
+    let recorded = recorded_realized_models(state_dir, mol_id);
+    for model in newly_observed(&recorded, &observed) {
+        cosmon_state::events::worker_spawn::emit_model_observed(
+            state_dir,
+            mol_id,
+            "claude",
+            model,
+            ModelObservationSource::ClaudeStreamJson,
+        );
+    }
+}
+
+/// The realized models already on the wire for `mol_id`, in append order —
+/// folded from the [`EventV2::ModelObserved`] events in `events.jsonl`. Any I/O
+/// error yields an empty list (best-effort), so a first observation is emitted.
+fn recorded_realized_models(state_dir: &Path, mol_id: &MoleculeId) -> Vec<String> {
+    let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
+    let Ok(envelopes) = cosmon_state::event_log::read_all(&log_path) else {
+        return Vec::new();
+    };
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.event {
+            EventV2::ModelObserved {
+                mol_id: ref m,
+                model,
+                ..
+            } if m == mol_id => Some(model),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The suffix of `observed` not yet present in `recorded` — the models to emit.
+///
+/// Pure and total. The common case is monotonic growth: `recorded` is a prefix
+/// of `observed` (the same trajectory, fewer turns seen last time), so the new
+/// tail is `observed[recorded.len()..]`. When the sequences diverge (they should
+/// not, given the collapse-consecutive fold), nothing is emitted — silence is
+/// safer than a fabricated re-observation.
+fn newly_observed<'a>(recorded: &[String], observed: &'a [String]) -> &'a [String] {
+    if recorded.is_empty() {
+        return observed;
+    }
+    if observed.len() > recorded.len() && observed[..recorded.len()] == *recorded {
+        return &observed[recorded.len()..];
+    }
+    &[]
+}
+
 /// Resolve the tmux pane PID for a worker by probing all sockets.
 #[must_use]
 pub fn resolve_tmux_pid(
@@ -177,6 +269,37 @@ mod tests {
             sanitize_path("/Users/e/dev/projects/cosmon"),
             "-Users-e-dev-projects-cosmon"
         );
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(ToString::to_string).collect()
+    }
+
+    #[test]
+    fn newly_observed_first_time_emits_all() {
+        assert_eq!(newly_observed(&[], &v(&["opus"])), v(&["opus"]).as_slice());
+    }
+
+    #[test]
+    fn newly_observed_no_change_emits_nothing() {
+        // Idempotency: a reload that sees the same trajectory emits nothing.
+        assert!(newly_observed(&v(&["opus"]), &v(&["opus"])).is_empty());
+    }
+
+    #[test]
+    fn newly_observed_growth_emits_only_the_new_tail() {
+        // A quota fallback appended sonnet after opus was already recorded.
+        assert_eq!(
+            newly_observed(&v(&["opus"]), &v(&["opus", "sonnet"])),
+            v(&["sonnet"]).as_slice()
+        );
+    }
+
+    #[test]
+    fn newly_observed_divergence_emits_nothing() {
+        // Should not happen given the collapse fold; if it does, stay silent
+        // rather than fabricate a re-observation.
+        assert!(newly_observed(&v(&["opus"]), &v(&["sonnet"])).is_empty());
     }
 
     #[test]

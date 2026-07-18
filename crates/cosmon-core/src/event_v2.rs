@@ -1555,6 +1555,60 @@ pub enum EventV2 {
         selected_at: DateTime<Utc>,
     },
 
+    /// **delib-20260718-c70e / realized-model** — an adapter reported the
+    /// *concrete* model it actually ran, observed at execution time.
+    ///
+    /// The ex-post empirical sibling of the ex-ante [`Self::ModelSelected`]:
+    /// `ModelSelected` records the *intention* (the pin resolved through the
+    /// ladder, minted before the run); `ModelObserved` records the
+    /// *realization* (the id the adapter's own output names once it is
+    /// running). They **coexist** and neither subsumes the other — an unpinned
+    /// dispatch (`ModelSelected.model == None`) can still observe a concrete
+    /// realized id, and a pinned dispatch can realize a *different* id (a dated
+    /// fallback, or a mid-session quota downgrade Opus→Sonnet). The
+    /// retrospective fold
+    /// ([`crate::adapter_attribution::AdapterAttribution`]) folds this event
+    /// onto a `realized` axis **disjoint** from the intention axis.
+    ///
+    /// # The honesty invariant, made structural
+    ///
+    /// The [`model`](Self::ModelObserved::model) field is a **bare `String`**,
+    /// never `Option`. Silence — an adapter that cannot report which model ran
+    /// (codex/aider today) — is expressed by *not emitting the event at all*,
+    /// so "never fabricate a record of execution" is true *by construction*:
+    /// there is no `ModelObserved` value that means "ran but unknown". The fold
+    /// reads this event and **only** this event for the realized axis; it never
+    /// back-fills the realized id from the pin or the config (sibling of the
+    /// `reasoning_effort_is_never_inferred` rule).
+    ///
+    /// # Cadence
+    ///
+    /// Emitted on the **first** assistant turn that carries a concrete id, and
+    /// **re-emitted only on change** (a later turn naming a different id — the
+    /// quota-fallback case). Not per-turn, not at teardown. A fold over the
+    /// events in append order reconstructs the realized *trajectory*
+    /// (`Observed(vec![opus, sonnet])`).
+    ///
+    /// The hot path must not fail because telemetry is unhappy: like the other
+    /// spawn-time receipts, write errors are swallowed (trace-not-lock).
+    ModelObserved {
+        /// The molecule whose worker reported the model.
+        mol_id: MoleculeId,
+        /// Adapter the observation is scoped to (a model id only has meaning
+        /// inside its adapter), mirroring [`Self::ModelSelected`].
+        adapter_name: String,
+        /// The concrete model id the adapter reported running — a **bare
+        /// `String`**: the event is emitted *only* when a real id was observed,
+        /// so this field can never be a fabricated placeholder.
+        model: String,
+        /// Where the realized id was read from — per-adapter provenance for
+        /// forensics. Never surfaced at the display (`realized` is an outcome,
+        /// not a choice, so it carries no source tag).
+        observed_source: crate::model_realization::ModelObservationSource,
+        /// Wall-clock time the observation was recorded.
+        observed_at: DateTime<Utc>,
+    },
+
     /// **delib-20260704-b476 / C4** — the fail-closed per-galaxy model-dispatch
     /// ceiling fired: a *strong* model pin was refused because the rolling
     /// window already held `cap` strong dispatches.
@@ -2379,6 +2433,7 @@ impl EventV2 {
             | Self::AdapterHandleReconciled { mol_id, .. }
             | Self::AdapterSelected { mol_id, .. }
             | Self::ModelSelected { mol_id, .. }
+            | Self::ModelObserved { mol_id, .. }
             | Self::ModelCeilingHit { mol_id, .. }
             | Self::RemoteEgressOptIn { mol_id, .. }
             | Self::EgressUnenforceable { mol_id, .. }
@@ -3839,6 +3894,16 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
             },
+            EventV2::ModelObserved {
+                mol_id: mid("cs-20260411-aaaa"),
+                adapter_name: "claude".to_owned(),
+                model: "claude-sonnet-5".to_owned(),
+                observed_source:
+                    crate::model_realization::ModelObservationSource::ClaudeStreamJson,
+                observed_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
             EventV2::ModelCeilingHit {
                 mol_id: mid("cs-20260411-aaaa"),
                 adapter_name: "claude".to_owned(),
@@ -4099,6 +4164,7 @@ mod tests {
             | EventV2::AdapterBriefingConsumed { .. }
             | EventV2::AdapterSelected { .. }
             | EventV2::ModelSelected { .. }
+            | EventV2::ModelObserved { .. }
             | EventV2::ModelCeilingHit { .. }
             | EventV2::RemoteEgressOptIn { .. }
             | EventV2::EgressUnenforceable { .. }

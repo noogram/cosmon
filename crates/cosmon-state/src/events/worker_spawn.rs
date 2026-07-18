@@ -33,6 +33,7 @@ use cosmon_core::event_v2::{
     AdapterHandleState, AdapterProbeKind, AdapterProbeResult, AdapterSelectionSource, EventV2,
     LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
 };
+use cosmon_core::model_realization::ModelObservationSource;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::spawn_seam::LoopOwnership;
 
@@ -342,6 +343,39 @@ pub fn emit_model_selected(
         model: model.map(ToOwned::to_owned),
         selection_source,
         selected_at: Utc::now(),
+    };
+    write_event(state_dir, event);
+}
+
+/// Emit an [`EventV2::ModelObserved`] (delib-20260718-c70e / realized-model).
+///
+/// The ex-post empirical sibling of [`emit_model_selected`]: `ModelSelected`
+/// records the model *intention* (the pin, ex-ante); this records the
+/// *realization* — the concrete id an adapter reported running, read from its
+/// fiable side-channel (`cosmon_core::model_realization`).
+///
+/// `model` is a **bare `&str`**, never optional: this helper is called *only*
+/// when a concrete id was observed, so silence is expressed by not calling it.
+/// That makes the honesty invariant structural — there is no `ModelObserved`
+/// line that means "ran but unknown". Callers emit on the first observation and
+/// re-emit only on change (the fold reconstructs the trajectory from the
+/// ordered events); a caller that would re-emit an unchanged id should skip it.
+///
+/// The hot path must not fail because telemetry is unhappy: write errors are
+/// swallowed (same trace-not-lock discipline as the other Worker-Spawn helpers).
+pub fn emit_model_observed(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    adapter_name: &str,
+    model: &str,
+    observed_source: ModelObservationSource,
+) {
+    let event = EventV2::ModelObserved {
+        mol_id: mol_id.clone(),
+        adapter_name: adapter_name.to_owned(),
+        model: model.to_owned(),
+        observed_source,
+        observed_at: Utc::now(),
     };
     write_event(state_dir, event);
 }
@@ -922,6 +956,36 @@ mod tests {
             selection_source,
             ModelSelectionSource::Flag { flag } if flag == "claude-opus-4-8"
         ));
+    }
+
+    /// realized-model (delib-20260718-c70e): a `ModelObserved` emission
+    /// round-trips through serde carrying the concrete realized id and its
+    /// per-adapter provenance. The `model` is a bare string — the event exists
+    /// only because a real id was observed.
+    #[test]
+    fn emit_model_observed_records_realized_model_and_source() {
+        let dir = tempdir().unwrap();
+        emit_model_observed(
+            dir.path(),
+            &mol(),
+            "claude",
+            "claude-sonnet-5",
+            ModelObservationSource::ClaudeStreamJson,
+        );
+        let envelopes = read_envelopes(dir.path());
+        assert_eq!(envelopes.len(), 1);
+        let EventV2::ModelObserved {
+            adapter_name,
+            model,
+            observed_source,
+            ..
+        } = &envelopes[0].event
+        else {
+            panic!("expected ModelObserved, got {:?}", envelopes[0].event);
+        };
+        assert_eq!(adapter_name, "claude");
+        assert_eq!(model, "claude-sonnet-5");
+        assert_eq!(*observed_source, ModelObservationSource::ClaudeStreamJson);
     }
 
     /// C2: the floor path — nothing pinned a model, so `model` is `None`
