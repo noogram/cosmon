@@ -882,7 +882,17 @@ pub struct Runtime {
     config: RuntimeConfig,
     bounds: RunBounds,
     shutdown: ShutdownSignal,
+    /// Per-tick probe invoked for every `Running` molecule the policy tracks
+    /// (round-3 / F-01). The production caller (`cs run`) passes the
+    /// realized-model capture so `ModelObserved` is emitted at the first
+    /// model-bearing turn *during* the run — durable even if the worker later
+    /// crashes before `cs complete`. `None` (the default) is a no-op; the
+    /// runtime core stays I/O-free with respect to what the probe does.
+    tick_probe: Option<TickProbe>,
 }
+
+/// A per-tick probe over one `Running` molecule — see [`Runtime::with_tick_probe`].
+pub type TickProbe = Box<dyn FnMut(&MoleculeId)>;
 
 impl Runtime {
     /// Build a new runtime from a store, a policy, an executor, and a config.
@@ -907,7 +917,17 @@ impl Runtime {
             config,
             bounds: RunBounds::default(),
             shutdown: ShutdownSignal::new(),
+            tick_probe: None,
         }
+    }
+
+    /// Install a per-tick probe invoked for every `Running` molecule inside
+    /// the policy's scope (round-3 / F-01 — the realized-model runtime
+    /// consumer). Without this setter the runtime never probes.
+    #[must_use]
+    pub fn with_tick_probe(mut self, probe: TickProbe) -> Self {
+        self.tick_probe = Some(probe);
+        self
     }
 
     /// Install server-side drain bounds (the B1 moussage-resident
@@ -1038,6 +1058,21 @@ impl Runtime {
             if let Some(every) = self.config.sweep_orphan_descendants_every {
                 if every > 0 && ticks.is_multiple_of(u64::from(every)) {
                     self.policy.refresh_scope(self.store.as_ref())?;
+                }
+            }
+
+            // Realized-model runtime consumer (round-3 / F-01): probe every
+            // in-scope Running molecule each tick so `ModelObserved` lands on
+            // the journal at the FIRST model-bearing turn, during the run —
+            // not at `cs complete`. A worker that crashes mid-run has already
+            // been observed. The probe itself dedups (first + on-change), so
+            // per-tick invocation is idempotent.
+            if let Some(probe) = self.tick_probe.as_mut() {
+                for mol in &snapshot.molecules {
+                    if mol.status == MoleculeStatus::Running && self.policy.tracks_molecule(&mol.id)
+                    {
+                        probe(&mol.id);
+                    }
                 }
             }
 

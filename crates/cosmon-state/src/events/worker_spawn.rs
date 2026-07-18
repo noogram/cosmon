@@ -361,19 +361,25 @@ pub fn emit_model_selected(
 /// re-emit only on change (the fold reconstructs the trajectory from the
 /// ordered events); a caller that would re-emit an unchanged id should skip it.
 ///
+/// `worker_id` is likewise **mandatory** (round-3 / F-02): every new
+/// observation is scoped to the worker that produced it, so an emitter that
+/// cannot resolve its worker must not emit at all — an unscoped line would be
+/// ambiguous forever and the fold treats such legacy lines fail-closed. The
+/// `Option` on the wire exists only for deserializing pre-F-02 lines.
+///
 /// The hot path must not fail because telemetry is unhappy: write errors are
 /// swallowed (same trace-not-lock discipline as the other Worker-Spawn helpers).
 pub fn emit_model_observed(
     state_dir: &Path,
     mol_id: &MoleculeId,
-    worker_id: Option<&WorkerId>,
+    worker_id: &WorkerId,
     adapter_name: &str,
     model: &str,
     observed_source: ModelObservationSource,
 ) {
     let event = EventV2::ModelObserved {
         mol_id: mol_id.clone(),
-        worker_id: worker_id.cloned(),
+        worker_id: Some(worker_id.clone()),
         adapter_name: adapter_name.to_owned(),
         model: model.to_owned(),
         observed_source,
@@ -398,7 +404,7 @@ pub fn emit_model_observed(
 pub fn emit_new_model_observations(
     state_dir: &Path,
     mol_id: &MoleculeId,
-    worker_id: Option<&WorkerId>,
+    worker_id: &WorkerId,
     adapter_name: &str,
     observed: &[cosmon_core::model_realization::ModelId],
     observed_source: ModelObservationSource,
@@ -421,14 +427,16 @@ pub fn emit_new_model_observations(
 
 /// The realized models already on the wire for exactly `(mol_id, worker_id,
 /// adapter_name)`, in append order — folded from the matching
-/// [`EventV2::ModelObserved`] events. A legacy observation with no `worker_id`
-/// matches any requested worker (adapter still must match). Any read error
+/// [`EventV2::ModelObserved`] events. **Fail-closed** (round-3 / F-02): a
+/// legacy observation carrying no `worker_id` is ambiguous and matches **no**
+/// requested worker — it must never suppress (dedup away) a properly-scoped
+/// new observation, nor be counted as this attempt's prefix. Any read error
 /// yields an empty list (best-effort), so a first observation is emitted.
 #[must_use]
 fn recorded_model_observations(
     state_dir: &Path,
     mol_id: &MoleculeId,
-    worker_id: Option<&WorkerId>,
+    worker_id: &WorkerId,
     adapter_name: &str,
 ) -> Vec<cosmon_core::model_realization::ModelId> {
     let log_path = resolve_events_log_path(state_dir);
@@ -440,25 +448,16 @@ fn recorded_model_observations(
         .filter_map(|env| match env.event {
             EventV2::ModelObserved {
                 mol_id: ref m,
-                worker_id: ref w,
+                worker_id: Some(ref w),
                 adapter_name: ref a,
                 ref model,
                 ..
-            } if m == mol_id && a == adapter_name && worker_matches(w.as_ref(), worker_id) => {
+            } if m == mol_id && a == adapter_name && w == worker_id => {
                 cosmon_core::model_realization::ModelId::new(model)
             }
             _ => None,
         })
         .collect()
-}
-
-/// A recorded observation matches the requested worker when it carries no
-/// worker id (legacy, best-effort) or the ids are equal.
-fn worker_matches(recorded: Option<&WorkerId>, requested: Option<&WorkerId>) -> bool {
-    match (recorded, requested) {
-        (Some(r), Some(q)) => r == q,
-        _ => true,
-    }
 }
 
 /// The suffix of `observed` not yet present in `recorded` — the models to emit.
@@ -1069,7 +1068,7 @@ mod tests {
         emit_model_observed(
             dir.path(),
             &mol(),
-            Some(&WorkerId::new("worker-1").unwrap()),
+            &WorkerId::new("worker-1").unwrap(),
             "claude",
             "claude-sonnet-5",
             ModelObservationSource::ClaudeStreamJson,

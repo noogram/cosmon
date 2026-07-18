@@ -58,13 +58,14 @@ pub enum Realized {
     /// We genuinely do not know what ran. Rendered `?`. The honest default.
     #[default]
     Unknown,
-    /// The dispatch ran to completion under a **structurally mute** adapter —
-    /// one that cannot surface a model id (aider/local today) — so silence is a
+    /// The dispatch ran to completion under a **proven structurally mute**
+    /// adapter — one the capability registry declares unable to surface a model
+    /// id ([`ModelReportCapability::Mute`]; aider today) — so silence is a
     /// property of the capability, not a capture failure. The *positive* claim
     /// "ran, said nothing". Rendered `-`. Per F-05 this is **never** derived
-    /// from a capable adapter's completion (that stays [`Self::Unknown`]): a
-    /// generic `MoleculeCompleted` proves neither that an assistant turn
-    /// happened nor that the observation seam worked.
+    /// from a capable *or unproven* adapter's completion (both stay
+    /// [`Self::Unknown`]): a generic `MoleculeCompleted` proves neither that an
+    /// assistant turn happened nor that the observation seam worked.
     Silent,
     /// One or more concrete model ids were observed, in execution order with
     /// consecutive duplicates collapsed. A single element is a plain model; two
@@ -294,25 +295,50 @@ pub const PENDING_GLYPH: &str = "...";
 /// therefore whether the absence of a [`Realized::Observed`] is honest silence
 /// or merely an un-observed run (F-05).
 ///
-/// A **capable** adapter exposes a fiable side-channel cosmon reads for the
-/// realized id (`crate::model_realization`): claude's session `*.jsonl`, the
-/// openai/anthropic/mistral provider response body, codex's `turn_context`
-/// line. For these, "completed but no observation" means the *observer* did not
-/// confirm a model — capture failed, `cs peek` never ran, the session was
-/// unreadable — so the honest projection is [`Realized::Unknown`], never
-/// [`Realized::Silent`].
-///
-/// A **mute** adapter (everything else — aider, the local floor) cannot surface
-/// a model at all; there, a completed run *is* the terminal proof that it "ran,
-/// said nothing", so [`Realized::Silent`] is the honest label. This is the only
-/// route to `Silent`: it is a property of the capability, never inferred from a
-/// generic completion of a capable adapter.
+/// This is an **explicit capability registry**, not a boolean whitelist. The
+/// round-2 audit's counter-example was the boolean's "everything else" arm: an
+/// unknown or aliased adapter name defaulted to *mute*, so its completion was
+/// classified [`Realized::Silent`] — a positive claim ("ran, said nothing")
+/// that no one had proven. Muteness is a *proven structural property* of a
+/// specific adapter, so it must be declared per-name; a name this registry has
+/// never seen carries **no** capability claim at all ([`Self::Unproven`]) and
+/// its unobserved completion stays [`Realized::Unknown`]. Fail-closed: absence
+/// of knowledge is never spun into either positive claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelReportCapability {
+    /// The adapter exposes a fiable side-channel cosmon reads for the realized
+    /// id (`crate::model_realization`): claude's session `*.jsonl`, the
+    /// openai/anthropic/mistral provider response body, codex's `turn_context`
+    /// line — and `local`, which routes through the `OpenAIProvider` seam with
+    /// full telemetry (task-20260614-a63c) and therefore *can* report. For
+    /// these, "completed but no observation" means the *observer* did not
+    /// confirm a model — capture failed, the session was unreadable — so the
+    /// honest projection is [`Realized::Unknown`], never [`Realized::Silent`].
+    Capable,
+    /// The adapter is **proven structurally mute** — it has no side-channel
+    /// that names a model (aider today). There, a completed run *is* the
+    /// terminal proof that it "ran, said nothing", so [`Realized::Silent`] is
+    /// the honest label. This variant is the **only** route to `Silent`, and
+    /// it is granted per-name, never by default.
+    Mute,
+    /// The adapter name is not in the registry — a new adapter, an alias, or a
+    /// typo. Nothing is proven either way, so an unobserved completion stays
+    /// [`Realized::Unknown`]: claiming `Silent` would fabricate the very
+    /// "ran, said nothing" record F-05 forbids inferring.
+    Unproven,
+}
+
+/// The declared [`ModelReportCapability`] for `adapter` — the single place a
+/// name acquires a capability claim (F-05, fail-closed).
 #[must_use]
-pub fn adapter_can_report_model(adapter: &str) -> bool {
-    matches!(
-        adapter,
-        "claude" | "openai" | "anthropic" | "mistral" | "codex"
-    )
+pub fn model_report_capability(adapter: &str) -> ModelReportCapability {
+    match adapter {
+        "claude" | "openai" | "anthropic" | "mistral" | "codex" | "local" => {
+            ModelReportCapability::Capable
+        }
+        "aider" => ModelReportCapability::Mute,
+        _ => ModelReportCapability::Unproven,
+    }
 }
 
 impl AdapterAttribution {
@@ -337,8 +363,11 @@ impl AdapterAttribution {
     /// run — so only the **last** attempt's observations survive the fold. A
     /// [`EventV2::ModelObserved`] is folded **only** when it belongs to the
     /// current attempt: its `adapter_name` must equal the current adapter, and
-    /// its `worker_id` (when present) must equal the current worker. Without
-    /// this, a re-tackle to a different adapter would inherit the previous
+    /// its `worker_id` must equal the current worker. An unscoped legacy line
+    /// (`worker_id = None`) is **fail-closed**: once any worker boundary exists
+    /// it is ambiguous and rejected; it folds only on a pure-legacy log with no
+    /// [`EventV2::WorkerSpawned`] at all. Without this, a re-tackle to a
+    /// different adapter would inherit the previous
     /// attempt's realized id — the exact `codex/gpt-5 ~> opus` fiction the
     /// audit's deterministic counter-example produced. The intention fields
     /// (adapter/model) keep last-wins across attempts, matching what actually
@@ -357,7 +386,7 @@ impl AdapterAttribution {
         let mut dispatched = false;
         // The current attempt's scope keys — an observation is folded only when
         // it matches these (F-02). `current_adapter` also decides `Silent` vs
-        // `Unknown` at resolution (F-05, via `adapter_can_report_model`).
+        // `Unknown` at resolution (F-05, via `model_report_capability`).
         let mut current_adapter: Option<String> = None;
         let mut current_worker: Option<crate::id::WorkerId> = None;
         for ev in events {
@@ -409,17 +438,19 @@ impl AdapterAttribution {
                 } => {
                     // Scope guard (F-02): reject any observation that does not
                     // belong to the current attempt — wrong adapter, or a worker
-                    // other than the one currently spawned. A legacy line with no
-                    // worker_id is accepted on the adapter match alone.
+                    // other than the one currently spawned. Fail-closed on
+                    // ambiguity (round-3): once a worker boundary exists for
+                    // this attempt, an unscoped legacy line (`worker_id=None`)
+                    // could belong to ANY attempt, so it is rejected — it may
+                    // only fold on a pure-legacy log that never recorded a
+                    // `WorkerSpawned` (nothing to scope against).
                     if current_adapter.as_deref() != Some(adapter_name.as_str()) {
                         continue;
                     }
-                    if let (Some(obs_w), Some(cur_w)) =
-                        (worker_id.as_ref(), current_worker.as_ref())
-                    {
-                        if obs_w != cur_w {
-                            continue;
-                        }
+                    match (worker_id.as_ref(), current_worker.as_ref()) {
+                        (Some(obs_w), Some(cur_w)) if obs_w != cur_w => continue,
+                        (None, Some(_)) => continue,
+                        _ => {}
                     }
                     // Realized trajectory: collapse consecutive duplicates so a
                     // stable session is one element and a quota fallback is two.
@@ -444,13 +475,16 @@ impl AdapterAttribution {
             // An observation always wins — a concrete realized trajectory.
             Realized::Observed(observed)
         } else if ran_to_completion {
-            // Completed without any observation. Only a *structurally mute*
-            // adapter's completion is honest silence; a capable adapter that
-            // completed unobserved means capture failed / never ran, which is
-            // `Unknown`, not `Silent` (F-05). A generic completion never proves
-            // a model-less run of a capable adapter.
+            // Completed without any observation. Only a *proven structurally
+            // mute* adapter's completion is honest silence; a capable adapter
+            // that completed unobserved means capture failed / never ran, and
+            // an adapter this build has never heard of proves nothing at all —
+            // both stay `Unknown`, not `Silent` (F-05, fail-closed). A generic
+            // completion never proves a model-less run.
             match out.adapter.as_deref() {
-                Some(a) if !adapter_can_report_model(a) => Realized::Silent,
+                Some(a) if model_report_capability(a) == ModelReportCapability::Mute => {
+                    Realized::Silent
+                }
                 _ => Realized::Unknown,
             }
         } else {
@@ -859,6 +893,72 @@ mod tests {
         assert!(a.detail_line().contains("realized: ? (unknown)"));
     }
 
+    /// F-05 fail-closed — an adapter name the capability registry has NEVER
+    /// seen (a new adapter, an alias, a typo) that completed unobserved stays
+    /// `Unknown`, never `Silent`: no one proved it mute, so claiming "ran,
+    /// said nothing" would fabricate the record the rule forbids inferring.
+    #[test]
+    fn realized_unknown_adapter_completed_unobserved_is_unknown_not_silent() {
+        for name in ["futurellm", "Claude", "claude-code", "codexx"] {
+            let events = vec![
+                adapter_selected(name, AdapterSelectionSource::Cli { flag: name.into() }),
+                molecule_completed(),
+            ];
+            let a = AdapterAttribution::fold(&events);
+            assert_eq!(
+                a.realized,
+                Realized::Unknown,
+                "unproven adapter `{name}` must fold Unknown, not Silent"
+            );
+            assert!(
+                a.compact_cell().ends_with(" ?"),
+                "cell: {}",
+                a.compact_cell()
+            );
+        }
+    }
+
+    /// F-05 — `local` routes through the `OpenAIProvider` seam with telemetry
+    /// (task-20260614-a63c), so it *can* report a model: its unobserved
+    /// completion is `Unknown` (capture failed / never ran), not the old
+    /// whitelist's `Silent` misclassification.
+    #[test]
+    fn realized_local_adapter_is_capable_not_mute() {
+        assert_eq!(
+            model_report_capability("local"),
+            ModelReportCapability::Capable
+        );
+        let events = vec![
+            adapter_selected(
+                "local",
+                AdapterSelectionSource::Default {
+                    fallback_reason: "floor".into(),
+                },
+            ),
+            molecule_completed(),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unknown);
+    }
+
+    /// The capability registry grants `Mute` per-name only — aider is the one
+    /// proven-mute adapter; everything unlisted is `Unproven`.
+    #[test]
+    fn capability_registry_is_explicit_per_name() {
+        assert_eq!(
+            model_report_capability("aider"),
+            ModelReportCapability::Mute
+        );
+        assert_eq!(
+            model_report_capability("claude"),
+            ModelReportCapability::Capable
+        );
+        assert_eq!(
+            model_report_capability("some-new-adapter"),
+            ModelReportCapability::Unproven
+        );
+    }
+
     /// Case (b) — mid-session change: a real Opus→Sonnet quota fallback. Both
     /// models ran; the tri-state keeps the *trajectory*, never last-wins. The
     /// drift renders `pin~>tail` (the redundant pin-equal head is dropped).
@@ -1159,10 +1259,11 @@ mod tests {
         assert_eq!(a.realized, Realized::Unknown);
     }
 
-    /// A legacy observation carrying no `worker_id` is still accepted on the
-    /// adapter match alone (round-trip compatibility for pre-F-02 lines).
+    /// A legacy observation carrying no `worker_id` folds ONLY on a pure-legacy
+    /// log that never recorded a `WorkerSpawned` — there is nothing to scope
+    /// against, so the adapter match alone is the best honest key.
     #[test]
-    fn legacy_observation_without_worker_id_is_accepted_on_adapter_match() {
+    fn legacy_observation_without_worker_id_folds_only_on_pure_legacy_log() {
         let events = vec![
             adapter_selected(
                 "claude",
@@ -1177,6 +1278,40 @@ mod tests {
             a.realized,
             Realized::Observed(vec!["claude-opus-4-8".to_string()])
         );
+    }
+
+    /// Round-3 / F-02 fail-closed: a LATE unscoped observation
+    /// (`worker_id=None`, same adapter) landing after a new attempt's
+    /// `WorkerSpawned` boundary is ambiguous — it could be a straggler from the
+    /// dead predecessor — and must NOT be attributed to the current attempt.
+    #[test]
+    fn late_unscoped_observation_after_new_attempt_boundary_is_rejected() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            EventV2::WorkerExited {
+                molecule_id: mid(),
+                exit_code: Some(137),
+                reason: "pane_died".into(),
+            },
+            // New attempt boundary.
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-2"),
+            // Straggler with no worker scope — ambiguous, reject.
+            model_observed_for("claude", "claude-opus-4-8", None),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unknown);
     }
 
     // ---- F-03: live-pending promotion ------------------------------------

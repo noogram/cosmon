@@ -1,0 +1,2 @@
+{"timestamp": "2026-02-14T22:22:40.970Z", "type": "session_meta", "payload": {"id": "00000000-0000-0000-0000-000000000000", "timestamp": "2026-02-14T22:22:40.964Z", "cwd": "/work/tree", "originator": "codex_cli_rs", "cli_version": "0.36.0", "instructions": null}}
+{"timestamp": "2026-02-14T22:22:40.970Z", "type": "turn_context", "payload": {"cwd": "/work/tree", "approval_policy": "on-request", "sandbox_policy": {"mode": "workspace-write", "network_access": false, "exclude_tmpdir_env_var": false, "exclude_slash_tmp": false}, "model": "gpt-5-codex", "summary": "auto"}}

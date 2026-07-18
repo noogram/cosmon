@@ -179,9 +179,14 @@ enum ClaudeLine {
     Other,
 }
 
-/// The `system`/`init` bootstrap line's realized-model-bearing fields.
+/// The `system` line's realized-model-bearing fields. Only the `init`
+/// bootstrap subtype names the session model; other `system` subtypes
+/// (compact-boundary, hook output, …) may carry unrelated `model`-shaped
+/// fields, so the parser discriminates on `subtype` (round-3 bonus / F-04).
 #[derive(Debug, Deserialize)]
 struct ClaudeSystemLine {
+    #[serde(default)]
+    subtype: Option<String>,
     #[serde(default)]
     model: Option<String>,
 }
@@ -220,9 +225,11 @@ pub fn realized_models_from_claude_jsonl(content: &str) -> Vec<ModelId> {
             return None;
         }
         let raw = match serde_json::from_str::<ClaudeLine>(line).ok()? {
-            ClaudeLine::System(s) => s.model,
+            // Only the `init` bootstrap subtype names the session model; any
+            // other `system` subtype is not a realization record.
+            ClaudeLine::System(s) if s.subtype.as_deref() == Some("init") => s.model,
             ClaudeLine::Assistant(a) => a.message.and_then(|m| m.model),
-            ClaudeLine::Other => None,
+            _ => None,
         };
         ModelId::new(raw.as_deref()?)
     });
@@ -454,6 +461,24 @@ mod tests {
         assert_eq!(
             realized_models_from_claude_jsonl(jsonl),
             ids(&["opus", "sonnet", "opus"])
+        );
+    }
+
+    /// Round-3 bonus / F-04: a `system` line whose subtype is NOT `init`
+    /// (compact boundary, hook output, …) must not be read as a realization
+    /// even if it happens to carry a `model`-shaped field.
+    #[test]
+    fn claude_non_init_system_subtype_is_ignored() {
+        let jsonl = concat!(
+            r#"{"type":"system","subtype":"compact_boundary","model":"claude-haiku-4-5"}"#,
+            "\n",
+            r#"{"type":"system","model":"claude-haiku-4-5"}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+        );
+        assert_eq!(
+            realized_models_from_claude_jsonl(jsonl),
+            ids(&["claude-opus-4-8"])
         );
     }
 

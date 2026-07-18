@@ -48,7 +48,7 @@ use colored::Colorize;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_filestore::FileStore;
-use cosmon_state::wait::{wait_for_status_with_metrics, WaitError};
+use cosmon_state::wait::{wait_for_status_with_metrics_probed, WaitError};
 
 use super::Context;
 
@@ -128,13 +128,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
-    match wait_for_status_with_metrics(
+    // Runtime realized-model capture (round-3 / F-01). The wait loop is the
+    // one cosmon process reliably alive during a subprocess-adapter run
+    // (canonical trinity: tackle → wait → done), so every poll tick probes the
+    // worker's live claude/codex session log and emits `ModelObserved` at the
+    // first model-bearing turn — durable even if the worker crashes before
+    // `cs complete`. Best-effort and idempotent; `cs peek` stays a reader.
+    let backends =
+        crate::energy_probe::discover_fleet_backends(&state_dir, &super::tmux_socket_name(ctx));
+    let on_poll = || crate::energy_probe::capture_realized_runtime(&state_dir, &mol_id, &backends);
+
+    match wait_for_status_with_metrics_probed(
         &store,
         &state_dir,
         &mol_id,
         &targets,
         timeout,
         poll_interval,
+        on_poll,
     ) {
         Ok(outcome) => {
             if ctx.json {
