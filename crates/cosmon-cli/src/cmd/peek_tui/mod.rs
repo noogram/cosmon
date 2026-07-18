@@ -3609,6 +3609,19 @@ fn adapter_cell(att: &cosmon_core::adapter_attribution::AdapterAttribution) -> L
             Style::default().fg(Color::Gray),
         ));
     }
+    // Realized-model drift (delib-20260718-c70e). The pin (intention) is dim
+    // gray above; the *realized* segment — what actually ran — is painted a
+    // distinct yellow so drift reads as a signal, not another pin. Shown only
+    // on drift / observed-without-pin (agreement and silence add nothing here;
+    // the honest disposition lives in the expanded detail).
+    if let Some(drift) = att.realized_drift_display() {
+        spans.push(Span::styled(
+            format!("~>{drift}"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if let Some(src) = att.adapter_source {
         spans.push(Span::styled(
             format!(" [{}]", src.tag()),
@@ -3732,6 +3745,31 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
     // recorded it, never inferred from the current config
     // (task-20260712-6609). Empty renders as `-`.
     lines.push(field("adapter", &r.adapter.compact_cell(), false));
+
+    // realized — the honest disposition of what actually ran, on its own axis
+    // (delib-20260718-c70e). Distinct from the intention pin shown in `adapter`:
+    // `? (unknown)` (crashed / never observed), `- (silent)` (ran, reported
+    // nothing), or the observed `a->b` trajectory. Never back-filled from the
+    // pin. The value is painted yellow when a concrete model was observed so it
+    // stands apart from the dim intention above.
+    {
+        let realized = format!(
+            "{} ({})",
+            r.adapter.realized.detail_fragment(),
+            r.adapter.realized.disposition(),
+        );
+        let realized_style = if r.adapter.realized.observed().is_some() {
+            Style::default().fg(Color::Yellow)
+        } else {
+            dim_style
+        };
+        let connector = "├─";
+        let label = format!("{indent}{connector} {:<10} ", "realized");
+        lines.push(Line::from(vec![
+            Span::styled(label, label_style),
+            Span::styled(realized, realized_style),
+        ]));
+    }
 
     // heartbeat (with last activity)
     //
@@ -4463,6 +4501,7 @@ pub(crate) fn build_snapshot(
                 state_dirs.insert(m.id.to_string(), sd.clone());
             }
             let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
+            capture_realized_models(&backends, &sd, &fleet);
             populate_snapshot(
                 &mut snap,
                 &store,
@@ -4499,6 +4538,7 @@ pub(crate) fn build_snapshot(
             .map(|(s, a)| (socket.to_owned(), s, a))
             .collect();
         let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
+        capture_realized_models(&backends, state_dir, &fleet);
         populate_snapshot(
             &mut snap,
             &store,
@@ -4513,6 +4553,27 @@ pub(crate) fn build_snapshot(
     }
 
     Ok((snap, state_dirs))
+}
+
+/// Opportunistic realized-model capture across a fleet's live workers
+/// (delib-20260718-c70e). For each worker currently assigned a molecule, probe
+/// its Claude Code session and emit `ModelObserved` for any model not yet
+/// recorded — the first-observation + on-change cadence, idempotent under the
+/// repeated reloads a live TUI performs. Best-effort: unresolvable workers are
+/// skipped silently. `cs peek` is the observer that already reads these sessions
+/// for energy, so capturing the realized id out of the same bytes is near-free.
+fn capture_realized_models(
+    backends: &[cosmon_transport::TmuxBackend],
+    state_dir: &std::path::Path,
+    fleet: &cosmon_state::Fleet,
+) {
+    for worker in fleet.workers.values() {
+        if let Some(mol_id) = &worker.current_molecule {
+            crate::energy_probe::capture_realized_for_worker(
+                backends, state_dir, &worker.id, mol_id,
+            );
+        }
+    }
 }
 
 fn project_label_for(path: &std::path::Path) -> String {
@@ -6541,7 +6602,9 @@ mod tests {
 
     // -- ADAPTER column (task-20260712-6609) ---------------------------------
 
-    use cosmon_core::adapter_attribution::{AdapterAttribution, AdapterSource, ModelSource};
+    use cosmon_core::adapter_attribution::{
+        AdapterAttribution, AdapterSource, ModelSource, Realized,
+    };
 
     /// Flatten a `Line`'s spans into its visible text — the drift-proof
     /// contents an operator actually reads.
@@ -6559,6 +6622,7 @@ mod tests {
             model: Some("claude-opus-4-8".into()),
             model_source: Some(ModelSource::Flag),
             reasoning_effort: None,
+            realized: Realized::default(),
         }
     }
 
@@ -6584,6 +6648,57 @@ mod tests {
         // thinking from the current config.
         let cell = adapter_cell(&claude_attribution());
         assert!(!line_text(&cell).contains('@'));
+    }
+
+    #[test]
+    fn adapter_cell_renders_realized_drift_distinctly() {
+        // Pinned opus, realized sonnet: the drift segment `~>sonnet` renders in
+        // a distinct yellow so it reads as a signal, not another pin.
+        let mut att = claude_attribution();
+        att.realized = Realized::Observed(vec!["claude-sonnet-5".into()]);
+        let cell = adapter_cell(&att);
+        assert_eq!(
+            line_text(&cell),
+            "claude/claude-opus-4-8~>claude-sonnet-5 [cli]"
+        );
+        // The drift span is yellow (distinct from the dim-gray pin).
+        let drift = cell
+            .spans
+            .iter()
+            .find(|s| s.content.contains("~>"))
+            .expect("drift span present");
+        assert_eq!(drift.style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn adapter_cell_agreement_shows_no_drift() {
+        // Realized == pin: agreement is silence — no `~>` glyph in the cell.
+        let mut att = claude_attribution();
+        att.realized = Realized::Observed(vec!["claude-opus-4-8".into()]);
+        let cell = adapter_cell(&att);
+        assert_eq!(line_text(&cell), "claude/claude-opus-4-8 [cli]");
+        assert!(!line_text(&cell).contains("~>"));
+    }
+
+    #[test]
+    fn expanded_detail_includes_realized_axis() {
+        let mut row = row_with("running", HeartbeatTier::Active);
+        row.adapter = claude_attribution();
+        row.adapter.realized = Realized::Silent;
+        let lines = expanded_detail_lines(&row);
+        let joined: String = lines
+            .iter()
+            .map(|l| line_text(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("realized"),
+            "expanded detail must carry a realized axis:\n{joined}"
+        );
+        assert!(
+            joined.contains("- (silent)"),
+            "a silent run must render its honest disposition:\n{joined}"
+        );
     }
 
     #[test]

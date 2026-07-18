@@ -138,6 +138,11 @@ impl Action {
             // model was pinned and where the choice came from. It observes
             // the spawn without driving a spec transition.
             | EventV2::ModelSelected { .. }
+            // Realized-model observation (delib-20260718-c70e) is the ex-post
+            // empirical sibling of ModelSelected — a forensic receipt of which
+            // concrete model an adapter actually ran. It observes the run
+            // without driving a spec transition.
+            | EventV2::ModelObserved { .. }
             // Model-budget ceiling receipt (delib-20260704-b476 / C4) is a
             // forensic record that the fail-closed strong-dispatch ceiling
             // fired (downgraded or aborted a strong pin). It observes the

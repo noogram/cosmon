@@ -176,6 +176,8 @@ pub mod model_budget;
 #[doc(hidden)]
 pub mod model_chain;
 #[doc(hidden)]
+pub mod model_realization;
+#[doc(hidden)]
 pub mod model_spec;
 #[doc(hidden)]
 pub mod molecule_class;
