@@ -66,8 +66,11 @@ pub struct Args {
     /// `--propel`, but classifies stalls from `last_progress_at` against
     /// the active step's `timeout_minutes` budget (M3, default 30 min) and
     /// guards idempotence — a worker won't be nudged twice within 60 s.
-    /// The nudge text references `briefing.md` so the re-engaged worker
-    /// re-reads its contract before continuing. Increments
+    /// Also covers the boot-stall class (task-20260718-ac03): a Running
+    /// molecule with NO progress signal at all — the stuck bootstrap paste
+    /// whose Enter was lost at spawn — is nudged once tackled more than
+    /// 120 s ago. The nudge text references `briefing.md` so the re-engaged
+    /// worker re-reads its contract before continuing. Increments
     /// [`cosmon_state::MoleculeData::nudge_count`] (M5).
     #[arg(long)]
     pub nudge: bool,
@@ -1439,14 +1442,34 @@ fn project_liveness_onto_process(
 /// twice within this duration. Cheap nudges, but not duplicate ones.
 pub(crate) const NUDGE_IDEMPOTENCE_SECS: i64 = 60;
 
-/// Pure: among `molecules`, return those that are `Running`, have an
-/// assigned worker, have a `last_progress_at` older than `now - budget`
-/// (where `budget = step.timeout_minutes`, default 30 min), and have
-/// not been nudged within [`NUDGE_IDEMPOTENCE_SECS`].
+/// Boot-stall budget for `cs patrol --nudge`: a `Running` molecule that has
+/// *never* recorded progress (`last_progress_at == None`) is nudged once its
+/// tackle is older than this many seconds.
 ///
-/// Loads each molecule's formula via the supplied lookup so the test
-/// fixture can pass a closure instead of touching disk. Returns the list
-/// of `(worker_id, molecule_id)` pairs ready for [`tmux send-keys`].
+/// This is the patrol half of the stuck-paste fix (task-20260718-ac03): a
+/// worker whose bootstrap paste lost its submitting Enter sits at the prompt
+/// with zero events and zero tokens forever — and because it never produced a
+/// `last_progress_at`, the pre-fix classifier skipped it *by construction*
+/// (`--propel` keys off progress staleness, `--nudge` off `last_progress_at`).
+/// A never-started molecule had neither, so the exact failure mode the patrol
+/// exists to catch was structurally invisible to it (13× on one galaxy,
+/// 2026-07-18). The signal here is control-plane only — a missing progress
+/// timestamp against `tackled_at` — never a pane grep (ADR-137 §2).
+pub(crate) const NUDGE_BOOT_STALL_SECS: i64 = 120;
+
+/// Pure: among `molecules`, return those that are `Running`, have an
+/// assigned worker, and are stalled by either signal:
+///
+/// - **step-stall** — `last_progress_at` older than `now - budget` (where
+///   `budget = step.timeout_minutes`, default 30 min); or
+/// - **boot-stall** — no `last_progress_at` at all and `tackled_at` (fallback
+///   `updated_at` for legacy records) older than [`NUDGE_BOOT_STALL_SECS`] —
+///   the never-started worker whose bootstrap paste was never submitted.
+///
+/// Both classes honor the [`NUDGE_IDEMPOTENCE_SECS`] guard. Loads each
+/// molecule's formula via the supplied lookup so the test fixture can pass a
+/// closure instead of touching disk. Returns the list of
+/// `(worker_id, molecule_id)` pairs ready for [`tmux send-keys`].
 pub(crate) fn find_stalled_for_nudge<F>(
     molecules: &[MoleculeData],
     now: chrono::DateTime<Utc>,
@@ -1463,18 +1486,28 @@ where
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
-        let Some(progress_ts) = mol.last_progress_at else {
-            continue;
+        let stalled = match mol.last_progress_at {
+            Some(progress_ts) => {
+                let timeout_minutes = formula_for(&mol.formula_id)
+                    .and_then(|f| {
+                        f.steps
+                            .get(mol.current_step)
+                            .map(cosmon_core::formula::Step::stall_timeout_minutes)
+                    })
+                    .unwrap_or(30);
+                let budget = chrono::Duration::minutes(i64::from(timeout_minutes));
+                now.signed_duration_since(progress_ts) > budget
+            }
+            None => {
+                // Boot-stall: tackled but zero progress ever recorded. Anchor
+                // on the tackle instant; legacy records without `tackled_at`
+                // fall back to `updated_at` (stamped at tackle and frozen
+                // since, precisely because nothing ever happened).
+                let anchor = mol.tackled_at.unwrap_or(mol.updated_at);
+                now.signed_duration_since(anchor).num_seconds() > NUDGE_BOOT_STALL_SECS
+            }
         };
-        let timeout_minutes = formula_for(&mol.formula_id)
-            .and_then(|f| {
-                f.steps
-                    .get(mol.current_step)
-                    .map(cosmon_core::formula::Step::stall_timeout_minutes)
-            })
-            .unwrap_or(30);
-        let budget = chrono::Duration::minutes(i64::from(timeout_minutes));
-        if now.signed_duration_since(progress_ts) <= budget {
+        if !stalled {
             continue;
         }
         if let Some(last_nudge) = mol.last_nudged_at {
@@ -3351,17 +3384,70 @@ mod tests {
     }
 
     #[test]
-    fn nudge_skips_molecule_without_progress_signal() {
-        // A molecule that has never been bumped by `cs evolve` (e.g. just
-        // tackled) has no `last_progress_at` — must not be nudged yet.
+    fn nudge_skips_freshly_tackled_molecule_without_progress_signal() {
+        // A molecule that has never been bumped by `cs evolve` and was
+        // tackled moments ago is inside the boot-stall grace — the worker is
+        // legitimately still booting and must not be nudged yet.
+        let now = Utc::now();
         let mut mol = make_molecule("task-20260425-eeee", MoleculeStatus::Running, Some("w1"));
         mol.formula_id = FormulaId::new("task-work").unwrap();
         mol.last_progress_at = None;
+        mol.tackled_at = Some(now - chrono::Duration::seconds(30));
         let mols = vec![mol];
-        let stalled = find_stalled_for_nudge(&mols, Utc::now(), |_| {
-            Some(synthetic_task_work_formula(Some(5)))
-        });
+        let stalled =
+            find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
         assert!(stalled.is_empty());
+    }
+
+    #[test]
+    fn nudge_finds_boot_stalled_molecule_that_never_progressed() {
+        // The task-20260718-ac03 stuck-paste class: tackled long ago, session
+        // running, but the bootstrap Enter was lost — no `last_progress_at`
+        // ever. The pre-fix classifier skipped this molecule by construction;
+        // it must now read as stalled once past the boot-stall budget.
+        let now = Utc::now();
+        let mut mol = make_molecule("task-20260718-b0aa", MoleculeStatus::Running, Some("w1"));
+        mol.formula_id = FormulaId::new("task-work").unwrap();
+        mol.last_progress_at = None;
+        mol.tackled_at = Some(now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60));
+        let mols = vec![mol];
+        let stalled =
+            find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
+        assert_eq!(stalled.len(), 1, "never-started molecule must be nudged");
+        assert_eq!(stalled[0].0.as_str(), "w1");
+    }
+
+    #[test]
+    fn nudge_boot_stall_falls_back_to_updated_at_for_legacy_records() {
+        // Legacy state files have no `tackled_at`; `updated_at` was stamped
+        // at tackle and frozen since (nothing ever happened), so it is the
+        // correct fallback anchor for the boot-stall clock.
+        let now = Utc::now();
+        let mut mol = make_molecule("task-20260718-b0bb", MoleculeStatus::Running, Some("w1"));
+        mol.formula_id = FormulaId::new("task-work").unwrap();
+        mol.last_progress_at = None;
+        mol.tackled_at = None;
+        mol.updated_at = now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60);
+        let mols = vec![mol];
+        let stalled =
+            find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
+        assert_eq!(stalled.len(), 1);
+    }
+
+    #[test]
+    fn nudge_boot_stall_honors_idempotence_window() {
+        // A boot-stalled molecule already nudged 30 s ago must not be poked
+        // again — same idempotence guard as the step-stall class.
+        let now = Utc::now();
+        let mut mol = make_molecule("task-20260718-b0cc", MoleculeStatus::Running, Some("w1"));
+        mol.formula_id = FormulaId::new("task-work").unwrap();
+        mol.last_progress_at = None;
+        mol.tackled_at = Some(now - chrono::Duration::seconds(NUDGE_BOOT_STALL_SECS + 60));
+        mol.last_nudged_at = Some(now - chrono::Duration::seconds(30));
+        let mols = vec![mol];
+        let stalled =
+            find_stalled_for_nudge(&mols, now, |_| Some(synthetic_task_work_formula(Some(5))));
+        assert!(stalled.is_empty(), "must not re-nudge within 60 s");
     }
 
     #[test]
