@@ -228,9 +228,8 @@ pub fn realized_models_from_claude_jsonl(content: &str) -> Vec<ModelId> {
             // Only the `init` bootstrap subtype names the session model; any
             // other `system` subtype is not a realization record.
             ClaudeLine::System(s) if s.subtype.as_deref() == Some("init") => s.model,
-            ClaudeLine::System(_) => None,
             ClaudeLine::Assistant(a) => a.message.and_then(|m| m.model),
-            ClaudeLine::Other => None,
+            _ => None,
         };
         ModelId::new(raw.as_deref()?)
     });
