@@ -1594,6 +1594,15 @@ pub enum EventV2 {
     ModelObserved {
         /// The molecule whose worker reported the model.
         mol_id: MoleculeId,
+        /// The worker/dispatch the observation belongs to — the per-attempt
+        /// scoping key (delib-20260718-c70e, F-02). A model id is only
+        /// meaningful *inside the run that produced it*: after a re-tackle the
+        /// fold must attribute a stale observation to the attempt that emitted
+        /// it, never to the new one. `None` on legacy lines predating this
+        /// field (`#[serde(default)]`), which the fold treats as
+        /// unscoped/best-effort.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<WorkerId>,
         /// Adapter the observation is scoped to (a model id only has meaning
         /// inside its adapter), mirroring [`Self::ModelSelected`].
         adapter_name: String,
@@ -3896,6 +3905,7 @@ mod tests {
             },
             EventV2::ModelObserved {
                 mol_id: mid("cs-20260411-aaaa"),
+                worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
                 adapter_name: "claude".to_owned(),
                 model: "claude-sonnet-5".to_owned(),
                 observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,

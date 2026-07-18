@@ -51,20 +51,35 @@ use crate::model_spec::ReasoningEffort;
 ///   an execution.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Realized {
-    /// No observation, and no evidence the run completed — the worker died
-    /// before reporting any model, or the molecule is legacy/pending. We
-    /// genuinely do not know what ran. Rendered `?`. The honest default.
+    /// No observation, and no honest evidence of what ran — the worker died
+    /// before reporting any model, capture failed, `cs peek` was never run, or
+    /// a *capable* adapter completed without the observer ever confirming a
+    /// model (F-05: absence of capture is never spun into a positive claim).
+    /// We genuinely do not know what ran. Rendered `?`. The honest default.
     #[default]
     Unknown,
-    /// The dispatch ran to completion but never reported a concrete model id
-    /// (an adapter that cannot surface it — codex/aider today). The *positive*
-    /// claim "ran, said nothing". Rendered `-`.
+    /// The dispatch ran to completion under a **structurally mute** adapter —
+    /// one that cannot surface a model id (aider/local today) — so silence is a
+    /// property of the capability, not a capture failure. The *positive* claim
+    /// "ran, said nothing". Rendered `-`. Per F-05 this is **never** derived
+    /// from a capable adapter's completion (that stays [`Self::Unknown`]): a
+    /// generic `MoleculeCompleted` proves neither that an assistant turn
+    /// happened nor that the observation seam worked.
     Silent,
     /// One or more concrete model ids were observed, in execution order with
     /// consecutive duplicates collapsed. A single element is a plain model; two
     /// or more is a *trajectory* (mid-session change / quota fallback), rendered
     /// `a->b`. Never empty (an empty observation is [`Self::Silent`]).
     Observed(Vec<String>),
+    /// The dispatch is **in flight** — a worker was spawned and the log carries
+    /// no terminal signal yet (no completion, no exit) and no observation. This
+    /// state is **never produced by the retrospective [`AdapterAttribution::fold`]**
+    /// (which cannot know liveness and must not claim a run is alive); it is set
+    /// only by a live surface that has positive evidence the worker is running
+    /// (`cs peek`), via [`AdapterAttribution::mark_pending_if_live`]. Rendered
+    /// `...` (motion) per D3 — distinct from `?`/`-` so a running-but-unobserved
+    /// molecule never reads as a confirmed or silent one.
+    Pending,
 }
 
 impl Realized {
@@ -79,26 +94,52 @@ impl Realized {
     }
 
     /// The honest one-glyph/one-fragment label for the detail line:
-    /// `?` (unknown), `-` (silent), or the `a->b` trajectory (observed).
+    /// `?` (unknown), `-` (silent), `...` (pending), or the `a->b` trajectory
+    /// (observed).
     #[must_use]
     pub fn detail_fragment(&self) -> String {
         match self {
             Self::Unknown => "?".to_string(),
             Self::Silent => EMPTY_CELL.to_string(),
+            Self::Pending => PENDING_GLYPH.to_string(),
             Self::Observed(ids) if ids.is_empty() => EMPTY_CELL.to_string(),
             Self::Observed(ids) => ids.join("->"),
         }
     }
 
     /// The parenthetical disposition tag for the detail line — how the value
-    /// should be read: `unknown`, `silent`, or `observed`.
+    /// should be read: `unknown`, `silent`, `pending`, or `observed`.
     #[must_use]
     pub fn disposition(&self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Silent => "silent",
+            Self::Pending => "pending",
             Self::Observed(ids) if ids.is_empty() => "silent",
             Self::Observed(_) => "observed",
+        }
+    }
+
+    /// The compact-cell **status glyph** for the non-drift states — the fix for
+    /// F-03, where `Unknown`, `Silent` and pin-agreement all used to render
+    /// blank and so an unconfirmed intention looked identical to a confirmed
+    /// realization. Returns:
+    ///
+    /// - `Some("?")` for [`Self::Unknown`] — ran/dispatched, nothing confirmed;
+    /// - `Some("-")` for [`Self::Silent`] — mute adapter, ran without a model;
+    /// - `Some("...")` for [`Self::Pending`] — in flight, not yet observed;
+    /// - `None` for [`Self::Observed`] — the realized value renders as drift
+    ///   (`~>`) or, on pin-agreement, as the *only* honest blank.
+    ///
+    /// Agreement (observed == pin) is therefore the single state that adds
+    /// nothing to the compact cell, exactly as D3 requires.
+    #[must_use]
+    pub fn compact_status(&self) -> Option<&'static str> {
+        match self {
+            Self::Unknown => Some("?"),
+            Self::Silent => Some(EMPTY_CELL),
+            Self::Pending => Some(PENDING_GLYPH),
+            Self::Observed(_) => None,
         }
     }
 }
@@ -245,6 +286,35 @@ impl ModelSource {
 /// the compact cell stays byte-safe for any downstream fixed-width surface.
 pub const EMPTY_CELL: &str = "-";
 
+/// The `...` motion glyph for a live-pending realization (D3) — ASCII so the
+/// compact cell stays byte-safe.
+pub const PENDING_GLYPH: &str = "...";
+
+/// Whether an adapter can *structurally* report the concrete model it ran, and
+/// therefore whether the absence of a [`Realized::Observed`] is honest silence
+/// or merely an un-observed run (F-05).
+///
+/// A **capable** adapter exposes a fiable side-channel cosmon reads for the
+/// realized id (`crate::model_realization`): claude's session `*.jsonl`, the
+/// openai/anthropic/mistral provider response body, codex's `turn_context`
+/// line. For these, "completed but no observation" means the *observer* did not
+/// confirm a model — capture failed, `cs peek` never ran, the session was
+/// unreadable — so the honest projection is [`Realized::Unknown`], never
+/// [`Realized::Silent`].
+///
+/// A **mute** adapter (everything else — aider, the local floor) cannot surface
+/// a model at all; there, a completed run *is* the terminal proof that it "ran,
+/// said nothing", so [`Realized::Silent`] is the honest label. This is the only
+/// route to `Silent`: it is a property of the capability, never inferred from a
+/// generic completion of a capable adapter.
+#[must_use]
+pub fn adapter_can_report_model(adapter: &str) -> bool {
+    matches!(
+        adapter,
+        "claude" | "openai" | "anthropic" | "mistral" | "codex"
+    )
+}
+
 impl AdapterAttribution {
     /// Fold an ordered slice of events into the honest attribution.
     ///
@@ -260,15 +330,36 @@ impl AdapterAttribution {
     /// **only** [`Self::realized`] and never reads the pin, so no fold path can
     /// clobber intention with realization or fabricate one from the other. This
     /// is what keeps the projection honest under the "never infer" rule.
+    /// # Per-attempt / per-worker scoping (delib-20260718-c70e, F-02)
+    ///
+    /// The realized accumulators are **reset at every attempt boundary** — each
+    /// [`EventV2::AdapterSelected`] and [`EventV2::WorkerSpawned`] starts a fresh
+    /// run — so only the **last** attempt's observations survive the fold. A
+    /// [`EventV2::ModelObserved`] is folded **only** when it belongs to the
+    /// current attempt: its `adapter_name` must equal the current adapter, and
+    /// its `worker_id` (when present) must equal the current worker. Without
+    /// this, a re-tackle to a different adapter would inherit the previous
+    /// attempt's realized id — the exact `codex/gpt-5 ~> opus` fiction the
+    /// audit's deterministic counter-example produced. The intention fields
+    /// (adapter/model) keep last-wins across attempts, matching what actually
+    /// ran; only the realized axis is attempt-scoped.
     #[must_use]
     pub fn fold<'a, I>(events: I) -> Self
     where
         I: IntoIterator<Item = &'a EventV2>,
     {
         let mut out = Self::default();
-        // Realized axis — accumulated disjointly from the intention fields.
+        // Realized axis — accumulated disjointly from the intention fields, and
+        // reset at every attempt boundary so only the last attempt survives.
         let mut observed: Vec<String> = Vec::new();
         let mut ran_to_completion = false;
+        let mut worker_exited = false;
+        let mut dispatched = false;
+        // The current attempt's scope keys — an observation is folded only when
+        // it matches these (F-02). `current_adapter` also decides `Silent` vs
+        // `Unknown` at resolution (F-05, via `adapter_can_report_model`).
+        let mut current_adapter: Option<String> = None;
+        let mut current_worker: Option<crate::id::WorkerId> = None;
         for ev in events {
             match ev {
                 EventV2::AdapterSelected {
@@ -278,6 +369,29 @@ impl AdapterAttribution {
                 } => {
                     out.adapter = Some(adapter_name.clone());
                     out.adapter_source = Some(AdapterSource::from_event(selection_source));
+                    // New attempt: discard any realized state from the prior run.
+                    current_adapter = Some(adapter_name.clone());
+                    observed.clear();
+                    ran_to_completion = false;
+                    worker_exited = false;
+                    dispatched = true;
+                }
+                EventV2::WorkerSpawned {
+                    worker_id,
+                    adapter_name,
+                    ..
+                } => {
+                    // A worker (re-)spawn is also an attempt boundary: clamp the
+                    // realized scope to this worker so a stale observation from a
+                    // dead predecessor (same adapter) can never contaminate it.
+                    current_worker = Some(worker_id.clone());
+                    if !adapter_name.is_empty() {
+                        current_adapter = Some(adapter_name.clone());
+                    }
+                    observed.clear();
+                    ran_to_completion = false;
+                    worker_exited = false;
+                    dispatched = true;
                 }
                 EventV2::ModelSelected {
                     model,
@@ -287,7 +401,26 @@ impl AdapterAttribution {
                     out.model.clone_from(model);
                     out.model_source = Some(ModelSource::from_event(selection_source));
                 }
-                EventV2::ModelObserved { model, .. } => {
+                EventV2::ModelObserved {
+                    worker_id,
+                    adapter_name,
+                    model,
+                    ..
+                } => {
+                    // Scope guard (F-02): reject any observation that does not
+                    // belong to the current attempt — wrong adapter, or a worker
+                    // other than the one currently spawned. A legacy line with no
+                    // worker_id is accepted on the adapter match alone.
+                    if current_adapter.as_deref() != Some(adapter_name.as_str()) {
+                        continue;
+                    }
+                    if let (Some(obs_w), Some(cur_w)) =
+                        (worker_id.as_ref(), current_worker.as_ref())
+                    {
+                        if obs_w != cur_w {
+                            continue;
+                        }
+                    }
                     // Realized trajectory: collapse consecutive duplicates so a
                     // stable session is one element and a quota fallback is two.
                     // This arm names ONLY the realized accumulator — never the
@@ -299,23 +432,54 @@ impl AdapterAttribution {
                 EventV2::MoleculeCompleted { .. } => {
                     ran_to_completion = true;
                 }
+                EventV2::WorkerExited { .. } => {
+                    worker_exited = true;
+                }
                 _ => {}
             }
         }
-        // Resolve the tri-state from the disjoint accumulators. Observation
-        // wins; else a completed-but-unobserved run is `Silent` ("ran, said
-        // nothing"), and anything else — crashed, pending, legacy — is the
-        // honest `Unknown`. The pin is NEVER consulted here.
-        out.realized = if observed.is_empty() {
-            if ran_to_completion {
-                Realized::Silent
-            } else {
-                Realized::Unknown
+        // Resolve the tri-state from the disjoint accumulators. The pin is NEVER
+        // consulted here.
+        out.realized = if !observed.is_empty() {
+            // An observation always wins — a concrete realized trajectory.
+            Realized::Observed(observed)
+        } else if ran_to_completion {
+            // Completed without any observation. Only a *structurally mute*
+            // adapter's completion is honest silence; a capable adapter that
+            // completed unobserved means capture failed / never ran, which is
+            // `Unknown`, not `Silent` (F-05). A generic completion never proves
+            // a model-less run of a capable adapter.
+            match out.adapter.as_deref() {
+                Some(a) if !adapter_can_report_model(a) => Realized::Silent,
+                _ => Realized::Unknown,
             }
         } else {
-            Realized::Observed(observed)
+            // Crashed before any event, dispatched-but-in-flight, legacy, or
+            // never tackled — all honestly `Unknown`. The fold does NOT emit
+            // `Pending`: it cannot know a worker is still alive, and claiming a
+            // run is in flight from the mere absence of a terminal event would
+            // be a liveness lie. A live surface promotes this to `Pending` via
+            // `mark_pending_if_live` when it has positive evidence.
+            let _ = (worker_exited, dispatched);
+            Realized::Unknown
         };
         out
+    }
+
+    /// Promote a folded [`Realized::Unknown`] to [`Realized::Pending`] when a
+    /// **live surface** has positive evidence the molecule's worker is still
+    /// running (delib-20260718-c70e, D3 — `...`).
+    ///
+    /// The retrospective [`Self::fold`] deliberately never emits `Pending`
+    /// (it cannot know liveness from the log alone). `cs peek`, which *does*
+    /// know a worker is alive, calls this so an in-flight, not-yet-observed
+    /// molecule renders `...` (motion) rather than `?` (unknown). It only ever
+    /// upgrades `Unknown` — an already-`Observed`/`Silent` realization is a
+    /// settled fact and is left untouched.
+    pub fn mark_pending_if_live(&mut self, worker_is_live: bool) {
+        if worker_is_live && self.realized == Realized::Unknown {
+            self.realized = Realized::Pending;
+        }
     }
 
     /// `true` when no adapter selection was ever recorded — the row should
@@ -379,6 +543,15 @@ impl AdapterAttribution {
         if let Some(effort) = self.reasoning_effort {
             s.push('@');
             s.push_str(&effort.to_string());
+        }
+        // Realized status glyph (F-03): a trailing `?`/`-`/`...` makes the three
+        // formerly-blank states (unknown / mute-silent / live-pending) legible
+        // at a glance, so an unconfirmed intention can never masquerade as a
+        // confirmed realization. `Observed` adds nothing here — its signal is
+        // the `~>` drift above, or, on pin-agreement, the honest blank.
+        if let Some(glyph) = self.realized.compact_status() {
+            s.push(' ');
+            s.push_str(glyph);
         }
         s
     }
@@ -483,12 +656,28 @@ mod tests {
     }
 
     fn model_observed(model: &str) -> EventV2 {
+        model_observed_for("claude", model, None)
+    }
+
+    fn model_observed_for(adapter: &str, model: &str, worker: Option<&str>) -> EventV2 {
         EventV2::ModelObserved {
             mol_id: mid(),
-            adapter_name: "claude".to_string(),
+            worker_id: worker.map(|w| crate::id::WorkerId::new(w).unwrap()),
+            adapter_name: adapter.to_string(),
             model: model.to_string(),
             observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,
             observed_at: Utc::now(),
+        }
+    }
+
+    fn worker_spawned(adapter: &str, worker: &str) -> EventV2 {
+        EventV2::WorkerSpawned {
+            worker_id: crate::id::WorkerId::new(worker).unwrap(),
+            molecule: Some(mid()),
+            session_name: "sess".to_string(),
+            role: "polecat".to_string(),
+            adapter_name: adapter.to_string(),
+            loop_ownership: Default::default(),
         }
     }
 
@@ -529,7 +718,9 @@ mod tests {
         assert_eq!(a.adapter_source, Some(AdapterSource::Cli));
         assert_eq!(a.model.as_deref(), Some("claude-opus-4-8"));
         assert_eq!(a.model_source, Some(ModelSource::Flag));
-        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8 [cli]");
+        // No observation yet on a capable adapter → honest `?` (F-03/F-05): an
+        // unconfirmed intention is visibly distinct from a confirmed one.
+        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8 [cli] ?");
     }
 
     #[test]
@@ -574,7 +765,8 @@ mod tests {
         ];
         let a = AdapterAttribution::fold(&events);
         assert_eq!(a.model, None);
-        assert_eq!(a.compact_cell(), "claude [config]");
+        // Unobserved capable adapter → trailing `?` (F-03).
+        assert_eq!(a.compact_cell(), "claude [config] ?");
     }
 
     #[test]
@@ -604,11 +796,46 @@ mod tests {
 
     // ---- Realized axis (delib-20260718-c70e) --------------------------------
 
-    /// Case (a) — silent adapter: ran to completion, never reported a model.
-    /// The tri-state is `Silent`, NOT an echo of the pin, and the compact cell
-    /// stays drift-*only* (no realized glyph) while the detail names `- (silent)`.
+    /// Case (a) — **mute** adapter: ran to completion under an adapter that
+    /// cannot structurally report a model (aider), never reported one. The
+    /// tri-state is `Silent`, NOT an echo of the pin. The compact cell now
+    /// carries a trailing `-` (F-03: silence is legible, not blank) while the
+    /// detail names `- (silent)`.
     #[test]
     fn realized_silent_completed_run_never_echoes_pin() {
+        let events = vec![
+            adapter_selected(
+                "aider",
+                AdapterSelectionSource::Config {
+                    path: "/x/.cosmon/config.toml".into(),
+                    key: "adapters.default".into(),
+                },
+            ),
+            model_selected(
+                Some("gpt-5-codex"),
+                ModelSelectionSource::Config {
+                    path: "/x/.cosmon/config.toml".into(),
+                    key: "adapters.aider.default_model".into(),
+                },
+            ),
+            molecule_completed(),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Silent);
+        // Silence is now legible: a trailing `-` distinguishes it from a
+        // confirmed-agreement (blank) cell.
+        assert_eq!(a.compact_cell(), "aider/gpt-5-codex [config] -");
+        // The honesty lives in the detail line too.
+        assert!(a.detail_line().contains("realized: - (silent)"));
+    }
+
+    /// F-05 — a **capable** adapter (codex/claude/openai/anthropic/mistral) that
+    /// completed with no observation is `Unknown`, never `Silent`. A generic
+    /// `MoleculeCompleted` proves neither an assistant turn nor a working
+    /// observation seam, so the honest label is "we could not observe" (`?`),
+    /// not the positive claim "ran, said nothing" (`-`).
+    #[test]
+    fn realized_capable_adapter_completed_unobserved_is_unknown_not_silent() {
         let events = vec![
             adapter_selected(
                 "codex",
@@ -627,11 +854,9 @@ mod tests {
             molecule_completed(),
         ];
         let a = AdapterAttribution::fold(&events);
-        assert_eq!(a.realized, Realized::Silent);
-        // Drift-only: a silent run adds no glyph to the compact cell.
-        assert_eq!(a.compact_cell(), "codex/gpt-5-codex [config]");
-        // The honesty lives in the detail line.
-        assert!(a.detail_line().contains("realized: - (silent)"));
+        assert_eq!(a.realized, Realized::Unknown);
+        assert_eq!(a.compact_cell(), "codex/gpt-5-codex [config] ?");
+        assert!(a.detail_line().contains("realized: ? (unknown)"));
     }
 
     /// Case (b) — mid-session change: a real Opus→Sonnet quota fallback. Both
@@ -746,7 +971,7 @@ mod tests {
                     fallback_reason: "no pin".into(),
                 },
             ),
-            model_observed("gpt-4o-2024-11-20"),
+            model_observed_for("codex", "gpt-4o-2024-11-20", None),
         ];
         let a = AdapterAttribution::fold(&events);
         assert_eq!(a.model, None);
@@ -781,10 +1006,12 @@ mod tests {
         assert_eq!(a.realized.observed(), None);
     }
 
-    /// Legacy fold (only intention events) stays byte-identical to the
-    /// pre-realized rendering — the realized axis adds nothing when unobserved.
+    /// Intention-only fold (no observation) now renders a trailing `?` — the
+    /// F-03 fix. Previously this asserted byte-identity with the pre-realized
+    /// rendering, which is exactly what let an *unconfirmed* intention look
+    /// like a *confirmed* one. An unobserved capable dispatch must read `?`.
     #[test]
-    fn legacy_intention_only_fold_is_byte_identical() {
+    fn intention_only_fold_marks_unconfirmed_realization() {
         let events = vec![
             adapter_selected(
                 "claude",
@@ -800,6 +1027,206 @@ mod tests {
             ),
         ];
         let a = AdapterAttribution::fold(&events);
-        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8 [cli]");
+        assert_eq!(a.realized, Realized::Unknown);
+        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8 [cli] ?");
+    }
+
+    // ---- F-02: per-attempt / per-worker scoping --------------------------
+
+    /// The audit's deterministic counter-example: attempt 1 (`claude`, pin
+    /// `opus`, observed `opus`) crashes; attempt 2 (`codex`, pin `gpt-5`, no
+    /// observation). The fold must NOT attribute attempt 1's `opus` realization
+    /// to the `codex` attempt — that was the fictional `codex/gpt-5 ~> opus`
+    /// drift. After scoping, the codex attempt is honestly `Unknown`.
+    #[test]
+    fn re_tackle_to_different_adapter_never_inherits_prior_realization() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            model_selected(
+                Some("claude-opus-4-8"),
+                ModelSelectionSource::Flag {
+                    flag: "claude-opus-4-8".into(),
+                },
+            ),
+            model_observed_for("claude", "claude-opus-4-8", Some("worker-1")),
+            EventV2::WorkerExited {
+                molecule_id: mid(),
+                exit_code: Some(137),
+                reason: "pane_died".into(),
+            },
+            // Re-tackle onto a different adapter.
+            adapter_selected(
+                "codex",
+                AdapterSelectionSource::Cli {
+                    flag: "codex".into(),
+                },
+            ),
+            worker_spawned("codex", "worker-2"),
+            model_selected(
+                Some("gpt-5-codex"),
+                ModelSelectionSource::Flag {
+                    flag: "gpt-5-codex".into(),
+                },
+            ),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.adapter.as_deref(), Some("codex"));
+        assert_eq!(a.model.as_deref(), Some("gpt-5-codex"));
+        // The prior `opus` observation is NOT carried into the codex attempt.
+        assert_eq!(a.realized, Realized::Unknown);
+        assert_eq!(a.compact_cell(), "codex/gpt-5-codex [cli] ?");
+        assert!(!a.compact_cell().contains("~>"));
+    }
+
+    /// Re-tackle onto the SAME adapter: the second attempt's observation must
+    /// replace the first's, not concatenate. `opus` (attempt 1) then `sonnet`
+    /// (attempt 2, fresh worker) folds to just `[sonnet]`, not `[opus, sonnet]`.
+    #[test]
+    fn re_tackle_same_adapter_resets_trajectory_to_last_attempt() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            model_observed_for("claude", "claude-opus-4-8", Some("worker-1")),
+            EventV2::WorkerExited {
+                molecule_id: mid(),
+                exit_code: Some(1),
+                reason: "pane_died".into(),
+            },
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-2"),
+            model_observed_for("claude", "claude-sonnet-5", Some("worker-2")),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(
+            a.realized,
+            Realized::Observed(vec!["claude-sonnet-5".to_string()])
+        );
+    }
+
+    /// A late observation from a DEAD predecessor worker (same adapter, arriving
+    /// after the new attempt's spawn) is rejected by the worker-id scope guard —
+    /// it never contaminates the current attempt.
+    #[test]
+    fn late_observation_from_dead_worker_is_rejected() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-2"),
+            // A straggler line attributed to the OLD worker-1 lands after the
+            // new worker-2 was spawned.
+            model_observed_for("claude", "claude-opus-4-8", Some("worker-1")),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unknown);
+    }
+
+    /// An observation whose `adapter_name` does not match the current attempt's
+    /// adapter is rejected outright, regardless of worker.
+    #[test]
+    fn observation_with_mismatched_adapter_is_rejected() {
+        let events = vec![
+            adapter_selected(
+                "codex",
+                AdapterSelectionSource::Cli {
+                    flag: "codex".into(),
+                },
+            ),
+            worker_spawned("codex", "worker-1"),
+            // A stray claude observation on a codex attempt — reject.
+            model_observed_for("claude", "claude-opus-4-8", Some("worker-1")),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unknown);
+    }
+
+    /// A legacy observation carrying no `worker_id` is still accepted on the
+    /// adapter match alone (round-trip compatibility for pre-F-02 lines).
+    #[test]
+    fn legacy_observation_without_worker_id_is_accepted_on_adapter_match() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            model_observed_for("claude", "claude-opus-4-8", None),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(
+            a.realized,
+            Realized::Observed(vec!["claude-opus-4-8".to_string()])
+        );
+    }
+
+    // ---- F-03: live-pending promotion ------------------------------------
+
+    /// `mark_pending_if_live` upgrades an `Unknown` to `Pending` when a live
+    /// surface knows the worker is running — `...` motion, distinct from `?`.
+    #[test]
+    fn live_unknown_promotes_to_pending() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            model_selected(
+                Some("claude-opus-4-8"),
+                ModelSelectionSource::Flag {
+                    flag: "claude-opus-4-8".into(),
+                },
+            ),
+        ];
+        let mut a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unknown);
+        a.mark_pending_if_live(true);
+        assert_eq!(a.realized, Realized::Pending);
+        assert_eq!(a.compact_cell(), "claude/claude-opus-4-8 [cli] ...");
+        assert!(a.detail_line().contains("realized: ... (pending)"));
+    }
+
+    /// `mark_pending_if_live` never overwrites a settled realization: an
+    /// already-`Observed` molecule stays `Observed` even if flagged live.
+    #[test]
+    fn live_flag_never_overwrites_observed() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            model_observed_for("claude", "claude-sonnet-5", Some("worker-1")),
+        ];
+        let mut a = AdapterAttribution::fold(&events);
+        a.mark_pending_if_live(true);
+        assert_eq!(
+            a.realized,
+            Realized::Observed(vec!["claude-sonnet-5".to_string()])
+        );
     }
 }

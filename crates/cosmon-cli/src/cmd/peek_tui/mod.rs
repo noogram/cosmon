@@ -1506,6 +1506,12 @@ impl App {
         for row in rows.iter_mut() {
             if let Some(att) = adapter_map.get(&row.mol_id) {
                 row.adapter = att.clone();
+                // D3 live-pending: a running molecule with no observation yet
+                // renders `...` (motion) instead of `?`. The fold stays honest
+                // (never claims liveness); the promotion happens here, where the
+                // TUI knows the molecule is currently running.
+                let worker_is_live = row.status.eq_ignore_ascii_case("running");
+                row.adapter.mark_pending_if_live(worker_is_live);
             }
             let Some(sd) = self.row_state_dirs.get(&row.mol_id) else {
                 continue;
@@ -4501,7 +4507,6 @@ pub(crate) fn build_snapshot(
                 state_dirs.insert(m.id.to_string(), sd.clone());
             }
             let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
-            capture_realized_models(&backends, &sd, &fleet);
             populate_snapshot(
                 &mut snap,
                 &store,
@@ -4538,7 +4543,6 @@ pub(crate) fn build_snapshot(
             .map(|(s, a)| (socket.to_owned(), s, a))
             .collect();
         let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
-        capture_realized_models(&backends, state_dir, &fleet);
         populate_snapshot(
             &mut snap,
             &store,
@@ -4555,26 +4559,12 @@ pub(crate) fn build_snapshot(
     Ok((snap, state_dirs))
 }
 
-/// Opportunistic realized-model capture across a fleet's live workers
-/// (delib-20260718-c70e). For each worker currently assigned a molecule, probe
-/// its Claude Code session and emit `ModelObserved` for any model not yet
-/// recorded — the first-observation + on-change cadence, idempotent under the
-/// repeated reloads a live TUI performs. Best-effort: unresolvable workers are
-/// skipped silently. `cs peek` is the observer that already reads these sessions
-/// for energy, so capturing the realized id out of the same bytes is near-free.
-fn capture_realized_models(
-    backends: &[cosmon_transport::TmuxBackend],
-    state_dir: &std::path::Path,
-    fleet: &cosmon_state::Fleet,
-) {
-    for worker in fleet.workers.values() {
-        if let Some(mol_id) = &worker.current_molecule {
-            crate::energy_probe::capture_realized_for_worker(
-                backends, state_dir, &worker.id, mol_id,
-            );
-        }
-    }
-}
+// `cs peek` is a STRICT READER (delib-20260718-c70e / F-01): it no longer
+// emits `ModelObserved`. Realized-model capture is now an always-on step of the
+// completion seam (`cs complete` → `energy_probe::capture_realized_at_completion`),
+// so the journal records what ran even when nobody is watching the TUI. The
+// pending live-view refinement is a pure read: `AdapterAttribution::mark_pending_if_live`
+// upgrades an unobserved but running molecule's `?` to `...` at render time.
 
 fn project_label_for(path: &std::path::Path) -> String {
     // .cosmon/ -> parent basename (project dir name). Fall back to "config.toml".project_id.
@@ -6856,7 +6846,9 @@ mod tests {
         let att = map.get(&mid.to_string()).expect("attribution folded");
         assert_eq!(att.adapter.as_deref(), Some("claude"));
         assert_eq!(att.model.as_deref(), Some("claude-opus-4-8"));
-        assert_eq!(att.compact_cell(), "claude/claude-opus-4-8 [cli]");
+        // No observation on disk → honest `?` (F-03): an unconfirmed intention
+        // is visibly distinct from a confirmed realization.
+        assert_eq!(att.compact_cell(), "claude/claude-opus-4-8 [cli] ?");
         // Honest silence: the disk record carried no effort, so none surfaces.
         assert_eq!(att.reasoning_effort, None);
     }

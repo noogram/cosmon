@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use cosmon_core::energy::{TokenCost, TokenCount};
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
-use cosmon_core::model_realization::{realized_models_from_claude_jsonl, ModelObservationSource};
+use cosmon_core::model_realization::{
+    realized_models_from_claude_jsonl, realized_models_from_codex_session, ModelObservationSource,
+};
 
 /// Per-worker aggregated energy values.
 #[derive(Clone, Copy, Debug, Default)]
@@ -109,92 +111,197 @@ pub fn probe_worker_energy(
     })
 }
 
-/// Best-effort **realized-model capture** for one live claude worker
-/// (delib-20260718-c70e).
+/// **Always-on realized-model capture** at the completion seam
+/// (delib-20260718-c70e / F-01). Called from `cs complete`/`cs done` — the
+/// worker's session log is fully written by then, and this runs regardless of
+/// whether anyone is watching `cs peek`. `cs peek` is therefore a **strict
+/// reader**: it never emits.
 ///
-/// Resolves the worker's Claude Code session `*.jsonl` (the same
-/// pid → session → jsonl chain as [`probe_worker_energy`]), parses the realized
-/// model trajectory (`message.model` per assistant turn), and emits an
-/// [`EventV2::ModelObserved`] for every model **not already recorded** for the
-/// molecule — the first-observation + on-change cadence, idempotent under the
-/// repeated reloads a live TUI performs.
+/// Resolution is filesystem-only and pane-independent: the completing `cs`
+/// process shares the worker's working directory, so the worker's session log
+/// is resolved from that `cwd` (claude via its `projects/{sanitize(cwd)}`
+/// directory, codex via the `session_meta.payload.cwd` join). The adapter that
+/// actually ran and the worker to scope observations to are read from the last
+/// `AdapterSelected` / `WorkerSpawned` on `events.jsonl` (F-02). The in-process
+/// provider adapters (openai/anthropic/mistral) emit during their run at the
+/// response seam, so they are skipped here.
 ///
-/// This is *opportunistic* capture: `cs peek` is the live observer that already
-/// pays the cost of reading the session for energy, so folding the realized-id
-/// out of the same bytes is nearly free. It is best-effort and trace-not-lock —
-/// any I/O failure yields no observation, never an error. (A future always-on
-/// emitter in the supervision loop would capture even when nothing is watching;
-/// until then, the observer that looks is the one that records.)
-pub fn capture_realized_for_worker(
-    backends: &[cosmon_transport::TmuxBackend],
-    state_dir: &Path,
-    worker_id: &WorkerId,
-    mol_id: &MoleculeId,
-) {
-    let Some(pid) = resolve_tmux_pid(backends, worker_id) else {
+/// Best-effort and trace-not-lock: any I/O or resolution failure yields no
+/// observation, never an error.
+pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
+    let Ok(cwd) = std::env::current_dir() else {
         return;
     };
-    let Some((session_id, cwd)) = read_claude_pid_file(pid) else {
-        return;
+    capture_realized_from_cwd(state_dir, mol_id, &cwd);
+}
+
+/// The `cwd`-parameterised core of [`capture_realized_at_completion`], split out
+/// so tests can drive it with a fixture directory instead of the process cwd.
+pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Path) {
+    let adapter = last_adapter_for(state_dir, mol_id);
+    let worker = last_worker_for(state_dir, mol_id);
+    let (observed, source) = match adapter.as_deref() {
+        // Subprocess adapters whose model lives in a session log on disk.
+        Some("claude") | None => (
+            resolve_claude_session_by_cwd(cwd)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|c| realized_models_from_claude_jsonl(&c))
+                .unwrap_or_default(),
+            ModelObservationSource::ClaudeStreamJson,
+        ),
+        Some("codex") => (
+            resolve_codex_session_by_cwd(cwd)
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|c| realized_models_from_codex_session(&c))
+                .unwrap_or_default(),
+            ModelObservationSource::CodexSessionMeta,
+        ),
+        // In-process providers emit at their own response seam.
+        _ => return,
     };
-    let jsonl_path = claude_projects_dir()
-        .join(sanitize_path(&cwd))
-        .join(format!("{session_id}.jsonl"));
-    let Ok(content) = std::fs::read_to_string(&jsonl_path) else {
-        return;
-    };
-    let observed = realized_models_from_claude_jsonl(&content);
     if observed.is_empty() {
         return;
     }
-    let recorded = recorded_realized_models(state_dir, mol_id);
-    for model in newly_observed(&recorded, &observed) {
-        cosmon_state::events::worker_spawn::emit_model_observed(
-            state_dir,
-            mol_id,
-            "claude",
-            model,
-            ModelObservationSource::ClaudeStreamJson,
-        );
-    }
+    let adapter_name = adapter.as_deref().unwrap_or("claude");
+    cosmon_state::events::worker_spawn::emit_new_model_observations(
+        state_dir,
+        mol_id,
+        worker.as_ref(),
+        adapter_name,
+        &observed,
+        source,
+    );
 }
 
-/// The realized models already on the wire for `mol_id`, in append order —
-/// folded from the [`EventV2::ModelObserved`] events in `events.jsonl`. Any I/O
-/// error yields an empty list (best-effort), so a first observation is emitted.
-fn recorded_realized_models(state_dir: &Path, mol_id: &MoleculeId) -> Vec<String> {
+/// The adapter that most recently ran for `mol_id`, folded from the last
+/// [`EventV2::AdapterSelected`] on `events.jsonl`. `None` on read error or when
+/// no selection was recorded (legacy → treated as claude by the caller).
+fn last_adapter_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<String> {
     let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
-    let Ok(envelopes) = cosmon_state::event_log::read_all(&log_path) else {
-        return Vec::new();
-    };
-    envelopes
-        .into_iter()
-        .filter_map(|env| match env.event {
-            EventV2::ModelObserved {
-                mol_id: ref m,
-                model,
-                ..
-            } if m == mol_id => Some(model),
-            _ => None,
-        })
-        .collect()
+    let envelopes = cosmon_state::event_log::read_all(&log_path).ok()?;
+    envelopes.into_iter().rev().find_map(|env| match env.event {
+        EventV2::AdapterSelected {
+            mol_id: ref m,
+            adapter_name,
+            ..
+        } if m == mol_id => Some(adapter_name),
+        _ => None,
+    })
 }
 
-/// The suffix of `observed` not yet present in `recorded` — the models to emit.
-///
-/// Pure and total. The common case is monotonic growth: `recorded` is a prefix
-/// of `observed` (the same trajectory, fewer turns seen last time), so the new
-/// tail is `observed[recorded.len()..]`. When the sequences diverge (they should
-/// not, given the collapse-consecutive fold), nothing is emitted — silence is
-/// safer than a fabricated re-observation.
-fn newly_observed<'a>(recorded: &[String], observed: &'a [String]) -> &'a [String] {
-    if recorded.is_empty() {
-        return observed;
+/// The worker most recently spawned for `mol_id` (the current attempt), from the
+/// last [`EventV2::WorkerSpawned`]. Scopes the emitted observations (F-02).
+fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId> {
+    let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
+    let envelopes = cosmon_state::event_log::read_all(&log_path).ok()?;
+    envelopes.into_iter().rev().find_map(|env| match env.event {
+        EventV2::WorkerSpawned {
+            molecule: Some(ref m),
+            worker_id,
+            ..
+        } if m == mol_id => Some(worker_id),
+        _ => None,
+    })
+}
+
+/// Resolve the claude session `*.jsonl` for a worker whose `cwd` is known: the
+/// most-recently-modified log under `~/.claude/projects/{sanitize(cwd)}/`. The
+/// completing process shares the worker's cwd, so this needs no live pane.
+fn resolve_claude_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
+    let dir = claude_projects_dir().join(sanitize_path(&cwd.to_string_lossy()));
+    most_recent_jsonl(&dir)
+}
+
+/// Resolve the codex session `rollout-*.jsonl` for a worker whose `cwd` is
+/// known: the most-recently-modified log under `~/.codex/sessions/**` whose
+/// `session_meta.payload.cwd` equals `cwd`. codex writes no pid sidecar, so the
+/// worktree `cwd` recorded in `session_meta` is the only join key.
+fn resolve_codex_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
+    let target = cwd.to_string_lossy();
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for path in codex_session_files() {
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if !codex_session_matches_cwd(&content, &target) {
+            continue;
+        }
+        let mtime = path
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        if best.as_ref().is_none_or(|(t, _)| mtime >= *t) {
+            best = Some((mtime, path));
+        }
     }
-    if observed.len() > recorded.len() && observed[..recorded.len()] == *recorded {
-        return &observed[recorded.len()..];
+    best.map(|(_, p)| p)
+}
+
+/// Whether a codex session log's `session_meta` line names `cwd` as its
+/// working directory (`payload.cwd`, with a top-level `cwd` fallback).
+fn codex_session_matches_cwd(content: &str, cwd: &str) -> bool {
+    for line in content.lines().take(8) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        let found = value
+            .get("payload")
+            .and_then(|p| p.get("cwd"))
+            .or_else(|| value.get("cwd"))
+            .and_then(serde_json::Value::as_str);
+        return found == Some(cwd);
     }
-    &[]
+    false
+}
+
+/// All codex session `*.jsonl` files under `~/.codex/sessions/**` (date-bucketed
+/// `YYYY/MM/DD/rollout-*.jsonl`). Best-effort — an unreadable tree yields none.
+fn codex_session_files() -> Vec<PathBuf> {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.push(path);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(&codex_sessions_dir(), &mut out);
+    out
+}
+
+/// The most-recently-modified `*.jsonl` directly inside `dir`, or `None` when
+/// the directory is absent/empty.
+fn most_recent_jsonl(dir: &Path) -> Option<PathBuf> {
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "jsonl") {
+            let mtime = path
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            if best.as_ref().is_none_or(|(t, _)| mtime >= *t) {
+                best = Some((mtime, path));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
+/// `~/.codex/sessions/` directory.
+#[must_use]
+pub fn codex_sessions_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(home).join(".codex").join("sessions")
 }
 
 /// Resolve the tmux pane PID for a worker by probing all sockets.
@@ -269,35 +376,21 @@ mod tests {
         );
     }
 
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(ToString::to_string).collect()
-    }
-
     #[test]
-    fn newly_observed_first_time_emits_all() {
-        assert_eq!(newly_observed(&[], &v(&["opus"])), v(&["opus"]).as_slice());
-    }
-
-    #[test]
-    fn newly_observed_no_change_emits_nothing() {
-        // Idempotency: a reload that sees the same trajectory emits nothing.
-        assert!(newly_observed(&v(&["opus"]), &v(&["opus"])).is_empty());
-    }
-
-    #[test]
-    fn newly_observed_growth_emits_only_the_new_tail() {
-        // A quota fallback appended sonnet after opus was already recorded.
-        assert_eq!(
-            newly_observed(&v(&["opus"]), &v(&["opus", "sonnet"])),
-            v(&["sonnet"]).as_slice()
+    fn codex_session_matches_cwd_reads_session_meta_payload() {
+        let content = concat!(
+            r#"{"type":"session_meta","payload":{"cwd":"/work/tree","session_id":"s"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
         );
+        assert!(codex_session_matches_cwd(content, "/work/tree"));
+        assert!(!codex_session_matches_cwd(content, "/other"));
     }
 
     #[test]
-    fn newly_observed_divergence_emits_nothing() {
-        // Should not happen given the collapse fold; if it does, stay silent
-        // rather than fabricate a re-observation.
-        assert!(newly_observed(&v(&["opus"]), &v(&["sonnet"])).is_empty());
+    fn codex_session_matches_cwd_false_without_session_meta() {
+        let content = r#"{"type":"turn_context","payload":{"model":"gpt-5"}}"#;
+        assert!(!codex_session_matches_cwd(content, "/work/tree"));
     }
 
     #[test]
@@ -311,5 +404,235 @@ mod tests {
         assert_eq!(i, 100);
         assert_eq!(o, 50);
         assert!((c - 0.25).abs() < f64::EPSILON);
+    }
+
+    // ---- F-01/F-06 end-to-end: completion-seam capture -------------------
+    //
+    // fixture session file on disk → `capture_realized_from_cwd` (the real
+    // completion seam) → `ModelObserved` on `events.jsonl` → retrospective
+    // fold → `compact_cell`. Exercised for claude and codex, which resolve
+    // their session by the worker's cwd. HOME is swapped to a fixture root;
+    // the swap is serialized so a parallel test never sees the borrowed HOME.
+
+    use std::sync::Mutex;
+    static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    fn seed_dispatch(state_dir: &Path, mol: &MoleculeId, adapter: &str, worker: &str) {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: mol.clone(),
+                adapter_name: adapter.to_owned(),
+                selected_at: chrono::Utc::now(),
+                selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                    flag: adapter.to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: WorkerId::new(worker).unwrap(),
+                molecule: Some(mol.clone()),
+                session_name: "sess".to_owned(),
+                role: "polecat".to_owned(),
+                adapter_name: adapter.to_owned(),
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    fn fold_from_log(
+        state_dir: &Path,
+        mol: &MoleculeId,
+    ) -> cosmon_core::adapter_attribution::AdapterAttribution {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        let events: Vec<EventV2> = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event.molecule_id() == Some(mol))
+            .map(|e| e.event)
+            .collect();
+        cosmon_core::adapter_attribution::AdapterAttribution::fold(&events)
+    }
+
+    #[test]
+    fn capture_at_completion_claude_end_to_end() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Claude wrote a session log under projects/{sanitize(cwd)}/.
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            concat!(
+                r#"{"type":"system","subtype":"init","model":"claude-opus-4-8"}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"model":"claude-sonnet-5"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-c1a1").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+        // Intention pinned opus.
+        cosmon_state::events::worker_spawn::emit_model_selected(
+            state.path(),
+            &mol,
+            "claude",
+            Some("claude-opus-4-8"),
+            cosmon_core::event_v2::ModelSelectionSource::Flag {
+                flag: "claude-opus-4-8".to_owned(),
+            },
+        );
+
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string(),
+                "claude-sonnet-5".to_string(),
+            ]),
+        );
+        // A real quota fallback surfaces as drift in the compact cell.
+        assert_eq!(
+            att.compact_cell(),
+            "claude/claude-opus-4-8~>claude-sonnet-5 [cli]"
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_at_completion_codex_end_to_end() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // Codex wrote a date-bucketed rollout log; session_meta.payload.cwd is
+        // the only join key back to the worker's worktree.
+        let sess = codex_sessions_dir().join("2026").join("07").join("18");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(
+            sess.join("rollout-x.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"s"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"gpt-5.6-terra"}}}}"#,
+                    "\n",
+                ),
+                cwd = cwd.path().to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-c0de").unwrap();
+        seed_dispatch(state.path(), &mol, "codex", "worker-1");
+
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let att = fold_from_log(state.path(), &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec!["gpt-5.6-terra".to_string()]),
+        );
+        // No pin, but a model was observed → shown after adapter with `~>`.
+        assert_eq!(att.compact_cell(), "codex~>gpt-5.6-terra [cli]");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_is_idempotent_across_repeated_completion_reads() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let proj = claude_projects_dir().join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260718-1de1").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+
+        // Two capture passes must emit the observation exactly once.
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let n_observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(n_observed, 1, "idempotent: one observation, not two");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn capture_skips_in_process_provider_adapters() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        // An openai dispatch: the completion seam must NOT read a session file
+        // (there is none) — the provider emitted at its own response seam.
+        let mol = MoleculeId::new("task-20260718-0a11").unwrap();
+        seed_dispatch(state.path(), &mol, "openai", "worker-1");
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        let log = cosmon_state::event_log::resolve_events_log_path(state.path());
+        let n_observed = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(n_observed, 0, "completion seam is a no-op for openai");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }

@@ -366,18 +366,119 @@ pub fn emit_model_selected(
 pub fn emit_model_observed(
     state_dir: &Path,
     mol_id: &MoleculeId,
+    worker_id: Option<&WorkerId>,
     adapter_name: &str,
     model: &str,
     observed_source: ModelObservationSource,
 ) {
     let event = EventV2::ModelObserved {
         mol_id: mol_id.clone(),
+        worker_id: worker_id.cloned(),
         adapter_name: adapter_name.to_owned(),
         model: model.to_owned(),
         observed_source,
         observed_at: Utc::now(),
     };
     write_event(state_dir, event);
+}
+
+/// Emit the **newly-observed tail** of a realized-model trajectory for one
+/// dispatch — the first-observation + on-change cadence (delib-20260718-c70e /
+/// D4), scoped to `(mol_id, worker_id, adapter_name)` so a re-tackle's
+/// observations never dedup against a prior attempt's (F-02).
+///
+/// Reads back the [`EventV2::ModelObserved`] already on the wire for exactly
+/// this `(mol, worker, adapter)` scope, computes the suffix of `observed` not
+/// yet recorded, and emits one event per new id. Idempotent: replaying the same
+/// trajectory emits nothing. Every id in `observed` is a non-empty
+/// [`ModelId`], so a blank realization can never reach the log.
+///
+/// Best-effort: an unreadable log is treated as "nothing recorded yet" (so a
+/// first observation is still emitted), matching the trace-not-lock discipline.
+pub fn emit_new_model_observations(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: Option<&WorkerId>,
+    adapter_name: &str,
+    observed: &[cosmon_core::model_realization::ModelId],
+    observed_source: ModelObservationSource,
+) {
+    if observed.is_empty() {
+        return;
+    }
+    let recorded = recorded_model_observations(state_dir, mol_id, worker_id, adapter_name);
+    for model in newly_observed(&recorded, observed) {
+        emit_model_observed(
+            state_dir,
+            mol_id,
+            worker_id,
+            adapter_name,
+            model.as_str(),
+            observed_source,
+        );
+    }
+}
+
+/// The realized models already on the wire for exactly `(mol_id, worker_id,
+/// adapter_name)`, in append order — folded from the matching
+/// [`EventV2::ModelObserved`] events. A legacy observation with no `worker_id`
+/// matches any requested worker (adapter still must match). Any read error
+/// yields an empty list (best-effort), so a first observation is emitted.
+#[must_use]
+fn recorded_model_observations(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: Option<&WorkerId>,
+    adapter_name: &str,
+) -> Vec<cosmon_core::model_realization::ModelId> {
+    let log_path = resolve_events_log_path(state_dir);
+    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
+        return Vec::new();
+    };
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.event {
+            EventV2::ModelObserved {
+                mol_id: ref m,
+                worker_id: ref w,
+                adapter_name: ref a,
+                ref model,
+                ..
+            } if m == mol_id && a == adapter_name && worker_matches(w.as_ref(), worker_id) => {
+                cosmon_core::model_realization::ModelId::new(model)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// A recorded observation matches the requested worker when it carries no
+/// worker id (legacy, best-effort) or the ids are equal.
+fn worker_matches(recorded: Option<&WorkerId>, requested: Option<&WorkerId>) -> bool {
+    match (recorded, requested) {
+        (Some(r), Some(q)) => r == q,
+        _ => true,
+    }
+}
+
+/// The suffix of `observed` not yet present in `recorded` — the models to emit.
+///
+/// The common case is monotonic growth: `recorded` is a prefix of `observed`
+/// (the same trajectory, fewer turns seen last time), so the new tail is
+/// `observed[recorded.len()..]`. When the sequences diverge (they should not,
+/// given the collapse-consecutive parse), nothing is emitted — silence is safer
+/// than a fabricated re-observation.
+fn newly_observed<'a>(
+    recorded: &[cosmon_core::model_realization::ModelId],
+    observed: &'a [cosmon_core::model_realization::ModelId],
+) -> &'a [cosmon_core::model_realization::ModelId] {
+    if recorded.is_empty() {
+        return observed;
+    }
+    if observed.len() > recorded.len() && observed[..recorded.len()] == *recorded {
+        return &observed[recorded.len()..];
+    }
+    &[]
 }
 
 /// Emit an [`EventV2::ModelCeilingHit`] (delib-20260704-b476 / C4).
@@ -968,6 +1069,7 @@ mod tests {
         emit_model_observed(
             dir.path(),
             &mol(),
+            Some(&WorkerId::new("worker-1").unwrap()),
             "claude",
             "claude-sonnet-5",
             ModelObservationSource::ClaudeStreamJson,
