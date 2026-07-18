@@ -432,7 +432,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &probe_state_dir,
         &super::tmux_socket_name(ctx),
     );
-    let tick_probe: Box<dyn FnMut(&cosmon_core::id::MoleculeId)> = Box::new(move |mol_id| {
+    let tick_probe: cosmon_runtime::TickProbe = Box::new(move |mol_id| {
         crate::energy_probe::capture_realized_runtime(&probe_state_dir, mol_id, &probe_backends);
     });
     let mut runtime = Runtime::new(store_box, policy, executor, config)

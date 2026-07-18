@@ -888,8 +888,11 @@ pub struct Runtime {
     /// model-bearing turn *during* the run — durable even if the worker later
     /// crashes before `cs complete`. `None` (the default) is a no-op; the
     /// runtime core stays I/O-free with respect to what the probe does.
-    tick_probe: Option<Box<dyn FnMut(&MoleculeId)>>,
+    tick_probe: Option<TickProbe>,
 }
+
+/// A per-tick probe over one `Running` molecule — see [`Runtime::with_tick_probe`].
+pub type TickProbe = Box<dyn FnMut(&MoleculeId)>;
 
 impl Runtime {
     /// Build a new runtime from a store, a policy, an executor, and a config.
@@ -922,7 +925,7 @@ impl Runtime {
     /// the policy's scope (round-3 / F-01 — the realized-model runtime
     /// consumer). Without this setter the runtime never probes.
     #[must_use]
-    pub fn with_tick_probe(mut self, probe: Box<dyn FnMut(&MoleculeId)>) -> Self {
+    pub fn with_tick_probe(mut self, probe: TickProbe) -> Self {
         self.tick_probe = Some(probe);
         self
     }
