@@ -203,6 +203,8 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Brew formula renderer contract (snapshot ↔ renderer, all four triples)
         run: ./scripts/release/render-brew-formula.test.sh
+      - name: update-tap artifact→formula path (release-path integration)
+        run: ./scripts/release/render-tap-from-artifacts.test.sh
       - name: Compare install.sh, release matrix, and brew formula triples
         run: |
           set -euo pipefail

@@ -407,21 +407,17 @@ jobs:
           version="${{ needs.release.outputs.version }}"
           owner="${{ github.repository_owner }}"
 
-          declare -A sha
-          for target in aarch64-apple-darwin x86_64-apple-darwin \
-                        aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
-            f="$(find artifacts -name "cosmon-${version}-${target}.tar.gz.sha256" | head -1)"
-            sha[$target]="$(awk '{print $1}' "$f")"
-          done
-
+          # The artifact→formula glue lives in a tracked, tested script
+          # (render-tap-from-artifacts.test.sh exercises this exact path in
+          # install-lint) so it can never drift or silently break behind the
+          # ENABLE_HOMEBREW_TAP gate. It finds each per-triple sha256 under the
+          # download-artifact tree and delegates the formula body to
+          # render-brew-formula.sh.
           mkdir -p tap/Formula
-          cosmon/scripts/release/render-brew-formula.sh \
+          cosmon/scripts/release/render-tap-from-artifacts.sh \
             --version "$version" \
             --owner   "$owner" \
-            --sha-arm-macos    "${sha[aarch64-apple-darwin]}" \
-            --sha-x86-macos    "${sha[x86_64-apple-darwin]}" \
-            --sha-arm-linux    "${sha[aarch64-unknown-linux-musl]}" \
-            --sha-x86-linux    "${sha[x86_64-unknown-linux-musl]}" \
+            --artifacts-dir artifacts \
             > tap/Formula/cosmon.rb
           echo "::group::Rendered formula"
           cat tap/Formula/cosmon.rb
