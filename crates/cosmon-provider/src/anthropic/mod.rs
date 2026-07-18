@@ -302,6 +302,12 @@ pub struct AnthropicProvider {
     model: String,
     /// Per-request timeout.
     timeout: Duration,
+    /// Optional telemetry (mol/worker/state-dir) so `one_turn` can emit the
+    /// realized-model observation at the response seam (F-01). `None` (the
+    /// constructor default) makes emission a silent no-op — the transport-
+    /// agnostic `Provider::one_turn(&self, log)` carries its own telemetry as a
+    /// field, mirroring [`crate::openai::OpenAIProvider`].
+    telemetry: Option<AdapterTelemetry>,
 }
 
 impl std::fmt::Debug for AnthropicProvider {
@@ -322,6 +328,7 @@ impl Default for AnthropicProvider {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: "claude-opus-4-7".to_owned(),
             timeout: Duration::from_secs(60),
+            telemetry: None,
         }
     }
 }
@@ -335,6 +342,7 @@ impl AnthropicProvider {
             base_url: DEFAULT_BASE_URL.to_owned(),
             model: model.into(),
             timeout: Duration::from_secs(60),
+            telemetry: None,
         }
     }
 
@@ -352,6 +360,7 @@ impl AnthropicProvider {
             base_url: base_url.into(),
             model: model.into(),
             timeout: Duration::from_secs(60),
+            telemetry: None,
         }
     }
 
@@ -360,6 +369,15 @@ impl AnthropicProvider {
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
+        self
+    }
+
+    /// Attach telemetry so `one_turn` can emit the realized-model observation
+    /// at the response seam (F-01). `None` leaves emission a silent no-op.
+    /// Mirrors [`crate::openai::OpenAIProvider::with_telemetry`].
+    #[must_use]
+    pub fn with_telemetry(mut self, telemetry: Option<AdapterTelemetry>) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -662,6 +680,11 @@ struct MessagesResponse {
     content: Vec<ContentBlock>,
     #[serde(default)]
     stop_reason: Option<String>,
+    /// The concrete model that served the response (delib-20260718-c70e /
+    /// F-01). The `/v1/messages` body echoes the served model here; cosmon
+    /// captures it as the realized id. `None`/absent on shapes that omit it.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -719,6 +742,13 @@ impl Provider for AnthropicProvider {
             .json()
             .await
             .map_err(|e| AnthropicError::Decode(e.to_string()))?;
+
+        // Realized-model capture (F-01): the `/v1/messages` body echoes the
+        // served model; emit `ModelObserved` at the response seam, scoped to
+        // this worker, first-observation + on-change.
+        if let Some(model) = parsed.model.as_deref() {
+            emit_realized_model(self.telemetry.as_ref(), model);
+        }
 
         // Anthropic returns a flat `content` array. tool_use blocks
         // mean "go execute these and come back"; text-only means the
@@ -838,7 +868,12 @@ pub async fn run_agent_loop(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<String, AnthropicError> {
-    match cosmon_agent_harness::run_loop(provider, briefing, work_dir, telemetry).await {
+    // Wire telemetry into the provider so `one_turn` can emit the realized-model
+    // observation at the response seam (F-01) — the `Provider::one_turn(&self,
+    // log)` trait is telemetry-free by design, so the adapter carries it as a
+    // field. Cheap clone (a handful of IDs + a path). Mirrors openai.
+    let provider = provider.clone().with_telemetry(telemetry.cloned());
+    match cosmon_agent_harness::run_loop(&provider, briefing, work_dir, telemetry).await {
         Ok(synthesis) => Ok(synthesis),
         Err(harness_err) => {
             let err = harness_error_to_anthropic(harness_err);
@@ -887,6 +922,26 @@ fn harness_error_to_anthropic(err: HarnessError<AnthropicError>) -> AnthropicErr
 /// the cross-Adapter convergence point with
 /// [`crate::openai::emit_silent_failure`] that makes ADR-098 §6
 /// trigger #3 mechanical rather than aspirational.
+/// Emit a realized-model observation (`ModelObserved`) at the anthropic
+/// response seam (F-01), scoped to the telemetry's worker. First-observation +
+/// on-change dedup is handled by `emit_new_model_observations`; a blank id can
+/// never pass the [`ModelId`](cosmon_core::model_realization::ModelId) newtype.
+/// Best-effort: no telemetry, or an unparseable id, is a silent no-op.
+fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
+    let Some(t) = telemetry else { return };
+    let Some(id) = cosmon_core::model_realization::ModelId::new(model) else {
+        return;
+    };
+    cosmon_state::events::worker_spawn::emit_new_model_observations(
+        &t.state_dir,
+        &t.mol_id,
+        Some(&t.worker_id),
+        t.adapter_name.as_deref().unwrap_or(ADAPTER_NAME),
+        std::slice::from_ref(&id),
+        cosmon_core::model_realization::ModelObservationSource::ProviderResponse,
+    );
+}
+
 fn emit_silent_failure(telemetry: Option<&AdapterTelemetry>, err: &AnthropicError) {
     let Some(t) = telemetry else { return };
     // `AnthropicError` is `#[non_exhaustive]` (tolnay F8). Inside the

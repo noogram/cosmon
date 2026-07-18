@@ -1098,6 +1098,11 @@ struct FunctionSpec<'a> {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    /// The concrete model the endpoint ran (delib-20260718-c70e / F-01). The
+    /// OpenAI-compatible response body echoes the served model here; cosmon
+    /// captures it as the realized id. `None`/absent on shapes that omit it.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1291,7 +1296,18 @@ impl Provider for OpenAIProvider {
         // as the verbatim bytes of a well-formed `ToolCall` and is surfaced
         // to the model downstream (see [`finalize_streamed_args`] for the M3
         // guard and `dispatch_tool_calls` in the spine for the recovery).
-        let (content, wire_calls) = consume_chat_completion(resp).await?;
+        let ChatCompletionOutcome {
+            content,
+            wire_calls,
+            realized_model,
+        } = consume_chat_completion(resp).await?;
+
+        // Realized-model capture (F-01): emit `ModelObserved` at the response
+        // seam, scoped to this worker, first-observation + on-change. The served
+        // id is authoritative — cosmon received it and used to discard it.
+        if let Some(model) = realized_model.as_deref() {
+            emit_realized_model(self.telemetry.as_ref(), model);
+        }
 
         if !wire_calls.is_empty() {
             // I4 — the spine pushes the assistant envelope to the log BEFORE
@@ -1434,6 +1450,10 @@ impl SseLineBuffer {
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// The concrete model the endpoint ran, echoed on every SSE frame
+    /// (delib-20260718-c70e / F-01). Captured as the realized id.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[cfg(feature = "http")]
@@ -1640,7 +1660,7 @@ fn finalize_wire_tool_call(mut c: WireToolCall) -> WireToolCall {
 #[cfg(feature = "http")]
 async fn consume_chat_completion(
     resp: reqwest::Response,
-) -> Result<(Option<String>, Vec<WireToolCall>), OpenAiError> {
+) -> Result<ChatCompletionOutcome, OpenAiError> {
     use futures_util::StreamExt;
 
     let mut stream = resp.bytes_stream();
@@ -1650,6 +1670,10 @@ async fn consume_chat_completion(
     // fallback can re-parse the whole body if no `data:` frame ever appears.
     let mut raw_body = String::new();
     let mut saw_sse_frame = false;
+    // Realized-model capture (F-01): the served `model` is echoed on every SSE
+    // frame; keep the first concrete one we see — cosmon already receives this
+    // byte and used to discard it.
+    let mut realized_model: Option<String> = None;
 
     while let Some(chunk) = stream.next().await {
         let bytes = chunk.map_err(|e| OpenAiError::Decode(e.to_string()))?;
@@ -1657,20 +1681,32 @@ async fn consume_chat_completion(
             raw_body.push_str(&line);
             raw_body.push('\n');
             saw_sse_frame |= acc.ingest_sse_line(&line);
+            if realized_model.is_none() {
+                realized_model = extract_sse_model(&line);
+            }
         }
     }
     if let Some(tail) = decoder.flush() {
         raw_body.push_str(&tail);
         saw_sse_frame |= acc.ingest_sse_line(&tail);
+        if realized_model.is_none() {
+            realized_model = extract_sse_model(&tail);
+        }
     }
 
     if saw_sse_frame {
-        return Ok(acc.finish());
+        let (content, wire_calls) = acc.finish();
+        return Ok(ChatCompletionOutcome {
+            content,
+            wire_calls,
+            realized_model,
+        });
     }
 
     // Non-streaming fallback — one whole JSON envelope.
     let parsed: ChatResponse =
         serde_json::from_str(raw_body.trim()).map_err(|e| OpenAiError::Decode(e.to_string()))?;
+    let realized_model = realized_model.or(parsed.model);
     let choice = parsed
         .choices
         .into_iter()
@@ -1683,7 +1719,32 @@ async fn consume_chat_completion(
         .into_iter()
         .map(finalize_wire_tool_call)
         .collect();
-    Ok((choice.message.content, wire_calls))
+    Ok(ChatCompletionOutcome {
+        content: choice.message.content,
+        wire_calls,
+        realized_model,
+    })
+}
+
+/// The outcome of consuming one `chat/completions` response — the assistant
+/// content, the accumulated wire tool calls, and the **realized model** the
+/// endpoint reported serving (F-01), if any.
+struct ChatCompletionOutcome {
+    content: Option<String>,
+    wire_calls: Vec<WireToolCall>,
+    realized_model: Option<String>,
+}
+
+/// Pull the served `model` out of one SSE line (`data: {…}`), if it carries
+/// one. Tolerates the `data:` prefix and the `[DONE]` sentinel; returns `None`
+/// for any line that is not a model-bearing JSON frame.
+fn extract_sse_model(line: &str) -> Option<String> {
+    let payload = line.trim().strip_prefix("data:").unwrap_or(line).trim();
+    if payload.is_empty() || payload == "[DONE]" {
+        return None;
+    }
+    let chunk: StreamChunk = serde_json::from_str(payload).ok()?;
+    chunk.model
 }
 
 // ---------------------------------------------------------------------------
@@ -1877,6 +1938,28 @@ fn emit_silent_failure(telemetry: Option<&AdapterTelemetry>, err: &OpenAiError) 
 /// Defensive by construction: a `None` telemetry (unit tests, an external
 /// scheduler owning pacing) is a silent no-op. Telemetry must never block
 /// the hot retry path — the same ADR-097 discipline as [`emit_silent_failure`].
+/// Emit a realized-model observation (`ModelObserved`) at the openai response
+/// seam (F-01), scoped to the telemetry's worker and stamped with the validated
+/// adapter name (so a `local`/`mistral` dispatch through this provider is logged
+/// under the adapter the operator actually selected). First-observation +
+/// on-change dedup is handled by `emit_new_model_observations`; a blank id can
+/// never pass the [`ModelId`](cosmon_core::model_realization::ModelId) newtype.
+/// Best-effort: no telemetry, or an unparseable id, is a silent no-op.
+fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
+    let Some(t) = telemetry else { return };
+    let Some(id) = cosmon_core::model_realization::ModelId::new(model) else {
+        return;
+    };
+    cosmon_state::events::worker_spawn::emit_new_model_observations(
+        &t.state_dir,
+        &t.mol_id,
+        Some(&t.worker_id),
+        t.adapter_name.as_deref().unwrap_or(ADAPTER_NAME),
+        std::slice::from_ref(&id),
+        cosmon_core::model_realization::ModelObservationSource::ProviderResponse,
+    );
+}
+
 fn emit_retry_probe(telemetry: Option<&AdapterTelemetry>, reason: String) {
     let Some(t) = telemetry else { return };
     emit_adapter_liveness_probed(
