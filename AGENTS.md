@@ -2,7 +2,7 @@
 
 Cosmon is a Rust workspace for persistent agent identity, typed lifecycle
 management, and crash recovery. Public artifacts are maintained by Noogram
-(noogram.dev).
+(noogram.org).
 
 ## Required reading
 

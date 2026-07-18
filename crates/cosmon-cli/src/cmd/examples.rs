@@ -676,7 +676,7 @@ Refuses unless the target pane's foreground command is in
 
 pub const DONE: &str = "EXAMPLES:
   cs done task-example-0001                      # merge + teardown
-  cs done <mol> --strategy ff-only                # strict linear history
+  cs done <mol> --strategy ff-only                # linear history; attribution off
   cs done <mol> --force                           # skip completion check
   cs done <mol> --if-completed                    # silent no-op if not Completed
 

@@ -3,7 +3,7 @@ type: vision
 created: 2026-06-23
 title: "Cosmon North Star — the AGPL kernel of an agentic OS"
 audience: the whole fleet (every cosmon session, every contributor), newcomers, release reviewers
-maker: Noogram (noogram.dev)
+maker: Noogram (noogram.org)
 status: living-doc
 mutable: true
 tags: [cosmon, noogram, vision, north-star, kernel, plugin, agpl, open-source, architecture]
@@ -248,14 +248,14 @@ flowchart LR
     PLUG --> NOO
 ```
 
-The destination is the federative project **Noogram** (noogram.dev) — the open
+The destination is the federative project **Noogram** (noogram.org) — the open
 home on which the work, and the social capital around it, accrues. The technical
 ingredients are: the one-repo membrane (ADR-133) — the residence audit, the
 content gates, and the pre-flip history purge — the crate frontier (ADR-126),
 and the docs surface at `docs.noogram.org`. *How that becomes a
 platform and why it matters economically is mailroom's story — see §7.*
 
-**External attribution is `Noogram` (noogram.dev)** in every shipped artifact —
+**External attribution is `Noogram` (noogram.org)** in every shipped artifact —
 the maker line, the NOTICE, the README. The operator's fund affiliation is
 private and never appears.
 
@@ -331,7 +331,7 @@ kernel/plugin/dual-track framing into the strategic index (see molecule notes).
 > network-SDK (the adoption surface) and a catalog of installable plugins
 > (local inference, voice, citation, formal-proof) that each graduate to their
 > own public home under their own license when ready. We are publishing the
-> kernel in the open as **Noogram** (noogram.dev) behind a deny-by-default
+> kernel in the open as **Noogram** (noogram.org) behind a deny-by-default
 > release membrane, while the same engine runs encrypted inside the *avatar*
 > platform with Tenant-Demo. The business and platform story lives in mailroom,
 > not here.
@@ -363,5 +363,5 @@ kernel/plugin/dual-track framing into the strategic index (see molecule notes).
 
 ---
 
-*Maker: Noogram (noogram.dev). This is a living doc — update it when the
+*Maker: Noogram (noogram.org). This is a living doc — update it when the
 boundary moves, and keep it honest: claim only what `ls` and `grep` confirm.*

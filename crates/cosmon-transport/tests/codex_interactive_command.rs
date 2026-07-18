@@ -41,6 +41,7 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         extra_args,
         telemetry: None,
         pre_existing_worker: None,
+        git_identity: None,
     }
 }
 

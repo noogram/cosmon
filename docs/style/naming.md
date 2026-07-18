@@ -43,7 +43,7 @@ run"; if the substitution survives, you were talking about the runnable kernel.
   repo `noogram/cosmon`. This is the subject of most of the documentation.
 - **Noogram** — the distribution: the project name, the doc site
   (`docs.noogram.org`), the apex (`noogram.org`), the external attribution
-  ("built by Noogram, noogram.dev"), the governance-bearing umbrella, and the
+  ("built by Noogram, noogram.org"), the governance-bearing umbrella, and the
   future plugins that compose the kernel.
 
 The reader lands on the **Noogram** billboard; their first *action* is

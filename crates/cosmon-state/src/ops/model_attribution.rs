@@ -233,6 +233,83 @@ pub fn latest_model_selection(state_dir: &Path, mol_id: &MoleculeId) -> Option<M
     latest
 }
 
+/// The distinct adapter names that ran a molecule across its whole life, in
+/// first-seen (append) order.
+///
+/// A molecule that is resumed or handed off (delib-20260717-194b, feynman Q2)
+/// can carry more than one `ModelSelected` line with *different* adapters —
+/// `claude` on the first tackle, `codex` after a handoff. This surfaces the
+/// full set so the caller can decide whether the dispatch is *unambiguous*
+/// (exactly one adapter turned the crank) rather than trusting the
+/// last-writer-wins projection of [`latest_model_selection`], which would
+/// silently pick the most recent and dress a guess as a fact.
+///
+/// Empty when the molecule has no recorded selection (missing / unreadable
+/// log, or never tackled) — advisory read, trace-not-lock.
+#[must_use]
+pub fn distinct_adapter_names(state_dir: &Path, mol_id: &MoleculeId) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for_each_model_selected(state_dir, |candidate, attr| {
+        if &candidate == mol_id {
+            let name = attr.adapter_name.trim().to_owned();
+            if !name.is_empty() && !seen.iter().any(|s| s == &name) {
+                seen.push(name);
+            }
+        }
+    });
+    seen
+}
+
+/// The outcome of folding a molecule's recorded adapters into the single
+/// honest witness the `Co-Authored-By` adapter trailer may credit.
+///
+/// The trailer answers *"who turned the crank?"* (delib-20260717-194b,
+/// feynman Q2). It is a provenance stamp folded from the durable log, never a
+/// guess — so it is emitted only on an **unambiguous** witness and dropped in
+/// every other case. Dropping costs nothing (no credit is falsely withheld
+/// from a person), which is exactly what licenses the aggressive drop rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdapterFold {
+    /// Exactly one distinct adapter ran the molecule — emit it as the second
+    /// co-author.
+    Single(String),
+    /// No adapter recorded (missing / empty / unreadable log) — drop the
+    /// adapter trailer. The maker trailer, if any, still rides.
+    Absent,
+    /// More than one distinct adapter across the molecule's life (resume /
+    /// handoff) — ambiguous. Drop the adapter trailer rather than pick
+    /// last-writer or list both; carries the witnessed set so the caller can
+    /// warn instead of failing silently.
+    Ambiguous(Vec<String>),
+}
+
+/// Fold a set of distinct adapter names into the [`AdapterFold`] verdict.
+///
+/// The pure core of the folding rule, split out from I/O so it is unit-testable
+/// against a hand-built witness set (delib-20260717-194b, knuth U6): exactly
+/// one → [`AdapterFold::Single`]; none → [`AdapterFold::Absent`]; two or more →
+/// [`AdapterFold::Ambiguous`]. The input is expected to already be
+/// de-duplicated and non-empty-trimmed (as [`distinct_adapter_names`]
+/// produces), so the count *is* the verdict.
+#[must_use]
+pub fn fold_adapter(distinct: &[String]) -> AdapterFold {
+    match distinct {
+        [] => AdapterFold::Absent,
+        [only] => AdapterFold::Single(only.clone()),
+        many => AdapterFold::Ambiguous(many.to_vec()),
+    }
+}
+
+/// Fold a molecule's recorded adapters (streamed from the log) into the single
+/// [`AdapterFold`] verdict the attribution trailer builds against.
+///
+/// Convenience composition of [`distinct_adapter_names`] and [`fold_adapter`]
+/// so `cs done` has one call to reach for.
+#[must_use]
+pub fn folded_adapter(state_dir: &Path, mol_id: &MoleculeId) -> AdapterFold {
+    fold_adapter(&distinct_adapter_names(state_dir, mol_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,5 +465,99 @@ mod tests {
         let dir = tempdir().unwrap();
         assert!(model_selections(dir.path()).is_empty());
         assert!(latest_model_selection(dir.path(), &mol("task-20260705-a408")).is_none());
+    }
+
+    // ---- Adapter folding rule (delib-20260717-194b, F6 / knuth U6) ---------
+
+    /// The pure fold: an empty witness set drops the adapter trailer.
+    #[test]
+    fn fold_empty_is_absent() {
+        assert_eq!(fold_adapter(&[]), AdapterFold::Absent);
+    }
+
+    /// Exactly one distinct adapter is the honest, unambiguous witness.
+    #[test]
+    fn fold_single_is_that_adapter() {
+        assert_eq!(
+            fold_adapter(&["claude".to_owned()]),
+            AdapterFold::Single("claude".to_owned())
+        );
+    }
+
+    /// Two distinct adapters (resume / handoff) is ambiguous — drop, don't
+    /// guess. The witnessed set rides so the caller can warn.
+    #[test]
+    fn fold_two_distinct_is_ambiguous() {
+        let names = vec!["claude".to_owned(), "codex".to_owned()];
+        assert_eq!(fold_adapter(&names), AdapterFold::Ambiguous(names));
+    }
+
+    /// A molecule with a single recorded adapter folds to `Single`, even when
+    /// the same adapter is recorded twice (re-tackle with the same crank).
+    #[test]
+    fn folded_adapter_single_across_retackle() {
+        let dir = tempdir().unwrap();
+        let m = mol("task-20260717-a754");
+        for model in ["claude-haiku-4-5", "claude-opus-4-8"] {
+            emit_model_selected(
+                dir.path(),
+                &m,
+                "claude",
+                Some(model),
+                ModelSelectionSource::Flag {
+                    flag: model.to_owned(),
+                },
+            );
+        }
+        assert_eq!(distinct_adapter_names(dir.path(), &m), vec!["claude"]);
+        assert_eq!(
+            folded_adapter(dir.path(), &m),
+            AdapterFold::Single("claude".to_owned())
+        );
+    }
+
+    /// A handoff — `claude` then `codex` — is ambiguous, so the adapter
+    /// trailer is dropped rather than crediting last-writer-wins.
+    #[test]
+    fn folded_adapter_ambiguous_across_handoff() {
+        let dir = tempdir().unwrap();
+        let m = mol("task-20260717-a754");
+        emit_model_selected(
+            dir.path(),
+            &m,
+            "claude",
+            Some("claude-opus-4-8"),
+            ModelSelectionSource::Flag {
+                flag: "claude-opus-4-8".to_owned(),
+            },
+        );
+        emit_model_selected(
+            dir.path(),
+            &m,
+            "codex",
+            None,
+            ModelSelectionSource::Default {
+                fallback_reason: "handoff".to_owned(),
+            },
+        );
+        assert_eq!(
+            distinct_adapter_names(dir.path(), &m),
+            vec!["claude".to_owned(), "codex".to_owned()]
+        );
+        assert!(matches!(
+            folded_adapter(dir.path(), &m),
+            AdapterFold::Ambiguous(_)
+        ));
+    }
+
+    /// No recorded selection folds to `Absent` — the adapter trailer is
+    /// dropped, distinct from an ambiguous handoff.
+    #[test]
+    fn folded_adapter_absent_when_unrecorded() {
+        let dir = tempdir().unwrap();
+        assert_eq!(
+            folded_adapter(dir.path(), &mol("task-20260717-zzzz")),
+            AdapterFold::Absent
+        );
     }
 }

@@ -2,7 +2,7 @@
 
 ## Reporting a vulnerability
 
-Email **security@noogram.dev** with a description, reproduction steps, and the
+Email **security@noogram.org** with a description, reproduction steps, and the
 affected version or commit. Please report privately first — do not open a public
 GitHub issue for a suspected vulnerability. We aim to acknowledge a report within
 a few business days and will coordinate a fix and disclosure timeline with you.

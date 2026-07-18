@@ -125,7 +125,8 @@ pub struct Args {
     /// `merge` (default) creates a merge commit (`git merge --no-ff`) so
     /// parallel workers can land independently even when main has moved.
     /// `ff-only` preserves a strictly linear history and refuses anything
-    /// that is not a fast-forward.
+    /// that is not a fast-forward; it is refused when native attribution is
+    /// configured because a fast-forward creates no trailer carrier.
     #[arg(long, value_enum, default_value_t = MergeStrategy::Merge)]
     strategy: MergeStrategy,
 
@@ -180,8 +181,68 @@ pub enum MergeStrategy {
     ///
     /// Refuses anything that would require a merge commit. Suited to
     /// strictly linear history regimes, but incompatible with parallel
-    /// tackling when main moves between worker starts.
+    /// tackling when main moves between worker starts and with configured
+    /// native attribution (which requires a cosmon-owned commit carrier).
     FfOnly,
+}
+
+/// Reject a merge shape that cannot carry configured attribution trailers.
+///
+/// `ff-only` advances the base ref directly to a worker commit and creates no
+/// cosmon-owned commit. Rewriting that worker commit would invalidate its SHA,
+/// so native attribution and fast-forward-only integration are mutually
+/// exclusive. The empty-trailer configuration retains the historical
+/// fast-forward behavior.
+fn ensure_attribution_carrier(
+    strategy: MergeStrategy,
+    coauthor_trailers: &[String],
+) -> anyhow::Result<()> {
+    if strategy == MergeStrategy::FfOnly && !coauthor_trailers.is_empty() {
+        return Err(anyhow::anyhow!(
+            "cs done refuses `--strategy ff-only` while native attribution is configured: \
+             a fast-forward creates no merge commit on which to stamp the Noogram/adapter \
+             `Co-Authored-By:` trailers, and cosmon will not rewrite worker commits. Use the \
+             default `--strategy merge`, or remove `[attribution].coauthor_email` if this \
+             repository intentionally chooses unstamped linear history \
+             (delib-20260717-194b, trailer-carrier contract)."
+        ));
+    }
+    Ok(())
+}
+
+/// Convert the durable adapter fold into an optional co-author and observable
+/// warnings without inventing provenance.
+fn adapter_for_coauthor(
+    fold: cosmon_state::ops::model_attribution::AdapterFold,
+    mol_id: &MoleculeId,
+    attribution_enabled: bool,
+    warnings: &mut Vec<String>,
+) -> Option<String> {
+    use cosmon_state::ops::model_attribution::AdapterFold;
+
+    match fold {
+        AdapterFold::Single(name) => Some(name),
+        AdapterFold::Absent => {
+            if attribution_enabled {
+                warnings.push(format!(
+                    "attribution: no adapter witness was found in the event log for {mol_id} — \
+                     omitting the adapter from the co-author display name. The maker trailer still rides, but \
+                     this commit does NOT prove which adapter ran."
+                ));
+            }
+            None
+        }
+        AdapterFold::Ambiguous(names) => {
+            warnings.push(format!(
+                "attribution: {} distinct adapters ran {mol_id} ({}) — dropping the \
+                 adapter annotation rather than guessing last-writer (F6). The \
+                 maker trailer still rides.",
+                names.len(),
+                names.join(", ")
+            ));
+            None
+        }
+    }
 }
 
 #[allow(clippy::struct_excessive_bools)]
@@ -797,6 +858,205 @@ fn check_publish_identity_blocklist(
          to 1 on the enumerated git-identity slot, but it does NOT detect paraphrase,\n\
          implication, encoded, or composed disclosure (undecidable, Rice-adjacent).\n\
          Human review remains the backstop for the semantic failure class.\n",
+    );
+    Err(anyhow::anyhow!("{msg}"))
+}
+
+/// The operator identity allowed in git author and committer slots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OperatorIdentity {
+    /// Operator display name (`git config user.name`).
+    name: String,
+    /// Operator email (`git config user.email`).
+    email: String,
+}
+
+/// Resolve the operator's canonical git identity from `repo_root`'s effective
+/// git config (`user.name` and `user.email`, walking local → global → system).
+///
+/// Returns `None` when no identity is configured (a bare CI checkout or fresh
+/// repo). Attribution-enabled integration treats that absence as a hard error:
+/// without a reference identity, the author-slot assertion cannot prove its
+/// direction-of-control invariant. The identity is the human who runs `cs
+/// done`; it is never the maker/adapter (those live only on `Co-Authored-By`
+/// trailers).
+fn resolve_operator_identity(repo_root: &Path) -> Option<OperatorIdentity> {
+    fn config_value(repo_root: &Path, key: &str) -> Option<String> {
+        let out = Command::new("git")
+            .args(["-C", &repo_root.to_string_lossy(), "config", key])
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        (!value.is_empty()).then_some(value)
+    }
+
+    Some(OperatorIdentity {
+        name: config_value(repo_root, "user.name")?,
+        email: config_value(repo_root, "user.email")?,
+    })
+}
+
+/// Resolve the operator identity or fail closed with an actionable remedy.
+fn require_operator_identity(repo_root: &Path) -> anyhow::Result<OperatorIdentity> {
+    resolve_operator_identity(repo_root).ok_or_else(|| {
+        anyhow::anyhow!(
+            "cs done refuses attribution-enabled integration because the operator git \
+             identity is incomplete. Configure both `git config user.name <operator>` and \
+             `git config user.email <operator-address>`, then rerun `cs done`. Without that \
+             reference identity cosmon cannot prove that worker commits keep Noogram and \
+             adapters out of the author/committer slots."
+        )
+    })
+}
+
+/// Count the commits in `<base>..<branch>` (`git rev-list --count`).
+///
+/// `None` on any probe failure (missing branch, non-git dir) so the caller
+/// distinguishes "probe slipped" from a real zero — the vacuous-range guard
+/// (F5) must fail *closed* on a genuine zero-but-unmerged branch, not on a
+/// probe that could not run.
+fn rev_list_count(repo_root: &Path, base: &str, branch: &str) -> Option<usize> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-list",
+            "--count",
+            &format!("{base}..{branch}"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// A commit in the publish range whose author or committer slot is NOT the
+/// operator — the direction-of-control violation the author-slot assertion
+/// (delib-20260717-194b, F4 / adversary's unifying CATCH) hunts for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AuthorSlotViolation {
+    /// Abbreviated commit SHA (for the operator-facing report).
+    sha: String,
+    /// The offending author name (`%an`).
+    author_name: String,
+    /// The offending author email (`%ae`).
+    author_email: String,
+    /// The offending committer name (`%cn`).
+    committer_name: String,
+    /// The offending committer email (`%ce`).
+    committer_email: String,
+}
+
+/// Field separator for the author-slot scan — the ASCII unit separator, which
+/// cannot occur in an email or a SHA, so the split is unambiguous even if a
+/// future format grows a free-text field.
+const AUTHOR_SCAN_SEP: char = '\u{1f}';
+
+/// Pure core of the author-slot assertion: given `git log` output of
+/// `%H<US>%an<US>%ae<US>%cn<US>%ce` lines and the operator identity, return
+/// every commit whose author OR committer name/email pair is not the operator.
+///
+/// Split out from I/O so the invariant — *every commit in the publish range is
+/// operator-authored* — is unit-testable against a hand-built log (knuth's
+/// RED-before/GREEN-after discipline). The comparison is trimmed and
+/// case-sensitive for names and case-insensitive for emails: display-name case
+/// is identity data, while email domains are not case-sensitive.
+fn collect_non_operator_authored(
+    log_output: &str,
+    operator: &OperatorIdentity,
+) -> Vec<AuthorSlotViolation> {
+    let operator_name = operator.name.trim();
+    let operator_email = operator.email.trim();
+    let mut out = Vec::new();
+    for line in log_output.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            continue;
+        }
+        let mut fields = line.split(AUTHOR_SCAN_SEP);
+        let sha = fields.next().unwrap_or("").trim();
+        let author_name = fields.next().unwrap_or("").trim();
+        let author_email = fields.next().unwrap_or("").trim();
+        let committer_name = fields.next().unwrap_or("").trim();
+        let committer_email = fields.next().unwrap_or("").trim();
+        let author_ok =
+            author_name == operator_name && author_email.eq_ignore_ascii_case(operator_email);
+        let committer_ok =
+            committer_name == operator_name && committer_email.eq_ignore_ascii_case(operator_email);
+        if !author_ok || !committer_ok {
+            out.push(AuthorSlotViolation {
+                sha: sha.to_owned(),
+                author_name: author_name.to_owned(),
+                author_email: author_email.to_owned(),
+                committer_name: committer_name.to_owned(),
+                committer_email: committer_email.to_owned(),
+            });
+        }
+    }
+    out
+}
+
+/// Author-slot assertion (delib-20260717-194b, F4). Every commit the merge
+/// would publish (`<base>..<branch>`, merges included) must be authored AND
+/// committed by the operator — the maker/adapter identity belongs on
+/// `Co-Authored-By` trailers, never in the author slot (direction-of-control).
+///
+/// This is **independent of the `[publish_identity]` blocklist** (T3): an
+/// internal galaxy ships an empty `allowed_emails`, so that gate catches
+/// nothing, yet a codex worker that leaked `Noogram <hello@noogram.org>` into
+/// the author slot must still be caught. Keying on the operator email — a
+/// closed set of one, resolved from the repo's own git config — covers every
+/// galaxy without asking it to fill a codebook.
+///
+/// Hard-fails, listing every offending SHA, when a non-operator
+/// author/committer slot is found. The caller must first obtain a complete
+/// identity through [`require_operator_identity`], which also fails closed.
+fn assert_operator_authored_commits(
+    repo_root: &Path,
+    base: &str,
+    branch: &str,
+    operator: &OperatorIdentity,
+) -> anyhow::Result<()> {
+    let range = format!("{base}..{branch}");
+    let fmt = format!(
+        "%H{AUTHOR_SCAN_SEP}%an{AUTHOR_SCAN_SEP}%ae{AUTHOR_SCAN_SEP}%cn{AUTHOR_SCAN_SEP}%ce"
+    );
+    let log = git_log_field(repo_root, &range, &fmt);
+    let violations = collect_non_operator_authored(&log, operator);
+    if violations.is_empty() {
+        return Ok(());
+    }
+    let mut msg = format!(
+        "cosmon refuses to integrate {branch}: {} commit(s) in `{range}` are not \
+         operator-authored — the git author/committer slot MUST be the operator \
+         ({} <{}>); the maker and the real adapter belong only on \
+         `Co-Authored-By:` trailers (delib-20260717-194b, F4 direction-of-control).\n",
+        violations.len(),
+        operator.name,
+        operator.email
+    );
+    for v in &violations {
+        let short: String = v.sha.chars().take(12).collect();
+        let _ = writeln!(
+            msg,
+            "  {short}  author={} <{}>  committer={} <{}>",
+            v.author_name, v.author_email, v.committer_name, v.committer_email
+        );
+    }
+    msg.push_str(
+        "\nThis is the codex-author leak class: a worker git process wrote the maker \
+         name into the author slot. Fix it at the source — pin the worktree identity \
+         (`git -C <worktree> config user.email <operator>`) so feature commits are \
+         BORN operator-authored — then re-stamp the offending commits:\n\
+         \n  git config user.email <operator>\n\
+         \n  git -c rebase.instructionFormat= rebase --exec \\\n\
+         \n    'git commit --amend --no-edit --reset-author' <base>\n\
+         \nthen rerun `cs done`.\n",
     );
     Err(anyhow::anyhow!("{msg}"))
 }
@@ -1436,12 +1696,63 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     legitimate here), so this is a zero-cost return for every project
     //     that does not configure the guard.
     let base_branch = resolve_base_branch(&repo_root);
+
+    // 1b'. Range non-emptiness precondition (delib-20260717-194b, F5 / adversary
+    //      A6). Every range-scoped gate below scans `<base>..<branch>`. If base
+    //      MISresolves, that range is empty and every gate passes *vacuously* —
+    //      scanning nothing, disabling them all at once. Fail CLOSED: when the
+    //      branch is NOT already reachable from base (so it genuinely carries
+    //      unlanded work) yet `rev-list --count <base>..<branch>` is zero, the
+    //      base resolved to something unrelated. Refuse rather than let the
+    //      publish-identity gate and the author-slot assertion sleep through an
+    //      empty scan. A probe that could not run (`None`) is NOT treated as a
+    //      zero — only a genuine, git-reported zero-but-unmerged branch aborts.
+    if !args.no_merge
+        && branch_exists(&repo_root, &branch_name)
+        && !is_branch_merged(&repo_root, &branch_name)
+    {
+        if let Some(0) = rev_list_count(&repo_root, &base_branch, &branch_name) {
+            return Err(anyhow::anyhow!(
+                "cs done aborts: branch {branch_name} is not reachable from base \
+                 `{base_branch}`, yet `git rev-list --count {base_branch}..{branch_name}` \
+                 is 0 — the base branch misresolved and every range-scoped publish gate \
+                 would pass scanning an empty range (delib-20260717-194b, F5 / adversary \
+                 A6). Refusing to integrate on a vacuous range. Verify the base branch \
+                 (COSMON_BASE_BRANCH / origin/HEAD) and rerun `cs done` from the main \
+                 checkout."
+            ));
+        }
+    }
+
     check_publish_identity_blocklist(
         &repo_root,
         &branch_name,
         &base_branch,
         &blocklist_cfg.publish_identity,
     )?;
+
+    // 1c''. Author-slot assertion (delib-20260717-194b, F4 — the load-bearing
+    //       backstop). The publish-identity blocklist above ships EMPTY in every
+    //       internal galaxy, so it catches nothing there. This assertion is
+    //       independent of that codebook (T3): it keys on the operator's own git
+    //       identity, resolved from the repo config, and demands that every
+    //       commit the merge would publish is operator-authored AND
+    //       operator-committed. The maker (Noogram) and the real adapter belong
+    //       ONLY on `Co-Authored-By:` trailers — never in the author slot. This
+    //       is the catch for the codex-author leak (P2): even when birth-time
+    //       identity pinning (F2/F3) silently no-ops (tmux boundary, config
+    //       precedence, a late amend), this post-facto scan closes the hole.
+    //
+    //       Gated on a configured `[attribution]` block: a galaxy that adopts
+    //       native attribution promises operator-authored feature commits, so
+    //       the invariant fires for it without asking it to fill a blocklist. A
+    //       zero-config galaxy stays byte-identical (F9). A configured galaxy
+    //       fails closed when operator identity cannot be resolved: silently
+    //       skipping would disable the assertion where it is needed most.
+    if !args.no_merge && !blocklist_cfg.attribution.is_empty() {
+        let operator = require_operator_identity(&repo_root)?;
+        assert_operator_authored_commits(&repo_root, &base_branch, &branch_name, &operator)?;
+    }
 
     // 1c'. Scope-guard (P3 of task-20260712-3819). When the molecule declared
     //      a change-perimeter via `--var scope_allow=<globs>`, surface any
@@ -1661,6 +1972,47 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // Native attribution (delib-20260717-194b, F1 + F6). Compute the
+    // `Co-Authored-By` trailer block ONCE, here, before the merge — so it can be
+    // stamped on the commit that actually EXISTS. The pre-194b bug threaded the
+    // trailers only into `commit_molecule_artifacts` (step 7), a carrier that
+    // task-work molecules never produce (no artifact staged under the molecule
+    // dir), so the trailers were silently discarded (0/6). The right carrier on
+    // the default `--no-ff` path is the merge commit cosmon itself creates
+    // (F1) — the trailers are threaded into `try_merge_with_escalation` below —
+    // and the artifact commit stays a fallback carrier for artifact-producing
+    // molecules (step 7 reuses the same vec).
+    //
+    // The adapter annotation is folded from the durable event log under the
+    // strict rule (F6): emitted only when EXACTLY ONE distinct adapter ran the
+    // molecule. Zero recorded → drop (the log is silent, so is the stamp); more
+    // than one (resume / handoff) → drop and WARN rather than credit
+    // last-writer-wins, "a guess dressed as a fact". Empty `coauthor_email` ⇒
+    // empty vec ⇒ every commit message byte-identical to a pre-attribution
+    // cosmon (F9).
+    let coauthor_trailers: Vec<String> = {
+        use cosmon_state::ops::model_attribution::folded_adapter;
+        let real_adapter = adapter_for_coauthor(
+            folded_adapter(&state_dir, &mol_id),
+            &mol_id,
+            !blocklist_cfg.attribution.coauthor_trailers(None).is_empty(),
+            &mut warnings,
+        );
+        blocklist_cfg
+            .attribution
+            .coauthor_trailers(real_adapter.as_deref())
+    };
+
+    // A fast-forward creates no commit owned by cosmon, so there is nowhere to
+    // carry the configured provenance trailers without rewriting worker
+    // commits (forbidden by delib-20260717-194b: it changes their SHAs and
+    // breaks ancestry guards). Refuse this contradictory option combination
+    // before touching the branch instead of reporting a successful but
+    // unstamped integration.
+    if !args.no_merge {
+        ensure_attribution_carrier(args.strategy, &coauthor_trailers)?;
+    }
+
     // Mechanical-first escalation: see docs/architectural-invariants.md
     // On conflict, try graduated escalation: ff-only → 3-way merge → propel
     // worker to rebase+resolve → retry, bounded by max_retries.
@@ -1677,6 +2029,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             !args.no_auto_propel,
             args.max_retries,
             args.propel_message.as_deref(),
+            &coauthor_trailers,
         );
         match merge_result {
             Ok(MergeLoopOutcome::Merged) => {
@@ -2329,22 +2682,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 actual.display(),
             ));
         } else {
-            // Native attribution (task-20260717-c873): stamp a `Co-Authored-By`
-            // trailer built from the project's `[attribution]` block plus the
-            // REAL adapter that ran this molecule, folded from the durable event
-            // log (`latest_model_selection` carries the honest `adapter_name`,
-            // never a guess). Empty `coauthor_email` ⇒ no trailers ⇒ commit
-            // message byte-identical to a pre-attribution cosmon, so this is a
-            // zero-cost default for every galaxy that has not opted in.
-            let attribution_cfg =
-                cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
-                    .unwrap_or_else(|_| ProjectConfig::default());
-            let real_adapter =
-                cosmon_state::ops::model_attribution::latest_model_selection(&state_dir, &mol_id)
-                    .map(|attr| attr.adapter_name);
-            let coauthor_trailers = attribution_cfg
-                .attribution
-                .coauthor_trailers(real_adapter.as_deref());
+            // Native attribution (task-20260717-c873; retargeted by
+            // delib-20260717-194b, F1). Reuse the SAME `coauthor_trailers`
+            // computed once at the top level (before the merge) — the merge
+            // commit is the primary carrier (F1); this artifact commit is the
+            // *fallback* carrier for artifact-producing molecules. Empty
+            // `coauthor_email` ⇒ no trailers ⇒ commit message byte-identical to
+            // a pre-attribution cosmon.
             match commit_molecule_artifacts(
                 &repo_root,
                 &mol_dir,
@@ -2707,6 +3051,7 @@ fn try_merge_with_escalation(
     auto_propel: bool,
     max_retries: u32,
     custom_message: Option<&str>,
+    coauthor_trailers: &[String],
 ) -> anyhow::Result<MergeLoopOutcome> {
     // The most recent set of conflicting files, carried from the first attempt
     // through every escalation retry so the final `Conflict` outcome can list
@@ -2716,7 +3061,7 @@ fn try_merge_with_escalation(
     let mut last_conflict_files: Vec<String>;
 
     // First attempt — purely mechanical.
-    match try_merge_branch(repo_root, branch, strategy) {
+    match try_merge_branch(repo_root, branch, strategy, coauthor_trailers) {
         MergeOutcome::Merged => {
             if verify_merge(repo_root, branch) {
                 return Ok(MergeLoopOutcome::Merged);
@@ -2811,7 +3156,7 @@ fn try_merge_with_escalation(
         std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
 
         // Retry the merge.
-        match try_merge_branch(repo_root, branch, strategy) {
+        match try_merge_branch(repo_root, branch, strategy, coauthor_trailers) {
             MergeOutcome::Merged => {
                 if verify_merge(repo_root, branch) {
                     record_escalation(store, mol_id, retry, "merged");
@@ -2964,7 +3309,12 @@ enum MergeOutcome {
 /// Returns a [`MergeOutcome`] variant rather than a `Result` so callers can
 /// distinguish the branch-not-found / already-merged / conflict / hard-fail
 /// cases without string matching.
-fn try_merge_branch(repo_root: &Path, branch: &str, strategy: MergeStrategy) -> MergeOutcome {
+fn try_merge_branch(
+    repo_root: &Path,
+    branch: &str,
+    strategy: MergeStrategy,
+    coauthor_trailers: &[String],
+) -> MergeOutcome {
     // Does the branch exist?
     if !branch_exists(repo_root, branch) {
         return MergeOutcome::NoBranch;
@@ -3034,10 +3384,28 @@ fn try_merge_branch(repo_root: &Path, branch: &str, strategy: MergeStrategy) -> 
         MergeStrategy::Merge => {
             // `--no-ff` always creates a merge commit even if a
             // fast-forward would be possible — that preserves a clear
-            // "molecule X landed here" marker in history. `--no-edit`
-            // stops git from launching $EDITOR for the merge commit
-            // message.
-            cmd.args(["--no-ff", "--no-edit", branch]);
+            // "molecule X landed here" marker in history.
+            //
+            // Native attribution (delib-20260717-194b, F1): the merge commit is
+            // the trailer carrier on the default path. When trailers are
+            // configured we reclaim the message slot `--no-edit` would throw
+            // away — passing git's own default subject as the first `-m` and the
+            // trailer block as a SINGLE second `-m` so it renders as one
+            // contiguous `Co-Authored-By` paragraph (a trailer block must not be
+            // split by a blank line). Empty trailer vec ⇒ we keep `--no-edit`
+            // verbatim, so the merge commit is byte-identical to a
+            // pre-attribution cosmon (F9). `git merge`'s default subject when
+            // merging `feat/x` into the current branch is `Merge branch
+            // 'feat/x'`, reproduced here so history reads the same.
+            if coauthor_trailers.is_empty() {
+                // `--no-edit` stops git from launching $EDITOR for the merge
+                // commit message.
+                cmd.args(["--no-ff", "--no-edit", branch]);
+            } else {
+                let subject = format!("Merge branch '{branch}'");
+                let trailers = coauthor_trailers.join("\n");
+                cmd.args(["--no-ff", "-m", &subject, "-m", &trailers, branch]);
+            }
         }
     }
     let output = cmd.output();
@@ -5596,6 +5964,13 @@ mod tests {
         full.push(repo_str);
         full.extend_from_slice(args);
         Command::new("git")
+            // The test process may itself be a codex worker with identity
+            // pinning (F3). Remove that ambient override so fixtures exercise
+            // the temp repository's explicit identity deterministically.
+            .env_remove("GIT_AUTHOR_NAME")
+            .env_remove("GIT_AUTHOR_EMAIL")
+            .env_remove("GIT_COMMITTER_NAME")
+            .env_remove("GIT_COMMITTER_EMAIL")
             .args(&full)
             .output()
             .expect("git command failed to spawn")
@@ -6618,7 +6993,7 @@ mod tests {
         // At this point main has a.txt from feat/a. feat/b cannot
         // fast-forward because main has moved. Default strategy must
         // still merge it cleanly via a merge commit.
-        let outcome = try_merge_branch(repo, "feat/b", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged, got {outcome:?}"
@@ -6644,7 +7019,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         commit_file(repo, "main.txt", "main advance\n", "chore: advance main");
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly, &[]);
         assert!(
             matches!(outcome, MergeOutcome::NotFastForward),
             "expected NotFastForward, got {outcome:?}"
@@ -6725,7 +7100,7 @@ mod tests {
         // Under the fix, `try_merge_branch` injects `LC_ALL=C` into its
         // spawned git regardless of the caller's environment, so the
         // English grep matches and classification is correct.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly, &[]);
         assert!(
             matches!(outcome, MergeOutcome::NotFastForward),
             "expected NotFastForward under FR-locale operator, got {outcome:?}"
@@ -6752,7 +7127,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         commit_file(repo, "shared.txt", "from main\n", "edit from main");
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
         match outcome {
             MergeOutcome::Conflict(files) => {
                 assert!(
@@ -6835,7 +7210,7 @@ mod tests {
             "append from main",
         );
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after auto-resolution, got {outcome:?}"
@@ -6870,7 +7245,7 @@ mod tests {
             .success());
 
         // Branch is fully merged; both strategies should report it.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::AlreadyMerged),
             "expected AlreadyMerged, got {outcome:?}"
@@ -7043,7 +7418,7 @@ mod tests {
 
         // The full merge attempt must therefore actually merge the branch,
         // not short-circuit with AlreadyMerged.
-        let outcome = try_merge_branch(repo, "feat/task-20260419-dc10", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/task-20260419-dc10", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged (topology probe), got {outcome:?} — \
@@ -7150,7 +7525,7 @@ mod tests {
         // configured base branch — strictly stronger than the original
         // contract (no false-AlreadyMerged), and on the path that would
         // have silently lost work.
-        let outcome = try_merge_branch(repo, "feat/task-20260421-37c1", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/task-20260421-37c1", MergeStrategy::Merge, &[]);
         assert!(
             !matches!(outcome, MergeOutcome::AlreadyMerged),
             "try_merge_branch must NOT report AlreadyMerged when the \
@@ -7235,7 +7610,7 @@ mod tests {
         let repo = tmp.path();
         init_repo(repo);
 
-        let outcome = try_merge_branch(repo, "feat/does-not-exist", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/does-not-exist", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::NoBranch),
             "expected NoBranch, got {outcome:?}"
@@ -7447,7 +7822,7 @@ mod tests {
         );
 
         // try_merge_branch must flush first, then merge, and report Merged.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after pre-merge flush, got {outcome:?}"
@@ -8365,6 +8740,7 @@ mod tests {
             false, // auto_propel disabled
             3,
             None,
+            &[],
         );
 
         match result.expect("conflict is a first-class Ok outcome, not Err") {
@@ -8442,6 +8818,7 @@ mod tests {
             true,
             3,
             None,
+            &[],
         );
 
         assert!(result.is_ok());
@@ -8522,6 +8899,7 @@ mod tests {
             true, // auto_propel enabled
             0,    // exhaust immediately
             None,
+            &[],
         );
 
         match result.expect("exhausted conflict is a first-class Ok outcome") {
@@ -8618,6 +8996,7 @@ mod tests {
             true,
             3,
             None,
+            &[],
         );
 
         assert!(matches!(result.unwrap(), MergeLoopOutcome::AlreadyMerged));
@@ -8651,6 +9030,7 @@ mod tests {
             true,
             3,
             None,
+            &[],
         );
 
         assert!(matches!(result.unwrap(), MergeLoopOutcome::NoBranch));
@@ -8746,9 +9126,14 @@ mod tests {
 
     #[test]
     fn test_commit_artifacts_stamps_coauthor_trailers() {
-        // Native attribution (task-20260717-c873): the trailers passed in ride
-        // the artifact commit as a contiguous Co-Authored-By block, separated
-        // from the subject by a blank line so git parses them as trailers.
+        // Native attribution — the FALLBACK carrier (delib-20260717-194b, F1).
+        // This proves the trailers ride the *artifact* commit for
+        // artifact-producing molecules. It is deliberately NOT the load-bearing
+        // regression: a task-work molecule produces no artifact commit, so the
+        // PRIMARY carrier is the merge commit — see
+        // `merge_commit_carries_coauthor_trailers` for that invariant (knuth's
+        // "prove the right object"). The trailers ride as a contiguous
+        // Co-Authored-By block, blank-line-separated so git parses them.
         let tmp = TempDir::new().unwrap();
         let repo = tmp.path();
         init_repo(repo);
@@ -8762,16 +9147,13 @@ mod tests {
         let events_path = repo.join(".cosmon/state/events.jsonl");
         std::fs::write(&events_path, "{\"event\":\"done\"}\n").unwrap();
 
-        let trailers = vec![
-            "Co-Authored-By: Noogram <noreply@noogram.org>".to_owned(),
-            "Co-Authored-By: Claude <claude@noogram.org>".to_owned(),
-        ];
+        let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
         let result =
             commit_molecule_artifacts(repo, &mol_dir, &events_path, &mol_id, "attr", &trailers);
         assert!(result.is_ok(), "commit should succeed: {result:?}");
         assert!(result.unwrap());
 
-        // Full commit body — both trailers present, subject intact.
+        // Full commit body — the single trailer is present, subject intact.
         let log = git(repo, &["log", "-1", "--format=%B"]);
         let body = String::from_utf8_lossy(&log.stdout);
         assert!(
@@ -8779,12 +9161,12 @@ mod tests {
             "subject missing: {body}"
         );
         assert!(
-            body.contains("Co-Authored-By: Noogram <noreply@noogram.org>"),
+            body.contains("Co-Authored-By: Noogram (claude) <noreply@noogram.org>"),
             "maker trailer missing: {body}"
         );
         assert!(
-            body.contains("Co-Authored-By: Claude <claude@noogram.org>"),
-            "adapter trailer missing: {body}"
+            !body.contains("<claude@noogram.org>"),
+            "synthetic adapter email leaked into trailer: {body}"
         );
         // git recognises them as real trailers (blank-line-separated block).
         let interpreted = git(
@@ -8793,8 +9175,342 @@ mod tests {
         );
         let trailers_out = String::from_utf8_lossy(&interpreted.stdout);
         assert!(
-            trailers_out.contains("Noogram") && trailers_out.contains("Claude"),
+            trailers_out.contains("Noogram (claude) <noreply@noogram.org>"),
             "git did not parse the co-author trailers: {trailers_out}"
+        );
+    }
+
+    // ---- Author-slot assertion pure core (F4 / adversary CATCH) -----------
+
+    fn test_operator() -> OperatorIdentity {
+        OperatorIdentity {
+            name: "Operator".to_owned(),
+            email: "op@x.org".to_owned(),
+        }
+    }
+
+    /// The happy path: every commit authored AND committed by the operator
+    /// yields no violations.
+    #[test]
+    fn author_scan_all_operator_is_clean() {
+        let sep = AUTHOR_SCAN_SEP;
+        let log = format!(
+            "abc123{sep}Operator{sep}op@x.org{sep}Operator{sep}op@x.org\n\
+             def456{sep}Operator{sep}op@x.org{sep}Operator{sep}op@x.org\n"
+        );
+        assert!(collect_non_operator_authored(&log, &test_operator()).is_empty());
+    }
+
+    /// The codex-author leak: a commit whose author slot is the maker
+    /// (`hello@noogram.org`) is flagged even though its committer is the
+    /// operator — the author slot is a responsibility claim the maker must not
+    /// occupy.
+    #[test]
+    fn author_scan_flags_leaked_author() {
+        let sep = AUTHOR_SCAN_SEP;
+        let log = format!("beef01{sep}Noogram{sep}hello@noogram.org{sep}Operator{sep}op@x.org\n");
+        let hits = collect_non_operator_authored(&log, &test_operator());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].sha, "beef01");
+        assert_eq!(hits[0].author_email, "hello@noogram.org");
+    }
+
+    /// A leaked *committer* slot is caught too (the merge/amend that re-stamps
+    /// only the committer).
+    #[test]
+    fn author_scan_flags_leaked_committer() {
+        let sep = AUTHOR_SCAN_SEP;
+        let log = format!("c0ffee{sep}Operator{sep}op@x.org{sep}Noogram{sep}bot@noogram.org\n");
+        let hits = collect_non_operator_authored(&log, &test_operator());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].committer_email, "bot@noogram.org");
+    }
+
+    /// Email comparison is case-insensitive while the operator name must match.
+    #[test]
+    fn author_scan_is_case_insensitive() {
+        let sep = AUTHOR_SCAN_SEP;
+        let log = format!("aa11{sep}Operator{sep}Op@X.org{sep}Operator{sep}op@x.ORG\n");
+        assert!(collect_non_operator_authored(&log, &test_operator()).is_empty());
+    }
+
+    /// A maker name paired with the operator's allowed email is still a leak:
+    /// names are part of the primary identity, not an email-only decoration.
+    #[test]
+    fn author_scan_rejects_noogram_name_with_operator_email() {
+        let sep = AUTHOR_SCAN_SEP;
+        let log = format!("bad123{sep}Noogram{sep}op@x.org{sep}Operator{sep}op@x.org\n");
+        let hits = collect_non_operator_authored(&log, &test_operator());
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].author_name, "Noogram");
+        assert_eq!(hits[0].author_email, "op@x.org");
+    }
+
+    /// An empty log (empty range / probe slip) yields no violations — the scan
+    /// finds nothing, which is exactly why F5 fails closed on a vacuous range
+    /// *before* this scan can pass over an empty set.
+    #[test]
+    fn author_scan_empty_log_is_clean() {
+        assert!(collect_non_operator_authored("", &test_operator()).is_empty());
+    }
+
+    #[test]
+    fn missing_adapter_witness_warns_when_attribution_is_enabled() {
+        use cosmon_state::ops::model_attribution::folded_adapter;
+
+        let state = TempDir::new().unwrap();
+        let mol_id = MoleculeId::new("task-20260718-warn").unwrap();
+        let mut warnings = Vec::new();
+        let adapter = adapter_for_coauthor(
+            folded_adapter(state.path(), &mol_id),
+            &mol_id,
+            true,
+            &mut warnings,
+        );
+        assert!(adapter.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no adapter witness"));
+        assert!(warnings[0].contains("does NOT prove which adapter ran"));
+    }
+
+    #[test]
+    fn missing_adapter_witness_stays_silent_without_attribution() {
+        use cosmon_state::ops::model_attribution::AdapterFold;
+
+        let mol_id = MoleculeId::new("task-20260718-noaa").unwrap();
+        let mut warnings = Vec::new();
+        let adapter = adapter_for_coauthor(AdapterFold::Absent, &mol_id, false, &mut warnings);
+        assert!(adapter.is_none());
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn missing_adapter_witness_warns_when_only_coauthor_facet_is_enabled() {
+        use cosmon_state::ops::model_attribution::AdapterFold;
+
+        let attribution = cosmon_core::config::AttributionConfig {
+            coauthor_name: "Noogram".to_owned(),
+            coauthor_email: "noreply@noogram.org".to_owned(),
+            ..cosmon_core::config::AttributionConfig::default()
+        };
+        assert!(
+            attribution.is_empty(),
+            "the directive facet remains disabled"
+        );
+        let enabled = !attribution.coauthor_trailers(None).is_empty();
+        let mol_id = MoleculeId::new("task-20260718-facet").unwrap();
+        let mut warnings = Vec::new();
+
+        let adapter = adapter_for_coauthor(AdapterFold::Absent, &mol_id, enabled, &mut warnings);
+
+        assert!(adapter.is_none());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("no adapter witness"));
+    }
+
+    #[test]
+    fn ff_only_refuses_configured_attribution_without_touching_git() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/ff-attribution"])
+            .status
+            .success());
+        commit_file(repo, "worker.rs", "// worker\n", "feat: worker");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        let head_before = git(repo, &["rev-parse", "HEAD"]).stdout;
+
+        let trailers = vec!["Co-Authored-By: Noogram <noreply@noogram.org>".to_owned()];
+        let err = ensure_attribution_carrier(MergeStrategy::FfOnly, &trailers).unwrap_err();
+        assert!(err.to_string().contains("creates no merge commit"));
+        assert!(err.to_string().contains("--strategy merge"));
+        assert_eq!(git(repo, &["rev-parse", "HEAD"]).stdout, head_before);
+        assert!(!is_branch_merged(repo, "feat/ff-attribution"));
+    }
+
+    #[test]
+    fn ff_only_remains_available_when_attribution_is_disabled() {
+        assert!(ensure_attribution_carrier(MergeStrategy::FfOnly, &[]).is_ok());
+    }
+
+    // ---- Merge-commit trailer carrier (F1) + author assertion (F4) --------
+
+    /// I1 (the load-bearing regression, knuth): on the default `--no-ff` path,
+    /// the trailers ride the MERGE COMMIT that `cs done` itself creates — the
+    /// carrier that exists for a task-work molecule that produces no artifact
+    /// commit. Pre-194b this was 0/N (the trailers were threaded only into the
+    /// phantom artifact commit). RED-before / GREEN-after.
+    #[test]
+    fn merge_commit_carries_coauthor_trailers() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        // A feature branch with one worker commit and no artifact commit.
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/a"])
+            .status
+            .success());
+        commit_file(repo, "src.rs", "fn main() {}\n", "feat: real work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
+        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &trailers);
+        assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
+
+        // HEAD is now the merge commit — git must parse the single trailer.
+        let interpreted = git(
+            repo,
+            &["log", "-1", "--format=%(trailers:key=Co-Authored-By)"],
+        );
+        let out = String::from_utf8_lossy(&interpreted.stdout);
+        assert!(
+            out.contains("Noogram (claude) <noreply@noogram.org>")
+                && !out.contains("<claude@noogram.org>"),
+            "merge commit did not carry the trailer block: {out}"
+        );
+        // The subject is preserved as git's own default merge subject.
+        let subj = git(repo, &["log", "-1", "--format=%s"]);
+        assert!(String::from_utf8_lossy(&subj.stdout).contains("Merge branch 'feat/a'"));
+    }
+
+    /// I4: empty trailers ⇒ the merge commit is byte-identical to a
+    /// pre-attribution cosmon (the `--no-edit` path), carrying NO trailer.
+    #[test]
+    fn merge_commit_without_trailers_is_unstamped() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/b"])
+            .status
+            .success());
+        commit_file(repo, "src.rs", "fn main() {}\n", "feat: work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let outcome = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
+        assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
+        let body = git(repo, &["log", "-1", "--format=%B"]);
+        assert!(
+            !String::from_utf8_lossy(&body.stdout).contains("Co-Authored-By"),
+            "empty trailers must not stamp the merge commit"
+        );
+    }
+
+    /// F4 end-to-end over a real repo: `assert_operator_authored_commits`
+    /// passes when every feature commit is operator-authored and FAILS (listing
+    /// the SHA) when a commit's author slot leaked the maker identity — the
+    /// codex-author bug, caught independent of any blocklist.
+    #[test]
+    fn assert_operator_authored_over_real_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo); // operator identity: test@example.com
+
+        // Clean branch — one operator-authored feature commit.
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/clean"])
+            .status
+            .success());
+        commit_file(repo, "a.rs", "// a\n", "feat: a");
+        assert!(assert_operator_authored_commits(
+            repo,
+            "main",
+            "feat/clean",
+            &OperatorIdentity {
+                name: "Test".to_owned(),
+                email: "test@example.com".to_owned(),
+            },
+        )
+        .is_ok());
+
+        // Leaky branch — a commit authored by the maker identity.
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/leak"])
+            .status
+            .success());
+        std::fs::write(repo.join("b.rs"), "// b\n").unwrap();
+        assert!(git(repo, &["add", "."]).status.success());
+        assert!(git(
+            repo,
+            &[
+                "-c",
+                "user.name=Noogram",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "feat: leaked author",
+            ],
+        )
+        .status
+        .success());
+        let err = assert_operator_authored_commits(
+            repo,
+            "main",
+            "feat/leak",
+            &OperatorIdentity {
+                name: "Test".to_owned(),
+                email: "test@example.com".to_owned(),
+            },
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Noogram <test@example.com>"), "msg: {msg}");
+        assert!(msg.contains("not operator-authored"), "msg: {msg}");
+    }
+
+    /// C2 regression: an attribution-enabled checkout without a complete git
+    /// identity must stop before integration instead of silently disabling the
+    /// author-slot assertion.
+    #[test]
+    fn missing_operator_identity_fails_closed() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["config", "user.name", ""]).status.success());
+        assert!(git(repo, &["config", "user.email", ""]).status.success());
+
+        let error = require_operator_identity(repo).unwrap_err().to_string();
+        assert!(error.contains("refuses attribution-enabled integration"));
+        assert!(error.contains("git config user.name"));
+        assert!(error.contains("git config user.email"));
+    }
+
+    /// I3: on the ff-only path no merge object is born, so the trailer carrier
+    /// is absent — but the feature commits must STILL be operator-authored
+    /// (P2 is fixed at birth, not at merge). The author assertion holds
+    /// regardless of merge shape.
+    #[test]
+    fn ff_only_feature_commits_are_operator_authored() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/ff"])
+            .status
+            .success());
+        commit_file(repo, "c.rs", "// c\n", "feat: c");
+        // Author assertion passes on the branch before any merge.
+        assert!(assert_operator_authored_commits(
+            repo,
+            "main",
+            "feat/ff",
+            &OperatorIdentity {
+                name: "Test".to_owned(),
+                email: "test@example.com".to_owned(),
+            },
+        )
+        .is_ok());
+        // ff-only merge creates no merge commit (no trailer carrier), which is
+        // exactly why author-correctness cannot depend on the merge.
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        let outcome = try_merge_branch(repo, "feat/ff", MergeStrategy::FfOnly, &[]);
+        assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
+        let parents = git(repo, &["log", "-1", "--format=%P"]);
+        // A ff merge leaves HEAD at the single feature-commit parent chain — the
+        // tip has one parent, not two, proving no merge object was created.
+        assert_eq!(
+            String::from_utf8_lossy(&parents.stdout)
+                .split_whitespace()
+                .count(),
+            1
         );
     }
 
@@ -9069,7 +9785,7 @@ mod tests {
 
         // Land branch A first (fast-forward or merge commit — both fine).
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
-        let merge_a = try_merge_branch(repo, "feat/a", MergeStrategy::Merge);
+        let merge_a = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
         assert!(
             matches!(merge_a, MergeOutcome::Merged),
             "A must land: {merge_a:?}"
@@ -9077,7 +9793,7 @@ mod tests {
 
         // Land branch B — without relocation this would add/add conflict on
         // `molecule/review.md`. After relocation the paths are disjoint.
-        let merge_b = try_merge_branch(repo, "feat/b", MergeStrategy::Merge);
+        let merge_b = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
         assert!(
             matches!(merge_b, MergeOutcome::Merged),
             "B must land cleanly after relocation: {merge_b:?}"
@@ -9494,6 +10210,10 @@ mod tests {
             Command::new("git")
                 .args(["-C", &root.to_string_lossy()])
                 .args(args)
+                .env_remove("GIT_AUTHOR_NAME")
+                .env_remove("GIT_AUTHOR_EMAIL")
+                .env_remove("GIT_COMMITTER_NAME")
+                .env_remove("GIT_COMMITTER_EMAIL")
                 .output()
                 .unwrap()
         };
@@ -9539,6 +10259,10 @@ mod tests {
             Command::new("git")
                 .args(["-C", &root.to_string_lossy()])
                 .args(args)
+                .env_remove("GIT_AUTHOR_NAME")
+                .env_remove("GIT_AUTHOR_EMAIL")
+                .env_remove("GIT_COMMITTER_NAME")
+                .env_remove("GIT_COMMITTER_EMAIL")
                 .output()
                 .unwrap()
         };
@@ -9998,7 +10722,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         // The merge attempt MUST refuse — and must NOT advance the
         // current branch (which would be the silent failure).
         let head_before = git(repo, &["rev-parse", "HEAD"]);
-        let outcome = try_merge_branch(repo, "feat/task-20260509-94f0", MergeStrategy::Merge);
+        let outcome = try_merge_branch(repo, "feat/task-20260509-94f0", MergeStrategy::Merge, &[]);
         let head_after = git(repo, &["rev-parse", "HEAD"]);
 
         match outcome {

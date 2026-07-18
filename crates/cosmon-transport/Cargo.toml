@@ -30,6 +30,8 @@ cosmon-state.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+toml_edit.workspace = true
+fs2.workspace = true
 # Logging facade only — a no-op when no subscriber is installed, so the
 # frontier `cargo add cosmon-transport` cost is one lightweight dep. The
 # hosts that actually run this backend (cosmon-daemon, cosmon-rpp-adapter)

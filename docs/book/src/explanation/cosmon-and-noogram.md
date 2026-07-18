@@ -55,7 +55,7 @@ stands on its own.
 A few deliberate limits on how this page talks:
 
 - **No private names.** Cosmon and Noogram are attributed to Noogram
-  (noogram.dev). No company, fund, or individual names appear here.
+  (noogram.org). No company, fund, or individual names appear here.
 - **Mechanism over adjectives.** Cosmon earns its description by what it *does*
   (identity, typed lifecycle, crash-recovery), not by adjectives like "powerful"
   or "revolutionary."

@@ -17,6 +17,19 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+### Fixed: native attribution closes alternate merge and Codex startup gaps
+
+- `cs done --strategy ff-only` now refuses configured native attribution
+  instead of successfully fast-forwarding without a trailer carrier. The
+  operator-identity backstop validates both names and emails, and a missing
+  adapter witness emits an explicit warning rather than implying full
+  provenance.
+- Interactive Codex workers pre-trust their exact canonical worktree path with
+  a locked, atomic, formatting-preserving config edit, preventing fresh
+  repositories from stalling at the first-run trust screen.
+- Shipped Noogram maker/byline slots consistently use `noogram.org`; historical
+  and defensive-DNS references to `noogram.dev` remain distinguishable.
+
 ### Security: public releases are isolated, scrubbed projections
 
 - Release checks now fail closed on tracked runtime state, credential-shaped

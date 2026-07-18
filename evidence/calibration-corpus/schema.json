@@ -1,6 +1,6 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://noogram.dev/cosmon/calibration-corpus/entry.schema.json",
+  "$id": "https://noogram.org/cosmon/calibration-corpus/entry.schema.json",
   "title": "CalibrationCorpusEntry",
   "description": "One labelled known-root debugging bug used to measure per-provider JUDGMENT quality (not liveness). The Rust mirror is crates/cosmon-core/src/calibration.rs (CorpusEntry). See ADR-135, ADR-104, oracle-canary.formula.toml.",
   "type": "object",

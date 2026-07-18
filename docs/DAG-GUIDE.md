@@ -254,7 +254,16 @@ To resolve:
 | Strategy | Flag | When to use |
 |----------|------|-------------|
 | `merge` (default) | `--strategy merge` | Parallel workers — always works |
-| `ff-only` | `--strategy ff-only` | Sequential chains — cleaner history |
+| `ff-only` | `--strategy ff-only` | Sequential chains without native attribution — cleaner history |
+
+Native attribution requires the default `merge` strategy because its
+`Co-Authored-By` provenance rides on the cosmon-owned merge commit. `cs done`
+refuses `ff-only` when attribution trailers are configured instead of silently
+fast-forwarding unstamped worker commits. The carrier is exactly one line:
+`Co-Authored-By: Noogram (<adapter>) <noreply@noogram.org>` when an adapter
+witness exists, or `Co-Authored-By: Noogram <noreply@noogram.org>` otherwise.
+The adapter is metadata in the display name; cosmon never synthesizes a
+model-specific email identity.
 
 ---
 

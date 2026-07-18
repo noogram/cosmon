@@ -148,6 +148,7 @@ bytes = "1.10"
 sha2 = "0.10"
 thiserror = "2"
 toml = "0.8"
+toml_edit = "0.22"
 strum = { version = "0.27", features = ["derive"] }
 tempfile = "3"
 fs2 = "0.4"

@@ -81,7 +81,7 @@ Done — terminal teardown for a molecule (merge + cleanup, human-callable)
 
 EXAMPLES:
   cs done task-example-0001                      # merge + teardown
-  cs done <mol> --strategy ff-only                # strict linear history
+  cs done <mol> --strategy ff-only                # linear history; attribution off
   cs done <mol> --force                           # skip completion check
   cs done <mol> --if-completed                    # silent no-op if not Completed
 
@@ -117,7 +117,7 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 * `--no-kill` — Skip killing the tmux session
 * `--strategy <STRATEGY>` — Merge strategy for the worker's branch.
 
-   `merge` (default) creates a merge commit (`git merge --no-ff`) so parallel workers can land independently even when main has moved. `ff-only` preserves a strictly linear history and refuses anything that is not a fast-forward.
+   `merge` (default) creates a merge commit (`git merge --no-ff`) so parallel workers can land independently even when main has moved. `ff-only` preserves a strictly linear history and refuses anything that is not a fast-forward; it is refused when native attribution is configured because a fast-forward creates no trailer carrier.
 
   Default value: `merge`
 

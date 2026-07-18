@@ -45,6 +45,8 @@
 //! a test telemetry sink.
 
 use std::fmt::Write as _;
+use std::fs::OpenOptions;
+use std::io::Write as IoWrite;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -55,6 +57,7 @@ use cosmon_state::events::worker_spawn::{
     emit_worker_spawn_attempted,
 };
 use serde::{Deserialize, Serialize};
+use toml_edit::{value, DocumentMut};
 
 use crate::spawn::SpawnError;
 use crate::TmuxBackend;
@@ -145,6 +148,16 @@ pub enum CodexError {
         /// Underlying I/O / parse error message.
         reason: String,
     },
+
+    /// Codex's user config could not be updated with the worker worktree's
+    /// trust grant, so an interactive spawn would stall at a prompt.
+    #[error("codex project trust config at {path} could not be updated: {reason}")]
+    TrustConfig {
+        /// User config path that was read or written.
+        path: PathBuf,
+        /// Underlying filesystem or TOML error.
+        reason: String,
+    },
 }
 
 impl From<CodexError> for SpawnError {
@@ -215,9 +228,10 @@ pub const INTERACTIVE_LOG_LEVEL: &str = "error";
 
 /// Default flags for an interactive codex worker.
 ///
-/// - `--dangerously-bypass-approvals-and-sandbox` — the flag equivalent of
-///   codex's `trust_level = "trusted"`: no approval prompts, no internal
-///   sandbox. A cosmon worker already runs in an externally-supervised
+/// - `--dangerously-bypass-approvals-and-sandbox` — no tool approval prompts
+///   and no internal sandbox. Codex's separate repository trust gate is
+///   handled by the exact-path pre-trust in [`spawn_codex_session`].
+///   A cosmon worker already runs in an externally-supervised
 ///   git worktree + tmux pane (exactly the "externally sandboxed
 ///   environment" the flag's own help names), so the worker can run
 ///   `cargo` / `git` autonomously to completion.
@@ -269,6 +283,31 @@ pub struct CodexSessionConfig {
     pub telemetry: Option<AdapterTelemetry>,
     /// Optional pre-existing worker the spawn path detected.
     pub pre_existing_worker: Option<WorkerId>,
+    /// Optional operator git identity to pin on the codex worker
+    /// (delib-20260717-194b, F3 — the codex belt-and-suspenders).
+    ///
+    /// codex is the sharpest case of the author-slot leak: an external CLI whose
+    /// own git identity is out of cosmon's process. Per-worktree `git config`
+    /// (F2) loses to the `GIT_AUTHOR_*` / `GIT_COMMITTER_*` environment, so when
+    /// this is `Some`, [`build_codex_command`] prefixes those four variables —
+    /// author AND committer, both set to the operator — onto the spawn command,
+    /// and env beats config. `None` leaves the command byte-identical to the
+    /// pre-194b shape (a bare CI checkout with no resolvable identity).
+    pub git_identity: Option<GitIdentity>,
+}
+
+/// An operator git identity — the `(name, email)` pinned into the author and
+/// committer slots of a worker's commits (delib-20260717-194b, F3).
+///
+/// The maker (Noogram) and the real adapter are credited only on
+/// `Co-Authored-By:` trailers; this identity is the human operator, resolved
+/// from the repo's own git config and never invented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitIdentity {
+    /// Operator display name (`user.name`).
+    pub name: String,
+    /// Operator email (`user.email`).
+    pub email: String,
 }
 
 /// Assemble the shell command string handed to the tmux backend for a
@@ -279,12 +318,13 @@ pub struct CodexSessionConfig {
 ///   pre-interactive behaviour; the prompt is single-quote escaped).
 /// - [`CodexMode::Interactive`] → `RUST_LOG=error codex <flags>` with **no**
 ///   positional prompt (the caller injects it into the composer after
-///   readiness). `<flags>` is [`DEFAULT_INTERACTIVE_ARGS`] unless
+///   readiness). [`spawn_codex_session`] pre-trusts `config.work_dir` before
+///   executing this command. `<flags>` is [`DEFAULT_INTERACTIVE_ARGS`] unless
 ///   `config.extra_args` overrides it.
 #[must_use]
 pub fn build_codex_command(config: &CodexSessionConfig) -> String {
     let bin = shell_escape(&config.binary.to_string_lossy());
-    match config.mode {
+    let cmd = match config.mode {
         CodexMode::Exec => {
             let mut cmd = bin;
             cmd.push_str(" exec");
@@ -322,7 +362,170 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             }
             cmd
         }
-    }
+    };
+    prefix_git_identity_env(config.git_identity.as_ref(), cmd)
+}
+
+/// Prepend the operator git-identity environment onto an assembled codex
+/// command (delib-20260717-194b, F3).
+///
+/// Local `git config` (F2) loses to the `GIT_AUTHOR_*` / `GIT_COMMITTER_*`
+/// environment, so codex — an external CLI running its own git process — is
+/// pinned to the operator via env, which wins. Both the author AND the
+/// committer slot are set (a `Co-Authored-By:` trailer credits the maker and
+/// adapter; the author slot stays the operator, direction-of-control).
+///
+/// `None` returns the command unchanged, byte-identical to the pre-194b shape.
+fn prefix_git_identity_env(identity: Option<&GitIdentity>, cmd: String) -> String {
+    let Some(id) = identity else {
+        return cmd;
+    };
+    let name = shell_escape(&id.name);
+    let email = shell_escape(&id.email);
+    format!(
+        "GIT_AUTHOR_NAME={name} GIT_AUTHOR_EMAIL={email} \
+         GIT_COMMITTER_NAME={name} GIT_COMMITTER_EMAIL={email} {cmd}"
+    )
+}
+
+/// Resolve Codex's user configuration path without inventing a home.
+fn codex_user_config_path() -> Result<PathBuf, CodexError> {
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|value| !value.is_empty())
+                .map(|home| PathBuf::from(home).join(".codex"))
+        })
+        .ok_or_else(|| CodexError::TrustConfig {
+            path: PathBuf::from("config.toml"),
+            reason: "neither CODEX_HOME nor HOME is set".to_owned(),
+        })?;
+    Ok(codex_home.join("config.toml"))
+}
+
+/// Persist a Codex project trust grant for a fresh cosmon worktree.
+///
+/// Codex evaluates repository trust before applying `-c` overrides, and its
+/// approvals/sandbox bypass is intentionally a separate gate. Interactive
+/// workers cannot answer that first-run screen, so cosmon records the exact,
+/// canonical worktree path in Codex's user config before launching the pane.
+/// The edit uses `toml_edit` to preserve the operator's comments and layout,
+/// an advisory lock to serialize concurrent tackles, and rename-based atomic
+/// replacement so a crash cannot leave a truncated config.
+fn ensure_codex_project_trusted(work_dir: &str) -> Result<(), CodexError> {
+    ensure_codex_project_trusted_at(&codex_user_config_path()?, Path::new(work_dir))
+}
+
+/// Injectable implementation of [`ensure_codex_project_trusted`].
+fn ensure_codex_project_trusted_at(config_path: &Path, work_dir: &Path) -> Result<(), CodexError> {
+    use fs2::FileExt;
+
+    let canonical = std::fs::canonicalize(work_dir).map_err(|e| CodexError::TrustConfig {
+        path: config_path.to_owned(),
+        reason: format!("cannot canonicalize worktree {}: {e}", work_dir.display()),
+    })?;
+    let project_key = canonical.to_string_lossy().into_owned();
+    let parent = config_path
+        .parent()
+        .ok_or_else(|| CodexError::TrustConfig {
+            path: config_path.to_owned(),
+            reason: "config path has no parent directory".to_owned(),
+        })?;
+    std::fs::create_dir_all(parent).map_err(|e| CodexError::TrustConfig {
+        path: config_path.to_owned(),
+        reason: e.to_string(),
+    })?;
+
+    let lock_path = parent.join("config.toml.cosmon.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(|e| CodexError::TrustConfig {
+            path: config_path.to_owned(),
+            reason: format!("open trust lock {}: {e}", lock_path.display()),
+        })?;
+    lock.lock_exclusive().map_err(|e| CodexError::TrustConfig {
+        path: config_path.to_owned(),
+        reason: format!("lock trust config: {e}"),
+    })?;
+
+    let update = (|| {
+        let raw = match std::fs::read_to_string(config_path) {
+            Ok(raw) => raw,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => {
+                return Err(CodexError::TrustConfig {
+                    path: config_path.to_owned(),
+                    reason: e.to_string(),
+                });
+            }
+        };
+        let mut document = raw
+            .parse::<DocumentMut>()
+            .map_err(|e| CodexError::TrustConfig {
+                path: config_path.to_owned(),
+                reason: format!("invalid TOML: {e}"),
+            })?;
+
+        let already_trusted = document
+            .get("projects")
+            .and_then(|projects| projects.get(&project_key))
+            .and_then(|project| project.get("trust_level"))
+            .and_then(toml_edit::Item::as_str)
+            == Some("trusted");
+        if already_trusted {
+            return Ok(());
+        }
+        document["projects"][&project_key]["trust_level"] = value("trusted");
+        let rendered = document.to_string();
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let temp_path = parent.join(format!(
+            ".config.toml.cosmon-{}-{nonce}.tmp",
+            std::process::id()
+        ));
+        let mut temp = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&temp_path)
+            .map_err(|e| CodexError::TrustConfig {
+                path: config_path.to_owned(),
+                reason: format!("create temporary config {}: {e}", temp_path.display()),
+            })?;
+        if let Ok(metadata) = std::fs::metadata(config_path) {
+            std::fs::set_permissions(&temp_path, metadata.permissions()).map_err(|e| {
+                CodexError::TrustConfig {
+                    path: config_path.to_owned(),
+                    reason: format!("preserve config permissions: {e}"),
+                }
+            })?;
+        }
+        temp.write_all(rendered.as_bytes())
+            .and_then(|()| temp.sync_all())
+            .map_err(|e| CodexError::TrustConfig {
+                path: config_path.to_owned(),
+                reason: format!("write temporary config: {e}"),
+            })?;
+        std::fs::rename(&temp_path, config_path).map_err(|e| CodexError::TrustConfig {
+            path: config_path.to_owned(),
+            reason: format!("replace config atomically: {e}"),
+        })?;
+        Ok(())
+    })();
+
+    let unlock = fs2::FileExt::unlock(&lock).map_err(|e| CodexError::TrustConfig {
+        path: config_path.to_owned(),
+        reason: format!("unlock trust config: {e}"),
+    });
+    update?;
+    unlock
 }
 
 /// Spawn a codex session in a tmux window.
@@ -345,6 +548,9 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
 /// Returns [`CodexError::SpawnFailed`] when the tmux session cannot be
 /// created.
 pub fn spawn_codex_session(config: &CodexSessionConfig) -> Result<(), CodexError> {
+    if config.mode == CodexMode::Interactive {
+        ensure_codex_project_trusted(&config.work_dir)?;
+    }
     let cmd = build_codex_command(config);
 
     if let Some(t) = &config.telemetry {
@@ -694,6 +900,7 @@ mod tests {
             extra_args,
             telemetry: None,
             pre_existing_worker: None,
+            git_identity: None,
         }
     }
 
@@ -702,6 +909,55 @@ mod tests {
         let c = cfg(CodexMode::Exec, Some("hello"), vec![]).clone();
         assert_eq!(c.session_name, "polecat-codex");
         assert_eq!(c.prompt.as_deref(), Some("hello"));
+    }
+
+    /// F3 (delib-20260717-194b): with no `git_identity`, the command is
+    /// byte-identical to the pre-194b shape — no env prefix.
+    #[test]
+    fn build_command_without_identity_is_unprefixed() {
+        let c = cfg(CodexMode::Interactive, None, vec![]);
+        let cmd = build_codex_command(&c);
+        assert!(!cmd.contains("GIT_AUTHOR_"));
+        assert!(cmd.starts_with("RUST_LOG="));
+    }
+
+    /// F3: a pinned operator identity prefixes all four `GIT_AUTHOR_*` /
+    /// `GIT_COMMITTER_*` variables (env beats per-worktree `git config`), so a
+    /// codex worker commits with the operator in BOTH author and committer
+    /// slots. The base command still follows the prefix intact.
+    #[test]
+    fn build_command_with_identity_prefixes_git_env() {
+        let mut c = cfg(CodexMode::Interactive, None, vec![]);
+        c.git_identity = Some(GitIdentity {
+            name: "Ada Lovelace".to_owned(),
+            email: "ada@operator.example".to_owned(),
+        });
+        let cmd = build_codex_command(&c);
+        // Name has a space → single-quoted; email has `@` (not in the safe
+        // set) → single-quoted too. Both slots pinned to the operator.
+        assert!(cmd.contains("GIT_AUTHOR_NAME='Ada Lovelace'"));
+        assert!(cmd.contains("GIT_AUTHOR_EMAIL='ada@operator.example'"));
+        assert!(cmd.contains("GIT_COMMITTER_NAME='Ada Lovelace'"));
+        assert!(cmd.contains("GIT_COMMITTER_EMAIL='ada@operator.example'"));
+        // The env prefix precedes the base command.
+        let author_at = cmd.find("GIT_AUTHOR_NAME").unwrap();
+        let rustlog_at = cmd.find("RUST_LOG=").unwrap();
+        assert!(author_at < rustlog_at);
+    }
+
+    /// F3 in `Exec` mode: the env prefix wraps `codex exec '<prompt>'` too, so
+    /// the batch path is pinned identically to the interactive path.
+    #[test]
+    fn build_command_identity_prefixes_exec_mode() {
+        let mut c = cfg(CodexMode::Exec, Some("do it"), vec![]);
+        c.git_identity = Some(GitIdentity {
+            name: "Op".to_owned(),
+            email: "op@example.org".to_owned(),
+        });
+        let cmd = build_codex_command(&c);
+        // `Op` is safe (unquoted); the email's `@` forces quoting.
+        assert!(cmd.starts_with("GIT_AUTHOR_NAME=Op GIT_AUTHOR_EMAIL='op@example.org'"));
+        assert!(cmd.contains("exec 'do it'"));
     }
 
     #[test]
@@ -780,6 +1036,46 @@ mod tests {
             build_codex_command(&c),
             "RUST_LOG=error codex -m gpt-5 --no-alt-screen"
         );
+    }
+
+    #[test]
+    fn project_pretrust_preserves_config_and_is_idempotent() {
+        let home = tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        let work_dir = home.path().join("fresh-worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::write(&config_path, "# operator comment\nmodel = \"gpt-test\"\n").unwrap();
+
+        ensure_codex_project_trusted_at(&config_path, &work_dir).unwrap();
+        let first = fs::read_to_string(&config_path).unwrap();
+        assert!(first.contains("# operator comment"));
+        assert!(first.contains("model = \"gpt-test\""));
+        let document = first.parse::<DocumentMut>().unwrap();
+        let key = fs::canonicalize(&work_dir)
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            document["projects"][&key]["trust_level"].as_str(),
+            Some("trusted")
+        );
+
+        ensure_codex_project_trusted_at(&config_path, &work_dir).unwrap();
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), first);
+    }
+
+    #[test]
+    fn project_pretrust_refuses_invalid_config_without_overwriting_it() {
+        let home = tempdir().unwrap();
+        let config_path = home.path().join("config.toml");
+        let work_dir = home.path().join("fresh-worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+        let invalid = "[broken\n";
+        fs::write(&config_path, invalid).unwrap();
+
+        let error = ensure_codex_project_trusted_at(&config_path, &work_dir).unwrap_err();
+        assert!(error.to_string().contains("invalid TOML"));
+        assert_eq!(fs::read_to_string(&config_path).unwrap(), invalid);
     }
 
     /// `consume_briefing` emits the same WS-4 envelope shape as

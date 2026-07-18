@@ -3123,6 +3123,7 @@ pub(super) fn create_worktree(
         let stderr = String::from_utf8_lossy(&output.stderr);
         // If worktree already checked out, that's fine.
         if stderr.contains("already checked out") || stderr.contains("already exists") {
+            pin_operator_identity(repo_root, worktree_path);
             return Ok(());
         }
         return Err(anyhow::anyhow!(
@@ -3131,7 +3132,68 @@ pub(super) fn create_worktree(
         ));
     }
 
+    // Pin the operator identity at the worktree seam (delib-20260717-194b, F2).
+    // This is the single choke point every adapter passes through, so feature
+    // commits are BORN operator-authored — no post-hoc rewrite, no SHA churn,
+    // no ancestry-guard breakage. The `cs done` author-slot assertion (F4) is
+    // the backstop for when this silently no-ops (env precedence, a late
+    // amend); pinning here reduces the failure *rate*, the assertion *closes*
+    // the hole. Best-effort: a failure to resolve or set identity never blocks
+    // tackle (the assertion catches the residue).
+    pin_operator_identity(repo_root, worktree_path);
+
     Ok(())
+}
+
+/// Pin the operator's git identity onto a freshly-created worktree
+/// (delib-20260717-194b, F2).
+///
+/// Resolves the operator identity from `repo_root`'s effective git config
+/// (`user.name` / `user.email`, which walks local → global → system) and writes
+/// it into the worktree so every worker git process — claude, codex, aider,
+/// gemini — commits with the operator in the author AND committer slots. The
+/// maker (Noogram) and the real adapter are credited ONLY on `Co-Authored-By:`
+/// trailers, never in the author slot (direction-of-control, tolnay Q3).
+///
+/// Best-effort and non-fatal: when no identity is configured (a bare CI
+/// checkout) nothing is written and the worktree inherits whatever the repo
+/// config already carries. The `cs done` author-slot assertion is the
+/// load-bearing backstop; this is defense-in-depth that lowers the failure
+/// rate at the source.
+fn pin_operator_identity(repo_root: &std::path::Path, worktree_path: &std::path::Path) {
+    for key in ["user.name", "user.email"] {
+        if let Some(value) = git_config_value(repo_root, key) {
+            let _ = std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &worktree_path.to_string_lossy(),
+                    "config",
+                    key,
+                    &value,
+                ])
+                .output();
+        }
+    }
+}
+
+/// Read a single git config value from `repo_root`'s effective config.
+///
+/// Returns `None` when the key is unset or the probe fails, so the caller can
+/// fall back cleanly rather than inventing a value.
+fn git_config_value(repo_root: &std::path::Path, key: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "config", key])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4077,6 +4139,21 @@ fn spawn_codex_and_prompt(
         .map(|e| e.extra_args.clone())
         .unwrap_or_default();
 
+    // Resolve the operator git identity to pin on the codex worker
+    // (delib-20260717-194b, F3). codex runs its own git process out of cosmon's
+    // reach, and env beats per-worktree `git config` (F2), so we thread the
+    // operator identity through as `GIT_AUTHOR_*` / `GIT_COMMITTER_*`. The
+    // worktree shares the repo config, so resolving from it yields the same
+    // effective identity `git commit` would use. `None` on a bare checkout with
+    // no configured identity — the command then stays byte-identical.
+    let git_identity = match (
+        git_config_value(worktree_path, "user.name"),
+        git_config_value(worktree_path, "user.email"),
+    ) {
+        (Some(name), Some(email)) => Some(codex::GitIdentity { name, email }),
+        _ => None,
+    };
+
     // codex is resolved by bare name; the tmux pane's shell resolves it on
     // PATH at exec time, the same contract `preflight::adapter_binary`
     // already checks ("codex" present on PATH). An absent binary surfaces
@@ -4092,6 +4169,7 @@ fn spawn_codex_and_prompt(
         extra_args,
         telemetry: None,
         pre_existing_worker: None,
+        git_identity,
     };
 
     codex::spawn_codex_session(&config)
@@ -7328,11 +7406,11 @@ mod tests {
         let mol_dir = Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd");
         let mut config = ProjectConfig::default();
         config.attribution.public_name = "Noogram".to_owned();
-        config.attribution.public_url = "noogram.dev".to_owned();
+        config.attribution.public_url = "noogram.org".to_owned();
         let prompt = build_prompt(&mol, None, None, &config, mol_dir);
 
         assert!(prompt.contains("## External attribution"));
-        assert!(prompt.contains("External attribution for this fleet is `Noogram` (noogram.dev)."));
+        assert!(prompt.contains("External attribution for this fleet is `Noogram` (noogram.org)."));
         assert!(prompt.contains("The operator's fund affiliation is PRIVATE"));
 
         // The directive must sit ABOVE the mission so the worker reads the

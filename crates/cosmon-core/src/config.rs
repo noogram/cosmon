@@ -647,7 +647,7 @@ pub struct ScopeGuardConfig {
 /// # External-facing galaxy: published commits must carry only the
 /// # canonical Noogram publish identity, never the operator's.
 /// [publish_identity]
-/// allowed_emails = ["bot@noogram.dev"]
+/// allowed_emails = ["bot@noogram.org"]
 /// forbidden_substrings = ["operator@example.org", "example.org", "Tenant-Demo"]
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -890,23 +890,28 @@ fn union_dedup(a: &[String], b: &[String]) -> Vec<String> {
 /// ```toml
 /// [attribution]
 /// public_name      = "Noogram"
-/// public_url       = "noogram.dev"
-/// contact          = "hello@noogram.dev"
-/// footer           = "© 2026 Noogram · noogram.dev"
+/// public_url       = "noogram.org"
+/// contact          = "hello@noogram.org"
+/// footer           = "© 2026 Noogram · noogram.org"
 /// readme_byline    = "Built by Noogram — open agent infrastructure and AI tooling."
-/// repo_description = "Maintained by Noogram (noogram.dev). Open tooling for AI agent fleets."
-/// authors_line     = "Noogram <hello@noogram.dev>"
+/// repo_description = "Maintained by Noogram (noogram.org). Open tooling for AI agent fleets."
+/// authors_line     = "Noogram <hello@noogram.org>"
 /// coauthor_name    = "Noogram"
 /// coauthor_email   = "noreply@noogram.org"
 /// ```
+///
+/// The byline fields resolve to a single canonical domain (`noogram.org`) —
+/// the same domain the [`coauthor_email`](Self::coauthor_email) trailer commits
+/// (delib-20260717-194b, F7). Aligning them removes the split where
+/// [`directive`](Self::directive) taught the worker one domain while the trailer
+/// stamped another. `coauthor_email` is unchanged (it was already `.org`).
 ///
 /// # The `Co-Authored-By` trailer facet
 ///
 /// [`coauthor_name`](Self::coauthor_name) + [`coauthor_email`](Self::coauthor_email)
 /// drive [`coauthor_trailers`](Self::coauthor_trailers), which `cs done` stamps
-/// onto the worker-produced commit so it credits both the maker identity and
-/// the *real* adapter that ran the molecule — attribution dogfooding, the
-/// product crediting its own agents automatically.
+/// onto the worker-produced commit so it credits the maker identity while
+/// recording the *real* adapter that ran the molecule in the display name.
 ///
 /// **Empty is a no-op.** When the section is absent (or `public_name` is
 /// blank), [`AttributionConfig::is_empty`] returns `true`, no directive is
@@ -922,11 +927,11 @@ pub struct AttributionConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_name: String,
 
-    /// Public URL for the maker (e.g. `"noogram.dev"`).
+    /// Public URL for the maker (e.g. `"noogram.org"`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_url: String,
 
-    /// Contactable, non-fund address (e.g. `"hello@noogram.dev"`). A
+    /// Contactable, non-fund address (e.g. `"hello@noogram.org"`). A
     /// maker-name *with* a contactable address is the doctrine: a bare
     /// anonymous footer is its own vacuum that the next worker
     /// "helpfully" enriches from context.
@@ -934,7 +939,7 @@ pub struct AttributionConfig {
     pub contact: String,
 
     /// Copyright / footer line for shipped artifacts
-    /// (e.g. `"© 2026 Noogram · noogram.dev"`).
+    /// (e.g. `"© 2026 Noogram · noogram.org"`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub footer: String,
 
@@ -948,7 +953,7 @@ pub struct AttributionConfig {
     pub repo_description: String,
 
     /// `Authors:` / `Cargo.toml authors` line
-    /// (e.g. `"Noogram <hello@noogram.dev>"`).
+    /// (e.g. `"Noogram <hello@noogram.org>"`).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub authors_line: String,
 
@@ -970,12 +975,10 @@ pub struct AttributionConfig {
     /// (e.g. `"noreply@noogram.org"`). This is the load-bearing field of the
     /// trailer facet: the primary trailer is emitted **only** when it is set.
     ///
-    /// Its domain also seeds the *adapter* co-author's address: the real
-    /// adapter that ran a molecule (`claude` / `gemini` / `mistral` / …, folded
-    /// from the durable event log) is added as a **second** co-author
-    /// `Co-Authored-By: Claude <claude@noogram.org>`, so a commit credits both
-    /// the maker identity and the agent that actually did the work — attribution
-    /// dogfooding, the product crediting its own agents automatically.
+    /// The same stable address is used whether or not an adapter witness is
+    /// available. When one is available (`claude` / `gemini` / `mistral` / …,
+    /// folded from the durable event log), it is recorded in parentheses in
+    /// the maker display name, never synthesized into a model-specific email.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub coauthor_email: String,
 }
@@ -1023,32 +1026,24 @@ impl AttributionConfig {
         ))
     }
 
-    /// The `Co-Authored-By` git trailer lines to stamp on a commit the worker
-    /// path produces, in the order they should appear in the commit message.
+    /// The single `Co-Authored-By` git trailer to stamp on a commit the worker
+    /// path produces.
     ///
-    /// Two co-authors, both derived from this one config block so the maker
-    /// name lives in exactly one place and is never re-typed per commit:
-    ///
-    /// 1. **The maker identity** —
-    ///    `Co-Authored-By: {coauthor_name || public_name} <{coauthor_email}>`.
-    ///    The primary trailer; the public bootstrap commits carry it by hand
-    ///    (`Co-Authored-By: Noogram <noreply@noogram.org>`) and this automates
-    ///    it.
-    /// 2. **The real adapter** — when `adapter` names the agent that actually
-    ///    ran the molecule (folded from the durable event log, so it is the
-    ///    honest dispatch, never a guess), a *second* co-author
-    ///    `Co-Authored-By: {Adapter} <{adapter}@{domain}>` where `{domain}` is
-    ///    borrowed from `coauthor_email`. This is the dogfooding half: the
-    ///    product credits its own agents automatically.
+    /// The maker name lives in exactly one config block and is never re-typed
+    /// per commit. When `adapter` names the agent that actually ran the
+    /// molecule (folded from the durable event log, so it is the honest
+    /// dispatch, never a guess), the format is
+    /// `Co-Authored-By: {coauthor_name || public_name} ({adapter}) <{coauthor_email}>`.
+    /// Without an adapter witness the parentheses are omitted. The address is
+    /// always the configured stable maker address; model-specific synthetic
+    /// addresses create phantom identities and are never emitted.
     ///
     /// # The email is load-bearing (fail-closed to empty)
     ///
     /// A `Co-Authored-By` line without a valid address is inert on every git
     /// host, so [`coauthor_email`](Self::coauthor_email) gates the whole
     /// facet: when it is empty the returned vec is empty and the commit message
-    /// is byte-identical to a pre-attribution cosmon. The adapter trailer also
-    /// needs a domain to synthesize its address, so it only appears when
-    /// `coauthor_email` contains an `@` — the same field, one gate.
+    /// is byte-identical to a pre-attribution cosmon.
     ///
     /// The trailer key is spelled `Co-Authored-By` to match the hand-written
     /// bootstrap commits; git hosts recognize the key case-insensitively.
@@ -1058,50 +1053,25 @@ impl AttributionConfig {
         if self.coauthor_email.is_empty() {
             return Vec::new();
         }
-        let mut out = Vec::new();
-
-        // 1. Maker identity. Falls back to the canonical `public_name` so a
+        // Maker identity. Falls back to the canonical `public_name` so a
         //    galaxy that only set `public_name` still gets a named co-author.
         let name = if self.coauthor_name.is_empty() {
             self.public_name.as_str()
         } else {
             self.coauthor_name.as_str()
         };
-        if !name.is_empty() {
-            out.push(format!("Co-Authored-By: {name} <{}>", self.coauthor_email));
+        if name.is_empty() {
+            return Vec::new();
         }
 
-        // 2. Real adapter, as a second co-author. Its address is synthesized
-        //    from the maker email's domain, so no second config field is
-        //    needed. Requires a domain (`@…`) in `coauthor_email`.
-        if let Some(adapter) = adapter.map(str::trim).filter(|a| !a.is_empty()) {
-            if let Some(domain) = self
-                .coauthor_email
-                .rsplit_once('@')
-                .map(|(_, domain)| domain)
-                .filter(|d| !d.is_empty())
-            {
-                let display = title_case(adapter);
-                out.push(format!("Co-Authored-By: {display} <{adapter}@{domain}>"));
-            }
-        }
-
-        out
-    }
-}
-
-/// Upper-case the first character of an adapter name for the co-author display
-/// name (`claude` → `Claude`), leaving the rest untouched.
-///
-/// A deliberately minimal transform: adapter names are lowercase single tokens
-/// (`claude`, `gemini`, `mistral`, `ollama`), so title-casing the first byte is
-/// the whole job. A name that is already capitalized or empty round-trips
-/// unchanged.
-fn title_case(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        None => String::new(),
-        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        let display = adapter
+            .map(str::trim)
+            .filter(|adapter| !adapter.is_empty())
+            .map_or_else(|| name.to_owned(), |adapter| format!("{name} ({adapter})"));
+        vec![format!(
+            "Co-Authored-By: {display} <{}>",
+            self.coauthor_email
+        )]
     }
 }
 
@@ -2514,7 +2484,7 @@ mod tests {
         let config = ProjectConfig::parse(
             r#"
             [publish_identity]
-            allowed_emails = ["bot@noogram.dev"]
+            allowed_emails = ["bot@noogram.org"]
             forbidden_substrings = ["operator@example.org", "example.org"]
             "#,
         )
@@ -2522,7 +2492,7 @@ mod tests {
         assert!(!config.publish_identity.is_empty());
         assert_eq!(
             config.publish_identity.allowed_emails,
-            vec!["bot@noogram.dev"]
+            vec!["bot@noogram.org"]
         );
         assert_eq!(config.publish_identity.forbidden_substrings.len(), 2);
     }
@@ -2534,7 +2504,7 @@ mod tests {
         let config = ProjectConfig::parse(
             r#"
             [publish_identity]
-            allowed_emails = ["bot@noogram.dev"]
+            allowed_emails = ["bot@noogram.org"]
             "#,
         )
         .unwrap();
@@ -2545,7 +2515,7 @@ mod tests {
     #[test]
     fn test_publish_identity_serde_roundtrip() {
         let original = PublishIdentityConfig {
-            allowed_emails: vec!["bot@noogram.dev".to_owned()],
+            allowed_emails: vec!["bot@noogram.org".to_owned()],
             forbidden_substrings: vec!["operator@example.org".to_owned()],
         };
         let serialized = toml::to_string(&original).unwrap();
@@ -2573,22 +2543,22 @@ mod tests {
             r#"
             [attribution]
             public_name      = "Noogram"
-            public_url       = "noogram.dev"
-            contact          = "hello@noogram.dev"
-            footer           = "© 2026 Noogram · noogram.dev"
+            public_url       = "noogram.org"
+            contact          = "hello@noogram.org"
+            footer           = "© 2026 Noogram · noogram.org"
             readme_byline    = "Built by Noogram — open agent infrastructure and AI tooling."
-            repo_description = "Maintained by Noogram (noogram.dev). Open tooling for AI agent fleets."
-            authors_line     = "Noogram <hello@noogram.dev>"
+            repo_description = "Maintained by Noogram (noogram.org). Open tooling for AI agent fleets."
+            authors_line     = "Noogram <hello@noogram.org>"
             "#,
         )
         .unwrap();
         assert!(!config.attribution.is_empty());
         assert_eq!(config.attribution.public_name, "Noogram");
-        assert_eq!(config.attribution.public_url, "noogram.dev");
-        assert_eq!(config.attribution.contact, "hello@noogram.dev");
+        assert_eq!(config.attribution.public_url, "noogram.org");
+        assert_eq!(config.attribution.contact, "hello@noogram.org");
         assert_eq!(
             config.attribution.authors_line,
-            "Noogram <hello@noogram.dev>"
+            "Noogram <hello@noogram.org>"
         );
     }
 
@@ -2598,13 +2568,13 @@ mod tests {
             r#"
             [attribution]
             public_name = "Noogram"
-            public_url  = "noogram.dev"
+            public_url  = "noogram.org"
             "#,
         )
         .unwrap();
         assert_eq!(
             config.attribution.directive().unwrap(),
-            "External attribution for this fleet is `Noogram` (noogram.dev). \
+            "External attribution for this fleet is `Noogram` (noogram.org). \
              Anywhere a maker, author, copyright holder, or \"built by\" name \
              is required in a shipped/public artifact, use `Noogram`. The \
              operator's fund affiliation is PRIVATE and never appears in any \
@@ -2634,7 +2604,7 @@ mod tests {
         // A URL without a public_name is still treated as empty — the maker
         // name is the load-bearing field.
         let cfg = AttributionConfig {
-            public_url: "noogram.dev".to_owned(),
+            public_url: "noogram.org".to_owned(),
             ..AttributionConfig::default()
         };
         assert!(cfg.is_empty());
@@ -2645,13 +2615,13 @@ mod tests {
     fn test_attribution_serde_roundtrip() {
         let original = AttributionConfig {
             public_name: "Noogram".to_owned(),
-            public_url: "noogram.dev".to_owned(),
-            contact: "hello@noogram.dev".to_owned(),
-            footer: "© 2026 Noogram · noogram.dev".to_owned(),
+            public_url: "noogram.org".to_owned(),
+            contact: "hello@noogram.org".to_owned(),
+            footer: "© 2026 Noogram · noogram.org".to_owned(),
             readme_byline: "Built by Noogram — open agent infrastructure and AI tooling."
                 .to_owned(),
-            repo_description: "Maintained by Noogram (noogram.dev).".to_owned(),
-            authors_line: "Noogram <hello@noogram.dev>".to_owned(),
+            repo_description: "Maintained by Noogram (noogram.org).".to_owned(),
+            authors_line: "Noogram <hello@noogram.org>".to_owned(),
             coauthor_name: "Noogram".to_owned(),
             coauthor_email: "noreply@noogram.org".to_owned(),
         };
@@ -2688,9 +2658,9 @@ mod tests {
     }
 
     #[test]
-    fn test_coauthor_trailers_adds_real_adapter_as_second_coauthor() {
-        // The dogfooding shape: maker + the real adapter, its address
-        // synthesized from the maker email's domain and title-cased.
+    fn test_coauthor_trailers_records_real_adapter_in_single_display_name() {
+        // The real adapter is recorded in the maker display name while the
+        // configured stable address remains unchanged.
         let cfg = AttributionConfig {
             public_name: "Noogram".to_owned(),
             coauthor_email: "noreply@noogram.org".to_owned(),
@@ -2698,15 +2668,11 @@ mod tests {
         };
         assert_eq!(
             cfg.coauthor_trailers(Some("claude")),
-            vec![
-                "Co-Authored-By: Noogram <noreply@noogram.org>".to_owned(),
-                "Co-Authored-By: Claude <claude@noogram.org>".to_owned(),
-            ]
+            vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()]
         );
-        // A different adapter title-cases the same way.
         assert_eq!(
-            cfg.coauthor_trailers(Some("gemini")).last().unwrap(),
-            "Co-Authored-By: Gemini <gemini@noogram.org>"
+            cfg.coauthor_trailers(Some("gemini")),
+            vec!["Co-Authored-By: Noogram (gemini) <noreply@noogram.org>".to_owned()]
         );
     }
 
@@ -2735,6 +2701,36 @@ mod tests {
         };
         assert_eq!(cfg.coauthor_trailers(Some("   ")).len(), 1);
         assert_eq!(cfg.coauthor_trailers(Some("")).len(), 1);
+    }
+
+    /// A configured address is reproduced verbatim; adapter attribution never
+    /// attempts to derive or repair an address from its domain.
+    #[test]
+    fn test_coauthor_trailers_preserves_email_without_at() {
+        let cfg = AttributionConfig {
+            public_name: "Noogram".to_owned(),
+            coauthor_email: "noreply".to_owned(), // no '@domain'
+            ..AttributionConfig::default()
+        };
+        assert_eq!(
+            cfg.coauthor_trailers(Some("claude")),
+            vec!["Co-Authored-By: Noogram (claude) <noreply>".to_owned()]
+        );
+        assert_eq!(cfg.coauthor_trailers(Some("claude")).len(), 1);
+    }
+
+    /// A trailing `@` is likewise preserved without synthesizing a replacement.
+    #[test]
+    fn test_coauthor_trailers_preserves_email_with_empty_domain() {
+        let cfg = AttributionConfig {
+            public_name: "Noogram".to_owned(),
+            coauthor_email: "noreply@".to_owned(), // '@' present, domain empty
+            ..AttributionConfig::default()
+        };
+        assert_eq!(
+            cfg.coauthor_trailers(Some("claude")),
+            vec!["Co-Authored-By: Noogram (claude) <noreply@>".to_owned()]
+        );
     }
 
     #[test]
