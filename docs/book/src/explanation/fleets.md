@@ -37,6 +37,33 @@ Two words sit close together and are worth separating:
 One is the roster, the other is the live view of the roster. You configure a
 fleet; you observe an ensemble.
 
+## Cross-examination
+
+A fleet is not only agents working *beside* each other; it is agents working
+*on* each other's output. Reviewing is itself molecule-shaped, so the reviewer
+is a different molecule, run by a different worker, in a different worktree —
+never the author grading its own homework.
+
+Three shapes recur:
+
+- A **panel** frames one question, dispatches several personas in parallel who
+  never see each other's drafts, and synthesizes where they converge and where
+  they disagree. That is the `deep-think` formula.
+- A **pre-mortem** is an independent audit molecule ordered behind the work. It
+  reads the merged code against its spec and returns NO-GO or GO with numbered
+  findings. NO-GO does not revert; it nucleates the remediation, which faces
+  another round.
+- A **verification molecule** re-checks a specific claim the gates cannot —
+  what a surface actually renders, whether a bug is closed everywhere.
+
+Each is an ordinary `cs nucleate --blocked-by` edge. There is no reviewer
+registry and no privileged molecule kind.
+
+[Adversarial review](./adversarial-review.md) works all three through, with the
+artifacts they leave on disk, the structural guard that stops a panel dodging
+its own question, a four-round NO-GO→GO example, and the honest limit: a panel
+of personas over one provider is channel-independent, not error-independent.
+
 ## A naming footgun, said once
 
 The config file is `fleet.toml`, singular. The on-disk state directory is
@@ -53,3 +80,5 @@ Knowing this once means no page trips you later.
 - [Monitor the fleet with cs peek](../how-to/monitor-with-peek.md): reading the
   ensemble in depth.
 - [Agent adapters](./adapter.md): what a fleet's config selects for each worker.
+- [Adversarial review](./adversarial-review.md): how a fleet's agents
+  cross-examine each other's findings.
