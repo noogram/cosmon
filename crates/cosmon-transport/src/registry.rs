@@ -423,9 +423,71 @@ pub fn pane_current_command(socket: &str, session: &str) -> Option<String> {
     }
 }
 
+/// How long the named tmux session's pane has produced **no output**, in
+/// seconds, or `None` when tmux cannot answer (dead session, wrong socket,
+/// unparsable format).
+///
+/// # Why a duration and not a capture
+///
+/// This is the transport clock the propulsion admission control
+/// ([`cosmon_core::propel`]) reads to tell a *thinking* worker apart from an
+/// *idle* one. A worker deep in one reasoning turn emits no cosmon events for
+/// many minutes, so the control-plane progress clock alone cannot distinguish
+/// it from a worker parked at a dead prompt — and patrol nudged the working
+/// one nine times in ten minutes (2026-07-19).
+///
+/// It returns a *number of seconds of silence*, never pane text. ADR-137 §2
+/// forbids reading a worker's **act** out of glyphs it authored, because a
+/// guard keyed on a string arrests everyone who prints the string. There is no
+/// string here to print: tmux stamps `session_activity` itself, the worker can
+/// only ever make the clock fresher, and a fresher clock only ever *suppresses*
+/// a nudge. No lifecycle transition keys off it.
+///
+/// `session_activity` is a Unix epoch in seconds. A clock that reads *ahead*
+/// of `now` (NTP step, tmux server on another host) clamps to zero silence —
+/// the safe direction, since zero means "recently active" means "do not poke".
+#[must_use]
+pub fn pane_idle_seconds(socket: &str, session: &str) -> Option<i64> {
+    let output = Command::new("tmux")
+        .args([
+            "-L",
+            socket,
+            "display-message",
+            "-p",
+            "-t",
+            session,
+            "#{session_activity}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let activity: i64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .ok()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs();
+    let now = i64::try_from(now).ok()?;
+    Some((now - activity).max(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A socket with no such session yields no clock — the caller must treat
+    /// that as *unknown*, not as *idle*.
+    #[test]
+    fn pane_idle_seconds_missing_session_is_none() {
+        assert_eq!(
+            pane_idle_seconds("cosmon-registry-test-nonexistent-socket", "no-such-session"),
+            None
+        );
+    }
 
     #[test]
     fn default_registry_knows_claude() {

@@ -425,8 +425,13 @@ fn propel_pass(
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
     let mut events = Vec::new();
     if let Some(be) = backend {
-        let propelled = propel_stale_molecules(store, &molecules, &fleet, Some(be), stale_after);
-        for (worker, molecule, stale_seconds) in propelled {
+        let sweep = propel_stale_molecules(store, &molecules, &fleet, Some(be), stale_after);
+        // Only actually-delivered nudges become `Propelled` events. A
+        // candidate that admission control declined (worker thinking, backoff
+        // window open, attempts exhausted) produced no perturbation, so
+        // emitting one here would put a nudge in the watch stream that the
+        // worker never received.
+        for (worker, molecule, stale_seconds) in sweep.propelled {
             events.push(WatchEvent::Propelled {
                 worker,
                 molecule,
@@ -1075,6 +1080,8 @@ mod tests {
             last_output_at: None,
             nudge_count: 0,
             last_nudged_at: None,
+            propel_count: 0,
+            last_propelled_at: None,
             process: None,
             energy_budget: None,
             stuck_at: None,

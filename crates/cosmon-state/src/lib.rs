@@ -514,6 +514,27 @@ pub struct MoleculeData {
     /// have never been nudged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_nudged_at: Option<DateTime<Utc>>,
+    /// Propulsion nudges (`cs patrol --propel`) delivered for the *current*
+    /// stall. Distinct from [`Self::nudge_count`], which is the lifetime
+    /// counter of the separate `--nudge` sweep: this one is a working register
+    /// that patrol **resets to zero the moment the molecule makes progress**,
+    /// because it drives the exponential backoff and a lifetime total would
+    /// space out the nudges of an unrelated later stall.
+    ///
+    /// Read by [`cosmon_core::propel::decide_propel`] as `attempts`; once it
+    /// reaches [`cosmon_core::propel::PROPEL_MAX_ATTEMPTS`] patrol stops
+    /// repeating itself and escalates. Skipped from serialisation when zero.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub propel_count: u32,
+    /// Wall-clock of the most recent propulsion nudge, the anchor for the
+    /// backoff window. `None` when this stall has not been propelled.
+    ///
+    /// Patrol writes this **without touching [`Self::updated_at`]**: a nudge is
+    /// bookkeeping about the worker, not progress by it, and advancing
+    /// `updated_at` here would make every propelled molecule look fresh and
+    /// silently disqualify it from the next sweep.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_propelled_at: Option<DateTime<Utc>>,
     /// **Inline live-process record (the `Worker`-into-`Molecule` fold-in).**
     ///
     /// The single authoritative slot for "is a worker bound to this
@@ -1177,6 +1198,8 @@ mod tests {
             last_output_at: None,
             nudge_count: 0,
             last_nudged_at: None,
+            propel_count: 0,
+            last_propelled_at: None,
             process: None,
             energy_budget: None,
             stuck_at: None,
@@ -2012,6 +2035,8 @@ mod tests {
                         last_output_at: None,
                         nudge_count: 0,
                         last_nudged_at: None,
+                        propel_count: 0,
+                        last_propelled_at: None,
                         process: None,
                         energy_budget,
                         stuck_at: None,
