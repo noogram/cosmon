@@ -19,6 +19,32 @@ public API guarantee at this stage.
 
 ## [0.2.0] — 2026-07-19
 
+**Highlights.** This release hardens the trust perimeter and makes execution
+attribution honest, across 62 detailed entries below.
+
+- **Security — trust & egress.** The sovereignty gate is now deny-by-default,
+  repo-supplied shell and delegated script targets are hash-pinned behind the
+  trust gate (closing an RCE-by-clone class), and exposed multi-tenant egress
+  fails closed on non-Linux hosts.
+- **Attribution & honesty.** `cs peek` reports the model that actually ran
+  (via the new `ModelObserved` event) alongside the one that was pinned;
+  merges carry native `Co-Authored-By` trailers with real-adapter folding;
+  model selection, adapter, and worker energy are surfaced end to end.
+- **Fleet robustness & patrol.** Briefless molecules are parked instead of
+  busy-looped, `cs patrol` gains `--heal` and `--dialogue-scan`, `cs done`
+  gains a merge-perimeter scope-guard and a blocking `pre_done` gate, and the
+  `archived ⇒ terminal` invariant is detected and healed.
+- **Release engineering & public projection.** Public releases are produced
+  from isolated, scrubbed projections behind a deny-by-default membrane and a
+  publish-identity gate; `install.sh` ships a non-destructive pilot-pack and
+  the contribution path is open.
+- **Remote, OIDC & RPP.** `cosmon-remote` gains real OAuth2-PKCE login with
+  silent refresh, the `run`/`do`/`converse` avatar surface, and a unified
+  tenant CLI.
+- **Adapters & reference.** The `codex` adapter dispatches with energy
+  accounting, OpenAI calls are rate-limit paced, and the mdBook now carries a
+  generated, CI-enforced command Reference.
+
 ### Added: realized-model attribution — intention vs realization (delib-20260718-c70e)
 
 - `cs peek` now distinguishes the model you **asked for** (the pin, resolved
