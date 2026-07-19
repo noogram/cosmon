@@ -226,6 +226,26 @@ impl CodexMode {
 /// exec` is left untouched so batch telemetry capture is unchanged.
 pub const INTERACTIVE_LOG_LEVEL: &str = "error";
 
+/// Per-run codex config override that disables the CLI's startup
+/// self-update for the duration of the worker's run.
+///
+/// codex's standalone installer channel checks for a new release on
+/// startup and can install it mid-session ("Installing standalone
+/// package …", "Update ran successfully! Please restart Codex."),
+/// after which the process exits — the pane dies with status 0 and the
+/// worker is silently lost while the molecule stays `active`
+/// (task-20260718-230a, the codex-sol death of task-20260718-37fc).
+/// `check_for_update_on_startup = false` is codex's only supported
+/// update-check knob; carrying it as a per-invocation `-c` override
+/// scopes the kill to the worker's run without editing the operator's
+/// `~/.codex/config.toml`.
+///
+/// This override is **structural, not preferential**: it is emitted in
+/// both launch modes and is *not* part of the [`DEFAULT_INTERACTIVE_ARGS`]
+/// set an `[adapters.codex].extra_args` row replaces — a flag override
+/// must never silently re-arm mid-run self-updates.
+pub const NO_STARTUP_UPDATE_OVERRIDE: &[&str] = &["-c", "check_for_update_on_startup=false"];
+
 /// Default flags for an interactive codex worker.
 ///
 /// - `--dangerously-bypass-approvals-and-sandbox` — no tool approval prompts
@@ -314,13 +334,16 @@ pub struct GitIdentity {
 /// codex worker — the pure, unit-testable seam (mirror of
 /// `cosmon_cli::tackle_env::build_claude_command`).
 ///
-/// - [`CodexMode::Exec`] → `codex exec '<prompt>'` (byte-identical to the
-///   pre-interactive behaviour; the prompt is single-quote escaped).
+/// - [`CodexMode::Exec`] → `codex exec '<prompt>'` (the legacy batch shape;
+///   the prompt is single-quote escaped).
 /// - [`CodexMode::Interactive`] → `RUST_LOG=error codex <flags>` with **no**
 ///   positional prompt (the caller injects it into the composer after
 ///   readiness). [`spawn_codex_session`] pre-trusts `config.work_dir` before
 ///   executing this command. `<flags>` is [`DEFAULT_INTERACTIVE_ARGS`] unless
 ///   `config.extra_args` overrides it.
+///
+/// Both modes carry [`NO_STARTUP_UPDATE_OVERRIDE`] unconditionally — a codex
+/// worker must never self-update (and die) mid-run.
 #[must_use]
 pub fn build_codex_command(config: &CodexSessionConfig) -> String {
     let bin = shell_escape(&config.binary.to_string_lossy());
@@ -328,6 +351,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
         CodexMode::Exec => {
             let mut cmd = bin;
             cmd.push_str(" exec");
+            push_no_update_override(&mut cmd);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -344,6 +368,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             // No positional prompt — it is injected post-readiness (the
             // claude-mirror that also fixes the submission bug).
             let mut cmd = format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} {bin}");
+            push_no_update_override(&mut cmd);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -364,6 +389,17 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
         }
     };
     prefix_git_identity_env(config.git_identity.as_ref(), cmd)
+}
+
+/// Append [`NO_STARTUP_UPDATE_OVERRIDE`] to an in-flight command string.
+///
+/// The tokens are within [`shell_escape`]'s safe ASCII subset by
+/// construction, so they are appended verbatim.
+fn push_no_update_override(cmd: &mut String) {
+    for token in NO_STARTUP_UPDATE_OVERRIDE {
+        cmd.push(' ');
+        cmd.push_str(token);
+    }
 }
 
 /// Prepend the operator git-identity environment onto an assembled codex
@@ -957,7 +993,8 @@ mod tests {
         let cmd = build_codex_command(&c);
         // `Op` is safe (unquoted); the email's `@` forces quoting.
         assert!(cmd.starts_with("GIT_AUTHOR_NAME=Op GIT_AUTHOR_EMAIL='op@example.org'"));
-        assert!(cmd.contains("exec 'do it'"));
+        assert!(cmd.ends_with("'do it'"));
+        assert!(cmd.contains(" exec "));
     }
 
     #[test]
@@ -984,19 +1021,25 @@ mod tests {
         assert_eq!(CodexMode::from_config_str("batch"), CodexMode::Interactive);
     }
 
-    /// Exec mode keeps the byte-identical `codex exec '<prompt>'` shape the
-    /// adapter shipped before interactive mode existed — the fire-and-forget
-    /// contract must not regress.
+    /// Exec mode keeps the legacy `codex exec '<prompt>'` fire-and-forget
+    /// shape, now carrying the self-update kill (task-20260718-230a) between
+    /// the subcommand and the prompt.
     #[test]
     fn build_command_exec_mode_is_unchanged() {
         let c = cfg(CodexMode::Exec, Some("do the thing"), vec![]);
-        assert_eq!(build_codex_command(&c), "codex exec 'do the thing'");
+        assert_eq!(
+            build_codex_command(&c),
+            "codex exec -c check_for_update_on_startup=false 'do the thing'"
+        );
     }
 
     #[test]
     fn build_command_exec_mode_escapes_single_quotes() {
         let c = cfg(CodexMode::Exec, Some("it's done"), vec![]);
-        assert_eq!(build_codex_command(&c), "codex exec 'it'\\''s done'");
+        assert_eq!(
+            build_codex_command(&c),
+            "codex exec -c check_for_update_on_startup=false 'it'\\''s done'"
+        );
     }
 
     #[test]
@@ -1017,7 +1060,8 @@ mod tests {
         let cmd = build_codex_command(&c);
         assert_eq!(
             cmd,
-            "RUST_LOG=error codex --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
+            "RUST_LOG=error codex -c check_for_update_on_startup=false \
+             --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
         );
         // The prompt must NOT leak onto the command line in interactive mode.
         assert!(!cmd.contains("ignored on cmdline"));
@@ -1034,8 +1078,26 @@ mod tests {
         );
         assert_eq!(
             build_codex_command(&c),
-            "RUST_LOG=error codex -m gpt-5 --no-alt-screen"
+            "RUST_LOG=error codex -c check_for_update_on_startup=false -m gpt-5 --no-alt-screen"
         );
+    }
+
+    /// task-20260718-230a: the standalone codex CLI can self-update on
+    /// startup and exit ("Update ran successfully! Please restart Codex."),
+    /// killing the pane mid-molecule. Both launch modes must carry the
+    /// per-run kill switch, and an `extra_args` override must not drop it.
+    #[test]
+    fn build_command_always_disables_startup_self_update() {
+        let interactive = cfg(CodexMode::Interactive, None, vec![]);
+        let exec = cfg(CodexMode::Exec, Some("batch"), vec![]);
+        let overridden = cfg(CodexMode::Interactive, None, vec!["--sandbox".into()]);
+        for c in [interactive, exec, overridden] {
+            let cmd = build_codex_command(&c);
+            assert!(
+                cmd.contains("-c check_for_update_on_startup=false"),
+                "self-update kill missing from {cmd:?}"
+            );
+        }
     }
 
     #[test]
