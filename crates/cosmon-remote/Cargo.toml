@@ -1,7 +1,14 @@
 [package]
 name = "cosmon-remote"
 publish.workspace = true
-version = "0.3.0"
+# Shipped user-facing binary → inherits the release version (see the
+# `[workspace.package]` rule in the root Cargo.toml). Since ff92 this binary
+# rides in the public pilot tarball and the installer's "Next steps" tells the
+# user to run `cosmon-remote --version`; it must answer with the version they
+# downloaded. One-time discontinuity 0.3.0 → 0.2.1 at the alignment, recorded
+# in CHANGELOG — legal because the crate is `publish = false` and has never
+# been on crates.io, so no registry ordering is violated.
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 # Frontier crate (ADR-092): a third-party operator who runs `cosmon-remote` against

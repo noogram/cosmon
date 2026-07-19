@@ -55,6 +55,12 @@ const DEFAULT_BIND_ADDR: &str = "0.0.0.0:8444";
 
 #[derive(Debug, Parser)]
 #[command(
+    // clap defaults `name` to CARGO_PKG_NAME, so this binary announced itself
+    // as `cosmon-oidc-testkit 0.2.1` — a name the user never typed and cannot
+    // find in the tarball. Pin it to the shipped binary name (the one in
+    // packaging/shipped-binaries.txt), same reason the versions are aligned:
+    // what the user reads must be what the user ran.
+    name = "cs-oidc-mock",
     version,
     about = "V0 demo IdP for cosmon-rpp-adapter (ADR-080) — JWKS + JWT issuance, embedded RSA test key."
 )]

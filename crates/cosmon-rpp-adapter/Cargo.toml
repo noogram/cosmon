@@ -1,11 +1,16 @@
 [package]
 name = "cosmon-rpp-adapter"
 publish.workspace = true
-# Tracks the bake tag series (image `cosmon-server:vX.Y.Z`) — this is
-# the value `/healthz` and `/v1/auth/me` report as `version`
-# (delib-20260610-9a0c, tolnay). Bump it with every bake that rebuilds
-# the adapter binary.
-version = "2.5.0"
+# Shipped user-facing binary (public service tarball, task-20260717-c487)
+# → inherits the release version. See the `[workspace.package]` rule in the
+# root Cargo.toml. This is also the value `/healthz` and `/v1/auth/me` report
+# as `version` (delib-20260610-9a0c, tolnay): a self-hosting operator now reads
+# the same number from the tarball they downloaded, from `--version`, and from
+# `/healthz` — previously three different answers. The bake image tag
+# (`cosmon-server:vX.Y.Z`) follows the release tag rather than leading it.
+# One-time discontinuity 2.5.0 → 0.2.1 at the alignment, recorded in CHANGELOG;
+# legal because the crate is `publish = false` and has never been on crates.io.
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 license.workspace = true

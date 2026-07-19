@@ -78,8 +78,10 @@ pub struct AuthMeResponse {
     /// JWT — the unauthenticated `/healthz` deliberately does not
     /// carry it.
     pub claude_credentials_present: Option<bool>,
-    /// Adapter binary version, aligned on the bake tag series
-    /// (`v2.0.1` ⇒ `"2.0.1"`). Additive field — mirrors `/healthz` so
+    /// Adapter binary version, aligned on the cosmon release version —
+    /// the same string as the release tag, the tarball the operator
+    /// downloaded, and `cosmon-rpp-adapter --version` (release `v0.2.1`
+    /// ⇒ `"0.2.1"`). Additive field — mirrors `/healthz` so
     /// an authenticated client gets
     /// the same answer without a second round-trip.
     pub version: String,

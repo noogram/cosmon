@@ -121,8 +121,8 @@ async fn healthz_stays_minimal_after_d820() {
         );
     }
 
-    // Full-body snapshot. `version` is the crate version (bake tag
-    // series); `api_surface_version` is the event-fold length —
+    // Full-body snapshot. `version` is the release version (aligned on
+    // the release tag); `api_surface_version` is the event-fold length —
     // derived, never a hand-edited literal (wheeler
     // I-ADDITIVE-COUNTERS), so appending a surface event keeps this
     // snapshot green without touching it.
