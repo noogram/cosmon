@@ -23,9 +23,17 @@ name: Install lint
 #      release on linux-x64 AND macOS — `live`. This catches a binary that does
 #      not run, but only once a public release exists (it self-skips before
 #      then; `fixture` covers that window for the installer logic);
-#   7. the hosted `curl https://noogram.org/cosmon/install.sh | sh` endpoint
+#   7. the bytes actually SERVED at the public endpoint are byte-identical to
+#      infra/install/install.sh — `served-drift`. This is the load-bearing one:
+#      the served copy has been reached by a hand-copy and drifted twice with a
+#      green board (gnu→musl; then v0.2.0's cosmon-remote connector, which the
+#      served copy never learned to place). Its own red path is tested offline
+#      on every PR by check-install-drift.test.sh in the `triples` job;
+#   8. the hosted `curl https://noogram.org/cosmon/install.sh | sh` endpoint
 #      actually serves a runnable installer once it is live — `endpoint`
 #      (schedule / manual only; self-skips while the Worker serves coming-soon).
+#      Note this asks only "does it RUN?" — `served-drift` asks "is it the SAME
+#      script?", which is the question both incidents needed asked.
 #
 # The original bug this hardening answers: a uname→target mismatch (Linux
 # resolved `unknown-linux-gnu` while every release ships `unknown-linux-musl`)
@@ -205,6 +213,10 @@ jobs:
         run: ./scripts/release/render-brew-formula.test.sh
       - name: update-tap artifact→formula path (release-path integration)
         run: ./scripts/release/render-tap-from-artifacts.test.sh
+      # The drift detector's own red path, offline. Runs on every PR so the
+      # detector can never quietly stop detecting — see the served-drift job.
+      - name: Drift detector reddens on the real incident (offline)
+        run: ./scripts/release/check-install-drift.test.sh
       - name: Compare install.sh, release matrix, and brew formula triples
         run: |
           set -euo pipefail
@@ -296,6 +308,78 @@ jobs:
           set -eu
           export PATH="${HOME}/.local/bin:${PATH}"
           cs --version
+
+  # ── served == source, or red ─────────────────────────────────────────────────
+  # THE load-bearing job. Every other job here checks install.sh as it exists in
+  # this repo; this one checks the bytes a stranger actually receives.
+  #
+  # The gap it closes: the served installer has been reached by a HAND-COPY into
+  # the deploy target, and that copy drifted twice without a single red build.
+  #   1. the gnu→musl target fix had to be re-synced by hand;
+  #   2. v0.2.0 shipped the cosmon-remote connector correctly — signed assets on
+  #      all four triples, client tarball verifiably carrying BOTH binaries —
+  #      but the served installer had zero cosmon-remote references. Fresh
+  #      one-liner installs on two Linux x86_64 hosts got cs 0.2.0 and silently
+  #      discarded the connector, leaving the documented remote-connect workflow
+  #      injouable from a fresh public install.
+  # Both were SILENT. `endpoint` below only asks "does the served script run?" —
+  # a stale-but-runnable copy sails through it. This job asks the stronger
+  # question: is it the SAME script? Nothing here warns; drift is a failure.
+  #
+  # It self-skips ONLY on a genuinely dark endpoint (non-200, i.e. the staging
+  # 503 coming-soon), and says so loudly. A 200 is always fully checked — a 200
+  # serving a placeholder is itself drift, not a reason to skip.
+  #
+  # Runs on push-to-main (so the comparison is always source-of-truth vs served,
+  # never an unpublished PR branch), plus the weekly schedule and on demand.
+  served-drift:
+    name: served install.sh == source (drift detector)
+    if: ${{ github.event_name != 'pull_request' }}
+    runs-on: ubuntu-latest
+    env:
+      # The public doorbell. Overridable for a staging URL. Deliberately the
+      # generic public endpoint — no deploy-provider account identifiers, repo
+      # paths, or internal infrastructure detail belong in this public repo.
+      COSMON_INSTALL_ENDPOINT: https://noogram.org/cosmon/install.sh
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Is the endpoint serving anything at all?
+        id: gate
+        run: |
+          set -eu
+          code="$(curl -s -o /dev/null -w '%{http_code}' --proto '=https' --tlsv1.2 \
+                    "$COSMON_INSTALL_ENDPOINT" || echo 000)"
+          echo "endpoint returned HTTP ${code}"
+          if [ "$code" = "200" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Drift check skipped"
+              echo ""
+              echo "\`$COSMON_INSTALL_ENDPOINT\` returned HTTP **${code}** — the endpoint"
+              echo "is dark (staging 503 / not deployed), so there are no served bytes to"
+              echo "compare. This is the ONLY condition under which drift goes unchecked."
+              echo "It re-arms automatically the moment the endpoint serves a 200."
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Served bytes must equal infra/install/install.sh
+        if: steps.gate.outputs.run == 'true'
+        run: |
+          ./scripts/release/check-install-drift.sh \
+            --served-url "$COSMON_INSTALL_ENDPOINT"
+      - name: Report drift loudly
+        if: failure() && steps.gate.outputs.run == 'true'
+        run: |
+          {
+            echo "### 🚨 The served installer is NOT this repo"
+            echo ""
+            echo "\`$COSMON_INSTALL_ENDPOINT\` diverges from \`infra/install/install.sh\`."
+            echo "Strangers running the public one-liner are getting something else."
+            echo ""
+            echo "Re-publish the served installer from source — see"
+            echo "\`infra/install/RUNBOOK.md\` → *Re-publish the served installer*."
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ── the literal hosted path ──────────────────────────────────────────────────
   # `live` runs install.sh from the checkout; `fixture` runs it against a local

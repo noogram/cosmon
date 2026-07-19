@@ -312,6 +312,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write   # create the release + upload assets
+      id-token: write   # cosign keyless: sign the installer asset below
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -331,13 +332,66 @@ jobs:
         with:
           path: artifacts
 
+      # ── the installer ships AS A RELEASE ASSET, derived from source ─────────
+      # Until now the only path from infra/install/install.sh to the bytes a
+      # stranger pipes into `sh` ran through a HAND-COPY into the deploy target.
+      # It drifted twice, silently (the gnu→musl fix; and v0.2.0's cosmon-remote
+      # connector, which the served copy never learned to place — so a fresh
+      # public install got `cs` and silently discarded the connector).
+      #
+      # Publishing the installer here gives the public endpoint an IMMUTABLE,
+      # versioned, cosign-signed artifact to serve or redirect to, whose bytes
+      # are the tag's own infra/install/install.sh by construction. No hand-copy
+      # can sit in that path. It also means a stranger can verify the installer
+      # with the same cosign gesture as the binaries, before running it.
+      #
+      # This is the publishing half. The load-bearing half is the `served-drift`
+      # job in install-lint.yml, which asserts the bytes actually being served
+      # equal source — because a signed asset nobody points at fixes nothing,
+      # and both incidents were silent.
+      - name: Stage the installer as a signed release asset
+        id: installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          stem="cosmon-install-${version}.sh"
+          mkdir -p dist
+          # Copied verbatim from the tag's tree — this IS the source of truth.
+          cp infra/install/install.sh "dist/${stem}"
+          chmod +x "dist/${stem}"
+          # Fail closed: never publish an installer that does not parse, or that
+          # cannot resolve its own release triples.
+          sh -n "dist/${stem}"
+          sh "dist/${stem}" --self-test
+          echo "stem=${stem}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da  # v3.7.0
+
+      - name: Sign the installer (keyless, Rekor-anchored)
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          blob="${{ steps.installer.outputs.stem }}"
+          cosign sign-blob --yes \
+            --output-signature "${blob}.sig" \
+            --output-certificate "${blob}.pem" \
+            "${blob}"
+          echo "Signed ${blob} (sig + cert + Rekor entry)"
+
       - name: Flatten + aggregate checksums
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p release
           find artifacts -type f -exec cp {} release/ \;
-          # One SHA256SUMS file over every shipped artifact (tarballs + bins).
+          # The installer + its signature ride along with the binaries, so the
+          # aggregate SHA256SUMS below covers the installer too.
+          cp dist/cosmon-install-* release/
+          # One SHA256SUMS file over every shipped artifact (tarballs + bins +
+          # the installer script).
           ( cd release && sha256sum cosmon-* > SHA256SUMS )
           ls -la release
 
