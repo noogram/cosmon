@@ -101,9 +101,35 @@ issues filed there are read by people, not only by machines.
 
 ## Install
 
-Cosmon ships a single binary, `cs`. On **Linux (glibc)** the build links the
-Secret Service keyring backend through `libdbus`, so install the system
-headers first (macOS and Windows need nothing extra):
+Cosmon ships a single binary, `cs`. Three routes, in order of preference.
+
+### Native install script (recommended)
+
+Works on **macOS and Linux**, arm64 and x86_64. It downloads the signed release
+tarball for your platform and fails closed if the sha256 does not match the
+published `SHA256SUMS`:
+
+```bash
+curl -fsSL https://noogram.org/cosmon/install.sh | sh
+cs --version
+```
+
+### Homebrew
+
+The tap has been live since v0.2.0, on macOS and Linuxbrew alike. It installs
+the *same* signed release tarballs as the script above:
+
+```bash
+brew install noogram/tap/cosmon
+```
+
+### From source
+
+Building locally needs the Rust toolchain (MSRV **1.88**). On **Linux (glibc)**
+the build links the Secret Service keyring backend through `libdbus`, so install
+the system headers first (macOS and Windows need nothing extra — and the
+prebuilt Linux binaries above are static musl, so this applies only when you
+compile):
 
 ```bash
 sudo apt-get install -y libdbus-1-dev pkg-config   # Debian/Ubuntu
@@ -139,7 +165,7 @@ from the cloned tree.
 
 ## Prerequisites: a model backend
 
-`cs` is a single Rust binary (build it with the toolchain above; MSRV **1.88**).
+`cs` is a single Rust binary, however you installed it above.
 To dispatch a worker you also need a **model backend**, and cosmon supports two
 shapes:
 

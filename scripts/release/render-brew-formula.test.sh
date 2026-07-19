@@ -67,6 +67,19 @@ assert_pair aarch64-unknown-linux-musl  "$PH_ARM_LINUX"
 assert_pair x86_64-unknown-linux-musl   "$PH_X86_LINUX"
 echo "PASS: each digest is bound to the correct triple"
 
+# 3b. The formula's `license` matches the workspace's effective license. Read
+#     from the root Cargo.toml rather than hardcoded here, so a future
+#     re-license moves both in one edit instead of silently drifting. The
+#     formula previously claimed MIT while the binary shipped AGPL-3.0-only —
+#     a false licence claim on the distribution channel users install from.
+ws_license="$(grep -m1 -E '^license = "' "$repo_root/Cargo.toml" | sed -E 's/^license = "(.*)"$/\1/')"
+[ -n "$ws_license" ] \
+  || { echo "FAIL: could not read license from $repo_root/Cargo.toml" >&2; exit 1; }
+formula_license="$(printf '%s\n' "$out" | grep -m1 -E '^  license "' | sed -E 's/^  license "(.*)"$/\1/')"
+[ "$formula_license" = "$ws_license" ] \
+  || { echo "FAIL: formula license is '$formula_license', workspace is '$ws_license'" >&2; exit 1; }
+echo "PASS: formula license matches the workspace ($ws_license)"
+
 # 4. The checked-in snapshot is byte-identical to a fresh placeholder render.
 if ! diff -u "$snapshot" <(render_placeholders); then
   echo "FAIL: $snapshot has drifted from render-brew-formula.sh." >&2
