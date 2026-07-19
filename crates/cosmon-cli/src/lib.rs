@@ -23,6 +23,11 @@ pub mod sensorium;
 
 pub mod tackle_env;
 
+/// Argv contract of the detached `cs realized-watch` re-exec `cs tackle`
+/// arms at dispatch — shared by the spawner and the integration test that
+/// exercises the real re-exec, so the two can never drift.
+pub mod realized_watcher;
+
 /// Repo-supplied shell trust gate (B5, RCE-by-clone) — the `direnv allow`
 /// of cosmon. Every `sh -c` on a string the repository supplies (formula
 /// `command`/`verification` steps, `post_merge`/`pre_done` hooks) is gated on
