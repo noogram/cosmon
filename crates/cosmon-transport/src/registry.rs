@@ -90,11 +90,11 @@ fn looks_like_version(s: &str) -> bool {
 ///
 /// Identity-pinned workers (delib-20260717-194b F3) are spawned with an
 /// env prefix on the shell command — e.g.
-/// `GIT_AUTHOR_NAME='Emmanuel Sérié' GIT_AUTHOR_EMAIL=… RUST_LOG=error
+/// `GIT_AUTHOR_NAME='Ada Lovelace' GIT_AUTHOR_EMAIL=… RUST_LOG=error
 /// codex --yolo`. On some tmux/platform combinations
 /// `pane_current_command` surfaces that full command line (or its first
 /// token) instead of the foreground process `comm`, so the propulsion /
-/// whisper gates observed `GIT_AUTHOR_NAME=Emmanuel…` and refused a
+/// whisper gates observed `GIT_AUTHOR_NAME=Ada…` and refused a
 /// perfectly live codex worker (friction 2026-07-18, task-20260718-912b).
 ///
 /// The parser walks shell words left to right, skipping `IDENT=value`
@@ -580,14 +580,14 @@ mod tests {
         let name = crate::codex::ADAPTER_NAME;
         // The exact spawn shape produced by `build_codex_command` with
         // `git_identity: Some(..)` — quoted values with embedded spaces.
-        let spawned = "GIT_AUTHOR_NAME='Emmanuel Sérié' \
+        let spawned = "GIT_AUTHOR_NAME='Ada Lovelace' \
                        GIT_AUTHOR_EMAIL='op@example.org' \
-                       GIT_COMMITTER_NAME='Emmanuel Sérié' \
+                       GIT_COMMITTER_NAME='Ada Lovelace' \
                        GIT_COMMITTER_EMAIL='op@example.org' \
                        RUST_LOG=error codex --yolo";
         assert!(r.matches(name, spawned));
         // First-token-only variant (what the field report showed).
-        assert!(r.matches(name, "GIT_AUTHOR_NAME=Emmanuel codex"));
+        assert!(r.matches(name, "GIT_AUTHOR_NAME=Ada codex"));
         // The claude adapter behind the same prefix shape keeps working.
         assert!(r.matches(
             crate::claude::ADAPTER_NAME,
@@ -595,9 +595,9 @@ mod tests {
         ));
         // A crashed-into-shell pane behind an env prefix is STILL refused —
         // normalisation must not widen the gate to arbitrary panes.
-        assert!(!r.matches(name, "GIT_AUTHOR_NAME='Emmanuel Sérié' zsh"));
+        assert!(!r.matches(name, "GIT_AUTHOR_NAME='Ada Lovelace' zsh"));
         // A bare assignment with no binary after it is not a match.
-        assert!(!r.matches(name, "GIT_AUTHOR_NAME=Emmanuel"));
+        assert!(!r.matches(name, "GIT_AUTHOR_NAME=Ada"));
     }
 
     /// Unit coverage for the env-prefix normaliser, independent of the
@@ -612,12 +612,18 @@ mod tests {
         assert_eq!(effective_pane_command("RUST_LOG=error codex"), "codex");
         // Quoted value with embedded whitespace does not split the word.
         assert_eq!(
-            effective_pane_command("GIT_AUTHOR_NAME='Emmanuel Sérié' codex --yolo"),
+            effective_pane_command("GIT_AUTHOR_NAME='Ada Lovelace' codex --yolo"),
             "codex"
         );
         assert_eq!(
             effective_pane_command("GIT_AUTHOR_NAME=\"Ada Lovelace\" node"),
             "node"
+        );
+        // Non-ASCII inside the quoted value: the walker counts bytes, not
+        // chars, so an accented identity must not shift the word boundary.
+        assert_eq!(
+            effective_pane_command("GIT_AUTHOR_NAME='Ada Löwe-Ångström' codex"),
+            "codex"
         );
         // A bare `env` launcher is skipped like an assignment.
         assert_eq!(effective_pane_command("env RUST_LOG=error codex"), "codex");
@@ -627,7 +633,7 @@ mod tests {
             "codex"
         );
         // Nothing after the assignments → empty (gate refuses).
-        assert_eq!(effective_pane_command("GIT_AUTHOR_NAME=Emmanuel"), "");
+        assert_eq!(effective_pane_command("GIT_AUTHOR_NAME=Ada"), "");
         assert_eq!(effective_pane_command(""), "");
         assert_eq!(effective_pane_command("   "), "");
         // A non-identifier before `=` is NOT an assignment — it is the

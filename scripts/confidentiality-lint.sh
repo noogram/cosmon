@@ -137,7 +137,12 @@ fi
 # is hardcoded here — only the public project trio and generic doc placeholders.
 # The real accepted-galaxy roster lives operator-local beside the denylist, so a
 # contributor clone (no $DIR at all) never reaches this code (early-exit above).
-allow=" cosmon noogram knowledge foo bar baz qux tenant-demo annex example foobar other-noyau "
+# `example-project` / `example-galaxy` are the doc/CLI placeholders shipped by
+# this tree itself (`cs examples`, the scheduler help snapshot, the project
+# reference chapter). They are manifestly generic — `example*` names cannot
+# denote a private galaxy — so they belong in the built-in public set rather
+# than in the operator-local `$ALLOWGAL`, which a contributor clone never has.
+allow=" cosmon noogram knowledge foo bar baz qux tenant-demo annex example example-project example-galaxy foobar other-noyau "
 if [[ -f "$ALLOWGAL" ]]; then
   while IFS= read -r g; do
     g="${g%%#*}"                                   # strip inline comment
