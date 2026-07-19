@@ -397,7 +397,8 @@ pub fn emit_model_observed(
 /// this `(mol, worker, adapter)` scope, computes the suffix of `observed` not
 /// yet recorded, and emits one event per new id. Idempotent: replaying the same
 /// trajectory emits nothing. Every id in `observed` is a non-empty
-/// [`ModelId`], so a blank realization can never reach the log.
+/// [`ModelId`](cosmon_core::model_realization::ModelId), so a blank
+/// realization can never reach the log.
 ///
 /// Best-effort: an unreadable log is treated as "nothing recorded yet" (so a
 /// first observation is still emitted), matching the trace-not-lock discipline.

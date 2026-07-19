@@ -81,7 +81,23 @@ jobs:
         run: |
           set -euo pipefail
           WORK="$(mktemp -d -t quickstart-e2e.XXXXXX)"
-          trap 'tmux kill-server >/dev/null 2>&1 || true; rm -rf "$WORK"' EXIT
+          cleanup() {
+              tmux kill-server >/dev/null 2>&1 || true
+              # Wait for the tmux server (and the worker panes it hosts) to
+              # actually die — kill-server returns before its children do.
+              for _ in $(seq 1 20); do
+                  tmux ls >/dev/null 2>&1 || break
+                  sleep 0.5
+              done
+              # A straggler can still write into $WORK for a beat after tmux
+              # dies, losing rm the race ("Directory not empty") — retry.
+              for _ in $(seq 1 10); do
+                  rm -rf "$WORK" 2>/dev/null && break
+                  sleep 0.5
+              done
+              rm -rf "$WORK" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
           for n in a b c; do
               printf '%%PDF-1.4\n%%dummy-%s\n' "$n" > "$WORK/$n.pdf"
           done
