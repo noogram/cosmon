@@ -544,6 +544,8 @@ jobs:
         run: bash scripts/check-provenance.sh
       - name: Self-test the gate against the c1cb pathology
         run: bash tests/harness/provenance-gate-test.sh
+      - name: Self-test the base-sync exemption (ADR-052 §D5-bis)
+        run: bash tests/harness/provenance-base-sync-test.sh
 
   license-partition:
     # Living per-crate license table gate. The script in

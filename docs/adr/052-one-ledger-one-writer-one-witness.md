@@ -594,6 +594,52 @@ mailroom `/ask` /raccourci-qui-sabote-le-contrat chronicle
 (2026-04-19). The register is governed by the syzygie protocol —
 both galaxies must keep their copy in sync.
 
+#### D5-bis. Amendment (2026-07-19) — the base-sync exemption
+
+The gates above were written assuming every merge commit is an *entry
+point*: a moment where new material crosses into main. Practice
+produced a second shape they did not anticipate.
+
+When main advances fast, a worker syncs its base *inside* the
+molecule's worktree, before `cs done`:
+
+    git merge main          # Merge branch 'main' into feat/task-…
+
+This exists so conflicts are resolved where the worker still has the
+context to resolve them, rather than at harvest time in the main
+checkout. Eight such merges turned the CI gate red on 2026-07-19 —
+correctly by the letter of the rule, wrongly by its intent. Every one
+of them was interior to a tracked molecule whose fold merge was itself
+gated.
+
+Both gates now recognise the shape, on **structural** evidence rather
+than on the subject string:
+
+- the incoming side must already sit on main's first-parent chain.
+  That makes the merge a no-op with respect to what main contains:
+  every line it carries was gated when it landed on main. A merge
+  that *claims* to be a base-sync while pulling off-trunk material is
+  still refused, by both gates.
+- the ledger check is deliberately **not** applied to this shape. At
+  base-sync time the molecule is by construction still running and
+  has no completion event. Demanding one would forbid the practice
+  rather than make it safe. The completion is demanded of the fold
+  merge, which is where the work actually crosses into main.
+
+**Should `cs done` perform the base-sync itself?** Evaluated and
+declined. It would put the subject under cosmon's control, which is
+genuinely attractive — the gate would no longer have to recognise a
+shape git writes. But `cs done` runs from the main checkout, after
+the work is finished, and moving the sync there moves the conflicts
+there too: back to the harvest moment, in a checkout where nobody
+holds the molecule's context. That is precisely the cost the practice
+was invented to avoid. The correct owner is a worktree-side verb
+(`cs sync`, emitting a cosmon-controlled subject), not `cs done`.
+Recorded here as a named follow-up, not as a silent gap.
+
+Covered by `tests/harness/provenance-base-sync-test.sh`, including a
+replay of the eight commits that motivated the amendment.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,
