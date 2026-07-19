@@ -52,7 +52,8 @@ info:
     name: Cosmon — Remote Pilot Port
     url: https://github.com/noogram/cosmon
   license:
-    name: MIT OR Apache-2.0
+    name: GNU Affero General Public License v3.0 only
+    identifier: AGPL-3.0-only
 
 servers:
   - url: https://rpp.{domain}
