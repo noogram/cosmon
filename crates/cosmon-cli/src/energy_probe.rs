@@ -2,16 +2,30 @@
 
 //! Shared energy probing for active workers.
 //!
-//! Resolution chain: worker → tmux pane PID → `~/.claude/sessions/{pid}.json`
+//! The probe is **adapter-aware**: the adapter that actually ran a worker's
+//! molecule (last `AdapterSelected` on `events.jsonl`) selects the resolution
+//! chain.
+//!
+//! Claude chain: worker → tmux pane PID → `~/.claude/sessions/{pid}.json`
 //! → `sessionId` + `cwd` → `~/.claude/projects/{encoded-cwd}/{sessionId}.jsonl`
 //! → parse with `claudion` → aggregate tokens and cost.
 //!
-//! Used by `cs ensemble` and `cs peek` to display the real Claude Code
-//! energy spent by every active worker.
+//! Codex chain: worker → tmux pane cwd (`#{pane_current_path}`, with the
+//! fleet-recorded worktree as post-mortem fallback) →
+//! [`resolve_codex_session_by_cwd`] (the `session_meta.payload.cwd` join)
+//! → [`cosmon_core::codex_energy`] token parser + price table →
+//! [`WorkerEnergy`]. Cost is attributed to the last realized model of the
+//! session's `turn_context` trajectory; an unpriced model keeps the real
+//! token counts and leaves cost at `0.0`, which the UI renders as `—`
+//! (honest floor — never fabricate a rate).
+//!
+//! Used by `cs ensemble` and `cs peek` to display the real energy spent by
+//! every active worker, whichever subprocess adapter hosts it.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use cosmon_core::codex_energy::{codex_price_for, codex_token_usage_from_session};
 use cosmon_core::energy::{TokenCost, TokenCount};
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
@@ -66,17 +80,27 @@ pub fn discover_fleet_backends(
     backends
 }
 
-/// Load energy for every worker in `fleet`, probing every tmux socket in `backends`.
+/// Load energy for every worker in `fleet`, probing every tmux socket in
+/// `backends`. `state_dir` locates `events.jsonl`, whose last
+/// `AdapterSelected` per molecule routes each worker to the right
+/// session-log parser (claude vs codex).
 #[must_use]
 pub fn load_worker_energy(
+    state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
     fleet: &cosmon_state::Fleet,
 ) -> HashMap<WorkerId, WorkerEnergy> {
     let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
     let pricing = claudion::PricingModel::opus();
 
-    for worker_id in fleet.workers.keys() {
-        let Some(energy) = probe_worker_energy(backends, worker_id, &pricing) else {
+    for (worker_id, data) in &fleet.workers {
+        let Some(energy) = probe_worker_energy(
+            state_dir,
+            backends,
+            worker_id,
+            data.current_molecule.as_ref(),
+            &pricing,
+        ) else {
             continue;
         };
         map.insert(worker_id.clone(), energy);
@@ -84,13 +108,27 @@ pub fn load_worker_energy(
     map
 }
 
-/// Probe a single worker's current energy values.
+/// Probe a single worker's current energy values, **adapter-aware**.
+///
+/// The adapter that ran `molecule` (last [`EventV2::AdapterSelected`] on
+/// `events.jsonl`) selects the chain: `codex` reads the codex rollout log
+/// via [`probe_codex_worker_energy`]; `claude` — and the legacy case where
+/// no selection was ever recorded — reads the Claude Code session log via
+/// the PID-sidecar chain, unchanged. In-process provider adapters
+/// (openai/anthropic/mistral) have no session log on disk and resolve to
+/// `None` through the claude chain's missing PID sidecar.
 #[must_use]
 pub fn probe_worker_energy(
+    state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &WorkerId,
+    molecule: Option<&MoleculeId>,
     pricing: &claudion::PricingModel,
 ) -> Option<WorkerEnergy> {
+    let adapter = molecule.and_then(|m| last_adapter_for(state_dir, m));
+    if adapter.as_deref() == Some("codex") {
+        return probe_codex_worker_energy(state_dir, backends, worker_id);
+    }
     let pid = resolve_tmux_pid(backends, worker_id)?;
     let (session_id, cwd) = read_claude_pid_file(pid)?;
     let encoded = sanitize_path(&cwd);
@@ -108,6 +146,41 @@ pub fn probe_worker_energy(
         input: TokenCount::new(input_total.get()),
         output: TokenCount::new(metrics.total_output.get()),
         cost: TokenCost::new(metrics.total_cost.get()),
+    })
+}
+
+/// Probe a **codex** worker's energy from its rollout session log.
+///
+/// Chain: live pane cwd (`#{pane_current_path}`), falling back to the
+/// worktree `cs tackle` recorded on the fleet when no pane answers (dead
+/// pane — same post-mortem fallback as the realized-model capture) →
+/// [`resolve_codex_session_by_cwd`] → last cumulative `token_count` line
+/// ([`codex_token_usage_from_session`]) → cost priced against the **last**
+/// realized model of the `turn_context` trajectory
+/// ([`cosmon_core::codex_energy::codex_price_for`]).
+///
+/// Honest floor: a model absent from the price table yields real token
+/// counts with `cost = 0.0`, which the ensemble/peek COST column renders
+/// as `—`. Input tokens include the cached portion — the same class of
+/// total the claude chain reports (fresh + cache creation + cache read).
+fn probe_codex_worker_energy(
+    state_dir: &Path,
+    backends: &[cosmon_transport::TmuxBackend],
+    worker_id: &WorkerId,
+) -> Option<WorkerEnergy> {
+    let cwd = resolve_tmux_pane_cwd(backends, worker_id)
+        .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))?;
+    let session_path = resolve_codex_session_by_cwd(&cwd)?;
+    let content = std::fs::read_to_string(session_path).ok()?;
+    let usage = codex_token_usage_from_session(&content)?;
+    let cost = realized_models_from_codex_session(&content)
+        .last()
+        .and_then(|model| codex_price_for(model.as_str()))
+        .map_or(0.0, |price| usage.cost_usd(&price));
+    Some(WorkerEnergy {
+        input: TokenCount::new(usage.input_tokens),
+        output: TokenCount::new(usage.output_tokens),
+        cost: TokenCost::new(cost),
     })
 }
 
@@ -306,6 +379,14 @@ fn resolve_claude_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
 /// known: the most-recently-modified log under `~/.codex/sessions/**` whose
 /// `session_meta.payload.cwd` equals `cwd`. codex writes no pid sidecar, so the
 /// worktree `cwd` recorded in `session_meta` is the only join key.
+///
+/// **Multiple sessions per cwd** (resume, retry, a second `codex` run in the
+/// same worktree): the most-recent-mtime session wins. The mtime of an
+/// append-only log tracks its last write, so the session currently being
+/// written — the live worker's — always outranks finished ones. An abandoned
+/// earlier attempt is at worst under-reported, never double-counted; the
+/// energy shown is that of the *current* attempt, matching what the claude
+/// chain reports through its pid sidecar.
 fn resolve_codex_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
     let target = cwd.to_string_lossy();
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -766,6 +847,170 @@ mod tests {
         );
         // No pin, but a model was observed → shown after adapter with `~>`.
         assert_eq!(att.compact_cell(), "codex~>gpt-5.6-terra [cli]");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // ---- Codex energy: adapter-aware probe (idea-20260718-e622) -----------
+    //
+    // fixture rollout log on disk → `probe_worker_energy` routed by the
+    // journal's `AdapterSelected: codex` → cwd join → token parse → pricing
+    // → `WorkerEnergy`. The pane is dead in the fixture (no backend), so the
+    // cwd resolves through the fleet-recorded worktree — the same
+    // post-mortem fallback the realized-model capture uses.
+
+    /// Seed a codex rollout log carrying a `session_meta.cwd` join key, a
+    /// `turn_context` model, and one cumulative `token_count` line.
+    fn seed_codex_rollout(cwd: &Path, model: &str) {
+        let sess = codex_sessions_dir().join("2026").join("07").join("19");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(
+            sess.join("rollout-x.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"s"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"{model}"}}}}"#,
+                    "\n",
+                    r#"{{"type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":2000000,"cached_input_tokens":1000000,"output_tokens":100000,"reasoning_output_tokens":40000,"total_tokens":2100000}}}}}}}}"#,
+                    "\n",
+                ),
+                cwd = cwd.to_string_lossy(),
+                model = model,
+            ),
+        )
+        .unwrap();
+    }
+
+    /// A codex dispatch fills the row with real tokens and a
+    /// realized-model-priced cost — same fidelity class as a claude row.
+    #[test]
+    fn codex_worker_energy_probes_tokens_and_priced_cost() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20260719-e401").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        seed_codex_rollout(&wt, "gpt-5.6-terra");
+
+        seed_dispatch(&state_dir, &mol, "codex", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        let energy = probe_worker_energy(
+            &state_dir,
+            &[],
+            &WorkerId::new("worker-1").unwrap(),
+            Some(&mol),
+            &claudion::PricingModel::opus(),
+        )
+        .expect("codex energy must resolve through the recorded worktree");
+        let (input, output, cost) = energy.as_tuple();
+        assert_eq!(input, 2_000_000, "input includes the cached portion");
+        assert_eq!(output, 100_000);
+        // 1M fresh × $2.50 + 1M cached × $0.25 + 100k out × $15 = $4.25.
+        assert!((cost - 4.25).abs() < 1e-9);
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// Honest floor: an unpriced model keeps the real token counts and
+    /// reports `cost = 0.0`, which the COST column renders as `—`.
+    #[test]
+    fn codex_worker_energy_unpriced_model_keeps_tokens_zero_cost() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20260719-e402").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        seed_codex_rollout(&wt, "gpt-7-hypothetical");
+
+        seed_dispatch(&state_dir, &mol, "codex", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        let energy = probe_worker_energy(
+            &state_dir,
+            &[],
+            &WorkerId::new("worker-1").unwrap(),
+            Some(&mol),
+            &claudion::PricingModel::opus(),
+        )
+        .expect("tokens stay computable for an unpriced model");
+        let (input, output, cost) = energy.as_tuple();
+        assert_eq!(input, 2_000_000);
+        assert_eq!(output, 100_000);
+        assert!(cost.abs() < f64::EPSILON, "no fabricated rate — cost is 0");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// A claude dispatch never takes the codex branch: with no live pane and
+    /// no pid sidecar the claude chain resolves to `None`, even when a codex
+    /// rollout log happens to name the same cwd.
+    #[test]
+    fn claude_worker_never_reads_codex_rollout() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20260719-e403").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+        seed_codex_rollout(&wt, "gpt-5.6-terra");
+
+        seed_dispatch(&state_dir, &mol, "claude", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        let energy = probe_worker_energy(
+            &state_dir,
+            &[],
+            &WorkerId::new("worker-1").unwrap(),
+            Some(&mol),
+            &claudion::PricingModel::opus(),
+        );
+        assert!(
+            energy.is_none(),
+            "claude chain must stay on the pid-sidecar path"
+        );
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

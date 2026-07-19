@@ -4506,7 +4506,7 @@ pub(crate) fn build_snapshot(
             for m in &molecules {
                 state_dirs.insert(m.id.to_string(), sd.clone());
             }
-            let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
+            let energy_by_worker = crate::energy_probe::load_worker_energy(&sd, &backends, &fleet);
             populate_snapshot(
                 &mut snap,
                 &store,
@@ -4542,7 +4542,8 @@ pub(crate) fn build_snapshot(
             .into_iter()
             .map(|(s, a)| (socket.to_owned(), s, a))
             .collect();
-        let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
+        let energy_by_worker =
+            crate::energy_probe::load_worker_energy(state_dir, &backends, &fleet);
         populate_snapshot(
             &mut snap,
             &store,

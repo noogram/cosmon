@@ -945,7 +945,7 @@ fn emit_energy_ticks(
         return;
     };
     let backends = crate::energy_probe::discover_fleet_backends(state_dir, socket);
-    let energy = crate::energy_probe::load_worker_energy(&backends, &fleet);
+    let energy = crate::energy_probe::load_worker_energy(state_dir, &backends, &fleet);
     if energy.is_empty() {
         return;
     }

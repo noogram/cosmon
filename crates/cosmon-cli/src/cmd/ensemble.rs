@@ -353,8 +353,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let project_socket = super::tmux_socket_name(ctx);
     let backends = discover_fleet_backends(&state_dir, &project_socket);
 
-    // Load energy data from Claude Code session logs (PID → session → tokens).
-    let energy_by_worker = crate::energy_probe::load_worker_energy(&backends, &fleet);
+    // Load energy data from session logs — adapter-aware (claude and codex).
+    let energy_by_worker = crate::energy_probe::load_worker_energy(&state_dir, &backends, &fleet);
     let cognitive_dir = state_dir.join("cognitive");
     let fleet_membership = build_fleet_membership(&state_dir);
     // Lookup from molecule id → (status, merged_at, tags, has_blockers).
