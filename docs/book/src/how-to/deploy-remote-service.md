@@ -40,7 +40,7 @@ revision.
 
 The client, `cosmon-remote`, is a laptop tool, so it ships *with* `cs`: the
 `cosmon-<version>-<target>.tar.gz` release tarball carries both, and the
-[one-liner installer](../tutorials/setup.md) (`curl -fsSL https://noogram.org/cosmon/install.sh | sh`)
+[one-liner installer](../getting-started/install.md) (`curl -fsSL https://noogram.org/cosmon/install.sh | sh`)
 and the Homebrew formula each place `cs` **and** `cosmon-remote` together. If you
 installed `cs`, you already have the connector — there is no separate client
 fetch. The steps below cover only the **host**; run the `cosmon-remote` commands

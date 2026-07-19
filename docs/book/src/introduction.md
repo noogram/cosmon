@@ -56,6 +56,9 @@ agent or model plugs in.
 
 ## Where to go next
 
+- **Want it running now?** [Install cosmon](./getting-started/install.md), then
+  [Ten minutes to cosmon](./getting-started/ten-minutes.md) takes you from an
+  empty terminal to one merged piece of agent work.
 - **New here?** The [Explanation](./explanation/physics-vocabulary.md) section is
   the conceptual on-ramp: the physics vocabulary, the kernel/distribution split,
   formulas and adapters and fleets, and how cosmon survives crashes. Start there.

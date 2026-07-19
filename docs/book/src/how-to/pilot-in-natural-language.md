@@ -118,5 +118,6 @@ not something cosmon maintains per tool.
 
 ## Related
 
-- [Set up cosmon (prerequisites)](../tutorials/setup.md) — the manual install path.
+- [Install cosmon](../getting-started/install.md) — putting `cs` on your `PATH`.
+- [Set up cosmon (prerequisites)](../tutorials/setup.md) — the manual driving path.
 - [CLI overview](../reference/overview.md) — the same surface `cs help` prints.
