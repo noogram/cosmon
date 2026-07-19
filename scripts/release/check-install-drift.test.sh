@@ -174,7 +174,26 @@ badpin="${tmp}/served-badpin.sh"
 expect "reddens on an injected pin line the endpoint would never emit" \
     "$badpin" 1 "HAS DRIFTED FROM SOURCE"
 
-# ── 7. the marker list cannot rot into a lie ─────────────────────────────────
+# ── 7. the fetch path is https-only ──────────────────────────────────────────
+# An installer fetched over plaintext is an installer an on-path attacker can
+# rewrite — and "it matched source" would then be a claim about the attacker's
+# bytes. curl's --proto '=https' makes that unreachable; assert it stays so.
+# No server needed: the protocol is refused before any connection is attempted.
+set +e
+sh "$CHECK" --served-url "http://127.0.0.1:9/install.sh" \
+    --canonical "$CANONICAL" > "${tmp}/http.out" 2>&1
+http_status=$?
+set -e
+if [ "$http_status" -ne 0 ] && grep -qF 'could not fetch' "${tmp}/http.out"; then
+    echo "✓ refuses to fetch the served installer over plaintext http"
+    pass=$((pass + 1))
+else
+    echo "✗ plaintext http was not refused (exit ${http_status})"
+    sed 's/^/    /' "${tmp}/http.out"
+    fail=$((fail + 1))
+fi
+
+# ── 8. the marker list cannot rot into a lie ─────────────────────────────────
 # A marker naming something the canonical source no longer says must red, so a
 # stale marker can never quietly stop covering anything.
 rotten="${tmp}/markers-rotten.txt"
