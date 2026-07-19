@@ -1407,6 +1407,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // 9b''. First-turn realized-model watcher (round-4 / COND-1, D4).
+    //
+    // D4 demands `ModelObserved` on the FIRST assistant turn carrying a
+    // concrete model id — not "at the next `cs wait` poll, if anyone runs
+    // one". Neither `cs wait` nor `cs run` is guaranteed to exist for this
+    // dispatch, so the emission consumer is attached to the dispatch itself:
+    // a detached `cs realized-watch` re-exec that ticks the idempotent
+    // capture core against the worktree we just created. Pane-independent by
+    // construction (session-log resolution by cwd), so a worker that crashes
+    // right after its first turn still gets its observation post-mortem.
+    // Session-log adapters only: in-process providers (openai/anthropic/…)
+    // emit at their own response seam.
+    if matches!(adapter.as_str(), "claude" | "codex") {
+        spawn_realized_watcher(&state_dir, &mol_id, &worktree_path);
+    }
+
     // 9c. In-process Direct-API completion emit — GAP #6 fix.
     //
     // Direct-API adapters (openai, anthropic) run the agent loop
@@ -3223,6 +3239,40 @@ fn git_config_value(repo_root: &std::path::Path, key: &str) -> Option<String> {
 /// worker_spawned.loop_ownership`.
 ///
 /// Idempotent: overwrites an existing entry with the same `worker_id`.
+/// Detach a `cs realized-watch` child for this dispatch (round-4 / COND-1).
+///
+/// Re-execs the current binary so the watcher and the dispatcher can never
+/// skew versions, parks the child in its own process group (it must survive
+/// `cs tackle` returning and any signal aimed at the operator's shell), and
+/// silences its stdio — the watcher speaks only through `events.jsonl`.
+/// Best-effort: a spawn failure costs the first-turn guarantee for this run
+/// (the `cs wait`/`cs run` pollers and the completion seam still capture),
+/// never the dispatch itself.
+fn spawn_realized_watcher(state_dir: &Path, mol_id: &MoleculeId, worktree_path: &Path) {
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let mut command = ProcessCommand::new(exe);
+    command
+        .arg("realized-watch")
+        .arg(mol_id.as_str())
+        .arg("--cwd")
+        .arg(worktree_path)
+        .arg("--config")
+        .arg(state_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+    // The child is deliberately not waited on: it outlives this process and
+    // is reparented to init — no zombie, no supervision coupling.
+    let _ = command.spawn();
+}
+
 pub(super) fn register_tackle_worker(
     store: &FileStore,
     wid: &WorkerId,

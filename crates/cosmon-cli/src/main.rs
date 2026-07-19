@@ -316,6 +316,14 @@ enum Command {
     #[command(after_help = cmd::examples::WAIT)]
     Wait(cmd::wait::Args),
 
+    /// Internal — first-turn realized-model watcher, spawned detached by
+    /// `cs tackle` for session-log adapters (claude/codex). Emits
+    /// `ModelObserved` at the first model-bearing assistant turn (D4),
+    /// pane-independent so a crashed worker's durable session log still
+    /// yields its observation.
+    #[command(name = "realized-watch", hide = true)]
+    RealizedWatch(cmd::realized_watch::Args),
+
     /// Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
     #[command(after_help = cmd::examples::RUN)]
     Run(cmd::run::Args),
@@ -582,6 +590,7 @@ fn main() {
         Command::Diverge(args) => cmd::diverge::run(&ctx, &args),
         Command::Peek(args) => cmd::peek::run(&ctx, &args),
         Command::Wait(args) => cmd::wait::run(&ctx, &args),
+        Command::RealizedWatch(args) => cmd::realized_watch::run(&ctx, &args),
         Command::Run(args) => cmd::run::run(&ctx, &args),
         Command::Spore(args) => cmd::spore::run(&ctx, &args),
         Command::Help(args) => cmd::help::run(&args),
