@@ -131,10 +131,9 @@ fn next_shell_word(input: &str) -> (String, &str) {
     for (i, c) in chars.by_ref() {
         match quote {
             Some(q) if c == q => quote = None,
-            Some(_) => word.push(c),
             None if c == '\'' || c == '"' => quote = Some(c),
             None if c.is_whitespace() => return (word, &input[i..]),
-            None => word.push(c),
+            Some(_) | None => word.push(c),
         }
     }
     (word, "")
@@ -571,7 +570,10 @@ mod tests {
         assert_eq!(effective_pane_command("   "), "");
         // A non-identifier before `=` is NOT an assignment — it is the
         // command itself (weird, but the gate should see it verbatim).
-        assert_eq!(effective_pane_command("2fast=furious codex"), "2fast=furious");
+        assert_eq!(
+            effective_pane_command("2fast=furious codex"),
+            "2fast=furious"
+        );
     }
 
     #[test]
