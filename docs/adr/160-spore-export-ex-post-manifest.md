@@ -218,7 +218,7 @@ partial exports impossible. The distinction is printed, never silent.
 
 > **Deliberate divergence from the entry note.** The design note writes
 > *« tout écart = FAIL, exit ≠ 0 »*. This ADR keeps that verdict for every
-> **listed** output (rows 1-3 above are strictly fail-closed) and carves out the
+> **listed** output (steps 1-3 and 5 above stay strictly fail-closed) and carves out the
 > single case of an *unlisted extra file*, which is not a divergence between
 > manifest and bytes but an absence of a claim. Under the note's literal rule a
 > recipient could never add a README to a bundle without turning it red. The
