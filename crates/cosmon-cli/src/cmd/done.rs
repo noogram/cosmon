@@ -210,6 +210,30 @@ fn ensure_attribution_carrier(
     Ok(())
 }
 
+/// Surface the fail-open corner of the trailer facet (pré-mortem
+/// task-20260717-ffe1, C4): a configured `[attribution]` block whose
+/// `coauthor_email` is empty stamps NOTHING, while the author-slot assertion
+/// keeps running and giving an impression of full protection. The empty-email
+/// configuration stays legal (the facet is opt-in by contract — see
+/// [`AttributionConfig::coauthor_trailers`](cosmon_core::config::AttributionConfig::coauthor_trailers)),
+/// but it must be visible at the moment of integration, not discovered later
+/// in `git log`.
+fn warn_unstamped_attribution(
+    attribution: &cosmon_core::config::AttributionConfig,
+    coauthor_trailers: &[String],
+    warnings: &mut Vec<String>,
+) {
+    if !attribution.is_empty() && coauthor_trailers.is_empty() {
+        warnings.push(format!(
+            "attribution: `[attribution]` names `{}` but `coauthor_email` is empty, so NO \
+             `Co-Authored-By:` trailer will be stamped on this integration. Set \
+             `coauthor_email` in `.cosmon/config.toml` to stamp maker/adapter provenance, \
+             or ignore this warning if unstamped history is intentional.",
+            attribution.public_name
+        ));
+    }
+}
+
 /// Convert the durable adapter fold into an optional co-author and observable
 /// warnings without inventing provenance.
 fn adapter_for_coauthor(
@@ -2002,6 +2026,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .attribution
             .coauthor_trailers(real_adapter.as_deref())
     };
+    warn_unstamped_attribution(&blocklist_cfg.attribution, &coauthor_trailers, &mut warnings);
 
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
     // carry the configured provenance trailers without rewriting worker
@@ -9489,6 +9514,133 @@ mod tests {
     #[test]
     fn ff_only_remains_available_when_attribution_is_disabled() {
         assert!(ensure_attribution_carrier(MergeStrategy::FfOnly, &[]).is_ok());
+    }
+
+    // ---- C4 visibility (pré-mortem task-20260717-ffe1) --------------------
+
+    /// C4: a configured `[attribution]` block with an empty `coauthor_email`
+    /// used to integrate in silence — no trailer AND no signal. The
+    /// configuration stays legal, but it must now warn at integration time.
+    #[test]
+    fn unstamped_attribution_block_warns() {
+        let attribution = cosmon_core::config::AttributionConfig {
+            public_name: "Noogram".to_owned(),
+            ..cosmon_core::config::AttributionConfig::default()
+        };
+        let trailers = attribution.coauthor_trailers(Some("claude"));
+        assert!(trailers.is_empty(), "empty coauthor_email must gate the facet");
+
+        let mut warnings = Vec::new();
+        warn_unstamped_attribution(&attribution, &trailers, &mut warnings);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("coauthor_email` is empty"));
+        assert!(warnings[0].contains("Noogram"));
+        assert!(warnings[0].contains("NO `Co-Authored-By:` trailer"));
+    }
+
+    /// A zero-config galaxy (no `[attribution]` at all) must stay silent —
+    /// the warning is scoped to the half-configured state, never to absence.
+    #[test]
+    fn absent_attribution_block_stays_silent() {
+        let attribution = cosmon_core::config::AttributionConfig::default();
+        let mut warnings = Vec::new();
+        warn_unstamped_attribution(&attribution, &[], &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    /// A fully-configured block that produces trailers must not warn.
+    #[test]
+    fn stamped_attribution_block_does_not_warn() {
+        let attribution = cosmon_core::config::AttributionConfig {
+            public_name: "Noogram".to_owned(),
+            coauthor_email: "noreply@noogram.org".to_owned(),
+            ..cosmon_core::config::AttributionConfig::default()
+        };
+        let trailers = attribution.coauthor_trailers(None);
+        assert_eq!(trailers.len(), 1);
+        let mut warnings = Vec::new();
+        warn_unstamped_attribution(&attribution, &trailers, &mut warnings);
+        assert!(warnings.is_empty());
+    }
+
+    // ---- C6: pre-existing worker trailer (pré-mortem task-20260717-ffe1) --
+
+    /// C6: a worker commit that already carries a `Co-Authored-By` trailer is
+    /// integrated WITHOUT rewrite — its SHA and its trailer survive intact —
+    /// while the merge commit carries the configured trailer. Two carriers,
+    /// two objects, no corruption and no intra-message duplication. (There is
+    /// deliberately no cross-commit deduplication: cosmon never rewrites
+    /// worker commits, so a worker that self-stamped keeps its own stamp.)
+    #[test]
+    fn preexisting_worker_trailer_survives_merge_unrewritten() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/pre"])
+            .status
+            .success());
+        std::fs::write(repo.join("w.rs"), "// w\n").unwrap();
+        assert!(git(repo, &["add", "."]).status.success());
+        assert!(git(
+            repo,
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "feat: worker work",
+                "-m",
+                "Co-Authored-By: Existing Person <existing@example.test>",
+            ],
+        )
+        .status
+        .success());
+        let worker_sha = String::from_utf8_lossy(&git(repo, &["rev-parse", "HEAD"]).stdout)
+            .trim()
+            .to_owned();
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
+        let outcome = try_merge_branch(repo, "feat/pre", MergeStrategy::Merge, &trailers);
+        assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
+
+        // The worker commit was NOT rewritten: same SHA, same trailer.
+        let branch_tip = String::from_utf8_lossy(&git(repo, &["rev-parse", "HEAD^2"]).stdout)
+            .trim()
+            .to_owned();
+        assert_eq!(branch_tip, worker_sha, "worker commit must keep its SHA");
+        let worker_trailers = git(
+            repo,
+            &[
+                "log",
+                "-1",
+                "--format=%(trailers:key=Co-Authored-By)",
+                &worker_sha,
+            ],
+        );
+        let worker_out = String::from_utf8_lossy(&worker_trailers.stdout);
+        assert!(
+            worker_out.contains("Existing Person <existing@example.test>"),
+            "pre-existing trailer must survive: {worker_out}"
+        );
+        assert!(
+            !worker_out.contains("Noogram"),
+            "the configured trailer must not be injected into the worker commit: {worker_out}"
+        );
+
+        // The merge commit carries the configured trailer exactly once and
+        // does not absorb the worker's own trailer.
+        let merge_body = git(repo, &["log", "-1", "--format=%B"]);
+        let body = String::from_utf8_lossy(&merge_body.stdout);
+        assert_eq!(
+            body.matches("Co-Authored-By: Noogram (claude) <noreply@noogram.org>")
+                .count(),
+            1,
+            "configured trailer must appear exactly once on the merge commit: {body}"
+        );
+        assert!(
+            !body.contains("existing@example.test"),
+            "the worker's own trailer belongs to the worker commit only: {body}"
+        );
     }
 
     // ---- Merge-commit trailer carrier (F1) + author assertion (F4) --------
