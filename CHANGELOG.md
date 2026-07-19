@@ -17,6 +17,72 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-19
+
+### Added: realized-model attribution — intention vs realization (delib-20260718-c70e)
+
+- `cs peek` now distinguishes the model you **asked for** (the pin, resolved
+  through the cli → formula → env → config → global → default ladder) from the
+  model that **actually ran**. The realized value folds from a dedicated
+  `ModelObserved` event and never reads the pin — silence is expressed by not
+  emitting the event, so "never fabricate a record of execution" holds by
+  construction.
+- The realized slot is a faithful **tri-state**: `?` worker died before any
+  observation, `-` ran and never reported its model, `X→Y` the observed
+  trajectory (a real quota fallback renders as the trajectory it was, not a
+  single model that never happened). Agreement with the pin renders **no**
+  glyph — drift is the signal, agreement is silence (`claude/opus~>sonnet`).
+- Capture rides the runtime seams: a detached watcher armed at `cs tackle`
+  emits on the **first** model-bearing assistant turn and re-emits only on
+  change; `cs wait` probes per poll; `cs done`/`cs complete` capture
+  post-mortem with atomic dedup. `cs peek` is a strict reader — it never
+  emits. Hardened over three adversarial pre-mortem rounds before GO
+  (per-attempt/worker scoping, typed per-adapter parsers, mandatory worker
+  scope, explicit capability declaration).
+
+### Added: automatic `Co-Authored-By` trailers with real-adapter fold (delib-20260717-194b)
+
+- When `[attribution]` is configured, `cs done` stamps the `--no-ff` merge
+  commit with a `Co-Authored-By: <name> (<adapter>)` trailer, where the
+  adapter is **folded from the molecule's event journal** — the trailer names
+  the adapter that actually worked, not the one that was requested. Worker
+  commits are never rewritten; the merge commit is the sole trailer carrier.
+- Fixed: the append-only `events.jsonl` conflict-resolution merge path
+  finalized with `git commit --no-edit`, silently dropping the trailer under
+  concurrent fleet activity. The trailer now survives that path too.
+
+### Added: codex worker energy accounting in `cs ensemble` / `cs peek`
+
+- New codex session-log token parser and price table in `cosmon-core`, and an
+  adapter-aware energy probe: codex workers now report tokens and cost next to
+  their claude siblings instead of rendering as dashes.
+
+### Added: `cs --version` carries build identity
+
+- Dev and release builds print `cs <version> (<short-sha>[+dirty], built <date>)`,
+  so "which binary is actually installed?" is answerable from the binary
+  itself — the deploy-gap class of confusion (HEAD moved, binary didn't) is
+  now diagnosable in one command.
+
+### Fixed: fleet robustness — boot-stall nudge, codex self-update, whisper gate
+
+- `cs patrol` now nudges boot-stalled molecules whose briefing was pasted but
+  never submitted (observed 13× in the field) instead of letting them sit
+  inert forever.
+- Codex workers no longer die mid-task to the CLI's startup self-update
+  ("Please restart Codex" killed the pane); the self-update is suppressed on
+  every codex worker spawn.
+- `cs whisper` accepts env-prefixed pane commands in its signature gate —
+  codex workers spawn under a git-identity env prefix and were wrongly
+  refused.
+- Removed an env-var data race in the runtime backlog-guard tests.
+
+### Release plumbing
+
+- The client tarball ships the `cosmon-remote` connector.
+- The brew formula gains a Linux ARM stanza and a real render pipeline
+  (checksums computed from actual assets, not placeholders).
+
 ### Fixed: native attribution closes alternate merge and Codex startup gaps
 
 - `cs done --strategy ff-only` now refuses configured native attribution
