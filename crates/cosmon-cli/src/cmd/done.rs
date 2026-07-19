@@ -3426,7 +3426,13 @@ fn try_merge_branch(
                 // unioning both sides and sorting by timestamp. See
                 // docs/events-jsonl-merge.md for the rationale.
                 if conflicts.iter().all(|f| is_append_only_jsonl(f))
-                    && auto_resolve_append_only_jsonl(repo_root, &conflicts).is_ok()
+                    && auto_resolve_append_only_jsonl(
+                        repo_root,
+                        &conflicts,
+                        branch,
+                        coauthor_trailers,
+                    )
+                    .is_ok()
                 {
                     return MergeOutcome::Merged;
                 }
@@ -3714,7 +3720,24 @@ fn is_append_only_jsonl(path: &str) -> bool {
 /// This must be called while git is mid-merge (`MERGE_HEAD` exists and the
 /// conflicting file has index stages 2 (ours) and 3 (theirs)). Precondition:
 /// `files` is non-empty and every entry passes [`is_append_only_jsonl`].
-fn auto_resolve_append_only_jsonl(repo_root: &Path, files: &[String]) -> anyhow::Result<()> {
+///
+/// `branch` and `coauthor_trailers` mirror the clean-merge path in
+/// [`try_merge_branch`]: the finalizing commit is a MERGE COMMIT, i.e. the
+/// trailer carrier of the trailer-carrier contract (delib-20260717-194b, F1).
+/// Finalizing with a bare `git commit --no-edit` re-uses whatever
+/// `.git/MERGE_MSG` holds — which varies with git version and
+/// `commit.cleanup` config, and (default cleanup) commits the
+/// `# Conflicts:` comment block verbatim. Under fleet parallelism this
+/// silently dropped the `Co-Authored-By` block from conflicted merges
+/// (task-20260718-7f91; incident merge of task-20260718-a550). Passing the
+/// subject and the trailer paragraph explicitly via `-m` makes the message
+/// deterministic and byte-compatible with the conflict-free path.
+fn auto_resolve_append_only_jsonl(
+    repo_root: &Path,
+    files: &[String],
+    branch: &str,
+    coauthor_trailers: &[String],
+) -> anyhow::Result<()> {
     let repo_arg = repo_root.to_string_lossy().to_string();
     for file in files {
         let ours = git_show_stage(repo_root, 2, file).unwrap_or_default();
@@ -3739,10 +3762,22 @@ fn auto_resolve_append_only_jsonl(repo_root: &Path, files: &[String]) -> anyhow:
         }
     }
 
-    // Finalize the merge commit. `--no-edit` prevents $EDITOR from firing.
-    let commit = Command::new("git")
-        .args(["-C", &repo_arg, "commit", "--no-edit"])
-        .output()?;
+    // Finalize the merge commit. Same message contract as the clean-merge
+    // path in `try_merge_branch`: with trailers configured, the subject and
+    // the trailer paragraph are passed explicitly via `-m` (never trusting
+    // `.git/MERGE_MSG`, see the function doc); with no trailers configured,
+    // `--no-edit` keeps the pre-attribution behavior byte-identical (F9).
+    // Either form prevents $EDITOR from firing.
+    let mut commit_cmd = Command::new("git");
+    commit_cmd.args(["-C", &repo_arg, "commit"]);
+    if coauthor_trailers.is_empty() {
+        commit_cmd.arg("--no-edit");
+    } else {
+        let subject = format!("Merge branch '{branch}'");
+        let trailers = coauthor_trailers.join("\n");
+        commit_cmd.args(["-m", &subject, "-m", &trailers]);
+    }
+    let commit = commit_cmd.output()?;
     if !commit.status.success() {
         return Err(anyhow::anyhow!(
             "git commit (post-auto-resolve) failed: {}",
@@ -7226,6 +7261,129 @@ mod tests {
         assert!(lines[0].contains("seed"));
         assert!(lines[1].contains("from_main"));
         assert!(lines[2].contains("from_a"));
+    }
+
+    /// Trailer-carrier contract (delib-20260717-194b, F1) on the CONFLICTED
+    /// path: when the merge conflicts on an append-only JSONL file and the
+    /// auto-resolver finalizes the merge commit, the `Co-Authored-By` block
+    /// must survive exactly as it does on the conflict-free path. Regression
+    /// for task-20260718-7f91: finalizing with a bare `git commit --no-edit`
+    /// silently dropped the trailers under fleet parallelism (incident merge
+    /// of task-20260718-a550).
+    #[test]
+    fn auto_resolved_merge_commit_carries_coauthor_trailers() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        // Both sides append to events.jsonl → guaranteed textual conflict
+        // that only the append-only auto-resolver can finalize.
+        let rel = ".cosmon/state/events.jsonl";
+        std::fs::create_dir_all(repo.join(".cosmon/state")).unwrap();
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n",
+            "seed events.jsonl",
+        );
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/c"])
+            .status
+            .success());
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n\
+             {\"timestamp\":\"2026-04-14T10:00:00Z\",\"type\":\"from_c\"}\n",
+            "append from c",
+        );
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n\
+             {\"timestamp\":\"2026-04-14T09:30:00Z\",\"type\":\"from_main\"}\n",
+            "append from main",
+        );
+
+        let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
+        let outcome = try_merge_branch(repo, "feat/c", MergeStrategy::Merge, &trailers);
+        assert!(
+            matches!(outcome, MergeOutcome::Merged),
+            "expected Merged after auto-resolution, got {outcome:?}"
+        );
+
+        // git itself must PARSE the trailer on the finalized merge commit —
+        // textual presence buried above a `# Conflicts:` block is not enough.
+        let interpreted = git(
+            repo,
+            &["log", "-1", "--format=%(trailers:key=Co-Authored-By)"],
+        );
+        let out = String::from_utf8_lossy(&interpreted.stdout);
+        assert!(
+            out.contains("Noogram (claude) <noreply@noogram.org>"),
+            "auto-resolved merge commit lost the trailer block: {out}"
+        );
+
+        // Message is byte-compatible with the conflict-free path: the
+        // default merge subject, and no committed `# Conflicts:` residue
+        // from `.git/MERGE_MSG`.
+        let body = git(repo, &["log", "-1", "--format=%B"]);
+        let body = String::from_utf8_lossy(&body.stdout);
+        assert!(
+            body.starts_with("Merge branch 'feat/c'"),
+            "unexpected merge subject: {body}"
+        );
+        assert!(
+            !body.contains("# Conflicts"),
+            "MERGE_MSG comment residue leaked into the commit: {body}"
+        );
+    }
+
+    /// The conflicted path with NO trailers configured stays byte-identical
+    /// to a pre-attribution cosmon (F9): `--no-edit`, no stamp.
+    #[test]
+    fn auto_resolved_merge_commit_without_trailers_is_unstamped() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let rel = ".cosmon/state/events.jsonl";
+        std::fs::create_dir_all(repo.join(".cosmon/state")).unwrap();
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n",
+            "seed events.jsonl",
+        );
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/d"])
+            .status
+            .success());
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n\
+             {\"timestamp\":\"2026-04-14T10:00:00Z\",\"type\":\"from_d\"}\n",
+            "append from d",
+        );
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        commit_file(
+            repo,
+            rel,
+            "{\"timestamp\":\"2026-04-14T09:00:00Z\",\"type\":\"seed\"}\n\
+             {\"timestamp\":\"2026-04-14T09:30:00Z\",\"type\":\"from_main\"}\n",
+            "append from main",
+        );
+
+        let outcome = try_merge_branch(repo, "feat/d", MergeStrategy::Merge, &[]);
+        assert!(
+            matches!(outcome, MergeOutcome::Merged),
+            "expected Merged after auto-resolution, got {outcome:?}"
+        );
+        let body = git(repo, &["log", "-1", "--format=%B"]);
+        assert!(
+            !String::from_utf8_lossy(&body.stdout).contains("Co-Authored-By"),
+            "empty trailers must not stamp the auto-resolved merge commit"
+        );
     }
 
     #[test]
