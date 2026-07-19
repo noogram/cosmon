@@ -214,6 +214,8 @@ pub mod presence_sensor;
 #[doc(hidden)]
 pub mod process;
 #[doc(hidden)]
+pub mod propel;
+#[doc(hidden)]
 pub mod provider_diversity;
 #[doc(hidden)]
 pub mod quality_band;
