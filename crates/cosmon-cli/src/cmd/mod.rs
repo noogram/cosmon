@@ -71,6 +71,7 @@ pub mod prime;
 pub mod pulse;
 pub mod purge;
 pub mod quench;
+pub mod realized_watch;
 pub mod reconcile;
 pub mod release_audit;
 pub mod replay;

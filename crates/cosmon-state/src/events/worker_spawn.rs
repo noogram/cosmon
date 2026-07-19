@@ -401,6 +401,16 @@ pub fn emit_model_observed(
 ///
 /// Best-effort: an unreadable log is treated as "nothing recorded yet" (so a
 /// first observation is still emitted), matching the trace-not-lock discipline.
+///
+/// **Atomic under concurrency** (round-4 / COND-1): the read-back + emit pair
+/// runs under an exclusive advisory `flock(2)` on a sidecar lock file next to
+/// `events.jsonl`, so two concurrent emitters (e.g. two `cs wait` processes
+/// polling the same molecule) serialize — the second sees the first's lines
+/// during its read-back and emits nothing. Without the lock the read-then-write
+/// is only sequentially idempotent and D4's "re-emit only on change" can be
+/// violated by duplicate identical lines on the journal. Lock failure degrades
+/// to the unlocked (sequentially-idempotent) behavior rather than losing the
+/// observation.
 pub fn emit_new_model_observations(
     state_dir: &Path,
     mol_id: &MoleculeId,
@@ -412,6 +422,7 @@ pub fn emit_new_model_observations(
     if observed.is_empty() {
         return;
     }
+    let _guard = ObservationEmitLock::acquire(state_dir);
     let recorded = recorded_model_observations(state_dir, mol_id, worker_id, adapter_name);
     for model in newly_observed(&recorded, observed) {
         emit_model_observed(
@@ -422,6 +433,42 @@ pub fn emit_new_model_observations(
             model.as_str(),
             observed_source,
         );
+    }
+}
+
+/// RAII guard making the dedup read-back + emission in
+/// [`emit_new_model_observations`] atomic across processes (round-4 / COND-1).
+///
+/// Holds `flock(LOCK_EX)` on `model_observed.lock` next to `events.jsonl` for
+/// the guard's lifetime. This is a *different* file from the append lock the
+/// event log itself takes per line, and it is always acquired first, so the
+/// lock order is total and deadlock-free. Best-effort: `acquire` returning
+/// `None` (unwritable dir, flock failure) means callers proceed unlocked —
+/// telemetry must never block the hot path.
+struct ObservationEmitLock {
+    file: std::fs::File,
+}
+
+impl ObservationEmitLock {
+    fn acquire(state_dir: &Path) -> Option<Self> {
+        let log_path = resolve_events_log_path(state_dir);
+        let dir = log_path.parent()?;
+        std::fs::create_dir_all(dir).ok()?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(dir.join("model_observed.lock"))
+            .ok()?;
+        fs2::FileExt::lock_exclusive(&file).ok()?;
+        Some(Self { file })
+    }
+}
+
+impl Drop for ObservationEmitLock {
+    fn drop(&mut self) {
+        // Best-effort unlock — the kernel releases on FD close regardless.
+        let _ = fs2::FileExt::unlock(&self.file);
     }
 }
 
@@ -1261,6 +1308,60 @@ mod tests {
         assert!(
             body.contains("worker_spawn_attempted"),
             "sidecar must carry the lost WS-1 envelope; observed body={body:?}"
+        );
+    }
+
+    /// Round-4 / COND-1: two emitters racing on the same observation must
+    /// yield exactly ONE `ModelObserved` line. The empirical failure this
+    /// falsifies: two concurrent `cs wait` pollers each did the (unlocked)
+    /// read-back before either wrote, and the journal ended up with two
+    /// identical lines — sequentially idempotent, but violating D4's
+    /// "re-emit only on change" cadence under concurrency. The
+    /// `ObservationEmitLock` serializes read-back + emit, so the loser of the
+    /// race sees the winner's line and stays silent.
+    #[test]
+    fn concurrent_emitters_yield_a_single_observation() {
+        use std::sync::{Arc, Barrier};
+
+        let dir = tempdir().unwrap();
+        let mol_id = mol();
+        let worker_id = wkr();
+        let observed =
+            vec![cosmon_core::model_realization::ModelId::new("claude-opus-4-8").unwrap()];
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let barrier = Arc::clone(&barrier);
+                let state_dir = dir.path().to_path_buf();
+                let mol_id = mol_id.clone();
+                let worker_id = worker_id.clone();
+                let observed = observed.clone();
+                std::thread::spawn(move || {
+                    // Maximize overlap: both emitters release together.
+                    barrier.wait();
+                    emit_new_model_observations(
+                        &state_dir,
+                        &mol_id,
+                        &worker_id,
+                        "claude",
+                        &observed,
+                        ModelObservationSource::ClaudeStreamJson,
+                    );
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let n_observed = read_envelopes(dir.path())
+            .into_iter()
+            .filter(|env| matches!(env.event, EventV2::ModelObserved { .. }))
+            .count();
+        assert_eq!(
+            n_observed, 1,
+            "concurrent emitters must serialize to exactly one ModelObserved line"
         );
     }
 }

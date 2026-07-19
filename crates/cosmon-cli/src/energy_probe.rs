@@ -149,9 +149,17 @@ pub fn capture_realized_at_completion(state_dir: &Path, mol_id: &MoleculeId) {
 /// [`capture_realized_from_cwd`] core: session-log resolution by cwd, typed
 /// parse, first-observation + on-change dedup, worker-scoped emission.
 ///
+/// **Post-mortem resolution** (round-4 / COND-1): a dead pane must not lose
+/// the observation — the worker's session JSONL is already durable on disk
+/// when the pane dies, so `turn(model) → crash → next poll` must still emit.
+/// When no pane answers, the cwd falls back to the worker's working directory
+/// recorded at dispatch on the fleet (`WorkerData::repo`, stamped by
+/// `cs tackle` when it creates the worktree), which survives the worker's
+/// death until harvest tears the state down.
+///
 /// Best-effort and cheap to call repeatedly: once the trajectory is on the
-/// wire, re-capture emits nothing (idempotent), and a dead pane / missing
-/// session resolves to a silent no-op.
+/// wire, re-capture emits nothing (idempotent), and a missing session
+/// resolves to a silent no-op.
 pub fn capture_realized_runtime(
     state_dir: &Path,
     mol_id: &MoleculeId,
@@ -161,10 +169,28 @@ pub fn capture_realized_runtime(
     let Some(worker) = last_worker_for(state_dir, mol_id) else {
         return;
     };
-    let Some(cwd) = resolve_tmux_pane_cwd(backends, &worker) else {
+    let cwd = resolve_tmux_pane_cwd(backends, &worker)
+        .or_else(|| resolve_recorded_worker_cwd(state_dir, &worker));
+    let Some(cwd) = cwd else {
         return;
     };
     capture_realized_from_cwd(state_dir, mol_id, &cwd);
+}
+
+/// The working directory `cs tackle` recorded for `worker_id` on the fleet
+/// (`WorkerData::repo`, relative to the project root) — the pane-independent
+/// join key back to the worker's session log. `None` when the worker is not
+/// on the fleet or carries no repo (e.g. already harvested).
+fn resolve_recorded_worker_cwd(state_dir: &Path, worker_id: &WorkerId) -> Option<PathBuf> {
+    use cosmon_state::StateStore as _;
+    let store = cosmon_filestore::FileStore::new(state_dir);
+    let fleet = store.load_fleet().ok()?;
+    let repo = fleet.workers.get(worker_id)?.repo.clone()?;
+    Some(match store.project_root() {
+        Some(root) => cosmon_filestore::resolve_repo_path(&repo, &root),
+        // Legacy absolute path (or rootless test layout): use as recorded.
+        None => PathBuf::from(repo),
+    })
 }
 
 /// The live working directory of a worker's tmux pane
@@ -429,7 +455,170 @@ pub fn claude_projects_dir() -> PathBuf {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Shared fixtures for the realized-model capture tests — used by this
+    //! module's tests and by `cmd::realized_watch`'s: journal seeding, a
+    //! Running molecule skeleton, crash simulation, fleet-worker registration,
+    //! and the serialized `HOME` swap (capture resolves session logs under
+    //! `$HOME`, so tests that redirect it must not overlap).
+
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes every test that swaps `HOME` to a fixture root.
+    pub(crate) static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Seed the dispatch journal: `AdapterSelected` + `WorkerSpawned`.
+    pub(crate) fn seed_dispatch(state_dir: &Path, mol: &MoleculeId, adapter: &str, worker: &str) {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: mol.clone(),
+                adapter_name: adapter.to_owned(),
+                selected_at: chrono::Utc::now(),
+                selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
+                    flag: adapter.to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: WorkerId::new(worker).unwrap(),
+                molecule: Some(mol.clone()),
+                session_name: "sess".to_owned(),
+                role: "polecat".to_owned(),
+                adapter_name: adapter.to_owned(),
+                loop_ownership: Default::default(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    /// Persist a minimal Running molecule so status-driven loops (`cs wait`,
+    /// the realized watcher) see a live run.
+    pub(crate) fn seed_running_molecule(
+        state_dir: &Path,
+        mol: &MoleculeId,
+    ) -> cosmon_filestore::FileStore {
+        use std::collections::{BTreeSet, HashMap};
+        let store = cosmon_filestore::FileStore::new(state_dir);
+        let data = cosmon_state::MoleculeData {
+            id: mol.clone(),
+            fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
+            formula_id: cosmon_core::id::FormulaId::new("task-work").unwrap(),
+            status: cosmon_core::molecule::MoleculeStatus::Running,
+            variables: HashMap::new(),
+            assigned_worker: Some(WorkerId::new("worker-1").unwrap()),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            total_steps: 1,
+            current_step: 0,
+            completed_steps: vec![],
+            collapse_reason: None,
+            collapse_cause: None,
+            collapse_reason_kind: None,
+            collapsed_step: None,
+            links: Vec::new(),
+            kind: None,
+            class: cosmon_core::molecule_class::MoleculeClass::default(),
+            typed_links: Vec::new(),
+            project_id: None,
+            assigned_role: None,
+            session_name: None,
+            tags: BTreeSet::new(),
+            escalations: Vec::new(),
+            freeze_on_last_step: false,
+            expires_at: None,
+            expiry_policy: None,
+            originating_branch: None,
+            pending_step: None,
+            merged_at: None,
+            prompt_seal: None,
+            briefing_seals: Vec::new(),
+            bootstrap_seals: Vec::new(),
+            archived: false,
+            last_progress_at: None,
+            last_output_at: None,
+            nudge_count: 0,
+            last_nudged_at: None,
+            process: None,
+            energy_budget: None,
+            stuck_at: None,
+            tackled_by: None,
+            tackled_at: None,
+        };
+        use cosmon_state::StateStore as _;
+        store.save_molecule(mol, &data).unwrap();
+        store
+    }
+
+    /// Register `worker` on the fleet with its working directory recorded
+    /// relative to the project root — exactly what `cs tackle`'s
+    /// `register_tackle_worker` persists, and the join key the post-mortem
+    /// capture falls back to when no pane answers.
+    pub(crate) fn register_fleet_worker(
+        state_dir: &Path,
+        mol: &MoleculeId,
+        worker: &str,
+        repo_rel: &str,
+    ) {
+        use cosmon_state::StateStore as _;
+        let store = cosmon_filestore::FileStore::new(state_dir);
+        let mut fleet = store.load_fleet().unwrap_or_default();
+        let mut data = cosmon_state::WorkerData::new(
+            WorkerId::new(worker).unwrap(),
+            cosmon_core::id::AgentId::new("tackle").unwrap(),
+            cosmon_core::agent::AgentRole::Implementation,
+            cosmon_core::clearance::Clearance::Write,
+            cosmon_core::worker::WorkerStatus::Active,
+        );
+        data.repo = Some(repo_rel.to_owned());
+        data.current_molecule = Some(mol.clone());
+        fleet.workers.insert(WorkerId::new(worker).unwrap(), data);
+        store.save_fleet(&fleet).unwrap();
+    }
+
+    /// Simulate the worker's death on the journal (pane died, exit 137).
+    pub(crate) fn crash_worker(state_dir: &Path, mol: &MoleculeId) {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        cosmon_state::event_log::emit_one(
+            &log,
+            EventV2::WorkerExited {
+                molecule_id: mol.clone(),
+                exit_code: Some(137),
+                reason: "pane_died".to_owned(),
+            },
+            None,
+        )
+        .unwrap();
+    }
+
+    /// Fold the molecule-scoped journal into an [`AdapterAttribution`].
+    pub(crate) fn fold_from_log(
+        state_dir: &Path,
+        mol: &MoleculeId,
+    ) -> cosmon_core::adapter_attribution::AdapterAttribution {
+        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
+        let events: Vec<EventV2> = cosmon_state::event_log::read_all(&log)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.event.molecule_id() == Some(mol))
+            .map(|e| e.event)
+            .collect();
+        cosmon_core::adapter_attribution::AdapterAttribution::fold(&events)
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use super::test_support::*;
     use super::*;
 
     #[test]
@@ -477,55 +666,6 @@ mod tests {
     // fold → `compact_cell`. Exercised for claude and codex, which resolve
     // their session by the worker's cwd. HOME is swapped to a fixture root;
     // the swap is serialized so a parallel test never sees the borrowed HOME.
-
-    use std::sync::Mutex;
-    static HOME_LOCK: Mutex<()> = Mutex::new(());
-
-    fn seed_dispatch(state_dir: &Path, mol: &MoleculeId, adapter: &str, worker: &str) {
-        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
-        cosmon_state::event_log::emit_one(
-            &log,
-            EventV2::AdapterSelected {
-                mol_id: mol.clone(),
-                adapter_name: adapter.to_owned(),
-                selected_at: chrono::Utc::now(),
-                selection_source: cosmon_core::event_v2::AdapterSelectionSource::Cli {
-                    flag: adapter.to_owned(),
-                },
-                role_hint: None,
-                loop_ownership: Default::default(),
-            },
-            None,
-        )
-        .unwrap();
-        cosmon_state::event_log::emit_one(
-            &log,
-            EventV2::WorkerSpawned {
-                worker_id: WorkerId::new(worker).unwrap(),
-                molecule: Some(mol.clone()),
-                session_name: "sess".to_owned(),
-                role: "polecat".to_owned(),
-                adapter_name: adapter.to_owned(),
-                loop_ownership: Default::default(),
-            },
-            None,
-        )
-        .unwrap();
-    }
-
-    fn fold_from_log(
-        state_dir: &Path,
-        mol: &MoleculeId,
-    ) -> cosmon_core::adapter_attribution::AdapterAttribution {
-        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
-        let events: Vec<EventV2> = cosmon_state::event_log::read_all(&log)
-            .unwrap()
-            .into_iter()
-            .filter(|e| e.event.molecule_id() == Some(mol))
-            .map(|e| e.event)
-            .collect();
-        cosmon_core::adapter_attribution::AdapterAttribution::fold(&events)
-    }
 
     #[test]
     fn capture_at_completion_claude_end_to_end() {
@@ -643,73 +783,6 @@ mod tests {
     // real capture core, then crash the worker (WorkerExited, never
     // `MoleculeCompleted`) and prove the observation is durable — with
     // `cs peek` never involved.
-
-    fn seed_running_molecule(state_dir: &Path, mol: &MoleculeId) -> cosmon_filestore::FileStore {
-        use std::collections::{BTreeSet, HashMap};
-        let store = cosmon_filestore::FileStore::new(state_dir);
-        let data = cosmon_state::MoleculeData {
-            id: mol.clone(),
-            fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
-            formula_id: cosmon_core::id::FormulaId::new("task-work").unwrap(),
-            status: cosmon_core::molecule::MoleculeStatus::Running,
-            variables: HashMap::new(),
-            assigned_worker: Some(WorkerId::new("worker-1").unwrap()),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            total_steps: 1,
-            current_step: 0,
-            completed_steps: vec![],
-            collapse_reason: None,
-            collapse_cause: None,
-            collapse_reason_kind: None,
-            collapsed_step: None,
-            links: Vec::new(),
-            kind: None,
-            class: cosmon_core::molecule_class::MoleculeClass::default(),
-            typed_links: Vec::new(),
-            project_id: None,
-            assigned_role: None,
-            session_name: None,
-            tags: BTreeSet::new(),
-            escalations: Vec::new(),
-            freeze_on_last_step: false,
-            expires_at: None,
-            expiry_policy: None,
-            originating_branch: None,
-            pending_step: None,
-            merged_at: None,
-            prompt_seal: None,
-            briefing_seals: Vec::new(),
-            bootstrap_seals: Vec::new(),
-            archived: false,
-            last_progress_at: None,
-            last_output_at: None,
-            nudge_count: 0,
-            last_nudged_at: None,
-            process: None,
-            energy_budget: None,
-            stuck_at: None,
-            tackled_by: None,
-            tackled_at: None,
-        };
-        use cosmon_state::StateStore as _;
-        store.save_molecule(mol, &data).unwrap();
-        store
-    }
-
-    fn crash_worker(state_dir: &Path, mol: &MoleculeId) {
-        let log = cosmon_state::event_log::resolve_events_log_path(state_dir);
-        cosmon_state::event_log::emit_one(
-            &log,
-            EventV2::WorkerExited {
-                molecule_id: mol.clone(),
-                exit_code: Some(137),
-                reason: "pane_died".to_owned(),
-            },
-            None,
-        )
-        .unwrap();
-    }
 
     /// Claude: the FIRST model-bearing turn is captured by the runtime poll
     /// (real `cs wait` loop, probed per tick) → the worker crashes before any
@@ -960,6 +1033,131 @@ mod tests {
             .filter(|e| matches!(e.event, EventV2::ModelObserved { .. }))
             .count();
         assert_eq!(n_observed, 0, "completion seam is a no-op for openai");
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // ---- COND-1 (round-4): post-mortem capture, crash BEFORE any tick -----
+    //
+    // The round-3 audit's strict counter-example, in the CRITICAL order the
+    // previous tests inverted: (1) the worker writes its first model-bearing
+    // turn, (2) the pane DIES — no tmux pane will ever answer again, (3) only
+    // THEN does a poll tick fire. The session JSONL is already durable on
+    // disk, so the capture must resolve it without the live pane — via the
+    // worker cwd `cs tackle` recorded on the fleet — and still emit.
+
+    /// Claude: turn → pane death → first-ever capture tick. The observation
+    /// must be emitted post-mortem through the recorded-cwd fallback (the
+    /// backends list resolves no pane, exactly like a dead pane in prod).
+    #[test]
+    fn post_mortem_capture_claude_turn_then_kill_then_capture() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20260719-4a01").unwrap();
+        // Canonical project layout: state under .cosmon/state, worker parked
+        // in .worktrees/<mol> — the repo path tackle records on the fleet.
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        // (1) The first model-bearing turn is on disk.
+        let proj = claude_projects_dir().join(sanitize_path(&wt.to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        seed_running_molecule(&state_dir, &mol);
+        seed_dispatch(&state_dir, &mol, "claude", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        // (2) The pane dies. No capture has run yet — zero observations.
+        crash_worker(&state_dir, &mol);
+
+        // (3) THEN the first tick fires. No backend can answer for the dead
+        // pane; resolution must go through the fleet-recorded cwd.
+        capture_realized_runtime(&state_dir, &mol, &[]);
+
+        let att = fold_from_log(&state_dir, &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string()
+            ]),
+            "a crash before the first tick must not lose the durable turn"
+        );
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// Codex: same turn → kill → capture order through the codex
+    /// `session_meta.payload.cwd` join — pane-independent by construction.
+    #[test]
+    fn post_mortem_capture_codex_turn_then_kill_then_capture() {
+        let _guard = HOME_LOCK.lock().unwrap();
+        let home = tempfile::TempDir::new().unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        let mol = MoleculeId::new("task-20260719-4a02").unwrap();
+        let state_dir = root.path().join(".cosmon").join("state");
+        let wt = root.path().join(".worktrees").join(mol.as_str());
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&wt).unwrap();
+
+        let sess = codex_sessions_dir().join("2026").join("07").join("19");
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(
+            sess.join("rollout-x.jsonl"),
+            format!(
+                concat!(
+                    r#"{{"type":"session_meta","payload":{{"cwd":"{cwd}","session_id":"s"}}}}"#,
+                    "\n",
+                    r#"{{"type":"turn_context","payload":{{"model":"gpt-5.6-terra"}}}}"#,
+                    "\n",
+                ),
+                cwd = wt.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        seed_running_molecule(&state_dir, &mol);
+        seed_dispatch(&state_dir, &mol, "codex", "worker-1");
+        register_fleet_worker(
+            &state_dir,
+            &mol,
+            "worker-1",
+            &format!(".worktrees/{}", mol.as_str()),
+        );
+
+        crash_worker(&state_dir, &mol);
+        capture_realized_runtime(&state_dir, &mol, &[]);
+
+        let att = fold_from_log(&state_dir, &mol);
+        assert_eq!(
+            att.realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec!["gpt-5.6-terra".to_string()]),
+            "codex post-mortem resolution must survive the dead pane"
+        );
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

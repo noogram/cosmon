@@ -311,6 +311,11 @@ class = "out_of_scope"
 reason = "worker liveness signal — worker-internal."
 
 [[verb_absent_from_thin]]
+verb = "realized-watch"
+class = "out_of_scope"
+reason = "hidden dispatch plumbing — first-turn realized-model watcher detached by cs tackle (D4 / COND-1); speaks only through events.jsonl, never operator- or tenant-invoked. Same family as cs heartbeat."
+
+[[verb_absent_from_thin]]
 verb = "topology"
 class = "out_of_scope"
 reason = "topon CLI wrapper — local code-graph tool."
