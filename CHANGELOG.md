@@ -17,6 +17,25 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+### Fixed: a worker waiting on the operator is no longer nudged toward acting
+
+- A worker that finishes its work and holds atomic questions for a human looks
+  dead on every clock cosmon owns — no progress events, a silent terminal — so
+  all three nudge channels read the deliberate pause as a stall and told it to
+  "continue execution immediately", over and over. That is not merely noise: a
+  sentence repeated indefinitely at a gated worker is slow pressure toward
+  taking the very action the gate exists to withhold.
+- `cs patrol --propel`, `cs patrol --nudge`, and the `--heal` re-engagement
+  remedy now pass through **one** admission judge instead of three copies of
+  "does this look idle?" — so a repair lands everywhere at once, which the
+  previous fix (thinking-worker spam, 0.2.1) did not. The operator gate
+  outranks every clock in it, and is recognised from either the
+  `temp:awaiting-op` tag or the durable `blocked_on.json`. A molecule that is
+  not `Running` is likewise never nudged; a `Starved` one especially, where a
+  re-prompt can compound the throttle. `--propel` now reports gated workers in
+  their own line: the one decline the operator must act on, because the
+  molecule is waiting on *them*.
+
 ## [0.2.1] — 2026-07-19
 
 ### Fixed: the Homebrew formula declared the wrong licence
