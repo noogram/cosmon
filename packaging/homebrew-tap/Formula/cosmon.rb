@@ -20,7 +20,7 @@ class Cosmon < Formula
   desc "Stateless CLI giving AI coding agents identity, lifecycle, and crash-recovery"
   homepage "https://github.com/noogram/cosmon"
   version "0.1.0"
-  license "MIT"
+  license "AGPL-3.0-only"
 
   on_macos do
     on_arm do

@@ -3254,12 +3254,11 @@ fn spawn_realized_watcher(state_dir: &Path, mol_id: &MoleculeId, worktree_path: 
     };
     let mut command = ProcessCommand::new(exe);
     command
-        .arg("realized-watch")
-        .arg(mol_id.as_str())
-        .arg("--cwd")
-        .arg(worktree_path)
-        .arg("--config")
-        .arg(state_dir)
+        .args(cosmon_cli::realized_watcher::watcher_argv(
+            mol_id.as_str(),
+            worktree_path,
+            state_dir,
+        ))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());

@@ -12,6 +12,7 @@
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
+repo_root="$(cd "$here/../.." && pwd)"
 render_from_artifacts="$here/render-tap-from-artifacts.sh"
 
 VERSION="9.9.9"
@@ -74,6 +75,19 @@ assert_pair x86_64-apple-darwin         "$SHA_X86_MACOS"
 assert_pair aarch64-unknown-linux-musl  "$SHA_ARM_LINUX"
 assert_pair x86_64-unknown-linux-musl   "$SHA_X86_LINUX"
 echo "PASS: each real digest is bound to the correct triple"
+
+# 2b. The formula published by the release path declares the workspace's
+#     effective license. Read from the root Cargo.toml so a re-license moves
+#     both together; a hardcoded copy here would just be a second thing to
+#     forget. The tap is the channel users install from — a wrong `license`
+#     line is a false claim about the binary they receive.
+ws_license="$(grep -m1 -E '^license = "' "$repo_root/Cargo.toml" | sed -E 's/^license = "(.*)"$/\1/')"
+[ -n "$ws_license" ] \
+  || { echo "FAIL: could not read license from $repo_root/Cargo.toml" >&2; exit 1; }
+formula_license="$(printf '%s\n' "$out" | grep -m1 -E '^  license "' | sed -E 's/^  license "(.*)"$/\1/')"
+[ "$formula_license" = "$ws_license" ] \
+  || { echo "FAIL: rendered license is '$formula_license', workspace is '$ws_license'" >&2; exit 1; }
+echo "PASS: released formula license matches the workspace ($ws_license)"
 
 # 3. A missing per-triple artifact fails loudly (not silently rendering an empty
 #    digest). This is the failure the original inline glue swallowed.
