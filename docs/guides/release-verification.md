@@ -43,7 +43,7 @@ For each platform target (`aarch64-apple-darwin`, `x86_64-apple-darwin`,
 
 ### Layer 1 — Homebrew already did the sha256 check
 
-`brew install cosmon/tap/cosmon` fails the install if the downloaded tarball's
+`brew install noogram/tap/cosmon` fails the install if the downloaded tarball's
 `sha256` does not match the digest pinned in the formula. That digest came from
 the signed release. You get this for free — but it only proves byte-integrity
 of the download against the formula, not provenance.
