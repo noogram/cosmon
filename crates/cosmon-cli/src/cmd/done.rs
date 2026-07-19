@@ -2026,7 +2026,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .attribution
             .coauthor_trailers(real_adapter.as_deref())
     };
-    warn_unstamped_attribution(&blocklist_cfg.attribution, &coauthor_trailers, &mut warnings);
+    warn_unstamped_attribution(
+        &blocklist_cfg.attribution,
+        &coauthor_trailers,
+        &mut warnings,
+    );
 
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
     // carry the configured provenance trailers without rewriting worker
@@ -9528,7 +9532,10 @@ mod tests {
             ..cosmon_core::config::AttributionConfig::default()
         };
         let trailers = attribution.coauthor_trailers(Some("claude"));
-        assert!(trailers.is_empty(), "empty coauthor_email must gate the facet");
+        assert!(
+            trailers.is_empty(),
+            "empty coauthor_email must gate the facet"
+        );
 
         let mut warnings = Vec::new();
         warn_unstamped_attribution(&attribution, &trailers, &mut warnings);

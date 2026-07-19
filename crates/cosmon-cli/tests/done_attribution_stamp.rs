@@ -226,7 +226,12 @@ fn cs_done_stamps_merge_commit_with_trailer_and_operator_author() {
     // per-model email).
     let trailers = git_stdout(
         repo,
-        &["log", "-1", "--format=%(trailers:key=Co-Authored-By)", "main"],
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Co-Authored-By)",
+            "main",
+        ],
     );
     assert!(
         trailers.contains("Noogram (claude) <noreply@noogram.org>"),
@@ -274,7 +279,12 @@ fn cs_done_without_adapter_witness_stamps_maker_only_and_warns() {
 
     let trailers = git_stdout(
         repo,
-        &["log", "-1", "--format=%(trailers:key=Co-Authored-By)", "main"],
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Co-Authored-By)",
+            "main",
+        ],
     );
     assert!(
         trailers.contains("Noogram <noreply@noogram.org>"),
@@ -329,7 +339,9 @@ fn cs_done_refuses_ff_only_under_configured_attribution() {
     // Nothing moved, nothing lost: main untouched, worker branch preserved.
     assert_eq!(git_stdout(repo, &["rev-parse", "main"]), main_before);
     assert!(
-        git(repo, &["rev-parse", "--verify", &branch]).status.success(),
+        git(repo, &["rev-parse", "--verify", &branch])
+            .status
+            .success(),
         "the worker branch must survive the refusal"
     );
 }
@@ -375,7 +387,9 @@ fn cs_done_fails_closed_without_operator_identity() {
         "main must not move when the identity gate refuses"
     );
     assert!(
-        git(repo, &["rev-parse", "--verify", &branch]).status.success(),
+        git(repo, &["rev-parse", "--verify", &branch])
+            .status
+            .success(),
         "the worker branch must survive the refusal"
     );
 }
@@ -411,7 +425,12 @@ fn cs_done_warns_when_attribution_has_no_coauthor_email() {
     // The merge commit is byte-honest: no trailer was stamped.
     let trailers = git_stdout(
         repo,
-        &["log", "-1", "--format=%(trailers:key=Co-Authored-By)", "main"],
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Co-Authored-By)",
+            "main",
+        ],
     );
     assert!(
         trailers.is_empty(),
