@@ -1471,20 +1471,13 @@ pub(crate) fn propel_stale_molecules(
         if !matched {
             continue;
         }
-        // Figé-mais-vivant: the process is up but its molecule's progress
-        // (`updated_at`) has been frozen past `stale_after`. The candidate
-        // is by construction a stale-Alive, so the two-coup scale reads it
-        // through the I10 demotion (Alive-older-than-TTL → Unknown): first
-        // sweep → Unresponsive (slow, we still nudge — never kill), a
-        // second consecutive frozen sweep → Stale. This is the case the
-        // claude CLI's "stay-alive on model-unavailable" produces — a
-        // false-active worker that no kernel signal will ever flag.
-        project_liveness_onto_process(store, &mid, Liveness::Alive, stale_after);
-
         // Admission control (task-20260719-00ed). Progress staleness alone
         // proved far too weak a warrant: it cannot see a worker thinking
         // inside one step, and it re-fires every pass forever. Consult the
-        // transport clock and the attempt ledger before speaking.
+        // transport clock and the attempt ledger before speaking — and
+        // *before* the liveness projection below, because condemning a
+        // working worker's process record is the same false-idle error
+        // committed in a second organ.
         let attempts = propel_attempts(molecules, &mid, now);
         let view = PropelView {
             progress_age: chrono::Duration::seconds(age),
@@ -1495,10 +1488,31 @@ pub(crate) fn propel_stale_molecules(
                 .map(|at| now.signed_duration_since(at))
                 .map(|d| d.max(chrono::Duration::zero())),
         };
-        match decide_propel(&view, stale_window) {
-            PropelDecision::Skip(PropelSkip::PaneActive { idle_secs, .. }) => {
-                sweep.active.push((wid, mid, idle_secs));
-            }
+        let decision = decide_propel(&view, stale_window);
+
+        // A thinking worker is left entirely alone: no nudge, and no witness
+        // stamped either. Its progress clock is frozen but its terminal is
+        // not, so the "figé-mais-vivant" reading below simply does not apply.
+        if let PropelDecision::Skip(PropelSkip::PaneActive { idle_secs, .. }) = decision {
+            sweep.active.push((wid, mid, idle_secs));
+            continue;
+        }
+
+        // Figé-mais-vivant: the process is up but its molecule's progress
+        // (`updated_at`) has been frozen past `stale_after` *and* its
+        // terminal has been silent at least as long. The candidate is by
+        // construction a stale-Alive, so the two-coup scale reads it
+        // through the I10 demotion (Alive-older-than-TTL → Unknown): first
+        // sweep → Unresponsive (slow, we still nudge — never kill), a
+        // second consecutive frozen sweep → Stale. This is the case the
+        // claude CLI's "stay-alive on model-unavailable" produces — a
+        // false-active worker that no kernel signal will ever flag.
+        project_liveness_onto_process(store, &mid, Liveness::Alive, stale_after);
+
+        match decision {
+            // Already handled by the early `continue` above; matched here
+            // only to keep the match exhaustive without a panic.
+            PropelDecision::Skip(PropelSkip::PaneActive { .. }) => {}
             PropelDecision::Skip(PropelSkip::Backoff {
                 since_secs,
                 window_secs,
