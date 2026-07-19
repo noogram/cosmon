@@ -2,6 +2,11 @@
 
 [Introduction](./introduction.md)
 
+# Getting Started
+
+- [Install cosmon](./getting-started/install.md)
+- [Ten minutes to cosmon](./getting-started/ten-minutes.md)
+
 # Tutorials
 
 - [Set up cosmon (prerequisites)](./tutorials/setup.md)
