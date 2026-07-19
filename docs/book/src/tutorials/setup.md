@@ -58,9 +58,21 @@ you, you never call it directly. The full resolution chain (flag →
 
 ## Step 3: Install the `cs` binary
 
+The **native install script** is the recommended route. It works on macOS and
+Linux, on arm64 and x86_64:
+
 ```sh
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
 ```
+
+If you already live in Homebrew, the tap is live and installs the *same bytes*:
+
+```sh
+brew install noogram/tap/cosmon
+```
+
+(See [Homebrew: the same artifact, a different door](#homebrew-the-same-artifact-a-different-door)
+below for why those two are byte-identical.)
 
 Then confirm:
 
@@ -121,17 +133,22 @@ release. `--dir <path>` (or `COSMON_INSTALL_DIR`) changes where `cs` lands.
 ### What you are installing, precisely
 
 The product **is** the `cs` binary published on GitHub Releases, versioned by
-the git tag it was built from. Two clarifications worth having up front:
+the git tag it was built from. One clarification worth having up front:
 
 - **The registry entries are name-holds, not the shipped binary.** If cosmon
   ever appears on crates.io, npm, or PyPI, those entries exist to hold the name
   and point back here. Do not expect `cargo install` / `npm install` /
   `pip install` to give you the released binary.
-- **Homebrew is a planned alternative to the same artifact.** The release
-  pipeline can regenerate a tap formula pointing at the very same tagged
-  tarballs, so `brew install` and this installer would deliver identical bytes.
-  That channel is built but not yet switched on, so the one-liner above is the
-  live path today.
+
+### Homebrew: the same artifact, a different door
+
+Since **v0.2.0** the tap [`noogram/homebrew-tap`](https://github.com/noogram/homebrew-tap)
+is live, so `brew install noogram/tap/cosmon` is a fully supported route — on
+macOS and on Linuxbrew, arm64 and x86_64 alike. It is not a separate build: the
+release pipeline renders the formula from the *same* tagged, signed release
+tarballs this installer downloads, and `brew` verifies the *same* sha256
+digests. Identical bytes, identical provenance; pick whichever door fits how
+you already manage tools.
 
 ### To prove where the binary came from
 
