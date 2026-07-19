@@ -134,8 +134,14 @@ class Cosmon < Formula
   end
 
   test do
-    assert_match "cs ", shell_output("#{bin}/cs --version")
-    assert_match "cosmon-remote ", shell_output("#{bin}/cosmon-remote --version")
+    # Assert the VERSION, not just the name. The previous \`assert_match "cs "\`
+    # form passed for any version at all, which is how v0.2.1 shipped a formula
+    # whose \`cosmon-remote\` answered "0.3.0" — a user who ran \`brew install\`
+    # for 0.2.1 and read 0.3.0 has every reason to think the install broke.
+    # Every shipped binary now reports the release version
+    # (packaging/shipped-binaries.txt).
+    assert_match "cs #{version}", shell_output("#{bin}/cs --version")
+    assert_match "cosmon-remote #{version}", shell_output("#{bin}/cosmon-remote --version")
   end
 end
 RUBY

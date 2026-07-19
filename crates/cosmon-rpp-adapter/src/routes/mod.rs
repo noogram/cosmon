@@ -39,10 +39,13 @@ pub use observability::{diagnostics_handler, metrics_handler};
 ///
 /// Body is minimal-plus-version:
 ///
-/// * `version` — the adapter binary's crate version, aligned on the
-///   bake tag series (`v2.0.1` ⇒ `"2.0.1"`). Before this field the
-///   deployed version could only be deduced by behavioural inference;
-///   the operator and external integrators (Tenant-Demo) both need it.
+/// * `version` — the adapter binary's version, aligned on the cosmon
+///   release version (release `v0.2.1` ⇒ `"0.2.1"`). Before this field
+///   the deployed version could only be deduced by behavioural
+///   inference; the operator and external integrators (Tenant-Demo)
+///   both need it. Since the shipped-binary alignment it is also the
+///   number on the tarball the operator downloaded and the one
+///   `cosmon-rpp-adapter --version` prints — one number, not three.
 /// * `api_surface_version` — the number of `surface_added` events the
 ///   binary was compiled with ([`crate::surface_events::SURFACE_EVENTS`]).
 ///   The data file is append-only, so the counter is monotonic: a

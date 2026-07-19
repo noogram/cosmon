@@ -156,7 +156,7 @@ async fn valid_jwt_returns_200_with_whoami_payload() {
     assert_eq!(&expires_at[16..17], ":");
 
     // Version fields (delib-20260610-9a0c, tolnay) — additive, mirror
-    // `/healthz`. `version` is the crate version (bake tag series);
+    // `/healthz`. `version` is the release version (aligned on the tag);
     // `api_surface_version` is the event-fold length, derived rather
     // than pinned so appending a surface event keeps this test green.
     assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
