@@ -1094,6 +1094,59 @@ mod tests {
         );
     }
 
+    /// The hypothesis this molecule was filed under, kept dead on purpose
+    /// (task-20260719-a850).
+    ///
+    /// The field report blamed a repository rename plus a compatibility
+    /// symlink (`cosmon-public` → `cosmon`) for a "dissonance de clé": grants
+    /// supposedly written under one key and re-read under another. They were
+    /// not — the key root is canonicalized, so reaching the repo through the
+    /// symlink and through its real path resolve to the *same* grant file. The
+    /// real cause was surface instability (see
+    /// [`prose_mentioning_a_file_does_not_enlist_it`]), which is why the gate
+    /// reported `Stale` and never `Untrusted`.
+    ///
+    /// A corollary worth recording: because one repository maps to exactly one
+    /// grant file which re-granting rewrites in place, "only ONE `.trust` file
+    /// after several `cs trust` runs" is correct behavior, not evidence of a
+    /// mis-keyed write.
+    #[cfg(unix)]
+    #[test]
+    fn symlinked_repo_path_shares_one_grant() {
+        let parent = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let real = parent.path().join("cosmon");
+        std::fs::create_dir_all(&real).unwrap();
+        make_repo(&real, "echo hi");
+        git_commit_all(&real);
+
+        // The compatibility symlink left behind by the rename.
+        let aliased = parent.path().join("cosmon-public");
+        std::os::unix::fs::symlink(&real, &aliased).unwrap();
+
+        // Grant through the SYMLINK, evaluate through the REAL path.
+        grant(&aliased, store.path()).unwrap();
+        assert_eq!(
+            evaluate(&real, store.path()),
+            TrustStatus::Trusted,
+            "a grant made through a symlinked path must be honored via the real path"
+        );
+        assert_eq!(
+            evaluate(&aliased, store.path()),
+            TrustStatus::Trusted,
+            "and via the symlinked path too"
+        );
+
+        // Exactly one grant file: both paths key to the same canonical root.
+        let grants = std::fs::read_dir(store.path()).unwrap().count();
+        assert_eq!(grants, 1, "a symlink alias must not mint a second grant");
+
+        // Re-granting is an in-place rewrite, not a new key.
+        grant(&real, store.path()).unwrap();
+        let grants = std::fs::read_dir(store.path()).unwrap().count();
+        assert_eq!(grants, 1, "re-granting rewrites the same file");
+    }
+
     #[test]
     fn grant_files_differ_by_repo_path() {
         let a = tempfile::tempdir().unwrap();
