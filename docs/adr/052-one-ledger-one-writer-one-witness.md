@@ -640,6 +640,25 @@ Recorded here as a named follow-up, not as a silent gap.
 Covered by `tests/harness/provenance-base-sync-test.sh`, including a
 replay of the eight commits that motivated the amendment.
 
+**Prior art, and a deliberate divergence from it.** ADR-105 already
+named this gap in May 2026 — its **β (back-merge)** case, diagnosed
+as "a syntactic gap: the regex set is incomplete by omission", to be
+closed by `task-20260518-1870` at a cost of "one regex extension".
+That half never landed, which is why the same shape turned CI red
+two months later.
+
+This amendment deliberately does **not** implement the remedy as
+scoped there. A regex extension alone would accept any merge whose
+subject *says* `Merge branch 'main' into feat/<mol_id>` — and a
+subject is written by whoever runs the merge, so the gate would be
+trusting the claim it is supposed to be checking. β is only a
+syntactic gap on the assumption that the subject is trustworthy
+evidence; it is not. The structural check (incoming side must sit on
+main's first-parent chain) is what actually distinguishes a base-sync
+from a merge dressed as one, and it is cheap. Recorded here because
+the divergence from ADR-105's costing is intentional, not an
+oversight.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,
