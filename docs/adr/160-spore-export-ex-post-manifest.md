@@ -1,8 +1,9 @@
 # ADR-160: `cs spore export` at conjugation — the ex-post output manifest, the RO-Crate bundle, and `cs spore verify`
 
-**Status:** Accepted (2026-07-20). Doc-only; refines
-[ADR-139](139-spore-shareable-polymer-template.md) D2 and supersedes the
-open half of [ADR-140](140-spore-format-expand-deterministic-cache-astra.md) D6.
+**Status:** Accepted (2026-07-20). Doc-only; extends
+[ADR-139](139-spore-shareable-polymer-template.md) D2 and narrows
+[ADR-140](140-spore-format-expand-deterministic-cache-astra.md) D6. It
+**supersedes nothing**: every ADR-140 decision stands as written.
 **Date:** 2026-07-20.
 **Decider:** Noogram (operator canonisation).
 **Scope discipline.** This ADR fixes the **ex-post artefact format, the export
@@ -23,8 +24,12 @@ adopted, not re-litigated, except where they collide with shipped code (§D0).
   adds the orthogonal ex-post axis to that same table.
 - [ADR-140](140-spore-format-expand-deterministic-cache-astra.md) D4 and D6:
   the honest seal-status contract, and the "a spore emits an ASTRA at share
-  time" emission point. D6 named the moment and the composition intent; it did
-  **not** pin a payload. This ADR pins it.
+  time" emission point. D6 pinned the **seed-side** payload — its deliverable
+  B, `docs/design/spore-toml-annotated.toml`, already fixes
+  `[spore.astra] profile = "ro-crate"`, and the shipped exporter writes exactly
+  that. What D6 left open is the **harvest-side** payload (nothing describes the
+  outputs) and whether a normative `astra.yaml` is also owed. This ADR closes
+  the first and answers the second.
 - [ADR-039](039-fleet-composability.md) §1: *content-addressing is the
   registry*. The output manifest is that principle applied one scale later —
   to the harvest rather than to the seed.
@@ -87,8 +92,16 @@ run.
 (the seed), and add an optional flag:
 
 ```
-cs spore export <ref> [--mission <mission-id>] [--out DIR] [--emit ro-crate|astra]
+cs spore export <ref> [--mission <mission-id>] [--out DIR] [--profile ro-crate|astra]
 ```
+
+> **Flag naming.** The new flag is `--profile`, not `--emit`. `emit` is already
+> taken, with different semantics and a different type: `[spore.astra] emit`
+> is a **boolean** governing *automatic* emission at run / mission completion,
+> explicitly not the hand-invoked verb (`spore.rs` documents this). `--profile`
+> selects the **payload format** and mirrors the stanza's own `profile` key,
+> whose sole v0 value is `ro-crate`. Reusing `emit` for an enum would collide
+> two unrelated meanings on one word.
 
 - **without `--mission`** — unchanged from today: seed description only. The
   crate carries the plan. Backward-compatible byte-for-byte on the fields it
@@ -104,8 +117,10 @@ export without `--mission` produces what it produced before.
 
 > **Deferred, and named honestly.** `cs spore export --mission <id>` cannot
 > today resolve the seed from the mission alone, because germination records no
-> link back: `germinate()` tags every nucleated molecule `temp:warm` and nothing
-> else. Closing that requires one cheap addition — germination stamps each
+> link back. `germinate()` does tag every nucleated molecule (`temp:warm`, plus
+> the `needs-review*` and `reviewer-adapter:*` tags when cross-provider review
+> is on), but **no tag or field carries the spore's bundle hash**, so a mission
+> cannot name the seed it grew from. Closing that requires one cheap addition — germination stamps each
 > molecule with a `spore:<bundle-hash>` tag, reusing the existing tag primitive
 > and no new field. Until that lands, `<ref>` stays **required**. When it lands,
 > `<ref>` becomes optional-if-`--mission`-resolves, which is again monotone.
@@ -201,6 +216,15 @@ a FAIL** — the manifest attests what it lists; unlisted bytes are simply
 unattested, and conflating "unattested" with "tampered" would make honest
 partial exports impossible. The distinction is printed, never silent.
 
+> **Deliberate divergence from the entry note.** The design note writes
+> *« tout écart = FAIL, exit ≠ 0 »*. This ADR keeps that verdict for every
+> **listed** output (rows 1-3 above are strictly fail-closed) and carves out the
+> single case of an *unlisted extra file*, which is not a divergence between
+> manifest and bytes but an absence of a claim. Under the note's literal rule a
+> recipient could never add a README to a bundle without turning it red. The
+> fail-closed property that matters — no listed row may silently pass — is
+> untouched.
+
 `verify` is the recipient's path to trust at the cost of a hash-and-compare, so
 it must run on a **bare bundle**, with no cosmon state store and no fleet. It
 reads only the bundle directory. It is the ex-post twin of `cs verify` (which
@@ -209,8 +233,14 @@ one certifies a process, the other certifies bytes.
 
 ### D3 — RO-Crate is the bundle; the manifest travels inside it
 
-The export writes a directory (zippable) conforming to RO-Crate 1.1, profile
-*Workflow Run RO-Crate*:
+**This layout is the `--mission` form only.** Without `--mission`, D0 holds and
+the output is unchanged from today: a single `ro-crate-metadata.json` written
+into `--out` (or the manifest directory), describing the seed. Adding
+`--mission` is what promotes the output from one file to a bundle directory,
+because only then is there a harvest to carry.
+
+With `--mission`, the export writes a directory (zippable) conforming to
+RO-Crate 1.1, profile *Workflow Run RO-Crate*:
 
 ```
 <mission-id>-crate/
@@ -267,16 +297,16 @@ ambiguity in that sentence, in the only honest direction available:
    becomes an hour of mapping *with their schema in hand*, and a relational
    gesture rather than a guess.
 
-Surface consequence: `cs spore export --emit astra` is **reserved and fails
+Surface consequence: `cs spore export --profile astra` is **reserved and fails
 closed** with an honest message —
 
 ```
 error: ASTRA schema not yet pinned (normative spec unread; see ADR-160 D4).
-       Use --emit ro-crate (default).
+       Use --profile ro-crate (default).
 ```
 
 Fail-closed extends into interop: a flag that would produce a plausible-looking
-file against an unread schema refuses instead. `--emit ro-crate` is the default
+file against an unread schema refuses instead. `--profile ro-crate` is the default
 and the only value that produces bytes.
 
 This **narrows** ADR-140 D6 without contradicting it: the emission *point*
@@ -306,8 +336,8 @@ them:
 ### D6 — The ex-post axis extends ADR-139 D2's state table, orthogonally
 
 ADR-139 D2 gave a spore three seal-and-sharing states: *unsealed*,
-*sealed-but-private*, *sealed-and-shared*. This ADR adds a **third axis**,
-about the harvest rather than the seed:
+*sealed-but-private*, *sealed-and-shared* — all of them properties of the
+**seed**. This ADR adds an axis about the **harvest**:
 
 | ex-post state | meaning |
 |---|---|
@@ -345,7 +375,7 @@ Resulting card:
 - **ADR-140 D6 is narrowed, not reversed.** The emission point stands; the
   payload is now the one schema we have read.
 - **The CLI surface grows by one verb and one flag.** `cs spore verify` is new;
-  `cs spore export` gains `--mission` and `--emit`. Per the repo convention,
+  `cs spore export` gains `--mission` and `--profile`. Per the repo convention,
   the implementing change must update `cs help` and `man cs` in the same PR.
 - **Rollback path:** doc-only. `git revert` of the introducing commit. Every
   cited primitive (`expand()`, the seal gate, `bundle_hash`, `build_astra`,
