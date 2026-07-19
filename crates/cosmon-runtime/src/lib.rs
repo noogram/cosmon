@@ -63,9 +63,10 @@ pub use dag_policy::{
     compile_plan, dag_depth, load_parallel_limits, load_step_models, DagPolicy, ModelResolver,
 };
 pub use guard::{
-    check_backlog, check_prior_seal, compute_sediment, current_threshold, emit_seal_bypassed,
-    is_sediment, BacklogGuardError, SealGuardError, SealReport, SedimentReport,
-    DEFAULT_STALE_THRESHOLD, SEDIMENT_AGE_HOURS, THRESHOLD_ENV_VAR,
+    check_backlog, check_backlog_with_threshold, check_prior_seal, compute_sediment,
+    current_threshold, emit_seal_bypassed, is_sediment, threshold_from, BacklogGuardError,
+    SealGuardError, SealReport, SedimentReport, DEFAULT_STALE_THRESHOLD, SEDIMENT_AGE_HOURS,
+    THRESHOLD_ENV_VAR,
 };
 pub use resident::{
     Decision, EnsembleMolecule, EnsembleSnapshot, ExitReason, ReadyFrontierScheduler,

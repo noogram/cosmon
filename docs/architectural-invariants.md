@@ -985,6 +985,27 @@ test results) at **git's pace** (commit → merge). The control plane carries
 **1-bit signals** (done/not-done) at **filesystem speed** (JSON write →
 JSON read). Neither plane should carry the other's traffic.
 
+### 8b'. Per-worktree build isolation (Cargo `target/`)
+
+Each worktree builds into its **own** `<worktree>/target/`. This is Cargo's
+default in the absence of any `CARGO_TARGET_DIR` override, and cosmon
+deliberately sets **no** such override — not in the repo's
+`.cargo/config.toml`, not in the worker spawn environment. What today looks
+like an accident of defaults is an invariant: a worker's verify gates must
+never read or write build artifacts another worker (or a concurrent
+`cs done` compile gate in the main checkout) is producing.
+
+Measured cost of the isolation (M4 Max, 2026-07-19, idea-20260718-ce52):
+~83 s cold build and ~11 GB disk per worker worktree, against hundreds of
+GB free — cheap, and reclaimed when `cs done` removes the worktree. A
+future "optimization" that points workers at a shared `target/` would trade
+that modest cost for cross-worker artifact coupling and lock contention
+(Cargo's build-dir lock serializes concurrent invocations in a shared
+target) and is forbidden without an ADR that supersedes this section. If
+cold-build time ever matters, the sanctioned lever is a shared *compiler
+cache* (e.g. sccache as `RUSTC_WRAPPER`) on top of per-worktree targets —
+shared cache, isolated artifacts — never a shared target directory.
+
 ### 8c. The Lifecycle Sequence
 
 The two planes interact through a well-defined sequence at each lifecycle

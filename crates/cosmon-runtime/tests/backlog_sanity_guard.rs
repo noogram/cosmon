@@ -20,7 +20,10 @@ use cosmon_core::id::{FleetId, FormulaId, MoleculeId};
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::tag::Tag;
 use cosmon_filestore::FileStore;
-use cosmon_runtime::{check_backlog, BacklogGuardError, DEFAULT_STALE_THRESHOLD};
+use cosmon_runtime::{
+    check_backlog, check_backlog_with_threshold, threshold_from, BacklogGuardError,
+    DEFAULT_STALE_THRESHOLD,
+};
 use cosmon_state::{MoleculeData, StateStore};
 use tempfile::TempDir;
 
@@ -146,29 +149,40 @@ fn curated_backlog_never_refuses_even_when_stale() {
 }
 
 #[test]
-fn env_override_tightens_threshold() {
+fn tightened_threshold_refuses_earlier() {
     // Safety-valve: an operator can tighten the threshold to refuse
-    // earlier. Use a fresh env-var value to avoid colliding with the
-    // process-wide environment (serde::test isolation is on opt-in in
-    // this repo; we restore afterwards).
+    // earlier. The threshold is injected through the seam production code
+    // resolves from the env — never via `std::env::set_var`, which is a
+    // process-wide write racing with the other tests in this binary
+    // (libtest runs them on parallel threads; that race was the 2026-07-18
+    // verify-gate flake, diagnosed in task-20260719-ef32).
     let tmp = TempDir::new().unwrap();
     let store = FileStore::new(tmp.path());
     store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
-    // Seed just one sediment mol.
+    // Seed just one sediment mol — clean at the default threshold of 5.
     let m = sediment_mol("task-20260414-only", 72, &[]);
     store.save_molecule(&m.id, &m).unwrap();
 
-    let prev = std::env::var("COSMON_RUNTIME_GUARD_STALE_THRESHOLD").ok();
-    // SAFETY: single-threaded test run; no concurrent env mutation.
-    unsafe { std::env::set_var("COSMON_RUNTIME_GUARD_STALE_THRESHOLD", "1") };
-    let res = check_backlog(&store, false);
-    // Restore env before asserting so a panic doesn't leak state.
-    match prev {
-        Some(v) => unsafe { std::env::set_var("COSMON_RUNTIME_GUARD_STALE_THRESHOLD", v) },
-        None => unsafe { std::env::remove_var("COSMON_RUNTIME_GUARD_STALE_THRESHOLD") },
-    }
-    match res {
-        Err(BacklogGuardError::DirtyBacklog(r)) => assert_eq!(r.count, 1),
+    match check_backlog_with_threshold(&store, false, 1) {
+        Err(BacklogGuardError::DirtyBacklog(r)) => {
+            assert_eq!(r.count, 1);
+            assert_eq!(r.threshold, 1);
+        }
         other => panic!("expected DirtyBacklog, got {other:?}"),
     }
+}
+
+#[test]
+fn threshold_env_parsing_contract() {
+    // The env → threshold resolution is a pure function; exercise the
+    // parsing contract without touching the process environment.
+    assert_eq!(threshold_from(Some("1")), 1);
+    assert_eq!(
+        threshold_from(Some("0")),
+        0,
+        "explicit 0 disables the guard"
+    );
+    assert_eq!(threshold_from(Some("garbage")), DEFAULT_STALE_THRESHOLD);
+    assert_eq!(threshold_from(Some("-3")), DEFAULT_STALE_THRESHOLD);
+    assert_eq!(threshold_from(None), DEFAULT_STALE_THRESHOLD);
 }
