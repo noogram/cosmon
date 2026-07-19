@@ -70,7 +70,12 @@ pub const BUILD_DATE: &str = env!("COSMON_BUILD_DATE");
 /// *documented* flag: `cs 0.1.0 (78a09f5c, built 2026-07-18)`.
 #[must_use]
 pub fn long_version() -> String {
-    compose_long_version(env!("CARGO_PKG_VERSION"), BUILD_SHA, BUILD_DIRTY, BUILD_DATE)
+    compose_long_version(
+        env!("CARGO_PKG_VERSION"),
+        BUILD_SHA,
+        BUILD_DIRTY,
+        BUILD_DATE,
+    )
 }
 
 /// Pure composition of the `--version` string from its stamped parts.
