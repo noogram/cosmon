@@ -317,6 +317,16 @@ fn apply_remedy(
             if !be.is_alive(&wid).unwrap_or(false) {
                 return ApplyResult::Skipped("session not alive".to_owned());
             }
+            // The healer is the third organ that can speak unbidden into a
+            // worker's terminal, and it reaches the *same* gated worker the
+            // other two must leave alone — indeed sooner, since a correctly
+            // paused worker looks to every diagnostic like a stalled one. It
+            // consults the one judge like its siblings.
+            if crate::cmd::patrol::worker_awaits_operator(store, mol) {
+                return ApplyResult::Skipped(
+                    "awaiting operator — questions pending, not nudged".to_owned(),
+                );
+            }
             let briefing = store.molecule_dir(&mol.id).join("briefing.md");
             if be.send_input(&wid, &nudge_text(&briefing)).is_ok() {
                 bump_nudge_count(store, &mol.id);

@@ -29,6 +29,8 @@ exactly once.
 - [lineage-conservation.md](lineage-conservation.md) — auto-parent conservation contract (binds ADR-037/016).
 - [runtime.md](runtime.md) — how the runtime behaves.
 - [watchdog.md](watchdog.md) — propulsion and liveness probes.
+- [guides/nudge-channels.md](guides/nudge-channels.md) — every path that speaks
+  unbidden into a live worker, and the single judge they all obey.
 - [spark-capture.md](spark-capture.md) — spark discipline (ties to the P_external axiom).
 
 ## Command references (per-feature deep dives)
