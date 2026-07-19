@@ -57,7 +57,15 @@ with yourself about what you are running:
   `Makefile` — resolved language-agnostically and *jailed* to the repository
   root. Rewriting a delegated script (not just the pointer) revokes the grant;
   a referenced file that exists but cannot be read folds a distinct fail-closed
-  sentinel rather than hashing as empty.
+  sentinel rather than hashing as empty. That transitive hop follows references
+  found in **shell-bearing values only**: prose fields (`description`,
+  `acceptance`, `title`, …) and TOML comments cannot reach `sh -c`, so a formula
+  that merely *mentions* `README.md` in its documentation does not enlist the
+  real `README.md`. The narrowing costs no coverage — prose cannot inject shell,
+  and `config.toml` and the formulas are still hashed byte-for-byte, so editing
+  even a comment still revokes the grant. It is a denylist, not an allowlist: an
+  unrecognized key counts as shell-bearing, and a surface file that does not
+  parse as TOML falls back to a full-text scan.
 
 - **The tenant installer trusts the network.** The hosted `install.sh` path for
   `cosmon-remote` fetches a binary over the wire; treat it as `curl | sh` and run

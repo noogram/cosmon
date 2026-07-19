@@ -17,6 +17,28 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+### Fixed: a trust grant no longer self-revokes on ordinary repo edits (task-20260719-a850)
+
+- **`cs trust` now holds.** The trust gate's delegated-target scan read the
+  *entire text* of `.cosmon/config.toml` and every formula looking for paths —
+  including prose. A formula step whose `description` merely mentioned
+  `README.md` enlisted the repository's real `README.md` into the hashed shell
+  surface. On an active repo that pulled in dozens of ordinary tracked files
+  (`README.md`, `Cargo.toml`, `crates/**/*.rs`, `docs/**`), so any normal edit
+  to any of them revoked every grant. In the field this read as `cs trust`
+  reporting success and the very next `cs done` refusing with
+  `repository trust is stale` — reproducibly, with nothing edited in between,
+  driving operators to `COSMON_ASSUME_TRUSTED=1`.
+- The scan now parses each surface file as TOML and follows only values that
+  can reach `sh -c`. Prose keys and TOML comments are excluded; neither can
+  inject shell, so no coverage is lost. `config.toml` and the formulas are
+  still hashed byte-for-byte, so editing a comment still revokes the grant —
+  only the *transitive* expansion narrows (26 → 4 targets on this repository).
+- The exclusion is a **denylist**: an unrecognized key counts as shell-bearing,
+  so a future executor field carrying a command is covered the day it lands
+  rather than silently reopening the RCE-by-clone hole. A surface file that
+  does not parse as TOML falls back to the previous full-text scan.
+
 ## [0.2.0] — 2026-07-19
 
 **Highlights.** This release hardens the trust perimeter and makes execution
