@@ -10,6 +10,30 @@ Every step, every decision, and every result is written to plain files under
 no account to log into: the files on disk are the whole source of truth, and the
 same record lets a fresh worker pick up exactly where a crashed one stopped.
 
+- **A social organization of agents.** A mission becomes small tasks, each with
+  a precise goal. Agents take them up side by side, wait on one another when
+  work depends on work, and cross-examine each other's findings — panels,
+  reviews, counter-arguments — before anything reaches you. Work organized at
+  scale, the way a good team organizes itself.
+- **Runs inside your perimeter.** The agent works on your corpus, on your
+  machine. Every step, every decision, and every result is written to plain
+  files on a disk you control — no server in the loop, no database, no account.
+- **You stay the judge.** The agent hands you a draft on its own branch, its
+  reasoning and evidence alongside; what the gates couldn't verify is marked
+  unverified, never silently accepted. Nothing lands until you sign off.
+- **The story can't be quietly rewritten.** Every mission leaves a complete,
+  replayable work record. If anyone — human or agent — edits it after the
+  fact, `cs verify` notices.
+- **A crash is a pause, not a loss.** Everything the agents know lives in those
+  same plain files, so a fresh worker picks up exactly where a crashed one
+  stopped.
+- **A harness over the harnesses you already use.** Claude Code, Codex, Aider,
+  and other CLI agents; hosted APIs from Anthropic, OpenAI, Google Gemini,
+  Mistral AI, Qwen, DeepSeek, GLM, Kimi, and more; or local models through
+  llama.cpp and Ollama.
+- **Federate** *(under construction)*. Several machines cooperating on one
+  mission, with no central owner.
+
 <!-- Four-band illustration (pilot → control plane → disk → federation), pitch
      spec 2026-07-15. The asset lives at docs/book/src/intro-how-cosmon-runs.svg
      so mdBook copies it into the built book alongside this page; the ./ ref
@@ -19,22 +43,6 @@ same record lets a fresh worker pick up exactly where a crashed one stopped.
        alt="Long AI-agent missions run on your machine: a pilot drives a chain of agents that write every step to the .cosmon/ folder as plain files you own; only the model call leaves your machine.">
   <img class="diag diag-dark" src="./intro-synthetic.svg" alt="">
 </figure>
-
-## What you do with it
-
-- **Compose** — break a large mission into steps and hand each to an agent.
-- **Pilot** — start, watch, nudge, and stop the agents while they run, all
-  inside your own perimeter.
-- **Audit** — read back the full record of what every agent did, from your own
-  disk, whenever you want. Each step is BLAKE3-sealed, so `cs verify` flags a
-  silent edit: tamper-evident, not tamper-proof.
-- **Federate** *(under construction)* — let several machines cooperate on one
-  mission, with no central owner.
-
-It drives the agents and models you already run: Claude Code, Codex, Aider;
-hosted APIs from Anthropic, OpenAI, Google Gemini, Mistral AI, Qwen, DeepSeek,
-GLM, or Kimi;
-or local models through llama.cpp or Ollama.
 
 ## noogram and its cosmon kernel
 
