@@ -194,8 +194,8 @@ irreversible-class block (signature/push/publish) fires `cs notify`.
 
 * `--respawn` — Auto-respawn: restart dead workers by re-creating tmux sessions
 * `--no-tmux` — Skip tmux liveness checks and respawn (state-only mode, for testing)
-* `--propel` — Propel: detect running molecules with stale progress and nudge their workers via transport. The cognitive safety net that complements the new propulsion prompt — if a worker falls silent mid-molecule, patrol re-engages it. Idempotent: nudges are cheap
-* `--stale-after <STALE_AFTER>` — Staleness threshold in seconds for `--propel` (default: 300). A molecule is considered stale if `updated_at` is older than this
+* `--propel` — Propel: detect running molecules with stale progress and nudge their workers via transport. The cognitive safety net that complements the new propulsion prompt — if a worker falls silent mid-molecule, patrol re-engages it. A worker whose terminal is still producing output is thinking, not idle, and is never nudged; a genuinely silent one is nudged with exponential backoff, at most 4 times, after which the molecule is tagged `propel-exhausted` for `--heal`
+* `--stale-after <STALE_AFTER>` — Staleness threshold in seconds for `--propel` (default: 300). A molecule is a candidate if `updated_at` is older than this AND its worker's terminal has been silent at least as long. Also the first backoff window, doubling per nudge up to 30 min
 
   Default value: `300`
 * `--nudge` — Nudge: per-step stall remediation. Like `--propel`, but classifies stalls from `last_progress_at` against the active step's `timeout_minutes` budget (M3, default 30 min) and guards idempotence — a worker won't be nudged twice within 60 s. Also covers the boot-stall class (task-20260718-ac03): a Running molecule with NO progress signal at all — the stuck bootstrap paste whose Enter was lost at spawn — is nudged once tackled more than 120 s ago. The nudge text references `briefing.md` so the re-engaged worker re-reads its contract before continuing. Increments [`cosmon_state::MoleculeData::nudge_count`] (M5)

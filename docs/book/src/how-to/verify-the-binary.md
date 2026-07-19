@@ -7,7 +7,7 @@
 
 ## Why this page exists
 
-[Installing `cs`](../tutorials/setup.md#step-3-install-the-cs-binary) checks that
+[Installing `cs`](../getting-started/install.md) checks that
 the tarball you carried home weighs what the stall *said* it would weigh — the
 `sha256` from the release's `SHA256SUMS`, served over TLS. That is real, and it
 is fail-closed: a mismatch aborts the install. But it only proves the basket
@@ -133,5 +133,5 @@ checks; a failure means either a corrupted download or a tampered artifact.
 
 ## See also
 
-- [Set up cosmon](../tutorials/setup.md) — installing `cs` in the first place.
+- [Install cosmon](../getting-started/install.md) — installing `cs` in the first place.
 - [Versioning policy](../explanation/versioning.md) — what a version tag promises.

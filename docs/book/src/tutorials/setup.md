@@ -1,10 +1,16 @@
 # Set up cosmon (prerequisites)
 
-This is the first tutorial. By the end you will have `cs` installed, a project
-that cosmon can track, and everything the next tutorial,
+This is the first tutorial. By the end you will have every prerequisite in
+place, a project that cosmon can track, and everything the next tutorial,
 [Your first molecule](./first-molecule.md), needs to actually run. If
 you skip this page, the `nucleate → tackle → wait → done` cycle in that tutorial
 will stall on a missing tool, so do it here, once.
+
+> **Just want `cs` on your machine?** Installing the binary is its own page —
+> [Install cosmon](../getting-started/install.md) — and a condensed run through
+> the whole cycle is [Ten minutes to cosmon](../getting-started/ten-minutes.md).
+> This tutorial covers what a *worker* needs around the binary (git, tmux, a
+> model backend) and does not repeat the install routes.
 
 > New to the physics-inspired names (nucleate, evolve, spore, …)? You do not need
 > them yet. This page installs tools; the vocabulary is introduced word by word
@@ -58,21 +64,17 @@ you, you never call it directly. The full resolution chain (flag →
 
 ## Step 3: Install the `cs` binary
 
-The **native install script** is the recommended route. It works on macOS and
-Linux, on arm64 and x86_64:
+If you have not installed it yet, do it now — the routes (install script,
+Homebrew, from source), version pinning, and what the one-liner actually does
+line by line all live on one page:
+
+→ **[Install cosmon](../getting-started/install.md)**
+
+The short version, on macOS or Linux:
 
 ```sh
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
 ```
-
-If you already live in Homebrew, the tap is live and installs the *same bytes*:
-
-```sh
-brew install noogram/tap/cosmon
-```
-
-(See [Homebrew: the same artifact, a different door](#homebrew-the-same-artifact-a-different-door)
-below for why those two are byte-identical.)
 
 Then confirm:
 
@@ -83,92 +85,6 @@ cs --help
 
 You should see the command groups (lifecycle, fleet, execution, …). The full
 command surface is documented in the [CLI overview](../reference/overview.md).
-
-### What that one line actually does
-
-Piping a script from the internet into your shell deserves an explanation, so
-here is the whole of it. The installer:
-
-1. **Detects your platform** from `uname -s` and `uname -m`, and maps it to one
-   of the four targets cosmon builds: macOS on arm64 or x86_64, Linux on x86_64
-   or arm64. Anything else is refused with a clear message rather than guessed
-   at. To see what it resolves for your machine without installing anything:
-   `curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --print-target`.
-2. **Downloads the release `SHA256SUMS`** from the GitHub Releases of
-   [`noogram/cosmon`](https://github.com/noogram/cosmon/releases). That file is
-   the source of truth for both the exact tarball name and its digest, which is
-   how the installer can ask for `latest` without knowing the version string up
-   front.
-3. **Downloads the tarball** for your target over HTTPS (`--proto '=https'
-   --tlsv1.2`), using `curl` or `wget`, whichever you have.
-4. **Verifies the sha256** of what it downloaded against `SHA256SUMS`. This leg
-   is **fail-closed**: a mismatch, a missing digest, or no `sha256sum`/`shasum`
-   on the box all abort the install rather than proceeding. Nothing is written
-   to your `PATH` before the digest matches.
-5. **Unpacks and installs** `cs` into `~/.local/bin`, falling back to
-   `/usr/local/bin` if that directory is not writable. The tarball also carries
-   `cosmon-remote` — the connector for driving a remote cosmon service — and the
-   installer places it in the same directory, so one command gives you both
-   laptop tools. If the install directory is not on your `PATH`, it says so and
-   prints the `export PATH=…` line to add.
-
-It carries no secret and needs no privilege beyond writing to that one
-directory.
-
-### Choosing a version
-
-The default is the **latest** release. To pin a specific one, either flag or
-environment works:
-
-```sh
-curl -fsSL https://noogram.org/cosmon/install.sh | sh -s -- --version v0.1.0
-# or
-curl -fsSL https://noogram.org/cosmon/install.sh | COSMON_VERSION=v0.1.0 sh
-```
-
-`v0.1.0` is the tag format the installer expects, shown here as an example —
-pinning any specific version requires that tag to actually exist as a published
-release. `--dir <path>` (or `COSMON_INSTALL_DIR`) changes where `cs` lands.
-
-### What you are installing, precisely
-
-The product **is** the `cs` binary published on GitHub Releases, versioned by
-the git tag it was built from. One clarification worth having up front:
-
-- **The registry entries are name-holds, not the shipped binary.** If cosmon
-  ever appears on crates.io, npm, or PyPI, those entries exist to hold the name
-  and point back here. Do not expect `cargo install` / `npm install` /
-  `pip install` to give you the released binary.
-
-### Homebrew: the same artifact, a different door
-
-Since **v0.2.0** the tap [`noogram/homebrew-tap`](https://github.com/noogram/homebrew-tap)
-is live, so `brew install noogram/tap/cosmon` is a fully supported route — on
-macOS and on Linuxbrew, arm64 and x86_64 alike. It is not a separate build: the
-release pipeline renders the formula from the *same* tagged, signed release
-tarballs this installer downloads, and `brew` verifies the *same* sha256
-digests. Identical bytes, identical provenance; pick whichever door fits how
-you already manage tools.
-
-### To prove where the binary came from
-
-The installer's sha256 check proves the bytes match the digest **the release
-published**. It does not, on its own, prove *who produced* that release — that
-proof is a cryptographic signature check you run once, deliberately, and it is
-worth doing. See
-[Verify the binary's provenance](../how-to/verify-the-binary.md).
-
-### Fallback: build from source
-
-If you would rather compile it yourself — or you are on a platform outside the
-four release targets — build from the cosmon repository:
-
-```sh
-git clone https://github.com/noogram/cosmon && cd cosmon
-cargo install --path crates/cosmon-cli --locked
-```
-
-Re-run `cs --help` afterwards to confirm it landed on your `PATH`.
 
 ## Step 4: Initialise a project
 

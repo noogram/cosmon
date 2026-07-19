@@ -98,6 +98,8 @@ fn mol(id: &str, status: MoleculeStatus, stuck: bool) -> MoleculeData {
         last_output_at: None,
         nudge_count: 0,
         last_nudged_at: None,
+        propel_count: 0,
+        last_propelled_at: None,
         process: None,
         energy_budget: None,
         stuck_at: if stuck { Some(now) } else { None },

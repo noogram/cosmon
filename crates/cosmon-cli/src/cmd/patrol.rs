@@ -23,6 +23,7 @@ use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::patrol::{PatrolAction, PatrolReport};
 use cosmon_core::process::project_process_status;
+use cosmon_core::propel::{decide_propel, PropelDecision, PropelSkip, PropelView};
 use cosmon_core::run_state::{BranchState, Liveness, Witness};
 use cosmon_core::tag::Tag;
 use cosmon_core::transport::TransportBackend;
@@ -33,7 +34,7 @@ use cosmon_core::worker::{
 use cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked;
 use cosmon_state::{event_log, Fleet, MoleculeData, MoleculeFilter, StateStore};
 use cosmon_transport::claude::ADAPTER_NAME as CLAUDE_ADAPTER;
-use cosmon_transport::registry::{default_registry, pane_current_command};
+use cosmon_transport::registry::{default_registry, pane_current_command, pane_idle_seconds};
 use cosmon_transport::TmuxBackend;
 
 use super::Context;
@@ -53,12 +54,17 @@ pub struct Args {
     /// Propel: detect running molecules with stale progress and nudge their
     /// workers via transport. The cognitive safety net that complements
     /// the new propulsion prompt — if a worker falls silent mid-molecule,
-    /// patrol re-engages it. Idempotent: nudges are cheap.
+    /// patrol re-engages it. A worker whose terminal is still producing
+    /// output is thinking, not idle, and is never nudged; a genuinely silent
+    /// one is nudged with exponential backoff, at most 4 times, after which
+    /// the molecule is tagged `propel-exhausted` for `--heal`.
     #[arg(long)]
     pub propel: bool,
 
     /// Staleness threshold in seconds for `--propel` (default: 300).
-    /// A molecule is considered stale if `updated_at` is older than this.
+    /// A molecule is a candidate if `updated_at` is older than this AND its
+    /// worker's terminal has been silent at least as long. Also the first
+    /// backoff window, doubling per nudge up to 30 min.
     #[arg(long, default_value_t = 300)]
     pub stale_after: u64,
 
@@ -567,7 +573,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             args.stale_after,
         )
     } else {
-        Vec::new()
+        PropelSweep::default()
     };
 
     // Nudge sweep (delib-20260420-1b02 M4) — per-step stall classifier
@@ -756,12 +762,43 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             output["propel"] = serde_json::json!({
                 "running_molecules": running_molecule_count,
                 "stale_after_seconds": args.stale_after,
+                "max_attempts": cosmon_core::propel::PROPEL_MAX_ATTEMPTS,
                 "propelled": propelled
+                    .propelled
                     .iter()
                     .map(|(w, m, age)| serde_json::json!({
                         "worker": w.as_str(),
                         "molecule": m.as_str(),
                         "stale_seconds": age,
+                    }))
+                    .collect::<Vec<_>>(),
+                // Declined candidates, each with the clock that declined it.
+                "active": propelled
+                    .active
+                    .iter()
+                    .map(|(w, m, idle)| serde_json::json!({
+                        "worker": w.as_str(),
+                        "molecule": m.as_str(),
+                        "pane_idle_seconds": idle,
+                    }))
+                    .collect::<Vec<_>>(),
+                "deferred": propelled
+                    .deferred
+                    .iter()
+                    .map(|(w, m, remaining)| serde_json::json!({
+                        "worker": w.as_str(),
+                        "molecule": m.as_str(),
+                        "next_nudge_in_seconds": remaining,
+                    }))
+                    .collect::<Vec<_>>(),
+                "escalated": propelled
+                    .escalated
+                    .iter()
+                    .map(|(w, m, attempts)| serde_json::json!({
+                        "worker": w.as_str(),
+                        "molecule": m.as_str(),
+                        "attempts": attempts,
+                        "tag": PROPEL_EXHAUSTED_TAG,
                     }))
                     .collect::<Vec<_>>(),
             });
@@ -1251,11 +1288,7 @@ fn print_auto_transitioned_report(molecules: &[MoleculeId], auto_collapse: bool)
 /// Print the propel section of the patrol report with explicit no-op
 /// messaging. Without this, a patrol loop with nothing to nudge looked
 /// identical to a patrol loop that had no running molecules at all.
-fn print_propel_report(
-    running_count: usize,
-    stale_after: u64,
-    propelled: &[(WorkerId, cosmon_core::id::MoleculeId, i64)],
-) {
+fn print_propel_report(running_count: usize, stale_after: u64, sweep: &PropelSweep) {
     println!();
     if running_count == 0 {
         println!(
@@ -1264,7 +1297,8 @@ fn print_propel_report(
         );
         return;
     }
-    if propelled.is_empty() {
+    let declined = sweep.active.len() + sweep.deferred.len() + sweep.escalated.len();
+    if sweep.propelled.is_empty() && declined == 0 {
         println!(
             "  {} {running_count} running molecule(s), all fresh (<{stale_after}s)",
             "PROPEL".cyan().bold()
@@ -1274,10 +1308,25 @@ fn print_propel_report(
     println!(
         "  {} {} worker(s) propelled ({running_count} running, threshold {stale_after}s):",
         "PROPEL".cyan().bold(),
-        propelled.len(),
+        sweep.propelled.len(),
     );
-    for (wid, mid, age) in propelled {
+    for (wid, mid, age) in &sweep.propelled {
         println!("    - {wid} ← {mid} (stale {age}s)");
+    }
+    // The declined lines are the point of the 2026-07-19 repair: a worker
+    // that is merely thinking must be visibly *left alone*, not silently
+    // omitted, or the next regression looks like a quiet patrol.
+    for (wid, mid, idle) in &sweep.active {
+        println!("    · {wid} ← {mid} (working — pane active {idle}s ago, not nudged)");
+    }
+    for (wid, mid, remaining) in &sweep.deferred {
+        println!("    · {wid} ← {mid} (backoff — next nudge in {remaining}s)");
+    }
+    for (wid, mid, attempts) in &sweep.escalated {
+        println!(
+            "    {} {wid} ← {mid} ({attempts} nudges ignored — tagged `{PROPEL_EXHAUSTED_TAG}` for `cs patrol --heal`)",
+            "!".yellow().bold()
+        );
     }
 }
 
@@ -1340,18 +1389,53 @@ pub(crate) fn find_stale_running_molecules(
 /// reporting its own version as the pane `comm` (e.g. `2.1.175`,
 /// observed 2026-06-12). The C6 `--adapter` flag plumbs the per-worker
 /// name through without further refactor here.
+/// The outcome of one `--propel` sweep, split by what admission control
+/// ([`cosmon_core::propel::decide_propel`]) decided for each stale candidate.
+///
+/// Before the 2026-07-19 repair this was a bare `Vec` of propelled workers,
+/// which made the sweep's two failure modes invisible: a nudge sent to a
+/// working worker and a nudge sent for the ninth time both showed up as an
+/// ordinary success line. Each declined candidate is now reported in its own
+/// bucket so the spam, if it ever returns, is legible in the report itself.
+#[derive(Debug, Default)]
+pub(crate) struct PropelSweep {
+    /// Workers actually nudged this pass: `(worker, molecule, stale_seconds)`.
+    pub(crate) propelled: Vec<(WorkerId, MoleculeId, i64)>,
+    /// Stale-by-progress candidates whose terminal was recently active — i.e.
+    /// thinking, not idle: `(worker, molecule, pane_idle_seconds)`.
+    pub(crate) active: Vec<(WorkerId, MoleculeId, i64)>,
+    /// Candidates whose backoff window has not elapsed:
+    /// `(worker, molecule, seconds_remaining)`.
+    pub(crate) deferred: Vec<(WorkerId, MoleculeId, i64)>,
+    /// Candidates that spent the attempt ceiling; patrol stopped nudging and
+    /// tagged them for the healer: `(worker, molecule, attempts)`.
+    pub(crate) escalated: Vec<(WorkerId, MoleculeId, u32)>,
+}
+
+/// Tag stamped on a molecule whose propulsion attempts are exhausted, so
+/// `cs patrol --heal` and a human triage query can find it.
+///
+/// A tag rather than a tenth nudge: four spaced sentences that changed nothing
+/// mean the fault is structural, and repeating the sentence is the one remedy
+/// already proven not to work.
+pub(crate) const PROPEL_EXHAUSTED_TAG: &str = "propel-exhausted";
+
 pub(crate) fn propel_stale_molecules(
     store: &dyn StateStore,
     molecules: &[MoleculeData],
     fleet: &Fleet,
     backend: Option<&TmuxBackend>,
     stale_after: u64,
-) -> Vec<(WorkerId, cosmon_core::id::MoleculeId, i64)> {
-    let Some(be) = backend else { return Vec::new() };
-    let candidates = find_stale_running_molecules(molecules, fleet, stale_after, Utc::now());
+) -> PropelSweep {
+    let Some(be) = backend else {
+        return PropelSweep::default();
+    };
+    let now = Utc::now();
+    let candidates = find_stale_running_molecules(molecules, fleet, stale_after, now);
     let registry = default_registry();
     let adapter_name = CLAUDE_ADAPTER;
-    let mut propelled = Vec::new();
+    let stale_window = chrono::Duration::seconds(i64::try_from(stale_after).unwrap_or(i64::MAX));
+    let mut sweep = PropelSweep::default();
 
     for (wid, mid, age) in candidates {
         if !be.is_alive(&wid).unwrap_or(false) {
@@ -1387,22 +1471,151 @@ pub(crate) fn propel_stale_molecules(
         if !matched {
             continue;
         }
+        // Admission control (task-20260719-00ed). Progress staleness alone
+        // proved far too weak a warrant: it cannot see a worker thinking
+        // inside one step, and it re-fires every pass forever. Consult the
+        // transport clock and the attempt ledger before speaking — and
+        // *before* the liveness projection below, because condemning a
+        // working worker's process record is the same false-idle error
+        // committed in a second organ.
+        let attempts = propel_attempts(molecules, &mid, now);
+        let view = PropelView {
+            progress_age: chrono::Duration::seconds(age),
+            pane_idle: pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds),
+            attempts: attempts.count,
+            since_last_propel: attempts
+                .last_at
+                .map(|at| now.signed_duration_since(at))
+                .map(|d| d.max(chrono::Duration::zero())),
+        };
+        let decision = decide_propel(&view, stale_window);
+
+        // A thinking worker is left entirely alone: no nudge, and no witness
+        // stamped either. Its progress clock is frozen but its terminal is
+        // not, so the "figé-mais-vivant" reading below simply does not apply.
+        if let PropelDecision::Skip(PropelSkip::PaneActive { idle_secs, .. }) = decision {
+            sweep.active.push((wid, mid, idle_secs));
+            continue;
+        }
+
         // Figé-mais-vivant: the process is up but its molecule's progress
-        // (`updated_at`) has been frozen past `stale_after`. The candidate
-        // is by construction a stale-Alive, so the two-coup scale reads it
+        // (`updated_at`) has been frozen past `stale_after` *and* its
+        // terminal has been silent at least as long. The candidate is by
+        // construction a stale-Alive, so the two-coup scale reads it
         // through the I10 demotion (Alive-older-than-TTL → Unknown): first
         // sweep → Unresponsive (slow, we still nudge — never kill), a
         // second consecutive frozen sweep → Stale. This is the case the
         // claude CLI's "stay-alive on model-unavailable" produces — a
         // false-active worker that no kernel signal will ever flag.
         project_liveness_onto_process(store, &mid, Liveness::Alive, stale_after);
-        if be.send_input(&wid, PROPULSION_NUDGE).is_ok() {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let _ = be.send_input(&wid, "");
-            propelled.push((wid, mid, age));
+
+        match decision {
+            // Already handled by the early `continue` above; matched here
+            // only to keep the match exhaustive without a panic.
+            PropelDecision::Skip(PropelSkip::PaneActive { .. }) => {}
+            PropelDecision::Skip(PropelSkip::Backoff {
+                since_secs,
+                window_secs,
+                ..
+            }) => {
+                sweep
+                    .deferred
+                    .push((wid, mid, (window_secs - since_secs).max(0)));
+            }
+            PropelDecision::Escalate { attempts } => {
+                mark_propel_exhausted(store, &mid);
+                sweep.escalated.push((wid, mid, attempts));
+            }
+            PropelDecision::Nudge { attempt, .. } => {
+                if be.send_input(&wid, PROPULSION_NUDGE).is_ok() {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                    let _ = be.send_input(&wid, "");
+                    record_propel(store, &mid, attempt, now);
+                    sweep.propelled.push((wid, mid, age));
+                }
+            }
         }
     }
-    propelled
+    sweep
+}
+
+/// The propulsion attempt ledger for one molecule, as of `now`.
+#[derive(Debug, Clone, Copy, Default)]
+struct PropelAttempts {
+    /// Nudges delivered for the *current* stall.
+    count: u32,
+    /// When the last of them was sent.
+    last_at: Option<chrono::DateTime<Utc>>,
+}
+
+/// Read a molecule's propulsion ledger, **resetting it when the molecule made
+/// progress since the last nudge**.
+///
+/// The reset is what keeps the backoff honest across stalls. `propel_count` is
+/// a per-stall register, not a lifetime total: a molecule that stalled, was
+/// nudged three times, recovered, and stalled again an hour later deserves a
+/// prompt first nudge — not the 30-minute window its old count would impose.
+/// Progress is `updated_at` moving past `last_propelled_at`, which is exactly
+/// why [`record_propel`] must never touch `updated_at`.
+fn propel_attempts(
+    molecules: &[MoleculeData],
+    mid: &MoleculeId,
+    _now: chrono::DateTime<Utc>,
+) -> PropelAttempts {
+    let Some(mol) = molecules.iter().find(|m| &m.id == mid) else {
+        return PropelAttempts::default();
+    };
+    let Some(last_at) = mol.last_propelled_at else {
+        return PropelAttempts::default();
+    };
+    if mol.updated_at > last_at {
+        // The worker moved after we last spoke: this is a fresh stall.
+        return PropelAttempts::default();
+    }
+    PropelAttempts {
+        count: mol.propel_count,
+        last_at: Some(last_at),
+    }
+}
+
+/// Persist one delivered nudge into the molecule's ledger.
+///
+/// Deliberately does **not** advance `updated_at`: a nudge is something patrol
+/// did *to* the worker, not progress the worker made. Bumping `updated_at`
+/// here would mark the molecule fresh, disqualify it from the next sweep, and
+/// then — one threshold later — present it as a brand-new stall with a
+/// zeroed ledger, resurrecting the unbounded nudging this repair removes.
+///
+/// Best-effort: a load/save failure is swallowed, matching the rest of the
+/// patrol's writer-of-last-resort discipline. The cost of a lost write is one
+/// extra nudge, never a wedged sweep.
+fn record_propel(
+    store: &dyn StateStore,
+    mid: &MoleculeId,
+    attempt: u32,
+    now: chrono::DateTime<Utc>,
+) {
+    let Ok(mut mol) = store.load_molecule(mid) else {
+        return;
+    };
+    mol.propel_count = attempt;
+    mol.last_propelled_at = Some(now);
+    let _ = store.save_molecule(mid, &mol);
+}
+
+/// Tag a molecule whose propulsion attempts are spent so the healer and the
+/// operator can see it without re-deriving the ledger. Idempotent — the tag is
+/// a set member, so a repeated sweep re-writes nothing.
+fn mark_propel_exhausted(store: &dyn StateStore, mid: &MoleculeId) {
+    let Ok(mut mol) = store.load_molecule(mid) else {
+        return;
+    };
+    let Ok(tag) = Tag::new(PROPEL_EXHAUSTED_TAG) else {
+        return;
+    };
+    if mol.tags.insert(tag) {
+        let _ = store.save_molecule(mid, &mol);
+    }
 }
 
 /// Project an external liveness observation onto a stale molecule's
@@ -2713,6 +2926,8 @@ mod tests {
             last_output_at: None,
             nudge_count: 0,
             last_nudged_at: None,
+            propel_count: 0,
+            last_propelled_at: None,
             process: None,
             energy_budget: None,
             stuck_at: None,
@@ -3118,6 +3333,79 @@ mod tests {
         mol.updated_at = Utc::now() - chrono::Duration::seconds(9999);
         let stale = find_stale_running_molecules(&[mol], &fleet, 300, Utc::now());
         assert!(stale.is_empty());
+    }
+
+    // --- propulsion ledger: the backoff's memory (task-20260719-00ed) ----
+    //
+    // `decide_propel` itself is covered in `cosmon_core::propel`. What is
+    // testable only here is the *reset rule*: the ledger must forget its
+    // attempts the moment the molecule makes progress, or a molecule that
+    // stalled once would carry a 30-minute backoff into every later stall.
+
+    #[test]
+    fn propel_ledger_starts_empty_for_a_never_propelled_molecule() {
+        let mol = make_stale_molecule("cs-20260719-0001", "w1", 600);
+        let ledger = propel_attempts(std::slice::from_ref(&mol), &mol.id, Utc::now());
+        assert_eq!(ledger.count, 0);
+        assert!(ledger.last_at.is_none());
+    }
+
+    #[test]
+    fn propel_ledger_remembers_attempts_while_the_molecule_stays_frozen() {
+        let now = Utc::now();
+        let mut mol = make_stale_molecule("cs-20260719-0002", "w1", 600);
+        // Frozen: the last nudge came *after* the last progress.
+        mol.updated_at = now - chrono::Duration::seconds(600);
+        mol.propel_count = 2;
+        mol.last_propelled_at = Some(now - chrono::Duration::seconds(120));
+        let ledger = propel_attempts(std::slice::from_ref(&mol), &mol.id, now);
+        assert_eq!(ledger.count, 2);
+        assert_eq!(ledger.last_at, mol.last_propelled_at);
+    }
+
+    #[test]
+    fn propel_ledger_resets_once_the_molecule_makes_progress() {
+        let now = Utc::now();
+        let mut mol = make_stale_molecule("cs-20260719-0003", "w1", 400);
+        // The worker moved after the last nudge, then went quiet again: this
+        // is a *new* stall and deserves a prompt first nudge, not the old
+        // window.
+        mol.propel_count = 3;
+        mol.last_propelled_at = Some(now - chrono::Duration::seconds(900));
+        mol.updated_at = now - chrono::Duration::seconds(400);
+        let ledger = propel_attempts(std::slice::from_ref(&mol), &mol.id, now);
+        assert_eq!(ledger.count, 0);
+        assert!(ledger.last_at.is_none());
+    }
+
+    /// A worker that is thinking — progress clock cold, terminal warm — is
+    /// admitted by `find_stale_running_molecules` (it only knows the control
+    /// plane) and then *declined* by admission control. This is the exact
+    /// 2026-07-19 shape: nine nudges to a worker rendering `Cultivating…`.
+    #[test]
+    fn thinking_worker_is_a_stale_candidate_but_never_nudged() {
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("w1", DesiredState::Running);
+        fleet.workers.insert(wid, w);
+        let mol = make_stale_molecule("cs-20260719-0004", "w1", 644);
+
+        // The control plane alone says "stale" — which is why the pre-fix
+        // sweep nudged it.
+        let candidates =
+            find_stale_running_molecules(std::slice::from_ref(&mol), &fleet, 300, Utc::now());
+        assert_eq!(candidates.len(), 1);
+
+        // The transport clock overrides that verdict.
+        let view = PropelView {
+            progress_age: chrono::Duration::seconds(644),
+            pane_idle: Some(chrono::Duration::seconds(2)),
+            attempts: 0,
+            since_last_propel: None,
+        };
+        assert!(matches!(
+            decide_propel(&view, chrono::Duration::seconds(300)),
+            PropelDecision::Skip(PropelSkip::PaneActive { .. })
+        ));
     }
 
     // --- silence-detect: heartbeat absence (pure logic) --------------

@@ -1,0 +1,34 @@
+# Conformance markers for the PUBLICLY SERVED install.sh.
+#
+# Each non-comment line is a substring that MUST appear in the bytes actually
+# served at the public one-liner endpoint. This is the *semantic* floor of the
+# drift check in scripts/release/check-install-drift.sh — it names, in human
+# terms, WHICH capability a stale served copy has silently dropped, instead of
+# only printing an anonymous diff.
+#
+# Why this file exists (both incidents were silent):
+#   1. the gnu→musl target fix had to be re-synced to the served copy by hand;
+#   2. v0.2.0 shipped the cosmon-remote connector correctly (signed assets on
+#      all four triples, client tarball verifiably carrying BOTH binaries), but
+#      the SERVED installer had zero references to cosmon-remote — so a fresh
+#      one-liner install placed `cs` and silently discarded the connector, and
+#      the documented remote-connect workflow stayed injouable from a fresh
+#      public install even though the release itself was correct.
+#
+# INVARIANT: every marker here must also be present in the canonical
+# infra/install/install.sh. The checker asserts that too, so a marker can never
+# rot into a claim the source itself no longer makes.
+#
+# Add a line when a capability becomes load-bearing for a fresh public install.
+
+# ── the connector must be placed, not silently dropped (incident 2) ──────────
+cosmon-remote
+${tmp}/cosmon-remote
+
+# ── static-musl Linux targets, not glibc (incident 1) ────────────────────────
+x86_64-unknown-linux-musl
+aarch64-unknown-linux-musl
+
+# ── the non-negotiable installer spine ───────────────────────────────────────
+detect_target
+SHA256SUMS

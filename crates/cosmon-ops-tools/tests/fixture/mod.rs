@@ -76,6 +76,8 @@ fn make_molecule(id: &str, status: &str, tags: &[&str]) -> MoleculeData {
         last_output_at: None,
         nudge_count: 0,
         last_nudged_at: None,
+        propel_count: 0,
+        last_propelled_at: None,
         process: None,
         energy_budget: None,
         stuck_at: None,
