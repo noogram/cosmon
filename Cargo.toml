@@ -105,14 +105,32 @@ members = [
 # path for the "local-first autonomy" story will be reconsidered separately.
 
 [workspace.package]
-# The workspace version is the **user-facing `cs` CLI version** — the only
-# version a cosmon user ever sees (`cs --version`) and the contract the
-# `v0.1.0` git tag and the CHANGELOG `[0.1.0]` heading seal. Only the crates
-# that opt in with `version.workspace = true` (today: `cosmon-cli`) inherit it;
-# library crates are internal-only and carry their own independent versions
-# (ADR forgemaster B6 — do NOT force-synchronize the workspace, the CLI binary
-# version is the pinned contract, the libraries are not). See
-# task-20260610-ccce version-cut-report.md for the audit table.
+# The workspace version is the **release version** — the version a cosmon user
+# downloads, and the contract the `vX.Y.Z` git tag, the release asset filenames
+# and the CHANGELOG heading seal. The rule, and the line it is drawn on:
+#
+#   A crate that SHIPS A USER-FACING BINARY in a release artifact opts in with
+#   `version.workspace = true`. A genuinely internal LIBRARY crate keeps its
+#   own independent semver.
+#
+# Shipped-binary crates today (`.github/workflows/release.yml`, `BINS=`):
+#   cosmon-cli          → `cs`                (pilot tarball + brew tap)
+#   cosmon-remote       → `cosmon-remote`     (pilot tarball, task-20260718-ff92)
+#   cosmon-rpp-adapter  → `cosmon-rpp-adapter` (service tarball, task-20260717-c487)
+#   cosmon-oidc-testkit → `cs-oidc-mock`      (service tarball, task-20260717-c487)
+#
+# This is ADR forgemaster B6 restored, not reversed. B6's rule was "the version
+# a user sees is the pinned contract, the libraries are not"; its *premise* was
+# that `cs` is the only binary a user ever sees. c487 and ff92 invalidated that
+# premise — the installer's own "Next steps" tells the user to run
+# `cosmon-remote --version`. B6 still forbids force-synchronizing the whole
+# workspace, and we do not: the ~35 library crates keep independent versions.
+#
+# The invariant is enforced, not merely documented: the release smoke test
+# asserts every shipped binary's `--version` equals the release tag
+# (`scripts/release-version-conformance.sh`). Both prior packaging defects
+# (gnu-vs-musl, the missing connector) shipped because nothing checked.
+# See task-20260610-ccce version-cut-report.md for the library audit table.
 version = "0.2.1"
 rust-version = "1.88"
 # Default cosmon licence is AGPL-3.0-only (core, runtime, end-to-end binaries).

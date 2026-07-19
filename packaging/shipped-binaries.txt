@@ -1,0 +1,33 @@
+# Canon of USER-FACING BINARIES shipped in a cosmon release.
+#
+# ONE declaration, three consumers:
+#   1. .github/workflows/release.yml — builds and packages exactly these.
+#   2. scripts/release-version-conformance.sh — asserts each installed binary's
+#      `--version` equals the release tag.
+#   3. crates/cosmon-cli/tests/shipped_binary_version_alignment.rs — asserts each
+#      owning crate opts into `version.workspace = true`, and that release.yml's
+#      `BINS=` line has not drifted from this file.
+#
+# WHY this file exists. The `[workspace.package]` doctrine comment in the root
+# Cargo.toml said "today: cosmon-cli" and called the other crates internal-only.
+# That stayed true for exactly as long as `cs` was the only binary a user saw.
+# task-20260717-c487 shipped cosmon-rpp-adapter + cs-oidc-mock, task-20260718-ff92
+# shipped cosmon-remote, and neither updated the comment — so a fresh install of
+# v0.2.1 handed users a binary announcing `cosmon-remote 0.3.0`, which reads as a
+# broken install. Prose drifts silently; a canon three tools read does not.
+#
+# FORMAT: one row per shipped binary, whitespace-separated.
+#   <binary-name>  <owning-crate>  <tarball>
+# `#` starts a comment. Blank lines ignored.
+#
+# Adding a row is the whole gesture for shipping a new binary: the alignment test
+# then REQUIRES the owning crate to carry `version.workspace = true`, and the
+# conformance script starts asserting its `--version` at release time.
+#
+# A crate that ships NO user-facing binary must NOT appear here — it keeps its own
+# independent semver (ADR forgemaster B6; the ~35 library crates are unaffected).
+
+cs                  cosmon-cli           client
+cosmon-remote       cosmon-remote        client
+cosmon-rpp-adapter  cosmon-rpp-adapter   service
+cs-oidc-mock        cosmon-oidc-testkit  service

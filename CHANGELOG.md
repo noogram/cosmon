@@ -5,17 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The pinned contract is the **`cs` CLI surface** — the version printed by
-`cs --version`, sealed by the matching git tag (`vX.Y.Z`) and the section
-heading below. Library crates inside the workspace (`cosmon-core`,
-`cosmon-state`, …) are internal and versioned independently; they carry no
-public API guarantee at this stage.
+The pinned contract is **every user-facing binary a release ships** — `cs`,
+`cosmon-remote`, `cosmon-rpp-adapter` and `cs-oidc-mock` all print the version
+sealed by the matching git tag (`vX.Y.Z`) and the section heading below. The
+canonical list is [`packaging/shipped-binaries.txt`](packaging/shipped-binaries.txt).
+Library crates inside the workspace (`cosmon-core`, `cosmon-state`, …) are
+internal and versioned independently; they carry no public API guarantee at
+this stage.
 
 > The commit-by-commit development history before `0.1.0` is preserved in the
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
 ## [Unreleased]
+
+### Fixed: every shipped binary now reports the version you downloaded
+
+- A fresh install of `0.2.1` gave you `cs 0.2.1` and `cosmon-remote 0.3.0` —
+  from an asset named `cosmon-remote-0.2.1-…`. The service tarball was worse
+  still: `cosmon-rpp-adapter 2.5.0` and `cs-oidc-mock 0.1.0`. Downloading one
+  version and being answered with three others reads as a broken install.
+- The four crates that ship a user-facing binary now inherit the release
+  version. Library crates keep their independent semver, unchanged.
+- **One-time version discontinuity.** `cosmon-remote` moves `0.3.0 → 0.2.1`,
+  `cosmon-rpp-adapter` moves `2.5.0 → 0.2.1`, and `cosmon-oidc-testkit` moves
+  `0.1.0 → 0.2.1`. The two downward moves are recorded here deliberately. They
+  are legal because none of these crates has ever been published to crates.io
+  (all are `publish = false`), so no registry ordering and no `cargo add`
+  consumer is affected; the numbers were internal counters that no user could
+  observe, while the numbers users *could* observe were wrong. From this
+  release on there is one version, and it is the one on the tarball.
+- `cosmon-rpp-adapter`'s `/healthz` and `/v1/auth/me` report that same version,
+  so a self-hoster now reads one number from the download, from `--version`,
+  and from the running service instead of three.
+- The alignment is enforced, not remembered: `scripts/release-version-conformance.sh`
+  runs every shipped binary at release time and fails the release on any
+  mismatch, and a workspace test fails on the branch if a shipped-binary crate
+  pins its own version or if the release workflow's binary list drifts from
+  the canon. Both prior packaging defects (gnu-vs-musl, the missing connector)
+  shipped precisely because nothing checked.
 
 ## [0.2.1] — 2026-07-19
 

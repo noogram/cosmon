@@ -1339,9 +1339,11 @@ paths:
                   version:
                     type: string
                     description: |
-                      Adapter binary version, aligned on the bake tag
-                      series (image `cosmon-server:v2.0.1` reports
-                      `"2.0.1"`).
+                      Adapter binary version, aligned on the cosmon
+                      release version — the same string as the release
+                      tag, the tarball filename and
+                      `cosmon-rpp-adapter --version` (a release
+                      `v0.2.1` reports `"0.2.1"`).
                   api_surface_version:
                     type: integer
                     description: |
@@ -1987,8 +1989,10 @@ components:
         version:
           type: string
           description: |
-            Adapter binary version, aligned on the bake tag series
-            (image `cosmon-server:v2.0.1` reports `"2.0.1"`). Mirrors
+            Adapter binary version, aligned on the cosmon release
+            version — the same string as the release tag, the tarball
+            filename and `cosmon-rpp-adapter --version` (a release
+            `v0.2.1` reports `"0.2.1"`). Mirrors
             `/healthz` so an authenticated client gets the same answer
             without a second round-trip. Additive field
             (delib-20260610-9a0c, tolnay).

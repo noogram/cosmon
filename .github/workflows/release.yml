@@ -76,13 +76,19 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `native: true` marks the legs whose output the runner can EXECUTE.
+          # Only those can run the version-conformance assertion below; the
+          # cross legs build the same source with the same manifests, so one
+          # native leg per OS is sufficient coverage for a version string.
           - target: aarch64-apple-darwin
             os: macos-14         # Apple Silicon
+            native: true
           - target: x86_64-apple-darwin
             os: macos-14         # cross-compiled on Apple Silicon (Intel mac
                                  # runners are being retired + queue for ~30min+)
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest      # static musl — no libdbus/glibc runtime dep
+            native: true
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest      # cross-compiled from x86_64 via zig (cargo-zigbuild)
     steps:
@@ -171,6 +177,22 @@ jobs:
           else
             cargo build --release --locked $BINS --target ${{ matrix.target }}
           fi
+
+      # Fail the release BEFORE packaging if any shipped binary announces a
+      # version other than the tag. v0.2.1 shipped an asset named
+      # `cosmon-remote-0.2.1-*` whose binary said `0.3.0`; nothing checked, so
+      # nothing complained. The binary list comes from
+      # packaging/shipped-binaries.txt, the same canon the `BINS=` line above is
+      # tested against (crates/cosmon-cli/tests/shipped_binary_version_alignment.rs).
+      # Native targets only: a cross-compiled binary cannot be executed here.
+      - name: Assert every shipped binary reports the release version
+        if: ${{ matrix.native }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/release-version-conformance.sh \
+            "${{ steps.version.outputs.version }}" \
+            --bindir "target/${{ matrix.target }}/release"
 
       - name: Package + checksum
         id: package
@@ -517,11 +539,20 @@ jobs:
       # macos-14 has brew preinstalled and setup-homebrew is a fast no-op.
       - name: Set up Homebrew
         uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef  # master 2026-07
+      # Needed for scripts/release-version-conformance.sh + its canon. Checked
+      # out AFTER the brew setup and BEFORE the timer starts, so it costs the
+      # 30-second budget nothing.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
       - name: brew install from tap + assert <30s
         shell: bash
         run: |
           set -euo pipefail
           owner="${{ github.repository_owner }}"
+          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          version="${ref#refs/tags/}"
+          version="${version#v}"
           start="$(date +%s)"
           brew tap "${owner}/tap" "https://github.com/${owner}/homebrew-tap"
           brew install "${owner}/tap/cosmon"
@@ -534,15 +565,15 @@ jobs:
             cs\ *) : ;;   # expected: "cs X.Y.Z"
             *) echo "unexpected --version output: $out" >&2; exit 1 ;;
           esac
-          # The connector rides in the same tarball; assert it installed and runs
-          # too, so a broken/absent cosmon-remote reddens the release the same way
-          # a broken cs would (task-20260718-ff92).
-          remote_out="$(cosmon-remote --version)"
-          echo "cosmon-remote --version => ${remote_out}"
-          case "$remote_out" in
-            cosmon-remote\ *) : ;;   # expected: "cosmon-remote X.Y.Z"
-            *) echo "unexpected cosmon-remote --version output: $remote_out" >&2; exit 1 ;;
-          esac
+          # Every shipped binary must announce the version the user downloaded,
+          # not merely be present and runnable. The previous check only asserted
+          # `cosmon-remote --version` STARTED with "cosmon-remote" — which is why
+          # v0.2.1 shipped green while that binary answered "0.3.0".
+          # Canon: packaging/shipped-binaries.txt. Scoped to the client tarball
+          # because that is all `brew install cosmon` places; the service
+          # binaries are asserted in the build job, against the artifacts that
+          # go into the service tarball.
+          bash scripts/release-version-conformance.sh "$version" --tarball client
           if [ "$elapsed" -gt 30 ]; then
             echo "::warning::install took ${elapsed}s (> 30s budget)"
           fi

@@ -1,7 +1,10 @@
 [package]
 name = "cosmon-oidc-testkit"
 publish.workspace = true
-version = "0.1.0"
+# Ships the user-facing `cs-oidc-mock` binary in the public service tarball
+# (task-20260717-c487) → inherits the release version. See the
+# `[workspace.package]` rule in the root Cargo.toml.
+version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 license.workspace = true
