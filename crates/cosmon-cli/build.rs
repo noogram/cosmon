@@ -42,6 +42,8 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     emit_build_sha();
+    emit_build_dirty();
+    emit_build_date();
 }
 
 /// Stamp the binary with the git commit SHA it is being built from.
@@ -63,6 +65,59 @@ fn emit_build_sha() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
+}
+
+/// Stamp the binary with the working-tree state it was built from.
+///
+/// Emits `cargo:rustc-env=COSMON_BUILD_DIRTY=<clean|dirty|unknown>`.
+/// `dirty` means the working tree had uncommitted changes at compile
+/// time — the SHA alone then under-identifies the binary, and
+/// `cs --version` surfaces the marker so a deploy diagnosis is not
+/// misled by a clean-looking stamp.
+///
+/// Caveat: cargo has no rerun trigger for "the working tree got
+/// dirty", so the flag reflects the state at the *last recompile* of
+/// this crate, not necessarily the instant the binary was linked. The
+/// SHA rerun triggers (HEAD, logs/HEAD) keep it honest across commits.
+fn emit_build_dirty() {
+    // `git status --porcelain` prints nothing on a clean tree; any
+    // output means uncommitted changes. `git_output` maps empty stdout
+    // to `None`, so we must distinguish "empty = clean" from "git
+    // failed = unknown" ourselves.
+    let state = match std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            if out.stdout.iter().all(u8::is_ascii_whitespace) {
+                "clean"
+            } else {
+                "dirty"
+            }
+        }
+        _ => "unknown",
+    };
+    println!("cargo:rustc-env=COSMON_BUILD_DIRTY={state}");
+}
+
+/// Stamp the binary with the (UTC) date it was compiled on.
+///
+/// Emits `cargo:rustc-env=COSMON_BUILD_DATE=<YYYY-MM-DD|unknown>`. Day
+/// granularity is deliberate: precise timestamps add churn without
+/// diagnostic value — "which repo built this and roughly when" is the
+/// question `cs --version` answers. Shells out to `date` to avoid a
+/// build-dependency on a time crate; failure degrades to `unknown`,
+/// never a build error.
+fn emit_build_date() {
+    let date = std::process::Command::new("date")
+        .args(["-u", "+%Y-%m-%d"])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=COSMON_BUILD_DATE={date}");
 }
 
 /// Run `git <args>` and return trimmed stdout, or `None` on any failure.
