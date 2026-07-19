@@ -17,6 +17,33 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+### Fixed: the Homebrew formula declared the wrong licence
+
+- The rendered tap formula claimed `MIT` while the `cs` binary ships
+  AGPL-3.0-only. The renderer now reads the licence from the workspace
+  `Cargo.toml` and the formula tests lock the two together, so a future
+  re-licence moves both in one edit.
+
+### Added: the served `install.sh` derives from source, with a drift detector
+
+- `install.sh` is now published as a cosign-signed release asset built from
+  `infra/install/install.sh`, and a `served-drift` CI job fetches the live
+  public installer and fails loudly when it diverges from source. The served
+  copy had drifted silently twice (a gnu-to-musl fix, then a v0.2.0 installer
+  that discarded the `cosmon-remote` connector without a word); the detector's
+  own red path replays that real incident in CI so it can never quietly stop
+  detecting. The operator publish step is documented in
+  `infra/install/RUNBOOK.md`.
+
+### Fixed: `cs patrol --propel` no longer spams workers that are thinking
+
+- The idle classifier consulted only cosmon events, so a worker in a long
+  reasoning stretch was nudged every ~70 s with identical PROPULSION messages
+  — polluting the very context it meant to revive. The classifier now checks
+  real pane activity before concluding idle, and re-nudges back off
+  exponentially with a cap that escalates to a patrol anomaly instead of
+  repeating forever.
+
 ### Fixed: a trust grant no longer self-revokes on ordinary repo edits (task-20260719-a850)
 
 - **`cs trust` now holds.** The trust gate's delegated-target scan read the
@@ -38,6 +65,43 @@ public API guarantee at this stage.
   so a future executor field carrying a command is covered the day it lands
   rather than silently reopening the RCE-by-clone hole. A surface file that
   does not parse as TOML falls back to the previous full-text scan.
+
+### Added: integration test for the real `cs realized-watch` re-exec path
+
+- The detached realized-model watcher armed by `cs tackle` was covered only by
+  a simulated spawn; the known reserve from the round-4 adversarial audit. A
+  new integration test exercises the actual binary re-exec: watcher starts,
+  ticks, emits `ModelObserved` from a synthetic session log, dedups atomically,
+  and respects its lifetime bound.
+
+### Fixed: the three CI reds from the 0.2.0 cut
+
+- A rustdoc intra-doc link broke the Documentation job; the help goldens still
+  carried the pre-bump version string; and the README-quickstart e2e lost a
+  teardown race (`rm -rf` vs a still-alive tmux worker — kill, wait for death,
+  then remove, with a bounded retry).
+
+### Fixed: the confidentiality lint's structural check never ran
+
+- `confidentiality-lint.sh` invoked a `scripts/publish.sh` that never shipped
+  in this tree, so the gate failed as a tooling error the first time an
+  external docs build ran it. It now delegates to the release checklist's
+  command-backed GATE items, and the matches it surfaced once it actually ran
+  (an operator name in test fixtures, a non-public galaxy name in a formula
+  example, an internal French pattern note) were genericized or removed.
+
+### Docs: a front door, one install story, and the cross-examine claim made liable
+
+- The mdBook gains a **Getting Started** ramp (Install cosmon, Ten minutes to
+  cosmon) at the head of the sidebar; the release notes, README, book, and
+  landing now tell one install story (native script, Homebrew tap, cargo — the
+  same signed bytes); and the introduction's *"cross-examine each other's
+  findings"* — its most differentiating claim — now links to a real
+  adversarial-review section grounded in the deep-think panels and pre-mortem
+  rounds. The introduction itself went through a five-profile reading
+  pre-mortem plus an independent cross-model proofread; the surviving text
+  restores the qualifiers the repository's own README and SECURITY.md already
+  carried.
 
 ## [0.2.0] — 2026-07-19
 
