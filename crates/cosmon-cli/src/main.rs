@@ -31,7 +31,11 @@ use cosmon_cli::sensorium;
 #[derive(Parser)]
 #[command(
     name = "cs",
-    version,
+    // Full build identity, not just the crate version: two repos can
+    // (and do) install the same `cs` at the same crate version into
+    // `~/.local/bin`; the SHA/dirty/date stamp makes `--version` enough
+    // to tell them apart without the hidden `__build-sha` plumbing.
+    version = cosmon_cli::long_version(),
     about = "Cosmon — compose, pilot and audit long-haul AI missions where the trace matters.",
     long_about = root_help::LONG_ABOUT,
     after_long_help = root_help::AFTER_LONG_HELP,
@@ -692,7 +696,11 @@ fn print_help_tree(all: bool) {
 fn print_man_page() -> anyhow::Result<()> {
     use std::io::Write;
 
-    let cmd = build_cli();
+    // The committed man page is a golden artifact: rendering it with
+    // the full build stamp (SHA, dirty, date) would make it drift on
+    // every commit. Pin the documented surface to the plain crate
+    // version; the stamp belongs to `--version` only.
+    let cmd = build_cli().version(env!("CARGO_PKG_VERSION"));
     let man = clap_mangen::Man::new(cmd);
     let mut buf: Vec<u8> = Vec::new();
     man.render(&mut buf)

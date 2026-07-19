@@ -109,6 +109,14 @@ fn test_help_subcommand_lists_all_commands() {
     assert!(stdout.contains("Tools:"));
 }
 
+/// `cs --version` must expose the build identity (short SHA, dirty
+/// marker, build date), not just the crate version — two repos install
+/// the same binary name at the same crate version, and `--version` is
+/// the documented way to tell which repo produced the deployed binary.
+///
+/// The test binary is stamped by the same `build.rs` run as the `cs`
+/// binary under test, so the exact expected string can be recomputed
+/// here instead of asserting a loose pattern.
 #[test]
 fn test_cli_version() {
     let output = cosmon_bin()
@@ -117,7 +125,33 @@ fn test_cli_version() {
         .expect("failed to run");
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(output.status.success());
-    assert!(stdout.contains("cs"));
+    assert_eq!(stdout.trim(), format!("cs {}", cosmon_cli::long_version()));
+
+    // Outside the no-git fallback, the short SHA must be visible so the
+    // operator never needs the hidden `cs __build-sha` to identify a
+    // deployed binary.
+    if cosmon_cli::BUILD_SHA != "unknown" {
+        let short: String = cosmon_cli::BUILD_SHA.chars().take(8).collect();
+        assert!(
+            stdout.contains(&format!("({short}")),
+            "--version must carry the short build SHA: {stdout}"
+        );
+    }
+}
+
+/// `cs __build-sha` is a deploy-verification contract (`cs done` runs it
+/// on the freshly-installed binary and compares against HEAD): it must
+/// keep printing the full stamped SHA, bare, regardless of what
+/// `--version` renders.
+#[test]
+fn test_build_sha_contract_unchanged() {
+    let output = cosmon_bin()
+        .arg("__build-sha")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert_eq!(stdout.trim(), cosmon_cli::BUILD_SHA);
 }
 
 /// `cs init --yes` must be accepted by the parser and run without
