@@ -8,7 +8,7 @@ contracts not yet frozen (e.g. M-v *"Play it"*, `delib-bfdb §IS-4`).
 **Scope:** any cosmon-managed galaxy that consumes a contract owned by a
 **sibling** galaxy while that contract is still in flight. Not a crate, not a
 trait, not a feature flag. A *shape*, ported per galaxy — same discipline as
-[`session-primitive`](session-primitive.md) (shared algebra, not shared
+the *session-primitive* shape (shared algebra, not shared
 runtime).
 
 ---
@@ -159,8 +159,8 @@ The split is precise:
   cited version it was handed against that pin.
 
 So the typestate is the *shape*, instantiated once per consuming galaxy — the
-same way [`session-primitive`](session-primitive.md) is one algebra with a
-voix/showroom/HFT instantiation each. What travels between galaxies is the
+same way the *session-primitive* shape is one algebra with a
+per-galaxy instantiation each. What travels between galaxies is the
 contract **version** (a fact, surfaced by a syzygie citation: `inherit` /
 `adapt(diff)` / `refuse`), never a Rust type. Silence on the upstream side is a
 bug the `chronicle-lint` patrol already catches; this pattern is what the
@@ -229,9 +229,9 @@ is exactly wrong for the latter.
 - **Syzygie** ([`../guides/syzygie.md`](../guides/syzygie.md)) — supplies the
   channel by which the *contract version* (the fact) crosses from B to A. This
   pattern is the downstream consumer of a syzygie citation.
-- **Session-primitive** ([`session-primitive.md`](session-primitive.md)) — the
-  sibling pattern in form: one algebra/shape, instantiated per galaxy, never a
-  shared crate. Read it first for the "shape not runtime" discipline.
+- **Session-primitive** — the sibling pattern in form: one algebra/shape,
+  instantiated per galaxy, never a shared crate. Same "shape not runtime"
+  discipline; its playbook is maintained outside this tree.
 - **Molecule typestate** (`cosmon-core/src/molecule.rs`) — the in-tree proof
   that cosmon already lifts lifecycle facts into the type system
   (`Molecule<Pending>` has no `.evolve()`; `Completed → Merged` requires

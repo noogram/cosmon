@@ -4793,7 +4793,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
 ///
 /// "Produced" = tracked files that differ from the worktree's merge-base with
 /// `main`, plus new untracked files. Git paths are read as NUL-delimited bytes.
-/// Cosmon-internal paths (`.cosmon/`, `target/`, `.git/`) are skipped.
+/// Paths internal to cosmon (`.cosmon/`, `target/`, `.git/`) are skipped.
 ///
 /// The artifact listing is flat, so each source path is encoded as
 /// `path-<hex-encoded-path-bytes>`. This mapping is reversible and injective:

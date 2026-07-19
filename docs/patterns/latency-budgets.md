@@ -61,6 +61,6 @@ does it respect the tightest budget of its target domains?
 ## Cross-refs
 
 - `delib-20260420-f3ef/synthesis.md §6` — origin of the table.
-- `docs/patterns/session-primitive.md` — the sibling pattern (ordered
-  single-writer log + unique terminal + idempotent projection +
-  observe-before-emit); respects these budgets by design.
+- The *session-primitive* shape — ordered single-writer log + unique
+  terminal + idempotent projection + observe-before-emit — respects these
+  budgets by design. Its playbook is maintained outside this tree.

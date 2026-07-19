@@ -43,13 +43,13 @@ PORTABILITY — paths are workdir-relative from `galaxy_path`.
 
 Required variables:
   - galaxy_path    Absolute path to the galaxy root (e.g. \
-                   `/srv/cosmon/cadence`). Must already \
+                   `/srv/cosmon/example-galaxy`). Must already \
                    contain `.cosmon/` (prerequisite above).
-  - galaxy_name    Short name of the galaxy (e.g. `cadence`). Used in \
+  - galaxy_name    Short name of the galaxy (e.g. `example-galaxy`). Used in \
                    the CLAUDE.md H1, chronicle title, and neurion \
                    repos-table key.
   - one_line       The single-sentence pitch that is the galaxy's \
-                   reason to exist (e.g. \"Atoms of cadencel thought, \
+                   reason to exist (e.g. \"Atoms of composable thought, \
                    not works, not samples — and let them compose.\"). \
                    Becomes the CLAUDE.md opening line.
 

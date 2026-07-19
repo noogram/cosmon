@@ -69,7 +69,6 @@ exactly once.
 ## Patterns (cross-galaxy shapes — prose, non-normative)
 
 - [patterns/upstream-contract-gating.md](patterns/upstream-contract-gating.md) — capability typestate at the galaxy boundary: gate a sibling galaxy's not-yet-frozen contract with a witness type, not a feature flag.
-- [patterns/session-primitive.md](patterns/session-primitive.md) — the molecule *is* the session primitive: one algebra, per-galaxy substrate.
 - [patterns/latency-budgets.md](patterns/latency-budgets.md) — per-domain hot-path budgets the portability of any shared primitive pulls against.
 
 ## Governance
