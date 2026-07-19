@@ -23,7 +23,7 @@ use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::patrol::{PatrolAction, PatrolReport};
 use cosmon_core::process::project_process_status;
-use cosmon_core::propel::{decide_propel, PropelDecision, PropelSkip, PropelView};
+use cosmon_core::propel::{decide_nudge, NudgeChannel, NudgeDecision, NudgeSkip, NudgeView};
 use cosmon_core::run_state::{BranchState, Liveness, Witness};
 use cosmon_core::tag::Tag;
 use cosmon_core::transport::TransportBackend;
@@ -1297,7 +1297,8 @@ fn print_propel_report(running_count: usize, stale_after: u64, sweep: &PropelSwe
         );
         return;
     }
-    let declined = sweep.active.len() + sweep.deferred.len() + sweep.escalated.len();
+    let declined =
+        sweep.active.len() + sweep.deferred.len() + sweep.escalated.len() + sweep.gated.len();
     if sweep.propelled.is_empty() && declined == 0 {
         println!(
             "  {} {running_count} running molecule(s), all fresh (<{stale_after}s)",
@@ -1318,6 +1319,11 @@ fn print_propel_report(running_count: usize, stale_after: u64, sweep: &PropelSwe
     // omitted, or the next regression looks like a quiet patrol.
     for (wid, mid, idle) in &sweep.active {
         println!("    · {wid} ← {mid} (working — pane active {idle}s ago, not nudged)");
+    }
+    // A gated worker is the one decline an operator must actually act on: the
+    // molecule is not stuck, it is waiting on *them*.
+    for (wid, mid) in &sweep.gated {
+        println!("    · {wid} ← {mid} (awaiting operator — questions pending, not nudged)");
     }
     for (wid, mid, remaining) in &sweep.deferred {
         println!("    · {wid} ← {mid} (backoff — next nudge in {remaining}s)");
@@ -1410,6 +1416,27 @@ pub(crate) struct PropelSweep {
     /// Candidates that spent the attempt ceiling; patrol stopped nudging and
     /// tagged them for the healer: `(worker, molecule, attempts)`.
     pub(crate) escalated: Vec<(WorkerId, MoleculeId, u32)>,
+    /// Candidates parked at an operator gate (`cs await-operator`). Not a
+    /// stall: the worker is holding questions for a human and must be left
+    /// entirely alone. Reported so the wait is visible rather than silent.
+    pub(crate) gated: Vec<(WorkerId, MoleculeId)>,
+}
+
+/// Does this molecule's worker sit at an operator gate?
+///
+/// Two independent witnesses, either of which is sufficient — the tag
+/// [`cosmon_core::operator_block::AWAITING_OP_TAG`] stamped by
+/// `cs await-operator`, and the durable `blocked_on.json` proof-of-block in the
+/// molecule dir. The file is the belt to the tag's suspenders: a reconcile or a
+/// hand-edit that drops tags must not silently re-open the gate to propulsion.
+///
+/// Failure direction is deliberately toward *silence*: an unreadable state dir
+/// makes this return `false` only when both witnesses are absent, and the cost
+/// of a false `true` is one skipped nudge against a worker `cs patrol --heal`
+/// will still reach.
+pub(crate) fn worker_awaits_operator(store: &dyn StateStore, mol: &MoleculeData) -> bool {
+    cosmon_core::operator_block::awaits_operator(&mol.tags)
+        || store.molecule_dir(&mol.id).join("blocked_on.json").exists()
 }
 
 /// Tag stamped on a molecule whose propulsion attempts are exhausted, so
@@ -1479,7 +1506,11 @@ pub(crate) fn propel_stale_molecules(
         // working worker's process record is the same false-idle error
         // committed in a second organ.
         let attempts = propel_attempts(molecules, &mid, now);
-        let view = PropelView {
+        let mol = molecules.iter().find(|m| m.id == mid);
+        let view = NudgeView {
+            channel: NudgeChannel::Propulsion,
+            status: mol.map_or(MoleculeStatus::Running, |m| m.status),
+            awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
             progress_age: chrono::Duration::seconds(age),
             pane_idle: pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds),
             attempts: attempts.count,
@@ -1488,13 +1519,27 @@ pub(crate) fn propel_stale_molecules(
                 .map(|at| now.signed_duration_since(at))
                 .map(|d| d.max(chrono::Duration::zero())),
         };
-        let decision = decide_propel(&view, stale_window);
+        let decision = decide_nudge(&view, stale_window);
 
         // A thinking worker is left entirely alone: no nudge, and no witness
         // stamped either. Its progress clock is frozen but its terminal is
         // not, so the "figé-mais-vivant" reading below simply does not apply.
-        if let PropelDecision::Skip(PropelSkip::PaneActive { idle_secs, .. }) = decision {
+        if let NudgeDecision::Skip(NudgeSkip::PaneActive { idle_secs, .. }) = decision {
             sweep.active.push((wid, mid, idle_secs));
+            continue;
+        }
+
+        // Likewise for a worker at an operator gate — and here the liveness
+        // projection must be skipped for a second reason: its process is
+        // healthy and its silence is the *intended* behaviour, so stamping it
+        // Unresponsive would manufacture a health anomaly out of a correct
+        // pause.
+        if let NudgeDecision::Skip(NudgeSkip::AwaitingOperator | NudgeSkip::NotRunning { .. }) =
+            decision
+        {
+            if matches!(decision, NudgeDecision::Skip(NudgeSkip::AwaitingOperator)) {
+                sweep.gated.push((wid, mid));
+            }
             continue;
         }
 
@@ -1510,10 +1555,14 @@ pub(crate) fn propel_stale_molecules(
         project_liveness_onto_process(store, &mid, Liveness::Alive, stale_after);
 
         match decision {
-            // Already handled by the early `continue` above; matched here
+            // Already handled by the early `continue`s above; matched here
             // only to keep the match exhaustive without a panic.
-            PropelDecision::Skip(PropelSkip::PaneActive { .. }) => {}
-            PropelDecision::Skip(PropelSkip::Backoff {
+            NudgeDecision::Skip(
+                NudgeSkip::PaneActive { .. }
+                | NudgeSkip::AwaitingOperator
+                | NudgeSkip::NotRunning { .. },
+            ) => {}
+            NudgeDecision::Skip(NudgeSkip::Backoff {
                 since_secs,
                 window_secs,
                 ..
@@ -1522,11 +1571,11 @@ pub(crate) fn propel_stale_molecules(
                     .deferred
                     .push((wid, mid, (window_secs - since_secs).max(0)));
             }
-            PropelDecision::Escalate { attempts } => {
+            NudgeDecision::Escalate { attempts } => {
                 mark_propel_exhausted(store, &mid);
                 sweep.escalated.push((wid, mid, attempts));
             }
-            PropelDecision::Nudge { attempt, .. } => {
+            NudgeDecision::Nudge { attempt, .. } => {
                 if be.send_input(&wid, PROPULSION_NUDGE).is_ok() {
                     std::thread::sleep(std::time::Duration::from_millis(300));
                     let _ = be.send_input(&wid, "");
@@ -1785,6 +1834,37 @@ pub(crate) fn nudge_stalled_molecules(
     let mut nudged = Vec::new();
     for (wid, mol) in candidates {
         if !be.is_alive(&wid).unwrap_or(false) {
+            continue;
+        }
+        // The classifier above answered "is there a step to resume?". Whether
+        // we are *allowed to speak* is not its call and never a second copy of
+        // the heuristic: it belongs to the one judge, exactly as the
+        // propulsion tier consults it. Without this, the 2026-07-19 repair
+        // would have covered `--propel` and left `--nudge` hammering the very
+        // same gated worker with the very same sentence.
+        let session = mol.session_name.clone().unwrap_or_else(|| wid.to_string());
+        let view = NudgeView {
+            channel: NudgeChannel::Briefing,
+            status: mol.status,
+            awaiting_operator: worker_awaits_operator(store, mol),
+            progress_age: now.signed_duration_since(mol.updated_at),
+            pane_idle: pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
+            // Deliberately not `mol.nudge_count`: that field is a *lifetime*
+            // total the briefing tier never resets, so feeding it as the
+            // per-stall attempt count would silence this channel permanently
+            // after the fourth nudge of a molecule's whole life. This tier
+            // brings its own spacing rule (the idempotence window below) and
+            // no ceiling; the ledger-and-ceiling arithmetic belongs to the
+            // propulsion tier, which keeps a per-stall register.
+            attempts: 0,
+            since_last_propel: mol
+                .last_nudged_at
+                .map(|at| now.signed_duration_since(at).max(chrono::Duration::zero())),
+        };
+        if !matches!(
+            decide_nudge(&view, chrono::Duration::seconds(NUDGE_IDEMPOTENCE_SECS)),
+            NudgeDecision::Nudge { .. }
+        ) {
             continue;
         }
         let briefing = store.molecule_dir(&mol.id).join("briefing.md");
@@ -3396,15 +3476,147 @@ mod tests {
         assert_eq!(candidates.len(), 1);
 
         // The transport clock overrides that verdict.
-        let view = PropelView {
+        let view = NudgeView {
+            channel: NudgeChannel::Propulsion,
+            status: MoleculeStatus::Running,
+            awaiting_operator: false,
             progress_age: chrono::Duration::seconds(644),
             pane_idle: Some(chrono::Duration::seconds(2)),
             attempts: 0,
             since_last_propel: None,
         };
         assert!(matches!(
-            decide_propel(&view, chrono::Duration::seconds(300)),
-            PropelDecision::Skip(PropelSkip::PaneActive { .. })
+            decide_nudge(&view, chrono::Duration::seconds(300)),
+            NudgeDecision::Skip(NudgeSkip::PaneActive { .. })
+        ));
+    }
+
+    // --- the operator gate: every channel holds its tongue (task-…-2cbf) ---
+
+    /// Stamp the molecule as parked at an operator gate the way
+    /// `cs await-operator` does, and persist it.
+    fn park_at_operator_gate(store: &FileStore, mol: &mut MoleculeData) {
+        mol.tags.insert(
+            cosmon_core::tag::Tag::new(cosmon_core::operator_block::AWAITING_OP_TAG).unwrap(),
+        );
+        store.save_molecule(&mol.id, mol).unwrap();
+    }
+
+    /// The tag written by `cs await-operator` is recognised as a gate.
+    #[test]
+    fn awaiting_op_tag_is_read_as_an_operator_gate() {
+        let (_tmp, store) = make_store();
+        let mut mol = make_stale_molecule("cs-20260719-0100", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        assert!(
+            !worker_awaits_operator(&store, &mol),
+            "an untagged molecule must not read as gated"
+        );
+        park_at_operator_gate(&store, &mut mol);
+        assert!(worker_awaits_operator(&store, &mol));
+    }
+
+    /// The durable `blocked_on.json` is the second, independent witness: a
+    /// reconcile or hand-edit that drops the tag must not silently re-open the
+    /// gate to propulsion.
+    #[test]
+    fn blocked_on_json_alone_is_read_as_an_operator_gate() {
+        let (_tmp, store) = make_store();
+        let mol = make_stale_molecule("cs-20260719-0101", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        assert!(!worker_awaits_operator(&store, &mol));
+
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("blocked_on.json"), "{}").unwrap();
+        assert!(
+            worker_awaits_operator(&store, &mol),
+            "proof-of-block on disk must gate propulsion even with no tag"
+        );
+    }
+
+    /// The field observation (2026-07-19, worker a850), end to end: a worker
+    /// whose molecule is `Completed` and which holds questions for the
+    /// operator is a stale candidate on both clocks — and receives **zero**
+    /// nudges from **every** channel, however many passes patrol makes.
+    #[test]
+    fn completed_worker_with_pending_questions_is_never_nudged_on_any_channel() {
+        use cosmon_core::propel::{NudgeChannel, NudgeDecision};
+
+        for channel in [
+            NudgeChannel::Propulsion,
+            NudgeChannel::Briefing,
+            NudgeChannel::Heal,
+        ] {
+            let (_tmp, store) = make_store();
+            let mut mol = make_stale_molecule("cs-20260719-0102", "w1", 9000);
+            mol.status = MoleculeStatus::Completed;
+            park_at_operator_gate(&store, &mut mol);
+
+            // Sixty passes over ~70 minutes — the shape that delivered
+            // "des dizaines de nudges" in the field.
+            for pass in 0..60_i64 {
+                let view = NudgeView {
+                    channel,
+                    status: mol.status,
+                    awaiting_operator: worker_awaits_operator(&store, &mol),
+                    progress_age: chrono::Duration::seconds(300 + pass * 70),
+                    pane_idle: Some(chrono::Duration::seconds(300 + pass * 70)),
+                    attempts: 0,
+                    since_last_propel: None,
+                };
+                assert!(
+                    !matches!(
+                        decide_nudge(&view, chrono::Duration::seconds(300)),
+                        NudgeDecision::Nudge { .. }
+                    ),
+                    "{channel:?} nudged a gated worker on pass {pass}"
+                );
+            }
+        }
+    }
+
+    /// The propulsion sweep reports the gated worker in its own bucket rather
+    /// than dropping it silently — a decline an operator must *act* on, since
+    /// the molecule is waiting on them, not stuck.
+    #[test]
+    fn propel_sweep_reports_gated_workers_and_nudges_none() {
+        let (_tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("w1", DesiredState::Running);
+        fleet.workers.insert(wid, w);
+        let mut mol = make_stale_molecule("cs-20260719-0103", "w1", 9000);
+        park_at_operator_gate(&store, &mut mol);
+
+        // No transport: the sweep short-circuits before any send_input, which
+        // is precisely what we assert — nothing is ever pushed at this worker.
+        let sweep = propel_stale_molecules(&store, &[mol], &fleet, None, 300);
+        assert!(sweep.propelled.is_empty(), "a gated worker was nudged");
+    }
+
+    /// The briefing tier (`cs patrol --nudge`) refuses the same worker. It is
+    /// the channel the 2026-07-19 propulsion repair did *not* cover, so this
+    /// is the regression guard for "fixed one organ, left the siblings".
+    #[test]
+    fn briefing_tier_refuses_a_gated_worker() {
+        let (_tmp, store) = make_store();
+        let mut mol = make_molecule("cs-20260719-0104", MoleculeStatus::Running, Some("w1"));
+        mol.formula_id = FormulaId::new("task-work").unwrap();
+        mol.last_progress_at = Some(Utc::now() - chrono::Duration::hours(3));
+        park_at_operator_gate(&store, &mut mol);
+
+        let view = NudgeView {
+            channel: NudgeChannel::Briefing,
+            status: mol.status,
+            awaiting_operator: worker_awaits_operator(&store, &mol),
+            progress_age: chrono::Duration::hours(3),
+            pane_idle: Some(chrono::Duration::hours(3)),
+            attempts: 0,
+            since_last_propel: None,
+        };
+        assert!(matches!(
+            decide_nudge(&view, chrono::Duration::seconds(NUDGE_IDEMPOTENCE_SECS)),
+            NudgeDecision::Skip(cosmon_core::propel::NudgeSkip::AwaitingOperator)
         ));
     }
 

@@ -72,6 +72,21 @@ pub const CAPABILITY_TAG_KEY: &str = "op-block";
 /// `cs ensemble --tag`, and `STATUS.md`; the molecule stays `Running`.
 pub const AWAITING_OP_TAG: &str = "temp:awaiting-op";
 
+/// Does this molecule's tag set say its worker is parked at an operator gate?
+///
+/// The single reader of [`AWAITING_OP_TAG`] for *suppression* decisions, so
+/// every organ that must hold its tongue at a gated worker — every propulsion
+/// channel in [`crate::propel`], first of all — agrees on what "gated" means
+/// instead of re-spelling the tag literal.
+///
+/// Deliberately a plain predicate over tags rather than a method on a state
+/// type: the core stays I/O-free, and the shell (patrol, the healer) supplies
+/// whatever it already loaded.
+#[must_use]
+pub fn awaits_operator(tags: &BTreeSet<Tag>) -> bool {
+    tags.iter().any(|t| t.as_str() == AWAITING_OP_TAG)
+}
+
 /// The irreversibility boundary at which a worker is authorised to pause
 /// for an operator decision (ADR-123 Q1).
 ///
