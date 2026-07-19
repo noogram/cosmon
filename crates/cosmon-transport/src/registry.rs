@@ -83,6 +83,77 @@ fn looks_like_version(s: &str) -> bool {
     components >= 2
 }
 
+/// Strip a leading environment-assignment prefix (`VAR=value …`) from an
+/// observed pane command and return the real binary token, basename'd.
+///
+/// # Why
+///
+/// Identity-pinned workers (delib-20260717-194b F3) are spawned with an
+/// env prefix on the shell command — e.g.
+/// `GIT_AUTHOR_NAME='Emmanuel Sérié' GIT_AUTHOR_EMAIL=… RUST_LOG=error
+/// codex --yolo`. On some tmux/platform combinations
+/// `pane_current_command` surfaces that full command line (or its first
+/// token) instead of the foreground process `comm`, so the propulsion /
+/// whisper gates observed `GIT_AUTHOR_NAME=Emmanuel…` and refused a
+/// perfectly live codex worker (friction 2026-07-18, task-20260718-912b).
+///
+/// The parser walks shell words left to right, skipping `IDENT=value`
+/// assignments (single- and double-quoted values with embedded spaces
+/// included) and a bare `env` launcher, then returns the first real
+/// command token with any directory prefix removed. A plain `comm` value
+/// (`codex`, `node`, `zsh`, `2.1.175`) passes through unchanged, so the
+/// gate's refusal semantics for crashed-into-shell panes are untouched.
+#[must_use]
+pub fn effective_pane_command(raw: &str) -> String {
+    let mut rest = raw.trim_start();
+    loop {
+        let (word, remainder) = next_shell_word(rest);
+        if word.is_empty() {
+            return String::new();
+        }
+        if is_env_assignment(&word) || word == "env" {
+            rest = remainder.trim_start();
+            continue;
+        }
+        return word.rsplit('/').next().unwrap_or(word.as_str()).to_owned();
+    }
+}
+
+/// Extract the next shell word from `input`, honouring single and double
+/// quotes (a quoted region may contain whitespace without ending the
+/// word). Returns the word with its quote characters stripped, plus the
+/// unconsumed remainder. No escape-sequence handling — the spawn seam
+/// quotes with `shell_escape` (single quotes), which this covers.
+fn next_shell_word(input: &str) -> (String, &str) {
+    let mut word = String::new();
+    let mut quote: Option<char> = None;
+    let mut chars = input.char_indices();
+    for (i, c) in chars.by_ref() {
+        match quote {
+            Some(q) if c == q => quote = None,
+            None if c == '\'' || c == '"' => quote = Some(c),
+            None if c.is_whitespace() => return (word, &input[i..]),
+            Some(_) | None => word.push(c),
+        }
+    }
+    (word, "")
+}
+
+/// `true` when a shell word is an environment assignment (`IDENT=…` with
+/// a POSIX-shaped identifier before the `=`).
+fn is_env_assignment(word: &str) -> bool {
+    let Some(eq) = word.find('=') else {
+        return false;
+    };
+    let ident = &word[..eq];
+    let mut bytes = ident.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
 /// `true` when `pane_cmd` satisfies a single registered `signature`.
 ///
 /// Three signature shapes are understood (checked in this order):
@@ -145,17 +216,22 @@ impl PaneSignatureRegistry {
     /// the empty `pane_cmd` (a tmux query that returned nothing is not
     /// a match — the worker pane may have died).
     ///
-    /// Each registered signature is evaluated with `signature_matches`,
-    /// so a literal (`claude`), a trailing-`*` prefix glob (`claude*`),
-    /// and the [`VERSION_SENTINEL`] all participate in the check.
+    /// The observed value is first normalised through
+    /// [`effective_pane_command`] so an env-assignment spawn prefix
+    /// (`GIT_AUTHOR_NAME=… codex …`, the F3 identity pinning) cannot mask
+    /// the real binary from the gate. Each registered signature is then
+    /// evaluated with `signature_matches`, so a literal (`claude`), a
+    /// trailing-`*` prefix glob (`claude*`), and the [`VERSION_SENTINEL`]
+    /// all participate in the check.
     #[must_use]
     pub fn matches(&self, adapter_name: &str, pane_cmd: &str) -> bool {
-        if pane_cmd.is_empty() {
+        let effective = effective_pane_command(pane_cmd);
+        if effective.is_empty() {
             return false;
         }
         self.entries
             .get(adapter_name)
-            .is_some_and(|sigs| sigs.iter().any(|s| signature_matches(s, pane_cmd)))
+            .is_some_and(|sigs| sigs.iter().any(|s| signature_matches(s, &effective)))
     }
 
     /// Return the registered signatures for `adapter_name`, or an empty
@@ -425,6 +501,79 @@ mod tests {
         assert!(!signature_matches(VERSION_SENTINEL, "node"));
         assert!(signature_matches("claude", "claude"));
         assert!(!signature_matches("claude", "claude-code"));
+    }
+
+    /// Regression for the 2026-07-18 friction (task-20260718-912b):
+    /// `cs whisper` toward an identity-pinned codex worker failed with
+    /// `pane_current_command=GIT_AUTHOR_NAME=… expected one of [claude,
+    /// claude*, node, codex, codex*]`. The F3 identity pinning
+    /// (delib-20260717-194b, `build_codex_command`) prefixes
+    /// `GIT_AUTHOR_*` / `GIT_COMMITTER_*` env assignments onto the spawn
+    /// command, and the observed pane command surfaced that prefix
+    /// instead of the binary. The gate must parse past the assignments
+    /// to the real binary.
+    #[test]
+    fn default_registry_matches_codex_behind_git_identity_env_prefix() {
+        let r = default_registry();
+        let name = crate::codex::ADAPTER_NAME;
+        // The exact spawn shape produced by `build_codex_command` with
+        // `git_identity: Some(..)` — quoted values with embedded spaces.
+        let spawned = "GIT_AUTHOR_NAME='Emmanuel Sérié' \
+                       GIT_AUTHOR_EMAIL='op@example.org' \
+                       GIT_COMMITTER_NAME='Emmanuel Sérié' \
+                       GIT_COMMITTER_EMAIL='op@example.org' \
+                       RUST_LOG=error codex --yolo";
+        assert!(r.matches(name, spawned));
+        // First-token-only variant (what the field report showed).
+        assert!(r.matches(name, "GIT_AUTHOR_NAME=Emmanuel codex"));
+        // The claude adapter behind the same prefix shape keeps working.
+        assert!(r.matches(
+            crate::claude::ADAPTER_NAME,
+            "GIT_AUTHOR_NAME='Ada Lovelace' claude --continue"
+        ));
+        // A crashed-into-shell pane behind an env prefix is STILL refused —
+        // normalisation must not widen the gate to arbitrary panes.
+        assert!(!r.matches(name, "GIT_AUTHOR_NAME='Emmanuel Sérié' zsh"));
+        // A bare assignment with no binary after it is not a match.
+        assert!(!r.matches(name, "GIT_AUTHOR_NAME=Emmanuel"));
+    }
+
+    /// Unit coverage for the env-prefix normaliser, independent of the
+    /// registry wiring.
+    #[test]
+    fn effective_pane_command_strips_env_prefix() {
+        // Plain comm values pass through untouched.
+        assert_eq!(effective_pane_command("codex"), "codex");
+        assert_eq!(effective_pane_command("zsh"), "zsh");
+        assert_eq!(effective_pane_command("2.1.175"), "2.1.175");
+        // Single assignment, unquoted value.
+        assert_eq!(effective_pane_command("RUST_LOG=error codex"), "codex");
+        // Quoted value with embedded whitespace does not split the word.
+        assert_eq!(
+            effective_pane_command("GIT_AUTHOR_NAME='Emmanuel Sérié' codex --yolo"),
+            "codex"
+        );
+        assert_eq!(
+            effective_pane_command("GIT_AUTHOR_NAME=\"Ada Lovelace\" node"),
+            "node"
+        );
+        // A bare `env` launcher is skipped like an assignment.
+        assert_eq!(effective_pane_command("env RUST_LOG=error codex"), "codex");
+        // Absolute binary paths are basename'd to the comm shape.
+        assert_eq!(
+            effective_pane_command("RUST_LOG=error /usr/local/bin/codex"),
+            "codex"
+        );
+        // Nothing after the assignments → empty (gate refuses).
+        assert_eq!(effective_pane_command("GIT_AUTHOR_NAME=Emmanuel"), "");
+        assert_eq!(effective_pane_command(""), "");
+        assert_eq!(effective_pane_command("   "), "");
+        // A non-identifier before `=` is NOT an assignment — it is the
+        // command itself (weird, but the gate should see it verbatim).
+        assert_eq!(
+            effective_pane_command("2fast=furious codex"),
+            "2fast=furious"
+        );
     }
 
     #[test]

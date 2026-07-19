@@ -27,7 +27,7 @@ use cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked;
 use cosmon_state::StateStore;
 use cosmon_transport::claude::ADAPTER_NAME as CLAUDE_ADAPTER;
 use cosmon_transport::codex::ADAPTER_NAME as CODEX_ADAPTER;
-use cosmon_transport::registry::{default_registry, pane_current_command};
+use cosmon_transport::registry::{default_registry, effective_pane_command, pane_current_command};
 use sha2::{Digest, Sha256};
 
 use super::Context;
@@ -416,10 +416,17 @@ fn check_pane_signature(
     }
 
     let observed = pane_current_command(socket, session_name).unwrap_or_default();
+    // Identity-pinned workers (F3, delib-20260717-194b) are spawned behind a
+    // `GIT_AUTHOR_NAME=… GIT_COMMITTER_NAME=…` env prefix; some tmux/platform
+    // combinations surface that prefix in `pane_current_command` instead of
+    // the binary. Normalise before comparing so the legacy
+    // `[whisper].allowed_commands` override sees the real command too
+    // (`registry.matches` normalises internally).
+    let effective = effective_pane_command(&observed);
     let matched = WHISPERABLE_ADAPTERS
         .iter()
         .any(|a| registry.matches(a, &observed))
-        || (!observed.is_empty() && allowed_commands.iter().any(|c| c == &observed));
+        || (!effective.is_empty() && allowed_commands.iter().any(|c| c == &effective));
     if let Ok(worker_id) = WorkerId::new(session_name) {
         emit_adapter_pane_signature_checked(
             mol_dir,
