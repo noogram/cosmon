@@ -113,7 +113,7 @@ members = [
 # (ADR forgemaster B6 — do NOT force-synchronize the workspace, the CLI binary
 # version is the pinned contract, the libraries are not). See
 # task-20260610-ccce version-cut-report.md for the audit table.
-version = "0.2.0"
+version = "0.2.1"
 rust-version = "1.88"
 # Default cosmon licence is AGPL-3.0-only (core, runtime, end-to-end binaries).
 # Frontier crates (libs/SDKs that a third party would `cargo add`) override

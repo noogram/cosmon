@@ -17,6 +17,8 @@ public API guarantee at this stage.
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-07-19
+
 ### Fixed: the Homebrew formula declared the wrong licence
 
 - The rendered tap formula claimed `MIT` while the `cs` binary ships
