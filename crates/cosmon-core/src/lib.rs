@@ -120,6 +120,8 @@ pub mod clearance;
 #[doc(hidden)]
 pub mod cluster;
 #[doc(hidden)]
+pub mod codex_energy;
+#[doc(hidden)]
 pub mod committee;
 #[doc(hidden)]
 pub mod config;
