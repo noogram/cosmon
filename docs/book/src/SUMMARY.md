@@ -48,6 +48,7 @@
 - [Formulas: the only extension point](./explanation/formulas.md)
 - [Agent adapters: a harness over harnesses](./explanation/adapter.md)
 - [Fleets: many agents, one portal](./explanation/fleets.md)
+- [Adversarial review: agents that cross-examine](./explanation/adversarial-review.md)
 - [Dynamic workflows or cosmon fleets?](./explanation/workflows-vs-fleets.md)
 - [Control plane vs data plane](./explanation/control-vs-data-plane.md)
 - [The three regimes: Inert / Propelled / Autonomous](./explanation/regimes.md)
