@@ -1486,26 +1486,23 @@ where
         let Some(wid) = mol.assigned_worker.as_ref() else {
             continue;
         };
-        let stalled = match mol.last_progress_at {
-            Some(progress_ts) => {
-                let timeout_minutes = formula_for(&mol.formula_id)
-                    .and_then(|f| {
-                        f.steps
-                            .get(mol.current_step)
-                            .map(cosmon_core::formula::Step::stall_timeout_minutes)
-                    })
-                    .unwrap_or(30);
-                let budget = chrono::Duration::minutes(i64::from(timeout_minutes));
-                now.signed_duration_since(progress_ts) > budget
-            }
-            None => {
-                // Boot-stall: tackled but zero progress ever recorded. Anchor
-                // on the tackle instant; legacy records without `tackled_at`
-                // fall back to `updated_at` (stamped at tackle and frozen
-                // since, precisely because nothing ever happened).
-                let anchor = mol.tackled_at.unwrap_or(mol.updated_at);
-                now.signed_duration_since(anchor).num_seconds() > NUDGE_BOOT_STALL_SECS
-            }
+        let stalled = if let Some(progress_ts) = mol.last_progress_at {
+            let timeout_minutes = formula_for(&mol.formula_id)
+                .and_then(|f| {
+                    f.steps
+                        .get(mol.current_step)
+                        .map(cosmon_core::formula::Step::stall_timeout_minutes)
+                })
+                .unwrap_or(30);
+            let budget = chrono::Duration::minutes(i64::from(timeout_minutes));
+            now.signed_duration_since(progress_ts) > budget
+        } else {
+            // Boot-stall: tackled but zero progress ever recorded. Anchor
+            // on the tackle instant; legacy records without `tackled_at`
+            // fall back to `updated_at` (stamped at tackle and frozen
+            // since, precisely because nothing ever happened).
+            let anchor = mol.tackled_at.unwrap_or(mol.updated_at);
+            now.signed_duration_since(anchor).num_seconds() > NUDGE_BOOT_STALL_SECS
         };
         if !stalled {
             continue;
