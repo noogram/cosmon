@@ -130,9 +130,19 @@ pub enum BacklogGuardError {
 /// [`THRESHOLD_ENV_VAR`] if it parses, or [`DEFAULT_STALE_THRESHOLD`].
 #[must_use]
 pub fn current_threshold() -> usize {
-    std::env::var(THRESHOLD_ENV_VAR)
-        .ok()
-        .and_then(|raw| raw.parse::<usize>().ok())
+    threshold_from(std::env::var(THRESHOLD_ENV_VAR).ok().as_deref())
+}
+
+/// Resolve a raw override value into the effective sediment threshold.
+///
+/// Pure counterpart of [`current_threshold`]: takes the would-be
+/// [`THRESHOLD_ENV_VAR`] value as a parameter so the parsing contract is
+/// testable without mutating the process environment (process-wide env
+/// writes race with concurrent test threads — the 2026-07-18 verify-gate
+/// flake, diagnosed in task-20260719-ef32).
+#[must_use]
+pub fn threshold_from(raw: Option<&str>) -> usize {
+    raw.and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(DEFAULT_STALE_THRESHOLD)
 }
 
@@ -194,7 +204,26 @@ pub fn check_backlog(
     store: &dyn StateStore,
     force: bool,
 ) -> Result<SedimentReport, BacklogGuardError> {
-    let threshold = current_threshold();
+    check_backlog_with_threshold(store, force, current_threshold())
+}
+
+/// [`check_backlog`] with the threshold injected instead of read from the
+/// environment.
+///
+/// This is the seam tests use to exercise tightened or disabled thresholds
+/// without `std::env::set_var` — a process-wide write that races with
+/// parallel test threads (the 2026-07-18 flake, task-20260719-ef32).
+/// Production callers go through [`check_backlog`], which resolves the
+/// operator override once and delegates here.
+///
+/// # Errors
+///
+/// Same contract as [`check_backlog`].
+pub fn check_backlog_with_threshold(
+    store: &dyn StateStore,
+    force: bool,
+    threshold: usize,
+) -> Result<SedimentReport, BacklogGuardError> {
     if threshold == 0 {
         // Explicit opt-out: operator set the env var to 0. Skip the read.
         return Ok(SedimentReport::clean(0));
