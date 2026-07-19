@@ -207,3 +207,15 @@ publish_globs = []
 api_key_env = "MISTRAL_API_KEY"
 base_url = "https://api.mistral.ai"
 default_model = "mistral-large-latest"
+
+# Galaxy-level model pin for claude workers (the "galaxy config" rung of the
+# intention ladder: cli → formula-step → env → HERE → global → builtin floor).
+# When neither `cs tackle --model` nor the formula step pins a model, workers
+# in this galaxy run Opus. The full canonical id (not the `opus` alias) keeps
+# the realized-model axis silent on agreement — an alias pin would render a
+# permanent false drift (`opus~>claude-opus-4-8`) in `cs peek`, since the
+# pin↔realized comparison is exact string equality by design (no alias table
+# to rot). No `strong` list is declared in this galaxy, so the Ghost A
+# only-downgrade guard (`cs reconcile --check`) stays dormant on this default.
+[adapters.claude]
+default_model = "claude-opus-4-8"
