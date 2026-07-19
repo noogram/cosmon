@@ -512,6 +512,11 @@ jobs:
       matrix:
         os: [macos-14, ubuntu-latest]
     steps:
+      # ubuntu-latest runners ship no Homebrew (first live run of this job,
+      # v0.2.1: `brew: command not found`, exit 127). Set up Linuxbrew there;
+      # macos-14 has brew preinstalled and setup-homebrew is a fast no-op.
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@df4b09108a1de9d6f995fe68f302b3f68bd6d2ef  # master 2026-07
       - name: brew install from tap + assert <30s
         shell: bash
         run: |
