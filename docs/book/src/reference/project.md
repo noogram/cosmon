@@ -247,7 +247,7 @@ MINIMAL patrols.toml (~/.config/cosmon/patrols.toml):
   name        = "chronicle-lint-weekly"
   cron        = "0 9 * * 0"            # cadence: Sundays 09:00
   command     = ["cs", "nucleate", "chronicle-lint"]
-  working_dir = "/srv/cosmon/example-project"
+  working_dir = "~/galaxies/example-project"
   enabled     = true
 
 HOT-RELOAD:
@@ -618,6 +618,30 @@ Reads the typed-link DAG (`Blocks` / `BlockedBy`).
 ###### **Options:**
 
 * `--transitive` — Walk the full transitive closure instead of only direct edges
+
+
+
+## `cs mission`
+
+Mission — read-only DAG view joining ledger edges to completion merge commits
+
+**Usage:** `cs mission <COMMAND>`
+
+###### **Subcommands:**
+
+* `graph` — Render the mission DAG rooted at a molecule, joining ledger edges to their completion merge commits
+
+
+
+## `cs mission graph`
+
+Render the mission DAG rooted at a molecule, joining ledger edges to their completion merge commits
+
+**Usage:** `cs mission graph <ROOT>`
+
+###### **Arguments:**
+
+* `<ROOT>` — Mission root molecule ID (exact or unambiguous prefix)
 
 
 

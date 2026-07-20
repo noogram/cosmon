@@ -108,11 +108,35 @@ PATTERNS=(
 # The molecule's own fold merge still faces the full ledger check.
 # See scripts/check-provenance.sh for the mirrored reasoning.
 BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
+# Durable base-sync marker (delib-20260720-cff4): `cs sync` stamps an explicit
+# `Base-Sync: <base>..<branch>` trailer so recognition no longer hangs solely
+# on the subject direction heuristic. Recognised via subject OR trailer; the
+# SAME structural check (incoming on main's first-parent chain) then applies,
+# so this widens recognition without weakening the gate.
+BASE_SYNC_TRAILER_RE="^Base-Sync:[[:space:]]*[^[:space:]]+\.\.feat/${MOL_ID_RE}[[:space:]]*\$"
+base_mol=""
 if [[ "$SUBJECT" =~ $BASE_SYNC_RE ]]; then
     base_mol="${BASH_REMATCH[1]}"
+else
+    # `|| true`: under `set -e` a no-match grep (exit 1), propagated through the
+    # pipe by `pipefail`, would otherwise abort the hook and veto every
+    # non-base-sync merge (e.g. an ordinary completion fold).
+    trailer_line=$(grep -iE '^Base-Sync:' "$MSG_FILE" 2>/dev/null | head -n 1 || true)
+    if [ -n "$trailer_line" ] && [[ "$trailer_line" =~ $BASE_SYNC_TRAILER_RE ]]; then
+        base_mol="${BASH_REMATCH[1]}"
+    fi
+fi
+if [ -n "$base_mol" ]; then
     incoming=$(cat "$GITDIR/MERGE_HEAD" 2>/dev/null | head -n 1)
-    if [ -n "$incoming" ] \
-        && git rev-list --first-parent main 2>/dev/null | grep -qx "$incoming"; then
+    # Materialise the trunk chain into a variable and match with a here-string,
+    # NOT `git rev-list … | grep -q`. Under `set -o pipefail`, `grep -q` closes
+    # the pipe the instant it matches; `git rev-list` then dies of SIGPIPE and
+    # pipefail propagates that failure, so a genuine match is misread as "not
+    # on trunk" once the history is long enough that rev-list is still writing
+    # (short histories raced clean, which is why this stayed latent). The CI
+    # mirror already reads its chain from a file for the same reason.
+    trunk_fp=$(git rev-list --first-parent main 2>/dev/null || true)
+    if [ -n "$incoming" ] && grep -qxF "$incoming" <<<"$trunk_fp"; then
         echo "cosmon: provenance ok ($base_mol) — base-sync from trunk" >&2
         exit 0
     fi

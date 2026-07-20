@@ -233,6 +233,8 @@ Commands:
   await-operator  Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   topology        Topology — structural maps of the workspace (wraps the `topon` CLI)
   deps            Deps — show blocking dependencies for a molecule (upstream/downstream)
+  mission         Mission — read-only DAG view joining ledger edges to completion merge commits
+  sync            Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
   diverge         Diverge — structural agreement check between two sessions on a molecule (turing §5)
   peek            Peek — canonical fleet observation command (TUI default; `--no-tui` for plaintext stream)
   wait            Wait — block until a molecule reaches a terminal (or requested) status

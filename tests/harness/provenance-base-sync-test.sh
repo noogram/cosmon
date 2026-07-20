@@ -125,6 +125,34 @@ git checkout -q main
 COSMON_SKIP_PROVENANCE=1 git merge -q --no-ff --no-edit \
     -m "Merge branch 'feat/no-molecule'" feat/no-molecule
 
+# --- Scenario 6: trailer-based base-sync (delib-20260720-cff4). The subject
+#     is NOT the direction-heuristic shape; recognition comes from the durable
+#     `Base-Sync:` trailer alone. P2 is on trunk → accepted.
+mol_t="task-20260720-fade"
+git checkout -q -b "feat/$mol_t" main
+echo t1 > t1.txt && git add t1.txt && git commit -q -m "evolve($mol_t): work"
+git checkout -q main
+echo trunk3 > trunk3.txt && git add trunk3.txt && git commit -q -m "chore: trunk moves thrice"
+git checkout -q "feat/$mol_t"
+git merge -q --no-ff -m "sync: refresh base" \
+    -m "Base-Sync: main..feat/$mol_t" main
+basesync_trailer_ok=$(git rev-parse HEAD)
+git checkout -q main
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_t'" "feat/$mol_t"
+
+# --- Scenario 7: forged trailer base-sync — trailer present, but P2 off-trunk.
+git checkout -q -b foreign2 main~3
+echo evil2 > evil2.txt && git add evil2.txt && git commit -q -m "unreviewed material 2"
+mol_u="task-20260720-beef"
+git checkout -q -b "feat/$mol_u" main
+echo u1 > u1.txt && git add u1.txt && git commit -q -m "evolve($mol_u): work"
+git merge -q --no-ff -m "sync: refresh base" \
+    -m "Base-Sync: main..feat/$mol_u" foreign2
+basesync_trailer_forged=$(git rev-parse HEAD)
+git checkout -q main
+COSMON_SKIP_PROVENANCE=1 git merge -q --no-ff --no-edit \
+    -m "Merge branch 'feat/$mol_u'" "feat/$mol_u"
+
 # Run the mirror over the whole synthetic history.
 out=$(env -u GITHUB_SHA -u GITHUB_BASE_REF -u GITHUB_EVENT_BEFORE \
     COSMON_PROVENANCE_SINCE="2020-01-01 00:00:00" bash "$GATE" 2>&1)
@@ -137,6 +165,12 @@ verdict "2. forged base-sync (off-trunk P2) still rejected" 0 "$r"
 
 grep -q "^FAIL  $basesync_nameless" <<<"$out" && r=0 || r=1
 verdict "3. base-sync into non-molecule branch rejected" 0 "$r"
+
+grep -q "^ok    $basesync_trailer_ok" <<<"$out" && r=0 || r=1
+verdict "6. trailer-based base-sync accepted (subject not the heuristic)" 0 "$r"
+
+grep -q "^FAIL  $basesync_trailer_forged" <<<"$out" && r=0 || r=1
+verdict "7. forged trailer base-sync (off-trunk P2) still rejected" 0 "$r"
 
 if [ "$failed" -ne 0 ]; then
     printf '%s\n' "$out" | sed 's/^/      /'
@@ -235,6 +269,25 @@ else
         >/dev/null 2>&1 && rc=0 || rc=$?
     git merge --abort 2>/dev/null || true
     verdict "5b. hook rejects forged base-sync (off-trunk incoming)" 1 "$rc"
+
+    # 5c — trailer-based base-sync (as `cs sync` writes it): a cosmon-controlled
+    #      subject plus a Base-Sync trailer. The hook must accept it on the same
+    #      structural evidence, recognising it via the trailer, not the subject.
+    git checkout -q main
+    echo t2 > t2.txt && git add t2.txt && git commit -q -m "chore: trunk moves again"
+    git checkout -q "feat/$mol_c"
+    git merge --no-ff -m "sync: refresh base" -m "Base-Sync: main..feat/$mol_c" main \
+        >/dev/null 2>&1 && rc=0 || rc=$?
+    verdict "5c. hook accepts trailer-based base-sync (cs sync shape)" 0 "$rc"
+
+    # 5d — forged trailer base-sync: trailer present, off-trunk incoming side.
+    git checkout -q -b rogue2 main~1
+    echo evil2 > evil2.txt && git add evil2.txt && git commit -q -m "ungated material 2"
+    git checkout -q "feat/$mol_c"
+    git merge --no-ff -m "sync: refresh base" -m "Base-Sync: main..feat/$mol_c" rogue2 \
+        >/dev/null 2>&1 && rc=0 || rc=$?
+    git merge --abort 2>/dev/null || true
+    verdict "5d. hook rejects forged trailer base-sync (off-trunk incoming)" 1 "$rc"
 
     cd "$REPO" || exit 2
 fi

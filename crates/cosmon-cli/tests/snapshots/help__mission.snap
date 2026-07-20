@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Mission — read-only DAG view joining ledger edges to completion merge commits
+
+Usage: cs mission [OPTIONS] <COMMAND>
+
+Commands:
+  graph  Render the mission DAG rooted at a molecule, joining ledger edges to their completion merge commits
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

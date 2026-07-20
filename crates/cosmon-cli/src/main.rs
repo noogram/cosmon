@@ -304,6 +304,12 @@ enum Command {
     #[command(after_help = cmd::examples::DEPS)]
     Deps(cmd::deps::Args),
 
+    /// Mission — read-only DAG view joining ledger edges to completion merge commits
+    Mission(cmd::mission::Args),
+
+    /// Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
+    Sync(cmd::sync::Args),
+
     /// Diverge — structural agreement check between two sessions on a molecule (turing §5)
     #[command(after_help = cmd::examples::DIVERGE)]
     Diverge(cmd::diverge::Args),
@@ -587,6 +593,8 @@ fn main() {
         Command::Heartbeat(args) => cmd::heartbeat::run(&ctx, &args),
         Command::Topology(args) => cmd::topology::run(&ctx, &args),
         Command::Deps(args) => cmd::deps::run(&ctx, &args),
+        Command::Mission(args) => cmd::mission::run(&ctx, &args),
+        Command::Sync(args) => cmd::sync::run(&ctx, &args),
         Command::Diverge(args) => cmd::diverge::run(&ctx, &args),
         Command::Peek(args) => cmd::peek::run(&ctx, &args),
         Command::Wait(args) => cmd::wait::run(&ctx, &args),

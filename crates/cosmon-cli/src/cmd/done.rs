@@ -2047,6 +2047,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &mut warnings,
     );
 
+    // Scheduler-derived lineage trailers (delib-20260720-cff4, Phase 1).
+    // The completion merge is stamped with the mission lineage read from the
+    // *ledger* — this molecule's id, the DAG root it belongs to, and one
+    // `Depends-On` per `blocked_by` parent — so git history's DAG structure
+    // becomes legible without changing any merge topology. buterin's hard
+    // constraint: these values come from `store.load_molecule` (the edges
+    // recorded at nucleation), never from worker-writable state, so the
+    // legibility layer cannot become a forgery channel. On the modal
+    // single-molecule case this adds exactly `Mol-Id` + `Mission-Id` and
+    // nothing else — the merge is byte-identical save the new trailer lines.
+    let lineage_trailers = super::lineage::completion_trailers(&store, &mol_id);
+
+    // The merge commit carries both attribution (`Co-Authored-By`) and lineage
+    // trailers as one contiguous trailer paragraph. Attribution stays first so
+    // pre-existing message snapshots keep their leading block; lineage follows.
+    let merge_trailers: Vec<String> = coauthor_trailers
+        .iter()
+        .cloned()
+        .chain(lineage_trailers.iter().cloned())
+        .collect();
+
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
     // carry the configured provenance trailers without rewriting worker
     // commits (forbidden by delib-20260717-194b: it changes their SHAs and
@@ -2073,7 +2094,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             !args.no_auto_propel,
             args.max_retries,
             args.propel_message.as_deref(),
-            &coauthor_trailers,
+            &merge_trailers,
         );
         match merge_result {
             Ok(MergeLoopOutcome::Merged) => {
@@ -7559,6 +7580,71 @@ mod tests {
             !String::from_utf8_lossy(&body.stdout).contains("Co-Authored-By"),
             "empty trailers must not stamp the auto-resolved merge commit"
         );
+    }
+
+    /// A completion merge must carry the scheduler-derived lineage trailers
+    /// (delib-20260720-cff4, Phase 1): `Mol-Id`, `Mission-Id`, and one
+    /// `Depends-On` per ledgered `blocked_by` parent. The values are computed
+    /// from the store (never from worker-writable state) and threaded through
+    /// the SAME `try_merge_branch` carrier as attribution trailers, so this
+    /// asserts the end-to-end path: ledger → `completion_trailers` → merge
+    /// commit body that git itself parses as trailers.
+    #[test]
+    fn completion_merge_carries_ledger_derived_lineage_trailers() {
+        use cosmon_core::interaction::MoleculeLink;
+
+        // Ledger: mission root A blocks child B.
+        let (tmp_state, store) = make_store();
+        let root = MoleculeId::new("task-20260720-a0a0").unwrap();
+        let child = MoleculeId::new("task-20260720-b0b0").unwrap();
+        let mut a = sample_mol(root.as_str(), MoleculeStatus::Completed);
+        a.typed_links.push(MoleculeLink::Blocks {
+            target: child.clone(),
+        });
+        let mut b = sample_mol(child.as_str(), MoleculeStatus::Completed);
+        b.typed_links.push(MoleculeLink::BlockedBy {
+            source: root.clone(),
+        });
+        store.save_molecule(&root, &a).unwrap();
+        store.save_molecule(&child, &b).unwrap();
+
+        // Trailers derived from the ledger, exactly as `cs done` does.
+        let trailers = super::super::lineage::completion_trailers(&store, &child);
+
+        // A real repo with the child's feat branch ahead of main.
+        let tmp_repo = TempDir::new().unwrap();
+        let repo = tmp_repo.path();
+        init_repo(repo);
+        let branch = format!("feat/{child}");
+        assert!(git(repo, &["checkout", "-q", "-b", &branch])
+            .status
+            .success());
+        commit_file(repo, "work.txt", "child work\n", "evolve(child): work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+
+        let outcome = try_merge_branch(repo, &branch, MergeStrategy::Merge, &trailers);
+        assert!(
+            matches!(outcome, MergeOutcome::Merged),
+            "expected Merged, got {outcome:?}"
+        );
+
+        // git must PARSE the trailers on the finalized merge commit — reading
+        // the raw body would hide a malformed (blank-line-split) trailer block.
+        let out = git(repo, &["log", "-1", "--format=%(trailers:only,unfold)"]);
+        let parsed = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            parsed.contains("Mol-Id: task-20260720-b0b0"),
+            "merge must carry the Mol-Id trailer, got:\n{parsed}"
+        );
+        assert!(
+            parsed.contains("Mission-Id: task-20260720-a0a0"),
+            "merge must carry the ledger-derived Mission-Id, got:\n{parsed}"
+        );
+        assert!(
+            parsed.contains("Depends-On: task-20260720-a0a0"),
+            "merge must carry one Depends-On per blocked_by parent, got:\n{parsed}"
+        );
+        drop(tmp_state);
     }
 
     #[test]
