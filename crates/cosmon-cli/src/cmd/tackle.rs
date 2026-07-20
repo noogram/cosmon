@@ -3811,6 +3811,16 @@ fn spawn_claude_and_prompt(
         strong_set,
     )?;
 
+    // Root escape valve (task-20260720-18bb / BUG #6): Claude Code v2.x
+    // `exit(1)`s at spawn under a bypass permission mode when euid == 0
+    // unless `IS_SANDBOX=1` is set. A worker that exits at spawn never
+    // reaches its composer, so the briefing send-keys lands in a dead pane —
+    // the reported "runtime hang". Force the escape valve only in that exact
+    // intersection; otherwise defer to whatever the operator already exported
+    // (the tmux env-freeze means an exported value must still be re-emitted).
+    let is_root = nix::unistd::Uid::effective().is_root();
+    let force_sandbox = cosmon_cli::tackle_env::force_sandbox_escape(perm_mode, is_root);
+
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
         parent_id_str,
@@ -3824,6 +3834,15 @@ fn spawn_claude_and_prompt(
         |k| match k {
             "ANTHROPIC_MODEL" => effective_model.clone(),
             "CLAUDE_CONFIG_DIR" => config_dir.clone(),
+            // Force the root escape valve when required; else preserve any
+            // operator-exported value across the tmux boundary.
+            "IS_SANDBOX" => {
+                if force_sandbox {
+                    Some("1".to_owned())
+                } else {
+                    std::env::var("IS_SANDBOX").ok()
+                }
+            }
             other => std::env::var(other).ok(),
         },
     );
@@ -3866,9 +3885,12 @@ fn spawn_claude_and_prompt(
         Ok(Liveness::Live) => {}
         Ok(Liveness::Dead) => {
             maybe_terminate(backend, wid);
+            let stderr_hint = worker_stderr_tail(mol_state_dir)
+                .map(|t| format!(" worker.stderr: {t}."))
+                .unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "cs tackle: claude session {session_name} died during startup; \
-                 no worker registered. Inspect with \
+                 no worker registered.{stderr_hint} Inspect with \
                  `tmux -L {} capture-pane -pS - -t {session_name}` \
                  (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)",
                 backend.socket()
@@ -3876,11 +3898,14 @@ fn spawn_claude_and_prompt(
         }
         Ok(Liveness::Indeterminate) => {
             maybe_terminate(backend, wid);
+            let stderr_hint = worker_stderr_tail(mol_state_dir)
+                .map(|t| format!(" worker.stderr: {t}."))
+                .unwrap_or_default();
             return Err(anyhow::anyhow!(
                 "cs tackle: claude session {session_name} did not reach a \
                  known state within 30s (status=unknown). Likely the binary \
-                 failed to start or printed nothing recognisable. Inspect \
-                 with `tmux -L {} capture-pane -pS - -t {session_name}` \
+                 failed to start or printed nothing recognisable.{stderr_hint} \
+                 Inspect with `tmux -L {} capture-pane -pS - -t {session_name}` \
                  then retry with --force \
                  (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)",
                 backend.socket()
@@ -5893,6 +5918,34 @@ fn which_claude() -> Option<String> {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         .filter(|s| !s.is_empty())
+}
+
+/// Read a short tail of the worker's captured `stderr` for spawn diagnostics.
+///
+/// The worker `claude` is a detached tmux grand-child whose fd 2 is
+/// redirected to `<mol_dir>/worker.stderr` (see
+/// [`cosmon_cli::tackle_env::build_claude_command`]). When it dies at startup
+/// — the Claude Code v2.x root/bypass refusal
+/// (`console.error(…), process.exit(1)`) is the canonical case
+/// (task-20260720-18bb / BUG #6) — the cause lands *there*, not in the pane
+/// the readiness probe reads via `capture-pane`. Surfacing the last lines
+/// turns an opaque "died during startup / status=unknown" into an actionable
+/// message. Best-effort: a missing or unreadable file yields `None` so the
+/// diagnostic degrades to the pane-inspection hint alone.
+fn worker_stderr_tail(mol_state_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(mol_state_dir.join("worker.stderr")).ok()?;
+    let tail: Vec<&str> = raw
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(6)
+        .collect();
+    if tail.is_empty() {
+        return None;
+    }
+    // `tail` is newest-first; reverse back to chronological order.
+    let lines: Vec<&str> = tail.into_iter().rev().collect();
+    Some(lines.join(" | "))
 }
 
 /// Default permission mode based on molecule kind.
