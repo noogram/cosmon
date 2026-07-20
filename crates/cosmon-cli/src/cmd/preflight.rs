@@ -95,9 +95,65 @@ pub(crate) fn check_configured_toolchain(gates: &GatesConfig) -> anyhow::Result<
 }
 
 fn command_mentions_cargo(command: &str) -> bool {
-    let words: Vec<_> = command.split_whitespace().collect();
+    // Leading `VAR=value` assignments are shell prefix syntax, not the command:
+    // the canonical doc gate is `RUSTDOCFLAGS='-D warnings' cargo doc …`, and a
+    // probe that stopped at the first word would read it as a program named
+    // `RUSTDOCFLAGS='-D` and miss the cargo behind it. Skipping the prefix is
+    // what lets an env-prefixed gate be seen at all.
+    let words = strip_env_prefix(command);
     matches!(words.as_slice(), ["cargo", ..])
         || matches!(words.as_slice(), ["timeout", _, "cargo", ..])
+}
+
+/// Drop leading `KEY=value` assignments, returning the words of the command
+/// proper.
+///
+/// Quote-aware, and that is the whole difficulty: the canonical doc gate is
+/// `RUSTDOCFLAGS='-D warnings' cargo doc …`, whose value contains a space, so
+/// whitespace splitting tears one assignment into `RUSTDOCFLAGS='-D` and
+/// `warnings'`. A skip that judged each token independently would stop on the
+/// orphaned `warnings'`, conclude that is the program name, and miss the cargo
+/// behind it. So when an assignment opens a quote it does not close, keep
+/// consuming words until the closing quote.
+fn strip_env_prefix(command: &str) -> Vec<&str> {
+    let mut words = command.split_whitespace().peekable();
+    while words.peek().is_some_and(|w| is_env_assignment(w)) {
+        let word = words.next().unwrap_or_default();
+        let Some((_, value)) = word.split_once('=') else {
+            continue;
+        };
+        let Some(quote) = value.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            continue;
+        };
+        // `VAR='x'` closes on the same token; `VAR='-D` does not. The len check
+        // keeps a lone `VAR='` from reading as its own terminator.
+        if value.len() >= 2 && value.ends_with(quote) {
+            continue;
+        }
+        for next in words.by_ref() {
+            if next.ends_with(quote) {
+                break;
+            }
+        }
+    }
+    words.collect()
+}
+
+/// Whether a token is a leading shell environment assignment (`KEY=value`).
+///
+/// Deliberately strict about the *key*: it must be a non-empty run of
+/// identifier characters before the `=`. Without that, a bare flag value or a
+/// path containing `=` would be mistaken for a prefix and the real command
+/// word skipped — turning the probe silently permissive.
+fn is_env_assignment(word: &str) -> bool {
+    match word.split_once('=') {
+        Some((key, _)) => {
+            !key.is_empty()
+                && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !key.starts_with(|c: char| c.is_ascii_digit())
+        }
+        None => false,
+    }
 }
 
 /// Fail-loud guard for the load-bearing `strict-local ⇒ in-process`
@@ -411,5 +467,55 @@ mod tests {
             assert!(on_path("sh") || on_path("ls"));
         }
         assert!(!on_path("definitely-not-a-real-binary-xyzzy-42"));
+    }
+
+    /// The doc gate's canonical spelling carries an env prefix, so the probe
+    /// must look past `VAR=value` to find the program. A probe that stopped at
+    /// the first word would declare this gate cargo-free and let `cs tackle`
+    /// dispatch a worker onto a machine with no toolchain.
+    #[test]
+    fn cargo_is_seen_through_a_leading_env_assignment() {
+        assert!(command_mentions_cargo(
+            "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps"
+        ));
+        assert!(command_mentions_cargo(
+            "CARGO_TERM_COLOR=never RUSTFLAGS=-C cargo check"
+        ));
+        assert!(command_mentions_cargo("cargo check --workspace"));
+        assert!(command_mentions_cargo("timeout 600 cargo test"));
+    }
+
+    /// The quoting cases specifically: a value containing a space survives
+    /// whitespace splitting only because the skip is quote-aware. These are the
+    /// spellings an operator actually writes for a rustdoc gate.
+    #[test]
+    fn quoted_env_values_containing_spaces_do_not_hide_cargo() {
+        assert!(command_mentions_cargo(
+            "RUSTDOCFLAGS=\"-D warnings\" cargo doc"
+        ));
+        assert!(command_mentions_cargo(
+            "A='one two' B=\"three four\" cargo doc --no-deps"
+        ));
+        // Empty and single-token quoted values close on their own token.
+        assert!(command_mentions_cargo("EMPTY='' cargo doc"));
+        assert!(command_mentions_cargo("ONE='x' cargo doc"));
+        // A quote that never closes swallows the rest — no command word remains.
+        assert!(!command_mentions_cargo(
+            "UNTERMINATED='-D warnings cargo doc"
+        ));
+    }
+
+    /// The mirror: skipping the prefix must not make the probe permissive.
+    /// Only real `KEY=value` tokens are prefixes — anything else is the command
+    /// word itself, and a non-cargo gate must stay non-cargo.
+    #[test]
+    fn env_prefix_skipping_does_not_swallow_the_command_word() {
+        assert!(!command_mentions_cargo("pytest -q"));
+        assert!(!command_mentions_cargo("UV_PYTHON=3.12 pytest -q"));
+        // No `=`, so `ruff` is the command and the probe stops there.
+        assert!(!command_mentions_cargo("ruff check ."));
+        // A leading token whose key is not identifier-shaped is not a prefix.
+        assert!(!command_mentions_cargo("./x=y/cargo-ish check"));
+        assert!(!command_mentions_cargo("=bare cargo"));
     }
 }
