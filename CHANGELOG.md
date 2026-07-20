@@ -19,6 +19,31 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed: a local dispatch no longer collapses a molecule when the backend cannot serve the model
+
+- Dispatching to `--adapter local` against a reachable-but-empty Ollama spawned
+  a worker that died within ~30 s. The patrol then auto-collapsed the molecule.
+  Collapse is *terminal*, so the brief was lost and had to be re-nucleated by
+  hand under a new id — an infrastructure failure destroying work that had
+  nothing wrong with it. Observed twice on 2026-07-19.
+- `cs tackle` now preflights the `local` / `ollama` adapter before committing a
+  molecule to it: one `GET /v1/models` against the same base URL the worker
+  will dial, asserting the resolved model is actually served. A backend that is
+  down, or that does not serve the model, refuses the dispatch instead of
+  spawning a doomed worker. The refusal is recoverable where the collapse was
+  not — the molecule stays `pending` and re-tacklable, because the check runs
+  before the worktree is created and before the status flips to running.
+- The two failures are reported distinctly, because they need different repairs:
+  a dead backend says `ollama serve`, an unpulled model says `ollama pull <id>`.
+  Both state that the molecule survived.
+- Bypass with `COSMON_SKIP_ADAPTER_PREFLIGHT=1`. It skips the check; it never
+  weakens it.
+- **Not** guarded: "no model was selected". The model chain's floor is `None`
+  by design, meaning *"let the adapter use its own default"*, and it is tested
+  as such. Refusing on `None` would reject every healthy bare `--adapter local`
+  dispatch while still missing the real fault — an explicitly pinned but
+  unpulled model dies identically. The serveable-model check catches both.
+
 ### Fixed: every shipped binary now reports the version you downloaded
 
 - A fresh install of `0.2.1` gave you `cs 0.2.1` and `cosmon-remote 0.3.0` —
