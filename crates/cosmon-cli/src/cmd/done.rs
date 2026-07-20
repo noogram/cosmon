@@ -186,25 +186,38 @@ pub enum MergeStrategy {
     FfOnly,
 }
 
-/// Reject a merge shape that cannot carry configured attribution trailers.
+/// Reject a merge shape that cannot carry the merge commit's trailers.
 ///
 /// `ff-only` advances the base ref directly to a worker commit and creates no
 /// cosmon-owned commit. Rewriting that worker commit would invalidate its SHA,
-/// so native attribution and fast-forward-only integration are mutually
-/// exclusive. The empty-trailer configuration retains the historical
-/// fast-forward behavior.
+/// so ANY trailer that must live on a cosmon-owned carrier — native
+/// attribution (`Co-Authored-By:`, delib-20260717-194b) *and* the
+/// scheduler-derived lineage projection (`Mol-Id`/`Mission-Id`/`Depends-On:`,
+/// delib-20260720-cff4 Phase 1) — is mutually exclusive with a fast-forward.
+///
+/// The guard therefore takes the COMPLETE merge trailer set, not just the
+/// attribution block: a single-molecule `cs done --strategy ff-only` carries
+/// empty attribution but still has non-empty lineage trailers, and letting it
+/// fast-forward would drop its mandatory `Mol-Id`/`Mission-Id` projection from
+/// git history — leaving `cs mission graph` unable to join the completed
+/// molecule to any commit. Because [`super::lineage::completion_trailers`]
+/// always emits at least `Mol-Id` + `Mission-Id`, a completion merge can never
+/// legally fast-forward; the only empty-trailer caller is a configuration with
+/// no lineage and no attribution, which retains the historical behavior.
 fn ensure_attribution_carrier(
     strategy: MergeStrategy,
-    coauthor_trailers: &[String],
+    merge_trailers: &[String],
 ) -> anyhow::Result<()> {
-    if strategy == MergeStrategy::FfOnly && !coauthor_trailers.is_empty() {
+    if strategy == MergeStrategy::FfOnly && !merge_trailers.is_empty() {
         return Err(anyhow::anyhow!(
-            "cs done refuses `--strategy ff-only` while native attribution is configured: \
-             a fast-forward creates no merge commit on which to stamp the Noogram/adapter \
-             `Co-Authored-By:` trailers, and cosmon will not rewrite worker commits. Use the \
-             default `--strategy merge`, or remove `[attribution].coauthor_email` if this \
-             repository intentionally chooses unstamped linear history \
-             (delib-20260717-194b, trailer-carrier contract)."
+            "cs done refuses `--strategy ff-only`: the completion merge must carry trailers \
+             (native attribution `Co-Authored-By:` and/or the scheduler-derived lineage \
+             projection `Mol-Id`/`Mission-Id`/`Depends-On:`), but a fast-forward creates no \
+             merge commit on which to stamp them, and cosmon will not rewrite worker commits. \
+             A fast-forwarded completion would drop its mandatory lineage from git history, \
+             so `cs mission graph` could not join this molecule to any commit. Use the default \
+             `--strategy merge` (delib-20260717-194b + delib-20260720-cff4, trailer-carrier \
+             contract)."
         ));
     }
     Ok(())
@@ -2069,13 +2082,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .collect();
 
     // A fast-forward creates no commit owned by cosmon, so there is nowhere to
-    // carry the configured provenance trailers without rewriting worker
-    // commits (forbidden by delib-20260717-194b: it changes their SHAs and
-    // breaks ancestry guards). Refuse this contradictory option combination
+    // carry the merge's trailers without rewriting worker commits (forbidden by
+    // delib-20260717-194b: it changes their SHAs and breaks ancestry guards).
+    // The guard takes the COMPLETE `merge_trailers` set — attribution AND the
+    // scheduler-derived lineage projection (delib-20260720-cff4 Phase 1) — not
+    // just `coauthor_trailers`: a single-molecule completion has empty
+    // attribution yet still carries mandatory `Mol-Id`/`Mission-Id` lineage,
+    // and fast-forwarding it away would leave `cs mission graph` unable to join
+    // this molecule to any commit. Refuse this contradictory option combination
     // before touching the branch instead of reporting a successful but
-    // unstamped integration.
+    // lineage-stripped integration.
     if !args.no_merge {
-        ensure_attribution_carrier(args.strategy, &coauthor_trailers)?;
+        ensure_attribution_carrier(args.strategy, &merge_trailers)?;
     }
 
     // Mechanical-first escalation: see docs/architectural-invariants.md
@@ -7647,6 +7665,86 @@ mod tests {
         drop(tmp_state);
     }
 
+    /// CODEX-SOL end-to-end regression (delib-20260720-cff4, Phase 1): a
+    /// single-molecule `cs done --strategy ff-only` with EMPTY attribution but
+    /// non-empty lineage must be REFUSED before it touches git, and once forced
+    /// onto the default merge path its `Mol-Id` trailer must be resolvable to a
+    /// completion-merge SHA — exactly the join `cs mission graph` performs.
+    ///
+    /// Mirrors the `run()` sequencing at the seam it protects: build
+    /// `merge_trailers` = (empty attribution) ++ (ledger lineage), assert the
+    /// carrier guard rejects ff-only, then land the same trailers via the
+    /// default merge and confirm git parses `Mol-Id` back to the merge commit.
+    #[test]
+    fn ff_only_single_molecule_refused_then_lineage_resolves_after_merge() {
+        // Ledger: a lone molecule (its own mission root, no blockers).
+        let (tmp_state, store) = make_store();
+        let mol = MoleculeId::new("task-20260720-79cc").unwrap();
+        let data = sample_mol(mol.as_str(), MoleculeStatus::Completed);
+        store.save_molecule(&mol, &data).unwrap();
+
+        // `run()` composes the merge trailer set exactly this way: empty
+        // attribution (no `[attribution].coauthor_email`) chained with the
+        // scheduler-derived lineage. Even with zero attribution the lineage
+        // half is non-empty (`Mol-Id` + `Mission-Id`).
+        let coauthor_trailers: Vec<String> = Vec::new();
+        let lineage_trailers = super::super::lineage::completion_trailers(&store, &mol);
+        let merge_trailers: Vec<String> = coauthor_trailers
+            .iter()
+            .cloned()
+            .chain(lineage_trailers.iter().cloned())
+            .collect();
+        assert!(
+            !merge_trailers.is_empty(),
+            "a completion always carries at least Mol-Id + Mission-Id"
+        );
+
+        // 1. ff-only is REFUSED — the guard sees the complete trailer set, not
+        //    just the (empty) attribution block, so the lineage cannot be
+        //    fast-forwarded away.
+        let err = ensure_attribution_carrier(MergeStrategy::FfOnly, &merge_trailers).unwrap_err();
+        assert!(
+            err.to_string().contains("mission graph"),
+            "refusal must explain the lost mission-graph join, got: {err}"
+        );
+
+        // 2. Forced onto the default merge path, the SAME trailers land on a
+        //    real completion merge commit.
+        let tmp_repo = TempDir::new().unwrap();
+        let repo = tmp_repo.path();
+        init_repo(repo);
+        let branch = format!("feat/{mol}");
+        assert!(git(repo, &["checkout", "-q", "-b", &branch])
+            .status
+            .success());
+        commit_file(repo, "work.txt", "lone work\n", "evolve: lone work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        let outcome = try_merge_branch(repo, &branch, MergeStrategy::Merge, &merge_trailers);
+        assert!(
+            matches!(outcome, MergeOutcome::Merged),
+            "expected Merged, got {outcome:?}"
+        );
+
+        // 3. `cs mission graph` joins ledger → git by reading the `Mol-Id`
+        //    trailer off `git log`. Reproduce that lookup and confirm the
+        //    completed molecule now resolves to the merge commit's SHA.
+        let log = git(repo, &["log", "-1", "--format=%h\x1f%B"]);
+        let text = String::from_utf8_lossy(&log.stdout);
+        let (sha, body) = text.split_once('\x1f').expect("sha\x1fbody record");
+        let resolved =
+            super::super::lineage::trailer_value(body, super::super::lineage::MOL_ID_KEY);
+        assert_eq!(
+            resolved.as_deref(),
+            Some(mol.as_str()),
+            "mission graph must join the molecule to the merge commit via Mol-Id"
+        );
+        assert!(
+            !sha.trim().is_empty(),
+            "the resolved completion merge must have a SHA to point at"
+        );
+        drop(tmp_state);
+    }
+
     #[test]
     fn test_merge_branch_already_merged_is_noop() {
         let tmp = TempDir::new().unwrap();
@@ -9750,6 +9848,23 @@ mod tests {
     #[test]
     fn ff_only_remains_available_when_attribution_is_disabled() {
         assert!(ensure_attribution_carrier(MergeStrategy::FfOnly, &[]).is_ok());
+    }
+
+    /// CODEX-SOL regression: even with EMPTY attribution, a completion merge
+    /// carries lineage trailers (`Mol-Id`/`Mission-Id`), and those must never
+    /// fast-forward away. The guard is fed the complete merge trailer set, so a
+    /// lineage-only completion is refused just as an attribution-bearing one is.
+    #[test]
+    fn ff_only_refuses_lineage_only_completion() {
+        // No `Co-Authored-By:` — attribution disabled — but the scheduler
+        // stamps a `Mol-Id` lineage trailer regardless. ff-only must refuse.
+        let lineage_only = vec![
+            "Mol-Id: task-20260720-79cc".to_owned(),
+            "Mission-Id: task-20260720-79cc".to_owned(),
+        ];
+        let err = ensure_attribution_carrier(MergeStrategy::FfOnly, &lineage_only).unwrap_err();
+        assert!(err.to_string().contains("mission graph"));
+        assert!(err.to_string().contains("--strategy merge"));
     }
 
     // ---- C4 visibility (pré-mortem task-20260717-ffe1) --------------------
