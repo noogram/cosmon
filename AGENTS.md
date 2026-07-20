@@ -32,7 +32,12 @@ cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
+RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 ```
+
+The doc gate is not redundant with the others: `cargo check` compiles code
+without resolving a doc link, and clippy is not rustdoc. A broken intra-doc
+link passes every other gate and fails only in CI on the trunk.
 
 Run `scripts/publish.sh --check` for release-bound changes. Runtime state,
 credentials, machine paths, internal identifiers, and unreviewed binary assets

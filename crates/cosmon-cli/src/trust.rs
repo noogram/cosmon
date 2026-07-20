@@ -62,7 +62,7 @@
 //! its raw text: prose fields (`description`, `acceptance`, `title`, …) and
 //! TOML comments cannot reach `sh -c`, so a formula that merely *mentions*
 //! `README.md` in its documentation must not enlist the real `README.md` into
-//! the security surface. See [`shell_bearing_text`] for why that narrowing is
+//! the security surface. See `shell_bearing_text` for why that narrowing is
 //! security-neutral and why it is a denylist rather than an allowlist.
 //!
 //! # Fail-closed hashing (unconditional jail)
@@ -91,7 +91,7 @@
 //!
 //! # One real file, one folded entry (case-insensitive filesystems)
 //!
-//! [`IMPLICIT_DEFAULTS`] deliberately lists several spellings of the same
+//! `IMPLICIT_DEFAULTS` deliberately lists several spellings of the same
 //! conceptual file (`just` → `justfile`, `Justfile`, `.justfile`). On a
 //! **case-insensitive** filesystem — default APFS on macOS, NTFS on Windows —
 //! two of those spellings name the *same inode*, so both candidate paths
@@ -100,10 +100,11 @@
 //! filesystem.
 //!
 //! That does not happen, and the reason is worth pinning here because it is
-//! not obvious. [`Path::canonicalize`] does more than resolve symlinks: on
+//! not obvious. [`std::path::Path::canonicalize`] does more than resolve
+//! symlinks: on
 //! both macOS and Windows it returns the **real on-disk spelling** of every
 //! component, so `…/Justfile` and `…/justfile` canonicalize to one identical
-//! `PathBuf`. [`delegated_targets`] dedupes on that canonical path *and*
+//! `PathBuf`. `delegated_targets` dedupes on that canonical path *and*
 //! derives the folded entry name from it, so the two spellings collapse to a
 //! single entry carrying the true on-disk case. Verified empirically against
 //! this repository's own `post_merge = "just install"` (one folded entry,

@@ -55,6 +55,7 @@ lint_command      = "cargo clippy --workspace -- -D warnings"
 format_command    = "cargo fmt --all -- --check"
 typecheck_command = "mypy ."           # optional standalone type-check
 setup_command     = "uv sync"          # dependency install / bootstrap
+doc_command       = "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps"
 integrity_command = "cargo check --workspace --all-targets"  # cs done merge gate
 fail_closed_on_unverified = false      # also roll back the "nothing declared" case (expected:true already fails closed)
 ```
@@ -69,6 +70,7 @@ fail_closed_on_unverified = false      # also roll back the "nothing declared" c
 | `lint_command` | Run the linter with errors-as-failures |
 | `format_command` | Verify formatting without rewriting files |
 | `typecheck_command` | Standalone type-checker (when the build step does not subsume it) |
+| `doc_command` | Build the API docs with warnings promoted to errors. Not subsumed by the others: `build_command` compiles code without resolving a doc link, and a code linter is not a doc linter, so a broken intra-doc link passes every other gate and surfaces only in CI on the trunk. |
 | `integrity_command` | The `cs done` **post-merge integrity gate** — run on the combined tree after a branch merges (ADR-158). See below. |
 | `fail_closed_on_unverified` | Bool (default `false`). Promote an `Unverified` post-merge outcome from loud-fail-open to a rollback. See below. |
 
@@ -113,9 +115,12 @@ expected-but-unchecked (`expected:true`) case already fails closed by default, s
 this flag is about the residual "nobody declared a verifier" case.
 
 `cs validate` (the heavyweight tier-2 milestone gate) delegates symmetrically to
-`test_command` / `lint_command` / `format_command` / `typecheck_command`,
-falling back to the cargo defaults when a slot is unset, and runs its
-repo-supplied stages under the same egress jail.
+`test_command` / `lint_command` / `format_command` / `typecheck_command` /
+`doc_command`, falling back to the cargo defaults when a slot is unset, and runs its
+repo-supplied stages under the same egress jail. The `doc_command` fallback is
+the one exception to "unset ⇒ cargo default": it applies only when the repo root
+actually holds a `Cargo.toml`, so a polyglot galaxy silent on the slot gets no
+doc stage rather than a `cargo doc` it cannot run.
 
 ### Language examples
 

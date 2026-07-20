@@ -14,7 +14,7 @@
 //! ```
 //!
 //! That gate carried two latent footguns that fired together on
-//! `mission-20260530-b4d2` (reproduced in the project_x galaxy, migrated to
+//! `mission-20260530-b4d2` (reproduced in the `project_x` galaxy, migrated to
 //! cosmon as `task-20260625-ae13`):
 //!
 //! 1. **`cs observe --json` with NO molecule id returns a JSON *array*** of
@@ -135,7 +135,7 @@ fn mission_planner_formulas_have_no_self_freeze_shell_gate() {
 /// molecule's own id by piping a bare `cs observe` into `jq … .id`.
 ///
 /// This is the durable fence: even if a stale formula is copied back in from
-/// a downstream galaxy (the exact provenance of this bug — project_x ran a
+/// a downstream galaxy (the exact provenance of this bug — `project_x` ran a
 /// stale `mission-plan` copy), the re-introduced footgun fails CI here rather
 /// than silently collapsing a mission molecule at runtime.
 #[test]

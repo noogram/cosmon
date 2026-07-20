@@ -82,6 +82,7 @@ pub(crate) fn check_configured_toolchain(gates: &GatesConfig) -> anyhow::Result<
         gates.test_command.as_deref(),
         gates.lint_command.as_deref(),
         gates.format_command.as_deref(),
+        gates.doc_command.as_deref(),
     ];
     if commands.into_iter().flatten().any(command_mentions_cargo) && !on_path("cargo") {
         anyhow::bail!(
