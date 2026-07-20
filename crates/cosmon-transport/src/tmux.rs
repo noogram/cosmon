@@ -396,6 +396,32 @@ impl TmuxBackend {
         composer_indicates_pending(&raw, input)
     }
 
+    /// Spawn-time public check: is `input` still sitting pasted-but-unsubmitted
+    /// in the worker's composer *right now*?
+    ///
+    /// A thin, session-resolving wrapper over the same composer scan
+    /// (`input_still_pending`) that [`TransportBackend::send_input`]'s
+    /// internal submit loop uses. It is exposed so the `cs tackle` spawn path
+    /// can run a **longer, spawn-scale** submit-confirmation than a single
+    /// `send_input` budget affords: a fresh Claude worker rendering a large
+    /// briefing paste can stay busy past `send_input`'s ~6 s budget and swallow
+    /// every re-`Enter`, leaving the worker idle on `❯ [Pasted text …]` — the
+    /// exact never-started stall reported on the 2026-07-20 knowledge fleet.
+    /// The caller polls this and re-nudges `Enter` until the worker leaves the
+    /// composer (or a spawn deadline passes).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError::NotFound`] if no live session matches `id`.
+    pub fn input_pending_for(&self, id: &WorkerId, input: &str) -> Result<bool, TransportError> {
+        let sessions = self.list_sessions()?;
+        let session = sessions
+            .iter()
+            .find(|s| s.worker_id == *id)
+            .ok_or_else(|| TransportError::NotFound(id.clone()))?;
+        Ok(self.input_still_pending(&session.session_name, input))
+    }
+
     /// Install a `pane-died` hook on `session_name` that shells out to
     /// `command` when any pane in the session exits.
     ///
@@ -1286,6 +1312,48 @@ mod tests {
             opt.contains("on"),
             "remain-on-exit must be 'on' after arming the pane-died hook, got: {opt:?}"
         );
+
+        let _ = backend.terminate(&worker.id);
+        cleanup(sock);
+    }
+
+    #[test]
+    fn input_pending_for_detects_unsubmitted_paste() {
+        // BUG #6 seam: the spawn-time submit-confirmation reads pending state
+        // through this public wrapper. A worker whose composer shows a
+        // collapsed-paste placeholder must read as pending so the tackle
+        // backstop keeps nudging Enter.
+        let sock = "cosmon-test-pending-for";
+        cleanup(sock);
+
+        let backend = TmuxBackend::new(sock);
+        let config = test_config(sock);
+
+        // A tiny TUI that prints a composer with the collapsed-paste
+        // placeholder and then blocks, so the pane keeps showing it.
+        let agent = AgentDefinition {
+            id: AgentId::new("pending-agent").unwrap(),
+            role: AgentRole::Implementation,
+            command: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "printf '\\342\\235\\257 [Pasted text #1 +86 lines]\\n'; sleep 300".to_owned(),
+            ],
+        };
+        let worker = backend.spawn(&agent, &config).expect("spawn failed");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        let pending = backend
+            .input_pending_for(&worker.id, "line one\nfinal line of the brief")
+            .expect("input_pending_for failed");
+        assert!(
+            pending,
+            "a composer showing `[Pasted text …]` must read as pending"
+        );
+
+        // A worker that never existed is NotFound, not a silent false.
+        let ghost = WorkerId::new("ghost-pending").unwrap();
+        assert!(backend.input_pending_for(&ghost, "x").is_err());
 
         let _ = backend.terminate(&worker.id);
         cleanup(sock);
