@@ -19,6 +19,17 @@ this stage.
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-07-20
+
+**External-tester hardening.** Every issue Jesse Thaler (MIT) raised against
+0.2.1 is fixed and converged clean: the flagship `cs verify` tamper check that
+tripped on cosmon's own honest output, two adapter faults that left workers
+alive but doing nothing, a hard-coded path leaking into worker prompts, and the
+missing Linux build prerequisites. A containerised regression bench and a
+null-context judge validated the fixes independently, and a math-attack v2
+spore ran fourteen nodes to terminal through the local adapter with the LLM
+firewall honored — end-to-end proof the sovereign local path carries real work.
+
 ### Fixed: a local dispatch no longer collapses a molecule when the backend cannot serve the model
 
 - Dispatching to `--adapter local` against a reachable-but-empty Ollama spawned
@@ -88,6 +99,84 @@ this stage.
   re-prompt can compound the throttle. `--propel` now reports gated workers in
   their own line: the one decline the operator must act on, because the
   molecule is waiting on *them*.
+
+### Added: merge history now reads like the mission that produced it
+
+- A `cs done` completion merge now carries scheduler-derived lineage trailers —
+  `Mol-Id`, `Mission-Id`, and `Depends-On` — so the shape of a mission is
+  recoverable from the git log alone, not just from the ledger. Base-sync merges
+  carry an explicit `Base-Sync` trailer, which replaces the old merge-direction
+  heuristic that guessed a merge's purpose from which way it pointed and got it
+  wrong on any non-trivial topology.
+- A new read-only `cs mission graph <root>` renders the mission DAG by joining
+  the ledger's dependency edges to the merge commits that realized them, so you
+  can see the whole tree — what depended on what, and where each branch landed —
+  without reconstructing it by hand.
+- The ordinary single-molecule path is byte-identical to before save for the new
+  trailer lines; nothing about a solo `cs done` changes shape. (Phase 1 of
+  delib-20260720-cff4.)
+
+### Fixed: `cs verify` read the wrong event schema and failed on every real molecule (Jesse #1)
+
+- The event-chain walker read the legacy kind-tagged envelope, but real
+  molecules write EventV2 records (`type` / `emitter_kind`). So `cs verify`
+  failed with `missing field kind` on every molecule that had ever run — the
+  flagship tamper-evidence claim tripping on cosmon's own honest output, which
+  is the worst possible place for it to break.
+- The walker now reads the EventV2 `seq` chain, and it requires that sequence to
+  be *contiguous*. That second half matters: a dropped middle record (say `0, 2`
+  with `1` excised) is now caught as tampering rather than silently accepted,
+  closing the hole a schema-only fix would have left open.
+
+### Fixed: `cs verify` seals tripped on honest rewrites (Jesse #1)
+
+- `briefing.md` is rewritten by cosmon at each step of a molecule, and the
+  bootstrap seal walked the operator's *ambient* `CLAUDE.md` / `AGENTS.md`. So
+  both seals FAILed on any multi-step molecule — again, an honest rewrite read
+  as tampering.
+- Seals now snapshot the per-step content and verify against that snapshot. A
+  legacy seal with no snapshot degrades to an honest `SKIP`-inconclusive instead
+  of a false alarm, while a genuine content swap *inside* a snapshot is still
+  caught — the check gets quieter about honest change without going blind to
+  dishonest change.
+
+### Fixed: the local/Ollama adapter booked no-op missions as completed (Jesse #4)
+
+- A weak local model that produced nothing at all was still marked done, so a
+  mission could report success having done no work. Completion now requires a
+  real-work guard, and an unresolvable ollama model fails loudly instead of
+  silently no-opping its way to a green checkmark.
+
+### Fixed: the Claude adapter failed against Claude Code v2.x (Jesse #6)
+
+- Two failures stacked on top of each other. Claude Code v2.x's root permission
+  guard refused `bypassPermissions`, and — even past that — the briefing was
+  pasted into the TUI but never submitted, so workers sat healthy and idle at
+  zero tokens, looking alive while doing nothing.
+- The adapter now survives the root guard (`IS_SANDBOX`) and confirms the
+  briefing was actually submitted: it re-nudges Enter until the worker is
+  observed Working, inside a bounded 90-second window, so a swallowed keystroke
+  no longer strands a worker.
+
+### Fixed: a hard-coded `/srv/cosmon` leaked into worker prompts (Jesse #5)
+
+- Worker-prompt and persona paths carried a hard-coded `/srv/cosmon`, which
+  surfaced verbatim in prompts on any machine that wasn't laid out that way.
+  They now resolve to the project/galaxy root, so the path a worker is told
+  about is the path it actually runs in.
+
+### Docs: the Linux build prerequisites are now stated (Jesse #2)
+
+- A from-source build on Linux/glibc needs `pkg-config` and `libdbus-1-dev` —
+  the keyring pulls in secret-service, which pulls in libdbus — and nothing said
+  so, so the build failed with a cryptic linker error. Getting Started now names
+  the two packages up front.
+
+### Not a bug: the DAG-orphan report (Jesse #3)
+
+- The reported DAG orphan was investigated and found already handled: orphan
+  detection is wired into `cs run`. No change was needed; recorded here so the
+  investigation is not silently lost.
 
 ## [0.2.1] — 2026-07-19
 
