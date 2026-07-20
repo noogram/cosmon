@@ -49,7 +49,8 @@ use crate::worker::EffectiveStatus;
 ///   [`EffectiveStatus::Healthy`]. The happy path.
 /// - [`Self::Orphaned`] — Running or Queued but the worker is gone
 ///   (no effective status passed in, or the worker reconciles to
-///   [`EffectiveStatus::Diverged`] / [`EffectiveStatus::Stopped`]).
+///   [`EffectiveStatus::Dead`] / [`EffectiveStatus::Diverged`] /
+///   [`EffectiveStatus::Stopped`]).
 ///   This is the signal an operator should act on first.
 /// - [`Self::Stalled`] — Running but the worker is
 ///   [`EffectiveStatus::Suspect`] (alive, cognitive declaration stale).
@@ -153,7 +154,7 @@ impl fmt::Display for MoleculeHealth {
 /// | `Running`               | `Healthy`                     | `Healthy`   |
 /// | `Running`               | `Suspect`                     | `Stalled`   |
 /// | `Running`               | `Blocked`                     | `Blocked`   |
-/// | `Running`               | `Diverged` / `Stopped`        | `Orphaned`  |
+/// | `Running`               | `Dead` / `Diverged` / `Stopped` | `Orphaned` |
 /// | `Running`               | `Paused` / `Error(_)`         | `Degraded`  |
 #[must_use]
 pub fn molecule_health(status: MoleculeStatus, worker: Option<&EffectiveStatus>) -> MoleculeHealth {
@@ -179,9 +180,9 @@ pub fn molecule_health(status: MoleculeStatus, worker: Option<&EffectiveStatus>)
             Some(EffectiveStatus::Suspect) => MoleculeHealth::Stalled,
             Some(EffectiveStatus::Blocked) => MoleculeHealth::Blocked,
             None
-            | Some(
-                EffectiveStatus::Dead | EffectiveStatus::Diverged | EffectiveStatus::Stopped,
-            ) => MoleculeHealth::Orphaned,
+            | Some(EffectiveStatus::Dead | EffectiveStatus::Diverged | EffectiveStatus::Stopped) => {
+                MoleculeHealth::Orphaned
+            }
             Some(EffectiveStatus::Paused | EffectiveStatus::Error(_)) => MoleculeHealth::Degraded,
         },
     }

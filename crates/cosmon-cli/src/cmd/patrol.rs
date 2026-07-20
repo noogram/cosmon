@@ -4436,7 +4436,11 @@ mod tests {
         fleet.workers.insert(wid.clone(), w);
         store.save_fleet(&fleet).unwrap();
 
-        let mol = make_molecule("cs-20260719-alv1", MoleculeStatus::Completed, Some("closing-w"));
+        let mol = make_molecule(
+            "cs-20260719-alv1",
+            MoleculeStatus::Completed,
+            Some("closing-w"),
+        );
         store.save_molecule(&mol.id, &mol).unwrap();
 
         let backend = mock_with_worker("closing-w", "");
@@ -4466,7 +4470,11 @@ mod tests {
         fleet.workers.insert(wid.clone(), w);
         store.save_fleet(&fleet).unwrap();
 
-        let mol = make_molecule("cs-20260719-run1", MoleculeStatus::Running, Some("running-w"));
+        let mol = make_molecule(
+            "cs-20260719-run1",
+            MoleculeStatus::Running,
+            Some("running-w"),
+        );
         store.save_molecule(&mol.id, &mol).unwrap();
 
         let backend = MockBackend::new();
@@ -4494,12 +4502,21 @@ mod tests {
         fleet.workers.insert(wid.clone(), w);
         store.save_fleet(&fleet).unwrap();
 
-        let mol = make_molecule("cs-20260719-unk1", MoleculeStatus::Completed, Some("unknown-w"));
+        let mol = make_molecule(
+            "cs-20260719-unk1",
+            MoleculeStatus::Completed,
+            Some("unknown-w"),
+        );
         store.save_molecule(&mol.id, &mol).unwrap();
 
-        let reaped =
-            reap_finished_dead_workers(&store, tmp.path(), &fleet, std::slice::from_ref(&mol), None)
-                .unwrap();
+        let reaped = reap_finished_dead_workers(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            None,
+        )
+        .unwrap();
 
         assert!(reaped.is_empty());
         assert!(store.load_fleet().unwrap().workers.contains_key(&wid));

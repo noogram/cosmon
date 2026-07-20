@@ -452,10 +452,33 @@ fn run_targeted(
 
     let mut fleet = store.load_fleet()?;
 
-    let worker = fleet
-        .workers
-        .get_mut(&worker_id)
-        .ok_or_else(|| anyhow::anyhow!("worker not found: {worker_id}"))?;
+    // task-20260719-fedf — a bare "worker not found" is a dead end. During
+    // the 2026-07-19 incident `cs purge` said exactly that for worker ids
+    // `cs ensemble` was rendering at that very moment, and the operator had
+    // no way to tell whether the id was wrong or the two verbs were reading
+    // different stores. `cs ensemble` aggregates across every deployed fleet
+    // (and, under `--all` / `--cluster`, across sibling galaxies); `cs purge`
+    // only ever reads the current galaxy's fleet. Naming the store searched —
+    // and what it does hold — turns the disagreement into a diagnosis.
+    if !fleet.workers.contains_key(&worker_id) {
+        let mut known: Vec<&str> = fleet.workers.keys().map(WorkerId::as_str).collect();
+        known.sort_unstable();
+        let known = if known.is_empty() {
+            "none".to_owned()
+        } else {
+            known.join(", ")
+        };
+        anyhow::bail!(
+            "worker not found: {worker_id}\n  searched: {}\n  this fleet holds: {known}\n  \
+             note: `cs ensemble` may be showing workers from another fleet or galaxy \
+             (`--all` / `--cluster`); purge only reads the current one",
+            state_dir.display(),
+        );
+    }
+    let Some(worker) = fleet.workers.get_mut(&worker_id) else {
+        // Unreachable: presence was just established above.
+        anyhow::bail!("worker not found: {worker_id}");
+    };
 
     let previous_status = worker.status.to_string();
     // Capture the molecule binding before we null it — a targeted purge of

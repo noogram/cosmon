@@ -74,6 +74,12 @@ struct EnsembleOutput {
     worker_roles: WorkerRoleSummary,
     molecules: MoleculeSummary,
     molecule_states: Vec<MoleculeStateEntry>,
+    /// The anti-silence signal (task-20260719-fedf), mirroring the banner the
+    /// human path prints. Machine readers must not have to re-derive "is the
+    /// fleet actually stopped?" by scanning `workers[].effective` themselves —
+    /// that re-creates, one layer up, exactly the noticing-work that let the
+    /// 2026-07-19 incident run for 17 hours.
+    stall_alert: StallAlert,
 }
 
 /// Per-molecule projection of the canonical state read by machine consumers
