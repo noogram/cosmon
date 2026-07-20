@@ -1612,11 +1612,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             } else {
                 "already_archived"
             };
-            let purged_stale = if mol.status == MoleculeStatus::Completed && mol.merged_at.is_some()
-            {
+            let already_merged = mol.status == MoleculeStatus::Completed && mol.merged_at.is_some();
+            let purged_stale = if already_merged {
                 purge_stale_worker_for(&store, &mol)
             } else {
                 false
+            };
+            // task-20260719-fedf — the fleet entry was only ever half the
+            // leftover. Reclaim the merged branch and worktree too, so the
+            // documented recovery verb actually leaves a clean galaxy.
+            let reclaimed = if already_merged {
+                find_repo_root().map_or_else(
+                    |_| Vec::new(),
+                    |root| reclaim_merged_git_artifacts(&root, &mol_id),
+                )
+            } else {
+                Vec::new()
             };
             if ctx.json {
                 let payload = serde_json::json!({
@@ -1625,12 +1636,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     "if_completed": true,
                     "outcome": outcome,
                     "purged_stale_worker": purged_stale,
+                    "reclaimed": reclaimed,
                 });
                 println!("{}", serde_json::to_string(&payload)?);
             } else {
                 println!("done {mol_id}: {outcome} (--if-completed no-op)");
                 if purged_stale {
                     println!("  • purged stale fleet worker");
+                }
+                for action in &reclaimed {
+                    println!("  • {action}");
                 }
             }
             return Ok(());
@@ -2825,6 +2840,60 @@ fn purge_stale_worker_for(store: &FileStore, mol: &cosmon_state::MoleculeData) -
         Ok(removed)
     };
     purge_result.unwrap_or(false)
+}
+
+/// Reclaim the git leftovers of an already-merged molecule: its worktree and
+/// its branch. Returns the action labels actually performed.
+///
+/// **Why this exists (task-20260719-fedf).** `cs done --if-completed` is the
+/// *documented recovery verb*, but on an already-merged molecule it declined
+/// to re-merge and returned — correctly refusing the merge, yet leaving the
+/// branch and worktree on disk. During the 2026-07-19 incident the operator
+/// ran the prescribed recovery and the leftovers stayed put, so the verb
+/// looked like it had done its job while the galaxy stayed dirty. A recovery
+/// verb that only half-recovers teaches operators not to trust it.
+///
+/// **Strictly conservative.** This is a no-op unless everything is provably
+/// safe, because it runs on a *no-op* path where the operator has not asked
+/// for a teardown and cannot pass `--force`:
+///
+/// - the worktree is removed only when `worktree_is_dirty` reports it clean —
+///   never forced, never after a rescue;
+/// - the branch is deleted only when it is an ancestor of the base branch,
+///   the same anti-wipe topology probe the main path uses (the 5eba guard).
+///   `merged_at` alone is *not* accepted as proof: it is a stamp we wrote,
+///   whereas ancestry is a fact git can confirm.
+///
+/// Anything unsafe or unexpected is simply left alone for the full `cs done`
+/// path to handle with its warnings and `--force` affordance.
+fn reclaim_merged_git_artifacts(repo_root: &Path, mol_id: &MoleculeId) -> Vec<String> {
+    let mut actions = Vec::new();
+    let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
+    let branch_name = format!("feat/{mol_id}");
+
+    if worktree_path.exists() {
+        // Clean-only: a dirty worktree holds work nobody has looked at, and
+        // this path has no `--force` for the operator to reach for.
+        if let Ok(dirty) = worktree_is_dirty(&worktree_path) {
+            if dirty.is_empty() && remove_worktree(repo_root, &worktree_path).is_ok() {
+                actions.push("removed_worktree".to_owned());
+            }
+        }
+    }
+
+    if branch_exists(repo_root, &branch_name) {
+        let base_branch = resolve_base_branch(repo_root);
+        // Ancestry is the load-bearing check, not `merged_at` — see the doc
+        // comment. If the branch is not reachable from base it is the only
+        // copy of the work, and deleting it here would be the 5eba wipe.
+        if branch_is_ancestor_of(repo_root, &branch_name, &base_branch)
+            && delete_branch(repo_root, &branch_name).is_ok()
+        {
+            actions.push("deleted_branch".to_owned());
+        }
+    }
+
+    actions
 }
 
 /// Build a human-readable conflict recovery message with exact commands.
@@ -6076,6 +6145,81 @@ mod tests {
                 })
                 .collect(),
         }
+    }
+
+    // ── `--if-completed` git reclaim (task-20260719-fedf) ───────────
+
+    /// The gap the incident exposed: `cs done --if-completed` on an
+    /// already-merged molecule left the branch behind, so the documented
+    /// recovery verb never actually finished recovering.
+    #[test]
+    fn reclaim_deletes_a_merged_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let mol_id = MoleculeId::new("cs-20260719-mrg1").unwrap();
+        let branch = format!("feat/{mol_id}");
+        assert!(git(repo, &["checkout", "-q", "-b", &branch])
+            .status
+            .success());
+        commit_file(repo, "work.txt", "done\n", "work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        assert!(
+            git(repo, &["merge", "-q", "--no-ff", "-m", "merge", &branch])
+                .status
+                .success()
+        );
+
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id);
+
+        assert!(
+            actions.contains(&"deleted_branch".to_owned()),
+            "a merged branch must be reclaimed; got {actions:?}"
+        );
+        assert!(!branch_exists(repo, &branch));
+    }
+
+    /// The 5eba anti-wipe guard, on the no-op path. `merged_at` is a stamp
+    /// *we* wrote; ancestry is a fact git can confirm. If the branch is not
+    /// reachable from base it is the only copy of the work, and this path
+    /// has no `--force` for the operator to reach for — so it must refuse.
+    #[test]
+    fn reclaim_refuses_to_delete_an_unmerged_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let mol_id = MoleculeId::new("cs-20260719-unm1").unwrap();
+        let branch = format!("feat/{mol_id}");
+        assert!(git(repo, &["checkout", "-q", "-b", &branch])
+            .status
+            .success());
+        commit_file(repo, "only-copy.txt", "precious\n", "unmerged work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        // Deliberately NOT merged.
+
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id);
+
+        assert!(
+            !actions.contains(&"deleted_branch".to_owned()),
+            "an unmerged branch is the only copy of the work — never delete it here"
+        );
+        assert!(
+            branch_exists(repo, &branch),
+            "the branch must survive; deleting it would be the 5eba wipe"
+        );
+    }
+
+    /// No branch, no worktree, nothing to do — and no spurious action label.
+    #[test]
+    fn reclaim_is_a_noop_when_there_is_nothing_to_reclaim() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        let mol_id = MoleculeId::new("cs-20260719-non1").unwrap();
+        assert!(reclaim_merged_git_artifacts(repo, &mol_id).is_empty());
     }
 
     #[test]

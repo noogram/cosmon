@@ -1136,6 +1136,35 @@ stateDiagram-v2
     }
 ```
 
+### `dead` vs `diverged` (the two directions of mismatch)
+
+**Origin:** Control theory distinguishes the *sign* of an error, not just its
+magnitude. A thermostat that reads "temperature is wrong" cannot decide whether
+to heat or cool.
+
+**Cosmon meaning:** Two opposite failures of the desired-vs-observed match,
+which `EffectiveStatus` used to spell with one word:
+
+| verdict | desired | transport | direction | meaning |
+| --- | --- | --- | --- | --- |
+| `dead` | Running | **gone** | absence | the worker vanished; nobody is working |
+| `diverged` | Stopped | **alive** | surplus | a process outlived its mandate (a zombie) |
+
+**Where you see it:** the `effective` column of `cs ensemble`; the `stalled`
+list of `cs patrol`.
+
+**Why the split (task-20260719-fedf):** on 2026-07-19 two workers died before
+dawn and `cs ensemble` rendered them `implementation running diverged` for
+about 17 hours. The word was not false — the planes really had diverged — but
+it reads as a *health nuance* ("working oddly") rather than an *absence*
+("died"). A word that covers both directions cannot warn about either. `dead`
+now names the absence and nothing else, and it is joined by an explicit banner
+under the table, because the failure mode of the incident was **silence**, not
+falsehood: a table asks to be read; a banner asks to be answered.
+
+**Related:** the [Orphan](#orphan-running--dead-tmux) pathology is what a
+`dead` worker leaves behind on a still-`Running` molecule.
+
 ### Ghost (Completed + Alive tmux)
 
 **Origin:** In operating systems, a ghost (or zombie) process has completed
