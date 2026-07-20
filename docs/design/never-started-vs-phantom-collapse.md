@@ -150,6 +150,49 @@ finding**, though it is also the one most likely to change observed
 DAG behaviour. 1 is safe to land immediately. 3 only pays for itself
 if 2 proves insufficient.
 
+## Appendix: the adapter success-rate clause (ASK 2, first half)
+
+The same brief also asks that "an adapter with a zero success rate over
+N dispatches should be reported, not kept in rotation". Recorded here
+because it was considered and deliberately not built.
+
+**"Not kept in rotation" is harmful on this evidence.** The `local`
+adapter's 0-for-2 record came from one environmental condition: an
+Ollama with no models pulled. Auto-removing it from rotation would
+have blacklisted a perfectly good adapter for a reason that had nothing
+to do with the adapter, and the blacklist would not self-heal — an
+adapter out of rotation receives no dispatches, so it never generates
+the evidence that would clear it. The moment the operator runs
+`ollama pull`, `local` works; a rotation rule would keep it benched
+anyway. This is the same defect as ASK(1): a guard on a proxy variable
+rather than on the condition that actually matters.
+
+**The sample sizes do not support the inference.** All-time dispatch
+counts folded from `events.jsonl`: `claude` 51, `codex` 12, `local` 6.
+A zero-success rule fires on single digits, where one bad afternoon of
+environment is indistinguishable from a broken adapter.
+
+**The reporting half is largely obviated.** A success-rate table is a
+lagging, cause-blind proxy for "can this adapter do the job?" The
+preflight now answers that question directly, at the only moment it
+matters (dispatch), naming the specific repair. Where the table would
+have said *"local: 0% success"* — inviting the operator to distrust the
+adapter — the preflight says *"the backend serves no models; run
+`ollama pull qwen3:8b`"*. Building the table would add a surface whose
+most likely reading is a misattribution.
+
+Doing it anyway would also not be free: `cs status` reads molecule
+state and never opens `events.jsonl`, so per-adapter rates would give a
+status command a new event-fold dependency, plus `cs help` / `man cs` /
+snapshot updates.
+
+**The residual need is real but is a different feature.** The preflight
+only covers `local` / `ollama`, and only at dispatch. If `claude`
+starts failing mid-run at 50%, nothing surfaces it. That is adapter
+*health telemetry* — continuous, cause-attributed, spanning all
+adapters — and it deserves its own molecule rather than a zero-success
+counter bolted onto a status command.
+
 ## What would falsify this note
 
 The load-bearing claim is that `auto_freeze_orphans` leaves `stuck_at`
