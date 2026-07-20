@@ -203,7 +203,7 @@ tree-sitter-rust = "0.24"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 notify = "8"
-nix = { version = "0.31", default-features = false, features = ["signal"] }
+nix = { version = "0.31", default-features = false, features = ["signal", "user"] }
 cosmon-cockpit = { path = "crates/cosmon-cockpit" }
 cosmon-observability = { path = "crates/cosmon-observability" }
 cosmon-archive = { path = "crates/cosmon-archive" }
