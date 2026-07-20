@@ -311,8 +311,15 @@ fn scan(
             }
         }
 
-        // Diverged workers with dead transport are stalled (for report).
-        if effective == EffectiveStatus::Diverged && transport == TransportState::Dead {
+        // A worker whose session is gone is stalled (for report).
+        //
+        // This used to read `effective == Diverged && transport == Dead`.
+        // Once `Dead` was split out of `Diverged` (task-20260719-fedf) that
+        // conjunction became unsatisfiable — `Diverged` now only names the
+        // zombie direction, which is `transport == Alive` by construction —
+        // and every dead worker would have silently dropped out of the
+        // report. Keying off `Dead` directly says what was always meant.
+        if effective == EffectiveStatus::Dead {
             stalled_workers.push(worker.id.clone());
         }
     }
@@ -493,6 +500,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     } else {
         Some(TmuxBackend::new(super::tmux_socket_name(ctx)))
     };
+
+    // task-20260719-fedf — reap the completed-but-teardown-failed limbo
+    // BEFORE scanning, so those entries never reach `reconcile` and never
+    // get proposed for respawn. Their work is finished; a respawn would
+    // restart a molecule that already succeeded.
+    let reaped = reap_finished_dead_workers(
+        store.as_ref(),
+        &state_dir,
+        &fleet,
+        &molecules,
+        backend.as_ref().map(|b| b as &dyn TransportBackend),
+    )?;
+    if !reaped.is_empty() {
+        fleet = store.load_fleet()?;
+    }
 
     let scan_result = scan(
         &fleet,
@@ -744,6 +766,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 "escalated": expire_report.escalated.iter().map(MoleculeId::as_str).collect::<Vec<_>>(),
             });
         }
+        if !reaped.is_empty() {
+            output["reaped_finished_workers"] =
+                serde_json::json!(reaped.iter().map(WorkerId::as_str).collect::<Vec<_>>());
+        }
         if !auto_transitioned.is_empty() {
             let target = if args.auto_collapse {
                 "collapsed"
@@ -901,6 +927,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("{json}");
     } else {
         print_human_report(report, &respawned);
+        if !reaped.is_empty() {
+            println!();
+            println!(
+                "  {} {} finished worker(s) reaped (molecule terminal, session gone): {}",
+                "REAP".cyan().bold(),
+                reaped.len(),
+                reaped
+                    .iter()
+                    .map(WorkerId::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
         if !auto_transitioned.is_empty() {
             print_auto_transitioned_report(&auto_transitioned, args.auto_collapse);
         }
@@ -1225,6 +1264,81 @@ fn auto_freeze_orphans(
         transitioned.push(mol_id);
     }
     Ok(transitioned)
+}
+
+/// Reap fleet entries for workers that finished their molecule and then died
+/// during teardown — the limbo [`auto_freeze_orphans`] cannot see.
+///
+/// **Why this exists (task-20260719-fedf).** `auto_freeze_orphans` filters
+/// molecules to `Running | Queued`, because its job is to rescue work that
+/// lost its worker. But the 2026-07-19 incident produced the mirror shape:
+/// the molecule reached `Completed`, the post-merge harvest failed on the
+/// trust gate, and the process died — leaving a *worker entry* that no sweep
+/// owned. The molecule was terminal so the orphan sweep skipped it; the
+/// worker was bound to a molecule so nothing else claimed it. It sat
+/// `desired=Running` with a dead session for 17 hours.
+///
+/// A worker whose molecule is terminal has no work left to do, so a dead
+/// session is not a failure to recover from — it is simply an entry to
+/// reclaim. Respawning it would be actively wrong (the work is done), which
+/// is why this runs *before* the respawn decision consumes the fleet.
+///
+/// Returns the reaped worker ids. Requires `backend` — with no liveness probe
+/// there is no honest verdict, so the sweep declines rather than guessing.
+fn reap_finished_dead_workers(
+    store: &dyn StateStore,
+    state_dir: &std::path::Path,
+    fleet: &Fleet,
+    molecules: &[MoleculeData],
+    backend: Option<&dyn TransportBackend>,
+) -> anyhow::Result<Vec<WorkerId>> {
+    let Some(be) = backend else {
+        return Ok(Vec::new());
+    };
+
+    // Workers bound to a molecule that has reached a terminal status.
+    let finished: Vec<WorkerId> = molecules
+        .iter()
+        .filter(|m| m.status.is_terminal())
+        .filter_map(|m| m.assigned_worker.clone())
+        .collect();
+
+    let mut reaped = Vec::new();
+    let events_path = state_dir.join("events.jsonl");
+    for wid in finished {
+        let Some(worker) = fleet.workers.get(&wid) else {
+            continue;
+        };
+        // Only entries still *claiming* to be live can be lying.
+        if !matches!(worker.desired, DesiredState::Running | DesiredState::Paused) {
+            continue;
+        }
+        // A probe error is not a death certificate — mirror `cs purge` and
+        // treat only a definitive `Ok(false)` as gone.
+        if be.is_alive(&wid).unwrap_or(true) {
+            continue;
+        }
+
+        // Re-read under the fleet lock: the snapshot `fleet` may be stale by
+        // now, and a blind write would clobber a concurrent spawn.
+        let _guard = store.lock_fleet()?;
+        let mut latest = store.load_fleet()?;
+        if latest.workers.remove(&wid).is_none() {
+            continue;
+        }
+        store.save_fleet(&latest)?;
+
+        let _ = event_log::emit_one(
+            &events_path,
+            EventV2::WorkerKilled {
+                worker_id: wid.clone(),
+                reason: "molecule terminal, session gone — reaped by patrol".to_owned(),
+            },
+            None,
+        );
+        reaped.push(wid);
+    }
+    Ok(reaped)
 }
 
 /// Append a patrol metric entry to `patrol-metrics.json`. Best-effort:
@@ -4270,6 +4384,126 @@ mod tests {
     }
 
     // --- auto-freeze / auto-collapse orphans ---------------------------
+
+    // --- the completed-but-teardown-failed limbo (task-20260719-fedf) ---
+
+    /// The founding incident, reconstructed. The molecule reached
+    /// `Completed`, post-merge harvest failed, the process died — and the
+    /// fleet entry survived, `desired=Running`, for 17 hours. Neither
+    /// `auto_freeze_orphans` (terminal molecules are filtered out) nor the
+    /// respawn path (the work is done) owned it. This sweep does.
+    #[test]
+    fn reap_removes_finished_worker_whose_session_is_gone() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("limbo-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule(
+            "cs-20260719-fedf",
+            MoleculeStatus::Completed,
+            Some("limbo-w"),
+        );
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        // Nothing registered on the backend → `is_alive` is a definitive false.
+        let backend = MockBackend::new();
+
+        let reaped = reap_finished_dead_workers(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            Some(&backend as &dyn TransportBackend),
+        )
+        .unwrap();
+
+        assert_eq!(reaped, vec![wid.clone()]);
+        assert!(
+            !store.load_fleet().unwrap().workers.contains_key(&wid),
+            "the stale fleet entry must be reclaimed, not left claiming to run"
+        );
+    }
+
+    /// A finished worker whose session is still up is mid-teardown, not
+    /// stranded. Reaping it would race a live process.
+    #[test]
+    fn reap_spares_finished_worker_whose_session_is_still_alive() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("closing-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule("cs-20260719-alv1", MoleculeStatus::Completed, Some("closing-w"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        let backend = mock_with_worker("closing-w", "");
+
+        let reaped = reap_finished_dead_workers(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            Some(&backend as &dyn TransportBackend),
+        )
+        .unwrap();
+
+        assert!(reaped.is_empty());
+        assert!(store.load_fleet().unwrap().workers.contains_key(&wid));
+    }
+
+    /// A dead session on a molecule that is still `Running` is the ORPHAN
+    /// case — `auto_freeze_orphans` owns it, and it may still be respawned.
+    /// This sweep must not steal it, or a rescuable molecule silently loses
+    /// its worker entry before the respawn path can see it.
+    #[test]
+    fn reap_leaves_the_still_running_orphan_to_the_orphan_sweep() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("running-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule("cs-20260719-run1", MoleculeStatus::Running, Some("running-w"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        let backend = MockBackend::new();
+
+        let reaped = reap_finished_dead_workers(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            Some(&backend as &dyn TransportBackend),
+        )
+        .unwrap();
+
+        assert!(reaped.is_empty());
+        assert!(store.load_fleet().unwrap().workers.contains_key(&wid));
+    }
+
+    /// With no transport there is no honest liveness verdict, so the sweep
+    /// declines rather than reaping on an assumption.
+    #[test]
+    fn reap_declines_without_a_backend() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("unknown-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule("cs-20260719-unk1", MoleculeStatus::Completed, Some("unknown-w"));
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        let reaped =
+            reap_finished_dead_workers(&store, tmp.path(), &fleet, std::slice::from_ref(&mol), None)
+                .unwrap();
+
+        assert!(reaped.is_empty());
+        assert!(store.load_fleet().unwrap().workers.contains_key(&wid));
+    }
 
     #[test]
     fn auto_freeze_orphans_default_freezes_running_molecule() {

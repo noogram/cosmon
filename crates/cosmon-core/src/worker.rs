@@ -279,7 +279,20 @@ pub struct ObservedState {
 pub enum EffectiveStatus {
     /// Desired=Running, transport alive, agent responsive.
     Healthy,
-    /// Desired vs. reality mismatch (dead process, zombie, etc.).
+    /// Desired=Running but the transport session is **gone** — the worker
+    /// is an absence, not a health nuance.
+    ///
+    /// Split out of [`Self::Diverged`] (task-20260719-fedf) because one word
+    /// for both "the process vanished" and "a process survives that should
+    /// not" is a word that cannot warn. In the 2026-07-19 incident two dead
+    /// workers rendered as `diverged` for 17 hours and read to the operator
+    /// as *working oddly* rather than *died before dawn*. `Dead` renders as
+    /// an absence and nothing else.
+    Dead,
+    /// Desired vs. reality mismatch in the *surplus* direction: a process
+    /// exists that the operator asked to be gone (a zombie).
+    ///
+    /// The absence direction is [`Self::Dead`] — keep them apart.
     Diverged,
     /// Desired=Running, alive but something looks off (stale cognitive, unknown session).
     Suspect,
@@ -297,6 +310,7 @@ impl fmt::Display for EffectiveStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Healthy => f.write_str("healthy"),
+            Self::Dead => f.write_str("dead"),
             Self::Diverged => f.write_str("diverged"),
             Self::Suspect => f.write_str("suspect"),
             Self::Blocked => f.write_str("blocked"),
@@ -363,7 +377,7 @@ pub fn reconcile(
                     vec![ReconcileAction::CircuitBreak],
                 )
             } else {
-                (EffectiveStatus::Diverged, vec![ReconcileAction::Respawn])
+                (EffectiveStatus::Dead, vec![ReconcileAction::Respawn])
             }
         }
         (DesiredState::Running, TransportState::Unknown) => {
@@ -845,8 +859,48 @@ mod tests {
             1,
             3,
         );
-        assert_eq!(status, EffectiveStatus::Diverged);
+        assert_eq!(status, EffectiveStatus::Dead);
         assert_eq!(actions, vec![ReconcileAction::Respawn]);
+    }
+
+    /// The falsification the 2026-07-19 incident asked for
+    /// (task-20260719-fedf): kill the session out from under a worker the
+    /// operator asked to keep running, and the reconciled verdict must name
+    /// an **absence**. It must never be a word the eye can read as a health
+    /// nuance — `diverged` was exactly that word, and it bought 17 hours of
+    /// silence.
+    #[test]
+    fn test_running_with_dead_session_never_reads_as_running_or_diverged() {
+        let (status, _) = reconcile(
+            DesiredState::Running,
+            &obs(TransportState::Dead, None, CognitiveState::None),
+            0,
+            3,
+        );
+        let rendered = status.to_string();
+        assert_eq!(rendered, "dead", "a gone worker must render as an absence");
+        assert_ne!(rendered, "running");
+        assert_ne!(
+            rendered, "diverged",
+            "`diverged` is reserved for the surplus direction (a zombie)"
+        );
+    }
+
+    /// The other half of the split: `diverged` still means *surplus* — a
+    /// process that outlived the operator's intent. Keeping both words
+    /// distinct is the whole point; collapsing them again would re-open the
+    /// incident.
+    #[test]
+    fn test_diverged_still_names_the_zombie_direction() {
+        let (status, actions) = reconcile(
+            DesiredState::Stopped,
+            &obs(TransportState::Alive, Some("idle"), CognitiveState::None),
+            0,
+            3,
+        );
+        assert_eq!(status, EffectiveStatus::Diverged);
+        assert_eq!(status.to_string(), "diverged");
+        assert_eq!(actions, vec![ReconcileAction::Kill]);
     }
 
     #[test]
@@ -1004,7 +1058,7 @@ mod tests {
             2,
             3,
         );
-        assert_eq!(status, EffectiveStatus::Diverged);
+        assert_eq!(status, EffectiveStatus::Dead);
         assert_eq!(actions, vec![ReconcileAction::Respawn]);
 
         // At max_restarts: circuit-break.

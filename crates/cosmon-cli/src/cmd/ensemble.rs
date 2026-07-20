@@ -6,6 +6,7 @@
 //! with molecule summary. Supports both human-readable (colored) and
 //! JSON output formats.
 
+use chrono::{DateTime, Duration, Utc};
 use colored::Colorize;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::reconcile::{molecule_health, MoleculeHealth};
@@ -14,7 +15,7 @@ use cosmon_core::transport::TransportBackend;
 use cosmon_core::worker::{
     reconcile, CognitiveState, EffectiveStatus, ObservedState, TransportState, WorkerRole,
 };
-use cosmon_state::MoleculeFilter;
+use cosmon_state::{MoleculeData, MoleculeFilter};
 use cosmon_transport::registry::{supervision_mode_for, SupervisionMode};
 
 use super::Context;
@@ -805,7 +806,90 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // task-20260719-fedf — the anti-silence line. The 2026-07-19 incident
+    // did not fail by printing something false; it failed by printing
+    // nothing *loud*. Two dead workers sat in a wide table for 17 hours and
+    // the operator had to notice an anomaly to learn the fleet had stopped.
+    // A table asks to be read; a banner asks to be answered.
+    print_stall_alert(&stall_alert(&rows, &molecules, Utc::now()));
+
     Ok(())
+}
+
+/// Seconds a `Completed`-but-unharvested molecule may sit before
+/// [`stall_alert`] escalates it to the banner.
+///
+/// 30 min — comfortably above a slow legitimate harvest, far below the
+/// 17 h the founding incident ran unnoticed.
+const UNHARVESTED_ALERT_SECS: i64 = 1800;
+
+/// What the anti-silence banner has to say. Empty means the fleet is clean
+/// and nothing is printed — the banner must stay rare enough to be believed.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StallAlert {
+    /// Workers whose transport session is gone while desired=Running.
+    dead_workers: Vec<String>,
+    /// Molecules completed but never harvested past [`UNHARVESTED_ALERT_SECS`].
+    stale_unharvested: Vec<String>,
+}
+
+impl StallAlert {
+    /// Nothing to shout about.
+    fn is_quiet(&self) -> bool {
+        self.dead_workers.is_empty() && self.stale_unharvested.is_empty()
+    }
+}
+
+/// Fold the rendered rows and the molecule store into the banner's payload.
+///
+/// Pure — takes `now` rather than reading the clock — so the threshold
+/// boundary is testable without sleeping.
+fn stall_alert(rows: &[WorkerRow], molecules: &[MoleculeData], now: DateTime<Utc>) -> StallAlert {
+    let dead_workers = rows
+        .iter()
+        .filter(|r| r.effective == "dead")
+        .map(|r| r.name.clone())
+        .collect();
+
+    let stale_unharvested = molecules
+        .iter()
+        .filter(|m| m.status == MoleculeStatus::Completed && m.merged_at.is_none() && !m.archived)
+        .filter(|m| {
+            now.signed_duration_since(m.updated_at) > Duration::seconds(UNHARVESTED_ALERT_SECS)
+        })
+        .map(|m| m.id.to_string())
+        .collect();
+
+    StallAlert {
+        dead_workers,
+        stale_unharvested,
+    }
+}
+
+/// Print the banner, or nothing at all when the fleet is clean.
+fn print_stall_alert(alert: &StallAlert) {
+    if alert.is_quiet() {
+        return;
+    }
+    println!();
+    if !alert.dead_workers.is_empty() {
+        println!(
+            "  {} {} worker(s) have no live session — they are gone, not busy: {}",
+            "⚠ DEAD:".red().bold(),
+            alert.dead_workers.len(),
+            alert.dead_workers.join(", ").red(),
+        );
+        println!("      {} cs purge <worker-id>", "reclaim:".dimmed());
+    }
+    if !alert.stale_unharvested.is_empty() {
+        println!(
+            "  {} {} molecule(s) completed but never harvested: {}",
+            "⚠ UNHARVESTED:".yellow().bold(),
+            alert.stale_unharvested.len(),
+            alert.stale_unharvested.join(", ").yellow(),
+        );
+        println!("      {} cs done <molecule-id>", "harvest:".dimmed());
+    }
 }
 
 /// Count worker rows by detected `GhostKind` variant, sorted by variant
@@ -938,7 +1022,7 @@ fn colorize_molecule_health(health_slug: &str) -> String {
 fn colorize_effective(effective: &str) -> String {
     match effective.trim() {
         "healthy" => effective.green().to_string(),
-        "diverged" | "blocked" => effective.red().bold().to_string(),
+        "dead" | "diverged" | "blocked" => effective.red().bold().to_string(),
         "suspect" => effective.yellow().bold().to_string(),
         "paused" => effective.yellow().to_string(),
         "stopped" => effective.dimmed().to_string(),
@@ -2016,5 +2100,88 @@ mod tests {
             SupervisionMode::InProcess,
             "openai must resolve to SupervisionMode::InProcess"
         );
+    }
+
+    // ── The anti-silence banner (task-20260719-fedf) ────────────────
+
+    /// Minimal row carrying only what [`stall_alert`] reads; every other
+    /// column is inert filler.
+    fn row_with_effective(name: &str, effective: &str) -> WorkerRow {
+        WorkerRow {
+            name: name.to_owned(),
+            effective: effective.to_owned(),
+            fleet: "-".to_owned(),
+            role: "-".to_owned(),
+            worker_role: "cognition".to_owned(),
+            desired: "running".to_owned(),
+            live: "-".to_owned(),
+            clearance: "-".to_owned(),
+            molecule: "-".to_owned(),
+            molecule_health: "inert".to_owned(),
+            ghost: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            cost: 0.0,
+            model: None,
+            model_source: None,
+            model_cell: None,
+            row_kind: RowKind::Idle,
+        }
+    }
+
+    #[test]
+    fn stall_alert_is_quiet_on_a_healthy_fleet() {
+        let rows = vec![row_with_effective("w1", "healthy")];
+        let mols = vec![make_molecule("aaaa", MoleculeStatus::Running)];
+        assert!(stall_alert(&rows, &mols, Utc::now()).is_quiet());
+    }
+
+    #[test]
+    fn stall_alert_names_dead_workers() {
+        let rows = vec![
+            row_with_effective("ghost-a", "dead"),
+            row_with_effective("ghost-b", "dead"),
+            row_with_effective("busy", "healthy"),
+        ];
+        let alert = stall_alert(&rows, &[], Utc::now());
+        assert_eq!(alert.dead_workers, vec!["ghost-a", "ghost-b"]);
+        assert!(!alert.is_quiet());
+    }
+
+    /// The founding incident, reconstructed: a molecule that COMPLETED and
+    /// whose harvest then failed sits unmerged. Past the threshold the
+    /// operator must be told in a line, not left to spot it in a table.
+    #[test]
+    fn stall_alert_flags_the_completed_but_unharvested_limbo() {
+        let now = Utc::now();
+        let mut stuck = make_molecule("dead", MoleculeStatus::Completed);
+        stuck.updated_at = now - Duration::seconds(UNHARVESTED_ALERT_SECS + 60);
+        assert!(stuck.merged_at.is_none());
+
+        let alert = stall_alert(&[], std::slice::from_ref(&stuck), now);
+        assert_eq!(alert.stale_unharvested, vec![stuck.id.to_string()]);
+    }
+
+    /// A harvest that is merely slow must not trip the banner — a warning
+    /// that fires on healthy states is a warning operators learn to ignore,
+    /// which is how the silence returns.
+    #[test]
+    fn stall_alert_tolerates_a_fresh_completion() {
+        let now = Utc::now();
+        let mut fresh = make_molecule("warm", MoleculeStatus::Completed);
+        fresh.updated_at = now - Duration::seconds(UNHARVESTED_ALERT_SECS - 60);
+
+        assert!(stall_alert(&[], &[fresh], now).is_quiet());
+    }
+
+    /// A completed molecule that WAS harvested is finished business.
+    #[test]
+    fn stall_alert_ignores_harvested_molecules() {
+        let now = Utc::now();
+        let mut merged = make_molecule("done", MoleculeStatus::Completed);
+        merged.updated_at = now - Duration::seconds(UNHARVESTED_ALERT_SECS * 10);
+        merged.merged_at = Some(now);
+
+        assert!(stall_alert(&[], &[merged], now).is_quiet());
     }
 }
