@@ -110,13 +110,9 @@ pub fn load_worker_energy(
             .as_ref()
             .and_then(|m| adapters.get(m))
             .map(String::as_str);
-        let Some(energy) = probe_worker_energy_with_adapter(
-            state_dir,
-            backends,
-            worker_id,
-            adapter,
-            &pricing,
-        ) else {
+        let Some(energy) =
+            probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter, &pricing)
+        else {
             continue;
         };
         map.insert(worker_id.clone(), energy);
@@ -1075,7 +1071,7 @@ mod tests {
         );
 
         let energy = probe_one_worker_energy(&state_dir, "worker-1")
-        .expect("codex energy must resolve through the recorded worktree");
+            .expect("codex energy must resolve through the recorded worktree");
         let (input, output, cost) = energy.as_tuple();
         assert_eq!(input, 2_000_000, "input includes the cached portion");
         assert_eq!(output, 100_000);
@@ -1114,7 +1110,7 @@ mod tests {
         );
 
         let energy = probe_one_worker_energy(&state_dir, "worker-1")
-        .expect("tokens stay computable for an unpriced model");
+            .expect("tokens stay computable for an unpriced model");
         let (input, output, cost) = energy.as_tuple();
         assert_eq!(input, 2_000_000);
         assert_eq!(output, 100_000);
