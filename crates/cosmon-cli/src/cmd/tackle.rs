@@ -2612,13 +2612,14 @@ fn render_gates_instruction(gates: &cosmon_core::config::GatesConfig) -> String 
             .to_owned();
     }
 
-    let labeled: [(&str, &Option<String>); 6] = [
+    let labeled: [(&str, &Option<String>); 7] = [
         ("setup", &gates.setup_command),
         ("build", &gates.build_command),
         ("typecheck", &gates.typecheck_command),
         ("test", &gates.test_command),
         ("lint", &gates.lint_command),
         ("format", &gates.format_command),
+        ("doc", &gates.doc_command),
     ];
 
     let mut out = String::from(
@@ -8647,6 +8648,53 @@ mod tests {
         assert!(idx_build < idx_test);
         assert!(idx_test < idx_lint);
         assert!(idx_lint < idx_fmt);
+    }
+
+    /// A declared `doc_command` reaches the worker's gate list. This is the
+    /// whole point of the slot: a broken intra-doc link compiles, lints and
+    /// tests green, so unless the doc build is named in the prompt the worker
+    /// has no way to know it is owed one, and CI on main finds it instead.
+    #[test]
+    fn test_build_prompt_renders_doc_gate_after_format() {
+        let mol = sample_molecule("task-20260719-gates4", MoleculeStatus::Pending);
+        let mut config = ProjectConfig::default();
+        config.gates.format_command = Some("cargo fmt --all -- --check".to_owned());
+        config.gates.doc_command =
+            Some("RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps".to_owned());
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &config,
+            Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+        );
+
+        assert!(prompt.contains("cargo doc --workspace --no-deps"));
+        assert!(
+            prompt.contains("RUSTDOCFLAGS='-D warnings'"),
+            "the warnings-as-errors prefix is what makes the gate bite"
+        );
+        assert!(prompt.find("cargo fmt").unwrap() < prompt.find("cargo doc").unwrap());
+    }
+
+    /// `doc_command` alone is enough to render a concrete gate list — the slot
+    /// counts toward `GatesConfig::is_empty`, so a galaxy that declares only a
+    /// doc build does not fall through to the neutral "see CLAUDE.md" prompt.
+    #[test]
+    fn test_build_prompt_doc_gate_alone_is_not_empty_gates() {
+        let mol = sample_molecule("task-20260719-gates5", MoleculeStatus::Pending);
+        let mut config = ProjectConfig::default();
+        config.gates.doc_command = Some("sphinx-build -W docs docs/_build".to_owned());
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &config,
+            Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+        );
+
+        assert!(prompt.contains("sphinx-build -W docs docs/_build"));
+        assert!(!prompt.contains("or the project's CLAUDE.md"));
     }
 
     #[test]

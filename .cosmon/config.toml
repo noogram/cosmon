@@ -64,6 +64,11 @@ build_command  = "cargo check --workspace"
 test_command   = "cargo test --workspace"
 lint_command   = "cargo clippy --workspace -- -D warnings"
 format_command = "cargo fmt --all -- --check"
+# A broken intra-doc link is invisible to every gate above: `cargo check`
+# type-checks code without resolving a doc link, and clippy is not rustdoc.
+# Without this slot the only thing that ever catches one is CI on main —
+# after the merge, when the worker that authored the link is long gone.
+doc_command    = "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps"
 
 # Archive — durable proof-of-work trail (ADR-030 + ADR-052)
 [archive]

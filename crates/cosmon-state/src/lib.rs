@@ -521,7 +521,7 @@ pub struct MoleculeData {
     /// because it drives the exponential backoff and a lifetime total would
     /// space out the nudges of an unrelated later stall.
     ///
-    /// Read by [`cosmon_core::propel::decide_propel`] as `attempts`; once it
+    /// Read by [`cosmon_core::propel::decide_nudge`] as `attempts`; once it
     /// reaches [`cosmon_core::propel::PROPEL_MAX_ATTEMPTS`] patrol stops
     /// repeating itself and escalates. Skipped from serialisation when zero.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
