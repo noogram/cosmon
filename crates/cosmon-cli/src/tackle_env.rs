@@ -254,7 +254,11 @@ pub fn force_sandbox_escape(perm_mode: &str, is_root: bool) -> bool {
     // The v2.x guard fires for `bypassPermissions` and the equivalent
     // `--dangerously-skip-permissions`; cosmon only ever passes the former,
     // but match both so a future mode change stays covered.
-    is_root && matches!(perm_mode, "bypassPermissions" | "dangerously-skip-permissions")
+    is_root
+        && matches!(
+            perm_mode,
+            "bypassPermissions" | "dangerously-skip-permissions"
+        )
 }
 
 /// Assemble the shell command string passed to
