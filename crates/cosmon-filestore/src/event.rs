@@ -115,10 +115,10 @@ pub enum ChainDivergenceReason {
     },
     /// Entry is missing its `hash` field (pre-v2 legacy or truncated write).
     MissingHash,
-    /// EventV2 log: the monotone `seq` witness regressed — an entry's
+    /// `EventV2` log: the monotone `seq` witness regressed — an entry's
     /// sequence number is not strictly greater than its predecessor's.
     ///
-    /// EventV2 envelopes (the schema the current writer emits) carry no
+    /// `EventV2` envelopes (the schema the current writer emits) carry no
     /// hash chain; their tamper-evidence is the strictly increasing
     /// per-file `seq`. A non-increasing `seq` means the log was
     /// reordered, spliced, or had a line removed.
@@ -165,10 +165,10 @@ pub enum VerifyOutcome {
 ///
 /// Before this split the walker deserialised every line into the legacy
 /// `Envelope` and rejected the whole log with `missing field 'kind'` the
-/// moment it hit an EventV2 line — which meant `cs verify` failed on every
+/// moment it hit an `EventV2` line — which meant `cs verify` failed on every
 /// honestly-produced molecule (tester Jesse Thaler, issue #1). The schema
 /// is now detected: a file whose every line parses as legacy `Envelope`
-/// walks the hash chain; otherwise it is an EventV2 log and walks `seq`.
+/// walks the hash chain; otherwise it is an `EventV2` log and walks `seq`.
 ///
 /// The first divergence wins — we stop there so operators see a single,
 /// actionable line.
@@ -252,7 +252,7 @@ fn verify_legacy_hash_chain(entries: &[Envelope]) -> Result<VerifyOutcome, Cosmo
 /// Walk an [`EventV2`](cosmon_core::event_v2::Envelope) log and verify the
 /// strict monotonicity of its per-file `seq` witness.
 ///
-/// EventV2 envelopes carry no hash chain, so `seq` is the integrity signal:
+/// `EventV2` envelopes carry no hash chain, so `seq` is the integrity signal:
 /// the writer assigns a strictly increasing sequence under `flock`, and a
 /// reader can prove no line was reordered or dropped by walking it upward.
 ///
@@ -260,7 +260,7 @@ fn verify_legacy_hash_chain(entries: &[Envelope]) -> Result<VerifyOutcome, Cosmo
 /// log) do not carry an authoritative `seq` — [`migrate_legacy_line`] stamps
 /// them `Seq(0)` — so, matching the writer's own reader semantics
 /// (`cosmon_state::event_log`), they are tolerated but do not contribute to
-/// sequencing. A line that is neither native EventV2 nor coercible legacy is
+/// sequencing. A line that is neither native `EventV2` nor coercible legacy is
 /// genuine corruption and surfaces as a parse error.
 ///
 /// [`migrate_legacy_line`]: cosmon_core::event_v2::migrate_legacy_line
