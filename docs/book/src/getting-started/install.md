@@ -92,7 +92,21 @@ verifies the *same* sha256 digests. Identical bytes, identical provenance.
 ## Route 3 — build from source
 
 If you would rather compile it yourself — or you are on a platform outside the
-four release targets — build from the cosmon repository:
+four release targets — build from the cosmon repository.
+
+On **Linux (glibc)** the build links the Secret Service keyring backend through
+`libdbus`, so install the system headers first, otherwise the compile fails at
+`libdbus-sys` with *"The system library `dbus-1` required by crate `libdbus-sys`
+was not found"*. macOS needs nothing extra (it uses the native keychain), and
+the prebuilt Linux release binaries above are static musl, so this applies only
+when you compile on glibc:
+
+```sh
+sudo apt install libdbus-1-dev pkg-config          # Debian/Ubuntu
+sudo dnf install dbus-devel pkgconf-pkg-config     # Fedora
+```
+
+Then build:
 
 ```sh
 git clone https://github.com/noogram/cosmon && cd cosmon
