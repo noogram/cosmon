@@ -163,6 +163,20 @@ fn plan_stages(gates: &GatesConfig, repo_root: &Path) -> Vec<Stage> {
         Some(cmd) => stages.push(Stage::declared("format", cmd.to_owned())),
         None => stages.push(Stage::fallback("format", "cargo fmt --all -- --check")),
     }
+    // A doc build with warnings-as-errors: the only gate that resolves intra-doc
+    // links — nothing above it can catch a broken one. The cargo fallback is
+    // probed rather than unconditional: a polyglot galaxy that declares no
+    // `doc_command` must not have `cargo doc` leak into its suite (Principle 1,
+    // Transport ≠ Cognition), so the default applies only where it is meaningful
+    // — a repo cargo actually resolves from the root.
+    match gates.doc_command.as_deref() {
+        Some(cmd) => stages.push(Stage::declared("doc", cmd.to_owned())),
+        None if repo_root.join("Cargo.toml").is_file() => stages.push(Stage::fallback(
+            "doc",
+            "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps",
+        )),
+        None => {}
+    }
     // cosmon-specific heavyweight extra: run the mutation falsifier only when its
     // wrapper script is present (cosmon has it; other galaxies do not).
     if repo_root.join("scripts/mutation-falsifier.sh").is_file() {
@@ -248,5 +262,61 @@ mod tests {
         assert!(stages.iter().any(|s| s.command == "pytest -q"));
         // A declared test_command owns testing — no separate doctest stage.
         assert!(!stages.iter().any(|s| s.name == "doctests"));
+    }
+
+    /// The doc gate is the only stage that resolves intra-doc links, so a Cargo
+    /// workspace that declares no `doc_command` still gets the rustdoc default:
+    /// a broken link must not need an opt-in to be caught.
+    #[test]
+    fn cargo_workspace_gets_the_doc_gate_without_declaring_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+
+        let stages = plan_stages(&GatesConfig::default(), tmp.path());
+        let doc = stages
+            .iter()
+            .find(|s| s.name == "doc")
+            .expect("a cargo workspace gets a doc stage from the fallback");
+        assert!(doc.command.contains("cargo doc"));
+        assert!(
+            doc.command.contains("-D warnings"),
+            "a doc build that does not fail on warnings gates nothing"
+        );
+        assert!(
+            !doc.repo_supplied,
+            "a cosmon-authored fallback is not repo-supplied shell"
+        );
+    }
+
+    /// The mirror of the case above: the cargo default is *probed*, never
+    /// unconditional. A polyglot galaxy silent on `doc_command` gets no doc
+    /// stage at all rather than a `cargo doc` it cannot run (Principle 1).
+    #[test]
+    fn non_cargo_repo_gets_no_doc_gate_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let stages = plan_stages(&GatesConfig::default(), tmp.path());
+        assert!(!stages.iter().any(|s| s.name == "doc"));
+    }
+
+    /// A declared `doc_command` wins over the cargo default and is repo-supplied
+    /// shell, so it rides the same trust gate as every other declared stage.
+    #[test]
+    fn declared_doc_command_overrides_the_cargo_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("Cargo.toml"), "[workspace]\n").unwrap();
+        let gates = GatesConfig {
+            doc_command: Some("sphinx-build -W docs docs/_build".to_owned()),
+            ..Default::default()
+        };
+
+        let stages = plan_stages(&gates, tmp.path());
+        let doc = stages.iter().find(|s| s.name == "doc").expect("doc stage");
+        assert_eq!(doc.command, "sphinx-build -W docs docs/_build");
+        assert!(doc.repo_supplied, "declared shell must be trust-gated");
+        assert_eq!(
+            stages.iter().filter(|s| s.name == "doc").count(),
+            1,
+            "the declaration replaces the default, it does not add to it"
+        );
     }
 }

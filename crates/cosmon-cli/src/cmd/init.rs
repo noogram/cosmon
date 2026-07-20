@@ -908,6 +908,7 @@ fn generate_config_toml(
          #            test_command      = \"cargo test --workspace\"\n\
          #            lint_command      = \"cargo clippy --workspace -- -D warnings\"\n\
          #            format_command    = \"cargo fmt --all -- --check\"\n\
+         #            doc_command       = \"RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps\"\n\
          #\n\
          #   Python:  setup_command     = \"uv sync\"\n\
          #            build_command     = \"uv sync\"\n\
@@ -934,6 +935,7 @@ fn generate_config_toml(
          # format_command    = \"\"\n\
          # typecheck_command = \"\"\n\
          # setup_command     = \"\"\n\
+         # doc_command       = \"\"\n\
          \n\
          # ── Operator notification channels ────────────────────────────────\n\
          # `cs notify <message>` and `cs patrol --silence-detect` push one-line\n\

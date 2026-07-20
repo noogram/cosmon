@@ -1396,7 +1396,7 @@ pub(crate) fn find_stale_running_molecules(
 /// observed 2026-06-12). The C6 `--adapter` flag plumbs the per-worker
 /// name through without further refactor here.
 /// The outcome of one `--propel` sweep, split by what admission control
-/// ([`cosmon_core::propel::decide_propel`]) decided for each stale candidate.
+/// ([`cosmon_core::propel::decide_nudge`]) decided for each stale candidate.
 ///
 /// Before the 2026-07-19 repair this was a bare `Vec` of propelled workers,
 /// which made the sweep's two failure modes invisible: a nudge sent to a
@@ -3417,7 +3417,7 @@ mod tests {
 
     // --- propulsion ledger: the backoff's memory (task-20260719-00ed) ----
     //
-    // `decide_propel` itself is covered in `cosmon_core::propel`. What is
+    // `decide_nudge` itself is covered in `cosmon_core::propel`. What is
     // testable only here is the *reset rule*: the ledger must forget its
     // attempts the moment the molecule makes progress, or a molecule that
     // stalled once would carry a 30-minute backoff into every later stall.

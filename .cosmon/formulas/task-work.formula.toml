@@ -56,7 +56,13 @@ acceptance = "Implementation complete, compiles clean"
 id = "verify"
 title = "Verify and validate"
 description = """
-Run all gates: build, test, lint, format. Fix any issues.
+Run all gates: build, test, lint, format, doc. Fix any issues.
+
+The doc gate is the one no other gate subsumes: `cargo check` compiles \
+code without resolving a single doc link, and clippy is not rustdoc. A \
+broken intra-doc link therefore compiles, lints, and tests green, and is \
+caught only by CI on main — after the merge, when you are gone. Run it \
+before claiming done.
 
 RESULT CONTRACT — if `$COSMON_ARTIFACT_DIR` is set in your env (it is \
 whenever a tenant tackled this molecule through the RPP API), copy your \
@@ -69,4 +75,4 @@ output (then the tenant enumerates `GET .../artifacts` instead). \
 Reference: task-20260605-f46c (tackled-output restitution contract).
 """
 needs = ["implement"]
-acceptance = "cargo check + test + clippy + fmt all pass"
+acceptance = "cargo check + test + clippy + fmt + doc all pass"

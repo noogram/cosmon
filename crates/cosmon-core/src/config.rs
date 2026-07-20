@@ -1437,6 +1437,7 @@ pub struct HooksConfig {
 /// format_command    = "cargo fmt --all -- --check"
 /// typecheck_command = "mypy ."
 /// setup_command     = "uv sync"
+/// doc_command       = "RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps"
 /// ```
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[allow(clippy::struct_field_names)]
@@ -1476,6 +1477,25 @@ pub struct GatesConfig {
     /// `uv sync`, `npm ci`, `bundle install`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub setup_command: Option<String>,
+
+    /// Command that builds the project's API documentation with warnings
+    /// promoted to errors. Examples:
+    /// `RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps`,
+    /// `sphinx-build -W docs docs/_build`, `typedoc --treatAsError`.
+    ///
+    /// Exists as a slot of its own because a broken doc build is invisible to
+    /// every other gate: `build_command` type-checks code but never resolves a
+    /// doc link, `lint_command` runs the *code* linter (clippy is not rustdoc),
+    /// and doc warnings are therefore only ever discovered by CI on the trunk —
+    /// after the merge, when the worker that authored the link is long gone.
+    /// Declaring it here moves that discovery back into the worker's own verify
+    /// step, where the author is still present to fix it.
+    ///
+    /// The gate is comparatively slow (a full workspace doc build), which is why
+    /// it is a worker-side gate rather than a rung of the `cs done` post-merge
+    /// cascade: it is paid once per molecule, not once per merge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_command: Option<String>,
 
     /// The top rung of the post-merge integrity cascade `cs done` runs on the
     /// **combined** tree, once the branch has merged but before `merged_at`
@@ -1542,6 +1562,7 @@ impl GatesConfig {
             && self.format_command.is_none()
             && self.typecheck_command.is_none()
             && self.setup_command.is_none()
+            && self.doc_command.is_none()
     }
 }
 
@@ -2285,6 +2306,7 @@ mod tests {
             format_command: None,
             typecheck_command: None,
             setup_command: None,
+            doc_command: Some("cargo doc --workspace --no-deps".to_owned()),
             integrity_command: Some("cargo check --workspace --all-targets".to_owned()),
             fail_closed_on_unverified: true,
         };

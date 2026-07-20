@@ -23,7 +23,7 @@ fn golden_claude_session_yields_assistant_model_only() {
     assert_eq!(models[0].as_str(), "claude-opus-4-8");
 }
 
-/// Real codex_cli_rs 0.36.0 rollout lines: `session_meta` carries no model
+/// Real `codex_cli_rs` 0.36.0 rollout lines: `session_meta` carries no model
 /// (config, not realization) and `turn_context.payload.model` names what ran.
 #[test]
 fn golden_codex_session_yields_turn_context_model() {
