@@ -19,7 +19,7 @@
 //!   "sid": "cosmon-main-1b2c",
 //!   "heartbeat_at": "2026-04-24T16:00:00Z",
 //!   "galaxy": "cosmon",
-//!   "cwd": "/srv/cosmon/cosmon",
+//!   "cwd": "~/galaxies/cosmon",
 //!   "pid": 12345,
 //!   "current_molecule": "task-20260424-abcd",
 //!   "headline": "implementing C-PEEK-ENSEMBLE"
@@ -84,7 +84,7 @@ pub(crate) fn scan(state_dir: &Path) -> Vec<PresenceEntry> {
     out
 }
 
-/// Scan presence across every `.cosmon/state/` under `/srv/cosmon/*/`.
+/// Scan presence across every `.cosmon/state/` under `~/galaxies/*/`.
 ///
 /// Mirrors `cs peek --all` semantics: same trick (enumerate galaxies), same
 /// best-effort silence on error.

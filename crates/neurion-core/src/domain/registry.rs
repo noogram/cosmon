@@ -143,7 +143,7 @@ pub struct PersonSurface {
     /// Surface kind — always `person` for rows returned by the resolver.
     pub kind: String,
     /// Authoritative pointer to the fiche on disk (the `container_of`
-    /// column), e.g. `/srv/cosmon/knowledge/wiki/people/jordan-noog.md`.
+    /// column), e.g. `~/galaxies/knowledge/wiki/people/jordan-noog.md`.
     /// `None` only for a malformed surface row with no container.
     pub container_of: Option<String>,
 }

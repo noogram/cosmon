@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::galaxies::{discover_galaxies, GalaxyEntry};
 
-/// Newtype wrapper around the `/srv/cosmon/` root directory.
+/// Newtype wrapper around the `~/galaxies/` root directory.
 #[derive(Debug, Clone)]
 pub struct GalaxiesRoot(pub PathBuf);
 

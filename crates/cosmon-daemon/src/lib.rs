@@ -11,7 +11,7 @@
 //! ## Wire surface (read-only in v1)
 //!
 //! - `GET /v1/health` — liveness + galaxy/running counts.
-//! - `GET /v1/galaxies` — list of galaxies under `/srv/cosmon/*/` that
+//! - `GET /v1/galaxies` — list of galaxies under `~/galaxies/*/` that
 //!   carry a `.cosmon/state/` directory.
 //! - `GET /v1/galaxies/{galaxy}/molecules` — molecule list, optional
 //!   `?status=pending,running` filter, sorted `updated_at` desc.

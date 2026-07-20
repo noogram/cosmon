@@ -61,7 +61,7 @@ pub const MIN_PANEL_SIZE: usize = 5;
 ///
 /// Personas are the named perspectives the panel mobilises. The short-name
 /// matches the canonical persona directory under
-/// `/srv/cosmon/workshop/personas/<name>/`, mirroring the `deep-think`
+/// `~/galaxies/workshop/personas/<name>/`, mirroring the `deep-think`
 /// formula's `panel=` vocabulary, but this type carries no opinion about
 /// where the persona's prose lives — it is just a stable identifier.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

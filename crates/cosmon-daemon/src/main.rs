@@ -4,7 +4,7 @@
 //!
 //! Bind: `host.example:8790` via [`apps_transport_http`]
 //! Tailscale auto-discovery (override with `COSMON_DAEMON_HTTP_BIND`).
-//! The same daemon serves every galaxy under `/srv/cosmon/` (override
+//! The same daemon serves every galaxy under `~/galaxies/` (override
 //! with `COSMON_GALAXIES_ROOT`).
 
 use std::sync::Arc;

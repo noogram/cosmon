@@ -14,7 +14,7 @@
 //!   (defense in depth — the walker only follows links inside the
 //!   work tree).
 //! - Output is capped at [`MAX_ENTRIES`] entries with a `truncated`
-//!   flag so a `list_dir` on `/srv/cosmon/knowledge` cannot saturate
+//!   flag so a `list_dir` on `~/galaxies/knowledge` cannot saturate
 //!   the model's context silently.
 //! - Hidden entries (`.git`, `.cargo`, …) and the usual heavy build
 //!   directories (`target`, `node_modules`, `.cosmon/state`) are

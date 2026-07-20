@@ -239,7 +239,7 @@ impl SystemInvoker {
     }
 
     /// Resolve the per-tenant `cwd` for the subprocess. ADR-080 §3.5:
-    /// `/srv/cosmon/<noyau>/`.
+    /// `~/galaxies/<noyau>/`.
     #[must_use]
     pub fn cwd_for_spark(&self, spark: &Spark) -> PathBuf {
         self.galaxies_root.join(spark.noyau.as_str())

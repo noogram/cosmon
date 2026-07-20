@@ -1555,7 +1555,7 @@ mod tests {
             snap.push_session(Session {
                 name: format!("cosmon-{id}"),
                 socket: "cosmon".into(),
-                project_root: "/srv/cosmon/cosmon".into(),
+                project_root: "~/galaxies/cosmon".into(),
                 molecule_id: Some(id.to_owned()),
                 worker_id: None,
                 last_activity: Some(Utc::now()),

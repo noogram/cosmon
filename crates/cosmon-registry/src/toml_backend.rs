@@ -13,7 +13,7 @@
 //! ```toml
 //! [[galaxy]]
 //! name = "mailroom"
-//! path = "/srv/cosmon/mailroom"
+//! path = "~/galaxies/mailroom"
 //! fleet = "default"
 //! default_formulas = { task = "task-work", idea = "idea-to-plan", deliberation = "deep-think" }
 //! ```
@@ -312,7 +312,7 @@ default_formulas = { task = "task-work", idea = "idea-to-plan", deliberation = "
             r#"
 [[galaxy]]
 name = "mailroom"
-path = "/srv/cosmon/mailroom"
+path = "~/galaxies/mailroom"
 "#,
         );
         let idx = TomlGalaxyIndex::load_from(&p).unwrap();

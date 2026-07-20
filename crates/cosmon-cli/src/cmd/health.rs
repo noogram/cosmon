@@ -233,7 +233,7 @@ pub(crate) fn fold_view(
 }
 
 /// Enumerate sibling galaxies' `.cosmon/state` directories under
-/// `/srv/cosmon/*/`, mirroring `cs peek --all`. The current galaxy's own state
+/// `~/galaxies/*/`, mirroring `cs peek --all`. The current galaxy's own state
 /// dir is excluded (already scanned with its live socket).
 fn discover_sibling_state_dirs(current: &Path) -> Vec<PathBuf> {
     let Some(home) = dirs::home_dir() else {

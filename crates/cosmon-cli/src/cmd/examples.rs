@@ -408,7 +408,7 @@ pub const MOTION: &str = "IMAGE:
     RECENT WHISPERS     .md déposés dans .cosmon/whispers/inbox/ (30 min)
     RECENT SPARKS       spark-YYYYMMDD-xxxx créés pendant la fenêtre
 
-  Agrégation cross-galaxy : tout /srv/cosmon/*/ avec `.cosmon/`. Même
+  Agrégation cross-galaxy : tout ~/galaxies/*/ avec `.cosmon/`. Même
   mécanique que l'endpoint `GET /motion` de cs-api — la CLI lit le
   système de fichiers localement, pas de daemon, pas d'HTTP.
 
@@ -469,7 +469,7 @@ MINIMAL patrols.toml (~/.config/cosmon/patrols.toml):
   name        = \"chronicle-lint-weekly\"
   cron        = \"0 9 * * 0\"            # cadence: Sundays 09:00
   command     = [\"cs\", \"nucleate\", \"chronicle-lint\"]
-  working_dir = \"/srv/cosmon/example-project\"
+  working_dir = \"~/galaxies/example-project\"
   enabled     = true
 
 HOT-RELOAD:

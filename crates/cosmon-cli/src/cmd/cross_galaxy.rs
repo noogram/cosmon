@@ -15,7 +15,7 @@
 //!    per-user fallback that does not require touching the canonical
 //!    registry — useful for ad-hoc aliasing during cross-galaxy
 //!    sessions).
-//!    c. The convention path `/srv/cosmon/<alias>/` if it contains a
+//!    c. The convention path `~/galaxies/<alias>/` if it contains a
 //!    `.cosmon/` directory.
 //! 2. Walk to the remote galaxy's state store, attempt to load the
 //!    referenced molecule, and surface a [`CrossGalaxyResolution`]
@@ -230,7 +230,7 @@ mod tests {
         );
         let res = resolve_cross_galaxy_ref(&cgr);
         // Either GalaxyUnknown (no registry, no convention path) or
-        // MoleculeMissing (some operator created `/srv/cosmon/...` for
+        // MoleculeMissing (some operator created `~/galaxies/...` for
         // an unrelated reason). Both are valid "miss" outcomes.
         assert!(!res.is_resolved(), "expected miss, got {res:?}");
     }
