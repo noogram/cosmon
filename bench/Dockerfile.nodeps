@@ -1,0 +1,25 @@
+# cosmon v0.2.1 regression bench — WITHOUT build deps (expected to FAIL).
+#
+# Negative half of probe #2. This image deliberately OMITS pkg-config and
+# libdbus-1-dev. The from-source build is expected to FAIL when cargo reaches
+# the native libdbus link step (keyring v3 -> secret-service -> libdbus). A
+# failing build here is the reproduced defect signature, not an error.
+#
+# We keep libssl-dev + git so the failure isolates to the dbus/pkg-config gap
+# and not to some unrelated missing dep — the probe must attribute the failure
+# precisely.
+FROM rust:1.89-bookworm
+
+# NOTE: pkg-config and libdbus-1-dev are intentionally NOT installed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libssl-dev \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY uut/ /src/
+
+# Expected to FAIL at the libdbus/pkg-config link step. The bench treats a
+# non-zero exit as the reproduced defect (probe #2 asserts this build fails).
+RUN cargo build --release -p cosmon-cli 2>&1 | tee /tmp/build.log
