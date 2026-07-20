@@ -3,7 +3,7 @@
 //! Tenant-cwd workspace fixtures — the §3.5 clause (e) substrate.
 //!
 //! A `cs` subprocess admitted by the RPP runs with `cwd =
-//! /srv/cosmon/<noyau>/`. Every test that exercises the subprocess
+//! ~/galaxies/<noyau>/`. Every test that exercises the subprocess
 //! envelope therefore needs a `TempDir`-backed `galaxies/` tree with at
 //! least one populated noyau. This module provides two shapes:
 //!
@@ -70,13 +70,13 @@ impl TenantWorkspace {
         &self.tenant.noyau
     }
 
-    /// Absolute path of `/srv/cosmon/<noyau>/` inside the `TempDir`.
+    /// Absolute path of `~/galaxies/<noyau>/` inside the `TempDir`.
     #[must_use]
     pub fn tenant_root(&self) -> &Path {
         &self.tenant.root
     }
 
-    /// Absolute path of `/srv/cosmon/<noyau>/.cosmon/state/`.
+    /// Absolute path of `~/galaxies/<noyau>/.cosmon/state/`.
     #[must_use]
     pub fn state_dir(&self) -> &Path {
         &self.tenant.state_dir
@@ -125,7 +125,7 @@ impl TenantWorkspaces {
         }
     }
 
-    /// Path to the shared `/srv/cosmon/` parent directory (the value to
+    /// Path to the shared `~/galaxies/` parent directory (the value to
     /// pass as `galaxies_root` to `cosmon-rpp-adapter::AppState`).
     #[must_use]
     pub fn galaxies_root(&self) -> &Path {

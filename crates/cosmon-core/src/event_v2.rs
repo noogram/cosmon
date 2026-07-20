@@ -3724,7 +3724,7 @@ mod tests {
                 refused_molecule: Some("task-20260531-ceaf".to_owned()),
             },
             EventV2::RuntimeReadDecideWrite {
-                path: "/srv/cosmon/cosmon/.cosmon/state/fleets/default/index.json".to_owned(),
+                path: "~/galaxies/cosmon/.cosmon/state/fleets/default/index.json".to_owned(),
                 pre_read_mtime_ns: 1_718_000_000_000_000_000_i64,
                 post_write_mtime_ns: 1_718_000_000_123_456_789_i64,
                 decision: "advance task-aaaa to step 2/3".to_owned(),
@@ -3747,7 +3747,7 @@ mod tests {
             },
             EventV2::RuntimeWorktreeClaimed {
                 molecule_id: mid("cs-20260411-aaaa"),
-                worktree_path: "/srv/cosmon/cosmon/.worktrees/task-aaaa".to_owned(),
+                worktree_path: "~/galaxies/cosmon/.worktrees/task-aaaa".to_owned(),
                 invocation_uuid: "abcdef0123456789abcdef0123456789".to_owned(),
             },
             EventV2::BlockingDialogueDetected {

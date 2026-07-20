@@ -114,7 +114,7 @@ Pilot workflow — the full cycle is nucleate → tackle → wait → done:
 
   Cross-galaxy edges (Phase 1, ADR-035):
   cs nucleate ... --blocked-by <alias>:<mol_id>    # alias resolves via
-    cosmon-registry, ~/.cosmon/galaxy-aliases.toml, or /srv/cosmon/<alias>/
+    cosmon-registry, ~/.cosmon/galaxy-aliases.toml, or ~/galaxies/<alias>/
   cs nucleate ... --blocks <alias>@<mol_id>        # `:` and `@` accepted
     (one-writer-per-galaxy: edge recorded locally only; remote galaxy is
      probed best-effort and a warning is printed if it cannot be reached)

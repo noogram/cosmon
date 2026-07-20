@@ -292,7 +292,7 @@ fn print_grouped_reference() {
     println!();
     println!("  Cross-galaxy edges (Phase 1, ADR-035):");
     println!("  cs nucleate ... --blocked-by <alias>:<mol_id>    # alias resolves via");
-    println!("    cosmon-registry, ~/.cosmon/galaxy-aliases.toml, or /srv/cosmon/<alias>/");
+    println!("    cosmon-registry, ~/.cosmon/galaxy-aliases.toml, or ~/galaxies/<alias>/");
     println!("  cs nucleate ... --blocks <alias>@<mol_id>        # `:` and `@` accepted");
     println!("    (one-writer-per-galaxy: edge recorded locally only; remote galaxy is");
     println!("     probed best-effort and a warning is printed if it cannot be reached)");

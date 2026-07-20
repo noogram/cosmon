@@ -7936,7 +7936,7 @@ mod tests {
         // delib-20260410-b79f / delib-20260531-bcc7 data-loss class.
         let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
         let mol_dir = Path::new(
-            "/srv/cosmon/example/.cosmon/state/fleets/default/molecules/idea-example-abcd",
+            "~/galaxies/example/.cosmon/state/fleets/default/molecules/idea-example-abcd",
         );
         let prompt = build_prompt(&mol, None, None, &ProjectConfig::default(), mol_dir);
 
@@ -7945,7 +7945,7 @@ mod tests {
         assert!(prompt.contains("Canonical molecule directory (resolved):"));
         // The exact absolute path appears verbatim.
         assert!(prompt.contains(
-            "/srv/cosmon/example/.cosmon/state/fleets/default/molecules/idea-example-abcd"
+            "~/galaxies/example/.cosmon/state/fleets/default/molecules/idea-example-abcd"
         ));
         // The worktree-is-destroyed warning is present and names the molecule.
         assert!(prompt.contains("NEVER write them to"));

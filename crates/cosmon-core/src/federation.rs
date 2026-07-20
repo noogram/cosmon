@@ -54,7 +54,7 @@ use serde::{Deserialize, Serialize};
 ///   federation list rejects it (which is the audit-trail value).
 /// - `source_commit` is the SHA in the source galaxy's git repo at the
 ///   moment the artefact crossed. It is informational: the cosmon gate
-///   may best-effort verify it via `git -C /srv/cosmon/<source_galaxy>
+///   may best-effort verify it via `git -C ~/galaxies/<source_galaxy>
 ///   rev-parse <commit>`, but a stale source repo does not invalidate
 ///   the lineage — the federation is detect-only, not enforce-only.
 /// - `source_path` is the path relative to the source galaxy's root.

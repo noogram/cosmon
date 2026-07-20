@@ -2640,7 +2640,7 @@ mod tests {
     /// `cs init` succeeds on any subdirectory.
     ///
     /// Before the ADR landed, this exact shape — a legitimate
-    /// `~/.cosmon/` cohabiting with `/srv/cosmon/<new>/` — silently
+    /// `~/.cosmon/` cohabiting with `~/galaxies/<new>/` — silently
     /// locked the operator out of the galaxy-birthing primitive.
     #[test]
     fn init_allows_child_of_configless_ancestor_cosmon() {

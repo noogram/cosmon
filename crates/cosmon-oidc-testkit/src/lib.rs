@@ -11,7 +11,7 @@
 //!   [`OidcMock::issue_jwt`] helper that produces tokens compatible
 //!   with `cosmon-rpp-adapter::JwtVerifier`.
 //! - [`tenant_workspace`] — a `TempDir` factory that lays out a per-noyau
-//!   `/srv/cosmon/<noyau>/.cosmon/state/` tree, the canonical subprocess
+//!   `~/galaxies/<noyau>/.cosmon/state/` tree, the canonical subprocess
 //!   `cwd` from ADR-080 §3.5 clause (e). Multi-tenant variants live on
 //!   [`TenantWorkspaces`].
 //!
@@ -25,8 +25,8 @@
 //! invariant: a JWT scoped to `noyau=A` cannot, through any path
 //! exposed by the RPP, read state owned by `noyau=B`. The structural
 //! defence is the per-tenant subprocess `cwd` (clause (e)) — a `cs`
-//! invocation in `/srv/cosmon/A/` cannot resolve a molecule that lives
-//! under `/srv/cosmon/B/.cosmon/state/`. This crate makes that test
+//! invocation in `~/galaxies/A/` cannot resolve a molecule that lives
+//! under `~/galaxies/B/.cosmon/state/`. This crate makes that test
 //! cheap to write and impossible to forget.
 //!
 //! [ADR-080]: ../../docs/adr/080-remote-pilot-port-https-oidc.md

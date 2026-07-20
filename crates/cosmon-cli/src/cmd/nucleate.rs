@@ -1449,7 +1449,7 @@ fn warn_cross_galaxy_reachability(refs: &[CrossGalaxyRef], flag: &str) {
             CrossGalaxyResolution::GalaxyUnknown => {
                 eprintln!(
                     "warning: {flag} `{cgr}` — galaxy `{}` not in registry, override file, \
-                     or `/srv/cosmon/<alias>/.cosmon/` (recorded anyway)",
+                     or `~/galaxies/<alias>/.cosmon/` (recorded anyway)",
                     cgr.galaxy
                 );
             }

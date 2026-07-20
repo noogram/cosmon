@@ -1948,7 +1948,7 @@ mod tests {
             "molecule_id": "task-20260514-f02f",
             "status": "Running",
             "tmux_session": "cosmon-task-20260514-f02f",
-            "worktree": "/srv/cosmon/cosmon/.worktrees/task-20260514-f02f",
+            "worktree": "~/galaxies/cosmon/.worktrees/task-20260514-f02f",
             "branch": "feat/task-20260514-f02f",
             "attach": "tmux -L cosmon attach -t cosmon-task-20260514-f02f",
             "spawned_at": "2026-05-14T12:00:00+00:00",

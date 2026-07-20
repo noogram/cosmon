@@ -61,7 +61,7 @@ MINIMAL patrols.toml (~/.config/cosmon/patrols.toml):
   name        = "chronicle-lint-weekly"
   cron        = "0 9 * * 0"            # cadence: Sundays 09:00
   command     = ["cs", "nucleate", "chronicle-lint"]
-  working_dir = "/srv/cosmon/example-project"
+  working_dir = "~/galaxies/example-project"
   enabled     = true
 
 HOT-RELOAD:

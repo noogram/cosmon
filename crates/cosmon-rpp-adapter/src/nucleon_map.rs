@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 /// A `noyau` is the multi-tenant axis (organisation / community) per
 /// ADR-063. The `noyau` value also determines the subprocess `cwd`:
-/// `/srv/cosmon/<noyau>/`.
+/// `~/galaxies/<noyau>/`.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub struct Noyau(pub String);
 
@@ -344,7 +344,7 @@ impl HabilitationMap {
     /// binding layer is already plural, so the set of noyaux to
     /// materialise is exactly the set of noyaux bound here. N nucléons
     /// may share a noyau — they collapse to one materialised galaxy
-    /// tree (`/srv/cosmon/<noyau>/`).
+    /// tree (`~/galaxies/<noyau>/`).
     #[must_use]
     pub fn noyaux(&self) -> Vec<Noyau> {
         let mut seen = std::collections::BTreeSet::new();

@@ -4,7 +4,7 @@
 //! one [`GalaxyEntry`] per directory that looks like a cosmon-managed
 //! galaxy.
 //!
-//! The caller passes the *galaxies root* (typically `/srv/cosmon/`); each
+//! The caller passes the *galaxies root* (typically `~/galaxies/`); each
 //! immediate subdirectory whose `.cosmon/state/` exists qualifies. A
 //! single pass over the directory keeps the listing endpoint cheap
 //! enough to call from the iOS polling loop without a cache.
@@ -42,7 +42,7 @@ pub fn discover_galaxies(root: &Path) -> Vec<GalaxyEntry> {
                 return None;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            // Skip dotted children (/srv/cosmon/.cache, etc.).
+            // Skip dotted children (~/galaxies/.cache, etc.).
             if name.starts_with('.') {
                 return None;
             }
