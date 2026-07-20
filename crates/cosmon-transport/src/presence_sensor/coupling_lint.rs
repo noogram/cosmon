@@ -79,10 +79,18 @@ fn linted_sensor_list_is_non_empty_on_supported_platforms() {
     // every CI runner to be macOS.
     #[cfg(target_os = "macos")]
     {
-        assert!(
-            !LINTED_SENSOR_SOURCES.is_empty(),
-            "macOS build must audit at least one sensor (darwin.rs)"
-        );
+        // `LINTED_SENSOR_SOURCES` is a const table, so `is_empty()` folds to a
+        // const `false` under newer clippy (`const_is_empty`). That is exactly
+        // what this test asserts — a compile-time-known non-empty table is the
+        // sanity property, not a smell — so the lint is suppressed here rather
+        // than restructured away.
+        #[allow(clippy::const_is_empty)]
+        {
+            assert!(
+                !LINTED_SENSOR_SOURCES.is_empty(),
+                "macOS build must audit at least one sensor (darwin.rs)"
+            );
+        }
     }
 }
 

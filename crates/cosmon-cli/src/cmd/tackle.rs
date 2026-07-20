@@ -3922,7 +3922,124 @@ fn spawn_claude_and_prompt(
     }
 
     backend.send_input(wid, prompt)?;
+
+    // Spawn-scale briefing-submit confirmation (BUG #6 — the paste-sans-submit
+    // stall observed on the 2026-07-20 knowledge fleet: 4/11 workers sat
+    // `healthy` but idle on `❯ [Pasted text #1 +86 lines]` for ~90 min, 0
+    // tokens, because the briefing was pasted but the submitting `Enter` was
+    // swallowed and never landed).
+    //
+    // `send_input` already re-sends `Enter` on a budget, but that budget is
+    // spent in ~6 s. A fresh Claude worker rendering a large briefing paste on
+    // a loaded fleet stays busy longer than that, swallows every re-`Enter`,
+    // and the budget gives up — leaving the paste unsubmitted with no further
+    // nudge until a patrol (which never fired here) notices. Manual recovery
+    // was a single `tmux send-keys Enter` once the TUI settled.
+    //
+    // This backstop keeps confirming submission on a spawn-scale window: it
+    // stops the instant the worker is visibly `Working` (⏺ / Thinking — the
+    // acceptance signal that the mission is producing tokens) and otherwise
+    // re-nudges `Enter` for as long as the composer still shows the
+    // pasted-but-unsubmitted briefing.
+    confirm_briefing_submitted(backend, wid, prompt);
     Ok(())
+}
+
+/// Upper bound on the spawn-time briefing-submit confirmation
+/// ([`confirm_briefing_submitted`]).
+///
+/// Sized to outlast the window in which a fresh Claude worker on a loaded
+/// fleet stays busy rendering a large briefing paste and swallows re-`Enter`s
+/// — the ~90 min stalls on 2026-07-20 never left that busy window on their
+/// own. `send_input`'s own budget (~6 s) is the fast path; this is the
+/// belt-and-suspenders that turns "never started" into "started".
+const BRIEFING_SUBMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// Interval between briefing-submit confirmation polls.
+const BRIEFING_SUBMIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// One-step decision for the spawn-time briefing-submit confirmation loop —
+/// the pure kernel of [`confirm_briefing_submitted`], factored out so the
+/// nudge/stop logic is unit-testable without a live tmux server or Claude TUI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BriefingSubmitStep {
+    /// The worker is producing tokens — the briefing was submitted. Stop.
+    Done,
+    /// The briefing is still pasted-but-unsubmitted in the composer. Re-`Enter`.
+    Nudge,
+    /// Neither yet — the composer looks clear but the worker has not reached
+    /// `Working`. Wait one poll rather than injecting a stray `Enter` into a
+    /// session that may be mid-submit.
+    Wait,
+}
+
+/// Decide the next action for the briefing-submit confirmation loop.
+///
+/// `Working` (tool-use / thinking) is only reachable *after* a submit, so it
+/// is the unambiguous success signal and takes priority over a still-visible
+/// paste echo scrolling through the transcript. Otherwise a composer that
+/// still holds the pasted briefing means the submit `Enter` has not landed.
+fn briefing_submit_step(
+    status: &cosmon_transport::readiness::SessionStatus,
+    still_pending: bool,
+) -> BriefingSubmitStep {
+    use cosmon_transport::readiness::SessionStatus;
+    if *status == SessionStatus::Working {
+        return BriefingSubmitStep::Done;
+    }
+    if still_pending {
+        BriefingSubmitStep::Nudge
+    } else {
+        BriefingSubmitStep::Wait
+    }
+}
+
+/// Keep confirming that a freshly-delivered briefing actually left the
+/// composer, re-nudging `Enter` until the worker is `Working` or the
+/// spawn-scale [`BRIEFING_SUBMIT_WINDOW`] elapses.
+///
+/// Best-effort by construction: every tmux read/write is allowed to fail
+/// without escalating a delivered briefing into a hard spawn error (the
+/// worker may already be working). A window that expires without the worker
+/// reaching `Working` is logged so a genuinely-stuck submit is visible to
+/// patrol operators rather than silent.
+fn confirm_briefing_submitted(
+    backend: &TmuxBackend,
+    wid: &cosmon_core::id::WorkerId,
+    prompt: &str,
+) {
+    use cosmon_transport::readiness::classify_output;
+    let deadline = std::time::Instant::now() + BRIEFING_SUBMIT_WINDOW;
+    loop {
+        let status = backend
+            .capture_output(wid, 30)
+            .map(|pane| classify_output(&pane))
+            .unwrap_or(cosmon_transport::readiness::SessionStatus::Unknown);
+        // A capture/session failure here reads as "not pending" (the loop
+        // must never manufacture a nudge from a read error).
+        let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
+
+        match briefing_submit_step(&status, still_pending) {
+            BriefingSubmitStep::Done => return,
+            BriefingSubmitStep::Nudge => {
+                // Empty input == a bare `Enter` (see `send_input`), which is
+                // exactly the manual recovery that unstalled these workers.
+                let _ = backend.send_input(wid, "");
+            }
+            BriefingSubmitStep::Wait => {}
+        }
+
+        if std::time::Instant::now() >= deadline {
+            tracing::warn!(
+                worker = %wid.name(),
+                "briefing-submit confirmation window elapsed without the worker \
+                 reaching Working; the paste may still be unsubmitted — relying \
+                 on patrol backstop"
+            );
+            return;
+        }
+        std::thread::sleep(BRIEFING_SUBMIT_POLL);
+    }
 }
 
 /// Per-model timeout for the pre-flight availability probe.
@@ -6590,6 +6707,57 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    // ── BUG #6: spawn-time briefing-submit confirmation ─────────────────
+    // The paste-sans-submit stall (2026-07-20 knowledge fleet). The pure
+    // decision kernel must: stop once the worker is Working, re-Enter while
+    // the paste is still pending, and otherwise wait rather than inject a
+    // stray Enter.
+    #[test]
+    fn briefing_submit_step_stops_when_working() {
+        use cosmon_transport::readiness::SessionStatus;
+        // Working is only reachable after a submit — it is the success signal,
+        // and it wins even if a paste echo is still scrolling (still_pending).
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Working, true),
+            BriefingSubmitStep::Done
+        );
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Working, false),
+            BriefingSubmitStep::Done
+        );
+    }
+
+    #[test]
+    fn briefing_submit_step_nudges_while_paste_pending() {
+        use cosmon_transport::readiness::SessionStatus;
+        // The reported stall: the composer still shows `❯ [Pasted text …]`,
+        // the worker is idle on Ready. Keep pressing Enter.
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Ready, true),
+            BriefingSubmitStep::Nudge
+        );
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Unknown, true),
+            BriefingSubmitStep::Nudge
+        );
+    }
+
+    #[test]
+    fn briefing_submit_step_waits_when_clear_but_not_working() {
+        use cosmon_transport::readiness::SessionStatus;
+        // Composer clear (submit likely landed) but Working not yet observed:
+        // wait for the next poll rather than firing a stray Enter into a
+        // session that may be mid-submit.
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Ready, false),
+            BriefingSubmitStep::Wait
+        );
+        assert_eq!(
+            briefing_submit_step(&SessionStatus::Loading, false),
+            BriefingSubmitStep::Wait
+        );
+    }
 
     // ── RÉSIDUEL SÉCU B: exposed launch → fail-closed egress ────────────
     // (task-20260713-d436). `cs tackle` must project the exposed /
