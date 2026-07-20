@@ -5023,15 +5023,18 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         job.adapter_entry.as_ref(),
         job.preferred_model.as_deref(),
     );
-    if let Err(error) = result {
-        let _ = append_local_worker_failure(&job.molecule_dir, &error);
-        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
-            Ok(()) => Err(error),
-            Err(mark_error) => Err(error.context(format!(
-                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
-            ))),
-        };
-    }
+    let synthesis = match result {
+        Ok(synthesis) => synthesis,
+        Err(error) => {
+            let _ = append_local_worker_failure(&job.molecule_dir, &error);
+            return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
+                Ok(()) => Err(error),
+                Err(mark_error) => Err(error.context(format!(
+                    "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
+                ))),
+            };
+        }
+    };
 
     // Surface the deliverables the worker produced in its worktree as RPP
     // artifacts (under COSMON_ARTIFACT_DIR), deterministically — do NOT rely on
@@ -5043,6 +5046,33 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
             Ok(()) => Err(error),
             Err(mark_error) => Err(error.context(format!(
+                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
+            ))),
+        };
+    }
+
+    // BUG #4 real-work guard. The agent loop returning `Ok` proves only that
+    // the transport did not error — NOT that the weak local model did any
+    // work. A no-op turn (empty synthesis, no worktree edits) must NOT be
+    // booked "completed": that is a silent false success, the exact wall
+    // tester Matteo Cacciari hit (an unresolvable/weak ollama model no-ops and
+    // the molecule "passes"). Refuse to finalize unless there is real work,
+    // and fail LOUDLY with a repair-naming message. The molecule is left
+    // Running with the worker stopped — recoverable and re-tacklable — rather
+    // than collapsed (terminal, work lost) or completed (false success).
+    if !local_worker_produced_real_work(&job.worktree_path, &synthesis) {
+        let guard_error = anyhow::anyhow!(
+            "cs local-worker: the local agent loop returned without producing any real work \
+             — synthesis.md is empty and the worktree holds no deliverables. This is almost \
+             always a weak or unresolved local model that no-opped instead of honoring the \
+             result contract. The molecule is NOT completed; it needs attention. Re-tackle \
+             with a model the backend can actually serve and reason with (pin one via \
+             --model, [adapters.local].default_model, or COSMON_LOCAL_MODEL)."
+        );
+        let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
+        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
+            Ok(()) => Err(guard_error),
+            Err(mark_error) => Err(guard_error.context(format!(
                 "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
             ))),
         };
@@ -5081,10 +5111,63 @@ fn sync_worktree_deliverables_to_artifact_dir(worktree: &Path) -> anyhow::Result
     sync_worktree_deliverables(worktree, &artifact_dir)
 }
 
+/// Whether a finished local worker produced *real work* worth booking as a
+/// completed molecule (BUG #4).
+///
+/// The `local` / `ollama` floor drives a weak, operator-supplied model. Such a
+/// model can return `Ok` from the agent loop having done nothing at all — no
+/// edits, no synthesis, a single no-op turn — because the loop's success is the
+/// *absence of a transport error*, not the *presence of output*. Booking that
+/// "completed" is a silent false success: the molecule reports done while the
+/// work never happened. This is the exact wall tester Matteo Cacciari hit —
+/// unable to name a capable ollama model, the loop no-ops and the molecule
+/// "passes".
+///
+/// Real work is either of:
+/// * a non-empty `synthesis.md` body (the model's own final text), or
+/// * at least one non-internal deliverable in the worktree (a tracked diff vs
+///   `main` or an untracked file that is not under `.cosmon/`, `target/`,
+///   `.git/`).
+///
+/// Fail-closed: if the worktree cannot even be inspected (git failure) *and*
+/// the synthesis is empty, we cannot prove work happened, so we report `false`
+/// and let the caller surface the molecule for attention rather than complete
+/// it on faith.
+fn local_worker_produced_real_work(worktree: &Path, synthesis: &str) -> bool {
+    if !synthesis.trim().is_empty() {
+        return true;
+    }
+    match discover_worktree_deliverables(worktree) {
+        Ok(rels) => rels.iter().any(|rel| !ignored_artifact_path(rel)),
+        Err(error) => {
+            tracing::warn!(
+                worktree = %worktree.display(),
+                error = %error,
+                "real-work guard could not inspect worktree deliverables; treating as no work"
+            );
+            false
+        }
+    }
+}
+
 /// Maximum artifact size accepted at the RPP boundary (16 MiB).
 const MAX_SYNCED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
-fn sync_worktree_deliverables(worktree: &Path, artifact_dir: &Path) -> anyhow::Result<()> {
+/// Discover the paths a local worker produced in its worktree, as
+/// git-native NUL-safe byte paths relative to the worktree root.
+///
+/// "Produced" = tracked files that differ from the worktree's merge-base with
+/// `main`, plus new untracked files. Cosmon-internal paths (`.cosmon/`,
+/// `target/`, `.git/`) are *not* filtered here — callers apply
+/// [`ignored_artifact_path`] themselves so both the artifact-sync boundary and
+/// the real-work guard share one discovery.
+///
+/// Shared by [`sync_worktree_deliverables`] (which publishes the paths) and
+/// [`local_worker_produced_real_work`] (which only counts them), so the two
+/// can never disagree about what the worker actually produced.
+fn discover_worktree_deliverables(
+    worktree: &Path,
+) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
     let mut rels = std::collections::BTreeSet::new();
     rels.extend(git_nul_paths(
         worktree,
@@ -5116,6 +5199,11 @@ fn sync_worktree_deliverables(worktree: &Path, artifact_dir: &Path) -> anyhow::R
         }
         Err(error) => return Err(error),
     }
+    Ok(rels)
+}
+
+fn sync_worktree_deliverables(worktree: &Path, artifact_dir: &Path) -> anyhow::Result<()> {
+    let rels = discover_worktree_deliverables(worktree)?;
     if rels.is_empty() {
         return Ok(());
     }
@@ -5243,7 +5331,7 @@ fn run_local_agent_loop(
     mol_state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<String> {
     // base_url: config → COSMON_LOCAL_BASE_URL → OPENAI_BASE_URL →
     // compile-time Ollama default. The provider's `normalize_base_url`
     // strips a stray trailing `/v1` so either the host-root or the
@@ -5356,7 +5444,7 @@ fn run_local_agent_loop(
         bytes = synthesis.len(),
         "local in-process agent loop completed"
     );
-    Ok(())
+    Ok(synthesis)
 }
 
 /// Run a local-worker future under its wall-clock limit inside the runtime that
@@ -6841,6 +6929,50 @@ mod tests {
         assert!(error
             .to_string()
             .contains("could not create artifact directory"));
+    }
+
+    /// BUG #4: a non-empty synthesis is real work even when the worktree is
+    /// otherwise untouched — the model produced output worth booking.
+    #[test]
+    fn real_work_guard_accepts_non_empty_synthesis() {
+        let (_tmp, root) = init_repo();
+        assert!(local_worker_produced_real_work(
+            &root,
+            "  I implemented the fix.  "
+        ));
+    }
+
+    /// BUG #4: an empty synthesis with no worktree deliverable is a no-op — the
+    /// guard must refuse it so the caller does not book a false "completed".
+    #[test]
+    fn real_work_guard_rejects_empty_synthesis_and_clean_worktree() {
+        let (_tmp, root) = init_repo();
+        // Only whitespace in the synthesis, and nothing changed since the seed
+        // commit: a weak model's no-op turn.
+        assert!(!local_worker_produced_real_work(&root, "   \n\t  "));
+    }
+
+    /// BUG #4: an empty synthesis is still real work when the worker actually
+    /// edited the worktree — a weak model that wrote code but no prose.
+    #[test]
+    fn real_work_guard_accepts_worktree_deliverable_without_synthesis() {
+        let (_tmp, root) = init_repo();
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
+        assert!(local_worker_produced_real_work(&root, ""));
+    }
+
+    /// BUG #4: a file produced only under a cosmon-internal path (`.cosmon/`,
+    /// `target/`, `.git/`) is NOT a deliverable — it must not rescue a no-op
+    /// from the guard.
+    #[test]
+    fn real_work_guard_ignores_internal_only_output() {
+        let (_tmp, root) = init_repo();
+        std::fs::create_dir(root.join("target")).unwrap();
+        std::fs::write(root.join("target/build-artifact"), "noise").unwrap();
+        std::fs::create_dir(root.join(".cosmon")).unwrap();
+        std::fs::write(root.join(".cosmon/state"), "internal").unwrap();
+        assert!(!local_worker_produced_real_work(&root, ""));
     }
 
     /// Create branch `feat/{id}` off `main`, add a commit dated `unix_ts`,
