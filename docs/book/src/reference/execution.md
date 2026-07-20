@@ -144,6 +144,21 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
 
 
+## `cs sync`
+
+Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
+
+**Usage:** `cs sync [OPTIONS]`
+
+###### **Options:**
+
+* `--base <BASE>` — Base branch to sync from (defaults to `main`)
+
+  Default value: `main`
+* `--dry-run` — Report what would happen without performing the merge
+
+
+
 ## `cs harvest`
 
 Harvest — close a completed-but-unmerged molecule by invoking `cs done`

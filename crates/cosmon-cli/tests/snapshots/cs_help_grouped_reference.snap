@@ -38,6 +38,7 @@ Fleet management:
 Execution:
   tackle               Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
   done                 Done — terminal teardown for a molecule (merge + cleanup, human-callable)
+  sync                 Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
   harvest              Harvest — close a completed-but-unmerged molecule by invoking `cs done`
   run                  Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
   spore                Spore germinates a whole polymer from a shareable `spore.toml` template (validate / run / export, ADR-140)
@@ -53,6 +54,7 @@ Project:
   daemons              Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
   migrate              Migrate the galaxy's memory — legacy flat→fleet, or residence-to-residence
   deps                 Deps — show blocking dependencies for a molecule (upstream/downstream)
+  mission              Mission — read-only DAG view joining ledger edges to completion merge commits
   diverge              Diverge — structural agreement check between two sessions on a molecule (turing §5)
   galaxies             Galaxies — inspect the four-family taxonomy
   topology             Topology — structural maps of the workspace (wraps the `topon` CLI)

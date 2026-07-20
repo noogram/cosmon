@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Render the mission DAG rooted at a molecule, joining ledger edges to their completion merge commits
+
+Usage: cs mission graph [OPTIONS] <ROOT>
+
+Arguments:
+  <ROOT>  Mission root molecule ID (exact or unambiguous prefix)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

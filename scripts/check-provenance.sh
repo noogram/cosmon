@@ -115,6 +115,17 @@ PATTERNS=(
 #     fold merge, which is where it belongs.
 BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
 
+# Durable base-sync marker (delib-20260720-cff4, Phase 1). `cs sync` stamps
+# an explicit `Base-Sync: <base>..<branch>` trailer on the merge it creates,
+# so recognition no longer depends solely on the subject direction heuristic
+# — a string git writes and nobody signs. The trailer is a superset signal:
+# a merge is treated as a base-sync candidate if EITHER its subject matches
+# BASE_SYNC_RE OR it carries a Base-Sync trailer whose branch names a
+# molecule. Either way the SAME structural safety check applies (incoming
+# side must sit on the trunk's first-parent chain), so this only hardens
+# recognition, it never relaxes the gate.
+BASE_SYNC_TRAILER_RE="^Base-Sync:[[:space:]]*[^[:space:]]+\.\.feat/${MOL_ID_RE}[[:space:]]*\$"
+
 # First-parent trunk commits, used to prove a base-sync's incoming side
 # is already-gated trunk material. Built lazily on first use, from the
 # scope head AND the scope base: in a PR scope the head is the feature
@@ -148,9 +159,25 @@ while IFS= read -r commit; do
     subject=$(git log -1 --format='%s' "$commit")
 
     # Base-sync class — checked before the general patterns because it
-    # carries its own, structural, evidence requirement.
+    # carries its own, structural, evidence requirement. Recognised via the
+    # subject direction heuristic OR the durable `Base-Sync:` trailer stamped
+    # by `cs sync` (delib-20260720-cff4). The trailer widens recognition; the
+    # structural check below is identical for both, so it cannot weaken the
+    # gate.
+    base_sync_mol=""
     if [[ "$subject" =~ $BASE_SYNC_RE ]]; then
-        mol_id="${BASH_REMATCH[1]}"
+        base_sync_mol="${BASH_REMATCH[1]}"
+    else
+        trailer_line=$(git log -1 --format='%(trailers:key=Base-Sync,valueonly)' "$commit" \
+            | head -n 1)
+        # Reconstruct the full trailer line for the regex (valueonly drops the key).
+        [ -n "$trailer_line" ] && trailer_line="Base-Sync: $trailer_line"
+        if [ -n "$trailer_line" ] && [[ "$trailer_line" =~ $BASE_SYNC_TRAILER_RE ]]; then
+            base_sync_mol="${BASH_REMATCH[1]}"
+        fi
+    fi
+    if [ -n "$base_sync_mol" ]; then
+        mol_id="$base_sync_mol"
         p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
         if [ -n "$p2" ] && trunk_has "$p2"; then
             echo "ok    $commit  ($mol_id)  base-sync from trunk"

@@ -1,0 +1,15 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Sync — base-sync the current worktree from main, stamping a Base-Sync trailer
+
+Usage: cs sync [OPTIONS]
+
+Options:
+      --base <BASE>    Base branch to sync from (defaults to `main`) [default: main]
+      --config <PATH>  Path to configuration file
+      --dry-run        Report what would happen without performing the merge
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

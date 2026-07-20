@@ -326,6 +326,16 @@ class = "out_of_scope"
 reason = "blocking-dep inspector — could move later (V1+)."
 
 [[verb_absent_from_thin]]
+verb = "mission"
+class = "out_of_scope"
+reason = "read-only DAG view joining ledger edges to completion merge commits (delib-20260720-cff4 Phase 1) — local git + ledger read; the payload is already covered by GET /v1/molecules/:id, same family as cs deps."
+
+[[verb_absent_from_thin]]
+verb = "sync"
+class = "out_of_scope"
+reason = "worktree-side base-sync stamping a Base-Sync trailer (delib-20260720-cff4 Phase 1) — local git inside the worker's worktree before cs done; no RPP/HTTP shape (same family as cs done / cs harvest)."
+
+[[verb_absent_from_thin]]
 verb = "diverge"
 class = "out_of_scope"
 reason = "structural agreement check — turing §5; operator-only."
