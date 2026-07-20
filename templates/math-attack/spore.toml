@@ -1,0 +1,456 @@
+# ==========================================================================
+# math-attack.spore.toml — a shareable "hard-math-attack" polymer (ADR-140)
+#
+# WHAT IT IS
+#   A spore is a parameterizable template of a WHOLE polymer: a fleet + per-node
+#   formulas + a ParamSchema + a DAG of typed edges + an (unverified) .tla seal.
+#   Fill the params, run `cs spore run`, and a full attack on a hard conjecture
+#   germinates: decompose -> source ledger -> concept cards -> proof attempts ||
+#   notebooks -> skeptic -> Lean skeleton -> Lean probe || red-team corpus ->
+#   seal gate -> synthesis -> paper -> editorial verdict -> chronicle.
+#
+# RECIPIENT QUICKSTART (see README.md for the full walk-through):
+#   cs spore validate templates/math-attack/spore.toml \
+#       --var subject="Firoozbakht's conjecture" \
+#       --var problem_statement="p(n+1)^(1/(n+1)) < p(n)^(1/n) for all n, to be PROVEN or REFUTED, not assumed"
+#   cs spore run templates/math-attack/spore.toml --var ... --allow-unchecked-seal
+#   cs spore export templates/math-attack/spore.toml --out dist/
+#
+# SEAL HONESTY (ADR-140 D4): this ship declares a [spore.seal] block but its
+# TLC proof is NOT wired yet (that is the follow-up molecule). A sealed spore
+# fails closed, so `cs spore run` REFUSES until you pass --allow-unchecked-seal.
+# The status line then reads "present, NOT verified" — never "verified".
+#
+# LIFTED, NOT REINVENTED:
+#   * roles / LLM-firewall constitution  <- templates/formal-research/fleet.toml
+#   * falsifiability + kernel-verdict invariant <- formal-research/MISSION.md.tmpl
+#   * citation seal leg  <- exp-families-stability citation-audit.formula.toml
+#   * chronicle fold     <- formal-research mycelium.formula.toml
+# ==========================================================================
+
+[spore]
+name        = "math-attack"
+version     = 1
+verb        = "germinate"    # spore -> polymer, the parallel of nucleate (formula -> molecule)
+description = """
+Germinate a full hard-math-attack polymer: attack a stated conjecture with a
+proof/refutation pipeline whose non-negotiable invariant is that no target
+reaches "proved" without a mechanical kernel verdict (Lean `lake build` exit 0,
+grep-clean of sorry/axiom). The LLM emits proof terms and prose; the kernel
+alone authors the verdict (the LLM firewall). Computation corroborates or
+refutes; it never constitutes the proof. When formal_backend = none the Lean
+branch is honestly skipped and the seal degrades to the skeptic + editor legs.
+"""
+
+# --------------------------------------------------------------------------
+# Seal (ADR-140 D2/D4) — DECLARED in ship A, TLC verification is the follow-up.
+# Termination         : every fan-out is bounded by a param list; no unbounded
+#                       foaming (ADR-139); editorial REWRITE loop is worker-bounded.
+# GateFailClosed      : the seal-gate and editorial-verdict refuse on absent
+#                       evidence — no leg silently degrades to "pass".
+# NoResourceCollision : worktree isolation + concurrency_cap bound concurrent
+#                       writers so parallel proof attempts never alias files.
+# NB: spore.tla / spore.cfg are intentionally ABSENT until the TLC follow-up
+# molecule writes them; `cs spore run` therefore needs --allow-unchecked-seal.
+# --------------------------------------------------------------------------
+[spore.seal]
+module     = "spore.tla"
+config     = "spore.cfg"
+properties = ["Termination", "GateFailClosed", "NoResourceCollision"]
+
+# --------------------------------------------------------------------------
+# ParamSchema. Two params are REQUIRED (subject, problem_statement); the rest
+# carry defaults so the spore expands cleanly for the single-target case.
+# NOTE (ADR-140 static kinds): node kind is fixed at parse time, so a node
+# cannot switch fixed<->fanout on a param value. The single-target ("FMG")
+# case is therefore a 1-element `subquestions` fan-out (the default ["main"]),
+# and the multi-subquestion ("EFS") case passes an N-element list. See README.
+# --------------------------------------------------------------------------
+[spore.params.subject]
+type        = "string"
+required    = true
+description = "Short name of the conjecture / problem under attack."
+
+[spore.params.problem_statement]
+type        = "string"
+required    = true
+description = "The verbatim conjecture, phrased 'to be PROVEN or REFUTED, not assumed'."
+
+[spore.params.origin]
+type        = "string"
+default     = ""
+description = "Provenance / context of the conjecture (paper, poser, motivation)."
+
+[spore.params.subquestions]
+type        = "list<string>"
+default     = ["main"]
+description = "Attack targets. One entry (default) => single-target; many => fan-out decomposition. NEVER empty (ADR-140 fan-out needs a non-empty param list)."
+
+[spore.params.formal_backend]
+type        = "enum"
+values      = ["lean", "none"]
+default     = "none"
+description = "lean => a real Lean kernel leg gates the seal; none => Lean branch skipped, seal degrades honestly to skeptic + editor legs."
+
+[spore.params.adversarial_corpus_min]
+type        = "int"
+default     = 10
+description = "Minimum number of false statements the red-team corpus must author (the kernel MUST reject them)."
+
+[spore.params.literature_anchors]
+type        = "list<string>"
+default     = []
+description = "Seed citations/anchors for the source ledger (citekeys, DOIs, or titles)."
+
+[spore.params.delivery]
+type        = "enum"
+values      = ["private", "staged", "public"]
+default     = "private"
+description = "Delivery posture for the resulting paper. Default private."
+
+# --------------------------------------------------------------------------
+# Fleet — concurrency-capped worktree isolation so parallel proof attempts and
+# the ||-branches never collide on the same files (NoResourceCollision).
+# --------------------------------------------------------------------------
+[spore.fleet]
+name            = "default"
+concurrency_cap = 6
+isolation       = "worktree"
+
+# --------------------------------------------------------------------------
+# Per-node recipes — formula aliases. Paths are relative to this manifest
+# (portability invariant). task-work drives the agentic legs; citation-audit
+# (lifted) is the seal's citation leg; mycelium (lifted) is the chronicle fold.
+# --------------------------------------------------------------------------
+[spore.formulas.task-work]
+path          = "formulas/task-work.formula.toml"
+description   = "Generic agentic work session (Opus). Emits the leg's artifact."
+deterministic = false
+
+[spore.formulas.citation-audit]
+path          = "formulas/citation-audit.formula.toml"
+description   = "Citation seal leg — L0/L1/L2/L3 locator-match audit of the paper."
+deterministic = false
+
+[spore.formulas.mycelium]
+path          = "formulas/mycelium.formula.toml"
+description   = "Chronicle fold over the drained attack DAG."
+deterministic = false
+
+# ==========================================================================
+# The DAG (declaration order; A||B then converge).
+#   decompose -> source-ledger -> concept-cards
+#             -> [proof-attempt || notebooks]        (fan-out over subquestions)
+#             -> skeptic -> lean-skeleton
+#             -> [lean-probe || red-team-corpus]
+#             -> seal-gate -> synthesize -> write-paper
+#             -> editorial-verdict -> chronicle
+# ==========================================================================
+
+# --- 1. decompose ---------------------------------------------------------
+[[spore.node]]
+id          = "decompose"
+kind        = "fixed"
+formula     = "task-work"
+description = "Restate the conjecture formally, build the proof-obligation tree, enumerate strategies + falsifiability tests."
+[spore.node.vars]
+topic = """
+MATH-ATTACK on ${params.subject}. Conjecture to be PROVEN or REFUTED, not \
+assumed: ${params.problem_statement}. Origin/context: ${params.origin}. \
+DECOMPOSE the attack surface into decompose.md: (a) the formal restatement; \
+(b) the proof-obligation tree — the sub-claims, lemmas and reductions any full \
+proof or refutation must pass through; (c) candidate strategies (direct, \
+contrapositive, contradiction, construction, counterexample search); (d) the \
+falsifiability tests whose failure would REFUTE the conjecture. Formal backend \
+requested: ${params.formal_backend}."""
+
+# --- 2. source-ledger -----------------------------------------------------
+[[spore.node]]
+id          = "source-ledger"
+kind        = "fixed"
+formula     = "task-work"
+description = "Build the authoritative bibliography ledger; every anchor gets citekey + locator + exact statement."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — SOURCE LEDGER. Build source-ledger.md: the \
+authoritative bibliography for the attack on ${params.problem_statement}. Seed \
+anchors: ${params.literature_anchors}. For every source, capture citekey, a \
+precise locator (theorem / proposition / page) and the exact statement it \
+supplies. This ledger is the citation substrate the seal-gate's citation-audit \
+leg will verify — every claim in the final paper must trace to a row here."""
+
+# --- 3. concept-cards -----------------------------------------------------
+[[spore.node]]
+id          = "concept-cards"
+kind        = "fixed"
+formula     = "task-work"
+description = "One card per load-bearing definition / lemma / technique, each pinned to a source-ledger row."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — CONCEPT CARDS. From decompose.md and \
+source-ledger.md, write one concept-card per load-bearing definition, lemma or \
+technique needed for ${params.problem_statement}. Each card: precise statement, \
+its role in the proof-obligation tree, its dependencies, and the source-ledger \
+row it rests on. Emit concept-cards/."""
+
+# --- 4a. proof-attempt (fan-out over subquestions) ------------------------
+[[spore.node]]
+id          = "proof-attempt"
+kind        = "fanout"
+for_each    = "${params.subquestions}"
+formula     = "task-work"
+description = "Attack one target: prove or refute in full rigor. Never asserts the conjecture — 'proved' is the kernel's word, downstream."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — PROOF ATTEMPT on target '${item}' (target \
+#${index}). Conjecture under attack: ${params.problem_statement}. Using the \
+concept-cards and source-ledger, attempt to PROVE or REFUTE this target. Emit \
+proof-attempt-${index}.md: the argument in full rigor, every step justified or \
+flagged as a gap; if refuted, the explicit counterexample; if stuck, the \
+precise obstruction. Do NOT assert the conjecture true — a target reaches \
+'proved' only through the kernel/Lean leg downstream. Backend: ${params.formal_backend}."""
+
+# --- 4b. notebooks (fan-out over subquestions, parallel to proof-attempt) -
+[[spore.node]]
+id          = "notebooks"
+kind        = "fanout"
+for_each    = "${params.subquestions}"
+formula     = "task-work"
+description = "Computational stress-test of one target: numeric/symbolic experiments, small-case checks, counterexample search."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — COMPUTATIONAL NOTEBOOKS for target '${item}' \
+(target #${index}). Conjecture: ${params.problem_statement}. Build executable \
+notebooks (numeric / symbolic experiments, small-case verification, \
+counterexample search) that stress target '${item}'. Emit notebook-${index} + \
+a findings note: what the computation supports, what it refutes, at what scale. \
+Computation corroborates or refutes; it NEVER constitutes the proof."""
+
+# --- 5. skeptic (converge: proof-attempt || notebooks) --------------------
+[[spore.node]]
+id          = "skeptic"
+kind        = "fixed"
+formula     = "task-work"
+description = "Adversarial review of all attempts + notebooks. faults.md with BLOCKER/MAJOR/MINOR; a non-empty BLOCKER set blocks the seal."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — SKEPTIC / red-team the proof attempts and \
+notebooks for ${params.problem_statement}. You are the adversary. Read every \
+proof-attempt-*.md and every notebook finding. Hunt for: unjustified steps, \
+hidden assumptions, circular reasoning, mis-cited lemmas, and scale-limited \
+computations passed off as general. Write faults.md: one numbered finding per \
+fault, each tagged BLOCKER / MAJOR / MINOR. A non-empty BLOCKER set BLOCKS the \
+seal downstream — do not soften. If genuinely clean, say so with the checks you ran."""
+
+# --- 6. lean-skeleton (fidelity anchor) -----------------------------------
+[[spore.node]]
+id          = "lean-skeleton"
+kind        = "fixed"
+formula     = "task-work"
+description = "Transcribe the target theorem(s) as 'theorem … := by sorry'. The statement is the fidelity anchor; a wrong statement voids every downstream proof."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — LEAN SKELETON (fidelity anchor). Backend: \
+${params.formal_backend}. If 'lean': transcribe the target theorem(s) for \
+${params.problem_statement} into Lean 4 as `theorem … := by sorry`. The Lean \
+statement MUST be a faithful transcription of the conjecture — this is the \
+fidelity anchor, and a wrong statement makes every downstream proof \
+meaningless. If 'none': write the skeleton as a precise natural-language \
+statement block and mark the Lean branch SKIPPED honestly; the seal will \
+degrade to the skeptic + editor legs only. Emit lean/ or skeleton.md."""
+
+# --- 7a. lean-probe -------------------------------------------------------
+[[spore.node]]
+id          = "lean-probe"
+kind        = "fixed"
+formula     = "task-work"
+description = "Discharge the sorries with real proof terms and run `lake build`. PROVED (exit 0, no sorry/axiom) or UNPROVABLE_IN_BUDGET — never 'false'."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — LEAN PROBE. Backend: ${params.formal_backend}. \
+If 'lean': attempt to discharge the `sorry`s from the lean-skeleton with real \
+proof terms; run `lake build`. Report each theorem as PROVED (lake build exit \
+0, grep-clean of sorry/axiom) or UNPROVABLE_IN_BUDGET — never conflate \
+'couldn't find a proof' with 'false'. If 'none': record the Lean leg as \
+SKIPPED (no backend). Emit lean-probe-report.md with the build exit code and \
+the per-theorem verdict. The LLM emits proof terms only; `lake build` is the \
+sole verdict (LLM firewall)."""
+
+# --- 7b. red-team-corpus (parallel to lean-probe) -------------------------
+[[spore.node]]
+id          = "red-team-corpus"
+kind        = "fixed"
+formula     = "task-work"
+description = "Author >= adversarial_corpus_min FALSE statements the kernel MUST reject — near-misses, dropped hypotheses, typing cheats."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — RED-TEAM CORPUS. Author at least \
+${params.adversarial_corpus_min} FALSE statements adjacent to \
+${params.problem_statement} that the kernel / `lake build` MUST reject: \
+near-miss variants, wrong quantifier order, dropped hypotheses, universe / \
+typing cheats. Each entry: statement, expected_verdict=false, category, \
+provenance. The corpus proves the checker rejects what it should. Emit corpus/ \
++ coverage-report.md. If backend='none', author them as natural-language \
+false-statement challenges for the skeptic to confirm are rejected."""
+
+# --- 8. seal-gate (converge: lean-probe || red-team-corpus) ---------------
+# Uses the LIFTED citation-audit formula as its recipe (the citation leg IS the
+# gating artifact); the node brief adds the kernel + skeptic legs as fail-closed
+# preconditions the auditor checks before sealing.
+[[spore.node]]
+id          = "seal-gate"
+kind        = "fixed"
+formula     = "citation-audit"
+description = "Three legs, fail-closed: kernel lake-build exit 0 + grep-clean; citation-audit report clean; zero residual skeptic BLOCKERs."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — SEAL GATE for the paper on \
+${params.problem_statement}. Run the citation audit (L0/L1/L2/L3 locator-match \
+protocol) over the emerging paper against source-ledger.md and emit the \
+verification-report. THEN gate on three legs, FAIL-CLOSED: (1) KERNEL leg — \
+lean-probe reports `lake build` exit 0 with grep-clean of sorry/axiom (or, if \
+formal_backend='none', record the leg as DEGRADED, not passed); (2) CITATION \
+leg — this audit shows zero unresolved L3 / fabricated citations; (3) SKEPTIC \
+leg — faults.md has zero residual BLOCKERs. Emit seal-verdict.md: SEALED only \
+if all applicable legs pass, else BLOCKED with the failing leg named."""
+
+# --- 9. synthesize --------------------------------------------------------
+[[spore.node]]
+id          = "synthesize"
+kind        = "fixed"
+formula     = "task-work"
+description = "Fold every leg into synthesis.md: proved / refuted / open, at what confidence, seal status stated honestly."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — SYNTHESIZE. Fold decompose, proof-attempts, \
+notebooks, skeptic faults, the Lean results and the seal verdict into \
+synthesis.md for ${params.problem_statement}: what was proved, what was \
+refuted, what remains open, at what confidence, with the seal status stated \
+honestly (SEALED / BLOCKED / DEGRADED)."""
+
+# --- 10. write-paper ------------------------------------------------------
+[[spore.node]]
+id          = "write-paper"
+kind        = "fixed"
+formula     = "task-work"
+description = "Write the paper from the synthesis; every citation traces to a source-ledger row. External attribution: Noogram."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — WRITE PAPER on ${params.problem_statement}. \
+From synthesis.md, write the paper (LaTeX or markdown): statement, method, \
+proof / refutation, computational evidence, honest limitations. Every citation \
+must trace to a source-ledger row. Delivery posture: ${params.delivery}. \
+External attribution: Noogram. Claim 'proved' ONLY for targets the kernel leg \
+established."""
+
+# --- 11. editorial-verdict (verifies write-paper, fail-closed) ------------
+[[spore.node]]
+id          = "editorial-verdict"
+kind        = "fixed"
+formula     = "task-work"
+description = "Independent fail-closed verdict: paper claims match the seal, citations resolve, skeptic findings addressed. SHIP or REWRITE."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — EDITORIAL VERDICT (fail-closed) on the paper \
+for ${params.problem_statement}. Independently verify: the paper claims no more \
+than the seal verdict established (no 'proved' beyond the kernel leg); every \
+citation resolves; the skeptic's accepted findings are addressed; limitations \
+are stated. Verdict SHIP or REWRITE with reasons. FAIL-CLOSED: absent evidence \
+=> REWRITE, never SHIP. Delivery posture ${params.delivery} is the operator's \
+call, not this gate's."""
+
+# --- 12. chronicle (mycelium fold) ----------------------------------------
+[[spore.node]]
+id          = "chronicle"
+kind        = "fixed"
+formula     = "mycelium"
+description = "Fold the drained attack DAG into CHRONICLES.md — 0-3 entries, only if a principle was illuminated (Feynman register)."
+[spore.node.vars]
+topic = """
+MATH-ATTACK ${params.subject} — CHRONICLE. Fold the drained attack DAG for \
+${params.problem_statement} into docs/lore/CHRONICLES.md: 0-3 entries, only if \
+a principle was illuminated, in Feynman register (a smart 8-year-old must grasp \
+the image). Density is the value; an 80% rejection rate is healthy."""
+
+# ==========================================================================
+# Typed edges (feeds / produces / verifies). All become blocked-by links at
+# expansion; the type is descriptive provenance, not a different control flow.
+# ==========================================================================
+[[spore.edge]]
+from = "decompose"
+to   = "source-ledger"
+type = "feeds"
+
+[[spore.edge]]
+from = "source-ledger"
+to   = "concept-cards"
+type = "feeds"
+
+# A || B : concept-cards feeds both proof-attempt and notebooks
+[[spore.edge]]
+from = "concept-cards"
+to   = "proof-attempt"
+type = "feeds"
+
+[[spore.edge]]
+from = "concept-cards"
+to   = "notebooks"
+type = "feeds"
+
+# converge on skeptic
+[[spore.edge]]
+from = "proof-attempt"
+to   = "skeptic"
+type = "feeds"
+
+[[spore.edge]]
+from = "notebooks"
+to   = "skeptic"
+type = "feeds"
+
+[[spore.edge]]
+from = "skeptic"
+to   = "lean-skeleton"
+type = "feeds"
+
+# A || B : lean-skeleton feeds both lean-probe and red-team-corpus
+[[spore.edge]]
+from = "lean-skeleton"
+to   = "lean-probe"
+type = "feeds"
+
+[[spore.edge]]
+from = "lean-skeleton"
+to   = "red-team-corpus"
+type = "feeds"
+
+# converge on seal-gate (verifies)
+[[spore.edge]]
+from = "lean-probe"
+to   = "seal-gate"
+type = "verifies"
+
+[[spore.edge]]
+from = "red-team-corpus"
+to   = "seal-gate"
+type = "verifies"
+
+[[spore.edge]]
+from = "seal-gate"
+to   = "synthesize"
+type = "feeds"
+
+[[spore.edge]]
+from = "synthesize"
+to   = "write-paper"
+type = "feeds"
+
+[[spore.edge]]
+from = "write-paper"
+to   = "editorial-verdict"
+type = "verifies"
+
+[[spore.edge]]
+from = "editorial-verdict"
+to   = "chronicle"
+type = "feeds"
