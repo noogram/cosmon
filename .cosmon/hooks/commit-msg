@@ -91,6 +91,47 @@ PATTERNS=(
     "^auto-merge\(${MOL_ID_RE}\)"
 )
 
+# Base-sync class — `git merge main` run inside a molecule's worktree
+# before `cs done`, so the fold does not fight a trunk that moved
+# underneath it. Handled ahead of the general patterns because its
+# evidence is structural, not ledger-based: at base-sync time the
+# molecule is by construction still running and therefore has no
+# completion event. Demanding one would forbid the practice rather
+# than make it safe.
+#
+# What we demand instead: the incoming side must already sit on main's
+# first-parent chain. That makes the merge a no-op with respect to
+# what main contains — every line it carries was gated when it landed
+# on main. A merge that *claims* to be a base-sync while pulling
+# off-trunk material falls through to the rejection below.
+#
+# The molecule's own fold merge still faces the full ledger check.
+# See scripts/check-provenance.sh for the mirrored reasoning.
+BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
+if [[ "$SUBJECT" =~ $BASE_SYNC_RE ]]; then
+    base_mol="${BASH_REMATCH[1]}"
+    incoming=$(cat "$GITDIR/MERGE_HEAD" 2>/dev/null | head -n 1)
+    if [ -n "$incoming" ] \
+        && git rev-list --first-parent main 2>/dev/null | grep -qx "$incoming"; then
+        echo "cosmon: provenance ok ($base_mol) — base-sync from trunk" >&2
+        exit 0
+    fi
+    cat >&2 <<EOF
+cosmon: REJECTED merge — subject claims a base-sync from main, but the
+incoming side is not on main's first-parent chain.
+
+  Got:      $SUBJECT
+  Incoming: ${incoming:-<none>}
+
+A base-sync is accepted because it adds nothing main does not already
+have. This one carries material that was never gated on main, so the
+exemption does not apply.
+
+Reference: docs/adr/052-one-ledger-one-writer-one-witness.md §I9, §D5.
+EOF
+    exit 1
+fi
+
 mol_id=""
 for re in "${PATTERNS[@]}"; do
     if [[ "$SUBJECT" =~ $re ]]; then

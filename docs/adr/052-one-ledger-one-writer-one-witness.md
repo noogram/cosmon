@@ -594,6 +594,71 @@ mailroom `/ask` /raccourci-qui-sabote-le-contrat chronicle
 (2026-04-19). The register is governed by the syzygie protocol —
 both galaxies must keep their copy in sync.
 
+#### D5-bis. Amendment (2026-07-19) — the base-sync exemption
+
+The gates above were written assuming every merge commit is an *entry
+point*: a moment where new material crosses into main. Practice
+produced a second shape they did not anticipate.
+
+When main advances fast, a worker syncs its base *inside* the
+molecule's worktree, before `cs done`:
+
+    git merge main          # Merge branch 'main' into feat/task-…
+
+This exists so conflicts are resolved where the worker still has the
+context to resolve them, rather than at harvest time in the main
+checkout. Eight such merges turned the CI gate red on 2026-07-19 —
+correctly by the letter of the rule, wrongly by its intent. Every one
+of them was interior to a tracked molecule whose fold merge was itself
+gated.
+
+Both gates now recognise the shape, on **structural** evidence rather
+than on the subject string:
+
+- the incoming side must already sit on main's first-parent chain.
+  That makes the merge a no-op with respect to what main contains:
+  every line it carries was gated when it landed on main. A merge
+  that *claims* to be a base-sync while pulling off-trunk material is
+  still refused, by both gates.
+- the ledger check is deliberately **not** applied to this shape. At
+  base-sync time the molecule is by construction still running and
+  has no completion event. Demanding one would forbid the practice
+  rather than make it safe. The completion is demanded of the fold
+  merge, which is where the work actually crosses into main.
+
+**Should `cs done` perform the base-sync itself?** Evaluated and
+declined. It would put the subject under cosmon's control, which is
+genuinely attractive — the gate would no longer have to recognise a
+shape git writes. But `cs done` runs from the main checkout, after
+the work is finished, and moving the sync there moves the conflicts
+there too: back to the harvest moment, in a checkout where nobody
+holds the molecule's context. That is precisely the cost the practice
+was invented to avoid. The correct owner is a worktree-side verb
+(`cs sync`, emitting a cosmon-controlled subject), not `cs done`.
+Recorded here as a named follow-up, not as a silent gap.
+
+Covered by `tests/harness/provenance-base-sync-test.sh`, including a
+replay of the eight commits that motivated the amendment.
+
+**Prior art, and a deliberate divergence from it.** ADR-105 already
+named this gap in May 2026 — its **β (back-merge)** case, diagnosed
+as "a syntactic gap: the regex set is incomplete by omission", to be
+closed by `task-20260518-1870` at a cost of "one regex extension".
+That half never landed, which is why the same shape turned CI red
+two months later.
+
+This amendment deliberately does **not** implement the remedy as
+scoped there. A regex extension alone would accept any merge whose
+subject *says* `Merge branch 'main' into feat/<mol_id>` — and a
+subject is written by whoever runs the merge, so the gate would be
+trusting the claim it is supposed to be checking. β is only a
+syntactic gap on the assumption that the subject is trustworthy
+evidence; it is not. The structural check (incoming side must sit on
+main's first-parent chain) is what actually distinguishes a base-sync
+from a merge dressed as one, and it is cheap. Recorded here because
+the divergence from ADR-105's costing is intentional, not an
+oversight.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,

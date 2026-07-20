@@ -87,6 +87,54 @@ PATTERNS=(
     "^auto-merge\(${MOL_ID_RE}\)"
 )
 
+# Base-sync: `git merge main` run INSIDE a molecule's worktree, before
+# `cs done`, so the fold does not have to resolve a pile of conflicts
+# against a trunk that moved underneath it. Git writes the subject
+# itself, hence the fixed shape.
+#
+# Why this is a separate class, and why accepting it does not weaken
+# the gate:
+#
+#   - It is interior to a tracked molecule. The commit that actually
+#     lands the work on main is the molecule's own fold merge
+#     (`Merge branch 'feat/<mol_id>'`), which goes through the full
+#     check above, ledger included. The base-sync is an ancestor of
+#     that fold, not an independent entry point.
+#
+#   - It contributes NOTHING new. Its incoming side is a commit that
+#     already sits on the trunk's first-parent chain, so every line it
+#     carries was gated when it landed there. We verify that
+#     structurally, per commit (see trunk_has below) — the subject
+#     string alone is never taken as proof. A merge that *claims* to be
+#     a base-sync but whose second parent is off-trunk is still FAIL.
+#
+#   - The ledger check is deliberately not applied here. At base-sync
+#     time the molecule is by construction still running, so it has no
+#     completion event; demanding one would make the practice
+#     impossible rather than safe. The completion is demanded of the
+#     fold merge, which is where it belongs.
+BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
+
+# First-parent trunk commits, used to prove a base-sync's incoming side
+# is already-gated trunk material. Built lazily on first use, from the
+# scope head AND the scope base: in a PR scope the head is the feature
+# branch (whose first-parent chain follows the branch, not the trunk),
+# so the trunk chain has to come from the base ref.
+trunk_fp=""
+trunk_has() {
+    if [ -z "$trunk_fp" ]; then
+        trunk_fp="$TMPDIR_PROV/trunk-fp"
+        {
+            git rev-list --first-parent "$head" 2>/dev/null || true
+            [ -n "$base" ] && (git rev-list --first-parent "$base" 2>/dev/null || true)
+        } > "$trunk_fp"
+    fi
+    grep -qx "$1" "$trunk_fp"
+}
+
+TMPDIR_PROV="$(mktemp -d -t cosmon-provenance-XXXXXX)"
+trap 'rm -rf "$TMPDIR_PROV"' EXIT
+
 # Read the ledger ONCE from the scope tip (see header comment for why
 # the merge commit's own tree is the wrong place to look).
 ledger=$(git show "$head:.cosmon/state/events.jsonl" 2>/dev/null || true)
@@ -98,6 +146,25 @@ while IFS= read -r commit; do
     checked=$((checked + 1))
 
     subject=$(git log -1 --format='%s' "$commit")
+
+    # Base-sync class — checked before the general patterns because it
+    # carries its own, structural, evidence requirement.
+    if [[ "$subject" =~ $BASE_SYNC_RE ]]; then
+        mol_id="${BASH_REMATCH[1]}"
+        p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
+        if [ -n "$p2" ] && trunk_has "$p2"; then
+            echo "ok    $commit  ($mol_id)  base-sync from trunk"
+        else
+            echo "FAIL  $commit  ($mol_id)"
+            echo "      subject claims a base-sync from main, but the"
+            echo "      incoming side is not on the trunk's first-parent"
+            echo "      chain — this merge carries ungated material"
+            echo "      $subject"
+            failed=$((failed + 1))
+        fi
+        continue
+    fi
+
     mol_id=""
     for re in "${PATTERNS[@]}"; do
         if [[ "$subject" =~ $re ]]; then
