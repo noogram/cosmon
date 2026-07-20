@@ -103,6 +103,8 @@ advance → terminate → infrastructure → introspection.
 | `cs tokens` | NO | — | Read-only IFBDD aggregator over the local `tokens.jsonl` sink (T-V1-IFBDD-METER). The HTTP-side analogue is the unauthenticated diagnostic `GET /health/backends` plus the `InvocationCompleted` events.jsonl trail; no per-tenant token surface is needed remotely. Re-evaluate at V2 if tenant_auditor asks. |
 | `cs note` | NO (V1 TBD) | — | Append-only molecule note; re-evaluate at V1 if tenant_auditor asks. |
 | `cs deps` | NO | — | Read-only DAG visualisation; covered by `GET /v1/molecules/:id` payload. |
+| `cs mission` | NO | — | Read-only DAG view joining the ledger's blocked_by edges to completion merge commits (delib-20260720-cff4 Phase 1). Local git+ledger read; the payload it renders is already covered by `GET /v1/molecules/:id`. |
+| `cs sync` | NO | — | Worktree-side base-sync (`git merge main`) stamping a `Base-Sync` trailer (delib-20260720-cff4 Phase 1). Runs inside the worker's local worktree before `cs done`; no remote act (the fold that crosses into main is `cs done`, itself hard-NEVER). |
 | `cs diverge` | NO | — | Local diff tool. |
 | `cs heartbeat` | NO | — | Worker liveness pulse; worker-internal. |
 | `cs run` | V0 | `POST /v1/molecules/:id/run` | Bounded drain (ADR-124, `task-20260610-56c4`): the client REQUESTS a drain of its own DAG; the resident loop runs in the tenant container under binding-sealed B1/B2/B3 bounds (never unbounded, B3 obligatory). 202-detached, lifecycle on the events bus. The *operator* `cs run` semantics (unbounded, local flags) are NOT exposed — the route forwards only the root id. |

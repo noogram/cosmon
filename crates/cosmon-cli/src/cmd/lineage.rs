@@ -16,8 +16,9 @@
 //! commit body it authored, a file in its worktree — the legibility layer
 //! would become a *forgery channel*, a place to claim a dependency edge that
 //! the scheduler never ledgered. Every value here is therefore derived from
-//! [`MoleculeData`] loaded from the canonical [`StateStore`] at `cs done`
-//! time: the `blocked_by()` edges recorded at nucleation, which no worker
+//! [`MoleculeData`](cosmon_state::MoleculeData) loaded from the canonical
+//! [`StateStore`] at `cs done` time: the `blocked_by()` edges recorded at
+//! nucleation, which no worker
 //! step mutates. The trailer is a *witness* of the ledger, not a second
 //! authored copy of it.
 //!
