@@ -19,11 +19,11 @@ source "$(dirname "${BASH_SOURCE[0]}")/lib/common.sh"
 STATIC_ONLY=0
 [[ "${1:-}" == "--static" ]] && STATIC_ONLY=1
 
-log "cosmon $COSMON_TAG regression bench starting (static_only=$STATIC_ONLY)"
+log "cosmon $COSMON_TAG regression bench starting (static_only=$STATIC_ONLY, cs=$CS_BIN)"
 
 # Materialise the unit-under-test ONCE and share it across all probes.
 UUT="$OUT_DIR/uut"
-checkout_v021 "$UUT"
+checkout_uut "$UUT"
 
 if [[ "$STATIC_ONLY" -eq 1 ]]; then
   export BENCH_SKIP_DOCKER=1

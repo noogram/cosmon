@@ -40,8 +40,13 @@ EVIDENCE="$EVIDENCE_OUT/$ID.txt"
 : > "$EVIDENCE"
 
 # Each entry: LABEL::REGEX. Patterns target worker-FACING strings.
+# NB the "mangled-license-url" pattern also catches choosetenant_auditornse.com,
+# a garbled/nonexistent canonical-source domain emitted into the GENERATED worker
+# prompt (crates/cosmon-cli/src/cmd/tackle.rs build_prompt) as a place to fetch
+# licence/canonical text — the exact first-contact bad-URL paper cut. The v1
+# probe missed it; the null-context judge surfaced it.
 PATTERNS=(
-  "mangled-license-url::choosealicense\.com|chooselicense|choose-a-license|choosalicense"
+  "mangled-license-url::choosealicense\.com|chooselicense|choose-a-license|choosalicense|choosetenant_auditornse|choosetenant"
   "srv-cosmon-persona-in-prompt::/srv/cosmon/[A-Za-z0-9_./-]*persona"
   "git-diff-usage-dump::git diff --help|usage: git diff|git-diff\(1\)"
 )
