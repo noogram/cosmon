@@ -128,6 +128,22 @@ pub enum ChainDivergenceReason {
         /// The `seq` actually found on this entry.
         found: u64,
     },
+    /// `EventV2` log: the monotone `seq` witness skipped a value — an entry's
+    /// sequence number is greater than its predecessor's but not by exactly
+    /// one, so at least one record was dropped between them.
+    ///
+    /// The writer emits a *contiguous* per-file `seq` (`0, 1, 2, …`), so a
+    /// hole proves a line was removed: deleting the middle of a genuine
+    /// `0, 1, 2` log yields `0, 2`, which strict-monotonicity alone would
+    /// wrongly accept. Requiring `seq == prev + 1` (and `seq == 0` for the
+    /// first native entry) closes that tamper-evidence gap.
+    SeqGap {
+        /// The `seq` the contiguous chain required (predecessor + 1, or 0
+        /// for the first native entry).
+        expected: u64,
+        /// The `seq` actually found on this entry.
+        found: u64,
+    },
 }
 
 /// Outcome of walking a JSONL chain with [`verify_chain`].
@@ -250,18 +266,36 @@ fn verify_legacy_hash_chain(entries: &[Envelope]) -> Result<VerifyOutcome, Cosmo
 }
 
 /// Walk an [`EventV2`](cosmon_core::event_v2::Envelope) log and verify the
-/// strict monotonicity of its per-file `seq` witness.
+/// *contiguity* of its per-file `seq` witness.
 ///
-/// `EventV2` envelopes carry no hash chain, so `seq` is the integrity signal:
-/// the writer assigns a strictly increasing sequence under `flock`, and a
-/// reader can prove no line was reordered or dropped by walking it upward.
+/// `EventV2` envelopes carry no hash chain, so `seq` is the integrity signal.
+/// The writer assigns a **contiguous** sequence under `flock` — it starts at
+/// `Seq(0)` and each subsequent native line is exactly `prev + 1`
+/// (`cosmon_state::event_log`: `next_seq` begins at `Seq(0)` and advances by
+/// `.next()` per emit). So a reader can prove no line was reordered *or
+/// dropped* by demanding that the native `seq` chain be gap-free:
 ///
-/// Lines that only coerce through *legacy* migration (a mixed grace-window
-/// log) do not carry an authoritative `seq` — [`migrate_legacy_line`] stamps
-/// them `Seq(0)` — so, matching the writer's own reader semantics
-/// (`cosmon_state::event_log`), they are tolerated but do not contribute to
-/// sequencing. A line that is neither native `EventV2` nor coercible legacy is
-/// genuine corruption and surfaces as a parse error.
+/// - the first native entry must be `seq == 0`;
+/// - every later native entry must be `seq == prev + 1`.
+///
+/// Strict monotonicity alone (`seq > prev`) is **not enough**: deleting the
+/// middle record of a genuine `0, 1, 2` log yields `0, 2`, which is still
+/// strictly increasing yet has silently lost a line. A `seq <= prev` step is a
+/// [`SeqRegression`](ChainDivergenceReason::SeqRegression) (reorder / splice);
+/// a `seq > prev + 1` step is a [`SeqGap`](ChainDivergenceReason::SeqGap)
+/// (dropped record). Both diverge.
+///
+/// **Mixed legacy + native compatibility policy.** Lines that only coerce
+/// through *legacy* migration (a mixed grace-window log) carry no authoritative
+/// `seq` — [`migrate_legacy_line`] stamps them `Seq(0)` — so, matching the
+/// writer's own reader semantics (`cosmon_state::event_log::catch_up_scan`,
+/// which skips non-native lines when advancing `next_seq`), they are tolerated
+/// and do **not** participate in the contiguity check: they neither reset nor
+/// advance the native counter. Native continuity is therefore never weakened to
+/// accommodate legacy lines — the native `seq` chain must still run `0, 1, 2, …`
+/// through and around any interleaved legacy lines. A line that is neither
+/// native `EventV2` nor coercible legacy is genuine corruption and surfaces as
+/// a parse error.
 ///
 /// [`migrate_legacy_line`]: cosmon_core::event_v2::migrate_legacy_line
 fn verify_eventv2_seq_chain(lines: &[&str]) -> Result<VerifyOutcome, CosmonError> {
@@ -272,8 +306,12 @@ fn verify_eventv2_seq_chain(lines: &[&str]) -> Result<VerifyOutcome, CosmonError
         match serde_json::from_str::<EventV2Envelope>(line) {
             Ok(env) => {
                 let seq = env.seq.0;
+                // The contiguous sequence the writer guarantees: 0 for the
+                // first native entry, then exactly `prev + 1` thereafter.
+                let expected = prev_seq.map_or(0, |prev| prev + 1);
                 if let Some(prev) = prev_seq {
                     if seq <= prev {
+                        // Reorder or splice: sequence went backward or stalled.
                         return Ok(VerifyOutcome::Diverged(ChainDivergence {
                             index: idx,
                             reason: ChainDivergenceReason::SeqRegression {
@@ -283,10 +321,23 @@ fn verify_eventv2_seq_chain(lines: &[&str]) -> Result<VerifyOutcome, CosmonError
                         }));
                     }
                 }
+                if seq != expected {
+                    // A hole: `seq > prev + 1` (or a non-zero first entry).
+                    // A record was dropped between predecessor and here.
+                    return Ok(VerifyOutcome::Diverged(ChainDivergence {
+                        index: idx,
+                        reason: ChainDivergenceReason::SeqGap {
+                            expected,
+                            found: seq,
+                        },
+                    }));
+                }
                 prev_seq = Some(seq);
             }
             // Not native EventV2 — tolerate a genuine legacy line, but let a
-            // line that is neither shape surface as a parse error.
+            // line that is neither shape surface as a parse error. Legacy
+            // lines do not touch `prev_seq`: they neither reset nor advance
+            // the native contiguity counter.
             Err(_) => {
                 EventV2Envelope::from_line(line)?;
             }
@@ -956,6 +1007,58 @@ mod tests {
                 );
             }
             other => panic!("expected Diverged(SeqRegression), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_chain_eventv2_dropped_middle_record_diverges() {
+        // Tamper-evidence: the writer emits a CONTIGUOUS seq (0, 1, 2, …).
+        // Deleting the middle record of a genuine 0,1,2 log yields 0,2 —
+        // still strictly increasing, so a monotonicity-only walk would
+        // wrongly accept it. The contiguity walk must FAIL with a SeqGap
+        // that names the dropped seq (expected 1, found 2) at index 1.
+        let dir = TempDir::new().unwrap();
+        let path = events_path(&dir);
+        write_v2_line(&path, &v2_completed(0, "task-20260720-aaaa"));
+        // seq 1 deleted — the tamperer removed the middle line.
+        write_v2_line(&path, &v2_completed(2, "task-20260720-cccc"));
+        let outcome = verify_chain(&path).unwrap();
+        match outcome {
+            VerifyOutcome::Diverged(d) => {
+                assert_eq!(d.index, 1);
+                assert_eq!(
+                    d.reason,
+                    ChainDivergenceReason::SeqGap {
+                        expected: 1,
+                        found: 2
+                    }
+                );
+            }
+            other => panic!("expected Diverged(SeqGap), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_chain_eventv2_nonzero_first_seq_diverges() {
+        // The first native entry must be seq == 0. A log that opens at seq 1
+        // has lost its head record and must FAIL as a SeqGap (expected 0).
+        let dir = TempDir::new().unwrap();
+        let path = events_path(&dir);
+        write_v2_line(&path, &v2_completed(1, "task-20260720-aaaa"));
+        write_v2_line(&path, &v2_completed(2, "task-20260720-bbbb"));
+        let outcome = verify_chain(&path).unwrap();
+        match outcome {
+            VerifyOutcome::Diverged(d) => {
+                assert_eq!(d.index, 0);
+                assert_eq!(
+                    d.reason,
+                    ChainDivergenceReason::SeqGap {
+                        expected: 0,
+                        found: 1
+                    }
+                );
+            }
+            other => panic!("expected Diverged(SeqGap), got {other:?}"),
         }
     }
 
