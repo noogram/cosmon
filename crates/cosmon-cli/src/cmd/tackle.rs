@@ -797,6 +797,58 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         model_source,
     );
 
+    // 3a''. Adapter preflight (task-20260719-f45b). Prove the resolved
+    //       adapter can actually *serve* the resolved model before the
+    //       molecule is committed to it.
+    //
+    //       Evidence this exists: on 2026-07-19 two molecules
+    //       (task-20260719-059b, task-20260719-e02c) were dispatched to
+    //       `--adapter local` against an Ollama that was running but had
+    //       nothing pulled. Each worker died ~30 s after `worker_spawned`
+    //       and the patrol auto-collapsed the molecule. Collapse is
+    //       terminal, so the work was lost and had to be re-nucleated by
+    //       hand under a new id.
+    //
+    //       Note what is deliberately NOT guarded here: `preferred_model
+    //       == None`. The model chain's floor is documented and tested to
+    //       be `None` meaning "let the adapter use its own default"
+    //       (`model_chain_floor_is_none_not_a_strong_constant`,
+    //       `model_floor_none_is_honest`). Refusing on `None` would
+    //       reject every healthy bare `--adapter local` dispatch while
+    //       still missing the real fault — an explicit `--model` naming
+    //       something unpulled dies identically. The serveable-model
+    //       check catches both; the None-check catches neither.
+    //
+    //       Placed here on purpose: before the worktree lands (step 4) and
+    //       before the status flips to Running, so a refusal leaves the
+    //       molecule pending and re-tacklable with zero cleanup.
+    //       Gated on exactly the adapter names the `local` spawn arm
+    //       handles (`BUILTIN_FLOOR_ADAPTER | "ollama"`) — deliberately
+    //       *not* `egress::adapter_is_local`, which also matches
+    //       `llama-cpp` / `llama`. Those take a different spawn arm with
+    //       their own resolution, so preflighting them with the Ollama
+    //       resolvers would check an endpoint they never dial.
+    if matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama")
+        && std::env::var(SKIP_PREFLIGHT_ENV).ok().as_deref() != Some("1")
+    {
+        let adapter_entry = project_config
+            .adapters
+            .as_ref()
+            .and_then(|cfg| cfg.entry(adapter.as_str()));
+        let base_url = resolve_local_base_url(adapter_entry);
+        let effective_model = resolve_local_model(preferred_model.as_deref(), adapter_entry);
+        if let Err(e) = preflight_local_adapter_model(
+            &base_url,
+            &effective_model,
+            std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS),
+        ) {
+            return Err(anyhow::anyhow!(
+                "{e}\n\n(bypass with {SKIP_PREFLIGHT_ENV}=1 if you intend to \
+                 dispatch anyway)"
+            ));
+        }
+    }
+
     // 3a'. Q5b fail-policy gate (task-20260530-c089). Parse and validate the
     //      `--fallback-from-local <cause>` opt-in *before* any worktree / tmux
     //      side effect lands. Two refusals, both fail-fast:
@@ -4522,6 +4574,222 @@ const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
 /// `[adapters.local].default_model` or `COSMON_LOCAL_MODEL`.
 const DEFAULT_LOCAL_MODEL: &str = "qwen3:8b";
 
+/// Resolve the `local` / `ollama` floor's base URL: config `base_url` →
+/// `COSMON_LOCAL_BASE_URL` → `OPENAI_BASE_URL` → compile-time Ollama
+/// default.
+///
+/// Extracted from [`run_local_agent_loop`] (task-20260719-f45b) so the
+/// **dispatch-side preflight and the worker resolve the same endpoint**.
+/// A preflight that probed a different URL than the worker later dialled
+/// would be worse than no preflight at all: it would certify a host the
+/// work never touches.
+fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
+    adapter_entry
+        .and_then(|e| e.base_url.clone())
+        .or_else(|| {
+            std::env::var("COSMON_LOCAL_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("OPENAI_BASE_URL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned())
+}
+
+/// Resolve the *effective* model the `local` / `ollama` floor will run:
+/// chain-resolved `--model` pin → config `default_model` →
+/// `COSMON_LOCAL_MODEL` → [`DEFAULT_LOCAL_MODEL`].
+///
+/// Note the return type is `String`, not `Option<String>`: by the time
+/// the floor spawns, *some* concrete model is always chosen. This is why
+/// "no model was selected" (`preferred_model == None`) is **not** the
+/// fault condition it looks like — the floor is documented to mean "let
+/// the adapter pick its own default", and it does. The real fault is a
+/// model the backend cannot serve, which is what
+/// [`preflight_local_adapter_model`] checks.
+///
+/// Extracted from [`run_local_agent_loop`] (task-20260719-f45b) so the
+/// preflight and the worker cannot drift apart.
+fn resolve_local_model(
+    preferred_model: Option<&str>,
+    adapter_entry: Option<&AdapterEntry>,
+) -> String {
+    preferred_model
+        .filter(|s| !s.is_empty())
+        .map(std::borrow::ToOwned::to_owned)
+        .or_else(|| adapter_entry.and_then(|e| e.default_model.clone()))
+        .or_else(|| {
+            std::env::var("COSMON_LOCAL_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| DEFAULT_LOCAL_MODEL.to_owned())
+}
+
+/// Escape hatch for [`preflight_local_adapter_model`]. Set to `1` to
+/// dispatch without proving the backend can serve the model.
+///
+/// Deliberately narrow: it skips the *check*, never weakens it. An
+/// operator who sets this is choosing to risk the collapse the preflight
+/// exists to prevent.
+const SKIP_PREFLIGHT_ENV: &str = "COSMON_SKIP_ADAPTER_PREFLIGHT";
+
+/// Wall-clock budget for the preflight probe. Short: this sits on the
+/// dispatch path, and an unreachable backend must surface fast rather
+/// than stalling the operator's terminal.
+const PREFLIGHT_TIMEOUT_SECS: u64 = 3;
+
+/// Why a dispatch to the `local` / `ollama` floor was refused before any
+/// molecule state changed (task-20260719-f45b).
+///
+/// Typed rather than a bare string so the caller can render a diagnostic
+/// that names the *repair* — the two failures need different fixes
+/// (start the daemon vs. pull the model), and a molecule refused for the
+/// wrong stated reason wastes the operator's next move.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LocalPreflightError {
+    /// The backend did not answer. The work never had a chance to run.
+    Unreachable { base_url: String, detail: String },
+    /// The backend answered, but does not serve the resolved model.
+    /// `available` is what it *does* serve — empty means a bare daemon
+    /// with nothing pulled, which is its own distinct diagnosis.
+    ModelNotServed {
+        base_url: String,
+        model: String,
+        available: Vec<String>,
+    },
+}
+
+impl std::fmt::Display for LocalPreflightError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unreachable { base_url, detail } => write!(
+                f,
+                "refusing to dispatch: the local adapter's backend at {base_url} \
+                 is not reachable ({detail}). Start it (`ollama serve`) or point \
+                 the adapter elsewhere with [adapters.local].base_url / \
+                 COSMON_LOCAL_BASE_URL. The molecule is untouched and still \
+                 tacklable — nothing was spawned and nothing collapsed."
+            ),
+            Self::ModelNotServed {
+                base_url,
+                model,
+                available,
+            } => {
+                let served = if available.is_empty() {
+                    "it serves no models at all — none have been pulled".to_owned()
+                } else {
+                    format!("it serves: {}", available.join(", "))
+                };
+                write!(
+                    f,
+                    "refusing to dispatch: the local adapter resolved to model \
+                     '{model}', but the backend at {base_url} cannot serve it — \
+                     {served}. Pull it (`ollama pull {model}`) or pin one that \
+                     exists via --model / [adapters.local].default_model / \
+                     COSMON_LOCAL_MODEL. The molecule is untouched and still \
+                     tacklable — nothing was spawned and nothing collapsed."
+                )
+            }
+        }
+    }
+}
+
+/// Ollama's OpenAI-compat `/v1/models` envelope.
+///
+/// `data` is `Option<Vec<_>>`, not `Vec<_>`: a freshly-installed Ollama
+/// with nothing pulled answers `{"object":"list","data":null}`, and a
+/// non-optional field makes that *parse error* — which would misreport
+/// the exact empty-daemon case this preflight exists to catch as an
+/// unreachable backend. Observed live on 2026-07-20.
+#[derive(serde::Deserialize)]
+struct PreflightModelsResponse {
+    #[serde(default)]
+    data: Option<Vec<PreflightModelEntry>>,
+}
+
+#[derive(serde::Deserialize)]
+struct PreflightModelEntry {
+    id: String,
+}
+
+/// Prove the `local` / `ollama` backend can actually serve `model`
+/// before a molecule is committed to it (task-20260719-f45b, ASK 2).
+///
+/// This is the guard whose absence let two molecules die: cosmon spawned
+/// a worker against a reachable-but-empty Ollama, the worker asked for a
+/// model that was never pulled, died in ~30 s, and the patrol collapsed
+/// the molecule — a *terminal* state, so the work was lost and had to be
+/// re-nucleated by hand.
+///
+/// Fail-closed by design: an unreachable backend refuses just as an
+/// unservable model does. Both mean the work cannot run, and refusing a
+/// dispatch is strictly recoverable where a collapse is not.
+///
+/// Probes `/v1/models` (the OpenAI-compat surface) rather than Ollama's
+/// native `/api/tags`, because `/v1` is the surface the worker itself
+/// dials — proving the endpoint the work will actually use.
+fn preflight_local_adapter_model(
+    base_url: &str,
+    model: &str,
+    timeout: std::time::Duration,
+) -> Result<(), LocalPreflightError> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return Err(LocalPreflightError::Unreachable {
+                base_url: base_url.to_owned(),
+                detail: format!("http client build failed: {e}"),
+            })
+        }
+    };
+
+    let resp = client
+        .get(&url)
+        .send()
+        .map_err(|e| LocalPreflightError::Unreachable {
+            base_url: base_url.to_owned(),
+            detail: format!("{e}"),
+        })?;
+
+    if !resp.status().is_success() {
+        return Err(LocalPreflightError::Unreachable {
+            base_url: base_url.to_owned(),
+            detail: format!("HTTP {}", resp.status()),
+        });
+    }
+
+    let parsed: PreflightModelsResponse =
+        resp.json().map_err(|e| LocalPreflightError::Unreachable {
+            base_url: base_url.to_owned(),
+            detail: format!("unreadable /v1/models response: {e}"),
+        })?;
+
+    let available: Vec<String> = parsed
+        .data
+        .unwrap_or_default()
+        .into_iter()
+        .map(|m| m.id)
+        .collect();
+
+    if available.iter().any(|m| m == model) {
+        return Ok(());
+    }
+
+    Err(LocalPreflightError::ModelNotServed {
+        base_url: base_url.to_owned(),
+        model: model.to_owned(),
+        available,
+    })
+}
+
 /// Default per-request HTTP timeout, in **seconds**, for the `local` /
 /// `ollama` floor (task-20260707-7d27, academy banc Mode C, hole #3).
 ///
@@ -4979,32 +5247,14 @@ fn run_local_agent_loop(
     // compile-time Ollama default. The provider's `normalize_base_url`
     // strips a stray trailing `/v1` so either the host-root or the
     // vendor-doc `…/v1` form is accepted.
-    let base_url = adapter_entry
-        .and_then(|e| e.base_url.clone())
-        .or_else(|| {
-            std::env::var("COSMON_LOCAL_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            std::env::var("OPENAI_BASE_URL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned());
+    //
+    // Shared with the dispatch-side preflight (task-20260719-f45b) — see
+    // `resolve_local_base_url` for why they must not drift.
+    let base_url = resolve_local_base_url(adapter_entry);
 
     // model: --model pin → config → COSMON_LOCAL_MODEL → compile-time
     // default. The chain-resolved pin (delib-20260704-b476 C1) is top tier.
-    let model = preferred_model
-        .filter(|s| !s.is_empty())
-        .map(std::borrow::ToOwned::to_owned)
-        .or_else(|| adapter_entry.and_then(|e| e.default_model.clone()))
-        .or_else(|| {
-            std::env::var("COSMON_LOCAL_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_LOCAL_MODEL.to_owned());
+    let model = resolve_local_model(preferred_model, adapter_entry);
 
     // Per-request timeout (hole #3): config `timeout_secs` →
     // `COSMON_LOCAL_TIMEOUT` (seconds) → 10-minute floor default. Without
@@ -7087,6 +7337,163 @@ mod tests {
                 assert!(matches!(source, ModelSelectionSource::Default { .. }));
             }
         }
+    }
+
+    /// Serve exactly one canned HTTP response on an ephemeral port, then
+    /// exit. Returns the base URL. Enough to drive the preflight without
+    /// pulling a test-server dependency into the CLI.
+    fn one_shot_http(body: &'static str, status_line: &'static str) -> String {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let addr = listener.local_addr().expect("local addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0_u8; 1024];
+                let _ = stream.read(&mut buf);
+                let resp = format!(
+                    "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(resp.as_bytes());
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn preflight_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS)
+    }
+
+    #[test]
+    fn preflight_refuses_the_empty_ollama_that_collapsed_two_molecules() {
+        // THE regression test (task-20260719-f45b). On 2026-07-19 an Ollama
+        // was running and answering, but had nothing pulled — it replies
+        // `{"object":"list","data":null}`. Two molecules were dispatched to
+        // it, spawned workers that died in ~30 s, and were auto-collapsed by
+        // the patrol into a TERMINAL state, losing the work.
+        //
+        // Reachable-but-empty must refuse, and must say so as
+        // `ModelNotServed` (pull a model) — not `Unreachable` (start the
+        // daemon), which would send the operator to the wrong repair.
+        let base = one_shot_http(r#"{"object":"list","data":null}"#, "200 OK");
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+            .expect_err("an Ollama serving no models must refuse the dispatch");
+        match err {
+            LocalPreflightError::ModelNotServed {
+                model, available, ..
+            } => {
+                assert_eq!(model, "qwen3:8b");
+                assert!(
+                    available.is_empty(),
+                    "a null `data` means no models served, not a parse failure"
+                );
+            }
+            unreachable @ LocalPreflightError::Unreachable { .. } => {
+                panic!("expected ModelNotServed, got {unreachable:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_admits_a_model_the_backend_actually_serves() {
+        // The healthy path must NOT refuse — a preflight that blocks good
+        // dispatches is worse than none.
+        let base = one_shot_http(
+            r#"{"object":"list","data":[{"id":"qwen3:8b"},{"id":"llama3:8b"}]}"#,
+            "200 OK",
+        );
+        assert!(preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout()).is_ok());
+    }
+
+    #[test]
+    fn preflight_refuses_an_explicitly_pinned_but_unpulled_model() {
+        // Why the guard is on "can the backend serve it", not on "was a
+        // model selected": here a model IS pinned, so a None-check would
+        // wave this through — and the worker would die exactly as the two
+        // collapsed molecules did. The served-model check catches it.
+        let base = one_shot_http(r#"{"object":"list","data":[{"id":"llama3:8b"}]}"#, "200 OK");
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+            .expect_err("a pinned-but-unpulled model must refuse");
+        match err {
+            LocalPreflightError::ModelNotServed { available, .. } => {
+                assert_eq!(available, vec!["llama3:8b".to_owned()]);
+            }
+            unreachable @ LocalPreflightError::Unreachable { .. } => {
+                panic!("expected ModelNotServed, got {unreachable:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_refuses_when_the_backend_is_unreachable() {
+        // Nothing listening: bind a port, drop the listener, reuse the addr.
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            l.local_addr().expect("addr")
+        };
+        let err = preflight_local_adapter_model(
+            &format!("http://{addr}"),
+            "qwen3:8b",
+            std::time::Duration::from_millis(500),
+        )
+        .expect_err("a dead backend must refuse the dispatch");
+        assert!(
+            matches!(err, LocalPreflightError::Unreachable { .. }),
+            "a dead backend is Unreachable (start it), not ModelNotServed (pull a model); got {err:?}"
+        );
+    }
+
+    #[test]
+    fn preflight_diagnostics_name_the_repair_and_promise_recoverability() {
+        // The refusal text is the whole operator-facing payload: it must
+        // name the fix and state that the molecule survived, because the
+        // failure mode being replaced is a SILENT terminal collapse.
+        let empty = LocalPreflightError::ModelNotServed {
+            base_url: "http://localhost:11434".to_owned(),
+            model: "qwen3:8b".to_owned(),
+            available: Vec::new(),
+        }
+        .to_string();
+        assert!(empty.contains("ollama pull qwen3:8b"), "{empty}");
+        assert!(empty.contains("no models at all"), "{empty}");
+        assert!(empty.contains("still tacklable"), "{empty}");
+
+        let dead = LocalPreflightError::Unreachable {
+            base_url: "http://localhost:11434".to_owned(),
+            detail: "connection refused".to_owned(),
+        }
+        .to_string();
+        assert!(dead.contains("ollama serve"), "{dead}");
+        assert!(dead.contains("still tacklable"), "{dead}");
+    }
+
+    #[test]
+    fn preflight_and_worker_resolve_the_same_model() {
+        // The preflight is only meaningful if it checks the model the
+        // worker will actually run. Both call `resolve_local_model`; this
+        // pins the two top tiers, which short-circuit above the env tier
+        // and so are safe under test parallelism.
+        let cfg = cosmon_core::config::AdapterEntry {
+            default_model: Some("llama3:8b".to_owned()),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            resolve_local_model(Some("qwen3:8b"), Some(&cfg)),
+            "qwen3:8b",
+            "an explicit pin outranks config"
+        );
+        assert_eq!(
+            resolve_local_model(None, Some(&cfg)),
+            "llama3:8b",
+            "config default applies when nothing is pinned"
+        );
+        assert_eq!(
+            resolve_local_model(Some(""), Some(&cfg)),
+            "llama3:8b",
+            "an empty pin is unset, not an empty model id"
+        );
     }
 
     #[test]
