@@ -492,6 +492,13 @@ fn apply_event(env: &Envelope, out: &mut HashMap<MoleculeId, MoleculeData>) {
                     sealed_at: *sealed_at,
                     briefing_bytes: *bytes,
                     canonical_version: *canonical_version,
+                    // The seal event carries the hash, not the content, so a
+                    // seal rebuilt from the event log has no immutable
+                    // snapshot. `cs verify` compares the prompt seal against
+                    // the live (immutable) `prompt.md`, so this is a no-op for
+                    // prompts; for briefing/bootstrap it means a post-rebuild
+                    // seal verifies as inconclusive rather than tampered.
+                    snapshot: None,
                 });
             }
         }
@@ -510,6 +517,9 @@ fn apply_event(env: &Envelope, out: &mut HashMap<MoleculeId, MoleculeData>) {
                     sealed_at: *sealed_at,
                     briefing_bytes: *bytes,
                     canonical_version: *canonical_version,
+                    // No snapshot in the event log — a rebuilt briefing seal
+                    // verifies as inconclusive (SKIP), never a false FAIL.
+                    snapshot: None,
                 });
             }
         }
@@ -528,6 +538,9 @@ fn apply_event(env: &Envelope, out: &mut HashMap<MoleculeId, MoleculeData>) {
                     sealed_at: *sealed_at,
                     briefing_bytes: *bytes,
                     canonical_version: *canonical_version,
+                    // No snapshot in the event log — a rebuilt bootstrap seal
+                    // verifies as inconclusive (SKIP), never a false FAIL.
+                    snapshot: None,
                 });
             }
         }

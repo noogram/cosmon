@@ -335,29 +335,55 @@ fn verify_briefing_seals(
     };
 
     if let Some(seal) = selected_seal {
-        match std::fs::read(mol_dir.join("briefing.md")) {
-            Ok(bytes) if seal.matches(&bytes) => checks.push(Check {
+        // Verify against the immutable per-step snapshot when the seal
+        // carries one. cosmon regenerates `briefing.md` at every advance
+        // and `cs complete` rewrites it once more, so comparing a
+        // historical seal against the *current* file flags cosmon's own
+        // honest rewrite as tampering — the flagship false positive. The
+        // snapshot is the briefing as it was at this step; a rewrite of
+        // the recorded snapshot (hash no longer matches) is still caught.
+        // Legacy seals (no snapshot) fall back to the live-file
+        // comparison for backward compatibility.
+        match &seal.snapshot {
+            Some(snapshot) if seal.matches(snapshot.as_bytes()) => checks.push(Check {
                 category: "seal",
                 name: format!("briefing.md@step{}", seal.step),
                 status: CheckStatus::Pass,
-                detail: format!("blake3 {}", short_hash(&seal.hash)),
+                detail: format!("blake3 {} (step snapshot)", short_hash(&seal.hash)),
             }),
-            Ok(_) => checks.push(Check {
+            Some(_) => checks.push(Check {
                 category: "seal",
                 name: format!("briefing.md@step{}", seal.step),
                 status: CheckStatus::Fail,
                 detail: format!(
-                    "shadow contract: briefing.md modified since step {} seal at {}",
+                    "shadow contract: sealed briefing snapshot for step {} was altered since seal at {}",
                     seal.step,
                     seal.sealed_at.to_rfc3339()
                 ),
             }),
-            Err(e) => checks.push(Check {
-                category: "seal",
-                name: format!("briefing.md@step{}", seal.step),
-                status: CheckStatus::Skip,
-                detail: format!("briefing.md unreadable: {e}"),
-            }),
+            None => match std::fs::read(mol_dir.join("briefing.md")) {
+                Ok(bytes) if seal.matches(&bytes) => checks.push(Check {
+                    category: "seal",
+                    name: format!("briefing.md@step{}", seal.step),
+                    status: CheckStatus::Pass,
+                    detail: format!("blake3 {}", short_hash(&seal.hash)),
+                }),
+                Ok(_) => checks.push(Check {
+                    category: "seal",
+                    name: format!("briefing.md@step{}", seal.step),
+                    status: CheckStatus::Skip,
+                    detail: format!(
+                        "legacy seal without snapshot; briefing.md differs (cosmon rewrites it per step) — inconclusive, sealed {}",
+                        seal.sealed_at.to_rfc3339()
+                    ),
+                }),
+                Err(e) => checks.push(Check {
+                    category: "seal",
+                    name: format!("briefing.md@step{}", seal.step),
+                    status: CheckStatus::Skip,
+                    detail: format!("briefing.md unreadable: {e}"),
+                }),
+            },
         }
     } else {
         let detail = step_filter.map_or_else(
@@ -385,26 +411,59 @@ fn verify_briefing_seals(
     };
 
     if let Some(seal) = selected_bootstrap {
-        let live_dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-        let live_bootstrap = cosmon_agent_harness::bootstrap::collect_bootstrap_context(&live_dir);
-        if seal.matches(live_bootstrap.as_bytes()) {
-            checks.push(Check {
+        // Verify against the immutable snapshot of the walk-as-it-was-at-
+        // this-step when the seal carries one. The bootstrap walk covers
+        // the operator's ambient `AGENTS.md` / `CLAUDE.md`, which live
+        // OUTSIDE the molecule and drift legitimately (the operator edits
+        // their own instructions; the worktree is torn down and `cs
+        // verify` runs from a different cwd). Re-walking live therefore
+        // fires on ambient drift, not tampering — the flagship false
+        // positive. A rewrite of the recorded snapshot is still caught.
+        // Legacy seals (no snapshot) fall back to the live re-walk.
+        match &seal.snapshot {
+            Some(snapshot) if seal.matches(snapshot.as_bytes()) => checks.push(Check {
                 category: "seal",
                 name: format!("bootstrap@step{}", seal.step),
                 status: CheckStatus::Pass,
-                detail: format!("blake3 {}", short_hash(&seal.hash)),
-            });
-        } else {
-            checks.push(Check {
+                detail: format!("blake3 {} (step snapshot)", short_hash(&seal.hash)),
+            }),
+            Some(_) => checks.push(Check {
                 category: "seal",
                 name: format!("bootstrap@step{}", seal.step),
                 status: CheckStatus::Fail,
                 detail: format!(
-                    "shadow contract: AGENTS.md/CLAUDE.md walk differs from step {} seal at {}",
+                    "shadow contract: sealed bootstrap snapshot for step {} was altered since seal at {}",
                     seal.step,
                     seal.sealed_at.to_rfc3339()
                 ),
-            });
+            }),
+            None => {
+                let live_dir =
+                    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                let live_bootstrap =
+                    cosmon_agent_harness::bootstrap::collect_bootstrap_context(&live_dir);
+                if seal.matches(live_bootstrap.as_bytes()) {
+                    checks.push(Check {
+                        category: "seal",
+                        name: format!("bootstrap@step{}", seal.step),
+                        status: CheckStatus::Pass,
+                        detail: format!("blake3 {}", short_hash(&seal.hash)),
+                    });
+                } else {
+                    // Legacy seal, no snapshot: the live walk covers ambient
+                    // operator files that drift outside the molecule's
+                    // control, so a mismatch is inconclusive, not tampering.
+                    checks.push(Check {
+                        category: "seal",
+                        name: format!("bootstrap@step{}", seal.step),
+                        status: CheckStatus::Skip,
+                        detail: format!(
+                            "legacy seal without snapshot; AGENTS.md/CLAUDE.md walk differs (ambient operator files drift) — inconclusive, sealed {}",
+                            seal.sealed_at.to_rfc3339()
+                        ),
+                    });
+                }
+            }
         }
     } else {
         let detail = step_filter.map_or_else(
@@ -1269,38 +1328,159 @@ mod tests {
     #[test]
     fn seal_check_uses_latest_briefing_seal_by_default() {
         let tmp = TempDir::new().unwrap();
-        let current = b"briefing at step 2".to_vec();
-        std::fs::write(tmp.path().join("briefing.md"), &current).unwrap();
+        // The live briefing.md is what `cs complete` last wrote — it
+        // deliberately DIFFERS from every sealed step's snapshot, exactly
+        // as it does in production. The snapshot-based verify must not
+        // read that honest rewrite as tampering.
+        std::fs::write(
+            tmp.path().join("briefing.md"),
+            b"briefing rewritten by cs complete",
+        )
+        .unwrap();
         let mut mol = mol_fixture();
-        mol.briefing_seals
-            .push(BriefingSeal::of_bytes(0, b"briefing at step 0"));
-        mol.briefing_seals
-            .push(BriefingSeal::of_bytes(1, b"briefing at step 1"));
-        mol.briefing_seals.push(BriefingSeal::of_bytes(2, &current));
+        mol.briefing_seals.push(
+            BriefingSeal::of_text(0, "briefing at step 0").with_snapshot("briefing at step 0"),
+        );
+        mol.briefing_seals.push(
+            BriefingSeal::of_text(1, "briefing at step 1").with_snapshot("briefing at step 1"),
+        );
+        mol.briefing_seals.push(
+            BriefingSeal::of_text(2, "briefing at step 2").with_snapshot("briefing at step 2"),
+        );
         let mut checks = Vec::new();
         verify_briefing_seals(tmp.path(), &mol, None, &mut checks);
         let pass_row = checks
             .iter()
             .find(|c| c.category == "seal" && c.name.contains("briefing.md@step2"))
             .expect("latest briefing seal check present");
-        assert_eq!(pass_row.status, CheckStatus::Pass);
+        assert_eq!(
+            pass_row.status,
+            CheckStatus::Pass,
+            "the step snapshot must verify even though the live file was honestly rewritten: {}",
+            pass_row.detail
+        );
     }
 
     #[test]
     fn seal_check_honours_step_filter() {
         let tmp = TempDir::new().unwrap();
-        // briefing.md on disk matches step 0 seal but not step 1.
-        std::fs::write(tmp.path().join("briefing.md"), b"step 0").unwrap();
+        // The live file is irrelevant now — verification is against the
+        // per-step snapshot. The --step filter must select step 1's seal.
+        std::fs::write(tmp.path().join("briefing.md"), b"latest").unwrap();
         let mut mol = mol_fixture();
         mol.briefing_seals
-            .push(BriefingSeal::of_bytes(0, b"step 0"));
+            .push(BriefingSeal::of_text(0, "step 0").with_snapshot("step 0"));
         mol.briefing_seals
-            .push(BriefingSeal::of_bytes(1, b"step 1"));
+            .push(BriefingSeal::of_text(1, "step 1").with_snapshot("step 1"));
         let mut checks = Vec::new();
         verify_briefing_seals(tmp.path(), &mol, Some(1), &mut checks);
-        assert!(checks
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name.contains("briefing.md@step1") && c.status == CheckStatus::Pass),
+            "the --step filter selects step 1's seal, which passes against its own snapshot"
+        );
+    }
+
+    #[test]
+    fn briefing_snapshot_passes_when_live_file_differs() {
+        // The flagship fix: a multi-step molecule whose live briefing.md
+        // has been legitimately rewritten (per-step re-briefing +
+        // `cs complete`) verifies CLEAN against the sealed snapshot.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("briefing.md"), b"# COMPLETED\n").unwrap();
+        let mut mol = mol_fixture();
+        mol.briefing_seals.push(
+            BriefingSeal::of_text(1, "# Step 2 briefing\n\nDo the thing.\n")
+                .with_snapshot("# Step 2 briefing\n\nDo the thing.\n"),
+        );
+        let mut checks = Vec::new();
+        verify_briefing_seals(tmp.path(), &mol, None, &mut checks);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name.contains("briefing.md@step1") && c.status == CheckStatus::Pass),
+            "snapshot verify passes despite the live file differing"
+        );
+    }
+
+    #[test]
+    fn briefing_snapshot_tamper_is_detected() {
+        // Genuine tamper-evidence is preserved: mutating the recorded
+        // snapshot (without recomputing the hash) is caught as a FAIL.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("briefing.md"), b"anything\n").unwrap();
+        let mut mol = mol_fixture();
+        // hash is over the honest content; snapshot has been swapped.
+        mol.briefing_seals.push(
+            BriefingSeal::of_text(1, "honest contract\n").with_snapshot("tampered contract\n"),
+        );
+        let mut checks = Vec::new();
+        verify_briefing_seals(tmp.path(), &mol, None, &mut checks);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name.contains("briefing.md@step1") && c.status == CheckStatus::Fail),
+            "a mutated snapshot must FAIL"
+        );
+    }
+
+    #[test]
+    fn legacy_briefing_seal_without_snapshot_is_skip_not_fail() {
+        // A pre-fix molecule has no snapshot and cosmon rewrites
+        // briefing.md per step, so the live file always differs. That is
+        // inconclusive (SKIP), never a false FAIL.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("briefing.md"), b"current briefing\n").unwrap();
+        let mut mol = mol_fixture();
+        mol.briefing_seals
+            .push(BriefingSeal::of_text(1, "old step-1 briefing\n")); // no snapshot
+        let mut checks = Vec::new();
+        verify_briefing_seals(tmp.path(), &mol, None, &mut checks);
+        let row = checks
             .iter()
-            .any(|c| c.name.contains("briefing.md@step1") && c.status == CheckStatus::Fail));
+            .find(|c| c.name.contains("briefing.md@step1"))
+            .expect("briefing seal check present");
+        assert_eq!(
+            row.status,
+            CheckStatus::Skip,
+            "legacy snapshot-less seal is inconclusive, not a failure: {}",
+            row.detail
+        );
+    }
+
+    #[test]
+    fn bootstrap_snapshot_passes_and_tamper_is_detected() {
+        // Ambient CLAUDE.md drift is invisible (snapshot verifies clean),
+        // but a mutated snapshot is still caught.
+        let tmp = TempDir::new().unwrap();
+        let mut mol = mol_fixture();
+        mol.bootstrap_seals.push(
+            BriefingSeal::of_text(1, "<bootstrap_context>ambient</bootstrap_context>")
+                .with_snapshot("<bootstrap_context>ambient</bootstrap_context>"),
+        );
+        let mut checks = Vec::new();
+        verify_briefing_seals(tmp.path(), &mol, None, &mut checks);
+        assert!(
+            checks
+                .iter()
+                .any(|c| c.name.contains("bootstrap@step1") && c.status == CheckStatus::Pass),
+            "bootstrap snapshot verifies clean regardless of the live cwd walk"
+        );
+
+        let mut tampered = mol_fixture();
+        tampered.bootstrap_seals.push(
+            BriefingSeal::of_text(1, "<bootstrap_context>ambient</bootstrap_context>")
+                .with_snapshot("<bootstrap_context>SWAPPED</bootstrap_context>"),
+        );
+        let mut checks2 = Vec::new();
+        verify_briefing_seals(tmp.path(), &tampered, None, &mut checks2);
+        assert!(
+            checks2
+                .iter()
+                .any(|c| c.name.contains("bootstrap@step1") && c.status == CheckStatus::Fail),
+            "a mutated bootstrap snapshot must FAIL"
+        );
     }
 
     #[test]

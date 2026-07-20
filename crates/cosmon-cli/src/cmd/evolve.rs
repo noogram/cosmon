@@ -1015,7 +1015,17 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
     // recorded").
     let bootstrap_bytes =
         cosmon_agent_harness::bootstrap::collect_bootstrap_context(&project_root_buf);
-    let bootstrap_seal = BriefingSeal::of_text(seal_step, &bootstrap_bytes);
+    // Snapshot the walk output into the molecule. The bootstrap walk
+    // covers the operator's ambient `AGENTS.md` / `CLAUDE.md`, which live
+    // OUTSIDE the molecule and drift legitimately (the operator edits
+    // their own instructions; the worktree is torn down and `cs verify`
+    // runs from a different cwd). Re-walking at verify time therefore
+    // fires on ambient drift, not tampering. Sealing an immutable
+    // snapshot of the walk-as-it-was-at-this-step preserves genuine
+    // tamper-evidence (a rewrite of the recorded snapshot is still
+    // caught) without alarming on honest ambient evolution.
+    let bootstrap_seal =
+        BriefingSeal::of_text(seal_step, &bootstrap_bytes).with_snapshot(&bootstrap_bytes);
     // Same defensive capture as the briefing seal above (ADR-131 Decision 2).
     let persisted: Result<(), cosmon_core::error::CosmonError> = 'bootstrap: {
         let _g = match store.lock_fleet() {
@@ -1236,9 +1246,24 @@ fn move_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// Compute a [`BriefingSeal`] over `briefing.md`. Returns `None` if the
 /// file cannot be read — the caller treats this as "no seal", never as
 /// an error. Seal emission is a probe, not a lock.
+///
+/// The seal carries an immutable snapshot of the briefing **as it was at
+/// this step**. cosmon regenerates `briefing.md` on every advance (and
+/// `cs complete` rewrites it once more at the end), so verifying a
+/// historical seal against the current file would flag cosmon's own
+/// honest per-step rewrite as tampering. Snapshotting the content into
+/// the molecule lets `cs verify` check each step's briefing against its
+/// own epoch. Binary (non-UTF-8) briefings carry no text snapshot and
+/// fall back to the live-file comparison at verify time.
 fn try_seal_briefing(briefing_path: &Path, step: u32) -> Option<BriefingSeal> {
     match fs::read(briefing_path) {
-        Ok(bytes) => Some(BriefingSeal::of_text_or_bytes(step, &bytes)),
+        Ok(bytes) => {
+            let seal = BriefingSeal::of_text_or_bytes(step, &bytes);
+            Some(match std::str::from_utf8(&bytes) {
+                Ok(text) => seal.with_snapshot(text),
+                Err(_) => seal,
+            })
+        }
         Err(e) => {
             eprintln!("warning: could not seal briefing.md: {e}");
             None
