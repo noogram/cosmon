@@ -27,3 +27,8 @@ docs-src/
 # build (Dockerfile.strace-test, docker/local-default-container/Dockerfile)
 # needs this one doc in the context despite the blanket docs/ exclusion.
 !docs/handbook.md
+# The spore-e2e image (docker/spore-e2e/Dockerfile) bakes in the TLC seal jar
+# and the staged spore (which carries README.md + .md docs) — re-include both
+# despite the blanket docs/ and *.md exclusions.
+!docs/specs/tla2tools.jar
+!docker/spore-e2e/_spore_stage/**

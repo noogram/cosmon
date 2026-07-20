@@ -205,3 +205,6 @@ apps/ios-pilot/project.yml.new
 # release-resync: real OIDC instance bindings are deployment data, never published
 crates/cosmon-rpp-adapter/deploy/state/**/oidc-identity.toml
 !crates/cosmon-rpp-adapter/deploy/state/**/oidc-identity.toml.example
+
+# spore-e2e build staging (external drop, never tracked)
+docker/spore-e2e/_spore_stage/
