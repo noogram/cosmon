@@ -1958,6 +1958,7 @@ mod tests {
                     sealed_at: Utc::now(),
                     briefing_bytes,
                     canonical_version,
+                    snapshot: None,
                 },
             ),
             0..4,

@@ -74,6 +74,31 @@ pub struct BriefingSeal {
     /// [`CANONICAL_VERSION_TEXT_V1`].
     #[serde(default)]
     pub canonical_version: u8,
+    /// The exact content that was sealed, captured at seal time.
+    ///
+    /// This is the fix for the flagship tamper-evidence false positive.
+    /// Some sealed artifacts are **legitimately rewritten** after the
+    /// seal is stamped: cosmon regenerates `briefing.md` at every step
+    /// (and `cs complete` rewrites it once more), and the bootstrap walk
+    /// covers the operator's ambient `AGENTS.md` / `CLAUDE.md`, which
+    /// drift outside the molecule's control. Verifying such a seal
+    /// against the *current* file therefore fires on cosmon's own honest
+    /// evolution, not on tampering.
+    ///
+    /// When a snapshot is present, `cs verify` compares the seal against
+    /// this immutable, in-molecule content — the artifact **as it was at
+    /// this epoch** — instead of the mutable live file. Genuine
+    /// tamper-evidence is preserved: the snapshot is still checked
+    /// against [`hash`](Self::hash) via [`matches`](Self::matches), so
+    /// any post-hoc rewrite of the recorded snapshot (without a matching
+    /// hash) is caught.
+    ///
+    /// `None` for prompt seals (whose file is genuinely immutable, so the
+    /// live comparison is correct) and for legacy seals written before
+    /// this field existed; a snapshot-less briefing/bootstrap seal is
+    /// **inconclusive** at verify time, never a failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<String>,
 }
 
 impl BriefingSeal {
@@ -91,6 +116,7 @@ impl BriefingSeal {
             sealed_at: Utc::now(),
             briefing_bytes: bytes.len() as u64,
             canonical_version: CANONICAL_VERSION_RAW,
+            snapshot: None,
         }
     }
 
@@ -110,7 +136,27 @@ impl BriefingSeal {
             sealed_at: Utc::now(),
             briefing_bytes: canonical.len() as u64,
             canonical_version: CANONICAL_VERSION_TEXT_V1,
+            snapshot: None,
         }
+    }
+
+    /// Attach the sealed content as an immutable in-molecule snapshot.
+    ///
+    /// The seal then carries the artifact **as it was at this epoch**, so
+    /// `cs verify` can check it against this content instead of the
+    /// mutable live file. Use this for artifacts cosmon legitimately
+    /// rewrites after sealing — the per-step `briefing.md` and the
+    /// ambient-file bootstrap walk — so that honest evolution does not
+    /// read as tampering. See [`snapshot`](Self::snapshot) for the full
+    /// rationale.
+    ///
+    /// The content is stored verbatim; [`matches`](Self::matches) applies
+    /// the seal's canonical form when comparing, so passing the raw
+    /// (pre-canonicalization) text is correct.
+    #[must_use]
+    pub fn with_snapshot(mut self, content: &str) -> Self {
+        self.snapshot = Some(content.to_owned());
+        self
     }
 
     /// Compute a seal over bytes read from disk that *ought* to be text.
@@ -242,5 +288,45 @@ mod tests {
         let bad: &[u8] = &[0xff, 0xfe];
         let seal = BriefingSeal::of_text_or_bytes(0, bad);
         assert_eq!(seal.canonical_version, 0);
+    }
+
+    #[test]
+    fn with_snapshot_stores_content_and_still_matches_its_hash() {
+        let seal = BriefingSeal::of_text(1, "step briefing\n").with_snapshot("step briefing\n");
+        assert_eq!(seal.snapshot.as_deref(), Some("step briefing\n"));
+        // The stored snapshot verifies against the seal's own hash.
+        assert!(seal.matches(seal.snapshot.as_ref().unwrap().as_bytes()));
+    }
+
+    #[test]
+    fn snapshot_defaults_none_and_is_skipped_when_absent() {
+        let seal = BriefingSeal::of_text(0, "x");
+        assert!(seal.snapshot.is_none());
+        let json = serde_json::to_string(&seal).unwrap();
+        assert!(
+            !json.contains("snapshot"),
+            "None snapshot must not be serialized: {json}"
+        );
+        let back: BriefingSeal = serde_json::from_str(&json).unwrap();
+        assert_eq!(seal, back);
+    }
+
+    #[test]
+    fn tampered_snapshot_no_longer_matches_the_hash() {
+        // hash is over the honest content; the snapshot is swapped.
+        let seal = BriefingSeal::of_text(1, "honest\n").with_snapshot("tampered\n");
+        assert!(
+            !seal.matches(seal.snapshot.as_ref().unwrap().as_bytes()),
+            "a mutated snapshot must not match the sealed hash"
+        );
+    }
+
+    #[test]
+    fn snapshot_survives_serde_roundtrip() {
+        let seal = BriefingSeal::of_text(2, "content\n").with_snapshot("content\n");
+        let json = serde_json::to_string(&seal).unwrap();
+        let back: BriefingSeal = serde_json::from_str(&json).unwrap();
+        assert_eq!(seal, back);
+        assert_eq!(back.snapshot.as_deref(), Some("content\n"));
     }
 }
