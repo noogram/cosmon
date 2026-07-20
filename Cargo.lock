@@ -907,7 +907,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "ansi-to-tui 7.0.0",
  "anyhow",
@@ -1206,7 +1206,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-oidc-testkit"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1263,7 +1263,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-process-witness"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libc",
 ]
@@ -1308,7 +1308,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-remote"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "base64",
@@ -1344,7 +1344,7 @@ dependencies = [
 
 [[package]]
 name = "cosmon-rpp-adapter"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "arc-swap",
