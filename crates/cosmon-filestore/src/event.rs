@@ -115,6 +115,19 @@ pub enum ChainDivergenceReason {
     },
     /// Entry is missing its `hash` field (pre-v2 legacy or truncated write).
     MissingHash,
+    /// `EventV2` log: the monotone `seq` witness regressed — an entry's
+    /// sequence number is not strictly greater than its predecessor's.
+    ///
+    /// `EventV2` envelopes (the schema the current writer emits) carry no
+    /// hash chain; their tamper-evidence is the strictly increasing
+    /// per-file `seq`. A non-increasing `seq` means the log was
+    /// reordered, spliced, or had a line removed.
+    SeqRegression {
+        /// The predecessor's `seq`; the walk requires strictly greater.
+        expected_gt: u64,
+        /// The `seq` actually found on this entry.
+        found: u64,
+    },
 }
 
 /// Outcome of walking a JSONL chain with [`verify_chain`].
@@ -135,23 +148,62 @@ pub enum VerifyOutcome {
     Diverged(ChainDivergence),
 }
 
-/// Walk the event log and verify every hash-chain link.
+/// Walk the event log and verify its integrity, selecting the check that
+/// matches the on-disk schema.
 ///
-/// The recipe mirrors `git fsck`: recompute each entry's canonical hash,
-/// check it matches the stored `hash`, and check its `prev_hash` matches
-/// the previous entry's `hash`. The first divergence wins — we stop there
-/// so operators see a single, actionable line.
+/// Cosmon's event log has evolved through two wire schemas, and a molecule
+/// that has been tackled/run carries the *newer* one:
+///
+/// - **Legacy `Envelope`** (`kind` discriminator, plumbing v2) carries a
+///   BLAKE3 hash chain (`prev_hash`/`hash`). Verified `git fsck`-style:
+///   recompute each entry's canonical hash and check it links to its
+///   predecessor.
+/// - **[`EventV2`](cosmon_core::event_v2::Envelope)** (`type` discriminator,
+///   the schema the current writer emits) carries **no** hash chain — its
+///   tamper-evidence is the strictly increasing per-file `seq`. Verified by
+///   walking `seq` and demanding strict monotonicity.
+///
+/// Before this split the walker deserialised every line into the legacy
+/// `Envelope` and rejected the whole log with `missing field 'kind'` the
+/// moment it hit an `EventV2` line — which meant `cs verify` failed on every
+/// honestly-produced molecule (tester Jesse Thaler, issue #1). The schema
+/// is now detected: a file whose every line parses as legacy `Envelope`
+/// walks the hash chain; otherwise it is an `EventV2` log and walks `seq`.
+///
+/// The first divergence wins — we stop there so operators see a single,
+/// actionable line.
 ///
 /// # Errors
 ///
 /// Returns [`CosmonError::Io`] on I/O failures or [`CosmonError::Json`]
-/// if a line cannot be parsed.
+/// if a line cannot be parsed as either schema.
 pub fn verify_chain(path: &Path) -> Result<VerifyOutcome, CosmonError> {
-    let entries = read_all(path)?;
-    if entries.is_empty() {
+    if !path.exists() {
+        return Ok(VerifyOutcome::Verified { count: 0 });
+    }
+    let content = std::fs::read_to_string(path)?;
+    let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
+    if lines.is_empty() {
         return Ok(VerifyOutcome::Verified { count: 0 });
     }
 
+    // Schema detection. EventV2 lines use a `type` discriminator and never
+    // parse as a legacy `Envelope` (which needs `kind`), so a file whose
+    // every line deserialises as `Envelope` is a legacy hash-chained log;
+    // anything else is treated as the current EventV2 schema.
+    let legacy: Result<Vec<Envelope>, _> = lines
+        .iter()
+        .map(|l| serde_json::from_str::<Envelope>(l))
+        .collect();
+    match legacy {
+        Ok(entries) => verify_legacy_hash_chain(&entries),
+        Err(_) => verify_eventv2_seq_chain(&lines),
+    }
+}
+
+/// Walk the legacy plumbing-v2 BLAKE3 hash chain (the original
+/// [`verify_chain`] behaviour, now schema-gated).
+fn verify_legacy_hash_chain(entries: &[Envelope]) -> Result<VerifyOutcome, CosmonError> {
     let signed = entries.iter().filter(|e| e.hash.is_some()).count();
     if signed == 0 {
         return Ok(VerifyOutcome::UnsignedLegacy {
@@ -195,6 +247,52 @@ pub fn verify_chain(path: &Path) -> Result<VerifyOutcome, CosmonError> {
     Ok(VerifyOutcome::Verified {
         count: entries.len(),
     })
+}
+
+/// Walk an [`EventV2`](cosmon_core::event_v2::Envelope) log and verify the
+/// strict monotonicity of its per-file `seq` witness.
+///
+/// `EventV2` envelopes carry no hash chain, so `seq` is the integrity signal:
+/// the writer assigns a strictly increasing sequence under `flock`, and a
+/// reader can prove no line was reordered or dropped by walking it upward.
+///
+/// Lines that only coerce through *legacy* migration (a mixed grace-window
+/// log) do not carry an authoritative `seq` — [`migrate_legacy_line`] stamps
+/// them `Seq(0)` — so, matching the writer's own reader semantics
+/// (`cosmon_state::event_log`), they are tolerated but do not contribute to
+/// sequencing. A line that is neither native `EventV2` nor coercible legacy is
+/// genuine corruption and surfaces as a parse error.
+///
+/// [`migrate_legacy_line`]: cosmon_core::event_v2::migrate_legacy_line
+fn verify_eventv2_seq_chain(lines: &[&str]) -> Result<VerifyOutcome, CosmonError> {
+    use cosmon_core::event_v2::Envelope as EventV2Envelope;
+
+    let mut prev_seq: Option<u64> = None;
+    for (idx, line) in lines.iter().enumerate() {
+        match serde_json::from_str::<EventV2Envelope>(line) {
+            Ok(env) => {
+                let seq = env.seq.0;
+                if let Some(prev) = prev_seq {
+                    if seq <= prev {
+                        return Ok(VerifyOutcome::Diverged(ChainDivergence {
+                            index: idx,
+                            reason: ChainDivergenceReason::SeqRegression {
+                                expected_gt: prev,
+                                found: seq,
+                            },
+                        }));
+                    }
+                }
+                prev_seq = Some(seq);
+            }
+            // Not native EventV2 — tolerate a genuine legacy line, but let a
+            // line that is neither shape surface as a parse error.
+            Err(_) => {
+                EventV2Envelope::from_line(line)?;
+            }
+        }
+    }
+    Ok(VerifyOutcome::Verified { count: lines.len() })
 }
 
 /// Read all event envelopes from a JSONL file.
@@ -790,6 +888,90 @@ mod tests {
 
         let outcome = verify_chain(&path).unwrap();
         assert_eq!(outcome, VerifyOutcome::UnsignedLegacy { count: 1 });
+    }
+
+    // ── EventV2-schema chain tests (issue #1 regression) ─────────────
+
+    /// Serialize an EventV2 envelope exactly as the live writer does — one
+    /// compact JSON object with a `seq`/`emitter_kind` header and a `type`
+    /// discriminator, no `kind`, no hash chain.
+    fn write_v2_line(path: &std::path::Path, env: &cosmon_core::event_v2::Envelope) {
+        use std::io::Write as _;
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        let line = serde_json::to_string(env).unwrap();
+        writeln!(f, "{line}").unwrap();
+    }
+
+    fn v2_completed(seq: u64, mol: &str) -> cosmon_core::event_v2::Envelope {
+        use cosmon_core::event_v2::{Envelope, EventV2, Seq};
+        use cosmon_core::id::MoleculeId;
+        Envelope::new(
+            Seq(seq),
+            None,
+            EventV2::MoleculeCompleted {
+                molecule_id: MoleculeId::new(mol).unwrap(),
+                duration_ms: None,
+                reason: "done".to_owned(),
+            },
+        )
+    }
+
+    #[test]
+    fn test_verify_chain_eventv2_log_passes() {
+        // The flagship regression: a molecule that has been tackled has a
+        // pure EventV2 events.jsonl (`type`/`emitter_kind`, monotone `seq`,
+        // no hash chain). Before the fix this failed with
+        // `missing field 'kind'`; it must now PASS.
+        let dir = TempDir::new().unwrap();
+        let path = events_path(&dir);
+        for seq in 0..3 {
+            write_v2_line(&path, &v2_completed(seq, "task-20260720-ccb5"));
+        }
+        let outcome = verify_chain(&path).unwrap();
+        assert_eq!(outcome, VerifyOutcome::Verified { count: 3 });
+    }
+
+    #[test]
+    fn test_verify_chain_eventv2_seq_regression_diverges() {
+        let dir = TempDir::new().unwrap();
+        let path = events_path(&dir);
+        // seq 0, 1, then a regression back to 1 (not strictly increasing).
+        write_v2_line(&path, &v2_completed(0, "task-20260720-aaaa"));
+        write_v2_line(&path, &v2_completed(1, "task-20260720-bbbb"));
+        write_v2_line(&path, &v2_completed(1, "task-20260720-cccc"));
+        let outcome = verify_chain(&path).unwrap();
+        match outcome {
+            VerifyOutcome::Diverged(d) => {
+                assert_eq!(d.index, 2);
+                assert_eq!(
+                    d.reason,
+                    ChainDivergenceReason::SeqRegression {
+                        expected_gt: 1,
+                        found: 1
+                    }
+                );
+            }
+            other => panic!("expected Diverged(SeqRegression), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_chain_eventv2_line_shape_matches_reader() {
+        // Belt-and-suspenders: the on-disk line the writer produces round
+        // trips through the same EventV2 reader the walker now uses.
+        let dir = TempDir::new().unwrap();
+        let path = events_path(&dir);
+        write_v2_line(&path, &v2_completed(0, "task-20260720-dddd"));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let line = raw.lines().next().unwrap();
+        assert!(line.contains(r#""type":"molecule_completed""#));
+        assert!(line.contains(r#""emitter_kind""#));
+        assert!(!line.contains(r#""kind":"#));
+        assert!(cosmon_core::event_v2::Envelope::from_line(line).is_ok());
     }
 
     #[test]
