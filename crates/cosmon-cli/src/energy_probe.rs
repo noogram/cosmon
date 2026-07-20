@@ -93,14 +93,26 @@ pub fn load_worker_energy(
     let mut map: HashMap<WorkerId, WorkerEnergy> = HashMap::new();
     let pricing = claudion::PricingModel::opus();
 
+    // Fold the global journal **once** into a `mol_id -> last adapter` map,
+    // then read the per-worker adapter from that map. The previous shape
+    // called `last_adapter_for` inside the loop, and each call re-read and
+    // re-parsed the entire `events.jsonl` — so a fleet with `W` workers
+    // folded the whole journal `W` times, an `O(W × J)` blowup that
+    // dominated `cs peek` on aged galaxies (a 94-worker / 80k-line journal
+    // fleet spent ~6 s here alone, folding 7.6M envelopes to answer a
+    // question one fold of 80k answers). See
+    // `docs/design/peek-fold-cost.md`.
+    let adapters = fold_last_adapters(state_dir);
+
     for (worker_id, data) in &fleet.workers {
-        let Some(energy) = probe_worker_energy(
-            state_dir,
-            backends,
-            worker_id,
-            data.current_molecule.as_ref(),
-            &pricing,
-        ) else {
+        let adapter = data
+            .current_molecule
+            .as_ref()
+            .and_then(|m| adapters.get(m))
+            .map(String::as_str);
+        let Some(energy) =
+            probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter, &pricing)
+        else {
             continue;
         };
         map.insert(worker_id.clone(), energy);
@@ -108,25 +120,60 @@ pub fn load_worker_energy(
     map
 }
 
+/// Fold the global `events.jsonl` **once** into a `mol_id -> last adapter`
+/// map: for every [`EventV2::AdapterSelected`], the last one wins (forward
+/// scan, overwrite). This is the batched form of [`last_adapter_for`] — one
+/// journal read answers the adapter question for *every* molecule at once,
+/// so callers with many workers avoid re-parsing the whole journal per
+/// worker.
+///
+/// Returns an empty map on read error (same fail-soft contract as
+/// [`last_adapter_for`], whose `None` the caller treats as "legacy → claude").
+#[must_use]
+fn fold_last_adapters(state_dir: &Path) -> HashMap<MoleculeId, String> {
+    let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
+    let mut out: HashMap<MoleculeId, String> = HashMap::new();
+    let Ok(envelopes) = cosmon_state::event_log::read_all(&log_path) else {
+        return out;
+    };
+    for env in envelopes {
+        if let EventV2::AdapterSelected {
+            mol_id,
+            adapter_name,
+            ..
+        } = env.event
+        {
+            out.insert(mol_id, adapter_name);
+        }
+    }
+    out
+}
+
 /// Probe a single worker's current energy values, **adapter-aware**.
 ///
-/// The adapter that ran `molecule` (last [`EventV2::AdapterSelected`] on
-/// `events.jsonl`) selects the chain: `codex` reads the codex rollout log
-/// via [`probe_codex_worker_energy`]; `claude` — and the legacy case where
-/// no selection was ever recorded — reads the Claude Code session log via
-/// the PID-sidecar chain, unchanged. In-process provider adapters
-/// (openai/anthropic/mistral) have no session log on disk and resolve to
-/// `None` through the claude chain's missing PID sidecar.
+/// The `adapter` that ran the worker's molecule (the last
+/// [`EventV2::AdapterSelected`] on `events.jsonl`, resolved by the caller —
+/// batched once via [`fold_last_adapters`], or for one molecule via
+/// [`last_adapter_for`]) selects the chain: `codex` reads the codex rollout
+/// log via [`probe_codex_worker_energy`]; `claude` — and the legacy case
+/// where no selection was ever recorded (`adapter == None`) — reads the
+/// Claude Code session log via the PID-sidecar chain, unchanged. In-process
+/// provider adapters (openai/anthropic/mistral) have no session log on disk
+/// and resolve to `None` through the claude chain's missing PID sidecar.
+///
+/// The adapter is passed in rather than folded here so a caller iterating
+/// over a whole fleet folds the journal a **single** time instead of once
+/// per worker — the difference between `O(J)` and `O(W × J)` on an aged
+/// galaxy. See [`load_worker_energy`].
 #[must_use]
-pub fn probe_worker_energy(
+pub fn probe_worker_energy_with_adapter(
     state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
     worker_id: &WorkerId,
-    molecule: Option<&MoleculeId>,
+    adapter: Option<&str>,
     pricing: &claudion::PricingModel,
 ) -> Option<WorkerEnergy> {
-    let adapter = molecule.and_then(|m| last_adapter_for(state_dir, m));
-    if adapter.as_deref() == Some("codex") {
+    if adapter == Some("codex") {
         return probe_codex_worker_energy(state_dir, backends, worker_id);
     }
     let pid = resolve_tmux_pid(backends, worker_id)?;
@@ -642,6 +689,24 @@ pub(crate) mod test_support {
         store
     }
 
+    /// Probe one registered worker's energy through the **production** batch
+    /// path ([`super::load_worker_energy`]): fold the journal once, resolve
+    /// the adapter from that fold, then probe. Tests use this rather than a
+    /// bespoke single-shot probe so they exercise exactly the code `cs peek`
+    /// runs — including [`super::fold_last_adapters`] and the
+    /// adapter-routing it feeds [`super::probe_worker_energy_with_adapter`].
+    pub(crate) fn probe_one_worker_energy(
+        state_dir: &Path,
+        worker: &str,
+    ) -> Option<super::WorkerEnergy> {
+        use cosmon_state::StateStore as _;
+        let store = cosmon_filestore::FileStore::new(state_dir);
+        let fleet = store.load_fleet().unwrap();
+        super::load_worker_energy(state_dir, &[], &fleet)
+            .get(&WorkerId::new(worker).unwrap())
+            .copied()
+    }
+
     /// Register `worker` on the fleet with its working directory recorded
     /// relative to the project root — exactly what `cs tackle`'s
     /// `register_tackle_worker` persists, and the join key the post-mortem
@@ -703,6 +768,99 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    /// The batched fold keeps only the **last** `AdapterSelected` per
+    /// molecule (forward scan, overwrite), and each molecule is independent.
+    /// This is the map `load_worker_energy` reads instead of re-scanning the
+    /// whole journal per worker.
+    #[test]
+    fn fold_last_adapters_keeps_last_selection_per_molecule() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path();
+        let a = MoleculeId::new("task-20260720-aaaa").unwrap();
+        let b = MoleculeId::new("task-20260720-bbbb").unwrap();
+
+        // `a` is re-selected (claude → codex); `b` is selected once.
+        seed_dispatch(state_dir, &a, "claude", "w-a1");
+        seed_dispatch(state_dir, &b, "codex", "w-b1");
+        seed_dispatch(state_dir, &a, "codex", "w-a2");
+
+        let map = fold_last_adapters(state_dir);
+        assert_eq!(map.get(&a).map(String::as_str), Some("codex"), "last wins");
+        assert_eq!(map.get(&b).map(String::as_str), Some("codex"));
+        assert_eq!(map.len(), 2);
+    }
+
+    /// A molecule with no recorded selection is absent from the fold, so the
+    /// caller's `adapters.get(m)` yields `None` — the legacy "treat as
+    /// claude" path, exactly as `last_adapter_for` returned `None` before.
+    #[test]
+    fn fold_last_adapters_omits_molecules_without_a_selection() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        assert!(fold_last_adapters(tmp.path()).is_empty());
+    }
+
+    /// Non-regression on the **fold cost** (task-20260720-6699): reading
+    /// energy for a fleet of many workers must fold the journal *once*, not
+    /// once per worker. The previous shape re-parsed the whole `events.jsonl`
+    /// inside the worker loop — an `O(W × J)` blowup that made `cs peek` take
+    /// ~11 s on an aged galaxy (94 workers × an 80k-line journal). Here a
+    /// 64-worker fleet over a ~4k-line journal would fold ~256k envelopes
+    /// under the old shape and ~4k under the batched one; the coarse ceiling
+    /// separates the two by more than an order of magnitude without asserting
+    /// a brittle absolute latency.
+    #[test]
+    fn load_worker_energy_does_not_scale_with_worker_count() {
+        use std::time::Instant;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path();
+
+        // 64 workers, each on its own molecule with a recorded selection.
+        // `claude` with no live pane resolves to `None` fast (no pid
+        // sidecar), so per-worker cost is dominated purely by the journal
+        // read the fix removes.
+        const WORKERS: usize = 64;
+        let mut fleet = cosmon_state::Fleet::default();
+        for i in 0..WORKERS {
+            let mol = MoleculeId::new(&format!("task-20260720-{i:04x}")).unwrap();
+            seed_dispatch(state_dir, &mol, "claude", &format!("w-{i:04}"));
+            let wid = WorkerId::new(&format!("w-{i:04}")).unwrap();
+            let mut data = cosmon_state::WorkerData::new(
+                wid.clone(),
+                cosmon_core::id::AgentId::new("polecat").unwrap(),
+                cosmon_core::agent::AgentRole::Implementation,
+                cosmon_core::clearance::Clearance::Write,
+                cosmon_core::worker::WorkerStatus::Active,
+            );
+            data.current_molecule = Some(mol);
+            fleet.workers.insert(wid, data);
+        }
+        {
+            use cosmon_state::StateStore as _;
+            cosmon_filestore::FileStore::new(state_dir)
+                .save_fleet(&fleet)
+                .unwrap();
+        }
+
+        let started = Instant::now();
+        let energy = load_worker_energy(state_dir, &[], &fleet);
+        let elapsed = started.elapsed();
+
+        // No live sessions, so no energy resolves — the point is the fold
+        // cost, not the token values.
+        assert!(energy.is_empty());
+        // The batched fold is milliseconds; the `O(W × J)` regression would
+        // be well into the seconds on this fixture. A 3 s ceiling is far
+        // above the batched path on any CI host yet far below the quadratic
+        // shape.
+        assert!(
+            elapsed.as_secs() < 3,
+            "load_worker_energy folded the journal per worker again \
+             (took {elapsed:?} for {WORKERS} workers) — the O(W × J) \
+             regression is back",
+        );
+    }
 
     #[test]
     fn sanitize_path_replaces_non_alphanumeric() {
@@ -912,14 +1070,8 @@ mod tests {
             &format!(".worktrees/{}", mol.as_str()),
         );
 
-        let energy = probe_worker_energy(
-            &state_dir,
-            &[],
-            &WorkerId::new("worker-1").unwrap(),
-            Some(&mol),
-            &claudion::PricingModel::opus(),
-        )
-        .expect("codex energy must resolve through the recorded worktree");
+        let energy = probe_one_worker_energy(&state_dir, "worker-1")
+            .expect("codex energy must resolve through the recorded worktree");
         let (input, output, cost) = energy.as_tuple();
         assert_eq!(input, 2_000_000, "input includes the cached portion");
         assert_eq!(output, 100_000);
@@ -957,14 +1109,8 @@ mod tests {
             &format!(".worktrees/{}", mol.as_str()),
         );
 
-        let energy = probe_worker_energy(
-            &state_dir,
-            &[],
-            &WorkerId::new("worker-1").unwrap(),
-            Some(&mol),
-            &claudion::PricingModel::opus(),
-        )
-        .expect("tokens stay computable for an unpriced model");
+        let energy = probe_one_worker_energy(&state_dir, "worker-1")
+            .expect("tokens stay computable for an unpriced model");
         let (input, output, cost) = energy.as_tuple();
         assert_eq!(input, 2_000_000);
         assert_eq!(output, 100_000);
@@ -1002,13 +1148,7 @@ mod tests {
             &format!(".worktrees/{}", mol.as_str()),
         );
 
-        let energy = probe_worker_energy(
-            &state_dir,
-            &[],
-            &WorkerId::new("worker-1").unwrap(),
-            Some(&mol),
-            &claudion::PricingModel::opus(),
-        );
+        let energy = probe_one_worker_energy(&state_dir, "worker-1");
         assert!(
             energy.is_none(),
             "claude chain must stay on the pid-sidecar path"
