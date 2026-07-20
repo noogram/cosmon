@@ -564,6 +564,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     if ctx.json {
         let output = EnsembleOutput {
+            stall_alert: stall_alert(&rows, &molecules, Utc::now()),
             workers: rows,
             worker_roles,
             molecules: mol_summary,
@@ -578,6 +579,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if fleet.workers.is_empty() {
         println!("{}", "No workers in the fleet.".dimmed());
         println!("{}", "Use `cs spawn` to add workers.".dimmed());
+        // An empty fleet is exactly the state a mass die-off leaves behind,
+        // so the banner has to survive this early return — otherwise the
+        // loudest case prints the quietest output.
+        print_stall_alert(&stall_alert(&rows, &molecules, Utc::now()));
         return Ok(());
     }
 
@@ -831,7 +836,7 @@ const UNHARVESTED_ALERT_SECS: i64 = 1800;
 
 /// What the anti-silence banner has to say. Empty means the fleet is clean
 /// and nothing is printed — the banner must stay rare enough to be believed.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq, serde::Serialize)]
 struct StallAlert {
     /// Workers whose transport session is gone while desired=Running.
     dead_workers: Vec<String>,
@@ -1760,6 +1765,7 @@ mod tests {
         // machine-readable `molecule_states`.
         let output = EnsembleOutput {
             workers: Vec::new(),
+            stall_alert: StallAlert::default(),
             worker_roles: WorkerRoleSummary {
                 cognition: 0,
                 runtime: 0,
