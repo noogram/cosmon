@@ -1365,11 +1365,25 @@ semantic failure class.\n";
 ///
 /// Scans **only** files matched by `publish_globs` (NARROW by design — a
 /// `grep -r` would false-positive on internal docs that legitimately name
-/// the entity). On any hit: returns `Err` listing every (file, substring)
-/// violation, points at the config block, and ends with the mandatory
-/// residual-risk statement. Hard abort, identical across all three regimes
-/// — Autonomous mode has no operator to scrub after the fact, so an
-/// advisory gate would abandon exactly the regime that needs it.
+/// the entity), and — when `scope` is supplied — further narrows to the
+/// files THIS molecule's branch actually introduces. On any hit: returns
+/// `Err` listing every (file, substring) violation, points at the config
+/// block, and ends with the mandatory residual-risk statement. Hard abort,
+/// identical across all three regimes — Autonomous mode has no operator to
+/// scrub after the fact, so an advisory gate would abandon exactly the
+/// regime that needs it.
+///
+/// `scope` is the harvested molecule's changed-path set
+/// (`git diff --name-only <base>...<branch>`). Passing `Some(diff)` closes
+/// the cross-mission false-positive (task-20260720-b474): a confidential
+/// string another mission already landed on `main` — its own README, its
+/// snapshots — is outside this molecule's diff and must never block an
+/// unrelated harvest. Before diff-scoping the gate scanned the WHOLE merged
+/// tree, so any mission could plant a mine that blocked every other
+/// mission's `cs done`. `None` (or an empty scope) keeps the pre-scoping
+/// whole-tree behavior, the fail-safe fallback for a diff-probe slip — a
+/// probe failure can never SILENTLY skip a real diff (worst case is the old
+/// false-positive, never a new false-negative).
 ///
 /// Probed against `repo_root` (the merged checkout) because that is where
 /// the about-to-be-published content lives after the merge step.
@@ -1455,11 +1469,15 @@ fn effective_confidential_blocklist_from(
 fn check_confidential_blocklist(
     repo_root: &Path,
     cfg: &ConfidentialBlocklistConfig,
+    scope: Option<&[String]>,
 ) -> anyhow::Result<()> {
     if cfg.is_empty() {
         return Ok(());
     }
-    let files = collect_publish_files(repo_root, &cfg.effective_publish_globs());
+    let files = restrict_publish_files_to_scope(
+        collect_publish_files(repo_root, &cfg.effective_publish_globs()),
+        scope,
+    );
     // Read each matched file; skip unreadable / binary (non-UTF8) files —
     // the gate is defensive, a read failure must never block the hot path
     // by panicking. A file we cannot read as text cannot carry a literal
@@ -1491,6 +1509,41 @@ fn check_confidential_blocklist(
     );
     msg.push_str(CONFIDENTIAL_RESIDUAL_RISK);
     Err(anyhow::anyhow!("{msg}"))
+}
+
+/// Narrow the publish-glob-matched files to the harvested molecule's diff.
+///
+/// The testable intersection half of the cross-mission false-positive fix
+/// (task-20260720-b474). `files` are the paths matched by `publish_globs`
+/// across the merged tree; `scope` is the set of paths this molecule's
+/// branch introduced (`git diff --name-only <base>...<branch>`).
+///
+/// - `Some(non-empty)` → keep only files that are BOTH publish-glob matches
+///   AND in the molecule's diff. A README or snapshot another mission
+///   already landed on `main` is outside this diff and is dropped, so a
+///   confidential string it carries can no longer block this harvest.
+/// - `None` or `Some(empty)` → return `files` unchanged. This is the
+///   fail-safe fallback: a diff-probe slip (missing branch, non-git dir)
+///   yields an empty set, and we must never let a probe failure SILENTLY
+///   skip a real diff. Worst case is the pre-scoping whole-tree scan (an
+///   over-broad false-positive a human can still clear), never a new
+///   false-negative that leaks.
+///
+/// Path forms match: both `collect_publish_files` (via `strip_prefix` of
+/// `repo_root`) and `git diff --name-only` emit repo-root-relative,
+/// forward-slash paths on the platforms cosmon runs.
+fn restrict_publish_files_to_scope(files: Vec<String>, scope: Option<&[String]>) -> Vec<String> {
+    match scope {
+        Some(paths) if !paths.is_empty() => {
+            let allow: std::collections::HashSet<&str> =
+                paths.iter().map(String::as_str).collect();
+            files
+                .into_iter()
+                .filter(|f| allow.contains(f.as_str()))
+                .collect()
+        }
+        _ => files,
+    }
 }
 
 /// Walk `repo_root` and return the relative paths of every file matched by
@@ -2470,8 +2523,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         //      (task-20260622-7207) so the confidential fund name — a
         //      federation-wide secret — is supplied ONCE privately yet guards
         //      every galaxy, not just the one that hand-typed the section.
+        //      Scope the scan to the files THIS molecule's branch introduces —
+        //      NOT the whole merged tree (task-20260720-b474). Before this, the
+        //      gate walked every publish-glob match in `repo_root`, so a
+        //      confidential string another mission had already landed on `main`
+        //      (its own README, its snapshots) blocked the harvest of every
+        //      unrelated molecule — one mission's mine detonated under all the
+        //      others. The diff over `<base>...<branch>` is the exact set of
+        //      paths this merge introduced (the same merge-base three-dot range
+        //      the scope-guard uses); the branch ref still exists here (branch
+        //      deletion is a later step). An empty probe result falls back to
+        //      the whole-tree scan inside `check_confidential_blocklist`, so a
+        //      probe slip never silently skips a real diff.
+        let base = resolve_base_branch(&repo_root);
+        let publish_scope = git_diff_names(&repo_root, &format!("{base}...{branch_name}"));
+        let publish_scope = (!publish_scope.is_empty()).then_some(publish_scope);
         let merged_blocklist = effective_confidential_blocklist(&cfg.confidential_blocklist);
-        check_confidential_blocklist(&repo_root, &merged_blocklist)?;
+        check_confidential_blocklist(&repo_root, &merged_blocklist, publish_scope.as_deref())?;
 
         // Non-blocking reminder: surfaces cosmon does not invoke (the GitHub
         // repo-description via `gh repo edit`, the deployed URL, package
@@ -11059,7 +11127,7 @@ mod tests {
         // without touching the filesystem.
         let tmp = TempDir::new().unwrap();
         let cfg = ConfidentialBlocklistConfig::default();
-        check_confidential_blocklist(tmp.path(), &cfg).unwrap();
+        check_confidential_blocklist(tmp.path(), &cfg, None).unwrap();
     }
 
     #[test]
@@ -11071,7 +11139,7 @@ mod tests {
             publish_globs: vec!["README*".to_owned()],
             ..Default::default()
         };
-        check_confidential_blocklist(tmp.path(), &cfg).unwrap();
+        check_confidential_blocklist(tmp.path(), &cfg, None).unwrap();
     }
 
     #[test]
@@ -11090,7 +11158,7 @@ mod tests {
             publish_globs: vec!["README*".to_owned()],
             ..Default::default()
         };
-        let err = check_confidential_blocklist(tmp.path(), &cfg).unwrap_err();
+        let err = check_confidential_blocklist(tmp.path(), &cfg, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("confidential substring"), "msg: {msg}");
         assert!(msg.contains("README.md"), "msg: {msg}");
@@ -11127,7 +11195,7 @@ mod tests {
             ..Default::default()
         };
         assert!(!cfg.is_empty(), "substrings-only config is still active");
-        let err = check_confidential_blocklist(tmp.path(), &cfg).unwrap_err();
+        let err = check_confidential_blocklist(tmp.path(), &cfg, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("paper.tex"), "must flag the paper file: {msg}");
         assert!(
@@ -11206,7 +11274,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         // (3) the federation merge supplies the secret; the gate now fires.
         let effective = effective_confidential_blocklist_from(&per_galaxy, &global_cfg);
         assert!(!effective.is_empty(), "inherited gate must be active");
-        let err = check_confidential_blocklist(&repo, &effective).unwrap_err();
+        let err = check_confidential_blocklist(&repo, &effective, None).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("paper.tex"), "must flag the paper: {msg}");
         assert!(
@@ -11262,7 +11330,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         let repo = tmp.path().join("galaxy");
         std::fs::create_dir(&repo).unwrap();
         std::fs::write(repo.join("README.md"), "# Tenant-Demo Research\n").unwrap();
-        check_confidential_blocklist(&repo, &effective).unwrap();
+        check_confidential_blocklist(&repo, &effective, None).unwrap();
     }
 
     #[test]
@@ -11307,6 +11375,108 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         assert_eq!(
             found,
             vec!["README.md".to_owned(), "site/index.html".to_owned()]
+        );
+    }
+
+    #[test]
+    fn restrict_publish_files_to_scope_keeps_only_diff_paths() {
+        // task-20260720-b474: the glob set matched three READMEs across the
+        // merged tree, but only one is in this molecule's diff. The scoped
+        // scan drops the two from other missions — a confidential string they
+        // carry can no longer block this harvest.
+        let matched = vec![
+            "README.md".to_owned(),
+            "missions/aurelie-bopp-133c/README.md".to_owned(),
+            "missions/aurelie-bopp-133c/snapshot-v1.0.md".to_owned(),
+        ];
+        let this_molecule_diff = vec!["README.md".to_owned(), "LEDGER-fidelite.md".to_owned()];
+        let scoped = restrict_publish_files_to_scope(matched, Some(&this_molecule_diff));
+        assert_eq!(
+            scoped,
+            vec!["README.md".to_owned()],
+            "only the diff ∩ glob-match survives; other missions' files are dropped"
+        );
+    }
+
+    #[test]
+    fn restrict_publish_files_to_scope_none_or_empty_is_whole_tree_fallback() {
+        // Fail-safe: a diff-probe slip (empty scope) or an explicit `None`
+        // returns the full glob-matched set unchanged — a probe failure must
+        // never SILENTLY skip a real diff (worst case = old false-positive,
+        // never a new false-negative).
+        let matched = vec!["README.md".to_owned(), "site/index.html".to_owned()];
+        assert_eq!(
+            restrict_publish_files_to_scope(matched.clone(), None),
+            matched,
+            "None → whole-tree fallback"
+        );
+        assert_eq!(
+            restrict_publish_files_to_scope(matched.clone(), Some(&[])),
+            matched,
+            "empty scope → whole-tree fallback"
+        );
+    }
+
+    #[test]
+    fn confidential_gate_diff_scope_ignores_other_mission_leak() {
+        // The exact incident (task-20260720-b474): mission B harvests a clean
+        // diff, but mission A had already landed a README naming the fund on
+        // `main`. The WHOLE-tree scan (scope = None) blocks B's harvest; the
+        // DIFF-scoped scan (scope = B's changed files) lets it through — B's
+        // own files carry nothing forbidden.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        // Mission A's file, already on main, carries the fund name.
+        std::fs::create_dir_all(root.join("missions/aurelie-bopp-133c")).unwrap();
+        std::fs::write(
+            root.join("missions/aurelie-bopp-133c/README.md"),
+            "# Aurelie mission\n\nBuilt by Tenant-Demo Research.\n",
+        )
+        .unwrap();
+        // Mission B's own deliverable — clean, zero forbidden substrings.
+        std::fs::write(root.join("LEDGER-fidelite.md"), "fidelity ledger\n").unwrap();
+
+        let cfg = ConfidentialBlocklistConfig {
+            forbidden_substrings: vec!["Tenant-Demo Research".to_owned()],
+            publish_globs: vec!["README*".to_owned(), "**/README*".to_owned()],
+            ..Default::default()
+        };
+
+        // Whole-tree scan (pre-fix behavior) blocks the unrelated harvest.
+        let err = check_confidential_blocklist(root, &cfg, None).unwrap_err();
+        assert!(
+            err.to_string().contains("aurelie-bopp-133c"),
+            "whole-tree scan trips on another mission's file: {err}"
+        );
+
+        // Diff-scoped scan sees only mission B's own change → passes clean.
+        let b_diff = vec!["LEDGER-fidelite.md".to_owned()];
+        check_confidential_blocklist(root, &cfg, Some(&b_diff))
+            .expect("diff-scoped scan must not block on another mission's landed file");
+    }
+
+    #[test]
+    fn confidential_gate_diff_scope_still_catches_this_molecule_leak() {
+        // Diff-scoping narrows the surface but never disarms the gate: a
+        // confidential string in a file THIS molecule introduces is still a
+        // hard abort. The fix removes false positives, not the gate.
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path();
+        std::fs::write(
+            root.join("README.md"),
+            "# Project\n\nBuilt by Tenant-Demo Research.\n",
+        )
+        .unwrap();
+        let cfg = ConfidentialBlocklistConfig {
+            forbidden_substrings: vec!["Tenant-Demo Research".to_owned()],
+            publish_globs: vec!["README*".to_owned()],
+            ..Default::default()
+        };
+        let this_diff = vec!["README.md".to_owned()];
+        let err = check_confidential_blocklist(root, &cfg, Some(&this_diff)).unwrap_err();
+        assert!(
+            err.to_string().contains("README.md"),
+            "in-diff leak must still abort: {err}"
         );
     }
 
