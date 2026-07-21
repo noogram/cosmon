@@ -61,11 +61,11 @@ Optional variables:
                    — the current syzygie as of 2026-04-19 (workshop joined \
                    2026-04-19 per delib-20260419-e402). \
                    \
-                   Galaxies that consume personas resolve short-names via \
-                   `/srv/cosmon/workshop/personas/<name>/<name>.md` — the \
-                   single canonical source of truth (the former \
-                   `~/dev/projects/agent-templates/` tree was archived on \
-                   2026-04-22; see workshop CHRONICLES "Un seul workshop").
+                   Galaxies that consume personas resolve short-names \
+                   against the worker's own Claude Code subagents \
+                   (`.claude/agents/`), so no absolute persona path is \
+                   assumed. See `docs/guides/personas.md` for optional \
+                   shared-library setup.
   - remote_url     Git remote origin URL to record in neurion \
                    (optional — absent means local-only galaxy).
 

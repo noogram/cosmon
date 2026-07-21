@@ -12,8 +12,9 @@ The molecule state directory is returned by `cs --json observe {mol_id}` \
 in the `molecule_dir` field. Typically: \
 `.cosmon/state/fleets/default/molecules/{mol_id}/`. \
 Files written to the worktree (.worktrees/{mol_id}/) are DESTROYED \
-when `cs done` tears down the session. This caused data loss in \
-delib-20260410-b79f where the entire synthesis.md was lost. \
+when `cs done` tears down the session, so a synthesis written there is \
+lost. See `docs/guides/deliberation-artifacts.md` for the failure that \
+motivated this hard gate. \
 
 Panel selection uses the `panel` variable:
   - panel="auto" (or unset): worker chooses 3-5 personas from its available \
@@ -23,15 +24,13 @@ Panel selection uses the `panel` variable:
   - panel="feynman,jobs,wheeler": explicit, comma-separated list of persona \
     names — worker uses exactly those.
 
-Canonical persona source: `/srv/cosmon/workshop/personas/<name>/<name>.md`. \
-The `workshop` galaxy (syzygie peer) holds the authoritative persona \
-definitions as of 2026-04-19; Claude Code's `.claude/agents/` symlinks \
-resolve to the same files. When auto-selecting or explicitly naming a \
-persona, the short-name in `panel=...` matches the directory name under \
-`workshop/personas/`. The previous source (`~/dev/projects/agent-templates/`) \
-was archived on 2026-04-22 (moved to `~/dev/projects/.archived/`); \
-workshop is now the single canonical home (see workshop CHRONICLES \
-2026-04-22 — "Un seul workshop").
+Persona source: the worker's own Claude Code subagents, discovered from \
+`.claude/agents/` (project- or user-scoped) at run time. The short-name in \
+`panel=...` matches an available subagent's name (e.g. `feynman`, `jobs`, \
+`architect`). No absolute path is assumed — the panel is drawn from whatever \
+subagents the install exposes, so the formula is portable across galaxies. \
+Authoring a shared persona library is optional operator infrastructure; see \
+`docs/guides/personas.md` if you maintain one.
 
 The worker dispatches each panel member via the Agent() tool in parallel, \
 collects their responses, and synthesizes a structured output. The number \

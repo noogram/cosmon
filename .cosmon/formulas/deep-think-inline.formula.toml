@@ -66,7 +66,10 @@ Panel selection uses the `panel` variable:
   - panel="feynman,jobs,wheeler": explicit, comma-separated list of \
     persona names — worker uses exactly those.
 
-Canonical persona source: `/srv/cosmon/workshop/personas/<name>/<name>.md`.
+Persona source: the worker's own Claude Code subagents, discovered from \
+`.claude/agents/` at run time — the short-name in `panel=...` matches an \
+available subagent. No absolute path is assumed, so the formula is portable \
+across installs. See `docs/guides/personas.md` for optional shared-library setup.
 """
 id_prefix = "delib"
 

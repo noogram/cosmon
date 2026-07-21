@@ -1523,17 +1523,34 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         updated.status
     };
 
+    // Only tmux-pane adapters (`claude`/`aider`/`codex`/`opencode`) actually
+    // start a tmux server we can attach to. The `local`/`ollama` floor spawns a
+    // detached `cs local-worker` child, and `openai`/`anthropic` run the loop
+    // in-process — for both, `tmux … attach` prints "no server running on …",
+    // an alarming phantom on first contact (issue #5, item 5). Point the
+    // operator at the log the worker actually writes instead.
+    let uses_tmux = adapter_uses_tmux(&adapter);
+    let worker_log = worker_log_path(&store, &mol_id);
     if ctx.json {
-        let out = serde_json::json!({
+        let mut out = serde_json::json!({
             "command": "tackle",
             "molecule_id": mol_id.as_str(),
             "status": final_status.to_string(),
-            "tmux_session": session_name,
             "worktree": worktree_path.to_string_lossy(),
             "branch": branch_name,
-            "attach": format!("tmux -L {socket} attach -t {session_name}"),
+            "adapter": adapter.as_str(),
             "spawned_at": Utc::now().to_rfc3339(),
         });
+        if uses_tmux {
+            out["tmux_session"] = serde_json::json!(session_name);
+            out["attach"] = serde_json::json!(format!("tmux -L {socket} attach -t {session_name}"));
+        } else {
+            // No tmux session exists for this adapter; expose the log path the
+            // in-process / detached worker writes so tooling never emits a
+            // dead `tmux attach` string.
+            out["attach"] = serde_json::Value::Null;
+            out["log"] = serde_json::json!(worker_log.to_string_lossy());
+        }
         println!("{out}");
     } else {
         let kind_emoji = updated.kind.map_or("", |k| k.emoji());
@@ -1544,8 +1561,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  molecule: {mol_id}");
         println!("  branch:   {branch_name}");
         println!("  worktree: {}", worktree_path.display());
-        println!("  session:  {session_name}");
-        println!("  attach:   tmux -L {socket} attach -t {session_name}");
+        if uses_tmux {
+            println!("  session:  {session_name}");
+            println!("  attach:   tmux -L {socket} attach -t {session_name}");
+        } else {
+            // In-process/detached local worker: no tmux to attach to.
+            println!("  log:      {}", worker_log.display());
+        }
         if final_status == MoleculeStatus::Completed {
             println!(
                 "  status:   completed (in-process agent loop returned; run `cs done {mol_id}` to merge)"
@@ -1554,6 +1576,25 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Path of the log an in-process / detached local worker writes, used for the
+/// operator-facing guidance when the adapter has no tmux session to attach to.
+///
+/// The detached `local`/`ollama` worker appends to
+/// `MOLECULE_DIR/local-worker.log` (see [`spawn_detached_local_worker`]); the
+/// Direct-API `openai`/`anthropic` loop runs inline and leaves its trace in
+/// `MOLECULE_DIR/log.md`. Both live under the molecule state directory, so we
+/// point at `local-worker.log` when it exists and fall back to the molecule
+/// directory otherwise.
+fn worker_log_path(store: &FileStore, mol_id: &MoleculeId) -> PathBuf {
+    let mol_dir = store.molecule_dir(mol_id);
+    let detached = mol_dir.join("local-worker.log");
+    if detached.exists() {
+        detached
+    } else {
+        mol_dir.join("log.md")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2765,7 +2806,7 @@ fn build_prompt(
          response and can wedge the loop retrying the identical blocked \
          generation. **FETCH it from a canonical source instead** — e.g. \
          `curl -fsSL https://creativecommons.org/licenses/by/4.0/legalcode.txt`, \
-         the SPDX text registry, or `choosetenant_auditornse.com` — and write the \
+         the SPDX text registry, or `choosealicense.com` — and write the \
          fetched bytes verbatim. If a fetch is impossible, reference the \
          licence by its SPDX identifier and STOP; do not transcribe the text \
          from memory.\n\n",
@@ -4706,7 +4747,7 @@ fn spawn_openai_session(
 /// `/v1/chat/completions` (see `OpenAIProvider::one_turn`), so the
 /// host root is the bare `http://localhost:11434` — *not* the `…/v1`
 /// form. Override via `[adapters.local].base_url`,
-/// `COSMON_LOCAL_BASE_URL`, or `OPENAI_BASE_URL`.
+/// `COSMON_LOCAL_BASE_URL`, `OLLAMA_HOST`, or `OPENAI_BASE_URL`.
 const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
 
 /// Default local model served by Ollama. Chosen because it returns
@@ -4718,8 +4759,8 @@ const DEFAULT_LOCAL_BASE_URL: &str = "http://localhost:11434";
 const DEFAULT_LOCAL_MODEL: &str = "qwen3:8b";
 
 /// Resolve the `local` / `ollama` floor's base URL: config `base_url` →
-/// `COSMON_LOCAL_BASE_URL` → `OPENAI_BASE_URL` → compile-time Ollama
-/// default.
+/// `COSMON_LOCAL_BASE_URL` → `OLLAMA_HOST` (Ollama's native var, normalized
+/// to a full URL) → `OPENAI_BASE_URL` → compile-time Ollama default.
 ///
 /// Extracted from [`run_local_agent_loop`] (task-20260719-f45b) so the
 /// **dispatch-side preflight and the worker resolve the same endpoint**.
@@ -4735,11 +4776,69 @@ fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
                 .filter(|s| !s.is_empty())
         })
         .or_else(|| {
+            // `OLLAMA_HOST` is the native env var an Ollama user already sets
+            // to point at a non-default daemon (`127.0.0.1:11434`,
+            // `http://gpu-box:11434`, a bare host, …). Honoring it before the
+            // generic `OPENAI_BASE_URL` means the local floor dials the daemon
+            // the user actually configured instead of silently reverting to
+            // `localhost:11434` (issue #5, item 6). Normalized to a full base
+            // URL (scheme + port) because Ollama accepts scheme-less / port-less
+            // forms the reqwest client cannot.
+            std::env::var("OLLAMA_HOST")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .map(|h| normalize_ollama_host(&h))
+        })
+        .or_else(|| {
             std::env::var("OPENAI_BASE_URL")
                 .ok()
                 .filter(|s| !s.is_empty())
         })
         .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned())
+}
+
+/// Normalize an `OLLAMA_HOST` value into a full base URL the HTTP client can
+/// dial.
+///
+/// Ollama accepts several scheme-less / port-less spellings — `127.0.0.1`,
+/// `127.0.0.1:11434`, `gpu-box:11434`, `http://gpu-box`, `https://host/` — and
+/// its own client fills in `http` and port `11434` when they are absent. The
+/// reqwest client cannot, so a bare `OLLAMA_HOST=gpu-box` would otherwise be
+/// dialed on port 80. This mirrors Ollama's defaults:
+///
+/// - no `://` scheme → prepend `http://`;
+/// - no explicit port on the authority → append `:11434`;
+/// - trailing slashes trimmed.
+fn normalize_ollama_host(raw: &str) -> String {
+    let trimmed = raw.trim().trim_end_matches('/');
+    let (scheme, rest) = match trimmed.split_once("://") {
+        Some((scheme, rest)) => (scheme, rest),
+        None => ("http", trimmed),
+    };
+    // `rest` is `authority[/path]`; only the authority (up to the first `/`)
+    // carries the host:port we must complete.
+    let (authority, path) = match rest.split_once('/') {
+        Some((authority, path)) => (authority, Some(path)),
+        None => (rest, None),
+    };
+    // A `:` in the authority means a port is already present. Guard against an
+    // IPv6 literal (`[::1]`) whose brackets contain colons but no port.
+    let has_port = if let Some(after_bracket) = authority.strip_prefix('[') {
+        after_bracket
+            .rsplit_once(']')
+            .is_some_and(|(_, tail)| tail.starts_with(':'))
+    } else {
+        authority.contains(':')
+    };
+    let authority = if has_port || authority.is_empty() {
+        authority.to_owned()
+    } else {
+        format!("{authority}:11434")
+    };
+    match path {
+        Some(path) => format!("{scheme}://{authority}/{path}"),
+        None => format!("{scheme}://{authority}"),
+    }
 }
 
 /// Resolve the *effective* model the `local` / `ollama` floor will run:
@@ -8712,6 +8811,38 @@ mod tests {
         assert!(
             !adapter_uses_tmux(&v("anthropic")),
             "anthropic is Direct-API (ADR-100 R2 wave 3) — no tmux session"
+        );
+    }
+
+    /// Issue #5, item 6: `OLLAMA_HOST` is normalized into a full base URL the
+    /// HTTP client can dial, mirroring Ollama's own scheme/port defaults.
+    #[test]
+    fn normalize_ollama_host_fills_scheme_and_port() {
+        // Bare host → http:// + default port.
+        assert_eq!(normalize_ollama_host("gpu-box"), "http://gpu-box:11434");
+        // Host:port keeps the explicit port.
+        assert_eq!(
+            normalize_ollama_host("127.0.0.1:11434"),
+            "http://127.0.0.1:11434"
+        );
+        // Non-default port is preserved.
+        assert_eq!(normalize_ollama_host("gpu-box:9000"), "http://gpu-box:9000");
+        // Explicit scheme is respected; missing port still filled.
+        assert_eq!(
+            normalize_ollama_host("http://gpu-box"),
+            "http://gpu-box:11434"
+        );
+        assert_eq!(
+            normalize_ollama_host("https://ollama.internal:443"),
+            "https://ollama.internal:443"
+        );
+        // Trailing slash trimmed; a path is preserved.
+        assert_eq!(normalize_ollama_host("http://host/"), "http://host:11434");
+        // IPv6 literal without a port gets the default port after the bracket.
+        assert_eq!(normalize_ollama_host("http://[::1]"), "http://[::1]:11434");
+        assert_eq!(
+            normalize_ollama_host("http://[::1]:11434"),
+            "http://[::1]:11434"
         );
     }
 
