@@ -906,6 +906,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         briefing.as_deref(),
         &project_config,
         &mol_dir,
+        adapter.as_str(),
     );
 
     // 6. Dry-run: just print the prompt.
@@ -2765,6 +2766,7 @@ fn build_prompt(
     briefing: Option<&str>,
     config: &ProjectConfig,
     molecule_dir: &Path,
+    adapter_name: &str,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -2925,7 +2927,31 @@ fn build_prompt(
         out.push('\n');
     }
 
-    // ── EXECUTION PROTOCOL ──────────────────────────────────────
+    // ── EXECUTION PROTOCOL — adapter/capability-aware split ─────
+    // Jesse #4 clause 2 (task-20260721-676d). The `claude` / external-CLI
+    // coding-agent path drives tmux + a full shell: it can run the gate
+    // toolchain, commit to git, and walk the `cs evolve` / `cs complete`
+    // lifecycle verbs. A *local* adapter (`local` / `ollama` / `llama-cpp` /
+    // `llama`, classified by `egress::adapter_is_local`) is the in-process /
+    // detached Direct-API loop of ADR-100 — a small model on the operator's
+    // own hardware that does NOT drive tmux/cargo/git/cs. Handing it the
+    // coding-agent contract guaranteed it would fail its own briefing (Jesse:
+    // "worker briefing assumes a full coding agent"). So the local worker gets
+    // a briefing it CAN satisfy: produce the declared deliverable, written to
+    // the canonical molecule directory, and let cosmon drive the lifecycle
+    // transitions on its behalf. The coding-agent briefing below is left
+    // BYTE-IDENTICAL for every non-local adapter.
+    //
+    // Orthogonality note: the #4 headline guard (a no-op-with-chatter local
+    // mission lands NOT-completed via the real-work / acceptance-artifact
+    // check) is a different seam and still holds. This split makes a local
+    // success *achievable*; the guard keeps a local *failure* honest.
+    if cosmon_core::egress::adapter_is_local(adapter_name) {
+        build_local_worker_protocol(&mut out, mol);
+        return out;
+    }
+
+    // ── EXECUTION PROTOCOL (coding agent) ───────────────────────
     out.push_str("## Execution Protocol\n\n");
     out.push_str(
         "**IMPORTANT: Use the `cs` CLI for all cosmon operations. \
@@ -3034,6 +3060,67 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
     );
 
     out
+}
+
+/// Append the **local-worker** execution protocol to `out`.
+///
+/// A local adapter is the in-process / detached Direct-API loop (ADR-100): a
+/// model running on the operator's own hardware with no shell, no tmux, no git
+/// and no `cs` command. The coding-agent protocol (gate toolchain, commit,
+/// `cs evolve` / `cs complete`) is a contract it can never satisfy — handing it
+/// over is exactly the "worker briefing assumes a full coding agent" defect
+/// (Jesse #4 clause 2, task-20260721-676d). This protocol asks for the one
+/// thing a local model CAN produce: the declared deliverable, written into the
+/// canonical molecule directory. cosmon drives the lifecycle transitions on the
+/// worker's behalf, so none of the coding-agent-only directives appear here.
+///
+/// Deliberately free of the tokens the coding-agent path emits (`cargo`,
+/// `git commit`, `cs evolve`, `cs complete`, "run all gates") so the two
+/// briefings are textually distinguishable — the regression contract in
+/// `test_build_prompt_local_adapter_drops_coding_agent_directives`.
+fn build_local_worker_protocol(out: &mut String, mol: &MoleculeData) {
+    use std::fmt::Write;
+
+    out.push_str("## Execution Protocol (local worker)\n\n");
+    out.push_str(
+        "You are a **local, in-process worker** — a model running on the \
+         operator's own hardware through cosmon's Direct-API loop. You are NOT \
+         a coding agent: you have no shell, no terminal, no version control and \
+         no `cs` command. Do not attempt to run any build, test, lint, format or \
+         documentation tooling; do not commit; do not run any lifecycle command. \
+         cosmon records your progress and completion for you.\n\n",
+    );
+    out.push_str(
+        "Your one job is to PRODUCE THE DELIVERABLE this molecule declares and \
+         write it into the canonical molecule directory named above.\n\n",
+    );
+    out.push_str("For EACH step:\n");
+    out.push_str("1. Read the step's description and exit criteria above.\n");
+    out.push_str(
+        "2. Write the artifact it asks for as a real file in the canonical \
+         molecule directory (Markdown unless the step names another format). \
+         Empty chatter is not a deliverable — the file must contain the actual \
+         work.\n",
+    );
+    out.push_str("3. Move straight to the next step. Do NOT pause.\n\n");
+
+    out.push_str("## DO NOT — These are violations\n\n");
+    out.push_str("- Do NOT pause between steps to summarize what you did.\n");
+    out.push_str("- Do NOT ask \"shall I continue?\" or \"would you like me to proceed?\".\n");
+    out.push_str(
+        "- Do NOT run any build, test, lint, format or documentation tooling, \
+         version control, or lifecycle command — you cannot, and cosmon does \
+         not expect you to.\n",
+    );
+    out.push_str("- Do NOT wait for user input.\n\n");
+
+    let _ = writeln!(
+        out,
+        "## ▶ Produce the deliverable for step {} NOW.\n\n\
+         Begin immediately. No preamble. No planning summary. Just write the \
+         artifact.",
+        mol.current_step + 1
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -8409,6 +8496,7 @@ mod tests {
             None,
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("idea-20260407-abcd"));
@@ -8437,6 +8525,79 @@ mod tests {
         assert!(!prompt.contains("Instrument the seam before you trust"));
     }
 
+    /// Jesse #4 clause 2 (task-20260721-676d): the worker briefing must be
+    /// adapter/capability-aware. A `local` adapter is the in-process /
+    /// detached Direct-API loop (ADR-100) — a small model with no shell, no
+    /// git and no `cs` command. It must NOT receive the coding-agent contract
+    /// (run the gate toolchain, commit, `cs evolve` / `cs complete`), because
+    /// it cannot satisfy it — that is exactly "worker briefing assumes a full
+    /// coding agent". The `claude` (coding-agent) briefing keeps every one of
+    /// those directives, unchanged.
+    #[test]
+    fn test_build_prompt_local_adapter_drops_coding_agent_directives() {
+        let mol = sample_molecule("task-20260721-loc1", MoleculeStatus::Pending);
+        // Configured gates + default `Commit` on_complete so the coding-agent
+        // path genuinely emits `cargo`, `cs evolve`, and `cs complete`.
+        let mut config = ProjectConfig::default();
+        config.gates.build_command = Some("cargo check --workspace".to_owned());
+        config.gates.test_command = Some("cargo test --workspace".to_owned());
+        let mol_dir = Path::new("/abs/state/fleets/default/molecules/task-20260721-loc1");
+
+        // Every local-inference adapter (egress::adapter_is_local) drops the
+        // coding-agent directives.
+        for adapter in ["local", "ollama", "llama-cpp", "llama"] {
+            let prompt = build_prompt(&mol, None, None, &config, mol_dir, adapter);
+            assert!(
+                !prompt.contains("cargo"),
+                "{adapter}: local briefing must not tell the worker to run cargo"
+            );
+            assert!(
+                !prompt.contains("git commit"),
+                "{adapter}: local briefing must not ask for a git commit"
+            );
+            assert!(
+                !prompt.contains("cs evolve"),
+                "{adapter}: local briefing must not ask for `cs evolve`"
+            );
+            assert!(
+                !prompt.contains("cs complete"),
+                "{adapter}: local briefing must not ask for `cs complete`"
+            );
+            assert!(
+                !prompt.contains("run all gates") && !prompt.contains("Run all gates"),
+                "{adapter}: local briefing must not ask to run all gates"
+            );
+            // It still asks for the actual deliverable.
+            assert!(
+                prompt.contains("Execution Protocol (local worker)"),
+                "{adapter}: local briefing must carry the local-worker protocol"
+            );
+            assert!(
+                prompt.contains("PRODUCE THE DELIVERABLE"),
+                "{adapter}: local briefing must ask for the deliverable directly"
+            );
+        }
+
+        // The `claude` coding-agent briefing keeps the full contract.
+        let claude = build_prompt(&mol, None, None, &config, mol_dir, "claude");
+        assert!(
+            claude.contains("cargo check --workspace"),
+            "claude briefing must still run the gate toolchain"
+        );
+        assert!(
+            claude.contains("cs evolve"),
+            "claude briefing must still walk the `cs evolve` lifecycle verb"
+        );
+        assert!(
+            claude.contains("cs complete"),
+            "claude briefing must still walk the `cs complete` lifecycle verb"
+        );
+        assert!(
+            !claude.contains("Execution Protocol (local worker)"),
+            "claude briefing must NOT get the local-worker protocol"
+        );
+    }
+
     #[test]
     fn test_build_prompt_no_attribution_block_is_byte_identical() {
         // Passive-helper discipline (ADR-128, mirrors CLAUDE_CONFIG_DIR):
@@ -8444,7 +8605,14 @@ mod tests {
         // attribution section — byte-identical to a pre-attribution cosmon.
         let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
         let mol_dir = Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd");
-        let baseline = build_prompt(&mol, None, None, &ProjectConfig::default(), mol_dir);
+        let baseline = build_prompt(
+            &mol,
+            None,
+            None,
+            &ProjectConfig::default(),
+            mol_dir,
+            "claude",
+        );
         assert!(!baseline.contains("## External attribution"));
         assert!(!baseline.contains("External attribution for this fleet"));
     }
@@ -8456,7 +8624,7 @@ mod tests {
         let mut config = ProjectConfig::default();
         config.attribution.public_name = "Noogram".to_owned();
         config.attribution.public_url = "noogram.org".to_owned();
-        let prompt = build_prompt(&mol, None, None, &config, mol_dir);
+        let prompt = build_prompt(&mol, None, None, &config, mol_dir, "claude");
 
         assert!(prompt.contains("## External attribution"));
         assert!(prompt.contains("External attribution for this fleet is `Noogram` (noogram.org)."));
@@ -8494,6 +8662,7 @@ mod tests {
             None,
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         // Step checklist rendered inline.
@@ -8512,6 +8681,7 @@ mod tests {
             Some("# Mission\nDo something great."),
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("## Briefing"));
@@ -8528,7 +8698,14 @@ mod tests {
         let mol_dir = Path::new(
             "~/galaxies/example/.cosmon/state/fleets/default/molecules/idea-example-abcd",
         );
-        let prompt = build_prompt(&mol, None, None, &ProjectConfig::default(), mol_dir);
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &ProjectConfig::default(),
+            mol_dir,
+            "claude",
+        );
 
         // The block header and its imperative are present.
         assert!(prompt.contains("## Artifact paths — write durable output HERE"));
@@ -9199,6 +9376,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("Do NOT push to remote"));
@@ -9217,6 +9395,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("git push -u origin HEAD"));
@@ -9234,6 +9413,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(!prompt.contains("cargo check"));
@@ -9256,6 +9436,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("cargo check --workspace"));
@@ -9289,6 +9470,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("cargo doc --workspace --no-deps"));
@@ -9313,6 +9495,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("sphinx-build -W docs docs/_build"));
@@ -9332,6 +9515,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("uv sync"));
@@ -9390,6 +9574,7 @@ mod tests {
             None,
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
         );
 
         assert!(prompt.contains("git push -u origin HEAD"));
