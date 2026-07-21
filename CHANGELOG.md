@@ -205,6 +205,18 @@ firewall honored — end-to-end proof the sovereign local path carries real work
   before Claude starts (reaped on spawn failure), so it never persists in
   shared temp storage.
 
+### Security: a spore bundle's advertised hash now covers its crew constitution (task-20260721-f939)
+
+- `cs spore export` computes a content-addressed BLAKE3 bundle id, but the id
+  covered `spore.toml` + formulas + seal and **not** the `fleet.toml` crew
+  constitution shipped in the same bundle — so the crew could be altered
+  without moving the advertised hash (an integrity gap: two bundles differing
+  only in `fleet.toml` shared one id). The coverage set now includes
+  `fleet.toml` and its `file:` includes, and `cs spore export` explicitly
+  lists every covered file (human, `--json`, and ASTRA `spore:bundleFiles`) so
+  an integrity audit can see what the id binds. Regression test closes the
+  falsifier. This moves previously-advertised bundle ids by design.
+
 ## [0.2.1] — 2026-07-19
 
 ### Fixed: the Homebrew formula declared the wrong licence
