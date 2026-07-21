@@ -57,6 +57,13 @@ fn send_enter(backend: &dyn TransportBackend, worker_id: &WorkerId) -> Result<()
 pub enum SessionStatus {
     /// Claude is showing the "trust this folder" prompt — needs "1" + Enter.
     TrustPrompt,
+    /// Claude Code v2.x is showing the bypass-permissions acceptance prompt —
+    /// the blocking confirmation that appears the FIRST time `claude
+    /// --permission-mode bypassPermissions` launches interactively. Its
+    /// default-highlighted option is `1. No, exit`, so a bare Enter would
+    /// quit the worker; it must be answered by selecting `2. Yes, I accept`
+    /// (send "2" + Enter). See [`wait_ready`] for the handshake.
+    BypassPermsPrompt,
     /// Claude is loading / initializing (spinner, "Loading..." etc.).
     Loading,
     /// Claude is ready for input (shows the `❯` prompt or "Type your message").
@@ -75,6 +82,7 @@ impl std::fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::TrustPrompt => f.write_str("trust-prompt"),
+            Self::BypassPermsPrompt => f.write_str("bypass-perms-prompt"),
             Self::Loading => f.write_str("loading"),
             Self::Ready => f.write_str("idle"),
             Self::Working => f.write_str("working"),
@@ -89,11 +97,11 @@ impl SessionStatus {
     /// Collapse the rich Claude-TUI verdict onto the substrate-agnostic
     /// [`Liveness`] axis.
     ///
-    /// The five states that prove the process *printed something a live
-    /// claude would print* — `Loading`, `TrustPrompt`, `Ready`, `Working`,
-    /// `Blocked` — all map to [`Liveness::Live`]. `Dead` maps to
-    /// [`Liveness::Dead`]. `Unknown` (alive-but-unrecognised, or nothing
-    /// rendered yet) maps to [`Liveness::Indeterminate`].
+    /// The six states that prove the process *printed something a live
+    /// claude would print* — `Loading`, `TrustPrompt`, `BypassPermsPrompt`,
+    /// `Ready`, `Working`, `Blocked` — all map to [`Liveness::Live`]. `Dead`
+    /// maps to [`Liveness::Dead`]. `Unknown` (alive-but-unrecognised, or
+    /// nothing rendered yet) maps to [`Liveness::Indeterminate`].
     ///
     /// This is the load-bearing translation between Claude's pane signature
     /// and the contract a TUI-less Adapter answers: the caller never has to
@@ -101,9 +109,12 @@ impl SessionStatus {
     #[must_use]
     pub fn liveness(&self) -> Liveness {
         match self {
-            Self::TrustPrompt | Self::Loading | Self::Ready | Self::Working | Self::Blocked => {
-                Liveness::Live
-            }
+            Self::TrustPrompt
+            | Self::BypassPermsPrompt
+            | Self::Loading
+            | Self::Ready
+            | Self::Working
+            | Self::Blocked => Liveness::Live,
             Self::Dead => Liveness::Dead,
             Self::Unknown => Liveness::Indeterminate,
         }
@@ -116,6 +127,13 @@ mod markers {
     pub const TRUST_PROMPT: &str = "Yes, I trust this folder";
     /// Alternative trust prompt marker.
     pub const TRUST_PROMPT_ALT: &str = "Quick safety check";
+    /// The bypass-permissions acceptance banner — Claude Code v2.x shows this
+    /// the first time it launches under `--permission-mode bypassPermissions`.
+    pub const BYPASS_PERMS_WARNING: &str = "Bypass Permissions mode";
+    /// The actionable accept option in the same prompt — the anchor we key on
+    /// to know the prompt is waiting for a `2` + Enter, not merely a passing
+    /// mention of bypass mode in scrollback.
+    pub const BYPASS_PERMS_ACCEPT: &str = "Yes, I accept";
     /// Claude is ready for input.
     pub const READY_PROMPT: &str = "❯";
     /// Alternative ready indicator.
@@ -163,6 +181,19 @@ pub fn detect_status(
     Ok(classify_output(&output))
 }
 
+/// `true` when captured pane `output` shows Claude Code's bypass-permissions
+/// acceptance prompt (the [`SessionStatus::BypassPermsPrompt`] gate).
+///
+/// Pure function — no I/O. Keyed on the co-presence of the warning banner and
+/// the actionable accept option, so a mere mention of "bypass" in scrollback
+/// does not trip it. The prompt is answered by [`wait_ready`] with `2` + Enter
+/// (selecting `2. Yes, I accept`), never a bare Enter — its default option is
+/// `1. No, exit`, which would tear the worker down.
+#[must_use]
+pub fn is_bypass_perms_prompt(output: &str) -> bool {
+    output.contains(markers::BYPASS_PERMS_WARNING) && output.contains(markers::BYPASS_PERMS_ACCEPT)
+}
+
 /// Classify raw terminal output into a session status.
 ///
 /// Pure function — no I/O. Examines the last lines of output to determine
@@ -173,6 +204,18 @@ pub fn classify_output(output: &str) -> SessionStatus {
     // Trust prompt is the most urgent — it blocks everything.
     if output.contains(markers::TRUST_PROMPT) || output.contains(markers::TRUST_PROMPT_ALT) {
         return SessionStatus::TrustPrompt;
+    }
+
+    // The bypass-permissions acceptance prompt must be classified BEFORE the
+    // generic `Blocked` check below: it carries the same `Esc to cancel`
+    // footer as any yes/no dialog, but its default-highlighted option is
+    // `1. No, exit`. Treating it as `Blocked` would make `wait_ready` send a
+    // bare Enter, which selects "No, exit" and kills the worker — the exact
+    // failure this detection exists to prevent (noogram/cosmon#6). It also
+    // renders the menu chevron `❯`, so it must precede the last-lines `❯`
+    // Ready scan for the same reason the first-run wizard does.
+    if is_bypass_perms_prompt(output) {
+        return SessionStatus::BypassPermsPrompt;
     }
 
     // Check for blocked state — Claude is waiting for permission/confirmation.
@@ -237,6 +280,7 @@ pub fn wait_ready(
 ) -> Result<SessionStatus, TransportError> {
     let start = Instant::now();
     let mut trust_handled = false;
+    let mut bypass_handled = false;
 
     while start.elapsed() < timeout {
         let status = detect_status(backend, worker_id)?;
@@ -255,6 +299,21 @@ pub fn wait_ready(
                     trust_handled = true;
                 }
                 // Continue polling — Claude will transition to Loading then Ready.
+            }
+            SessionStatus::BypassPermsPrompt => {
+                if !bypass_handled {
+                    // Unlike the trust prompt, the default-highlighted option
+                    // here is `1. No, exit` — a bare Enter would quit the
+                    // worker. Select `2. Yes, I accept` explicitly by sending
+                    // the digit `2` followed by Enter (send_input appends the
+                    // Enter). Idempotent by the `bypass_handled` latch: once
+                    // accepted, ~/.claude.json records it and no re-launch of
+                    // this worker shows the prompt again. (noogram/cosmon#6)
+                    backend.send_input(worker_id, "2")?;
+                    bypass_handled = true;
+                }
+                // Continue polling — Claude dismisses the prompt and settles
+                // on Loading then Ready / Working.
             }
             SessionStatus::Blocked => {
                 // Session is blocked on a permission prompt.
@@ -943,6 +1002,119 @@ mod tests {
    2. No, exit
 ";
         assert_eq!(classify_output(output), SessionStatus::TrustPrompt);
+    }
+
+    /// A real Claude Code v2.x bypass-permissions acceptance prompt, captured
+    /// from the reproduction inside a Debian root container (noogram/cosmon#6).
+    const BYPASS_PERMS_PANE: &str = r"
+ WARNING: Claude Code running in Bypass Permissions mode
+
+ By proceeding, you accept all responsibility for actions taken while running
+ in Bypass Permissions mode.
+
+ ❯ 1. No, exit
+   2. Yes, I accept
+
+ Enter to confirm · Esc to cancel
+";
+
+    #[test]
+    fn test_classify_bypass_perms_prompt() {
+        assert_eq!(
+            classify_output(BYPASS_PERMS_PANE),
+            SessionStatus::BypassPermsPrompt
+        );
+    }
+
+    #[test]
+    fn test_bypass_perms_takes_priority_over_blocked() {
+        // The prompt shares the `Esc to cancel` footer with a generic yes/no
+        // dialog. It must NOT be classified as Blocked — a Blocked verdict
+        // makes wait_ready send a bare Enter, which selects the highlighted
+        // `1. No, exit` and kills the worker.
+        assert_ne!(
+            classify_output(BYPASS_PERMS_PANE),
+            SessionStatus::Blocked,
+            "bypass-perms prompt mis-classified as Blocked — a bare Enter would exit the worker"
+        );
+    }
+
+    #[test]
+    fn test_bypass_perms_takes_priority_over_ready() {
+        // The prompt renders the menu chevron `❯` on `❯ 1. No, exit`, which
+        // the last-lines scan would otherwise read as Ready.
+        assert_eq!(
+            classify_output(BYPASS_PERMS_PANE),
+            SessionStatus::BypassPermsPrompt
+        );
+    }
+
+    #[test]
+    fn test_is_bypass_perms_prompt_requires_both_markers() {
+        // A passing mention of bypass mode in scrollback (no accept option) is
+        // not the live prompt and must not trip the detector.
+        assert!(!is_bypass_perms_prompt(
+            "running in Bypass Permissions mode\n❯ "
+        ));
+        // The accept phrase without the warning banner is likewise not enough.
+        assert!(!is_bypass_perms_prompt("2. Yes, I accept the terms\n"));
+        assert!(is_bypass_perms_prompt(BYPASS_PERMS_PANE));
+    }
+
+    #[test]
+    fn test_bypass_perms_liveness_is_live() {
+        // The worker parked at the accept prompt is alive — the probe must not
+        // tear it down as a failed spawn before the handshake answers it.
+        assert_eq!(SessionStatus::BypassPermsPrompt.liveness(), Liveness::Live);
+    }
+
+    #[test]
+    fn test_wait_ready_sends_accept_on_bypass_prompt() {
+        use crate::mock::MockCall;
+        use crate::MockBackend;
+
+        let backend = MockBackend::new();
+        let config = cosmon_core::transport::RuntimeConfig::default();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("test-bypass").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "echo".to_owned(),
+            args: vec![],
+        };
+        let worker = backend.spawn(&agent, &config).unwrap();
+
+        // The pane stays parked at the bypass prompt for the whole window, so
+        // wait_ready times out returning the last observed status — but along
+        // the way it MUST answer the prompt with `2` (never a bare Enter).
+        backend.set_canned_output(BYPASS_PERMS_PANE);
+
+        let status = wait_ready(
+            &backend,
+            &worker.id,
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        assert_eq!(status, SessionStatus::BypassPermsPrompt);
+
+        let calls = backend.calls();
+        let accept_count = calls
+            .iter()
+            .filter(|c| matches!(c, MockCall::SendInput { input, .. } if input == "2"))
+            .count();
+        assert_eq!(
+            accept_count, 1,
+            "expected exactly one `2` accept keystroke (idempotent handshake), got {accept_count}"
+        );
+        // And crucially: no bare-Enter (empty input) was sent, which would
+        // have selected `1. No, exit`.
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, MockCall::SendInput { input, .. } if input.is_empty())),
+            "wait_ready sent a bare Enter on the bypass prompt — would select `No, exit`"
+        );
     }
 
     #[test]
