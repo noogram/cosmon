@@ -7,6 +7,28 @@
 //! flag and delegate all tmux operations to the backend (no duplicate
 //! tmux command execution).
 //!
+//! # Headless spawn contract (Jesse Thaler / issue #6)
+//!
+//! This is the *headless* claude spawn path — distinct from the TUI
+//! send-keys path in `cosmon-cli`'s `tackle_env`. It is reached by the
+//! worker-respawn / re-engage callers (`cs thaw`, patrol restart). Three
+//! things that Claude Code v2.x made mandatory and that this module now
+//! honours:
+//!
+//! 1. **`-p`, not `--prompt`.** Claude Code v2.x renamed the headless flag
+//!    to `-p` / `--print` (the prompt is now positional or read from
+//!    stdin); passing the removed `--prompt` dies with
+//!    `error: unknown option '--prompt'` before the model ever runs.
+//! 2. **Briefing on stdin, never inline.** A multi-KB multi-line briefing
+//!    shell-escaped through `new-session -> sh -c -> claude -p '<blob>'`
+//!    leaves claude waiting on stdin forever (the escaping across three
+//!    layers desynchronises). We write the briefing to a file and redirect
+//!    it onto claude's stdin (`claude -p < <file>`) — zero escaping layers.
+//! 3. **Root escape valve.** Under euid 0 a bypass permission mode is
+//!    refused unless `IS_SANDBOX=1` is exported (many container
+//!    deployments run as root); the spawn path forces it in that exact
+//!    intersection.
+//!
 //! # ADR-097 Worker-Spawn Port IFBDD trail
 //!
 //! Each spawn / kill / liveness probe is instrumented with one of the
@@ -107,7 +129,12 @@ pub struct ClaudeSessionConfig {
     pub work_dir: String,
     /// Permission mode derived from agent clearance.
     pub permission_mode: PermissionMode,
-    /// Optional initial prompt to send to Claude.
+    /// Optional initial prompt (the worker briefing) to hand to Claude.
+    ///
+    /// When `Some`, it is delivered to a headless `claude -p` via **stdin
+    /// from a temp file** — never as an inline `-p '<blob>'` argument (see
+    /// the module docs, point 2). When `None`, a bare TUI session is
+    /// spawned and the caller is expected to deliver work via send-keys.
     pub prompt: Option<String>,
     /// Optional IFBDD telemetry context (ADR-097). When `Some`, the
     /// spawn path emits [`EventV2::WorkerSpawnAttempted`](cosmon_core::event_v2::EventV2::WorkerSpawnAttempted)
@@ -123,11 +150,124 @@ pub struct ClaudeSessionConfig {
     pub pre_existing_worker: Option<WorkerId>,
 }
 
+/// Whether a headless claude spawn must force `IS_SANDBOX=1` to survive
+/// Claude Code v2.x's root guard (issue #6.2 / Jesse Thaler).
+///
+/// Claude Code refuses a bypass permission mode when `getuid() == 0` unless
+/// `IS_SANDBOX=1` (or `CLAUDE_CODE_BUBBLEWRAP`) is set, then `exit(1)`. We
+/// force the escape valve **only** in that exact intersection — running as
+/// root *and* the bypass mode — so a non-root worker's env is untouched and
+/// a non-bypass mode (which the guard never trips) gains nothing spurious.
+///
+/// This mirrors [`cosmon_cli::tackle_env::force_sandbox_escape`], the copy on
+/// the TUI send-keys path. The canonical predicate cannot be imported here:
+/// `cosmon-cli` depends on `cosmon-transport`, not the reverse, so inverting
+/// the edge to share a three-line pure fn would be far more disruptive than
+/// duplicating it. The two copies are kept in lock-step by name and by the
+/// shared issue-#6 reference. Pure: `is_root` is injected so the decision is
+/// unit-testable without actually being root.
+///
+/// [`cosmon_cli::tackle_env::force_sandbox_escape`]: https://docs.rs/cosmon-cli
+#[must_use]
+fn force_sandbox_escape(perm_mode: PermissionMode, is_root: bool) -> bool {
+    is_root && matches!(perm_mode, PermissionMode::BypassPermissions)
+}
+
+/// Shell-quote a string for safe embedding in the spawn command.
+///
+/// Mirrors the quoting used on the TUI path (`tackle_env::shell_quote` /
+/// `TmuxBackend::shell_quote`): safe characters pass verbatim, anything else
+/// is single-quoted with embedded quotes escaped as `'\''`. Used only for
+/// the *briefing file path* — the briefing content itself never touches the
+/// command string (it travels on stdin), so no multi-KB blob is escaped here.
+fn shell_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_owned();
+    }
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@'))
+    {
+        return s.to_owned();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Write the worker briefing to a temp file and return its path.
+///
+/// The briefing is delivered to a headless `claude -p` on **stdin** (see
+/// [`build_headless_command`]) rather than as an inline `-p '<blob>'`
+/// argument — a multi-KB multi-line briefing escaped through
+/// `new-session -> sh -c -> claude` desynchronises and leaves claude waiting
+/// on stdin forever (issue #6.3). A file redirect has no escaping layers to
+/// get wrong.
+///
+/// The file lives in the system temp dir, keyed by the worker session name
+/// and this process's pid so concurrent spawns never collide. It is
+/// intentionally **not** deleted here: the `claude` that reads it is a
+/// detached grand-child that outlives this call (same lifetime discipline as
+/// the `worker.stderr` capture on the TUI path).
+///
+/// # Errors
+///
+/// Returns [`ClaudeError::Io`] if the file cannot be written.
+fn write_briefing_file(session_name: &str, briefing: &str) -> Result<String, ClaudeError> {
+    let safe: String = session_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let mut path = std::env::temp_dir();
+    path.push(format!("cosmon-briefing-{safe}-{}.txt", std::process::id()));
+    std::fs::write(&path, briefing).map_err(|e| ClaudeError::Io(e.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Build the shell command string for a headless claude spawn.
+///
+/// Pure and side-effect-free so the byte shape is unit-testable without
+/// tmux, root, or a real `claude`. The three issue-#6 fixes live here:
+///
+/// - `-p` (not the removed `--prompt`) when a briefing is present;
+/// - the briefing delivered via stdin redirect from `briefing_file`, so no
+///   escaped blob rides the command string;
+/// - an `IS_SANDBOX=1` prefix when [`force_sandbox_escape`] fires.
+///
+/// `briefing_file` is `None` for a bare TUI spawn (caller delivers via
+/// send-keys) and `Some(path)` for a headless briefing delivery.
+fn build_headless_command(
+    permission_mode: PermissionMode,
+    briefing_file: Option<&str>,
+    is_root: bool,
+) -> String {
+    let mut cmd = String::new();
+    if force_sandbox_escape(permission_mode, is_root) {
+        // Re-emitted inline (not via the process env) because the tmux
+        // server froze its env at startup and drops later shell overrides;
+        // the value must ride the command string to reach the worker.
+        cmd.push_str("IS_SANDBOX=1 ");
+    }
+    let _ = write!(cmd, "claude --permission-mode {permission_mode}");
+    if let Some(path) = briefing_file {
+        // issue #6.1 + #6.3: `-p` with the briefing on stdin from a file.
+        let _ = write!(cmd, " -p < {}", shell_quote(path));
+    }
+    cmd
+}
+
 /// Spawn a new Claude Code session in a tmux window.
 ///
 /// Creates a tmux session running `claude` with the appropriate
 /// `--permission-mode` flag derived from the agent's [`Clearance`].
 /// Delegates all tmux operations to [`TmuxBackend`].
+///
+/// When [`ClaudeSessionConfig::prompt`] is `Some`, the briefing is written to
+/// a temp file and delivered to a headless `claude -p` on **stdin** (issue #6
+/// — see the module docs). When `None`, a bare TUI session is spawned.
 ///
 /// When [`ClaudeSessionConfig::telemetry`] is `Some`, an
 /// [`EventV2::WorkerSpawnAttempted`](cosmon_core::event_v2::EventV2::WorkerSpawnAttempted)
@@ -137,15 +277,18 @@ pub struct ClaudeSessionConfig {
 ///
 /// # Errors
 ///
-/// Returns [`ClaudeError::SpawnFailed`] if the tmux session cannot be created.
+/// Returns [`ClaudeError::Io`] if the briefing temp file cannot be written,
+/// or [`ClaudeError::SpawnFailed`] if the tmux session cannot be created.
 pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeError> {
-    let mut claude_cmd = format!("claude --permission-mode {}", config.permission_mode);
-
-    if let Some(ref prompt) = config.prompt {
-        // Shell-escape the prompt for safe embedding
-        let escaped = prompt.replace('\'', "'\\''");
-        let _ = write!(claude_cmd, " --prompt '{escaped}'");
-    }
+    let briefing_file = match config.prompt {
+        Some(ref prompt) => Some(write_briefing_file(&config.session_name, prompt)?),
+        None => None,
+    };
+    // Production callers read the real effective uid; the guard fires only
+    // under root + bypass (see `force_sandbox_escape`).
+    let is_root = nix::unistd::Uid::effective().is_root();
+    let claude_cmd =
+        build_headless_command(config.permission_mode, briefing_file.as_deref(), is_root);
 
     // ADR-097 / WS-1 — record the spawn attempt *before* the backend
     // call so a crash mid-spawn still leaves a trail. The event uses
@@ -438,6 +581,116 @@ mod tests {
         assert_eq!(
             PermissionMode::BypassPermissions.to_string(),
             "bypassPermissions"
+        );
+    }
+
+    // -- issue #6 headless spawn: command shape (Jesse Thaler) --
+
+    /// #6.1: the headless command uses `-p` with the briefing on stdin, and
+    /// NEVER the removed `--prompt` flag (which dies with
+    /// `error: unknown option '--prompt'` on Claude Code v2.x).
+    #[test]
+    fn headless_command_uses_dash_p_stdin_not_prompt() {
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            Some("/tmp/cosmon-briefing-polecat-42.txt"),
+            false,
+        );
+        assert_eq!(
+            cmd,
+            "claude --permission-mode bypassPermissions -p < /tmp/cosmon-briefing-polecat-42.txt"
+        );
+        assert!(
+            !cmd.contains("--prompt"),
+            "the removed --prompt flag must never appear: {cmd}"
+        );
+    }
+
+    /// A bare TUI spawn (no briefing) omits `-p` entirely — the caller
+    /// delivers work via send-keys. This is the current live shape for the
+    /// thaw / patrol respawn callers, which pass `prompt: None`.
+    #[test]
+    fn headless_command_without_briefing_is_bare_tui() {
+        let cmd = build_headless_command(PermissionMode::AcceptEdits, None, false);
+        assert_eq!(cmd, "claude --permission-mode acceptEdits");
+        assert!(!cmd.contains(" -p"), "no briefing → no -p: {cmd}");
+    }
+
+    /// #6.2: root + bypass forces `IS_SANDBOX=1` in front of the binary so
+    /// Claude Code v2.x does not `exit(1)` under euid 0. Container
+    /// deployments frequently run as root.
+    #[test]
+    fn headless_command_forces_is_sandbox_under_root_bypass() {
+        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, true);
+        assert!(
+            cmd.starts_with("IS_SANDBOX=1 claude"),
+            "root + bypass must prefix IS_SANDBOX=1: {cmd}"
+        );
+    }
+
+    /// The escape valve fires ONLY in the exact intersection (root AND a
+    /// bypass mode) — every other combination leaves the command untouched.
+    #[test]
+    fn force_sandbox_escape_only_under_root_and_bypass() {
+        assert!(force_sandbox_escape(
+            PermissionMode::BypassPermissions,
+            true
+        ));
+        assert!(!force_sandbox_escape(
+            PermissionMode::BypassPermissions,
+            false
+        ));
+        assert!(!force_sandbox_escape(PermissionMode::AcceptEdits, true));
+        assert!(!force_sandbox_escape(PermissionMode::Plan, true));
+        assert!(!force_sandbox_escape(PermissionMode::AcceptEdits, false));
+    }
+
+    /// A non-root worker's command is byte-identical to the no-sandbox shape
+    /// even under a bypass mode — the common fleet path is untouched.
+    #[test]
+    fn headless_command_non_root_has_no_sandbox_prefix() {
+        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, false);
+        assert!(
+            !cmd.contains("IS_SANDBOX"),
+            "non-root must not gain an IS_SANDBOX prefix: {cmd}"
+        );
+    }
+
+    /// #6.3: the briefing content rides a file on stdin, never the command
+    /// string — so a multi-KB multi-line briefing is never shell-escaped
+    /// through the `new-session -> sh -c -> claude` layers. `write_briefing_file`
+    /// round-trips the bytes and the built command redirects that exact path.
+    #[test]
+    fn briefing_travels_on_stdin_not_inline() {
+        let briefing = "line one\nline two with 'quotes' and $VARS\n".repeat(200);
+        let path = write_briefing_file("polecat-bbbb", &briefing).expect("write succeeds");
+        let read_back = std::fs::read_to_string(&path).expect("briefing file readable");
+        assert_eq!(read_back, briefing, "briefing bytes must round-trip");
+
+        let cmd = build_headless_command(PermissionMode::BypassPermissions, Some(&path), false);
+        assert!(
+            cmd.contains(" -p < "),
+            "must redirect stdin from the file: {cmd}"
+        );
+        assert!(
+            !cmd.contains("line two"),
+            "briefing content must never appear in the command string: {cmd}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A briefing-file path with shell-special characters is quoted so the
+    /// redirect survives the outer shell round-trip.
+    #[test]
+    fn briefing_path_with_spaces_is_quoted() {
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            Some("/tmp/My Dir/brief.txt"),
+            false,
+        );
+        assert!(
+            cmd.ends_with("-p < '/tmp/My Dir/brief.txt'"),
+            "a path with spaces must be single-quoted: {cmd}"
         );
     }
 
