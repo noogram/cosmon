@@ -101,6 +101,34 @@ C5 distinguishes real output from liveness and exposes an `OutputStalled`
 witness to `cs health`/patrol. These signals inform the operator. They do not
 authorize the runtime to terminate or re-tackle work automatically.
 
+### RR-SAFE-5 — Harvest routing
+
+The runtime never auto-harvests a molecule whose merge the operator has
+reserved or routed. Two per-molecule tags carry the intent, both honored in the
+resident loop's first (harvest) sweep alongside `hold:human` and the review
+gate:
+
+- **`no-auto-harvest`** — reserve the harvest as an operator gesture. The
+  completed molecule is left untouched; a human runs `cs done` (or merges by
+  hand) when the park is lifted.
+- **`harvest_to:<branch>`** — a routing intent naming a non-trunk merge target.
+  The resident loop can only ever merge to the trunk (its `cs done` shell-out
+  carries no branch argument), so *any* `harvest_to:` is honored as "not the
+  runtime's to harvest": the merge is reserved for the operator gesture that can
+  route it.
+
+This is the response to the 2026-07-20 failure: the operator had rewritten
+`main` to park the whole math-attack line on `spore/math-attack` pending
+validation, yet the runtime auto-harvested completed `task-20260720-90d2` and
+merged its branch into `main` (merge `63fc899`), silently undoing the park. The
+git-level park was invisible to the runtime, which reasons over molecule
+tags/status, not branch topology. A harvest-reserved completed blocker also
+never clears its dependents (it never merges, so `merged_at` stays absent),
+mirroring the operator's park of the whole line rather than draining past it.
+
+Falsifier: a runtime harvest event merging to the trunk for a molecule carrying
+`no-auto-harvest` or any `harvest_to:` tag.
+
 ## Re-ignition gate
 
 The gate is intentionally binary. Its wording is copied verbatim from the
