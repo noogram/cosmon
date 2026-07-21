@@ -169,20 +169,23 @@ firewall honored — end-to-end proof the sovereign local path carries real work
 - Also corrected a misleading log line: the `local` adapter runs as a *detached*
   worker, not the in-process ADR-100 Direct-API model its completion message
   claimed.
-- The worker briefing is now **adapter/capability-aware** — closing the issue's
-  second clause ("worker briefing assumes a full coding agent"). A `local` /
-  `ollama` / `llama-cpp` / `llama` adapter is a small model running on the
-  operator's own hardware with no shell, no git and no `cs` command; it used to
-  receive the identical full-coding-agent contract as a Claude coding agent
-  ("run all gates", "commit your changes", `cs evolve`, `cs complete`), a
-  briefing it could never satisfy. It now gets a briefing matched to what it can
-  do: produce the declared deliverable and write it into the canonical molecule
-  directory, with cosmon driving the lifecycle transitions on its behalf. The
-  Claude / external-CLI coding-agent briefing is unchanged. The two changes are
-  complementary — the acceptance-artifact guard keeps a local *failure* honest;
-  the adapter-aware briefing makes a local *success* achievable, so a mission
-  can genuinely run end-to-end on local models. (The docs-suggestion prong of
-  the issue is tracked separately in the documentation work.)
+- The worker's **execution protocol is now adapter-aware** — partly addressing
+  the issue's second clause ("worker briefing assumes a full coding agent"). A
+  `local` / `ollama` / `llama-cpp` / `llama` adapter is a small model running on
+  the operator's own hardware with no shell, no git and no `cs` command; it used
+  to receive the identical full-coding-agent contract as a Claude coding agent
+  ("run all gates", "commit your changes", `cs evolve`, `cs complete`). Its
+  protocol wrapper is now matched to what it can do — produce the declared
+  deliverable, with cosmon driving the lifecycle transitions on its behalf; the
+  Claude / external-CLI coding-agent briefing is unchanged. **This is not the
+  whole fix, and we say so honestly:** a clean-room re-audit showed the *formula
+  step text* (e.g. `task-work`'s "run all gates: build, test, ...") is itself
+  coding-agent-shaped and still renders into the local prompt, contradicting the
+  new protocol. Fully closing clause 2 needs adapter-capability gating of
+  formulas (a cargo-gates mission should not dispatch to a chat-only model at
+  all) - that, and the issue's docs-suggestion prong, are tracked follow-ups,
+  not shipped here. The acceptance-artifact guard above still keeps a local
+  *failure* honest regardless.
 
 ### Fixed: the Claude adapter failed against Claude Code v2.x (Jesse #6)
 
