@@ -26,6 +26,11 @@ cosmon-bridge-claude.workspace = true
 # out of the test-gated `harness` module (task-20260622-da94 seam-lifting).
 # Surfaced cosmon-ward in molecule task-20260623-a2db outcomes.
 cosmon-core = { workspace = true, features = ["test-harness"] }
+# `nix` supplies `Uid::effective().is_root()` for the headless claude spawn
+# path (`claude.rs`): Claude Code v2.x refuses a bypass permission mode under
+# euid 0 unless `IS_SANDBOX=1` is set (BUG #6.2). `user` is the feature that
+# exposes `unistd::Uid`; the workspace pin already enables it.
+nix.workspace = true
 cosmon-state.workspace = true
 serde.workspace = true
 thiserror.workspace = true

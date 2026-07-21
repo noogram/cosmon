@@ -1523,6 +1523,7 @@ dependencies = [
  "cosmon-core",
  "cosmon-state",
  "fs2",
+ "nix 0.31.2",
  "serde",
  "tempfile",
  "thiserror 2.0.18",
