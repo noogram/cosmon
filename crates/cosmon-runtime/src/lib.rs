@@ -477,6 +477,29 @@ pub trait LivenessCheck {
     /// as `true` (optimistic) so transient failures never synthesize a
     /// false-positive orphan warning.
     fn is_session_alive(&self, session_name: &str) -> bool;
+
+    /// Return `true` if the operating-system worker process identified by
+    /// `pid` (and its launch fingerprint `pid_start_time`) is still alive.
+    ///
+    /// This is the second liveness axis, added for the detached
+    /// `cs local-worker` transport: a local worker has no tmux pane, so
+    /// [`Self::is_session_alive`] cannot witness its death — but `cs tackle`
+    /// records the child's PID and platform launch-time token on the
+    /// molecule's [`cosmon_core::process::MoleculeProcess`]. Consulting that
+    /// witness is what lets `cs run` reclaim a `Running` molecule whose local
+    /// worker was `kill -9`'d (noogram/cosmon#3, Jesse Thaler's kill+restart
+    /// repro): a numeric PID alone is reusable, so implementations must
+    /// compare `pid_start_time` too and only report *dead* when the identity
+    /// provably no longer matches.
+    ///
+    /// The default implementation returns `true` (optimistic), so
+    /// tmux-only implementations and test doubles that do not model a PID
+    /// witness are unaffected — the same "better to miss an orphan than cry
+    /// wolf" posture as [`Self::is_session_alive`].
+    fn is_worker_alive(&self, pid: u32, pid_start_time: Option<u64>) -> bool {
+        let _ = (pid, pid_start_time);
+        true
+    }
 }
 
 /// Default [`LivenessCheck`] used when none is configured — always reports
@@ -536,6 +559,22 @@ impl LivenessCheck for TmuxLivenessCheck {
             Err(_) => true,
         }
     }
+
+    /// Probe the recorded worker PID via its platform launch fingerprint.
+    ///
+    /// A live worker's current [`cosmon_process_witness::process_start_time`]
+    /// must equal the token captured at `cs tackle` time. If the PID is gone
+    /// (`None`) or the kernel has reused the number for a different process
+    /// (mismatch), the original worker is provably dead. When the molecule
+    /// never recorded a start-time token (`pid_start_time == None`) we cannot
+    /// authenticate the PID and stay optimistic (`true`) rather than risk
+    /// resetting a live worker — a PID alone is not an identity.
+    fn is_worker_alive(&self, pid: u32, pid_start_time: Option<u64>) -> bool {
+        let Some(recorded) = pid_start_time else {
+            return true;
+        };
+        cosmon_process_witness::process_start_time(pid) == Some(recorded)
+    }
 }
 
 /// One detected orphan: a molecule that is `Running` in the store but whose
@@ -549,11 +588,25 @@ pub struct Orphan {
     pub session_name: String,
 }
 
-/// Scan a [`FleetSnapshot`] for running molecules whose tmux session is dead.
+/// Scan a [`FleetSnapshot`] for running molecules whose worker is dead.
 ///
-/// Molecules without a `session_name` are skipped — they predate functional
-/// session naming and cannot be probed. The scan is a pure function over the
-/// snapshot and the liveness probe; it never mutates state.
+/// A `Running` molecule is reported as an [`Orphan`] when **either** liveness
+/// axis witnesses its worker's death:
+///
+/// * **PID witness** — the detached `cs local-worker` transport records the
+///   child PID and its launch fingerprint on
+///   [`cosmon_core::process::MoleculeProcess`]. A local worker has no tmux
+///   pane, so it can only be caught here. Checked first because it is the
+///   authoritative witness for the transport in noogram/cosmon#3 (a
+///   `kill -9`'d local worker leaves a `Running` molecule whose PID identity
+///   no longer resolves). See [`LivenessCheck::is_worker_alive`].
+/// * **tmux session** — the historical axis: a molecule whose stamped
+///   `session_name` no longer maps to a live tmux session (phantom-workers
+///   part 2). Molecules without a `session_name` and without a PID witness
+///   are skipped — they cannot be probed.
+///
+/// The scan is a pure function over the snapshot and the liveness probe; it
+/// never mutates state.
 #[must_use]
 pub fn orphan_scan(snapshot: &FleetSnapshot, liveness: &dyn LivenessCheck) -> Vec<Orphan> {
     snapshot
@@ -561,6 +614,24 @@ pub fn orphan_scan(snapshot: &FleetSnapshot, liveness: &dyn LivenessCheck) -> Ve
         .iter()
         .filter(|m| m.status == MoleculeStatus::Running)
         .filter_map(|m| {
+            // Axis 1 — PID witness (detached local-worker). Only a recorded
+            // PID *with* a launch fingerprint is authenticatable; without the
+            // fingerprint `is_worker_alive` stays optimistic and we fall
+            // through to the tmux axis.
+            if let Some(process) = m.process.as_ref() {
+                if let Some(pid) = process.pid {
+                    if !liveness.is_worker_alive(pid, process.pid_start_time) {
+                        return Some(Orphan {
+                            id: m.id.clone(),
+                            session_name: m
+                                .session_name
+                                .clone()
+                                .unwrap_or_else(|| process.tmux_session.clone()),
+                        });
+                    }
+                }
+            }
+            // Axis 2 — tmux session (phantom-workers part 2).
             let session = m.session_name.as_ref()?;
             if liveness.is_session_alive(session) {
                 None
@@ -1094,10 +1165,13 @@ impl Runtime {
             //     died seconds after spawn.
             // The recheck runs orphan_scan against the same liveness
             // probe production already injects (TmuxLivenessCheck), and
-            // for every Running molecule whose tmux session is dead
-            // resets the molecule to Pending (clearing assigned_worker
-            // and session_name). The next tick's frontier reducer then
-            // re-dispatches it via the normal path.
+            // for every Running molecule whose worker is dead — a dead
+            // tmux pane OR a dead detached local-worker PID
+            // (noogram/cosmon#3) — resets the molecule to Pending
+            // (clearing assigned_worker and session_name). The next
+            // tick's frontier reducer then re-dispatches it via the
+            // normal path, reusing its existing worktree/branch. COMPLETED
+            // work is never touched: the scan filters on `Running` only.
             // See `docs/diagnostic/2026-04-25-phantom-workers-part2-invariance-review.md`.
             //
             // The reset is best-effort: if it succeeds, we let the
@@ -1647,6 +1721,66 @@ mod tests {
         assert!(NoLivenessCheck.is_session_alive("whatever"));
     }
 
+    #[test]
+    fn no_liveness_check_reports_worker_alive_by_default() {
+        // The PID axis inherits the optimistic default.
+        assert!(NoLivenessCheck.is_worker_alive(4242, Some(123_456)));
+    }
+
+    /// Liveness double for the detached local-worker transport: the tmux
+    /// axis reports *alive* (there is no pane to witness — a local worker is
+    /// a bare detached process), while the PID axis reports *dead* (the
+    /// worker was `kill -9`'d). This is exactly Jesse Thaler's
+    /// noogram/cosmon#3 shape: only the PID witness can catch it.
+    struct DeadLocalWorkerCheck;
+    impl LivenessCheck for DeadLocalWorkerCheck {
+        fn is_session_alive(&self, _session_name: &str) -> bool {
+            true
+        }
+        fn is_worker_alive(&self, _pid: u32, _pid_start_time: Option<u64>) -> bool {
+            false
+        }
+    }
+
+    /// Attach a detached-local-worker process record with a recorded PID and
+    /// launch fingerprint — the witness `cs tackle` persists for a local
+    /// worker (see `record_detached_local_worker_pid`).
+    fn with_local_worker_process(mut mol: MoleculeData, pid: u32) -> MoleculeData {
+        let wid = cosmon_core::id::WorkerId::new("w-local").expect("wid");
+        let process = cosmon_core::process::MoleculeProcess::new(wid, "local-b")
+            .with_pid(pid)
+            .with_pid_start_time(999_000);
+        mol.process = Some(process);
+        mol
+    }
+
+    #[test]
+    fn orphan_scan_detects_dead_local_worker_pid() {
+        // Session appears alive (no tmux pane), but the recorded PID is
+        // provably dead — the molecule must still be flagged as an orphan.
+        let mol =
+            with_local_worker_process(running_mol_with_session("task-20260412-0002", None), 4242);
+        let snap = FleetSnapshot {
+            molecules: vec![mol],
+        };
+        let orphans = orphan_scan(&snap, &DeadLocalWorkerCheck);
+        assert_eq!(orphans.len(), 1, "dead local-worker PID must be caught");
+        assert_eq!(orphans[0].session_name, "local-b");
+    }
+
+    #[test]
+    fn orphan_scan_skips_live_local_worker_pid() {
+        // A live PID with a matching session must not be reclaimed.
+        let mol =
+            with_local_worker_process(running_mol_with_session("task-20260412-0003", None), 4242);
+        let snap = FleetSnapshot {
+            molecules: vec![mol],
+        };
+        // Both axes report alive: AliveSessionCheck uses the default
+        // (optimistic) `is_worker_alive`.
+        assert!(orphan_scan(&snap, &AliveSessionCheck).is_empty());
+    }
+
     /// Executor that records `drain_native_tail` calls so tests can assert
     /// the runtime re-enters a molecule stalled on a native/gate step.
     #[derive(Default)]
@@ -1866,6 +2000,151 @@ mod tests {
             reloaded.status,
             MoleculeStatus::Running,
             "molecule must end Running after the successful retry, not stranded Pending"
+        );
+    }
+
+    /// Regression for noogram/cosmon#3 (Jesse Thaler, external tester):
+    /// `cs run` must reclaim a `Running` molecule whose **detached
+    /// local-worker** process was `kill -9`'d, then re-dispatch it — instead
+    /// of trusting `Running` forever and idling to the timeout (exit 124).
+    ///
+    /// The scenario faithfully mirrors the kill+restart repro:
+    ///   1. `A` has already completed and merged; `B` (`--blocked-by A`) was
+    ///      dispatched and is `Running`, carrying the local worker's PID
+    ///      witness on its `MoleculeProcess`.
+    ///   2. Both the `cs run` process and B's `cs local-worker` were killed —
+    ///      modelled by [`DeadLocalWorkerCheck`] (tmux says alive, because a
+    ///      local worker has no pane; the PID witness says dead).
+    ///   3. `cs run A` restarts.
+    ///
+    /// Before the fix `orphan_scan` only consulted the tmux axis, so B (no
+    /// `session_name`, only a PID) was never flagged, never reset, never
+    /// re-dispatched — the runtime idled to the deadline. After the fix the
+    /// PID axis catches it: B is reset to `Pending`, re-dispatched, completes,
+    /// and the loop drains cleanly (`PolicyDrained`, not `Deadline`). The
+    /// already-`Completed` A is never re-run.
+    #[test]
+    #[allow(clippy::items_after_statements)]
+    fn test_cs_run_reclaims_orphaned_local_worker_after_kill_restart() {
+        use cosmon_filestore::FileStore;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
+
+        let a = MoleculeId::new("task-20260721-aaaa").unwrap();
+        let b = MoleculeId::new("task-20260721-bbbb").unwrap();
+
+        // A: completed and merged, with a forward Blocks edge to B.
+        let mut mol_a = pending_mol(a.as_str());
+        mol_a.status = MoleculeStatus::Completed;
+        mol_a.merged_at = Some(Utc::now());
+        mol_a.typed_links =
+            vec![cosmon_core::interaction::MoleculeLink::Blocks { target: b.clone() }];
+        store.save_molecule(&a, &mol_a).unwrap();
+
+        // B: Running, blocked-by A, with a *dead* detached-local-worker PID
+        // witness and NO tmux session_name (the local-worker shape).
+        let mut mol_b = pending_mol(b.as_str());
+        mol_b.status = MoleculeStatus::Running;
+        mol_b.typed_links =
+            vec![cosmon_core::interaction::MoleculeLink::BlockedBy { source: a.clone() }];
+        mol_b = with_local_worker_process(mol_b, 424_242);
+        mol_b.session_name = None;
+        store.save_molecule(&b, &mol_b).unwrap();
+
+        // Executor that completes a molecule synchronously on dispatch —
+        // stands in for a fresh worker that reclaims B's worktree and lands
+        // the branch. Records every dispatch so we can assert B (and only B)
+        // was re-dispatched.
+        struct CompletingExecutor {
+            root: std::path::PathBuf,
+            dispatched: std::sync::Mutex<Vec<MoleculeId>>,
+        }
+        impl Executor for CompletingExecutor {
+            fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+                self.dispatched.lock().unwrap().push(id.clone());
+                let store = FileStore::new(&self.root);
+                let mut mol = store
+                    .load_molecule(id)
+                    .map_err(|e| RuntimeError::Dispatch {
+                        id: id.clone(),
+                        reason: e.to_string(),
+                    })?;
+                mol.status = MoleculeStatus::Completed;
+                mol.merged_at = Some(Utc::now());
+                mol.release_process();
+                store
+                    .save_molecule(id, &mol)
+                    .map_err(|e| RuntimeError::Dispatch {
+                        id: id.clone(),
+                        reason: e.to_string(),
+                    })?;
+                Ok(())
+            }
+        }
+
+        let (plan, edges) = compile_plan(&store, std::slice::from_ref(&a)).unwrap();
+        assert!(
+            edges.contains(&(a.clone(), b.clone())),
+            "compile_plan must derive the A→B edge, got {edges:?}"
+        );
+
+        let config = RuntimeConfig {
+            poll_interval: Duration::from_millis(5),
+            max_runtime: Some(Duration::from_millis(500)),
+            sweep_orphan_descendants_every: None,
+            // Recheck every tick so the reclaim fires promptly in the test.
+            liveness_recheck_every: Some(1),
+        };
+        let executor = std::sync::Arc::new(CompletingExecutor {
+            root: tmp.path().to_path_buf(),
+            dispatched: std::sync::Mutex::new(Vec::new()),
+        });
+        struct Proxy(std::sync::Arc<CompletingExecutor>);
+        impl Executor for Proxy {
+            fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+                self.0.dispatch(id)
+            }
+        }
+
+        let store_box: Box<dyn StateStore> = Box::new(FileStore::new(tmp.path()));
+        let mut runtime = Runtime::new(
+            store_box,
+            Box::new(DagPolicy::new(plan, edges)),
+            Box::new(Proxy(executor.clone())),
+            config,
+        )
+        .with_liveness_check(Box::new(DeadLocalWorkerCheck));
+
+        let report = runtime
+            .run()
+            .expect("runtime must not error on the reclaim path");
+
+        // The loop must drain because B was reclaimed and completed — NOT
+        // stall to the deadline (Jesse's exit-124 symptom).
+        assert_eq!(
+            report.reason,
+            ShutdownReason::PolicyDrained,
+            "orphaned local worker must be reclaimed and the DAG drained, not timed out"
+        );
+
+        let dispatched = executor.dispatched.lock().unwrap();
+        assert_eq!(
+            dispatched.iter().filter(|id| **id == b).count(),
+            1,
+            "B must be re-dispatched exactly once after reclaim, got {dispatched:?}"
+        );
+        assert!(
+            !dispatched.contains(&a),
+            "completed work (A) must never be re-dispatched, got {dispatched:?}"
+        );
+
+        let reloaded_b = store.load_molecule(&b).unwrap();
+        assert_eq!(
+            reloaded_b.status,
+            MoleculeStatus::Completed,
+            "B must reach Completed after being reclaimed"
         );
     }
 
