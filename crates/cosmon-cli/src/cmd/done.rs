@@ -1535,8 +1535,7 @@ fn check_confidential_blocklist(
 fn restrict_publish_files_to_scope(files: Vec<String>, scope: Option<&[String]>) -> Vec<String> {
     match scope {
         Some(paths) if !paths.is_empty() => {
-            let allow: std::collections::HashSet<&str> =
-                paths.iter().map(String::as_str).collect();
+            let allow: std::collections::HashSet<&str> = paths.iter().map(String::as_str).collect();
             files
                 .into_iter()
                 .filter(|f| allow.contains(f.as_str()))
