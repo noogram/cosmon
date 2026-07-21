@@ -5905,11 +5905,18 @@ fn commit_molecule_artifacts(
     for p in &pathspecs {
         diff_args.push(p.to_string_lossy().into_owned());
     }
+    // `.output()` (not `.status()`) so git's stderr is CAPTURED, never inherited
+    // by our terminal. If this repo is momentarily not a work tree, `git diff
+    // --cached` silently switches to `--no-index` mode, where `--cached` is an
+    // unknown option and git dumps a full `usage: git diff --no-index …` screen
+    // — the alarming first-contact paper cut (issue #5, item 2). We only need
+    // the exit code (0 = nothing staged under our pathspecs), so swallowing the
+    // diagnostic costs nothing.
     let diff_index = Command::new("git")
         .args(&diff_args)
         .current_dir(repo_root)
-        .status()?;
-    if diff_index.success() {
+        .output()?;
+    if diff_index.status.success() {
         // Exit code 0 → nothing staged under our pathspecs.
         return Ok(false);
     }
