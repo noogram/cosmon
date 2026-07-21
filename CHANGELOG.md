@@ -19,7 +19,7 @@ this stage.
 
 ## [Unreleased]
 
-## [0.2.2] — 2026-07-20
+## [0.2.2] — 2026-07-21
 
 **External-tester hardening.** Every issue Jesse Thaler (MIT) raised against
 0.2.1 is fixed and converged clean: the flagship `cs verify` tamper check that
@@ -172,11 +172,38 @@ firewall honored — end-to-end proof the sovereign local path carries real work
   so, so the build failed with a cryptic linker error. Getting Started now names
   the two packages up front.
 
-### Not a bug: the DAG-orphan report (Jesse #3)
+### Fixed: a crashed worker no longer wedges a whole DAG (Jesse #3)
 
-- The reported DAG orphan was investigated and found already handled: orphan
-  detection is wired into `cs run`. No change was needed; recorded here so the
-  investigation is not silently lost.
+- When a detached worker process died mid-mission, a restarted `cs run` trusted
+  the `running` state unconditionally and waited on the orphaned molecule until
+  `--timeout` (exit 124), never re-dispatching it. (An initial investigation
+  wrongly reported this as "already handled": orphan-detection code existed but
+  was gated off by default, so the default `cs run` never reclaimed the orphan.)
+- The worker now records a PID + start-time witness, and `cs run` consults
+  liveness before treating `running` as in-flight: a molecule whose recorded
+  worker is provably dead is reset to `pending` and re-dispatched into its
+  existing worktree/branch/event-chain — on by default. The witness is
+  conservative (PID reuse cannot reclaim a healthy worker), and completed work
+  is still never re-run. Regression test reproduces the kill+restart recovery.
+
+### Fixed: the headless Claude spawn crashed and could hang (Jesse #6, residual)
+
+- The main `cs tackle --adapter claude` path was already interactive-TUI, but
+  the headless spawn in `cosmon-transport` (patrol/thaw respawn paths) still
+  built the removed `--prompt` flag (dies on Claude Code v2.x) and passed a
+  multi-KB briefing inline through `bash -c` where the escaping left Claude
+  waiting on stdin. It now uses `-p` with the briefing on the child's **stdin**,
+  and exports `IS_SANDBOX=1` for root + `bypassPermissions`.
+
+### Security: the Claude briefing is no longer exposed in shared /tmp
+
+- The stdin-delivery fix above first wrote the briefing — which routinely
+  carries private operator context — to a predictable `/tmp` path that was
+  never removed (a TOCTOU / arbitrary-overwrite and confidentiality-leak
+  surface, caught by an adversarial review of our own fix). The file is now
+  created atomically with an unpredictable name and mode `0600`, and unlinked
+  before Claude starts (reaped on spawn failure), so it never persists in
+  shared temp storage.
 
 ## [0.2.1] — 2026-07-19
 
