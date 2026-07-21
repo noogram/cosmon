@@ -506,6 +506,38 @@ pub enum EventV2 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         federation_provenance: Option<crate::federation::FederationLineage>,
     },
+    /// The `[hooks].post_merge` deploy hook was resolved during a harvest.
+    ///
+    /// # Why this exists — the runtime-harvest deploy blind-spot
+    ///
+    /// `cs done` runs `[hooks].post_merge` (typically `just install`) after a
+    /// merge lands, then pushes the outcome — `post_merge: <cmd> (exit 0)`,
+    /// `post_merge hook skipped (untrusted repo)`, `deploy verified: cs @
+    /// <sha>` — into the human-facing `actions`/`warnings` **stdout** report.
+    /// That is fine for an operator `cs done`, who reads stdout. But when the
+    /// **runtime** harvests a completed molecule it shells out `cs done` with
+    /// `Stdio::null()` on stdout (see `cosmon_runtime::resident::shell_out`),
+    /// so every one of those lines is discarded. The deploy could silently
+    /// no-op (untrusted repo → hook skipped, a losing race between two
+    /// back-to-back `just install`s, a swallowed non-zero) and leave the
+    /// installed `cs` stale, with **nothing** in `events.jsonl` to distinguish
+    /// "hook ran and verified" from "hook never ran" — exactly the
+    /// `task-20260720-912f` regression (a runtime harvest left `~/.local/bin/cs`
+    /// pinned to the previous harvest's build).
+    ///
+    /// This event closes that blind-spot: it is a durable, path-independent
+    /// witness written to `events.jsonl` from inside `cs done`, so both harvest
+    /// paths — operator and runtime — leave the same auditable record of what
+    /// the post-merge deploy hook actually did. A `Skipped` outcome is the
+    /// visible `post_merge SKIPPED` the fix direction called for.
+    PostMergeHook {
+        /// The molecule whose merge triggered the hook.
+        molecule: MoleculeId,
+        /// The configured hook command string (`[hooks].post_merge`), verbatim.
+        hook: String,
+        /// What actually happened to the hook on this harvest.
+        result: PostMergeHookResult,
+    },
     /// A worker was spawned by `cs tackle`.
     WorkerSpawned {
         /// The worker's identity.
@@ -2459,9 +2491,9 @@ impl EventV2 {
             | Self::SF6SupervisionSetupFailed { mol_id, .. }
             | Self::SF7BinaryVersionMismatch { mol_id, .. } => Some(mol_id),
             Self::DecaySpliced { parent, .. } => Some(parent),
-            Self::MergeDispatched { molecule, .. } | Self::MergeCompleted { molecule, .. } => {
-                Some(molecule)
-            }
+            Self::MergeDispatched { molecule, .. }
+            | Self::MergeCompleted { molecule, .. }
+            | Self::PostMergeHook { molecule, .. } => Some(molecule),
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
@@ -2852,6 +2884,42 @@ pub enum AdapterProbeResult {
     Retried {
         /// Free-form reason naming the transient class that was retried
         /// (e.g. `"tool_parse_reinject"`, `"server_error_5xx"`).
+        reason: String,
+    },
+}
+
+/// Outcome of the `[hooks].post_merge` deploy hook on a single harvest.
+///
+/// Tagged enum so a downstream auditor can branch on *what happened to the
+/// deploy* — `ran` vs `skipped` vs `failed` — without parsing free-form prose.
+/// Carried by [`EventV2::PostMergeHook`], which makes the outcome durable and
+/// path-independent (operator `cs done` and runtime auto-harvest write the
+/// identical record) rather than stdout-only. See the doc-comment on
+/// [`EventV2::PostMergeHook`] for the blind-spot this closes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "disposition", rename_all = "snake_case")]
+pub enum PostMergeHookResult {
+    /// The hook ran to completion. `exit_code` is its process exit status;
+    /// `deploy_verified` records whether the freshly-installed binary's build
+    /// commit matched the just-merged HEAD (`false` on divergence — the deploy
+    /// gap — or when verification could not run).
+    Ran {
+        /// The hook process's exit code.
+        exit_code: i32,
+        /// Whether the post-deploy binary-commit check confirmed a fresh image.
+        deploy_verified: bool,
+    },
+    /// The hook was **not run**. `reason` names why (e.g. `"untrusted repo"`).
+    /// This is the visible `post_merge SKIPPED` witness: a deploy that never
+    /// happened, recorded rather than inferred from silence.
+    Skipped {
+        /// Free-form reason the hook was skipped.
+        reason: String,
+    },
+    /// The hook was invoked but errored (spawn failure or non-zero-and-fatal).
+    /// The merge already landed, so this is advisory, never a rollback.
+    Failed {
+        /// Free-form failure detail.
         reason: String,
     },
 }
@@ -3533,6 +3601,14 @@ mod tests {
                 result: MergeResult::Ok,
                 federation_provenance: None,
             },
+            EventV2::PostMergeHook {
+                molecule: mid("cs-20260411-aaaa"),
+                hook: "just install".to_owned(),
+                result: PostMergeHookResult::Ran {
+                    exit_code: 0,
+                    deploy_verified: true,
+                },
+            },
             EventV2::WorkerSpawned {
                 worker_id: wid("quartz"),
                 molecule: Some(mid("cs-20260411-aaaa")),
@@ -4132,6 +4208,7 @@ mod tests {
             | EventV2::DecaySpliced { .. }
             | EventV2::MergeDispatched { .. }
             | EventV2::MergeCompleted { .. }
+            | EventV2::PostMergeHook { .. }
             | EventV2::WorkerSpawned { .. }
             | EventV2::WorkerKilled { .. }
             | EventV2::WorkerHeartbeat { .. }
@@ -4543,6 +4620,46 @@ mod tests {
             let back: EmitterKind = serde_json::from_str(&json).unwrap();
             assert_eq!(back, variant);
         }
+    }
+
+    #[test]
+    fn post_merge_hook_result_wire_is_tagged_snake_case() {
+        // The durable contract task-20260720-912f depends on: an auditor greps
+        // `events.jsonl` for the deploy disposition, so the tag key and the
+        // three dispositions must serialise to stable snake_case strings.
+        let ran = PostMergeHookResult::Ran {
+            exit_code: 0,
+            deploy_verified: true,
+        };
+        let json = serde_json::to_value(&ran).unwrap();
+        assert_eq!(json["disposition"], "ran");
+        assert_eq!(json["deploy_verified"], true);
+
+        let skipped = PostMergeHookResult::Skipped {
+            reason: "untrusted repo".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&skipped).unwrap()["disposition"],
+            "skipped"
+        );
+
+        let failed = PostMergeHookResult::Failed {
+            reason: "just: command not found".to_owned(),
+        };
+        assert_eq!(
+            serde_json::to_value(&failed).unwrap()["disposition"],
+            "failed"
+        );
+
+        // Round-trip through the full event envelope so the `molecule` and
+        // `hook` fields are exercised on the wire too.
+        let evt = EventV2::PostMergeHook {
+            molecule: mid("cs-20260720-912f"),
+            hook: "just install".to_owned(),
+            result: skipped.clone(),
+        };
+        let back: EventV2 = serde_json::from_str(&serde_json::to_string(&evt).unwrap()).unwrap();
+        assert_eq!(back, evt);
     }
 
     #[test]

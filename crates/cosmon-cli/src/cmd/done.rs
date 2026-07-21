@@ -2489,19 +2489,46 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // and runs *after* the merge has already landed, so an untrusted
             // repository skips the hook with a warning rather than aborting a
             // now-irreversible teardown.
-            match cosmon_cli::trust::ensure_trusted(&repo_root) {
+            //
+            // `hook_ran` records whether the deploy actually executed, so the
+            // durable `PostMergeHook` witness below (task-20260720-912f) can
+            // distinguish a real deploy from a `Skipped` / `Failed` no-op —
+            // the record the runtime auto-harvest path used to lose to its
+            // `Stdio::null()` stdout.
+            let hook_ran = match cosmon_cli::trust::ensure_trusted(&repo_root) {
                 Ok(()) => match run_post_merge_hook(&repo_root, hook_cmd) {
                     Ok(code) => {
                         actions.push(format!("post_merge: {hook_cmd} (exit {code})"));
+                        Some(code)
                     }
                     Err(e) => {
-                        warnings.push(format!("post_merge hook failed: {e}"));
+                        let reason = e.to_string();
+                        warnings.push(format!("post_merge hook failed: {reason}"));
+                        emit_post_merge_hook_event(
+                            &events_path,
+                            &mol_id,
+                            hook_cmd,
+                            cosmon_core::event_v2::PostMergeHookResult::Failed { reason },
+                            merge_dispatch_seq,
+                            &mut warnings,
+                        );
+                        None
                     }
                 },
                 Err(e) => {
-                    warnings.push(format!("post_merge hook skipped (untrusted repo): {e}"));
+                    let reason = format!("untrusted repo: {e}");
+                    warnings.push(format!("post_merge hook skipped ({reason})"));
+                    emit_post_merge_hook_event(
+                        &events_path,
+                        &mol_id,
+                        hook_cmd,
+                        cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
+                        merge_dispatch_seq,
+                        &mut warnings,
+                    );
+                    None
                 }
-            }
+            };
             // Deploy-hygiene self-check (task-20260607-3ad4): the post_merge
             // hook deploys to exactly one PATH target, but stale `cs` copies
             // elsewhere on PATH drift silently and can shadow the fresh build.
@@ -2518,7 +2545,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // binary which commit it was built from and assert it matches
             // the just-merged HEAD; warn loudly on divergence, never
             // silently succeed. Sibling guard to the multiplicity check.
-            let (note, warn_lines) = format_deploy_verification(&verify_deploy(&repo_root));
+            let deploy = verify_deploy(&repo_root);
+            let (note, warn_lines) = format_deploy_verification(&deploy);
             if let Some(note) = note {
                 actions.push(note);
             }
@@ -2526,6 +2554,26 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 for line in lines {
                     warnings.push(line);
                 }
+            }
+            // Durable, harvest-path-independent witness (task-20260720-912f).
+            // When the hook actually ran, fold the deploy-verification verdict
+            // into the same record so `events.jsonl` answers "did the deploy
+            // refresh the binary?" without replaying stdout the runtime threw
+            // away. The `Skipped` / `Failed` cases already emitted their own
+            // witness above (before this verification, which is meaningless for
+            // a deploy that never happened).
+            if let Some(exit_code) = hook_ran {
+                emit_post_merge_hook_event(
+                    &events_path,
+                    &mol_id,
+                    hook_cmd,
+                    cosmon_core::event_v2::PostMergeHookResult::Ran {
+                        exit_code,
+                        deploy_verified: matches!(deploy, DeployVerification::Match { .. }),
+                    },
+                    merge_dispatch_seq,
+                    &mut warnings,
+                );
             }
         }
     }
@@ -4187,6 +4235,42 @@ fn run_post_merge_hook(repo_root: &Path, hook_cmd: &str) -> anyhow::Result<i32> 
         anyhow::bail!("{hook_cmd} exited {code}: {}", stderr.trim());
     }
     Ok(code)
+}
+
+/// Emit the durable [`EventV2::PostMergeHook`](cosmon_core::event_v2::EventV2::PostMergeHook)
+/// witness for a single harvest.
+///
+/// This is the load-bearing half of the task-20260720-912f fix: the human-facing
+/// `actions`/`warnings` report is written to stdout, which the **runtime**
+/// auto-harvest path discards (`cs done` is shelled with `Stdio::null()`). By
+/// writing the same outcome to `events.jsonl` here, the post-merge deploy
+/// result becomes auditable regardless of who harvested the molecule — an
+/// operator reading stdout or the runtime that threw it away.
+///
+/// A persistence failure is non-fatal (the merge already landed) but is never
+/// swallowed silently: it is surfaced on stderr and pushed into `warnings`, the
+/// same discipline the `MergeCompleted` witness uses one step earlier.
+fn emit_post_merge_hook_event(
+    events_path: &Path,
+    mol_id: &MoleculeId,
+    hook_cmd: &str,
+    result: cosmon_core::event_v2::PostMergeHookResult,
+    causal_parent: Option<cosmon_core::event_v2::Seq>,
+    warnings: &mut Vec<String>,
+) {
+    if let Err(e) = cosmon_state::event_log::emit_one(
+        events_path,
+        cosmon_core::event_v2::EventV2::PostMergeHook {
+            molecule: mol_id.clone(),
+            hook: hook_cmd.to_owned(),
+            result,
+        },
+        causal_parent,
+    ) {
+        let msg = format!("failed to persist post_merge hook witness to events.jsonl: {e}");
+        eprintln!("⚠ {msg}");
+        warnings.push(msg);
+    }
 }
 
 /// Return the currently checked-out commit, used as the rollback point for
