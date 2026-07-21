@@ -529,7 +529,7 @@ pub enum EventV2 {
     /// witness written to `events.jsonl` from inside `cs done`, so both harvest
     /// paths — operator and runtime — leave the same auditable record of what
     /// the post-merge deploy hook actually did. A `Skipped` outcome is the
-    /// visible "post_merge SKIPPED" the fix direction called for.
+    /// visible `post_merge SKIPPED` the fix direction called for.
     PostMergeHook {
         /// The molecule whose merge triggered the hook.
         molecule: MoleculeId,
@@ -2493,9 +2493,7 @@ impl EventV2 {
             Self::DecaySpliced { parent, .. } => Some(parent),
             Self::MergeDispatched { molecule, .. }
             | Self::MergeCompleted { molecule, .. }
-            | Self::PostMergeHook { molecule, .. } => {
-                Some(molecule)
-            }
+            | Self::PostMergeHook { molecule, .. } => Some(molecule),
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
@@ -2912,7 +2910,7 @@ pub enum PostMergeHookResult {
         deploy_verified: bool,
     },
     /// The hook was **not run**. `reason` names why (e.g. `"untrusted repo"`).
-    /// This is the visible "post_merge SKIPPED" witness: a deploy that never
+    /// This is the visible `post_merge SKIPPED` witness: a deploy that never
     /// happened, recorded rather than inferred from silence.
     Skipped {
         /// Free-form reason the hook was skipped.
