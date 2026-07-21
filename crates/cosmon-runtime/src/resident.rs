@@ -312,6 +312,49 @@ fn reserved_for_human(molecule: &EnsembleMolecule) -> bool {
             && !molecule.tags.iter().any(|tag| tag == "auto:ok"))
 }
 
+/// Whether the operator has reserved this molecule's *harvest* — the merge of
+/// its completed branch — as a manual gesture, so the runtime must not
+/// auto-`cs done` it to the trunk.
+///
+/// # Why this is distinct from [`reserved_for_human`]
+///
+/// `reserved_for_human` (`hold:human`) reserves the molecule from *all*
+/// autonomous action, including the initial `cs tackle`. It must be set
+/// *before* the worker runs. The harvest brake answers a different, later
+/// need: a molecule the runtime was allowed to *work*, but whose *merge target*
+/// the operator wants to control — because they have parked the whole line on
+/// a spore branch pending validation, or want to route the merge elsewhere.
+///
+/// Without this brake, the resident loop's first sweep auto-harvests every
+/// completed molecule to `main`, silently undoing an operator park (observed
+/// 2026-07-20: `task-20260720-90d2` merged into `main` as `63fc899` despite the
+/// math-attack line being parked on `spore/math-attack`). See ADR-156
+/// (resident-runtime-safety-envelope) and the molecule `task-20260720-820a`
+/// outcomes.
+///
+/// # The two forms of the brake
+///
+/// * **`no-auto-harvest`** — the explicit "reserve harvest as an operator
+///   gesture" flag. The runtime leaves the completed molecule alone; a human
+///   runs `cs done` (or merges by hand) when the park is lifted.
+/// * **`harvest_to:<branch>`** — a *routing* intent naming a non-trunk merge
+///   target. The resident loop can only ever merge to the trunk (its `cs done`
+///   shell-out carries no branch argument), so any `harvest_to:` — regardless
+///   of the branch named — is honored here as "not the runtime's to harvest":
+///   the merge is reserved for the operator gesture that can route it. This is
+///   the falsifier this molecule closes — *a runtime harvest event merging to
+///   main for a molecule whose `harvest_to` points elsewhere* — held closed by
+///   never emitting a `Done` for a `harvest_to`-tagged molecule.
+///
+/// Like [`reserved_for_human`], this is a pure snapshot predicate: a restart or
+/// a stale process re-reads the persisted tag and cannot bypass the hold.
+fn harvest_reserved(molecule: &EnsembleMolecule) -> bool {
+    molecule
+        .tags
+        .iter()
+        .any(|tag| tag == "no-auto-harvest" || tag.starts_with("harvest_to:"))
+}
+
 /// Whether merging this molecule requires an independent review verdict.
 fn requires_review(molecule: &EnsembleMolecule) -> bool {
     molecule.tags.iter().any(|tag| {
@@ -508,6 +551,13 @@ impl ResidentScheduler for ReadyFrontierScheduler {
         for m in &snapshot.molecules {
             if m.status == "completed" && !self.merged.contains(&m.id) {
                 if reserved_for_human(m) {
+                    continue;
+                }
+                // Harvest brake: the operator has parked this molecule's merge
+                // (or routed it to a non-trunk branch). The runtime can only
+                // merge to the trunk, so it must keep its hands off and leave
+                // the harvest as an operator gesture. See `harvest_reserved`.
+                if harvest_reserved(m) {
                     continue;
                 }
                 if requires_review(m) && !review_confirmed_on_disk(m) {
@@ -1796,6 +1846,58 @@ mod tests {
         assert!(
             !decisions.contains(&Decision::Done("reserved-decision".into())),
             "the runtime must not auto-merge a human-reserved decision: {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ready_frontier_never_auto_harvests_no_auto_harvest() {
+        // The explicit harvest brake: a completed molecule the operator has
+        // flagged `no-auto-harvest` reserves its merge as an operator gesture.
+        // The runtime must not emit `Done` for it.
+        let mut parked = mol("parked", "completed", &[]);
+        parked.tags.push("no-auto-harvest".into());
+        let decisions = ReadyFrontierScheduler::new().next_decisions(&EnsembleSnapshot {
+            molecules: vec![parked],
+        });
+        assert!(
+            !decisions.contains(&Decision::Done("parked".into())),
+            "a `no-auto-harvest` completed molecule must not be auto-merged: {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ready_frontier_never_auto_harvests_harvest_to_branch() {
+        // The falsifier this molecule closes: a runtime harvest event merging
+        // to main for a molecule whose `harvest_to` points elsewhere. The
+        // resident loop can only merge to the trunk, so any `harvest_to:` tag
+        // reserves the harvest for the operator gesture that can route it.
+        let mut routed = mol("math-attack", "completed", &[]);
+        routed.tags.push("harvest_to:spore/math-attack".into());
+        let decisions = ReadyFrontierScheduler::new().next_decisions(&EnsembleSnapshot {
+            molecules: vec![routed],
+        });
+        assert!(
+            !decisions.contains(&Decision::Done("math-attack".into())),
+            "a `harvest_to:<branch>` molecule must never be auto-merged to the trunk: {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ready_frontier_holds_dependents_of_harvest_reserved_blocker() {
+        // A parked completed blocker never merges (`merged_at` stays None and
+        // the runtime issues no `Done`), so it stays present and un-cleared —
+        // its dependents must remain blocked, mirroring the operator's park of
+        // the whole line rather than draining past it.
+        let mut parked = mol("root", "completed", &[]);
+        parked.tags.push("no-auto-harvest".into());
+        let snap = EnsembleSnapshot {
+            molecules: vec![parked, mol("child", "pending", &["root"])],
+        };
+        let decisions = ReadyFrontierScheduler::new().next_decisions(&snap);
+        assert!(
+            decisions.is_empty(),
+            "a harvest-reserved blocker must neither merge nor release its \
+             dependents, got {decisions:?}"
         );
     }
 
