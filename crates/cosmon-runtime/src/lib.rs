@@ -199,14 +199,63 @@ pub enum RuntimeAction {
 // Executor — the dispatch interface (C7: real worker dispatch)
 // ---------------------------------------------------------------------------
 
+/// The molecule's original adapter/model pin carried on a **re-dispatch** so
+/// the second `cs tackle` reproduces the first's resolution instead of
+/// re-resolving from ambient environment (noogram/cosmon#3 Defect 2).
+///
+/// Read from the molecule's `MoleculeProcess` (which survives an
+/// `orphan_scan` reset to `Pending`) when the runtime evolves a molecule and
+/// passed to [`Executor::dispatch_with_pin`]. An all-`None` pin
+/// ([`Self::default`]) means "no prior dispatch to reproduce" — the molecule
+/// is being dispatched for the first time, so the executor uses its normal
+/// resolution chain unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchPin {
+    /// The adapter name the molecule was originally dispatched with
+    /// (`"local"`, `"claude"`, …), or `None` when the molecule has never
+    /// been tackled. Its presence is what tells the executor this is a
+    /// pinned re-dispatch.
+    pub adapter: Option<String>,
+    /// The model id originally resolved for the molecule, or `None` for the
+    /// floor (the adapter's own default). When `adapter` is `Some` and this
+    /// is `None`, the re-dispatch must reproduce the *floor* — i.e. strip
+    /// ambient model env rather than let it bleed in.
+    pub model: Option<String>,
+}
+
+impl DispatchPin {
+    /// Build the pin from a molecule's live-process record, if any.
+    ///
+    /// Returns the empty pin when the molecule carries no `MoleculeProcess`
+    /// (never dispatched), so a first dispatch is unpinned.
+    #[must_use]
+    pub fn from_molecule(mol: &MoleculeData) -> Self {
+        match mol.process.as_ref() {
+            Some(process) => Self {
+                adapter: process.adapter_name.clone(),
+                model: process.model.clone(),
+            },
+            None => Self::default(),
+        }
+    }
+
+    /// Whether this pin names an adapter — i.e. it reproduces a prior
+    /// dispatch and the executor must honour the pin rather than re-resolve
+    /// from ambient environment.
+    #[must_use]
+    pub fn is_pinned(&self) -> bool {
+        self.adapter.is_some()
+    }
+}
+
 /// The pluggable dispatch function that translates a scheduling decision into
 /// real worker execution.
 ///
 /// When the runtime's [`Policy`] emits a [`RuntimeAction::Evolve`], the
 /// runtime transitions the molecule to [`MoleculeStatus::Running`] and then
-/// calls [`Executor::dispatch`] to hand off actual work. This separation
-/// keeps the runtime agnostic to *how* workers are spawned — the default
-/// [`SubprocessExecutor`] calls `cs tackle`, but tests can inject a
+/// calls [`Executor::dispatch_with_pin`] to hand off actual work. This
+/// separation keeps the runtime agnostic to *how* workers are spawned — the
+/// default [`SubprocessExecutor`] calls `cs tackle`, but tests can inject a
 /// [`NoOpExecutor`] that skips the subprocess.
 ///
 /// # Object safety
@@ -225,6 +274,35 @@ pub trait Executor {
     /// Returns [`RuntimeError`] if the dispatch fails (e.g. subprocess
     /// cannot be spawned).
     fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError>;
+
+    /// Dispatch a molecule carrying its original adapter/model pin so a
+    /// **re-dispatch** reproduces the first tackle's resolution instead of
+    /// re-resolving it from ambient environment.
+    ///
+    /// This is the entry point the runtime actually calls for every
+    /// dispatch. On a molecule's *first* dispatch the pin is empty
+    /// ([`DispatchPin::default`]) and this is byte-identical to a bare
+    /// [`Self::dispatch`]. On a **re-dispatch** — e.g. after `orphan_scan`
+    /// reset a reclaimed local worker to `Pending` — the pin carries the
+    /// adapter and model recorded on the molecule's `MoleculeProcess`, so
+    /// the production [`SubprocessExecutor`] can pass `--adapter`/`--model`
+    /// and strip ambient model env. Without it, the runtime's bare
+    /// `cs tackle <id>` re-resolved the model from the ambient
+    /// `$ANTHROPIC_MODEL`, which on the local/Ollama adapter yields a
+    /// non-served model, the preflight refuses every re-dispatch, and the
+    /// molecule stalls `Pending` until the deadline (noogram/cosmon#3
+    /// Defect 2, exit 124).
+    ///
+    /// The default implementation ignores the pin and calls
+    /// [`Self::dispatch`] — correct for in-process and test executors that
+    /// do not shell out and therefore cannot bleed ambient env.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RuntimeError`] if the dispatch fails.
+    fn dispatch_with_pin(&self, id: &MoleculeId, _pin: &DispatchPin) -> Result<(), RuntimeError> {
+        self.dispatch(id)
+    }
 
     /// Called when a molecule transitions to Completed during a tick.
     ///
@@ -305,8 +383,49 @@ impl SubprocessExecutor {
     }
 }
 
+impl SubprocessExecutor {
+    /// Append the molecule's original adapter/model pin to a `cs tackle`
+    /// command so a re-dispatch reproduces the first tackle's resolution
+    /// (noogram/cosmon#3 Defect 2).
+    ///
+    /// Applied only when `pin.is_pinned()` — i.e. the molecule carries a
+    /// prior-dispatch adapter. Then:
+    ///
+    /// * `--adapter <a>` pins the adapter, so a re-dispatch can never drift
+    ///   to a different adapter via the ambient `$COSMON_DEFAULT_ADAPTER` or
+    ///   config default.
+    /// * `$ANTHROPIC_MODEL` and `$COSMON_DEFAULT_MODEL` are **stripped** from
+    ///   the child env. When the original resolution was the floor
+    ///   (`pin.model == None`), this is what keeps the floor the floor
+    ///   instead of bleeding a Claude model id into the Ollama-backed local
+    ///   adapter (the exact refusal loop Jesse hit). When a model *was*
+    ///   pinned, the explicit `--model` below dominates anyway, so stripping
+    ///   is safe in both cases.
+    /// * `--model <m>` reproduces an explicit model pin when one was recorded.
+    ///
+    /// A first (unpinned) dispatch leaves the command untouched, so its
+    /// resolution chain — and ambient env — behave exactly as before.
+    fn apply_dispatch_pin(cmd: &mut Command, pin: &DispatchPin) {
+        if !pin.is_pinned() {
+            return;
+        }
+        if let Some(adapter) = pin.adapter.as_deref() {
+            cmd.arg("--adapter").arg(adapter);
+            cmd.env_remove("ANTHROPIC_MODEL")
+                .env_remove("COSMON_DEFAULT_MODEL");
+            if let Some(model) = pin.model.as_deref() {
+                cmd.arg("--model").arg(model);
+            }
+        }
+    }
+}
+
 impl Executor for SubprocessExecutor {
     fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+        self.dispatch_with_pin(id, &DispatchPin::default())
+    }
+
+    fn dispatch_with_pin(&self, id: &MoleculeId, pin: &DispatchPin) -> Result<(), RuntimeError> {
         // `cs tackle` is always a leaf dispatch since the unification
         // landed in delib-20260426-1bcd #2 / task-20260426-c33f. The
         // runtime owns the DAG walk; its executor only dispatches one
@@ -327,6 +446,11 @@ impl Executor for SubprocessExecutor {
             .arg(format!("runtime:{}", std::process::id()))
             .env("COSMON_RUNTIME_ACTIVE", "1")
             .current_dir(&self.cwd);
+        // Carry the molecule's original adapter/model pin on a re-dispatch so
+        // the second tackle reproduces the first's resolution rather than
+        // bleeding ambient model env (noogram/cosmon#3 Defect 2). No-op on a
+        // first (unpinned) dispatch.
+        Self::apply_dispatch_pin(&mut cmd, pin);
         if self.quiet {
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -424,6 +548,13 @@ impl Executor for SubprocessExecutor {
             .arg(format!("runtime:{}", std::process::id()))
             .env("COSMON_RUNTIME_ACTIVE", "1")
             .current_dir(&self.cwd);
+        // When this cascade is re-spawning a worker for a molecule that was
+        // already dispatched (its `MoleculeProcess` carries the original
+        // adapter/model), carry that pin so the cascade never re-resolves
+        // from ambient env either (same reproduction contract as the primary
+        // re-dispatch path, noogram/cosmon#3 Defect 2). Native/gate steps are
+        // adapter-agnostic, so the pin is a harmless no-op for them.
+        Self::apply_dispatch_pin(&mut cmd, &DispatchPin::from_molecule(mol));
         if self.quiet {
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -590,20 +721,29 @@ pub struct Orphan {
 
 /// Scan a [`FleetSnapshot`] for running molecules whose worker is dead.
 ///
-/// A `Running` molecule is reported as an [`Orphan`] when **either** liveness
-/// axis witnesses its worker's death:
+/// The liveness axis is chosen by **worker kind**, never OR-combined across
+/// kinds (noogram/cosmon#3 Defect 1). The presence of a recorded PID on the
+/// molecule's [`cosmon_core::process::MoleculeProcess`] is the discriminator:
 ///
-/// * **PID witness** — the detached `cs local-worker` transport records the
-///   child PID and its launch fingerprint on
-///   [`cosmon_core::process::MoleculeProcess`]. A local worker has no tmux
-///   pane, so it can only be caught here. Checked first because it is the
-///   authoritative witness for the transport in noogram/cosmon#3 (a
-///   `kill -9`'d local worker leaves a `Running` molecule whose PID identity
-///   no longer resolves). See [`LivenessCheck::is_worker_alive`].
-/// * **tmux session** — the historical axis: a molecule whose stamped
-///   `session_name` no longer maps to a live tmux session (phantom-workers
-///   part 2). Molecules without a `session_name` and without a PID witness
-///   are skipped — they cannot be probed.
+/// * **PID present ⇒ detached local worker.** The `cs local-worker` transport
+///   is the only one that stamps a PID, and it has **no tmux pane**. Its PID
+///   axis ([`LivenessCheck::is_worker_alive`]) is therefore authoritative and
+///   the tmux axis is categorically inapplicable. The scan short-circuits on
+///   the PID verdict and never probes `tmux has-session` for such a molecule
+///   — doing so would always report dead (there is no pane) and falsely reset
+///   a live (or SIGSTOP'd) worker on every recheck. When the PID cannot be
+///   authenticated (no launch fingerprint), `is_worker_alive` stays optimistic
+///   (`true`) rather than leaking into the tmux axis.
+/// * **PID absent ⇒ tmux-supervised worker.** The historical axis: a molecule
+///   whose stamped `session_name` no longer maps to a live tmux session
+///   (phantom-workers part 2). Molecules with neither a PID nor a
+///   `session_name` cannot be probed and are skipped.
+///
+/// This closes the noogram/cosmon#3 thrashing failure mode (a `cs run` with
+/// the local adapter false-flagging and resetting its own live workers): a
+/// `kill -9`'d local worker's PID identity no longer resolves and it is
+/// reclaimed, while a live or SIGSTOP'd one matches its fingerprint and is
+/// left alone.
 ///
 /// The scan is a pure function over the snapshot and the liveness probe; it
 /// never mutates state.
@@ -614,24 +754,43 @@ pub fn orphan_scan(snapshot: &FleetSnapshot, liveness: &dyn LivenessCheck) -> Ve
         .iter()
         .filter(|m| m.status == MoleculeStatus::Running)
         .filter_map(|m| {
-            // Axis 1 — PID witness (detached local-worker). Only a recorded
-            // PID *with* a launch fingerprint is authenticatable; without the
-            // fingerprint `is_worker_alive` stays optimistic and we fall
-            // through to the tmux axis.
+            // The liveness axis is chosen by **worker kind**, never OR-combined
+            // across kinds (noogram/cosmon#3 Defect 1). A recorded PID is the
+            // discriminator: only the detached local-worker transport stamps
+            // one (`cs tackle`'s `spawn_detached_local_worker` → step 9 bind),
+            // and such a worker has **no tmux pane**. So:
+            //
+            // * **PID present ⇒ PID axis is authoritative, and the tmux axis is
+            //   categorically inapplicable.** Short-circuit either way — never
+            //   fall through to a `tmux has-session` on the stamped
+            //   `session_name`, which for a paneless local worker *always*
+            //   reports dead and would falsely reset a live (or SIGSTOP'd)
+            //   worker every recheck interval (the thrashing symptom). When
+            //   `is_worker_alive` cannot authenticate (no launch fingerprint)
+            //   it stays optimistic (`true`) — "better to miss an orphan than
+            //   cry wolf" — so an un-fingerprinted PID is treated as alive
+            //   rather than leaking into the tmux axis.
+            //
+            // * **PID absent ⇒ tmux-supervised worker.** Use the historical
+            //   `session_name` → `tmux has-session` axis (phantom-workers
+            //   part 2). Molecules with neither a PID nor a `session_name`
+            //   cannot be probed and are skipped.
             if let Some(process) = m.process.as_ref() {
                 if let Some(pid) = process.pid {
-                    if !liveness.is_worker_alive(pid, process.pid_start_time) {
-                        return Some(Orphan {
+                    return if liveness.is_worker_alive(pid, process.pid_start_time) {
+                        None
+                    } else {
+                        Some(Orphan {
                             id: m.id.clone(),
                             session_name: m
                                 .session_name
                                 .clone()
                                 .unwrap_or_else(|| process.tmux_session.clone()),
-                        });
-                    }
+                        })
+                    };
                 }
             }
-            // Axis 2 — tmux session (phantom-workers part 2).
+            // Tmux axis (no PID witness → tmux-supervised worker).
             let session = m.session_name.as_ref()?;
             if liveness.is_session_alive(session) {
                 None
@@ -1508,8 +1667,17 @@ impl Runtime {
         // same actor class — the two writers agree. `mark_tackled` also
         // bumps `updated_at`.
         mol.mark_tackled(cosmon_core::tackle::TackledBy::runtime(std::process::id()));
+        // Build the re-dispatch pin from the molecule's live-process record
+        // BEFORE the save (the save does not clear `process`, but reading it
+        // here keeps the pin adjacent to the dispatch it parameterises). On a
+        // first dispatch `process` is `None` and the pin is empty, so the
+        // executor's resolution chain is untouched. On a re-dispatch after an
+        // `orphan_scan` reset, `process` still carries the original adapter +
+        // model, so the pin reproduces them instead of re-resolving from
+        // ambient env (noogram/cosmon#3 Defect 2).
+        let pin = DispatchPin::from_molecule(&mol);
         self.store.save_molecule(&mol.id.clone(), &mol)?;
-        if let Err(e) = self.executor.dispatch(id) {
+        if let Err(e) = self.executor.dispatch_with_pin(id, &pin) {
             // Rollback: the molecule was flipped to Running optimistically
             // before dispatch. If dispatch fails, the molecule is stranded
             // in Running with no worker — the DAG stalls. Reset to Pending
@@ -1742,22 +1910,50 @@ mod tests {
         }
     }
 
-    /// Attach a detached-local-worker process record with a recorded PID and
-    /// launch fingerprint — the witness `cs tackle` persists for a local
-    /// worker (see `record_detached_local_worker_pid`).
+    /// Liveness double for the **production** local-worker shape
+    /// (noogram/cosmon#3 Defect 1): the tmux axis reports *dead* — because a
+    /// local worker has no pane, `tmux has-session` on the stamped
+    /// `session_name` always fails — while the PID axis reports the worker
+    /// *alive* (it is running, or `SIGSTOP`'d, but its launch fingerprint
+    /// still matches). Before the axis-selection fix, `orphan_scan` fell
+    /// through to the always-dead tmux axis and reset the live worker every
+    /// recheck (the thrashing symptom).
+    struct DeadSessionLiveWorkerCheck;
+    impl LivenessCheck for DeadSessionLiveWorkerCheck {
+        fn is_session_alive(&self, _session_name: &str) -> bool {
+            false
+        }
+        fn is_worker_alive(&self, _pid: u32, _pid_start_time: Option<u64>) -> bool {
+            true
+        }
+    }
+
+    /// Attach a **production-shaped** detached-local-worker process record:
+    /// `session_name = Some(...)` (tackle stamps one even though a local
+    /// worker has no tmux pane — `crates/cosmon-cli/src/cmd/tackle.rs`
+    /// step 9), a recorded PID + launch fingerprint, and
+    /// `adapter_name = "local"`. This is the real on-disk shape a local
+    /// worker leaves — the inverse of the pre-fix regression fixture, which
+    /// used `session_name = None` and (in production) no PID, and therefore
+    /// never exercised the axis-selection the production shape triggers
+    /// (noogram/cosmon#3 Defect 3).
     fn with_local_worker_process(mut mol: MoleculeData, pid: u32) -> MoleculeData {
+        let session = "cs-local-worker-b";
         let wid = cosmon_core::id::WorkerId::new("w-local").expect("wid");
-        let process = cosmon_core::process::MoleculeProcess::new(wid, "local-b")
+        let process = cosmon_core::process::MoleculeProcess::new(wid, session)
+            .with_adapter_name("local")
             .with_pid(pid)
             .with_pid_start_time(999_000);
+        mol.session_name = Some(session.to_owned());
         mol.process = Some(process);
         mol
     }
 
     #[test]
     fn orphan_scan_detects_dead_local_worker_pid() {
-        // Session appears alive (no tmux pane), but the recorded PID is
-        // provably dead — the molecule must still be flagged as an orphan.
+        // Production shape (session_name stamped), but the recorded PID is
+        // provably dead — the molecule must be flagged as an orphan on the
+        // PID axis regardless of the (categorically-dead) tmux axis.
         let mol =
             with_local_worker_process(running_mol_with_session("task-20260412-0002", None), 4242);
         let snap = FleetSnapshot {
@@ -1765,20 +1961,26 @@ mod tests {
         };
         let orphans = orphan_scan(&snap, &DeadLocalWorkerCheck);
         assert_eq!(orphans.len(), 1, "dead local-worker PID must be caught");
-        assert_eq!(orphans[0].session_name, "local-b");
+        assert_eq!(orphans[0].session_name, "cs-local-worker-b");
     }
 
     #[test]
     fn orphan_scan_skips_live_local_worker_pid() {
-        // A live PID with a matching session must not be reclaimed.
+        // A live PID must not be reclaimed even though the stamped session is
+        // (categorically) dead — the exact false-positive Defect 1 fixed.
+        // This is RED before the axis-selection short-circuit: the old code
+        // fell through to the always-dead tmux axis and reset the live
+        // worker. A `SIGSTOP`'d worker has this same shape and must survive.
         let mol =
             with_local_worker_process(running_mol_with_session("task-20260412-0003", None), 4242);
         let snap = FleetSnapshot {
             molecules: vec![mol],
         };
-        // Both axes report alive: AliveSessionCheck uses the default
-        // (optimistic) `is_worker_alive`.
-        assert!(orphan_scan(&snap, &AliveSessionCheck).is_empty());
+        assert!(
+            orphan_scan(&snap, &DeadSessionLiveWorkerCheck).is_empty(),
+            "a live (or SIGSTOP'd) local worker with a stamped, paneless \
+             session must never be reset — the PID axis is authoritative"
+        );
     }
 
     /// Executor that records `drain_native_tail` calls so tests can assert
@@ -2043,14 +2245,16 @@ mod tests {
             vec![cosmon_core::interaction::MoleculeLink::Blocks { target: b.clone() }];
         store.save_molecule(&a, &mol_a).unwrap();
 
-        // B: Running, blocked-by A, with a *dead* detached-local-worker PID
-        // witness and NO tmux session_name (the local-worker shape).
+        // B: Running, blocked-by A, in the **production** local-worker shape
+        // (session_name stamped + a *dead* PID witness). This is the shape a
+        // real `kill -9`'d local worker leaves on disk — the tmux axis is
+        // categorically dead (no pane), so only the PID axis can reclaim it
+        // (noogram/cosmon#3 Defects 1 + 3).
         let mut mol_b = pending_mol(b.as_str());
         mol_b.status = MoleculeStatus::Running;
         mol_b.typed_links =
             vec![cosmon_core::interaction::MoleculeLink::BlockedBy { source: a.clone() }];
         mol_b = with_local_worker_process(mol_b, 424_242);
-        mol_b.session_name = None;
         store.save_molecule(&b, &mol_b).unwrap();
 
         // Executor that completes a molecule synchronously on dispatch —
@@ -2145,6 +2349,157 @@ mod tests {
             reloaded_b.status,
             MoleculeStatus::Completed,
             "B must reach Completed after being reclaimed"
+        );
+    }
+
+    /// Executor that captures the [`DispatchPin`] handed to it so a test can
+    /// assert the runtime reproduces a molecule's original adapter/model on a
+    /// re-dispatch (noogram/cosmon#3 Defect 2).
+    #[derive(Default)]
+    struct PinRecordingExecutor {
+        pins: std::sync::Mutex<Vec<(MoleculeId, DispatchPin)>>,
+    }
+    impl Executor for PinRecordingExecutor {
+        fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+            self.dispatch_with_pin(id, &DispatchPin::default())
+        }
+        fn dispatch_with_pin(
+            &self,
+            id: &MoleculeId,
+            pin: &DispatchPin,
+        ) -> Result<(), RuntimeError> {
+            self.pins.lock().unwrap().push((id.clone(), pin.clone()));
+            Ok(())
+        }
+    }
+
+    fn local_process(model: Option<&str>) -> cosmon_core::process::MoleculeProcess {
+        cosmon_core::process::MoleculeProcess::new(
+            cosmon_core::id::WorkerId::new("w-local").unwrap(),
+            "cs-local",
+        )
+        .with_adapter_name("local")
+        .with_model(model)
+    }
+
+    #[test]
+    fn dispatch_pin_reads_adapter_and_model_from_process() {
+        let mut mol = pending_mol("task-20260721-cccc");
+        mol.process = Some(local_process(Some("qwen2.5-coder")));
+        let pin = DispatchPin::from_molecule(&mol);
+        assert!(
+            pin.is_pinned(),
+            "a molecule with a process record is pinned"
+        );
+        assert_eq!(pin.adapter.as_deref(), Some("local"));
+        assert_eq!(pin.model.as_deref(), Some("qwen2.5-coder"));
+
+        // A molecule that has never been tackled carries no pin — a first
+        // dispatch must fall through to the normal resolution chain.
+        let fresh = pending_mol("task-20260721-dddd");
+        assert!(!DispatchPin::from_molecule(&fresh).is_pinned());
+    }
+
+    /// Defect 2: a molecule reset to `Pending` by an orphan reclaim keeps its
+    /// process record, so the runtime's re-dispatch reproduces the original
+    /// adapter (and the *floor* model) instead of re-resolving from ambient
+    /// env. Before the fix the runtime shelled a bare `cs tackle <id>`, the
+    /// local adapter re-resolved the model from `$ANTHROPIC_MODEL`, the
+    /// preflight refused, and the molecule stalled `Pending` to the deadline
+    /// (exit 124). This asserts the pin is carried; the env-strip that makes
+    /// it faithful for the floor lives in `SubprocessExecutor::apply_dispatch_pin`.
+    #[test]
+    fn apply_evolve_carries_original_pin_on_redispatch() {
+        use cosmon_filestore::FileStore;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
+
+        // Local adapter, floor model (None) — the reclaimed local-worker shape.
+        let id = MoleculeId::new("task-20260721-eeee").unwrap();
+        let mut mol = pending_mol(id.as_str());
+        mol.process = Some(local_process(None));
+        store.save_molecule(&id, &mol).unwrap();
+
+        let executor = std::sync::Arc::new(PinRecordingExecutor::default());
+        struct Proxy(std::sync::Arc<PinRecordingExecutor>);
+        impl Executor for Proxy {
+            fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+                self.0.dispatch(id)
+            }
+            fn dispatch_with_pin(
+                &self,
+                id: &MoleculeId,
+                pin: &DispatchPin,
+            ) -> Result<(), RuntimeError> {
+                self.0.dispatch_with_pin(id, pin)
+            }
+        }
+
+        let runtime = Runtime::new(
+            Box::new(FileStore::new(tmp.path())),
+            Box::new(NoOpPolicy),
+            Box::new(Proxy(executor.clone())),
+            RuntimeConfig::default(),
+        );
+        runtime
+            .apply_evolve(&id, "reclaim re-dispatch")
+            .expect("apply_evolve must succeed");
+
+        let pins = executor.pins.lock().unwrap();
+        assert_eq!(pins.len(), 1, "apply_evolve must dispatch exactly once");
+        assert_eq!(pins[0].0, id);
+        assert_eq!(
+            pins[0].1.adapter.as_deref(),
+            Some("local"),
+            "re-dispatch must carry the molecule's original adapter, not re-resolve from env"
+        );
+        assert!(
+            pins[0].1.model.is_none(),
+            "the original floor (model None) must be reproduced, not bled from ambient env"
+        );
+    }
+
+    /// A first-ever dispatch (no process record) must be **unpinned** so the
+    /// executor's normal resolution chain — and ambient env — behave exactly
+    /// as before the pin existed.
+    #[test]
+    fn apply_evolve_first_dispatch_is_unpinned() {
+        use cosmon_filestore::FileStore;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        store.save_fleet(&cosmon_state::Fleet::default()).unwrap();
+
+        let id = MoleculeId::new("task-20260721-ffff").unwrap();
+        store.save_molecule(&id, &pending_mol(id.as_str())).unwrap();
+
+        let executor = std::sync::Arc::new(PinRecordingExecutor::default());
+        struct Proxy(std::sync::Arc<PinRecordingExecutor>);
+        impl Executor for Proxy {
+            fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+                self.0.dispatch(id)
+            }
+            fn dispatch_with_pin(
+                &self,
+                id: &MoleculeId,
+                pin: &DispatchPin,
+            ) -> Result<(), RuntimeError> {
+                self.0.dispatch_with_pin(id, pin)
+            }
+        }
+        let runtime = Runtime::new(
+            Box::new(FileStore::new(tmp.path())),
+            Box::new(NoOpPolicy),
+            Box::new(Proxy(executor.clone())),
+            RuntimeConfig::default(),
+        );
+        runtime.apply_evolve(&id, "first dispatch").unwrap();
+
+        let pins = executor.pins.lock().unwrap();
+        assert_eq!(pins.len(), 1);
+        assert!(
+            !pins[0].1.is_pinned(),
+            "a first dispatch must be unpinned (no process record to reproduce)"
         );
     }
 
