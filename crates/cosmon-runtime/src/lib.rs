@@ -204,7 +204,7 @@ pub enum RuntimeAction {
 /// re-resolving from ambient environment (noogram/cosmon#3 Defect 2).
 ///
 /// Read from the molecule's `MoleculeProcess` (which survives an
-/// `orphan_scan` reset to `Pending`) at [`Runtime::apply_evolve`] time and
+/// `orphan_scan` reset to `Pending`) when the runtime evolves a molecule and
 /// passed to [`Executor::dispatch_with_pin`]. An all-`None` pin
 /// ([`Self::default`]) means "no prior dispatch to reproduce" — the molecule
 /// is being dispatched for the first time, so the executor uses its normal
@@ -300,11 +300,7 @@ pub trait Executor {
     /// # Errors
     ///
     /// Returns [`RuntimeError`] if the dispatch fails.
-    fn dispatch_with_pin(
-        &self,
-        id: &MoleculeId,
-        _pin: &DispatchPin,
-    ) -> Result<(), RuntimeError> {
+    fn dispatch_with_pin(&self, id: &MoleculeId, _pin: &DispatchPin) -> Result<(), RuntimeError> {
         self.dispatch(id)
     }
 
@@ -2391,7 +2387,10 @@ mod tests {
         let mut mol = pending_mol("task-20260721-cccc");
         mol.process = Some(local_process(Some("qwen2.5-coder")));
         let pin = DispatchPin::from_molecule(&mol);
-        assert!(pin.is_pinned(), "a molecule with a process record is pinned");
+        assert!(
+            pin.is_pinned(),
+            "a molecule with a process record is pinned"
+        );
         assert_eq!(pin.adapter.as_deref(), Some("local"));
         assert_eq!(pin.model.as_deref(), Some("qwen2.5-coder"));
 
