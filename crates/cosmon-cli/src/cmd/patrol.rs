@@ -1672,6 +1672,59 @@ fn notify_propel_orphaned(wid: &WorkerId, mid: &MoleculeId, stale_secs: i64) {
     let _ = cmd.spawn();
 }
 
+/// Assemble the [`NudgeView`] the propulsion judge reads for one stale
+/// candidate: the molecule's status and operator-gate witnesses, the orphan
+/// (briefing-present) fact, both clocks, and the per-stall attempt ledger.
+///
+/// Split out of [`propel_stale_molecules`] so the sweep loop stays readable —
+/// the shell's job is to gather these facts and obey the verdict, never to
+/// re-implement the heuristic (the one-judge discipline of the module docs).
+fn build_propulsion_view(
+    store: &dyn StateStore,
+    molecules: &[MoleculeData],
+    mid: &MoleculeId,
+    progress_age: chrono::Duration,
+    pane_idle: Option<chrono::Duration>,
+) -> NudgeView {
+    let now = Utc::now();
+    let attempts = propel_attempts(molecules, mid, now);
+    let mol = molecules.iter().find(|m| &m.id == mid);
+    NudgeView {
+        channel: NudgeChannel::Propulsion,
+        status: mol.map_or(MoleculeStatus::Running, |m| m.status),
+        awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
+        briefing_present: worker_briefing_present(store, mid),
+        progress_age,
+        pane_idle,
+        attempts: attempts.count,
+        since_last_propel: attempts
+            .last_at
+            .map(|at| now.signed_duration_since(at))
+            .map(|d| d.max(chrono::Duration::zero())),
+    }
+}
+
+/// Record an orphaned candidate: tag it `propel-orphaned`, page the operator
+/// via `cs notify`, and file it in the sweep's `orphaned` bucket. Never nudges
+/// — a brief-less worker cannot proceed no matter what it is told.
+fn escalate_orphan(
+    store: &dyn StateStore,
+    sweep: &mut PropelSweep,
+    wid: WorkerId,
+    mid: MoleculeId,
+    age: i64,
+    attempts: u32,
+) {
+    mark_propel_orphaned(store, &mid);
+    notify_propel_orphaned(&wid, &mid, age);
+    sweep.orphaned.push((wid, mid, attempts));
+}
+
+// The sweep is a per-candidate decision-dispatch loop with six terminal arms
+// (nudge, active, gated, orphaned, backoff, escalate); the view assembly and
+// orphan handling are already split into `build_propulsion_view` /
+// `escalate_orphan`, and further slicing would scatter one linear story.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn propel_stale_molecules(
     store: &dyn StateStore,
     molecules: &[MoleculeData],
@@ -1723,28 +1776,19 @@ pub(crate) fn propel_stale_molecules(
         if !matched {
             continue;
         }
-        // Admission control (task-20260719-00ed). Progress staleness alone
-        // proved far too weak a warrant: it cannot see a worker thinking
-        // inside one step, and it re-fires every pass forever. Consult the
-        // transport clock and the attempt ledger before speaking — and
-        // *before* the liveness projection below, because condemning a
-        // working worker's process record is the same false-idle error
-        // committed in a second organ.
-        let attempts = propel_attempts(molecules, &mid, now);
-        let mol = molecules.iter().find(|m| m.id == mid);
-        let view = NudgeView {
-            channel: NudgeChannel::Propulsion,
-            status: mol.map_or(MoleculeStatus::Running, |m| m.status),
-            awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
-            briefing_present: worker_briefing_present(store, &mid),
-            progress_age: chrono::Duration::seconds(age),
-            pane_idle: pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds),
-            attempts: attempts.count,
-            since_last_propel: attempts
-                .last_at
-                .map(|at| now.signed_duration_since(at))
-                .map(|d| d.max(chrono::Duration::zero())),
-        };
+        // Admission control (task-20260719-00ed): progress staleness alone is
+        // too weak a warrant. Consult the transport clock, the orphan fact, and
+        // the attempt ledger before speaking — and before the liveness
+        // projection below, which must not condemn a working worker's record.
+        let pane_idle =
+            pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds);
+        let view = build_propulsion_view(
+            store,
+            molecules,
+            &mid,
+            chrono::Duration::seconds(age),
+            pane_idle,
+        );
         let decision = decide_nudge(&view, stale_window);
 
         // A thinking worker is left entirely alone: no nudge, and no witness
@@ -1769,19 +1813,16 @@ pub(crate) fn propel_stale_molecules(
             continue;
         }
 
-        // The orphan gate (task-20260721-e1d9). A brief-less worker cannot
-        // evolve, so nudging it is the six-hour money pump. Escalate once —
-        // tag it, notify the operator loudly — and never nudge. Handled before
-        // the liveness projection because an orphan is a control-plane fact
-        // (missing briefing), not a stalled-but-live process to demote.
+        // The orphan gate (task-20260721-e1d9): a brief-less worker cannot
+        // evolve, so nudging it is the six-hour money pump. Escalate before the
+        // liveness projection — an orphan is a control-plane fact, not a
+        // stalled-but-live process to demote. See [`escalate_orphan`].
         if let NudgeDecision::Escalate {
             attempts,
             reason: EscalateReason::Orphaned,
         } = decision
         {
-            mark_propel_orphaned(store, &mid);
-            notify_propel_orphaned(&wid, &mid, age);
-            sweep.orphaned.push((wid, mid, attempts));
+            escalate_orphan(store, &mut sweep, wid, mid, age, attempts);
             continue;
         }
 
@@ -3765,7 +3806,11 @@ mod tests {
         store.save_molecule(&mol.id, &mol).unwrap();
         let dir = store.molecule_dir(&mol.id);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("briefing.md"), "# Molecule brief\n\nDo the work.\n").unwrap();
+        std::fs::write(
+            dir.join("briefing.md"),
+            "# Molecule brief\n\nDo the work.\n",
+        )
+        .unwrap();
         assert!(worker_briefing_present(&store, &mol.id));
     }
 
