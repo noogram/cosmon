@@ -185,6 +185,25 @@ firewall honored — end-to-end proof the sovereign local path carries real work
   existing worktree/branch/event-chain — on by default. The witness is
   conservative (PID reuse cannot reclaim a healthy worker), and completed work
   is still never re-run. Regression test reproduces the kill+restart recovery.
+- **Completed for the local/Ollama adapter (the reporter's exact conditions).**
+  A clean-room re-audit found the first pass only *partially* closed #3 for a
+  detached local worker, with three residual defects — all now fixed:
+  - The PID witness never survived in `state.json` for a local worker: it was
+    written before the worker's process record was bound and then overwritten
+    with `pid: none`, so the liveness check's PID axis was inert. The PID +
+    start-time is now stamped on the record `cs tackle` actually persists.
+  - `cs run` false-flagged and reset its own *live* (or `SIGSTOP`'d) local
+    workers every recheck: a local worker has no tmux pane, yet the scan
+    OR-combined the always-dead tmux axis. The liveness axis is now chosen by
+    worker kind — a PID witness is authoritative and short-circuits; the tmux
+    axis is never applied to a paneless local worker.
+  - A re-dispatch re-resolved the model from the ambient environment instead
+    of the molecule's original pin, so with `ANTHROPIC_MODEL` set the local
+    adapter resolved to a non-served model and every re-dispatch was refused —
+    the molecule stalled `pending` to the timeout (exit 124). The re-dispatch
+    now carries the molecule's original adapter + model and strips ambient
+    model env, so the floor stays the floor. New regression tests reproduce
+    the live-worker false reset and the stuck-`pending` re-dispatch.
 
 ### Fixed: the headless Claude spawn crashed and could hang (Jesse #6, residual)
 
