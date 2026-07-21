@@ -1202,7 +1202,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // worker + branch + worktree) or nothing persists. On spawn failure
     // we now undo `create_worktree`'s side effects before surfacing the
     // error.
-    if let Err(e) = spawn_and_prompt(
+    let spawn_outcome = match spawn_and_prompt(
         &backend,
         &wid,
         &session_name,
@@ -1217,16 +1217,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         preferred_model.as_deref(),
         &current_strong_set,
     ) {
-        cleanup_partial_tackle(
-            &backend,
-            &wid,
-            &repo_root,
-            &worktree_path,
-            &branch_name,
-            args.no_worktree,
-        );
-        return Err(e);
-    }
+        Ok(outcome) => outcome,
+        Err(e) => {
+            cleanup_partial_tackle(
+                &backend,
+                &wid,
+                &repo_root,
+                &worktree_path,
+                &branch_name,
+                args.no_worktree,
+            );
+            return Err(e);
+        }
+    };
 
     // Two post-spawn steps below presuppose a tmux-backed worker —
     // install_harvest_hook (kernel-level pane-died witness) and the
@@ -1342,8 +1345,26 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // can branch on the adapter's `SupervisionMode` without
         // re-running the dispatch logic — see GAP #7
         // (chronicle `2026-05-18-gap7-observer-side-fix.md`).
-        let process = cosmon_core::process::MoleculeProcess::new(wid.clone(), session_name.clone())
-            .with_adapter_name(adapter.as_str());
+        let mut process =
+            cosmon_core::process::MoleculeProcess::new(wid.clone(), session_name.clone())
+                .with_adapter_name(adapter.as_str())
+                // Persist the resolved model pin (or the floor `None`) so a
+                // re-dispatch reproduces this exact resolution instead of
+                // bleeding ambient `$ANTHROPIC_MODEL` (noogram/cosmon#3
+                // Defect 2). See `orphan_scan` + the runtime's re-dispatch.
+                .with_model(preferred_model.as_deref());
+        // Stamp the detached local worker's PID + launch fingerprint on the
+        // record we are about to persist. This is the point where the PID
+        // witness finally survives in `state.json` (noogram/cosmon#3
+        // Defect 1) — `orphan_scan`'s PID axis reads it back to authenticate
+        // the worker's liveness (a live or SIGSTOP'd worker matches its
+        // fingerprint and is never reset; a `kill -9`'d one no longer does).
+        if let Some(witness) = &spawn_outcome.detached_local {
+            process = process.with_pid(witness.pid);
+            if let Some(start) = witness.pid_start_time {
+                process = process.with_pid_start_time(start);
+            }
+        }
         updated.bind_process(process);
         // Record the dispatch claim (anti-preemption lease). A `human`
         // claim is sticky — the resident runtime will never preempt it;
@@ -3511,6 +3532,39 @@ fn report_existing_session(
 /// registry but forgets to wire its branch here, the error fires at
 /// runtime rather than dispatching silently through Claude. That is a
 /// distinct invariant from the validation one TS-0 closes — keep both.
+/// Side-channel results a spawn arm produces that the caller must persist on
+/// the molecule's live-process record **after** it is bound (step 9 of
+/// [`run`]).
+///
+/// Only the detached local-worker arm yields a witness today: its child PID
+/// is not known until [`spawn_detached_local_worker`] has forked, which
+/// happens *before* the `MoleculeProcess` is bound. Returning the PID here —
+/// rather than trying to stamp it on a record that does not yet exist — is
+/// the persistence half of the noogram/cosmon#3 Defect 1 fix. Before it, the
+/// PID was written by a helper that ran when `molecule.process` was still
+/// `None` (a silent no-op) and step 9 then bound a fresh record with
+/// `pid: None`, so a local worker's PID never survived in `state.json` and
+/// `orphan_scan`'s PID axis was inert. Every tmux / in-process arm returns
+/// [`SpawnOutcome::default`] (their liveness is witnessed by tmux or the arm
+/// runs synchronously).
+#[derive(Debug, Default, Clone)]
+pub(super) struct SpawnOutcome {
+    /// The detached local worker's PID and launch fingerprint, to be stamped
+    /// on the `MoleculeProcess` so the runtime's PID-axis liveness check can
+    /// authenticate it. `None` for every other adapter.
+    pub detached_local: Option<DetachedLocalWitness>,
+}
+
+/// The PID identity of a freshly-forked detached local worker.
+#[derive(Debug, Clone)]
+pub(super) struct DetachedLocalWitness {
+    /// Operating-system PID of the detached `cs local-worker` child.
+    pub pid: u32,
+    /// Platform launch fingerprint captured with the PID (`None` when the
+    /// platform did not surface one; the PID axis then stays optimistic).
+    pub pid_start_time: Option<u64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn spawn_and_prompt(
     backend: &TmuxBackend,
@@ -3537,12 +3591,38 @@ pub(super) fn spawn_and_prompt(
     // to a strong model on a transient outage (task-20260705-ba98). Only the
     // claude branch pre-flights a fallback chain, so the other arms ignore it.
     strong_set: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SpawnOutcome> {
     // Per-Adapter override row (`[adapters.openai]`, `[adapters.anthropic]`)
     // — keys the Direct-API branches lift the api_key_env / base_url /
     // default_model from. `None` means "fall back to env-var + compile-time
     // defaults", which is the historical pre-C6 behaviour.
     let adapter_entry = adapters_cfg.and_then(|cfg| cfg.entry(adapter.as_str()));
+    // The detached local-worker arm is the only one that yields a PID witness
+    // (noogram/cosmon#3 Defect 1); handle it with an early return so the
+    // remaining match stays uniformly `Result<()>` and is wrapped into an
+    // empty [`SpawnOutcome`] after the fact. `task-20260707-7d27` (hole #1):
+    // the `local` floor and its `ollama` alias share the identical
+    // `OpenAIProvider`-against-Ollama spawn path; the validated name
+    // (`adapter.as_str()`) is threaded through so the floor's telemetry
+    // stamps the name the operator selected — keeping the ADR-099 cat-test
+    // (`adapter_selected == worker_spawned`) intact for both.
+    if matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama") {
+        return spawn_detached_local_worker(
+            adapter.as_str(),
+            wid,
+            session_name,
+            worktree_path,
+            prompt,
+            mol,
+            mol_state_dir,
+            state_dir,
+            adapter_entry,
+            preferred_model,
+        );
+    }
+    // Every tmux / in-process arm below returns `()`; wrap the match's value
+    // in an empty [`SpawnOutcome`] so the caller has a single uniform value
+    // to persist.
     match adapter.as_str() {
         "claude" => spawn_claude_and_prompt(
             backend,
@@ -3625,43 +3705,19 @@ pub(super) fn spawn_and_prompt(
             adapter_entry,
             preferred_model,
         ),
-        // `task-20260530-821f` (parent `delib-20260530-0877`) — the
-        // walking-skeleton local-default branch. Reuses the proven
-        // `OpenAIProvider` + `run_agent_loop` (R-openai route from the
-        // synthesis) pointed at Ollama's OpenAI-compat `/v1` endpoint:
-        // ZERO new provider code, multi-turn tool-calling already in
-        // place via `cosmon_agent_harness::run_loop`. This is the
-        // built-in `cs tackle` default (no `--adapter` flag), so the
-        // loop runs in-process with NO `claude` subprocess. Matched via
-        // the floor constant so the dispatch arm tracks the floor name.
-        // `task-20260707-7d27` (hole #1): the `local` floor and its
-        // `ollama` alias share the identical `OpenAIProvider`-against-Ollama
-        // spawn path. The validated name (`adapter.as_str()`) is threaded
-        // through so the floor's telemetry stamps the name the operator
-        // actually selected — `local` or `ollama` — keeping the ADR-099
-        // cat-test (`adapter_selected == worker_spawned`) intact for both.
-        BUILTIN_FLOOR_ADAPTER | "ollama" => spawn_detached_local_worker(
-            adapter.as_str(),
-            wid,
-            session_name,
-            worktree_path,
-            prompt,
-            mol,
-            mol_state_dir,
-            state_dir,
-            adapter_entry,
-            preferred_model,
-        ),
+        // The `local` / `ollama` floor is handled by the early return above
+        // (it is the only PID-witness arm), so it never reaches this match.
         // `validate_adapter_name` already refused any name not in the
-        // dispatch registry; reaching the catch-all means a new
-        // adapter was added to the registry without a matching branch
-        // here — completeness invariant, not user error.
+        // dispatch registry; reaching the catch-all means a new adapter was
+        // added to the registry without a matching branch here —
+        // completeness invariant, not user error.
         other => Err(anyhow::anyhow!(
             "cs tackle: adapter '{other}' validated by validate_adapter_name but \
              not wired in spawn_and_prompt — this is a build-time bug, not \
              a runtime path. Add a match arm in spawn_and_prompt."
         )),
     }
+    .map(|()| SpawnOutcome::default())
 }
 
 /// `FeatureNotCompiled` stub for the `llama-cpp` adapter. The in-process
@@ -5116,7 +5172,7 @@ fn spawn_detached_local_worker(
     state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<SpawnOutcome> {
     let job = LocalWorkerJob {
         adapter_name: adapter_name.to_owned(),
         worker_id: wid.as_str().to_owned(),
@@ -5169,44 +5225,26 @@ fn spawn_detached_local_worker(
         .spawn()
         .map_err(|e| anyhow::anyhow!("cs tackle: could not detach local worker: {e}"))?;
 
-    // The detached process is the ground-truth witness for the RPP tackle
-    // ceiling. Persist its PID after spawn so a worker that crashes before it
-    // can report its own terminal transition cannot occupy a slot forever.
-    record_detached_local_worker_pid(
-        state_dir,
-        &mol.id,
-        wid,
-        child.id(),
-        process_start_time(child.id()),
-    )?;
-
-    Ok(())
-}
-
-/// Persist the PID of a detached local worker without reviving a record that
-/// has already reached a terminal status.
-fn record_detached_local_worker_pid(
-    state_dir: &Path,
-    mol_id: &MoleculeId,
-    worker_id: &WorkerId,
-    pid: u32,
-    pid_start_time: Option<u64>,
-) -> anyhow::Result<()> {
-    let store = FileStore::new(state_dir);
-    let _guard = store.lock_fleet()?;
-    let mut molecule = store.load_molecule(mol_id)?;
-    if let Some(process) = molecule
-        .process
-        .as_mut()
-        .filter(|p| p.worker_id == *worker_id)
-    {
-        if process.is_active() {
-            process.pid = Some(pid);
-            process.pid_start_time = pid_start_time;
-            store.save_molecule(mol_id, &molecule)?;
-        }
-    }
-    Ok(())
+    // The detached process is the ground-truth liveness witness for both the
+    // RPP tackle ceiling and the runtime's `orphan_scan` PID axis. Return its
+    // PID + launch fingerprint so the caller can stamp it on the
+    // `MoleculeProcess` it is *about* to bind (step 9 of `run`).
+    //
+    // This replaces the earlier `record_detached_local_worker_pid` helper,
+    // which loaded the molecule and tried to patch `molecule.process` in
+    // place. That never worked: at this point in the tackle flow the process
+    // record has not been bound yet (`molecule.process == None`), so the
+    // patch was a silent no-op, and step 9 then bound a *fresh* record with
+    // `pid: None` — overwriting nothing and persisting nothing. The PID axis
+    // was therefore inert for every real local worker (noogram/cosmon#3
+    // Defect 1). Threading the witness up so step 9 binds the record *with*
+    // the PID is the durable fix.
+    Ok(SpawnOutcome {
+        detached_local: Some(DetachedLocalWitness {
+            pid: child.id(),
+            pid_start_time: process_start_time(child.id()),
+        }),
+    })
 }
 
 /// Mark a detached local worker terminal once its process has returned.

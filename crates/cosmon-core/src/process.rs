@@ -105,6 +105,22 @@ pub struct MoleculeProcess {
     /// completion fix (chronicle 2026-05-18-gap7-observer-side-fix.md).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adapter_name: Option<String>,
+    /// The per-molecule **model** pin resolved at `cs tackle` time
+    /// (delib-20260704-b476 C1), or `None` when nothing pinned a model and
+    /// the adapter's own default (the floor) applied.
+    ///
+    /// Recorded as the durable sibling of [`Self::adapter_name`] so a
+    /// **re-dispatch** can reproduce the molecule's *original* resolution
+    /// instead of re-resolving from ambient environment (`$ANTHROPIC_MODEL`,
+    /// `$COSMON_DEFAULT_MODEL`). This is the persistence half of the
+    /// noogram/cosmon#3 Defect 2 fix: without it, an orphan-reclaimed local
+    /// worker re-dispatched by the runtime bled an ambient Claude model id
+    /// into the Ollama-backed floor and every re-dispatch was refused by the
+    /// preflight, stranding the molecule `Pending` until the deadline
+    /// (exit 124). `None` for legacy records, tmux/in-process adapters, and
+    /// the floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 impl MoleculeProcess {
@@ -120,6 +136,7 @@ impl MoleculeProcess {
             pid: None,
             pid_start_time: None,
             adapter_name: None,
+            model: None,
         }
     }
 
@@ -130,6 +147,17 @@ impl MoleculeProcess {
     #[must_use]
     pub fn with_adapter_name(mut self, adapter: impl Into<String>) -> Self {
         self.adapter_name = Some(adapter.into());
+        self
+    }
+
+    /// Builder: record the per-molecule model pin chosen at `cs tackle` time.
+    ///
+    /// Read back by the runtime's re-dispatch path to reproduce the original
+    /// model resolution (noogram/cosmon#3 Defect 2). Passing `None` is a
+    /// no-op so the floor (`None`) is representable without a spurious write.
+    #[must_use]
+    pub fn with_model(mut self, model: Option<impl Into<String>>) -> Self {
+        self.model = model.map(Into::into);
         self
     }
 
