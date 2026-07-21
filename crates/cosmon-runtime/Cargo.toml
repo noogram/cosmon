@@ -14,6 +14,7 @@ cosmon-core.workspace = true
 cosmon-filestore.workspace = true
 cosmon-graph.workspace = true
 cosmon-hash.workspace = true
+cosmon-process-witness.workspace = true
 cosmon-state.workspace = true
 notify.workspace = true
 rand.workspace = true
