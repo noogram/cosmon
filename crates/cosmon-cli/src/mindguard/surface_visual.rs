@@ -467,17 +467,21 @@ fn is_git_repo(project_root: &Path) -> bool {
 /// Run `git diff --name-only --diff-filter=d <base>...<head>` and parse
 /// the names.
 ///
-/// The `--diff-filter=d` (lower-case = *exclude*) drops pure deletions:
-/// a molecule that only removes surface files leaves nothing to render,
-/// so it must not read as a surface touch (false-alarm fix, 2026-06-23).
-/// Added / modified / renamed / copied / type-changed paths are kept.
+/// The filter keeps Added / Modified / Renamed / Copied / Type-changed paths
+/// and drops pure deletions: a molecule that only removes surface files leaves
+/// nothing to render, so it must not read as a surface touch (false-alarm fix,
+/// 2026-06-23). We spell the kept classes explicitly as `--diff-filter=ACMRT`
+/// (an *inclusion* set) rather than the equivalent pure-exclusion `d`
+/// (issue #5, item 2): the exclusion-only spelling is the fragile form that
+/// leaks a `git diff` usage screen on some older/downstream git builds, whereas
+/// an explicit inclusion set is unambiguous on every git that ships diff-filter.
 fn git_diff_names(project_root: &Path, base: &str, head: &str) -> Result<Vec<String>, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(project_root)
         .arg("diff")
         .arg("--name-only")
-        .arg("--diff-filter=d")
+        .arg("--diff-filter=ACMRT")
         .arg(format!("{base}...{head}"))
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;
@@ -504,15 +508,17 @@ fn git_diff_names(project_root: &Path, base: &str, head: &str) -> Result<Vec<Str
 /// when one is checked out, the project root otherwise — a working-tree
 /// diff is only molecule-attributable in the molecule's own checkout.
 ///
-/// `--diff-filter=d` excludes pure deletions for the same reason as
-/// [`git_diff_names`]: removing surface files is not a surface touch.
+/// `--diff-filter=ACMRT` keeps the same classes as [`git_diff_names`] and drops
+/// pure deletions for the same reason: removing surface files is not a surface
+/// touch. The explicit inclusion set is used in place of the pure-exclusion `d`
+/// for the portability reason documented on [`git_diff_names`] (issue #5).
 fn git_diff_names_plain(dir: &Path) -> Result<Vec<String>, String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
         .arg("diff")
         .arg("--name-only")
-        .arg("--diff-filter=d")
+        .arg("--diff-filter=ACMRT")
         .arg("HEAD")
         .output()
         .map_err(|e| format!("spawn git: {e}"))?;

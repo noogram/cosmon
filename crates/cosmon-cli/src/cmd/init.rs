@@ -632,7 +632,9 @@ fn run_upgrade(
             println!("  + project_id backfilled");
         }
         if registry_added {
-            println!("  + registry.sqlite (neurion schema + default referents)");
+            println!(
+                "  + registry.sqlite (derived index — gitignored cache, not the source of truth)"
+            );
         }
         if state_added {
             println!("  + state/fleets/default/molecules/ + fleet.json");

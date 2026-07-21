@@ -46,7 +46,10 @@ reading the rest.
 
 Cosmon is one command-line tool, `cs`. Each command runs, writes to files on
 disk, and exits. The local workflow has no database server or scheduler to
-operate. That lets a small team — three to ten agents — add it to an existing
+operate. (`cs init` does create a local `.cosmon/registry.sqlite`: it is a
+gitignored, derived index rebuilt from the JSON files on demand — a cache, not
+the source of truth for molecule state and history, which stay in `.cosmon/`
+JSON and git.) That lets a small team — three to ten agents — add it to an existing
 repository without standing up new infrastructure. By default `cs` drives a
 local model over an OpenAI-compatible endpoint such as
 [Ollama](https://ollama.com); it can also hand a task to Claude Code, Codex,
