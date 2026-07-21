@@ -196,7 +196,10 @@ fn nucleate_molecule(dir: &Path) -> String {
             "task-work",
             "--json",
             "--var",
-            "topic=write a haiku to README",
+            // Must leave a real worktree deliverable: the Jesse #4 real-work
+            // floor refuses to book `completed` on chatter alone, so the demo
+            // task explicitly writes a file rather than merely replying.
+            "topic=Create a file README.md containing a haiku.",
         ])
         .output()
         .expect("spawn cs nucleate");
