@@ -3773,10 +3773,21 @@ pub(super) fn finalize_inprocess_molecule(
     mol_id: &MoleculeId,
     adapter: &ValidatedAdapterName,
 ) -> anyhow::Result<()> {
-    let reason = format!(
-        "in-process agent loop returned Ok ({} adapter, ADR-100 Direct-API)",
-        adapter.as_str()
-    );
+    // Reason string is adapter-honest. The `local` / `ollama` floor no longer
+    // runs in-process — it is a DETACHED worker (`cs local-worker`) that drives
+    // Ollama out of the caller's address space — so the historic
+    // "in-process agent loop … ADR-100 Direct-API" phrasing describes an
+    // execution model the local path has not used since the detached-worker
+    // split. Only the true Direct-API adapters (openai, anthropic) keep it.
+    let reason = match adapter.as_str() {
+        "local" | "ollama" => {
+            format!(
+                "detached local worker returned Ok ({} adapter)",
+                adapter.as_str()
+            )
+        }
+        other => format!("in-process agent loop returned Ok ({other} adapter, ADR-100 Direct-API)"),
+    };
     super::complete::complete_one(store, state_dir, mol_id, &reason).map(|_| ())
 }
 
@@ -5253,6 +5264,12 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     let wid = WorkerId::new(&job.worker_id)?;
     let mol = store.load_molecule(&mol_id)?;
 
+    // Stamp the step start BEFORE running the loop. The acceptance-artifact
+    // guard below rejects any declared artifact whose mtime predates this — a
+    // file left over from a previous tackle is not proof that *this* turn did
+    // work (Jesse #4, the "older than step start" clause).
+    let step_start = std::time::SystemTime::now();
+
     let result = run_local_agent_loop(
         &job.adapter_name,
         &wid,
@@ -5264,7 +5281,11 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         job.adapter_entry.as_ref(),
         job.preferred_model.as_deref(),
     );
-    let synthesis = match result {
+    // The returned synthesis body is already persisted to `synthesis.md` inside
+    // the agent loop; the completion decision below deliberately does NOT trust
+    // it (a synthesis body is not a work product — Jesse #4), so the value is
+    // dropped here.
+    let _synthesis = match result {
         Ok(synthesis) => synthesis,
         Err(error) => {
             let _ = append_local_worker_failure(&job.molecule_dir, &error);
@@ -5292,23 +5313,60 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         };
     }
 
-    // BUG #4 real-work guard. The agent loop returning `Ok` proves only that
-    // the transport did not error — NOT that the weak local model did any
-    // work. A no-op turn (empty synthesis, no worktree edits) must NOT be
-    // booked "completed": that is a silent false success, the exact wall
-    // tester Matteo Cacciari hit (an unresolvable/weak ollama model no-ops and
-    // the molecule "passes"). Refuse to finalize unless there is real work,
-    // and fail LOUDLY with a repair-naming message. The molecule is left
-    // Running with the worker stopped — recoverable and re-tacklable — rather
-    // than collapsed (terminal, work lost) or completed (false success).
-    if !local_worker_produced_real_work(&job.worktree_path, &synthesis) {
+    // BUG #4 real-work guard (Jesse #4 acceptance-artifact closure). The agent
+    // loop returning `Ok` proves only that the transport did not error — NOT
+    // that the weak local model did any work. A no-op turn must NOT be booked
+    // "completed": that is a silent false success. Jesse's clean-room audit
+    // reproduced it on cs 0.2.2 — a task-work brief of "reply with the single
+    // word hello, create no files" reached `completed` with energy untouched,
+    // an EMPTY branch, and a synthesis body of just "hello." The prior guard
+    // accepted any non-empty synthesis, so that chatter passed. A synthesis
+    // body is not a work product; real work on this floor is a worktree
+    // deliverable (see [`local_worker_produced_real_work`]). Refuse to finalize
+    // otherwise, and fail LOUDLY with a repair-naming message. The molecule is
+    // left Running with the worker stopped — recoverable and re-tacklable —
+    // rather than collapsed (terminal, work lost) or completed (false success).
+    if !local_worker_produced_real_work(&job.worktree_path) {
         let guard_error = anyhow::anyhow!(
-            "cs local-worker: the local agent loop returned without producing any real work \
-             — synthesis.md is empty and the worktree holds no deliverables. This is almost \
-             always a weak or unresolved local model that no-opped instead of honoring the \
-             result contract. The molecule is NOT completed; it needs attention. Re-tackle \
-             with a model the backend can actually serve and reason with (pin one via \
-             --model, [adapters.local].default_model, or COSMON_LOCAL_MODEL)."
+            "cs local-worker: the local agent loop returned but produced NO real work \
+             product — the worktree branch is empty (no file created or edited) and the \
+             only output is the model's synthesis chatter. A synthesis body is not a \
+             deliverable: any chat model emits text, so booking this \"completed\" would \
+             be a silent false success (Jesse #4). The molecule is NOT completed; it \
+             needs attention. If this was a genuine task, re-tackle with a model the \
+             backend can actually serve — one that writes its deliverable to a file (the \
+             formula's RESULT CONTRACT) or edits the worktree — pinned via --model, \
+             [adapters.local].default_model, or COSMON_LOCAL_MODEL."
+        );
+        let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
+        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
+            Ok(()) => Err(guard_error),
+            Err(mark_error) => Err(guard_error.context(format!(
+                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
+            ))),
+        };
+    }
+
+    // General acceptance-artifact enforcement (Jesse #4 primitive). When the
+    // formula DECLARES machine-checkable `acceptance_artifacts`, refuse to book
+    // `completed` unless every one landed under the canonical molecule dir —
+    // present, non-empty, inside the dir, and written during THIS turn (newer
+    // than `step_start`). This fires only where declared, so text-only formulas
+    // are unaffected. It closes the falsifier "a molecule whose declared
+    // artifact is absent reaches status=completed" on the in-process completion
+    // path, which never traverses the per-step `cs evolve` gate that already
+    // enforces the same contract for the multi-step (claude) path.
+    let missing_declared =
+        missing_declared_acceptance_artifacts(&job.state_dir, &mol, &job.molecule_dir, step_start);
+    if !missing_declared.is_empty() {
+        let guard_error = anyhow::anyhow!(
+            "cs local-worker: the formula declares acceptance_artifacts that did not land \
+             under the molecule directory {} during this turn: {}. A declared artifact \
+             that is absent, empty, outside the molecule dir, or older than the step \
+             start is not proof of work — the molecule is NOT completed and needs \
+             attention.",
+            job.molecule_dir.display(),
+            missing_declared.join(", "),
         );
         let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
         return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
@@ -5352,32 +5410,63 @@ fn sync_worktree_deliverables_to_artifact_dir(worktree: &Path) -> anyhow::Result
     sync_worktree_deliverables(worktree, &artifact_dir)
 }
 
-/// Whether a finished local worker produced *real work* worth booking as a
-/// completed molecule (BUG #4).
+/// The declared `acceptance_artifacts` a detached-local turn failed to produce,
+/// per the strengthened presence contract
+/// ([`super::evolve::unsatisfied_expected_artifacts`]).
 ///
-/// The `local` / `ollama` floor drives a weak, operator-supplied model. Such a
-/// model can return `Ok` from the agent loop having done nothing at all — no
-/// edits, no synthesis, a single no-op turn — because the loop's success is the
-/// *absence of a transport error*, not the *presence of output*. Booking that
-/// "completed" is a silent false success: the molecule reports done while the
-/// work never happened. This is the exact wall tester Matteo Cacciari hit —
-/// unable to name a capable ollama model, the loop no-ops and the molecule
-/// "passes".
-///
-/// Real work is either of:
-/// * a non-empty `synthesis.md` body (the model's own final text), or
-/// * at least one non-internal deliverable in the worktree (a tracked diff vs
-///   `main` or an untracked file that is not under `.cosmon/`, `target/`,
-///   `.git/`).
-///
-/// Fail-closed: if the worktree cannot even be inspected (git failure) *and*
-/// the synthesis is empty, we cannot prove work happened, so we report `false`
-/// and let the caller surface the molecule for attention rather than complete
-/// it on faith.
-fn local_worker_produced_real_work(worktree: &Path, synthesis: &str) -> bool {
-    if !synthesis.trim().is_empty() {
-        return true;
+/// Empty when the formula declares none (or cannot be loaded) — enforcement
+/// fires only where declared, so text-only formulas are unaffected. The
+/// `step_start` floor rejects any declared artifact left over from a prior
+/// tackle (mtime before this turn began).
+fn missing_declared_acceptance_artifacts(
+    state_dir: &Path,
+    mol: &MoleculeData,
+    mol_dir: &Path,
+    step_start: std::time::SystemTime,
+) -> Vec<String> {
+    let Some(formula) = load_formula_for_molecule(state_dir, mol) else {
+        return Vec::new();
+    };
+    let expected: Vec<String> = formula
+        .steps
+        .iter()
+        .flat_map(|s| s.expected_artifacts.iter().cloned())
+        .collect();
+    if expected.is_empty() {
+        return Vec::new();
     }
+    super::evolve::unsatisfied_expected_artifacts(mol_dir, &expected, Some(step_start))
+}
+
+/// Whether a finished local worker produced *real work* worth booking as a
+/// completed molecule (BUG #4 / Jesse #4).
+///
+/// The `local` / `ollama` floor drives a weak, operator-supplied model that
+/// returns `Ok` from the agent loop as long as the *transport* did not error —
+/// entirely independent of whether the model did any work. Jesse's clean-room
+/// audit reproduced the failure on cs 0.2.2: a task-work molecule whose brief
+/// was "reply with the single word hello, create no files" reached `completed`
+/// with energy untouched, an EMPTY branch, and a synthesis body of just
+/// "hello." A second run dumped a fabricated `<tool_result name="edit_file">`
+/// transcript as raw text into `synthesis.md` — the silent-false-success on file.
+///
+/// The lesson: **a synthesis body is not a work product.** The auto-generated
+/// `synthesis.md` wrapper always exists, and any chat model emits *some* text,
+/// so "non-empty synthesis" is a thin proxy that a no-op turn passes trivially
+/// (the prior guard did exactly that). Real work on this floor is a
+/// **deliverable in the worktree** — a tracked diff against `main` or an
+/// untracked file that is not cosmon-internal (`.cosmon/`, `target/`, `.git/`).
+///
+/// This does not break a genuine *text* deliverable: the formula's RESULT
+/// CONTRACT directs such a deliverable to a file (e.g. `result.md`), which the
+/// local sandboxed loop lands in the worktree and this guard then counts. A
+/// mission that produces no file at all is chatter, not a task-work
+/// deliverable, and must not be booked completed.
+///
+/// Fail-closed: if the worktree cannot even be inspected (git failure) we
+/// cannot prove work happened, so we report `false` and let the caller surface
+/// the molecule for attention rather than complete it on faith.
+fn local_worker_produced_real_work(worktree: &Path) -> bool {
     match discover_worktree_deliverables(worktree) {
         Ok(rels) => rels.iter().any(|rel| !ignored_artifact_path(rel)),
         Err(error) => {
@@ -7251,38 +7340,49 @@ mod tests {
             .contains("could not create artifact directory"));
     }
 
-    /// BUG #4: a non-empty synthesis is real work even when the worktree is
-    /// otherwise untouched — the model produced output worth booking.
+    /// Jesse #4 REGRESSION — the audit repro. A non-empty synthesis with an
+    /// empty branch is the no-op-with-chatter case: the model emitted text
+    /// ("hello." / a fabricated tool-result dump) but created no file. This
+    /// reached `completed` on cs 0.2.2 because the old guard accepted any
+    /// non-empty synthesis. It must now be refused (guard returns `false`), so
+    /// the caller leaves the molecule NOT-completed.
     #[test]
-    fn real_work_guard_accepts_non_empty_synthesis() {
+    fn real_work_guard_rejects_chatter_only_no_op() {
         let (_tmp, root) = init_repo();
-        assert!(local_worker_produced_real_work(
-            &root,
-            "  I implemented the fix.  "
-        ));
+        // Whatever the model said, an empty branch is not a work product.
+        assert!(!local_worker_produced_real_work(&root));
     }
 
-    /// BUG #4: an empty synthesis with no worktree deliverable is a no-op — the
-    /// guard must refuse it so the caller does not book a false "completed".
+    /// Jesse #4: a clean worktree (a weak model's no-op turn) is refused —
+    /// nothing changed since the seed commit, so there is no deliverable.
     #[test]
-    fn real_work_guard_rejects_empty_synthesis_and_clean_worktree() {
+    fn real_work_guard_rejects_clean_worktree() {
         let (_tmp, root) = init_repo();
-        // Only whitespace in the synthesis, and nothing changed since the seed
-        // commit: a weak model's no-op turn.
-        assert!(!local_worker_produced_real_work(&root, "   \n\t  "));
+        assert!(!local_worker_produced_real_work(&root));
     }
 
-    /// BUG #4: an empty synthesis is still real work when the worker actually
-    /// edited the worktree — a weak model that wrote code but no prose.
+    /// Jesse #4: a worktree deliverable is real work — a model that wrote code
+    /// (or wrote its text deliverable to a file per the RESULT CONTRACT).
     #[test]
-    fn real_work_guard_accepts_worktree_deliverable_without_synthesis() {
+    fn real_work_guard_accepts_worktree_deliverable() {
         let (_tmp, root) = init_repo();
         std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
-        assert!(local_worker_produced_real_work(&root, ""));
+        assert!(local_worker_produced_real_work(&root));
     }
 
-    /// BUG #4: a file produced only under a cosmon-internal path (`.cosmon/`,
+    /// Jesse #4: a text deliverable honouring the RESULT CONTRACT — the model
+    /// wrote its answer to `result.md` in the worktree — is real work. This is
+    /// the boundary that must NOT break: a genuine text mission passes because
+    /// it produced a file, while chatter-only does not.
+    #[test]
+    fn real_work_guard_accepts_result_md_text_deliverable() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("result.md"), "# Answer\n\nThe reply is: hello.\n").unwrap();
+        assert!(local_worker_produced_real_work(&root));
+    }
+
+    /// Jesse #4: a file produced only under a cosmon-internal path (`.cosmon/`,
     /// `target/`, `.git/`) is NOT a deliverable — it must not rescue a no-op
     /// from the guard.
     #[test]
@@ -7292,7 +7392,7 @@ mod tests {
         std::fs::write(root.join("target/build-artifact"), "noise").unwrap();
         std::fs::create_dir(root.join(".cosmon")).unwrap();
         std::fs::write(root.join(".cosmon/state"), "internal").unwrap();
-        assert!(!local_worker_produced_real_work(&root, ""));
+        assert!(!local_worker_produced_real_work(&root));
     }
 
     /// Create branch `feat/{id}` off `main`, add a commit dated `unix_ts`,

@@ -5,6 +5,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::SystemTime;
 
 use chrono::Utc;
 use cosmon_core::event::{Envelope, Event};
@@ -1129,19 +1130,93 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
 /// [`cosmon_core::formula::Step::expected_artifacts`] for the doctrine
 /// (why this blocks where the briefing-seal family swallows).
 fn missing_expected_artifacts(mol_dir: &Path, expected: &[String]) -> Vec<String> {
+    unsatisfied_expected_artifacts(mol_dir, expected, None)
+}
+
+/// The acceptance-artifact presence check, shared by the `cs evolve` gate
+/// (per-step, `min_mtime = None`) and the in-process / detached-local finalize
+/// guard (whole-formula, `min_mtime = Some(step_start)`).
+///
+/// An entry is *unsatisfied* — i.e. fails to prove work — when any of the four
+/// failure modes the acceptance-artifact contract names holds (Jesse #4):
+///
+/// * **absent** — the declared path does not exist under `mol_dir`;
+/// * **empty** — a declared file exists but is zero bytes, or a declared
+///   directory (`"…/"`) exists but holds no entry. A zero-byte file is as much
+///   a near-loss as none: a weak model that `touch`es its deliverable without
+///   writing it must not pass;
+/// * **outside the molecule dir** — the entry is absolute or climbs out with
+///   `..`. Such a path can never be satisfied by a real deliverable *inside*
+///   the recovery window, so it is treated as unsatisfied rather than resolved
+///   against something the `cs done` teardown will not preserve;
+/// * **stale** — when `min_mtime` is given, the artifact (or, for a directory,
+///   its freshest child) was last modified *before* the step started. A file
+///   left over from a previous tackle is not proof that *this* turn did work.
+///
+/// The check is read-only and idempotent. Legacy steps that declare no
+/// `acceptance_artifacts` yield an empty `expected` slice and thus an empty
+/// result — backward-compatible.
+pub(crate) fn unsatisfied_expected_artifacts(
+    mol_dir: &Path,
+    expected: &[String],
+    min_mtime: Option<SystemTime>,
+) -> Vec<String> {
     expected
         .iter()
-        .filter(|entry| {
-            let path = mol_dir.join(entry.trim_end_matches('/'));
-            if entry.ends_with('/') {
-                // Directory contract: exists AND contains at least one entry.
-                !fs::read_dir(&path).is_ok_and(|mut d| d.next().is_some())
-            } else {
-                !path.exists()
-            }
-        })
+        .filter(|entry| !artifact_satisfied(mol_dir, entry, min_mtime))
         .cloned()
         .collect()
+}
+
+/// Whether a single declared `entry` is satisfied under `mol_dir`. See
+/// [`unsatisfied_expected_artifacts`] for the four failure modes this rejects.
+fn artifact_satisfied(mol_dir: &Path, entry: &str, min_mtime: Option<SystemTime>) -> bool {
+    let rel = entry.trim_end_matches('/');
+    // Containment: the declared path must resolve strictly *inside* `mol_dir`.
+    // An absolute path or one climbing out with `..` can never be a deliverable
+    // inside the recovery window, so it is unsatisfiable by construction.
+    if rel.is_empty() || Path::new(rel).is_absolute() {
+        return false;
+    }
+    if Path::new(rel)
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return false;
+    }
+    let path = mol_dir.join(rel);
+    if entry.ends_with('/') {
+        // Directory contract: exists, holds at least one entry, and — when a
+        // step-start floor is given — at least one entry is fresher than it.
+        let Ok(read) = fs::read_dir(&path) else {
+            return false;
+        };
+        let mut saw_child = false;
+        for child in read.flatten() {
+            saw_child = true;
+            if mtime_at_or_after(&child.path(), min_mtime) {
+                return true;
+            }
+        }
+        // Non-empty but every child is stale (only reachable with a floor);
+        // an empty directory falls through here too.
+        saw_child && min_mtime.is_none()
+    } else {
+        match fs::metadata(&path) {
+            Ok(meta) if meta.is_file() && meta.len() > 0 => {
+                min_mtime.is_none_or(|floor| meta.modified().is_ok_and(|m| m >= floor))
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Whether `path`'s mtime is at or after `floor` (always true when no floor).
+fn mtime_at_or_after(path: &Path, floor: Option<SystemTime>) -> bool {
+    match floor {
+        None => true,
+        Some(floor) => fs::metadata(path).is_ok_and(|m| m.modified().is_ok_and(|t| t >= floor)),
+    }
 }
 
 /// Recover acceptance artifacts the worker wrote to the worktree root
@@ -1440,6 +1515,79 @@ mod tests {
         assert_eq!(recovered, vec!["synthesis.md".to_owned()]);
         assert!(mol.path().join("synthesis.md").exists());
         assert!(mol.path().join("frame.md").exists());
+    }
+
+    #[test]
+    fn artifact_guard_empty_file_is_reported() {
+        // Jesse #4 "empty" clause: a zero-byte file is a near-loss — a weak
+        // model that `touch`es its deliverable without writing it must not pass.
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join("result.md"), "").unwrap();
+        let missing = missing_expected_artifacts(td.path(), &["result.md".to_owned()]);
+        assert_eq!(missing, vec!["result.md".to_owned()]);
+    }
+
+    #[test]
+    fn artifact_guard_outside_mol_dir_is_reported() {
+        // Jesse #4 "outside the molecule dir" clause: an escaping or absolute
+        // path can never be satisfied by a deliverable inside the recovery
+        // window, so it is always unsatisfied — even if such a file exists.
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join("result.md"), "real").unwrap();
+        // `..` climbs out of mol_dir.
+        assert_eq!(
+            unsatisfied_expected_artifacts(td.path(), &["../result.md".to_owned()], None),
+            vec!["../result.md".to_owned()]
+        );
+        // An absolute path is likewise unsatisfiable by contract.
+        let abs = td.path().join("result.md").to_string_lossy().into_owned();
+        assert_eq!(
+            unsatisfied_expected_artifacts(td.path(), std::slice::from_ref(&abs), None),
+            vec![abs]
+        );
+    }
+
+    #[test]
+    fn artifact_guard_stale_file_is_reported_under_mtime_floor() {
+        // Jesse #4 "older than step start" clause: a file left over from a
+        // previous tackle (mtime before the step start) is not proof that THIS
+        // turn did work.
+        let td = tempfile::tempdir().unwrap();
+        std::fs::write(td.path().join("result.md"), "stale from a prior run").unwrap();
+        // Floor = now; the file we just wrote is at-or-after `now` only within
+        // clock granularity, so use a floor comfortably in the future to model
+        // "written before the step started".
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            unsatisfied_expected_artifacts(td.path(), &["result.md".to_owned()], Some(future)),
+            vec!["result.md".to_owned()]
+        );
+        // With a floor comfortably in the past, the same file counts as fresh.
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        assert!(
+            unsatisfied_expected_artifacts(td.path(), &["result.md".to_owned()], Some(past))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn artifact_guard_directory_freshness_under_mtime_floor() {
+        // A declared directory passes the floor only when at least one child is
+        // fresher than the step start.
+        let td = tempfile::tempdir().unwrap();
+        let responses = td.path().join("responses");
+        std::fs::create_dir(&responses).unwrap();
+        std::fs::write(responses.join("feynman.md"), "x").unwrap();
+        let past = SystemTime::now() - std::time::Duration::from_secs(3600);
+        assert!(
+            unsatisfied_expected_artifacts(td.path(), &["responses/".to_owned()], Some(past))
+                .is_empty()
+        );
+        let future = SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert_eq!(
+            unsatisfied_expected_artifacts(td.path(), &["responses/".to_owned()], Some(future)),
+            vec!["responses/".to_owned()]
+        );
     }
 
     #[test]

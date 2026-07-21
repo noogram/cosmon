@@ -29,6 +29,17 @@ cannot establish that the production path ran. `producer-work` has a hard \
 `smoke-dispatch` step that executes the declared producer path and refuses to \
 advance unless that path leaves a non-empty real output artifact. This is the \
 distinction between “well formed” and “it produced a thing”.
+
+REAL-WORK FLOOR (Jesse #4). Completion of a `task-work` molecule requires a \
+real work PRODUCT, not just model chatter. On the local/ollama floor the cs \
+runtime refuses to book `completed` when the turn leaves an EMPTY branch (no \
+file created or edited) and only a synthesis body — any chat model emits text, \
+so a non-empty synthesis is not proof of work. A genuine TEXT deliverable (a \
+reply, a short analysis) satisfies the floor by WRITING its answer to a file: \
+honour the RESULT CONTRACT below and put the deliverable in `result.md` (in \
+`$COSMON_ARTIFACT_DIR` when set, else the worktree). A mission that produces no \
+file at all is chatter and will land NOT-completed (recoverable, re-tacklable) \
+rather than a silent false success.
 """
 id_prefix = "task"
 
