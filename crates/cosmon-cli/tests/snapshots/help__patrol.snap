@@ -18,7 +18,7 @@ Options:
       --json
           Output in JSON format
       --propel
-          Propel: detect running molecules with stale progress and nudge their workers via transport. The cognitive safety net that complements the new propulsion prompt — if a worker falls silent mid-molecule, patrol re-engages it. A worker whose terminal is still producing output is thinking, not idle, and is never nudged; a genuinely silent one is nudged with exponential backoff, at most 4 times, after which the molecule is tagged `propel-exhausted` for `--heal`
+          Propel: detect running molecules with stale progress and nudge their workers via transport. The cognitive safety net that complements the new propulsion prompt — if a worker falls silent mid-molecule, patrol re-engages it. A worker whose terminal is still producing output is thinking, not idle, and is never nudged; a genuinely silent one is nudged with exponential backoff, at most 4 times, after which the molecule is tagged `propel-exhausted` for `--heal`. A worker that lost its briefing (orphaned by a crash / machine-sleep) *cannot* evolve, so it is never nudged at all: it is tagged `propel-orphaned`, the operator is paged via `cs notify`, and the brief must be re-delivered (`cs tackle --force`) or the molecule collapsed — closing the 2026-07-21 money-pump where a brief-less worker was nudged for six hours
       --stale-after <STALE_AFTER>
           Staleness threshold in seconds for `--propel` (default: 300). A molecule is a candidate if `updated_at` is older than this AND its worker's terminal has been silent at least as long. Also the first backoff window, doubling per nudge up to 30 min [default: 300]
       --nudge

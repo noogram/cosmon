@@ -23,7 +23,9 @@ use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::patrol::{PatrolAction, PatrolReport};
 use cosmon_core::process::project_process_status;
-use cosmon_core::propel::{decide_nudge, NudgeChannel, NudgeDecision, NudgeSkip, NudgeView};
+use cosmon_core::propel::{
+    decide_nudge, EscalateReason, NudgeChannel, NudgeDecision, NudgeSkip, NudgeView,
+};
 use cosmon_core::run_state::{BranchState, Liveness, Witness};
 use cosmon_core::tag::Tag;
 use cosmon_core::transport::TransportBackend;
@@ -57,7 +59,12 @@ pub struct Args {
     /// patrol re-engages it. A worker whose terminal is still producing
     /// output is thinking, not idle, and is never nudged; a genuinely silent
     /// one is nudged with exponential backoff, at most 4 times, after which
-    /// the molecule is tagged `propel-exhausted` for `--heal`.
+    /// the molecule is tagged `propel-exhausted` for `--heal`. A worker that
+    /// lost its briefing (orphaned by a crash / machine-sleep) *cannot* evolve,
+    /// so it is never nudged at all: it is tagged `propel-orphaned`, the
+    /// operator is paged via `cs notify`, and the brief must be re-delivered
+    /// (`cs tackle --force`) or the molecule collapsed — closing the 2026-07-21
+    /// money-pump where a brief-less worker was nudged for six hours.
     #[arg(long)]
     pub propel: bool,
 
@@ -827,6 +834,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         "tag": PROPEL_EXHAUSTED_TAG,
                     }))
                     .collect::<Vec<_>>(),
+                "orphaned": propelled
+                    .orphaned
+                    .iter()
+                    .map(|(w, m, attempts)| serde_json::json!({
+                        "worker": w.as_str(),
+                        "molecule": m.as_str(),
+                        "attempts": attempts,
+                        "tag": PROPEL_ORPHANED_TAG,
+                    }))
+                    .collect::<Vec<_>>(),
             });
         }
         if args.nudge {
@@ -1411,8 +1428,11 @@ fn print_propel_report(running_count: usize, stale_after: u64, sweep: &PropelSwe
         );
         return;
     }
-    let declined =
-        sweep.active.len() + sweep.deferred.len() + sweep.escalated.len() + sweep.gated.len();
+    let declined = sweep.active.len()
+        + sweep.deferred.len()
+        + sweep.escalated.len()
+        + sweep.gated.len()
+        + sweep.orphaned.len();
     if sweep.propelled.is_empty() && declined == 0 {
         println!(
             "  {} {running_count} running molecule(s), all fresh (<{stale_after}s)",
@@ -1446,6 +1466,14 @@ fn print_propel_report(running_count: usize, stale_after: u64, sweep: &PropelSwe
         println!(
             "    {} {wid} ← {mid} ({attempts} nudges ignored — tagged `{PROPEL_EXHAUSTED_TAG}` for `cs patrol --heal`)",
             "!".yellow().bold()
+        );
+    }
+    // The orphan line is the 2026-07-21 money-pump made visible: a brief-less
+    // worker that must never be nudged, only re-briefed or collapsed.
+    for (wid, mid, attempts) in &sweep.orphaned {
+        println!(
+            "    {} {wid} ← {mid} (orphaned — briefing missing, {attempts} nudges spent; tagged `{PROPEL_ORPHANED_TAG}`, operator notified — re-deliver brief or collapse, NOT nudgeable)",
+            "‼".red().bold()
         );
     }
 }
@@ -1534,6 +1562,11 @@ pub(crate) struct PropelSweep {
     /// stall: the worker is holding questions for a human and must be left
     /// entirely alone. Reported so the wait is visible rather than silent.
     pub(crate) gated: Vec<(WorkerId, MoleculeId)>,
+    /// Candidates whose worker is **orphaned** — its briefing is missing, so it
+    /// cannot evolve and a nudge is futile (the 2026-07-21 money pump). Tagged
+    /// [`PROPEL_ORPHANED_TAG`] and surfaced to the operator via `cs notify`;
+    /// never nudged: `(worker, molecule, nudges_already_delivered)`.
+    pub(crate) orphaned: Vec<(WorkerId, MoleculeId, u32)>,
 }
 
 /// Does this molecule's worker sit at an operator gate?
@@ -1561,6 +1594,137 @@ pub(crate) fn worker_awaits_operator(store: &dyn StateStore, mol: &MoleculeData)
 /// already proven not to work.
 pub(crate) const PROPEL_EXHAUSTED_TAG: &str = "propel-exhausted";
 
+/// Tag stamped on a molecule whose worker is orphaned (briefing missing), so
+/// `cs patrol --heal`, `cs health`, and an operator triage can find the
+/// molecule that needs its brief re-delivered — a distinct fault from
+/// [`PROPEL_EXHAUSTED_TAG`] (which means "nudged and ignored", not "cannot be
+/// nudged at all").
+pub(crate) const PROPEL_ORPHANED_TAG: &str = "propel-orphaned";
+
+/// Basename of the briefing artefact `cs tackle` / `cs evolve` write into a
+/// molecule's directory. Its **absence** is the structural signature of an
+/// orphaned worker (task-20260721-e1d9).
+const BRIEFING_FILENAME: &str = "briefing.md";
+
+/// Can the worker's briefing be read for this molecule?
+///
+/// Returns `false` only on a *definite* negative — the file is missing or
+/// empty — which is the money-pump signature the orphan gate keys on. Every
+/// other outcome (file present and non-empty, or an I/O error that leaves
+/// presence genuinely unknown) returns `true`, so an unreadable state dir
+/// degrades to the pre-orphan behaviour rather than mass-escalating a fleet on
+/// a transient filesystem hiccup (the failure direction the module docs
+/// require).
+///
+/// This reads a *filesystem fact*, never a pane glyph, so it is clear of the
+/// ADR-137 §2 use/mention hazard: there is no string a worker can print to
+/// make patrol treat it as orphaned.
+pub(crate) fn worker_briefing_present(store: &dyn StateStore, mid: &MoleculeId) -> bool {
+    let path = store.molecule_dir(mid).join(BRIEFING_FILENAME);
+    match std::fs::metadata(&path) {
+        Ok(meta) => meta.len() > 0,
+        // `NotFound` is the one certain "orphaned" verdict; any other error
+        // (permissions, a racing writer) is treated as unknown ⇒ present.
+        Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Tag an orphaned molecule so the healer and operator can find it and
+/// re-deliver its brief. Idempotent — the tag is a set member.
+fn mark_propel_orphaned(store: &dyn StateStore, mid: &MoleculeId) {
+    let Ok(mut mol) = store.load_molecule(mid) else {
+        return;
+    };
+    let Ok(tag) = Tag::new(PROPEL_ORPHANED_TAG) else {
+        return;
+    };
+    if mol.tags.insert(tag) {
+        let _ = store.save_molecule(mid, &mol);
+    }
+}
+
+/// Surface an orphaned worker to the operator via `cs notify` (the cost-guard:
+/// a brief-less worker left unattended is the money pump, so it must be *loud*,
+/// not a silent bleed). Best-effort and detached, mirroring the silence-detect
+/// notify: a missing `[notify]` block, CI, or dry-run all just skip.
+fn notify_propel_orphaned(wid: &WorkerId, mid: &MoleculeId, stale_secs: i64) {
+    let cs_bin = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("cs"));
+    let msg = format!(
+        "worker {worker} orphaned on {mol} (briefing missing, stale {stale_secs}s) — \
+         re-deliver the brief (`cs tackle --force {mol}`) or collapse; NOT nudgeable",
+        worker = wid.as_str(),
+        mol = mid.as_str(),
+    );
+    let mut cmd = std::process::Command::new(cs_bin);
+    cmd.args([
+        "notify",
+        &msg,
+        "--level",
+        "alert",
+        "--molecule",
+        mid.as_str(),
+        "--title",
+        "cosmon: worker orphaned (brief-less)",
+    ]);
+    if std::env::var_os("COSMON_NOTIFY_DRY_RUN").is_some() {
+        cmd.arg("--dry-run");
+    }
+    let _ = cmd.spawn();
+}
+
+/// Assemble the [`NudgeView`] the propulsion judge reads for one stale
+/// candidate: the molecule's status and operator-gate witnesses, the orphan
+/// (briefing-present) fact, both clocks, and the per-stall attempt ledger.
+///
+/// Split out of [`propel_stale_molecules`] so the sweep loop stays readable —
+/// the shell's job is to gather these facts and obey the verdict, never to
+/// re-implement the heuristic (the one-judge discipline of the module docs).
+fn build_propulsion_view(
+    store: &dyn StateStore,
+    molecules: &[MoleculeData],
+    mid: &MoleculeId,
+    progress_age: chrono::Duration,
+    pane_idle: Option<chrono::Duration>,
+) -> NudgeView {
+    let now = Utc::now();
+    let attempts = propel_attempts(molecules, mid, now);
+    let mol = molecules.iter().find(|m| &m.id == mid);
+    NudgeView {
+        channel: NudgeChannel::Propulsion,
+        status: mol.map_or(MoleculeStatus::Running, |m| m.status),
+        awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
+        briefing_present: worker_briefing_present(store, mid),
+        progress_age,
+        pane_idle,
+        attempts: attempts.count,
+        since_last_propel: attempts
+            .last_at
+            .map(|at| now.signed_duration_since(at))
+            .map(|d| d.max(chrono::Duration::zero())),
+    }
+}
+
+/// Record an orphaned candidate: tag it `propel-orphaned`, page the operator
+/// via `cs notify`, and file it in the sweep's `orphaned` bucket. Never nudges
+/// — a brief-less worker cannot proceed no matter what it is told.
+fn escalate_orphan(
+    store: &dyn StateStore,
+    sweep: &mut PropelSweep,
+    wid: WorkerId,
+    mid: MoleculeId,
+    age: i64,
+    attempts: u32,
+) {
+    mark_propel_orphaned(store, &mid);
+    notify_propel_orphaned(&wid, &mid, age);
+    sweep.orphaned.push((wid, mid, attempts));
+}
+
+// The sweep is a per-candidate decision-dispatch loop with six terminal arms
+// (nudge, active, gated, orphaned, backoff, escalate); the view assembly and
+// orphan handling are already split into `build_propulsion_view` /
+// `escalate_orphan`, and further slicing would scatter one linear story.
+#[allow(clippy::too_many_lines)]
 pub(crate) fn propel_stale_molecules(
     store: &dyn StateStore,
     molecules: &[MoleculeData],
@@ -1612,27 +1776,19 @@ pub(crate) fn propel_stale_molecules(
         if !matched {
             continue;
         }
-        // Admission control (task-20260719-00ed). Progress staleness alone
-        // proved far too weak a warrant: it cannot see a worker thinking
-        // inside one step, and it re-fires every pass forever. Consult the
-        // transport clock and the attempt ledger before speaking — and
-        // *before* the liveness projection below, because condemning a
-        // working worker's process record is the same false-idle error
-        // committed in a second organ.
-        let attempts = propel_attempts(molecules, &mid, now);
-        let mol = molecules.iter().find(|m| m.id == mid);
-        let view = NudgeView {
-            channel: NudgeChannel::Propulsion,
-            status: mol.map_or(MoleculeStatus::Running, |m| m.status),
-            awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
-            progress_age: chrono::Duration::seconds(age),
-            pane_idle: pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds),
-            attempts: attempts.count,
-            since_last_propel: attempts
-                .last_at
-                .map(|at| now.signed_duration_since(at))
-                .map(|d| d.max(chrono::Duration::zero())),
-        };
+        // Admission control (task-20260719-00ed): progress staleness alone is
+        // too weak a warrant. Consult the transport clock, the orphan fact, and
+        // the attempt ledger before speaking — and before the liveness
+        // projection below, which must not condemn a working worker's record.
+        let pane_idle =
+            pane_idle_seconds(be.socket(), &session_name).map(chrono::Duration::seconds);
+        let view = build_propulsion_view(
+            store,
+            molecules,
+            &mid,
+            chrono::Duration::seconds(age),
+            pane_idle,
+        );
         let decision = decide_nudge(&view, stale_window);
 
         // A thinking worker is left entirely alone: no nudge, and no witness
@@ -1657,6 +1813,19 @@ pub(crate) fn propel_stale_molecules(
             continue;
         }
 
+        // The orphan gate (task-20260721-e1d9): a brief-less worker cannot
+        // evolve, so nudging it is the six-hour money pump. Escalate before the
+        // liveness projection — an orphan is a control-plane fact, not a
+        // stalled-but-live process to demote. See [`escalate_orphan`].
+        if let NudgeDecision::Escalate {
+            attempts,
+            reason: EscalateReason::Orphaned,
+        } = decision
+        {
+            escalate_orphan(store, &mut sweep, wid, mid, age, attempts);
+            continue;
+        }
+
         // Figé-mais-vivant: the process is up but its molecule's progress
         // (`updated_at`) has been frozen past `stale_after` *and* its
         // terminal has been silent at least as long. The candidate is by
@@ -1675,7 +1844,11 @@ pub(crate) fn propel_stale_molecules(
                 NudgeSkip::PaneActive { .. }
                 | NudgeSkip::AwaitingOperator
                 | NudgeSkip::NotRunning { .. },
-            ) => {}
+            )
+            | NudgeDecision::Escalate {
+                reason: EscalateReason::Orphaned,
+                ..
+            } => {}
             NudgeDecision::Skip(NudgeSkip::Backoff {
                 since_secs,
                 window_secs,
@@ -1685,7 +1858,10 @@ pub(crate) fn propel_stale_molecules(
                     .deferred
                     .push((wid, mid, (window_secs - since_secs).max(0)));
             }
-            NudgeDecision::Escalate { attempts } => {
+            NudgeDecision::Escalate {
+                attempts,
+                reason: EscalateReason::AttemptsExhausted,
+            } => {
                 mark_propel_exhausted(store, &mid);
                 sweep.escalated.push((wid, mid, attempts));
             }
@@ -1961,6 +2137,10 @@ pub(crate) fn nudge_stalled_molecules(
             channel: NudgeChannel::Briefing,
             status: mol.status,
             awaiting_operator: worker_awaits_operator(store, mol),
+            // The same orphan gate the propulsion tier consults: telling a
+            // brief-less worker to "re-read briefing.md" is exactly as futile
+            // as telling it to "continue", so this channel suppresses too.
+            briefing_present: worker_briefing_present(store, &mol.id),
             progress_age: now.signed_duration_since(mol.updated_at),
             pane_idle: pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
             // Deliberately not `mol.nudge_count`: that field is a *lifetime*
@@ -3594,6 +3774,7 @@ mod tests {
             channel: NudgeChannel::Propulsion,
             status: MoleculeStatus::Running,
             awaiting_operator: false,
+            briefing_present: true,
             progress_age: chrono::Duration::seconds(644),
             pane_idle: Some(chrono::Duration::seconds(2)),
             attempts: 0,
@@ -3614,6 +3795,81 @@ mod tests {
             cosmon_core::tag::Tag::new(cosmon_core::operator_block::AWAITING_OP_TAG).unwrap(),
         );
         store.save_molecule(&mol.id, mol).unwrap();
+    }
+
+    /// A molecule dir with a non-empty `briefing.md` reads as *briefed*: the
+    /// worker has its contract, so the orphan gate stays shut.
+    #[test]
+    fn briefing_present_when_file_is_non_empty() {
+        let (_tmp, store) = make_store();
+        let mol = make_stale_molecule("cs-20260721-0200", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("briefing.md"),
+            "# Molecule brief\n\nDo the work.\n",
+        )
+        .unwrap();
+        assert!(worker_briefing_present(&store, &mol.id));
+    }
+
+    /// A missing `briefing.md` is the money-pump signature: the worker lost its
+    /// brief, so `worker_briefing_present` returns `false` and the orphan gate
+    /// fires. (`make_store` never writes one.)
+    #[test]
+    fn briefing_absent_reads_as_orphaned() {
+        let (_tmp, store) = make_store();
+        let mol = make_stale_molecule("cs-20260721-0201", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        assert!(
+            !worker_briefing_present(&store, &mol.id),
+            "a molecule with no briefing.md must read as orphaned"
+        );
+    }
+
+    /// An *empty* `briefing.md` is as useless as an absent one — a truncated
+    /// write during the crash that orphaned the worker — and must also read as
+    /// orphaned rather than a valid (zero-byte) contract.
+    #[test]
+    fn empty_briefing_reads_as_orphaned() {
+        let (_tmp, store) = make_store();
+        let mol = make_stale_molecule("cs-20260721-0202", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("briefing.md"), "").unwrap();
+        assert!(
+            !worker_briefing_present(&store, &mol.id),
+            "a zero-byte briefing.md must read as orphaned"
+        );
+    }
+
+    /// End-to-end orphan tagging: `mark_propel_orphaned` stamps the molecule
+    /// with [`PROPEL_ORPHANED_TAG`] and is idempotent across repeated passes —
+    /// the operator/healer can find the brief-less molecule, and re-running the
+    /// patrol never churns the tag set.
+    #[test]
+    fn mark_propel_orphaned_is_idempotent() {
+        let (_tmp, store) = make_store();
+        let mol = make_stale_molecule("cs-20260721-0203", "w1", 9000);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        mark_propel_orphaned(&store, &mol.id);
+        mark_propel_orphaned(&store, &mol.id);
+        let reloaded = store.load_molecule(&mol.id).unwrap();
+        assert!(reloaded
+            .tags
+            .iter()
+            .any(|t| t.as_str() == PROPEL_ORPHANED_TAG));
+        assert_eq!(
+            reloaded
+                .tags
+                .iter()
+                .filter(|t| t.as_str() == PROPEL_ORPHANED_TAG)
+                .count(),
+            1,
+            "the orphan tag must be a single set member, not duplicated"
+        );
     }
 
     /// The tag written by `cs await-operator` is recognised as a gate.
@@ -3674,6 +3930,7 @@ mod tests {
                     channel,
                     status: mol.status,
                     awaiting_operator: worker_awaits_operator(&store, &mol),
+                    briefing_present: true,
                     progress_age: chrono::Duration::seconds(300 + pass * 70),
                     pane_idle: Some(chrono::Duration::seconds(300 + pass * 70)),
                     attempts: 0,
@@ -3723,6 +3980,7 @@ mod tests {
             channel: NudgeChannel::Briefing,
             status: mol.status,
             awaiting_operator: worker_awaits_operator(&store, &mol),
+            briefing_present: true,
             progress_age: chrono::Duration::hours(3),
             pane_idle: Some(chrono::Duration::hours(3)),
             attempts: 0,

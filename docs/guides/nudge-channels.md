@@ -31,7 +31,7 @@ Three **unbidden** channels — cosmon decides, the worker did not ask:
 
 | Channel | Emitter | Message | Judge |
 |---|---|---|---|
-| `Propulsion` | `cs patrol --propel` → `propel_stale_molecules` | `PROPULSION_NUDGE` | ✅ `decide_nudge`, per-stall ledger + exponential backoff + ceiling |
+| `Propulsion` | `cs patrol --propel` → `propel_stale_molecules` | `PROPULSION_NUDGE` | ✅ `decide_nudge`, per-stall ledger + exponential backoff + ceiling + orphan gate |
 | `Briefing` | `cs patrol --nudge` → `nudge_stalled_molecules` | `nudge_message(briefing)` | ✅ `decide_nudge`, idempotence window, no ceiling |
 | `Heal` | `cs patrol --heal` remedy `A2` → `apply_remedy` | `nudge_text(briefing)` | ✅ operator gate; the diagnosis supplies the rest |
 
@@ -85,10 +85,35 @@ manufacture a health anomaly out of a correct pause.
     · w-c02a ← task-20260719-cdef (awaiting operator — questions pending, not nudged)
     · w-d55e ← task-20260719-defa (backoff — next nudge in 420s)
     ! w-e77b ← task-20260719-efab (4 nudges ignored — tagged `propel-exhausted` for `cs patrol --heal`)
+    ‼ w-f88c ← task-20260721-8b63 (orphaned — briefing missing; tagged `propel-orphaned`, operator notified — re-deliver brief or collapse, NOT nudgeable)
 ```
 
 The `awaiting operator` line is the one an operator must act on. That molecule
-is not stuck. It is waiting on *them*.
+is not stuck. It is waiting on *them*. The `orphaned` line is the other: that
+worker lost its briefing and **cannot** proceed — re-deliver the brief
+(`cs tackle --force <id>`) or collapse it. It is never nudged.
+
+## Why the orphan gate outranks the clocks too
+
+The operator gate is not the only state where "idle" is the wrong reading. A
+worker that lost its briefing to a crash or an overnight machine-sleep cycle is
+*idle and unworkable*: it sits at the prompt answering "Waiting on brief or
+orphan" but structurally cannot `cs evolve`, because the contract it needs is
+gone. On 2026-07-21 one such worker (task-20260720-8b63) was nudged every ~3 min
+for six hours — 97.6M input tokens, $151, zero commits — because each nudge
+produced a few tokens and no work, and the propulsion patrol had no way to tell
+"thinking" from "cannot proceed".
+
+The distinguishing signal is a **filesystem fact, not a pane glyph**
+(`NudgeView::briefing_present`): can the worker's `briefing.md` be read? A
+missing or empty briefing is the money-pump signature. `decide_nudge` checks it
+right after the not-running gate — ahead of the pane clock, because an orphan
+that just answered the last nudge has a *fresh* terminal and would otherwise
+read as "thinking" and be retried forever — and returns
+`Escalate { reason: Orphaned }`: **zero nudges**, straight to tag
+(`propel-orphaned`) + a loud `cs notify` so the bleed is heard, never silent.
+This is ADR-137 §2-clean: there is no string a worker can print to be treated as
+orphaned; the signal is whether a file exists.
 
 ## See also
 

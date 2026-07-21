@@ -87,6 +87,38 @@
 //! Correspondingly, an *unknown* pane clock ([`NudgeView::pane_idle`] =
 //! `None`) is not treated as "idle": it falls through to the progress clock
 //! alone, i.e. exactly the pre-fix behaviour, still under backoff.
+//!
+//! # The orphan gate: idle and *unworkable* are different states
+//!
+//! The false-idle and backoff repairs above both assume the worker *could*
+//! proceed if it chose to — they only ask "is it working?" and "have we asked
+//! recently?". Neither can see the worker that is genuinely stuck at the prompt
+//! yet **structurally cannot advance**: it lost its briefing to a crash or an
+//! overnight machine-sleep cycle, so the contract it needs to `cs evolve` is
+//! simply not there. Observed live on 2026-07-21 (worker task-20260720-8b63): a
+//! brief-less worker was nudged every ~3 min for six hours — 97.6M input
+//! tokens, $151, zero commits — because every nudge produced a few tokens of
+//! "Waiting on brief or orphan" and not one line of real work. Nudging an
+//! orphan "continue immediately" is not re-engagement; it is a money pump, and
+//! a propel that never gives up on it is the pump's crank.
+//!
+//! The distinguishing signal is a **fact about the filesystem, not a glyph on
+//! the pane** ([`NudgeView::briefing_present`]): can the worker's briefing be
+//! read at all? A missing briefing is the structural signature of an orphan, so
+//! [`decide_nudge`] refuses to nudge one and returns
+//! [`NudgeDecision::Escalate`] with [`EscalateReason::Orphaned`] instead — the
+//! repair for "Waiting on brief" is to *re-deliver the brief* (a fresh
+//! `cs tackle --force`) or hand the molecule to a human, never to shout
+//! "continue" at a worker that has nothing to continue *from*. The check sits
+//! high in the order (right after the not-running gate, ahead of every clock),
+//! because an orphan that just answered the last nudge has a *fresh* pane and
+//! would otherwise be misread as "thinking" and quietly retried forever.
+//!
+//! Being wrong here is safe in the same asymmetric way the operator gate is: a
+//! false "orphaned" costs one escalation a healer or human still resolves,
+//! while a false "workable" is the six-hour bleed itself. When the shell cannot
+//! determine briefing presence it passes `briefing_present: true`, degrading to
+//! exactly the pre-orphan behaviour (still bounded by the attempt ceiling).
 
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
@@ -146,6 +178,14 @@ pub struct NudgeView {
     /// The worker declared an operator gate (ADR-123) and is holding questions.
     /// Outranks every clock below — see the module docs.
     pub awaiting_operator: bool,
+    /// The worker's briefing is readable — the contract it needs to make
+    /// progress is actually present. `false` is the structural signature of an
+    /// **orphaned** worker (it lost its brief to a crash / machine-sleep) and
+    /// makes a nudge futile: see the orphan-gate section of the module docs.
+    /// The shell passes `true` whenever it cannot determine presence, so an
+    /// unknown briefing degrades to the pre-orphan behaviour rather than
+    /// manufacturing an escalation.
+    pub briefing_present: bool,
     /// Control-plane clock: how long since the molecule recorded progress
     /// (`now - updated_at`). This is what made the molecule a candidate.
     pub progress_age: Duration,
@@ -195,6 +235,22 @@ pub enum NudgeSkip {
     },
 }
 
+/// Why patrol stopped nudging a molecule and handed it off instead of
+/// repeating itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EscalateReason {
+    /// The attempt ceiling ([`PROPEL_MAX_ATTEMPTS`]) is spent: spaced-out
+    /// nudges were delivered and ignored, so the fault is structural and a
+    /// louder sentence will not fix it.
+    AttemptsExhausted,
+    /// The worker is orphaned — its briefing is missing, so it *cannot*
+    /// `cs evolve` no matter how often it is nudged. The remedy is to
+    /// re-deliver the brief or hand the molecule to a human, never to nudge.
+    /// Detected before the first nudge, so the money-pump never starts.
+    Orphaned,
+}
+
 /// What patrol should do with one stale-by-progress molecule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "decision", rename_all = "snake_case")]
@@ -208,11 +264,15 @@ pub enum NudgeDecision {
     },
     /// Do nothing this pass.
     Skip(NudgeSkip),
-    /// The attempt ceiling is spent: stop nudging, surface the molecule as a
-    /// health anomaly for `cs patrol --heal` / a human instead.
+    /// Stop nudging and hand the molecule off — the attempt ceiling is spent
+    /// or the worker is orphaned, so patrol surfaces it as a health anomaly for
+    /// `cs patrol --heal` / a human instead of repeating a futile sentence.
     Escalate {
-        /// Nudges delivered before giving up.
+        /// Nudges delivered before giving up (0 for an orphan caught before the
+        /// first nudge).
         attempts: u32,
+        /// Why patrol gave up — see [`EscalateReason`].
+        reason: EscalateReason,
     },
 }
 
@@ -241,10 +301,12 @@ pub fn propel_backoff(attempts: u32, stale_after: Duration) -> Duration {
 /// 1. an operator gate (nudging through it erodes a safety boundary — the
 ///    worst outcome, and the only one that is not merely wasteful),
 /// 2. a non-`Running` status (there is no step to continue),
-/// 3. an active pane (nudging a thinking worker — the 2026-07-19 spam),
-/// 4. the attempt ceiling (so an exhausted molecule reports `Escalate` rather
+/// 3. an orphan (briefing missing — nudging is structurally futile and, left
+///    to the clocks below, would loop forever: the 2026-07-21 money pump),
+/// 4. an active pane (nudging a thinking worker — the 2026-07-19 spam),
+/// 5. the attempt ceiling (so an exhausted molecule reports `Escalate` rather
 ///    than a perpetual `Backoff`),
-/// 5. the spacing window.
+/// 6. the spacing window.
 #[must_use]
 pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
     let threshold = stale_after.num_seconds().max(1);
@@ -265,7 +327,19 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
         });
     }
 
-    // (3) False-idle repair. A terminal that spoke more recently than the
+    // (3) The orphan gate. A worker with no readable briefing cannot advance,
+    // so "continue immediately" is not re-engagement but a money pump. Checked
+    // ahead of every clock because an orphan that just answered the previous
+    // nudge has a fresh pane and would otherwise read as "thinking" and be
+    // retried forever. Zero nudges, straight to escalation.
+    if !view.briefing_present {
+        return NudgeDecision::Escalate {
+            attempts: view.attempts,
+            reason: EscalateReason::Orphaned,
+        };
+    }
+
+    // (4) False-idle repair. A terminal that spoke more recently than the
     // staleness threshold belongs to a worker that is working.
     if let Some(idle) = view.pane_idle {
         let idle_secs = idle.num_seconds();
@@ -277,15 +351,16 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
         }
     }
 
-    // (4) Ceiling. Four ignored nudges are a structural fault, not a volume
+    // (5) Ceiling. Four ignored nudges are a structural fault, not a volume
     // problem; escalate instead of repeating.
     if view.attempts >= PROPEL_MAX_ATTEMPTS {
         return NudgeDecision::Escalate {
             attempts: view.attempts,
+            reason: EscalateReason::AttemptsExhausted,
         };
     }
 
-    // (5) Spacing. The first nudge is immediate; each later one waits twice as
+    // (6) Spacing. The first nudge is immediate; each later one waits twice as
     // long as the one before.
     let window = propel_backoff(view.attempts, stale_after);
     if let Some(since) = view.since_last_propel {
@@ -316,6 +391,7 @@ mod tests {
             channel: NudgeChannel::Propulsion,
             status: MoleculeStatus::Running,
             awaiting_operator: false,
+            briefing_present: true,
             progress_age: Duration::seconds(progress),
             pane_idle: pane.map(Duration::seconds),
             attempts,
@@ -522,7 +598,92 @@ mod tests {
             ),
             NudgeDecision::Escalate {
                 attempts: PROPEL_MAX_ATTEMPTS,
+                reason: EscalateReason::AttemptsExhausted,
             }
+        );
+    }
+
+    /// The 2026-07-21 money pump: an orphaned worker (briefing gone) sits at a
+    /// cold prompt, `Running`, un-gated. Every clock below would eventually say
+    /// "nudge", and the per-stall ledger reset would let it loop forever. The
+    /// orphan gate must catch it *before* the first nudge — zero nudges, straight
+    /// to `Escalate { Orphaned }` — so the pump never turns.
+    #[test]
+    fn orphaned_worker_escalates_without_a_single_nudge() {
+        let mut v = view(400, Some(400), 0, None);
+        v.briefing_present = false;
+        assert_eq!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Escalate {
+                attempts: 0,
+                reason: EscalateReason::Orphaned,
+            }
+        );
+    }
+
+    /// The orphan gate outranks the pane clock: an orphan that *just* answered
+    /// the previous nudge has a fresh terminal (silent 2 s) and would read as a
+    /// "thinking" worker, hiding the pump behind an endless `PaneActive` skip.
+    /// It must still escalate rather than be quietly retried.
+    #[test]
+    fn orphaned_worker_with_fresh_pane_still_escalates() {
+        let mut v = view(400, Some(2), 0, None);
+        v.briefing_present = false;
+        assert_eq!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Escalate {
+                attempts: 0,
+                reason: EscalateReason::Orphaned,
+            }
+        );
+    }
+
+    /// Sixty passes over an orphaned worker — the exact six-hour shape — yields
+    /// escalation on every pass and **never** a single nudge, whatever the
+    /// clocks or the (spuriously resetting) ledger say.
+    #[test]
+    fn orphaned_worker_is_never_nudged_across_passes() {
+        for pass in 0..60_i64 {
+            let mut v = view(300 + pass * 70, Some(pass % 5), 0, Some(pass * 70));
+            v.briefing_present = false;
+            assert!(
+                matches!(
+                    decide_nudge(&v, STALE),
+                    NudgeDecision::Escalate {
+                        reason: EscalateReason::Orphaned,
+                        ..
+                    }
+                ),
+                "pass {pass} nudged an orphan",
+            );
+        }
+    }
+
+    /// The gate must not fire when the briefing *is* present but happens to be
+    /// unreported vs. workable — a genuinely stale, briefed worker is still
+    /// rescued. (Guards against an accidental inversion of the boolean.)
+    #[test]
+    fn briefed_stale_worker_is_still_nudged() {
+        let v = view(400, Some(400), 0, None);
+        assert!(v.briefing_present);
+        assert!(matches!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// The operator gate still outranks the orphan gate: a worker that is both
+    /// holding questions *and* missing its briefing is reported as awaiting the
+    /// operator (the human is already the right recipient), not escalated as a
+    /// health anomaly.
+    #[test]
+    fn operator_gate_outranks_orphan_gate() {
+        let mut v = view(9_000, Some(9_000), 0, None);
+        v.awaiting_operator = true;
+        v.briefing_present = false;
+        assert_eq!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Skip(NudgeSkip::AwaitingOperator)
         );
     }
 
