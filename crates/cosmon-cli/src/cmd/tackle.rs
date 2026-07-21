@@ -3781,7 +3781,10 @@ pub(super) fn finalize_inprocess_molecule(
     // split. Only the true Direct-API adapters (openai, anthropic) keep it.
     let reason = match adapter.as_str() {
         "local" | "ollama" => {
-            format!("detached local worker returned Ok ({} adapter)", adapter.as_str())
+            format!(
+                "detached local worker returned Ok ({} adapter)",
+                adapter.as_str()
+            )
         }
         other => format!("in-process agent loop returned Ok ({other} adapter, ADR-100 Direct-API)"),
     };
@@ -5353,37 +5356,25 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // artifact is absent reaches status=completed" on the in-process completion
     // path, which never traverses the per-step `cs evolve` gate that already
     // enforces the same contract for the multi-step (claude) path.
-    if let Some(formula) = load_formula_for_molecule(&job.state_dir, &mol) {
-        let expected: Vec<String> = formula
-            .steps
-            .iter()
-            .flat_map(|s| s.expected_artifacts.iter().cloned())
-            .collect();
-        if !expected.is_empty() {
-            let missing = super::evolve::unsatisfied_expected_artifacts(
-                &job.molecule_dir,
-                &expected,
-                Some(step_start),
-            );
-            if !missing.is_empty() {
-                let guard_error = anyhow::anyhow!(
-                    "cs local-worker: the formula declares acceptance_artifacts that did \
-                     not land under the molecule directory {} during this turn: {}. A \
-                     declared artifact that is absent, empty, outside the molecule dir, \
-                     or older than the step start is not proof of work — the molecule is \
-                     NOT completed and needs attention.",
-                    job.molecule_dir.display(),
-                    missing.join(", "),
-                );
-                let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
-                return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
-                    Ok(()) => Err(guard_error),
-                    Err(mark_error) => Err(guard_error.context(format!(
-                        "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
-                    ))),
-                };
-            }
-        }
+    let missing_declared =
+        missing_declared_acceptance_artifacts(&job.state_dir, &mol, &job.molecule_dir, step_start);
+    if !missing_declared.is_empty() {
+        let guard_error = anyhow::anyhow!(
+            "cs local-worker: the formula declares acceptance_artifacts that did not land \
+             under the molecule directory {} during this turn: {}. A declared artifact \
+             that is absent, empty, outside the molecule dir, or older than the step \
+             start is not proof of work — the molecule is NOT completed and needs \
+             attention.",
+            job.molecule_dir.display(),
+            missing_declared.join(", "),
+        );
+        let _ = append_local_worker_failure(&job.molecule_dir, &guard_error);
+        return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
+            Ok(()) => Err(guard_error),
+            Err(mark_error) => Err(guard_error.context(format!(
+                "cs local-worker: additionally failed to mark worker {wid} stopped: {mark_error}"
+            ))),
+        };
     }
 
     mark_detached_local_worker_stopped(&store, &mol_id, &wid)?;
@@ -5417,6 +5408,34 @@ fn sync_worktree_deliverables_to_artifact_dir(worktree: &Path) -> anyhow::Result
         _ => return Ok(()),
     };
     sync_worktree_deliverables(worktree, &artifact_dir)
+}
+
+/// The declared `acceptance_artifacts` a detached-local turn failed to produce,
+/// per the strengthened presence contract
+/// ([`super::evolve::unsatisfied_expected_artifacts`]).
+///
+/// Empty when the formula declares none (or cannot be loaded) — enforcement
+/// fires only where declared, so text-only formulas are unaffected. The
+/// `step_start` floor rejects any declared artifact left over from a prior
+/// tackle (mtime before this turn began).
+fn missing_declared_acceptance_artifacts(
+    state_dir: &Path,
+    mol: &MoleculeData,
+    mol_dir: &Path,
+    step_start: std::time::SystemTime,
+) -> Vec<String> {
+    let Some(formula) = load_formula_for_molecule(state_dir, mol) else {
+        return Vec::new();
+    };
+    let expected: Vec<String> = formula
+        .steps
+        .iter()
+        .flat_map(|s| s.expected_artifacts.iter().cloned())
+        .collect();
+    if expected.is_empty() {
+        return Vec::new();
+    }
+    super::evolve::unsatisfied_expected_artifacts(mol_dir, &expected, Some(step_start))
 }
 
 /// Whether a finished local worker produced *real work* worth booking as a

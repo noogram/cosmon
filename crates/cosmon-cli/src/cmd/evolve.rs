@@ -1204,9 +1204,7 @@ fn artifact_satisfied(mol_dir: &Path, entry: &str, min_mtime: Option<SystemTime>
     } else {
         match fs::metadata(&path) {
             Ok(meta) if meta.is_file() && meta.len() > 0 => {
-                min_mtime.is_none_or(|floor| {
-                    meta.modified().is_ok_and(|m| m >= floor)
-                })
+                min_mtime.is_none_or(|floor| meta.modified().is_ok_and(|m| m >= floor))
             }
             _ => false,
         }
