@@ -140,12 +140,35 @@ firewall honored — end-to-end proof the sovereign local path carries real work
   caught — the check gets quieter about honest change without going blind to
   dishonest change.
 
-### Fixed: the local/Ollama adapter booked no-op missions as completed (Jesse #4)
+### Fixed: the local/Ollama adapter booked no-op-with-chatter missions as completed (Jesse #4)
 
-- A weak local model that produced nothing at all was still marked done, so a
-  mission could report success having done no work. Completion now requires a
-  real-work guard, and an unresolvable ollama model fails loudly instead of
-  silently no-opping its way to a green checkmark.
+- The first fix guarded only the *empty* case: a model that produced literally
+  nothing failed loudly. A clean-room re-audit reproduced the deeper hole on
+  the installed `cs 0.2.2` — the completion criterion was "non-empty synthesis
+  OR a worktree deliverable", and **any chat model emits some text**. A
+  task-work brief of "reply with the single word hello, create no files" reached
+  `completed` with energy untouched, an empty branch, and a synthesis body of
+  just "hello." A second run dumped a fabricated `<tool_result>` transcript as
+  raw text into the synthesis — a plausible-looking success with zero work
+  behind it. A synthesis body is a *thin proxy*, not proof of work.
+- Completion now requires a real **work product**, not chatter. On the local /
+  ollama floor a turn that leaves an empty branch (no file created or edited) is
+  refused: the molecule lands not-completed — recoverable and re-tacklable —
+  instead of a silent green checkmark. A genuine *text* deliverable is not
+  broken: it satisfies the floor by writing its answer to a file (the formula's
+  RESULT CONTRACT, e.g. `result.md`), which the local loop lands in the worktree
+  and the guard then counts. A mission that refuses to produce any file is
+  chatter, not a task-work deliverable.
+- The acceptance-artifact contract is now a first-class primitive. Formulas
+  declare machine-checkable `acceptance_artifacts` per step, and the runtime
+  refuses completion when a declared artifact is **absent, empty, outside the
+  molecule directory, or older than the step start** — enforced not only on the
+  per-step `cs evolve` gate but also on the in-process / detached-local
+  completion path, which previously never checked it. Enforcement fires only
+  where declared, so text-only formulas are unaffected.
+- Also corrected a misleading log line: the `local` adapter runs as a *detached*
+  worker, not the in-process ADR-100 Direct-API model its completion message
+  claimed.
 
 ### Fixed: the Claude adapter failed against Claude Code v2.x (Jesse #6)
 
