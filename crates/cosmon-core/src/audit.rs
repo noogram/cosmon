@@ -95,6 +95,10 @@ impl Action {
             | EventV2::SealBypassed { .. }
             | EventV2::Resurrected { .. }
             | EventV2::Harvested { .. }
+            // The post-merge deploy hook is a receipt of what `cs done` did
+            // *after* the merge already landed — the `Done` action was already
+            // projected from `MergeCompleted`. It moves no spec state.
+            | EventV2::PostMergeHook { .. }
             | EventV2::WorkerSilenceDetected { .. }
             // Blocking-dialogue detection is a patrol observation of pane
             // state (ADR-137 §2) — advisory telemetry, never a lifecycle
