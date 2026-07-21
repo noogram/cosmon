@@ -24,6 +24,14 @@
 //!    leaves claude waiting on stdin forever (the escaping across three
 //!    layers desynchronises). We write the briefing to a file and redirect
 //!    it onto claude's stdin (`claude -p < <file>`) — zero escaping layers.
+//!    The file is created **atomically with an unpredictable name and mode
+//!    `0600`** (tempfile crate: `O_CREAT|O_EXCL`, owner-only), never a
+//!    guessable `/tmp/…-<pid>.txt`, and the spawn command **self-deletes**
+//!    it the instant the worker has it open on stdin — so the briefing
+//!    (which routinely carries the operator's private context) never lingers
+//!    world-readable in shared temp. See `write_briefing_file` and
+//!    `build_headless_command` (issue #6 security follow-up,
+//!    task-20260721-7a68 review of `claude.rs:206-227`).
 //! 3. **Root escape valve.** Under euid 0 a bypass permission mode is
 //!    refused unless `IS_SANDBOX=1` is exported (many container
 //!    deployments run as root); the spawn path forces it in that exact
@@ -192,7 +200,7 @@ fn shell_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Write the worker briefing to a temp file and return its path.
+/// Write the worker briefing to a private temp file and return its path.
 ///
 /// The briefing is delivered to a headless `claude -p` on **stdin** (see
 /// [`build_headless_command`]) rather than as an inline `-p '<blob>'`
@@ -201,29 +209,46 @@ fn shell_quote(s: &str) -> String {
 /// on stdin forever (issue #6.3). A file redirect has no escaping layers to
 /// get wrong.
 ///
-/// The file lives in the system temp dir, keyed by the worker session name
-/// and this process's pid so concurrent spawns never collide. It is
-/// intentionally **not** deleted here: the `claude` that reads it is a
-/// detached grand-child that outlives this call (same lifetime discipline as
-/// the `worker.stderr` capture on the TUI path).
+/// # Security (task-20260721-7a68 review of the earlier `claude.rs:206-227`)
+///
+/// The file is created **atomically** by the `tempfile` crate
+/// (`O_CREAT | O_EXCL` with mode `0600`, an unpredictable random name), not
+/// written to a guessable `/tmp/cosmon-briefing-<session>-<pid>.txt`. That
+/// removes the two defects the earlier version carried:
+///
+/// - **Predictable path / TOCTOU.** A local attacker could pre-create the
+///   guessable path (or plant a symlink) and turn cosmon's `std::fs::write`
+///   into an arbitrary-file overwrite. `O_EXCL` refuses a pre-existing name
+///   and the random component makes it unguessable.
+/// - **World-readable confidentiality leak.** The full briefing routinely
+///   carries the operator's private context; the earlier version left it
+///   `0644` in shared `/tmp` and deliberately never removed it. Mode `0600`
+///   makes it owner-only, and the spawn command (see
+///   [`build_headless_command`]) unlinks it the instant the worker has it
+///   open on stdin, so it never lingers.
+///
+/// The handle is `keep()`-ed so the file survives this call: the `claude`
+/// that reads it is a detached grand-child, and the spawn command itself is
+/// responsible for the delete (with a best-effort Rust fallback in
+/// [`spawn_claude_session`] if the spawn never launches the shell).
 ///
 /// # Errors
 ///
-/// Returns [`ClaudeError::Io`] if the file cannot be written.
-fn write_briefing_file(session_name: &str, briefing: &str) -> Result<String, ClaudeError> {
-    let safe: String = session_name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let mut path = std::env::temp_dir();
-    path.push(format!("cosmon-briefing-{safe}-{}.txt", std::process::id()));
-    std::fs::write(&path, briefing).map_err(|e| ClaudeError::Io(e.to_string()))?;
+/// Returns [`ClaudeError::Io`] if the file cannot be created or written.
+fn write_briefing_file(briefing: &str) -> Result<String, ClaudeError> {
+    use std::io::Write as _;
+
+    let mut tmp = tempfile::Builder::new()
+        .prefix("cosmon-briefing-")
+        .suffix(".txt")
+        .tempfile()
+        .map_err(|e| ClaudeError::Io(e.to_string()))?;
+    tmp.write_all(briefing.as_bytes())
+        .map_err(|e| ClaudeError::Io(e.to_string()))?;
+    tmp.flush().map_err(|e| ClaudeError::Io(e.to_string()))?;
+    // Disable delete-on-drop: the detached worker consumes the file on stdin
+    // after this call returns, and the spawn command self-deletes it then.
+    let (_file, path) = tmp.keep().map_err(|e| ClaudeError::Io(e.to_string()))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -235,6 +260,11 @@ fn write_briefing_file(session_name: &str, briefing: &str) -> Result<String, Cla
 /// - `-p` (not the removed `--prompt`) when a briefing is present;
 /// - the briefing delivered via stdin redirect from `briefing_file`, so no
 ///   escaped blob rides the command string;
+/// - the briefing file **self-deleted** the instant the worker has it open
+///   on stdin — the redirect opens the fd for the whole brace group, `rm`
+///   unlinks the name, and `claude` reads the briefing from the surviving
+///   open fd, so the private briefing never lingers in temp (issue #6
+///   security follow-up, task-20260721-7a68);
 /// - an `IS_SANDBOX=1` prefix when [`force_sandbox_escape`] fires.
 ///
 /// `briefing_file` is `None` for a bare TUI spawn (caller delivers via
@@ -244,19 +274,31 @@ fn build_headless_command(
     briefing_file: Option<&str>,
     is_root: bool,
 ) -> String {
-    let mut cmd = String::new();
-    if force_sandbox_escape(permission_mode, is_root) {
-        // Re-emitted inline (not via the process env) because the tmux
-        // server froze its env at startup and drops later shell overrides;
-        // the value must ride the command string to reach the worker.
-        cmd.push_str("IS_SANDBOX=1 ");
+    // Re-emitted inline (not via the process env) because the tmux server
+    // froze its env at startup and drops later shell overrides; the value
+    // must ride the command string to reach the worker.
+    let sandbox = if force_sandbox_escape(permission_mode, is_root) {
+        "IS_SANDBOX=1 "
+    } else {
+        ""
+    };
+    match briefing_file {
+        // issue #6.1 + #6.3 + security follow-up: `-p` with the briefing on
+        // stdin from a file that is unlinked while still open. POSIX applies
+        // the group's `< path` redirect before running the list, so `rm`
+        // removes only the directory entry — claude keeps reading the open
+        // fd. The briefing is gone from temp the moment the worker starts.
+        Some(path) => {
+            let q = shell_quote(path);
+            let mut cmd = String::new();
+            let _ = write!(
+                cmd,
+                "{{ rm -f {q}; {sandbox}claude --permission-mode {permission_mode} -p; }} < {q}"
+            );
+            cmd
+        }
+        None => format!("{sandbox}claude --permission-mode {permission_mode}"),
     }
-    let _ = write!(cmd, "claude --permission-mode {permission_mode}");
-    if let Some(path) = briefing_file {
-        // issue #6.1 + #6.3: `-p` with the briefing on stdin from a file.
-        let _ = write!(cmd, " -p < {}", shell_quote(path));
-    }
-    cmd
 }
 
 /// Spawn a new Claude Code session in a tmux window.
@@ -281,7 +323,7 @@ fn build_headless_command(
 /// or [`ClaudeError::SpawnFailed`] if the tmux session cannot be created.
 pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeError> {
     let briefing_file = match config.prompt {
-        Some(ref prompt) => Some(write_briefing_file(&config.session_name, prompt)?),
+        Some(ref prompt) => Some(write_briefing_file(prompt)?),
         None => None,
     };
     // Production callers read the real effective uid; the guard fires only
@@ -326,6 +368,17 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
             ADAPTER_NAME,
             &err.to_string(),
         );
+    }
+
+    // Security follow-up (task-20260721-7a68): the spawn command self-deletes
+    // the briefing once the worker opens it on stdin, but a *failed* spawn may
+    // never launch that shell — the private briefing would then persist in
+    // temp. Reap it best-effort so the confidentiality guarantee holds even on
+    // the failure path.
+    if outcome.is_err() {
+        if let Some(ref path) = briefing_file {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     outcome
@@ -598,12 +651,40 @@ mod tests {
         );
         assert_eq!(
             cmd,
-            "claude --permission-mode bypassPermissions -p < /tmp/cosmon-briefing-polecat-42.txt"
+            "{ rm -f /tmp/cosmon-briefing-polecat-42.txt; \
+             claude --permission-mode bypassPermissions -p; } \
+             < /tmp/cosmon-briefing-polecat-42.txt"
         );
         assert!(
             !cmd.contains("--prompt"),
             "the removed --prompt flag must never appear: {cmd}"
         );
+    }
+
+    /// Security follow-up (task-20260721-7a68): the briefing is self-deleted
+    /// while the worker holds it open on stdin. The generated command must
+    /// `rm` the briefing path *before* claude and wrap both in a brace group
+    /// whose stdin redirect opens the fd first, so the unlink is race-free.
+    #[test]
+    fn headless_command_self_deletes_briefing_after_open() {
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            Some("/tmp/cosmon-briefing-xyz.txt"),
+            false,
+        );
+        assert!(
+            cmd.starts_with("{ rm -f /tmp/cosmon-briefing-xyz.txt;"),
+            "must unlink the briefing inside the group: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("} < /tmp/cosmon-briefing-xyz.txt"),
+            "the group's stdin must redirect from the briefing so the fd is \
+             opened before the rm: {cmd}"
+        );
+        // The rm must precede the claude invocation in source order.
+        let rm_at = cmd.find("rm -f").expect("rm present");
+        let claude_at = cmd.find("claude").expect("claude present");
+        assert!(rm_at < claude_at, "rm must come before claude: {cmd}");
     }
 
     /// A bare TUI spawn (no briefing) omits `-p` entirely — the caller
@@ -663,13 +744,13 @@ mod tests {
     #[test]
     fn briefing_travels_on_stdin_not_inline() {
         let briefing = "line one\nline two with 'quotes' and $VARS\n".repeat(200);
-        let path = write_briefing_file("polecat-bbbb", &briefing).expect("write succeeds");
+        let path = write_briefing_file(&briefing).expect("write succeeds");
         let read_back = std::fs::read_to_string(&path).expect("briefing file readable");
         assert_eq!(read_back, briefing, "briefing bytes must round-trip");
 
         let cmd = build_headless_command(PermissionMode::BypassPermissions, Some(&path), false);
         assert!(
-            cmd.contains(" -p < "),
+            cmd.contains("-p; } < "),
             "must redirect stdin from the file: {cmd}"
         );
         assert!(
@@ -679,8 +760,8 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    /// A briefing-file path with shell-special characters is quoted so the
-    /// redirect survives the outer shell round-trip.
+    /// A briefing-file path with shell-special characters is quoted so both
+    /// the `rm` and the redirect survive the outer shell round-trip.
     #[test]
     fn briefing_path_with_spaces_is_quoted() {
         let cmd = build_headless_command(
@@ -689,8 +770,73 @@ mod tests {
             false,
         );
         assert!(
-            cmd.ends_with("-p < '/tmp/My Dir/brief.txt'"),
-            "a path with spaces must be single-quoted: {cmd}"
+            cmd.starts_with("{ rm -f '/tmp/My Dir/brief.txt';"),
+            "a path with spaces must be single-quoted in the rm: {cmd}"
+        );
+        assert!(
+            cmd.ends_with("} < '/tmp/My Dir/brief.txt'"),
+            "a path with spaces must be single-quoted in the redirect: {cmd}"
+        );
+    }
+
+    /// Security (task-20260721-7a68 finding, `claude.rs:206-227`): the briefing
+    /// is created owner-only (`0600`) and with an unpredictable name — never a
+    /// guessable `/tmp/cosmon-briefing-<session>-<pid>.txt` an attacker could
+    /// pre-create or symlink (TOCTOU), and never world-readable.
+    #[cfg(unix)]
+    #[test]
+    fn briefing_file_is_mode_0600_and_unpredictable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let p1 = write_briefing_file("secret operator context one").expect("write one");
+        let p2 = write_briefing_file("secret operator context two").expect("write two");
+
+        let mode = fs::metadata(&p1).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "briefing must be owner-only, got {mode:o}");
+
+        assert_ne!(
+            p1, p2,
+            "successive briefings must get unpredictable distinct paths, not a \
+             guessable pid-keyed name: {p1} == {p2}"
+        );
+
+        let _ = fs::remove_file(&p1);
+        let _ = fs::remove_file(&p2);
+    }
+
+    /// Security (task-20260721-7a68 finding, `claude.rs:206-227`): the private
+    /// briefing must NOT survive after the worker consumes it. This exercises
+    /// the exact shell mechanism the spawn command uses — the group's redirect
+    /// opens the fd, `rm` unlinks the name, and the consumer (here `cat`
+    /// standing in for `claude`) still reads the full briefing from the open
+    /// fd — then asserts the file is gone from temp.
+    #[cfg(unix)]
+    #[test]
+    fn briefing_file_does_not_survive_consumption() {
+        let briefing = "SECRET operator context — do not circulate\n".repeat(64);
+        let path = write_briefing_file(&briefing).expect("write succeeds");
+        assert!(
+            Path::new(&path).exists(),
+            "briefing exists before consumption"
+        );
+
+        // `cat` stands in for the real `claude` binary: identical fd semantics.
+        let q = shell_quote(&path);
+        let consume = format!("{{ rm -f {q}; cat; }} < {q}");
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&consume)
+            .output()
+            .expect("sh runs");
+
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout),
+            briefing,
+            "consumer must still read the full briefing after the unlink"
+        );
+        assert!(
+            !Path::new(&path).exists(),
+            "briefing must not survive consumption: {path}"
         );
     }
 
