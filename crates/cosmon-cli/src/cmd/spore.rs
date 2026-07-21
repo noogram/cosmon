@@ -287,10 +287,11 @@ fn germinate(
 /// `cs spore export` — content-addressed bundle id + ASTRA descriptive layer.
 fn run_export(ctx: &Context, args: &ExportArgs) -> anyhow::Result<()> {
     let (spore, manifest_dir) = load_spore(&args.reference)?;
-    let bundle = bundle_hash(&spore, &manifest_dir);
+    let covered = bundle_files(&spore, &manifest_dir);
+    let bundle = bundle_hash(&covered, &manifest_dir);
 
     let out_dir = args.out.clone().unwrap_or_else(|| manifest_dir.clone());
-    let astra = build_astra(&spore, &bundle);
+    let astra = build_astra(&spore, &bundle, &covered);
 
     // `cs spore export` is the explicit *share-time* emit verb (ADR-140 D6):
     // invoking it always writes the RO-Crate. The `[spore.astra]` stanza only
@@ -321,12 +322,17 @@ fn run_export(ctx: &Context, args: &ExportArgs) -> anyhow::Result<()> {
             serde_json::json!({
                 "spore": spore.name,
                 "bundle_hash": bundle,
+                "covered_files": covered,
                 "astra": astra_path.display().to_string(),
             })
         );
     } else {
         println!("spore: {}", spore.name);
         println!("bundle: {bundle}");
+        println!("covered ({} file(s)):", covered.len());
+        for rel in &covered {
+            println!("  - {rel}");
+        }
         println!("astra: {}", astra_path.display());
     }
     Ok(())
@@ -437,11 +443,31 @@ fn resolve_project_context(ctx: &Context) -> (Option<cosmon_core::id::ProjectId>
     (project_id, energy)
 }
 
-/// Compute a content-addressed bundle hash over the manifest and every
-/// recipe / seal file it references. The hash binds each file's relative
-/// path and bytes in sorted order, so the same bundle content always
-/// yields the same id (content-addressing is the registry, ADR-039).
-fn bundle_hash(spore: &Spore, manifest_dir: &Path) -> String {
+/// The conventional crew constitution shipped alongside a spore manifest.
+const FLEET_MANIFEST: &str = "fleet.toml";
+
+/// Enumerate every bundle file the recipient receives, as manifest-relative
+/// paths in sorted, deduplicated order. This is the *coverage set* the
+/// [`bundle_hash`] binds — and, just as importantly, the list an integrity
+/// audit can read to see exactly what the advertised id does and does not
+/// cover.
+///
+/// The set is the union of:
+///
+/// - the manifest itself (`spore.toml`);
+/// - every per-node recipe (`[spore.formulas.*].path`);
+/// - the seal module and its `.cfg`, when a `[spore.seal]` is present;
+/// - the crew constitution `fleet.toml`, when it ships in the bundle, **plus
+///   every `file:` fleet it includes** — the integrity gap this closes
+///   (sporarium recette v3.2 prise n°5): a bundle used to advertise a hash
+///   over `spore.toml` + formulas + seal while shipping a `fleet.toml` the
+///   hash never covered, so the crew could be altered without changing the id.
+///
+/// A fleet manifest that fails to parse still has its own bytes covered (the
+/// file is in the bundle); only its declared includes are then skipped, since
+/// their paths cannot be read from an unparseable manifest. Export never fails
+/// closed on a malformed `fleet.toml` — it binds what it can and lists it.
+fn bundle_files(spore: &Spore, manifest_dir: &Path) -> Vec<String> {
     let mut files: Vec<String> = vec!["spore.toml".to_string()];
     for f in spore.formulas.values() {
         files.push(f.path.clone());
@@ -452,11 +478,37 @@ fn bundle_hash(spore: &Spore, manifest_dir: &Path) -> String {
             files.push(cfg.clone());
         }
     }
+
+    // The crew constitution ships in the bundle even though the `[spore.fleet]`
+    // stanza only names it — a physically present file must be covered, or the
+    // advertised id lies about what the recipient received.
+    let fleet_path = manifest_dir.join(FLEET_MANIFEST);
+    if let Ok(text) = std::fs::read_to_string(&fleet_path) {
+        files.push(FLEET_MANIFEST.to_string());
+        // Fold in each `file:` include the crew constitution composes from.
+        // A parse failure is not fatal here: the fleet.toml bytes are already
+        // covered above; we simply cannot enumerate includes we cannot read.
+        if let Ok(spec) = cosmon_core::fleet::FleetSpec::parse(&text) {
+            for inc in &spec.includes {
+                if inc.scheme == "file" {
+                    files.push(inc.path.clone());
+                }
+            }
+        }
+    }
+
     files.sort();
     files.dedup();
+    files
+}
 
+/// Compute a content-addressed bundle hash over every file the recipient
+/// receives (see [`bundle_files`]). The hash binds each file's relative path
+/// and bytes in sorted order, so the same bundle content always yields the
+/// same id (content-addressing is the registry, ADR-039).
+fn bundle_hash(files: &[String], manifest_dir: &Path) -> String {
     let mut buf: Vec<u8> = Vec::new();
-    for rel in &files {
+    for rel in files {
         let path = manifest_dir.join(rel);
         let bytes = std::fs::read(&path).unwrap_or_default();
         buf.extend_from_slice(rel.as_bytes());
@@ -470,8 +522,10 @@ fn bundle_hash(spore: &Spore, manifest_dir: &Path) -> String {
 /// Build a minimal RO-Crate / ASTRA-compatible descriptive layer (ADR-140
 /// D6). The spore header, params, and DAG map onto ASTRA's method /
 /// provenance fields; the seal verdict is attached as the proof artifact —
-/// honestly marked unverified, never claiming a proof that did not run.
-fn build_astra(spore: &Spore, bundle: &str) -> serde_json::Value {
+/// honestly marked unverified, never claiming a proof that did not run. The
+/// `covered` file list is recorded verbatim so a recipient can audit exactly
+/// which bundle files the `spore:bundleHash` binds (integrity transparency).
+fn build_astra(spore: &Spore, bundle: &str, covered: &[String]) -> serde_json::Value {
     let params: Vec<_> = spore
         .params
         .iter()
@@ -509,6 +563,7 @@ fn build_astra(spore: &Spore, bundle: &str) -> serde_json::Value {
                 "version": spore.version,
                 "description": spore.description,
                 "spore:bundleHash": bundle,
+                "spore:bundleFiles": covered,
                 "spore:params": params,
                 "spore:nodes": nodes,
                 "spore:edges": edges,
@@ -743,18 +798,92 @@ acceptance = "any evidence"
     fn bundle_hash_is_stable_and_prefixed() {
         let dir = fixture(SPORE);
         let (spore, manifest_dir) = load_spore(dir.path()).unwrap();
-        let a = bundle_hash(&spore, &manifest_dir);
-        let b = bundle_hash(&spore, &manifest_dir);
+        let files = bundle_files(&spore, &manifest_dir);
+        let a = bundle_hash(&files, &manifest_dir);
+        let b = bundle_hash(&files, &manifest_dir);
         assert_eq!(a, b);
         assert!(a.starts_with("blake3:"));
     }
 
+    /// The integrity gap this molecule closes (sporarium recette v3.2 prise
+    /// n°5): the falsifier is *two bundles differing only in `fleet.toml`
+    /// sharing the same bundle id*. Covering the crew constitution in the
+    /// hash makes that impossible — a fleet.toml edit shifts the id.
     #[test]
-    fn astra_marks_seal_unverified() {
+    fn bundle_hash_covers_fleet_toml() {
+        let dir = fixture(SPORE);
+        std::fs::write(
+            dir.path().join("fleet.toml"),
+            "fleet = \"crew-a\"\nversion = 1\n",
+        )
+        .unwrap();
+        let (spore, manifest_dir) = load_spore(dir.path()).unwrap();
+
+        let files = bundle_files(&spore, &manifest_dir);
+        assert!(
+            files.iter().any(|f| f == "fleet.toml"),
+            "fleet.toml must be in the coverage set; got {files:?}"
+        );
+        let before = bundle_hash(&files, &manifest_dir);
+
+        // Alter ONLY the crew constitution — nothing else in the bundle.
+        std::fs::write(
+            dir.path().join("fleet.toml"),
+            "fleet = \"crew-b\"\nversion = 1\n",
+        )
+        .unwrap();
+        let after = bundle_hash(&bundle_files(&spore, &manifest_dir), &manifest_dir);
+
+        assert_ne!(
+            before, after,
+            "editing fleet.toml must change the bundle id (integrity gap)"
+        );
+    }
+
+    /// A `fleet.toml` composing from `file:` fleets must fold those includes
+    /// into the coverage set too — otherwise the same gap reappears one level
+    /// down (a sub-crew altered without moving the id).
+    #[test]
+    fn bundle_hash_covers_fleet_includes() {
+        let dir = fixture(SPORE);
+        std::fs::write(
+            dir.path().join("fleet.toml"),
+            "[fleet]\nschema_version = 1\nid = \"master\"\n\n\
+             [[fleet.include]]\nsource = \"file:./crew/wiki.toml\"\nas = \"wiki\"\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(dir.path().join("crew")).unwrap();
+        let included = dir.path().join("crew/wiki.toml");
+        std::fs::write(&included, "fleet = \"wiki\"\nversion = 1\n").unwrap();
+
+        let (spore, manifest_dir) = load_spore(dir.path()).unwrap();
+        let files = bundle_files(&spore, &manifest_dir);
+        // The include path is folded in verbatim as the fleet resolver joins
+        // it (`./`-prefix preserved) — what matters is that its bytes are bound.
+        assert!(
+            files.iter().any(|f| f.ends_with("crew/wiki.toml")),
+            "a file: fleet include must be covered; got {files:?}"
+        );
+        let before = bundle_hash(&files, &manifest_dir);
+
+        // Alter ONLY the included sub-crew.
+        std::fs::write(&included, "fleet = \"wiki-v2\"\nversion = 1\n").unwrap();
+        let after = bundle_hash(&bundle_files(&spore, &manifest_dir), &manifest_dir);
+        assert_ne!(before, after, "editing an included fleet must move the id");
+    }
+
+    #[test]
+    fn astra_marks_seal_unverified_and_lists_covered_files() {
         let spore = Spore::parse(SEALED).unwrap();
-        let astra = build_astra(&spore, "blake3:abc");
+        let covered = vec!["spore.toml".to_string(), "work.formula.toml".to_string()];
+        let astra = build_astra(&spore, "blake3:abc", &covered);
         let dataset = &astra["@graph"][1];
         assert_eq!(dataset["spore:seal"]["present"], serde_json::json!(true));
         assert_eq!(dataset["spore:seal"]["verified"], serde_json::json!(false));
+        assert_eq!(
+            dataset["spore:bundleFiles"],
+            serde_json::json!(["spore.toml", "work.formula.toml"]),
+            "ASTRA must record the coverage set for integrity audit"
+        );
     }
 }
