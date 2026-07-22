@@ -78,6 +78,11 @@ jobs:
         run: cargo install --path crates/cosmon-cli --locked --debug
       - name: Run quickstart end-to-end on a clean temp dir
         shell: bash
+        env:
+          # This is a bootstrap SHAPE smoke test (project scaffold + molecule
+          # observability), not an inference test: there is no model backend on
+          # the runner, so bypass the local-adapter liveness preflight.
+          COSMON_SKIP_ADAPTER_PREFLIGHT: "1"
         run: |
           set -euo pipefail
           WORK="$(mktemp -d -t quickstart-e2e.XXXXXX)"
