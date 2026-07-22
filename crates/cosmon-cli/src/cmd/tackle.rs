@@ -4212,11 +4212,10 @@ fn confirm_briefing_submitted(
     use cosmon_transport::readiness::classify_output;
     let deadline = std::time::Instant::now() + BRIEFING_SUBMIT_WINDOW;
     loop {
-        let status = backend
-            .capture_output(wid, 30)
-            .map_or(cosmon_transport::readiness::SessionStatus::Unknown, |pane| {
-                classify_output(&pane)
-            });
+        let status = backend.capture_output(wid, 30).map_or(
+            cosmon_transport::readiness::SessionStatus::Unknown,
+            |pane| classify_output(&pane),
+        );
         // A capture/session failure here reads as "not pending" (the loop
         // must never manufacture a nudge from a read error).
         let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
