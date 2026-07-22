@@ -29,7 +29,11 @@ referent = "project.decisions"
 kind = "directory"
 path = "docs/adr/"
 
-[[surface]]
-referent = "project.issues"
-kind = "github-issues"
-repo = "noogram/cosmon"
+# github-issues surface DISABLED (2026-07-22). This pushed the internal .cosmon/
+# task+issue backlog to the PUBLIC repo as GitHub issues under the operator's
+# account, cluttering the tracker next to external-tester issues. Re-enable
+# deliberately (uncomment) only if a public backlog mirror is truly intended.
+# [[surface]]
+# referent = "project.issues"
+# kind = "github-issues"
+# repo = "noogram/cosmon"
