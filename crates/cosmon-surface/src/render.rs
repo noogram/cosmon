@@ -1032,6 +1032,7 @@ mod tests {
             labels: vec![],
             molecule_kinds: vec![],
             branding: Branding::HostNative,
+            public: false,
         };
         let molecules = vec![
             test_molecule_with_kind(
@@ -1065,6 +1066,7 @@ mod tests {
             labels: vec![],
             molecule_kinds: vec![MoleculeKind::Task, MoleculeKind::Issue],
             branding: Branding::HostNative,
+            public: false,
         };
         let molecules = vec![
             test_molecule_with_kind(
@@ -1105,6 +1107,7 @@ mod tests {
             labels: vec![],
             molecule_kinds: vec![MoleculeKind::Task],
             branding: Branding::HostNative,
+            public: false,
         };
         let mut mol = test_molecule("legacy-20260407-0001", MoleculeStatus::Running);
         mol.kind = None; // Legacy molecule with no kind field

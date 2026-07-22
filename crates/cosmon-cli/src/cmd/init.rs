@@ -1143,10 +1143,14 @@ fn generate_surfaces_toml(
             toml,
             "\n\
              # Auto-detected GitHub remote: {repo}\n\
+             # Set `public = true` if this repo is public: cosmon then suppresses\n\
+             # the internal molecule-id marker from issue bodies and requires an\n\
+             # explicit COSMON_SURFACE_PUBLISH=1 gesture before publishing.\n\
              [[surface]]\n\
              referent = \"project.issues\"\n\
              kind = \"github-issues\"\n\
-             repo = \"{repo}\"\n"
+             repo = \"{repo}\"\n\
+             public = false\n"
         );
     }
 
