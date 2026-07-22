@@ -3277,6 +3277,19 @@ pub(super) fn create_worktree(
         return Ok(());
     }
 
+    // Newcomer first-run guard (task-20260722-44ce, reported by external tester
+    // Matteo Cacciari / LPTHE). When the branch is cut from HEAD (no blocker
+    // start-point) and the repo has NO commits — an unborn HEAD, the state a
+    // fresh `git init` leaves behind — `git branch feat/<mol>` fails with
+    // `fatal: not a valid object name: 'main'` (git resolves the symbolic HEAD
+    // to its unborn target). That was a hard first-run wall for the documented
+    // `cs init` → `git init` → `cs demo` path. Materialize the base branch with
+    // one empty seed commit so the branch cut below just works. This fires
+    // *only* on a genuinely commit-less repo — never over existing history.
+    if start_point.is_none() {
+        ensure_base_commit(repo_root)?;
+    }
+
     // Create branch from start_point (blocker's branch) or HEAD (main).
     // Pre-fix (task-20260416-ef31): the result of `git branch` was
     // silently discarded. A disk-full / permission / corrupt-repo failure
@@ -3366,6 +3379,81 @@ pub(super) fn create_worktree(
     // tackle (the assertion catches the residue).
     pin_operator_identity(repo_root, worktree_path);
 
+    Ok(())
+}
+
+/// Materialize the base branch when the repository has no commits yet.
+///
+/// A freshly `git init`'d repository has an *unborn HEAD*: the symbolic ref
+/// `HEAD` points at `refs/heads/main` (or whatever `init.defaultBranch` names),
+/// but that ref does not resolve to any object because no commit exists. In
+/// that state `git branch feat/<mol>` fails with
+/// `fatal: not a valid object name: 'main'` — the exact wall an external tester
+/// (Matteo Cacciari, LPTHE) hit twice on the documented
+/// `cs init` → `git init` → `cs demo` first-run path.
+///
+/// We detect that case *specifically* — `git rev-parse --verify HEAD` returning
+/// non-zero means the repo has no commits — and seed a single empty commit so
+/// the base branch resolves and the feature branch can be cut from it. A repo
+/// that already has history returns early untouched: cosmon MUST NEVER fabricate
+/// a commit over existing work.
+///
+/// The seed commit is authored with the operator's configured git identity when
+/// one is present (walking local → global → system); if none is configured — a
+/// bare CI checkout with no `user.*` — a neutral fallback identity is supplied
+/// via `-c` so the commit still succeeds instead of failing the newcomer's very
+/// first command with a git-identity error.
+fn ensure_base_commit(repo_root: &std::path::Path) -> anyhow::Result<()> {
+    // Probe for an unborn HEAD. `rev-parse --verify HEAD` exits non-zero with an
+    // unborn HEAD and zero once any commit exists. `--quiet` suppresses the
+    // "Needed a single revision" noise on the expected miss.
+    let head = std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-parse",
+            "--quiet",
+            "--verify",
+            "HEAD",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run git rev-parse: {e}"))?;
+    if head.status.success() {
+        // The repo already has at least one commit — leave history untouched.
+        return Ok(());
+    }
+
+    // Unborn HEAD confirmed: seed one empty commit. Supply an author identity
+    // only when the repo config has none, so a configured operator keeps their
+    // own identity and a bare checkout still commits cleanly.
+    let mut args: Vec<String> = vec!["-C".to_owned(), repo_root.to_string_lossy().into_owned()];
+    if git_config_value(repo_root, "user.name").is_none()
+        || git_config_value(repo_root, "user.email").is_none()
+    {
+        args.push("-c".to_owned());
+        args.push("user.name=cosmon".to_owned());
+        args.push("-c".to_owned());
+        args.push("user.email=cosmon@localhost".to_owned());
+    }
+    args.extend([
+        "commit".to_owned(),
+        "--allow-empty".to_owned(),
+        "-m".to_owned(),
+        "cosmon: initial commit".to_owned(),
+    ]);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = std::process::Command::new("git")
+        .env("LC_ALL", "C")
+        .args(refs)
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run git commit: {e}"))?;
+    if !out.status.success() {
+        return Err(anyhow::anyhow!(
+            "cs tackle: the repository has no commits and cosmon could not create \
+             an initial commit to branch from: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
     Ok(())
 }
 
@@ -7375,6 +7463,125 @@ mod tests {
             &["commit", "-q", "-m", "seed"],
         );
         (tmp, root)
+    }
+
+    /// REGRESSION (task-20260722-44ce, external tester Matteo Cacciari / LPTHE).
+    /// A freshly `git init`'d repo has an unborn HEAD and no commits — the exact
+    /// state the documented `cs init` → `git init` → `cs demo` path leaves. Before
+    /// the fix, `create_worktree` ran `git branch feat/<mol>` from HEAD and git
+    /// aborted with `fatal: not a valid object name: 'main'`, a hard first-run
+    /// wall. `create_worktree` must now seed a base commit and succeed with NO
+    /// manual `git commit` step. RED before the fix, GREEN after.
+    #[test]
+    fn create_worktree_seeds_base_commit_on_unborn_head() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        // Fresh `git init` only — no commit. Identity is set so the seed commit
+        // uses it, but the repo is deliberately commit-less (unborn HEAD).
+        git_in(&root, &[], &["init", "-q", "-b", "main"]);
+        git_in(&root, &[], &["config", "user.email", "t@test"]);
+        git_in(&root, &[], &["config", "user.name", "test"]);
+
+        // Precondition: HEAD does not resolve (the tester's exact starting state).
+        assert!(
+            !std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &root.to_string_lossy(),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "test setup must start from an unborn HEAD"
+        );
+
+        let wt = root.join(".worktrees").join("task-20260722-44ce");
+        create_worktree(&root, &wt, "feat/task-20260722-44ce", None)
+            .expect("create_worktree must succeed on a fresh `git init` repo");
+
+        // The feature branch exists and the worktree is materialized.
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &root.to_string_lossy(),
+                    "rev-parse",
+                    "--verify",
+                    "feat/task-20260722-44ce",
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "feat/<mol> branch must exist after tackle on an empty repo"
+        );
+        assert!(wt.join(".git").exists(), "worktree must be checked out");
+    }
+
+    /// The unborn-HEAD seed must succeed with NO *local* git identity — a fresh
+    /// `git init` sets none. A newcomer's very first command must not die on
+    /// `Please tell me who you are`. On a bare CI checkout (no global identity
+    /// either) this exercises the `-c user.*` fallback; on a dev machine with a
+    /// global identity the operator's identity is used — both must produce a
+    /// commit. No process-global env mutation, so it is parallel-safe.
+    #[test]
+    fn ensure_base_commit_seeds_without_local_identity() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        git_in(&root, &[], &["init", "-q", "-b", "main"]);
+
+        ensure_base_commit(&root).expect("seed commit must succeed without a local identity");
+
+        assert!(
+            std::process::Command::new("git")
+                .args([
+                    "-C",
+                    &root.to_string_lossy(),
+                    "rev-parse",
+                    "--verify",
+                    "HEAD"
+                ])
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "HEAD must resolve after the seed commit"
+        );
+    }
+
+    /// The seed must NEVER fire over existing history: a repo that already has a
+    /// commit is left byte-for-byte identical (same HEAD sha, no new commit).
+    /// cosmon must not fabricate commits on top of a user's real work.
+    #[test]
+    fn ensure_base_commit_leaves_existing_history_untouched() {
+        let (_tmp, root) = init_repo();
+        let head_before = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+
+        ensure_base_commit(&root).expect("ensure_base_commit is a no-op on a repo with history");
+
+        let head_after = String::from_utf8(
+            std::process::Command::new("git")
+                .args(["-C", &root.to_string_lossy(), "rev-parse", "HEAD"])
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap();
+        assert_eq!(
+            head_before, head_after,
+            "cosmon must not create a commit over existing history"
+        );
     }
 
     /// Nested paths and names containing the old `__` separator publish as

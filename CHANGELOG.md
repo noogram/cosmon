@@ -19,6 +19,25 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed: the documented first-run path works on a freshly `git init`'d repo
+
+- A newcomer following the getting-started path — `cs init` → `git init` →
+  `cs demo` — hit a hard wall: `cs: git branch feat/<mol> failed: fatal: not a
+  valid object name: 'main'`. A fresh `git init` leaves an *unborn HEAD* (no
+  commits, the base branch does not resolve yet), so cutting the feature branch
+  from it aborted. The only workaround was an undocumented manual
+  `git commit --allow-empty` right after `git init`. Reported twice by external
+  tester Matteo Cacciari (LPTHE) — 2026-07-18 and again on 0.2.2 (2026-07-22).
+- `cs tackle` / `cs demo` now detect the unborn-HEAD case *specifically* (an
+  unresolvable `HEAD`) and seed a single empty base commit
+  (`cosmon: initial commit`) before branching, so the documented path succeeds
+  out of the box with no hidden manual step. A repository that already has
+  history is left byte-for-byte untouched — cosmon never fabricates a commit
+  over existing work.
+- `cs init`'s "Next steps" now states step 1 accurately: `git init &&
+  git commit --allow-empty -m init`, with a note that cosmon needs at least one
+  commit on the base branch (and seeds one for you if you forget).
+
 ## [0.2.2] — 2026-07-21
 
 **External-tester hardening.** Every issue Jesse Thaler (MIT) raised against
