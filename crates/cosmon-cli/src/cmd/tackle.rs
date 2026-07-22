@@ -828,7 +828,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //       `llama-cpp` / `llama`. Those take a different spawn arm with
     //       their own resolution, so preflighting them with the Ollama
     //       resolvers would check an endpoint they never dial.
-    if matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama")
+    //       Skipped on `--dry-run`: a dry run only renders the prompt and never
+    //       dispatches, so requiring a live backend to be reachable would make
+    //       `cs tackle --dry-run` fail on a machine without the local model
+    //       server up (e.g. CI) - a spurious coupling. The preflight guards a
+    //       real dispatch, which dry-run is not.
+    if !args.dry_run
+        && matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama")
         && std::env::var(SKIP_PREFLIGHT_ENV).ok().as_deref() != Some("1")
     {
         let adapter_entry = project_config
@@ -4208,8 +4214,9 @@ fn confirm_briefing_submitted(
     loop {
         let status = backend
             .capture_output(wid, 30)
-            .map(|pane| classify_output(&pane))
-            .unwrap_or(cosmon_transport::readiness::SessionStatus::Unknown);
+            .map_or(cosmon_transport::readiness::SessionStatus::Unknown, |pane| {
+                classify_output(&pane)
+            });
         // A capture/session failure here reads as "not pending" (the loop
         // must never manufacture a nudge from a read error).
         let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
