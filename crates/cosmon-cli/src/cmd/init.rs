@@ -421,7 +421,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
         println!();
         println!("Next steps:");
-        println!("  1. Initialize git yourself if needed (`git init`) — cs leaves it alone.");
+        println!("  1. Initialize git if needed:  `git init && git commit --allow-empty -m init`");
+        println!(
+            "     (cs needs at least one commit on the base branch; `cs demo`/`cs tackle` seed"
+        );
+        println!("      one for you if you forget, but never over existing history).");
         println!("  2. Try the full cycle in one command:  `cs demo`.");
         println!(
             "  3. Nucleate work:  `cs nucleate task-work --var topic=\"...\"`  then  `cs tackle <id>`."
