@@ -1,0 +1,179 @@
+formula = "clean-room-repro"
+version = 1
+description = """
+The G2 reproduction gate of the `cosmon-dev` spore — turn an externally-reported
+issue into a DETERMINISTIC RED that fails on `affected_ref` for the RIGHT reason,
+FROZEN (content-hashed) before the fix branch opens, with a DIFFERENTIAL
+REFUTATION and explicit false-green / false-red modes. It emits a machine-readable
+verdict.json and FAIL-CLOSES.
+
+WHY A NEW FORMULA (not task-work with a topic). The reproduction gate carries
+load-bearing structure that a generic agentic leg cannot enforce by prose alone:
+(1) the red must be OBSERVED failing on the parent ref before any fix exists;
+(2) it must fail for the RIGHT reason, not merely fail; (3) it must be HASHED and
+write-locked before the fix branch, so the green later comes from the UNCHANGED
+test; (4) it must ship a differential refutation (flip one variable => colour
+flips) and name its false-green / false-red modes. These are the blueprint §5 +
+keystone K2 discipline made executable. `task-work` is the base; this is the
+specialised gate.
+
+REUSE, DO NOT REINVENT. This formula does NOT re-implement the clean-room
+container, the adapter resolver, or any cosmon primitive. It DRIVES the shipped
+clean-room scripts (../clean-room/scripts/) against a `git archive <affected_ref>`
+checkout, and for resolver-class issues it ASSERTS on the COMPOSED resolver
+`resolve_adapter_selection(...)` (cosmon-cli tackle.rs), never on a literal flag.
+The two repro-contracts under ../repro/ (#20A/#20B, #21) are the concrete
+instances this gate produces and freezes.
+
+VARIABLES:
+  - topic         : the reproduction task, one or more sentences (the spore
+                    interpolates the issue).
+  - issue         : the reported defect id + verbatim symptom (trusted evidence).
+  - affected_ref  : the git ref the red MUST fail on (e.g. v0.2.2). The clean-room
+                    checks it out via `git archive`, never the live worktree.
+  - risk          : normal | release | security — widens the environment matrix
+                    (root/non-root, amd64/arm64) at higher stakes.
+
+ARTIFACT PATHS — all artifacts (reproduce.md, red/, freeze.sha256, verdict.json)
+MUST be written to the MOLECULE STATE DIRECTORY (the `molecule_dir` field from
+`cs --json observe {mol_id}`), NEVER the worktree — the worktree is destroyed by
+`cs done`.
+"""
+id_prefix = "repro"
+freeze_on_last_step = false
+
+[vars.topic]
+description = "The reproduction task, stated in one or more sentences."
+required = true
+
+[vars.issue]
+description = "The reported defect id + verbatim symptom — trusted evidence, kept separate from any inferred mechanism."
+required = true
+
+[vars.affected_ref]
+description = "The git ref the RED must fail on, for the right reason (e.g. v0.2.2). Checked out via `git archive`, never the live worktree."
+required = true
+
+[vars.risk]
+description = "normal | release | security — widens the reproduction environment matrix at higher stakes."
+default = "normal"
+
+# Tier 0 — a leaf gate. It produces and freezes the red; it does NOT nucleate
+# children. (The convergence loop is the only node that germinates — blueprint §8.)
+[tier]
+level = 0
+
+[[steps]]
+id = "locate-the-seam"
+title = "Locate the seam and the pre-oracle decision"
+description = """
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` —
+NEVER the worktree.
+
+Read the G1 contract (contract.md from the upstream node) and the issue's verbatim
+symptom. Before writing any test, decide WHERE the assertion reads:
+
+  1. Name the SEAM the bug lives at (FFI/ABI boundary, a read path, a dispatch
+     path, a permission layer). Follow diagnosis-discipline CLAUSE 1: a measured
+     value at the seam beats a plausible explanation.
+  2. Identify the PRE-ORACLE DECISION — the decision cosmon takes BEFORE consulting
+     any model or external oracle (the mur-de-determinisme, blueprint K1). The red
+     asserts on THAT decision, NEVER on a model's output (the Rice trap / false
+     green). For a resolver-class issue, the decision is the value returned by the
+     COMPOSED resolver `resolve_adapter_selection(render(dispatch_args), env)` —
+     NOT the literal `--adapter` string a code path happens to emit, and NOT what
+     the LLM later does with it.
+  3. Confirm no network egress is required to reproduce: an open egress is a SECOND
+     oracle and destroys determinism (blueprint S2 / K5). If the repro needs the
+     model neutralised, use the clean-room `--network none` mechanical mode.
+
+Write MOLECULE_DIR/reproduce.md §1: the seam, the pre-oracle decision the assertion
+will read, and why asserting there (not on model output) makes the test
+deterministic.
+"""
+acceptance = "reproduce.md §1 names the seam, the pre-oracle decision the red asserts on (never model output), and confirms no network egress is needed. For a resolver-class issue it names the composed resolver as the assertion target, not a literal flag."
+
+[[steps]]
+id = "write-and-observe-red"
+title = "Write the red and observe it fail on affected_ref for the right reason"
+description = """
+Write the reproduction against a `git archive ${affected_ref}` checkout inside the
+clean-room (../clean-room/scripts/), NEVER the live worktree. Then OBSERVE it fail
+BEFORE any fix exists.
+
+  1. Materialise the red under MOLECULE_DIR/red/ — a self-contained harness (a
+     cargo test snippet, a shell assertion, or a container run) that a third party
+     can replay. If it is a Rust-level assertion (e.g. #21), keep it a STANDALONE
+     harness under ../repro/ that the clean-room runs against the archived ref; do
+     NOT wire it into the cosmon workspace test suite (that would redden the repo's
+     own green gates for a test that is red BY DESIGN on the parent).
+  2. Run it against ${affected_ref} and capture the FAILURE with its reason. The
+     failure message must match the CONTRACT breach, not an unrelated panic
+     (right-reason discipline, keystone K2). A red that fails for the wrong reason
+     is a false-red — log it and fix the harness.
+  3. skip-if-not-root is FORBIDDEN for a root-class bug (blueprint §5): a skip is
+     not a red. Assert `uid==0` where the contract demands root; where the OS must
+     permit an operation, a `control_write` via std::fs PROVES the OS allows it
+     before the permission layer is accused.
+
+Write MOLECULE_DIR/reproduce.md §2: the exact command, the captured RED output, and
+the one-line "fails because <contract breach>" statement.
+"""
+needs = ["locate-the-seam"]
+acceptance = "MOLECULE_DIR/red/ holds a replayable red harness; reproduce.md §2 records the command, the captured failure on affected_ref, and the right-reason statement. No skip-if-not-root for a root-class bug; no wiring of a by-design-red test into the repo's own workspace suite."
+
+[[steps]]
+id = "freeze-and-refute"
+title = "Freeze the red, then differential-refute it"
+description = """
+Two moves that turn a red into a GATE (blueprint K2: a red non-audite n'interdit
+rien).
+
+  1. FREEZE. Content-hash the red harness (blake3 or sha256) and write
+     MOLECULE_DIR/freeze.sha256 BEFORE the fix branch opens. The green at G5 must
+     come from this UNCHANGED test (verify the hash matches). Record the parent
+     commit the red was observed red on.
+  2. DIFFERENTIAL REFUTATION. Retourne exactly ONE variable — apply the expected
+     fix (or, for a resolver issue, feed the resolver the corrected dispatch args)
+     — and confirm the colour BASCULES (red -> green). Then revert it and confirm
+     it returns red. A colour that does not move is a tautology; the test is NOT an
+     oracle (diagnosis-discipline CLAUSE 4). Record both transitions.
+  3. NAME THE MODES. Write the FALSE-GREEN mode (how this test could wrongly pass
+     while the bug persists — e.g. asserting on the literal flag instead of the
+     composed resolver; a network egress silently answering) and the FALSE-RED mode
+     (how it could wrongly fail while the bug is absent — e.g. an unrelated env
+     difference in the clean-room). Each named mode is a guard the harness must
+     defend against.
+
+Write MOLECULE_DIR/reproduce.md §3: the freeze hash + parent commit, the two colour
+transitions of the differential refutation, and the named false-green / false-red
+modes.
+"""
+needs = ["write-and-observe-red"]
+acceptance = "MOLECULE_DIR/freeze.sha256 written before the fix branch; reproduce.md §3 records the differential refutation (one variable flips the colour both ways) and the explicit false-green + false-red modes."
+
+[[steps]]
+id = "emit-verdict"
+title = "Emit the fail-closed verdict.json"
+description = """
+Fold the gate into a machine-readable verdict the downstream can trust without
+re-reading prose.
+
+Write MOLECULE_DIR/verdict.json:
+  {
+    "verdict": "PASS" | "BLOCKED",
+    "count": <number of findings>,
+    "findings": [ { "loc", "quote", "fix", "severity" } ],
+    "frozen_hash": "<sha256 of the red harness>",
+    "parent_commit": "<the ref/commit the red was observed red on>",
+    "affected_ref": "${affected_ref}"
+  }
+
+PASS iff: the red was observed failing on ${affected_ref} for the right reason, it
+is frozen (hash recorded), the differential refutation flipped the colour both
+ways, and the false-green / false-red modes are named. Any of these absent =>
+BLOCKED with the missing element as a finding. FAIL-CLOSED: a missing or malformed
+verdict.json is read by the downstream as BLOCKED — never a silent PASS.
+"""
+needs = ["freeze-and-refute"]
+acceptance = "MOLECULE_DIR/verdict.json written with verdict/count/findings/frozen_hash/parent_commit/affected_ref. PASS only when all four G2 conditions hold; otherwise BLOCKED with the missing element named. The gate is fail-closed."
