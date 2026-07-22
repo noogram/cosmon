@@ -1,0 +1,540 @@
+# ==========================================================================
+# cosmon-dev.spore.toml — the FIRST spore of the cosmon repo (dogfooding).
+#
+# WHAT IT IS
+#   A spore is a parameterizable template of a WHOLE polymer: a fleet + per-node
+#   formulas + a ParamSchema + a DAG of typed edges + a TLC-checkable .tla seal
+#   (ADR-139 / ADR-140). This one germinates the ROBUST-DEV mission: one issue
+#   reported by an external tester becomes a deterministic RED reproduction (a
+#   validation gate), a smallest FIX, a DOUBLE clean-room review by two DIFFERENT
+#   provider families iterated until CLEAN, then a RELEASE. No agent pushes to a
+#   remote (the human gate is the only door to the world).
+#
+# GUIDING PRINCIPLE — REUSE, DO NOT REINVENT.
+#   This spore WIRES existing cosmon primitives; it rewrites NONE of them.
+#     * `task-work`                (../../.cosmon/formulas/) — the agentic gate legs.
+#     * `while`                    (../../.cosmon/formulas/) — the iterate-until-condition
+#                                    loop; its `max_iterations` cap IS `max_rounds`.
+#                                    Composed BY `converge-clean-room`, not copied.
+#     * `cross-provider-committee` (../../.cosmon/formulas/, ADR-147) — the jury that
+#                                    is provider-diverse BY CONSTRUCTION (adapter-pinned
+#                                    seats). One claude seat + one codex-sol (gpt-5.6-sol)
+#                                    seat = OUR double clean-room review. Composed BY
+#                                    `converge-clean-room`, not copied. NEVER a
+#                                    deep-think panel (claude-only = A->A, an echo).
+#     * `bug-closure`              (../../.cosmon/formulas/) — the CLOSED/REOPEN verdict
+#                                    over the full semantic surface = OUR closure gate.
+#   Only TWO formulas are genuinely NEW and ship in formulas/ here:
+#     * `clean-room-repro`      — the G2 reproduction gate (deterministic red, frozen
+#                                  before the fix branch, differential refutation,
+#                                  false-green / false-red modes). Emits verdict.json.
+#     * `converge-clean-room`   — the §6bis double-engine convergence loop wrapper that
+#                                  composes `while` + `cross-provider-committee`, reads
+#                                  BOTH verdict.json, fail-closes on absent/malformed,
+#                                  and re-nucleates fix+reviews FORWARD each round until
+#                                  CLEAN and CLEAN, or blocks+escalates at max_rounds.
+#
+# THE GATE DAG (blueprint §3, diamond topology — NOT a pipeline; a pipeline
+# diffuses responsibility by construction):
+#
+#   trace (root+leaf, always-on sidecar)
+#   intake(G0) -> contract(G1) -> reproduce(G2) ─┬─> implement(G4) ─┐
+#                                                 │                  ├─> green(G5) -> ci-gate(G8)
+#                                                 └─> falsify(G3) ───┘        │
+#                                                                             v
+#                                          converge (§6bis, EMERGENT — the double clean-room
+#                                          loop; replaces G6 breaker + G7 judge) ─┬─> rehearsal(G9) ─┐
+#                                                                                  └─> dissent(§9) ──┤
+#                                                                                                    v
+#                                                                              release(G10) -> confirm(G11)
+#
+# CLEAN = CONJUNCTION. Both review seats (claude AND codex-sol) must return CLEAN
+# in the SAME round. A single FINDINGS from either relaunches the loop; the fix
+# corrects the UNION of the two reports (keystone K4: a single cross-model FAIL
+# blocks; the bloc-claude counts as ONE voice, codex-sol is the second substrate).
+#
+# LIMITE DURE (codex-sol #28, buterin, blueprint §8): the edges ORDER molecules;
+# they do NOT prove a review passed or that two seats had distinct identities.
+# Every gate EMITS and VALIDATES a machine-readable verdict artifact and
+# FAIL-CLOSES if it is absent or malformed. `release` validates the WHOLE
+# manifest; it never infers success from predecessor completion. The spore germs
+# the TOPOLOGY, not the human independence (identities, credentials,
+# branch-protection stay external controls).
+#
+# RECIPIENT QUICKSTART (run from inside spores/cosmon-dev/):
+#   cs spore validate spore.toml \
+#       --var issue="#21 --resident ignores COSMON_DEFAULT_ADAPTER" \
+#       --var affected_ref="v0.2.2" \
+#       --var upstream_version="0.2.2"
+#   cs spore run spore.toml --var ... --allow-unchecked-seal   # see SEAL HONESTY
+# ==========================================================================
+
+[spore]
+name        = "cosmon-dev"
+version     = 1
+verb        = "germinate"    # spore -> polymer, the parallel of nucleate (formula -> molecule)
+description = """
+Germinate the robust-dev polymer: turn one externally-reported issue into a
+deterministic RED reproduction (fails on affected_ref for the RIGHT reason,
+frozen before the fix), a smallest FIX, a DOUBLE clean-room review by two distinct
+provider families (claude + codex-sol) iterated until CLEAN and CLEAN or a bounded
+escalation, and a RELEASE. No agent pushes to any remote. When an external
+reproduction contradicts an internal proof, the reproduction wins and the proof
+becomes the bug.
+"""
+
+# --------------------------------------------------------------------------
+# Seal — a TLC proof over spore.tla + spore.cfg (four properties). Paths are
+# RELATIVE to this manifest (portability invariant). Seal-verification contract
+# (ADR-140 D4): absent / present+checked / present+unchecked-honest. `cs spore
+# run` refuses by default to germinate a present-but-unverified seal; pass
+# --allow-unchecked-seal to opt into the risk. It NEVER claims a seal verified
+# when it is not.
+#
+# Termination                  : the convergence loop is bounded by max_rounds (a
+#                                fatal cap, blueprint §6bis) and the gate DAG is
+#                                acyclic, so every germinated polymer either drains
+#                                or reaches a typed `blocked` escalation. No spin.
+# GateFailClosed  (LOAD-BEARING): every gate BLOCKS on an absent/malformed verdict;
+#                                release SHIPs only if every upstream gate PASSED,
+#                                the convergence reached CLEAN, and the dissent field
+#                                is non-empty. Absence refuses, always.
+# DeterministicParametrization : the node set is a pure function of the params;
+#                                nothing environmental perturbs the expansion.
+# NoResourceCollision          : each node (and each convergence round) writes a
+#                                distinct, round-indexed path; parallel writers and
+#                                iterated rounds never alias a resource.
+#
+# SEAL HONESTY: a released `cs` may report "TLC unavailable" (the TLC-verify wiring
+# is not in every released binary), so `cs spore run` fails closed and you germinate
+# with --allow-unchecked-seal (the status line stays honest: "seal: present, NOT
+# verified"). Re-check the proof directly (any Java 11+; jar at
+# ../../docs/specs/tla2tools.jar):
+#   export TLA2TOOLS_JAR=../../docs/specs/tla2tools.jar
+#   java -XX:+UseParallelGC -cp "$TLA2TOOLS_JAR" tlc2.TLC -workers auto \
+#        -config spore.cfg spore.tla
+# --------------------------------------------------------------------------
+[spore.seal]
+module     = "spore.tla"
+config     = "spore.cfg"
+properties = ["Termination", "GateFailClosed", "DeterministicParametrization", "NoResourceCollision"]
+
+# --------------------------------------------------------------------------
+# ParamSchema (blueprint §8). Three params are REQUIRED (issue, affected_ref,
+# upstream_version); the rest carry defaults so the spore expands cleanly for the
+# common single-issue case. DeterministicParametrization: the node set does NOT
+# depend on any param value (risk / review_scale / max_rounds are POSTURE params
+# that shape node TOPICS and the loop bound, never the node SET), so the seal's
+# cardinality argument is param-independent.
+# --------------------------------------------------------------------------
+[spore.params.issue]
+type        = "string"
+required    = true
+description = "The reported defect: id, title, and the tester's verbatim symptom. The trusted evidence, kept separate from any inferred mechanism."
+
+[spore.params.affected_ref]
+type        = "string"
+required    = true
+description = "The git ref the RED reproduction MUST fail on, for the RIGHT reason (e.g. v0.2.2). The clean-room checks out this ref via `git archive`, never the live worktree."
+
+[spore.params.upstream_version]
+type        = "string"
+required    = true
+description = "The released version the external tester actually ran (what the world saw fail)."
+
+[spore.params.risk]
+type        = "enum"
+values      = ["normal", "release", "security"]
+default     = "normal"
+description = "Drives the review jury floor and the rehearsal matrix. normal => committee jury of 2 families (claude + codex-sol); release/security => >=3 distinct families, conjunctive; security also widens the rehearsal to root+non-root x amd64+arm64."
+
+[spore.params.review_scale]
+type        = "enum"
+values      = ["mission", "submission"]
+default     = "mission"
+description = "mission (default) => one convergence loop wraps the whole deliverable (the oxymake style). submission => each gate/sub-mission carries its own nested loop. Advisory to the converge node; does not change the node SET."
+
+[spore.params.max_rounds]
+type        = "int"
+default     = 5
+description = "Hard cap on convergence rounds. At exhaustion the mission goes `blocked` + human escalation (NOT-CONVERGED blocks like NOT-RUN) — NEVER a silent pass. Feeds the seal's Termination bound and the `while` max_iterations."
+
+# --------------------------------------------------------------------------
+# Fleet — concurrency-capped worktree isolation so the two review seats (and any
+# parallel rehearsal legs) never collide on the same files (NoResourceCollision).
+# The default cosmon fleet is used (this is dogfooding inside the cosmon repo).
+# --------------------------------------------------------------------------
+[spore.fleet]
+name            = "default"
+concurrency_cap = 4
+isolation       = "worktree"
+
+# --------------------------------------------------------------------------
+# Per-node recipes — formula aliases. Paths RELATIVE to this manifest.
+#   REFERENCED (repo primitives, not copied):
+#     task-work    -> ../../.cosmon/formulas/task-work.formula.toml
+#     bug-closure  -> ../../.cosmon/formulas/bug-closure.formula.toml
+#   NEW (ship here, genuinely new plumbing the primitives cannot compose directly):
+#     clean-room-repro     -> formulas/clean-room-repro.formula.toml
+#     converge-clean-room  -> formulas/converge-clean-room.formula.toml
+# The convergence formula itself composes ../../.cosmon/formulas/while.formula.toml
+# and ../../.cosmon/formulas/cross-provider-committee.formula.toml at RUN time by
+# nucleation — they are dependencies of `converge-clean-room`, not spore nodes.
+# --------------------------------------------------------------------------
+[spore.formulas.task-work]
+path          = "../../.cosmon/formulas/task-work.formula.toml"
+description   = "Generic agentic gate leg (referenced repo primitive). The gate's verdict contract lives in each node's topic; task-work is not modified."
+deterministic = false
+
+[spore.formulas.clean-room-repro]
+path          = "formulas/clean-room-repro.formula.toml"
+description   = "NEW — the G2 reproduction gate: a deterministic red that fails on affected_ref for the right reason, frozen (hashed) before the fix branch, with differential refutation + false-green/false-red modes. Emits verdict.json."
+deterministic = false
+
+[spore.formulas.converge-clean-room]
+path          = "formulas/converge-clean-room.formula.toml"
+description   = "NEW — the §6bis double-engine convergence loop: composes `while` + `cross-provider-committee`; reads BOTH verdict.json; CLEAN and CLEAN debloque; else re-nucleates fix+reviews forward; fail-close on absent verdict; blocked+escalate at max_rounds."
+deterministic = false
+
+[spore.formulas.bug-closure]
+path          = "../../.cosmon/formulas/bug-closure.formula.toml"
+description   = "Referenced repo primitive — the CLOSED/REOPEN verdict over the bug's full semantic surface. OUR closure gate (G11)."
+deterministic = false
+
+# ==========================================================================
+# The DAG (declaration order; diamond topology, blueprint §3).
+# ==========================================================================
+
+# --- trace (always-on append-only sidecar; root+leaf, no edges) -----------
+# Germinates the instant the polymer does (no blocked-by) and nothing depends on
+# it (leaf), so a stall anywhere downstream never strands the trace. NOT gated on
+# anything. It captures the append-only record of what ran, on what model,
+# producing what bytes — the consolation artifact if the mission stalls.
+[[spore.node]]
+id          = "trace"
+kind        = "fixed"
+formula     = "task-work"
+description = "Always-on append-only trace sidecar (raw events + per-node briefs + artifact hashes). Root+leaf: survives a downstream stall."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — TRACE SIDECAR (always-on). Open an append-only trace
+under trace/ the instant this polymer germinates, INDEPENDENT of whether the gate
+DAG completes. Capture, as they happen: the raw cosmon events (nucleation / tackle
+/ evolve / complete / collapse) for THIS polymer, each node's germinated brief
+(topic + formula), and a content hash + byte count for every artifact any node
+writes. READ-ONLY on .cosmon/state/ — copy into trace/, never mutate. Emit
+trace/events.jsonl, trace/briefs.md, trace/hashes.tsv. Even if the mission stalls
+or a worker dies, trace/ must let a third party reconstruct what ran.
+"""
+
+# --- G0 intake ------------------------------------------------------------
+[[spore.node]]
+id          = "intake"
+kind        = "fixed"
+formula     = "task-work"
+description = "G0 intake integrity (BLOCK): minimal reproduction evidence present — tag, OS/UID/arch, transcript, is-it-deterministic. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G0 INTAKE INTEGRITY (fail-closed). The tester ran
+${params.upstream_version}; the affected ref is ${params.affected_ref}. Verify the
+issue carries the MINIMAL evidence a reproduction needs: (1) the exact symptom,
+verbatim, as trusted evidence (never softened into an inferred mechanism); (2) the
+environment fingerprint — OS, UID (root vs non-root MATTERS for env-fit bugs),
+arch (amd64/arm64), the released binary version; (3) any transcript / log the
+tester supplied; (4) an honest "is this deterministic or flaky?" note. Emit
+intake.md AND verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+missing environment fingerprint => BLOCKED, never PASS. A vague "it broke" is
+BLOCKED with the missing field named. verdict.json absent or malformed = the
+downstream reads it as BLOCKED.
+"""
+
+# --- G1 behavioural contract ----------------------------------------------
+[[spore.node]]
+id          = "contract"
+kind        = "fixed"
+formula     = "task-work"
+description = "G1 behavioural contract (BLOCK): state what cosmon PROMISES, decided BEFORE the test exists, so a fix cannot 'pass' by changing the promise. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G1 BEHAVIOURAL CONTRACT (fail-closed). BEFORE any test
+is written, state in contract.md WHAT COSMON PROMISES for the verb/surface the
+issue touches — the invariant a correct build must satisfy. This is decided up
+front precisely so a later fix cannot quietly 'succeed' by weakening the promise.
+For an adapter-resolution issue, the contract is the FULL precedence table of
+`resolve_adapter_selection` (flag > formula-step > $COSMON_DEFAULT_ADAPTER > config
+> global-config > builtin floor), stated as the semantic the composed resolver
+must honour under every dispatch path (including --resident). Emit contract.md AND
+verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: a contract
+that merely restates the symptom (not the promise) is BLOCKED.
+"""
+
+# --- G2 reproduce (the deterministic red; NEW formula) --------------------
+[[spore.node]]
+id          = "reproduce"
+kind        = "fixed"
+formula     = "clean-room-repro"
+description = "G2 deterministic red, frozen (BLOCK): a test that fails on affected_ref for the RIGHT reason, hashed before the fix branch, write-locked, with differential refutation + false-green/false-red modes. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G2 CLEAN-ROOM REPRODUCTION on ${params.affected_ref}.
+"""
+issue          = "${params.issue}"
+affected_ref   = "${params.affected_ref}"
+risk           = "${params.risk}"
+
+# --- G3 falsification of the test (anti-tautology) ------------------------
+[[spore.node]]
+id          = "falsify"
+kind        = "fixed"
+formula     = "task-work"
+description = "G3 falsification (BLOCK): mutate the EXPECTED fix -> the red test must go red (anti-tautology). A test that stays green under a mutated fix is not an oracle. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G3 TEST FALSIFICATION (anti-tautology, fail-closed).
+The reproduce gate froze a red test on ${params.affected_ref}. Prove the test has
+TEETH: apply the DIFFERENTIAL REFUTATION from reproduce/ — flip exactly ONE
+variable (the expected fix) and confirm the colour BASCULES (red<->green). A test
+whose colour does not move when the fix is mutated is a tautology, not an oracle
+(diagnosis-discipline CLAUSE 4). Independently, confirm the fixture does NOT derive
+its oracle from the thing under test (no reuse of the same constant / resolver the
+code under test uses to compute the expected value). Emit falsify.md AND
+verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: if the
+mutation does not redden the test, BLOCKED with the tautology named.
+"""
+
+# --- G4 implement (smallest fix) ------------------------------------------
+[[spore.node]]
+id          = "implement"
+kind        = "fixed"
+formula     = "task-work"
+description = "G4 implementation (BLOCK): the smallest patch that satisfies the G1 contract; keeps the domain I/O-free; no authority to relax any gate. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G4 IMPLEMENTATION (fail-closed). Write the SMALLEST
+patch that makes the G2 red pass while satisfying the G1 contract verbatim. Do NOT
+optimise to preserve a defective behaviour (e.g. for a root-bypass bug, the fix
+must reach one of the CONTRACT-approved outcomes, never keep the unsafe shortcut).
+Keep the domain core I/O-free (ports stay injectable). Return Result; no unwrap /
+expect. Document every public item. Update the CLI/UI parity audit if a
+user-facing command changed. This node has NO authority to relax any gate. Emit
+implement.md (the patch summary + the files touched) AND verdict.json
+{verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED.
+"""
+
+# --- G5 green on the original red -----------------------------------------
+[[spore.node]]
+id          = "green"
+kind        = "fixed"
+formula     = "task-work"
+description = "G5 green on the frozen red (BLOCK): the SAME frozen test/fixture/command/timeout now passes UNCHANGED. No substituted test. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G5 GREEN ON THE ORIGINAL RED (fail-closed). Run the
+EXACT frozen red from reproduce/ (same image, same fixture, same command, same
+timeout) against the fixed tree and confirm it now passes UNCHANGED. Compare the
+frozen hash: the test bytes MUST be identical to the ones hashed at G2 (never a
+substituted or edited test blessed to green — see 'never bless a golden to get
+green'). Emit green.md AND verdict.json {verdict: PASS|BLOCKED, count, findings[]}.
+FAIL-CLOSED: a green obtained by editing the test, or a hash mismatch vs the frozen
+red, is BLOCKED.
+"""
+
+# --- G8 CI gate (cheap before dear) ---------------------------------------
+[[spore.node]]
+id          = "ci-gate"
+kind        = "fixed"
+formula     = "task-work"
+description = "G8 CI (BLOCK, NOT-RUN blocks): check + test + clippy -Dwarnings + fmt + doc, BEFORE the dear judgement loop. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G8 CI GATE (fail-closed, cheap-before-dear). Run the
+repo's configured gates and record each exit status to a FILE (never read an exit
+code through a pipe):
+  cargo check --workspace
+  cargo test --workspace          (wrap in `timeout 600`; a timeout is a FINDING)
+  cargo clippy --workspace -- -D warnings
+  cargo fmt --all -- --check
+  RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+The doc gate is the one no other subsumes: a broken intra-doc link compiles, lints,
+and tests green and fails only in CI on main. Emit ci-gate.md (one line per gate
+with its captured exit code) AND verdict.json {verdict: PASS|BLOCKED, count,
+findings[]}. FAIL-CLOSED and NOT-RUN blocks: a gate that did not run is BLOCKED, not
+skipped. This runs BEFORE the convergence loop (cheap before dear).
+"""
+
+# --- §6bis converge (EMERGENT — the double clean-room loop; replaces G6+G7) -
+# The ONLY non-Tier-0 node: it nucleates children (fix + two reviews + a converge
+# check) FORWARD each round via `cs nucleate --blocked-by` (auto-parent contract
+# COSMON_PARENT_MOL_ID). Because the round count is not knowable at germination,
+# it is an EMERGENT zone and MUST declare [bounds] (ADR-140 D2). The bound is the
+# seal's Termination variant.
+[[spore.node]]
+id          = "converge"
+kind        = "emergent"
+for_each    = "${nodes.converge.rounds}"
+formula     = "converge-clean-room"
+description = "§6bis double-engine convergence loop (BLOCK). Composes `while` + `cross-provider-committee`: each round runs review-claude || review-codex-sol, reads BOTH verdict.json, CLEAN and CLEAN debloque; else re-nucleates fix(union) + reviews forward. Fail-close on absent verdict; blocked+escalate at max_rounds. Replaces G6 breaker + G7 judge."
+[spore.node.bounds]
+output_type    = "review-round"
+max_instances  = 5    # the max_rounds ceiling — the foaming variant the seal bounds
+stop_condition = "both review engines (claude AND codex-sol) return CLEAN in the same round, OR max_rounds reached => `blocked` + human escalation (never a silent pass)"
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — §6bis DOUBLE CLEAN-ROOM CONVERGENCE (fail-closed).
+"""
+issue        = "${params.issue}"
+max_rounds   = "${params.max_rounds}"
+risk         = "${params.risk}"
+review_scale = "${params.review_scale}"
+
+# --- G9 rehearsal (packaged artefact, not the dev build) ------------------
+[[spore.node]]
+id          = "rehearsal"
+kind        = "fixed"
+formula     = "task-work"
+description = "G9 rehearsal (BLOCK): install the SIGNED packaged artefact (not the dev build) into the repro image and re-run the frozen red green. release/security widens to root+non-root x amd64+arm64. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G9 REHEARSAL (fail-closed). Install the PACKAGED,
+SIGNED artefact (NOT the dev build) into the clean-room repro image and re-run the
+frozen red from reproduce/ — it must go green from the packaged bytes. Matrix by
+risk: normal => the primary profile; release/security => root AND non-root, amd64
+AND arm64. Emit rehearsal.md (the matrix + the green results) AND verdict.json
+{verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: a green from the dev build
+instead of the packaged artefact is BLOCKED.
+"""
+
+# --- §9 dissent (the release-gate field, not a seat) ----------------------
+[[spore.node]]
+id          = "dissent"
+kind        = "fixed"
+formula     = "task-work"
+description = "§9 dissent field (BLOCK, empty=hard-block): a non-empty contre-brief at release, explicitly overruled with named rationale, with the right-to-fork (force a 2nd independent judge on the frozen dossier). Emits {brief, overruled_by, rationale}."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — §9 DISSENT FIELD (fail-closed, empty = hard-block).
+Produce the mandatory release contre-brief: the single strongest reason this fix
+should NOT ship (correctness, blast-radius, a residual the convergence loop
+tolerated). It must be EXPLICITLY overruled with a NAMED rationale, or it forces
+the right-to-fork (buterin): a 2nd independent judge on the frozen dossier before
+release. Emit dissent.md AND verdict.json shaped {verdict: PASS|BLOCKED, count,
+findings, brief, overruled_by, rationale}. FAIL-CLOSED: an EMPTY brief is a
+hard-block (a release with no recorded dissent is groupthink); a non-empty brief
+with no named overrule is BLOCKED.
+"""
+
+# --- G10 release (signed manifest; NO agent pushes) -----------------------
+[[spore.node]]
+id          = "release"
+kind        = "fixed"
+formula     = "task-work"
+description = "G10 release (BLOCK): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, dissent). NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — G10 RELEASE MANIFEST (fail-closed, NO PUSH). Assemble
+release-manifest.json validating the WHOLE dossier (never inferring success from
+completion): the fix commit sha, the FROZEN red hash from G2, the clean-room image
+digest, the affected_ref (${params.affected_ref}) and upstream_version
+(${params.upstream_version}), the CI verdict, the convergence CLEAN and CLEAN
+verdict, the rehearsal matrix, and the non-empty dissent {brief, overruled_by,
+rationale}. Run `scripts/publish.sh --check` for the scrub projection. Emit
+verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: any missing
+manifest field => BLOCKED. NO AGENT PUSHES: the output stays on the feat-branch;
+the actual push/tag is a HUMAN gate. State this explicitly in release.md.
+"""
+
+# --- G11 confirm (external replay closes the loop; bug-closure) -----------
+[[spore.node]]
+id          = "confirm"
+kind        = "fixed"
+formula     = "bug-closure"
+description = "G11 external confirm (BLOCK to CLOSE an env-specific issue): the reporter replays the candidate; bug-closure emits the CLOSED/REOPEN verdict over the full semantic surface. Emits verdict.md."
+[spore.node.vars]
+bug_molecule_id = "${params.issue}"
+topic = """
+COSMON-DEV ${params.issue} — G11 EXTERNAL CONFIRM + CLOSURE (fail-closed). Run the
+bug-closure ritual: enumerate the full semantic surface the issue's verb touches
+(code, help text, man page, tests, snapshots), confirm the fix leaves NONE stale,
+and record the reporter's replay of the release candidate on their environment.
+Emit surfaces.md, coverage.md, verdict.md. The verdict is CLOSED only if every
+surface is repaired AND the external replay went green on the reporter's
+environment; else REOPEN with the named gap. Absent external replay for an
+env-specific issue => REOPEN, never CLOSED (advisory before release, BLOCK to
+close).
+"""
+
+# ==========================================================================
+# Typed edges (feeds / produces / verifies) -> blocked-by links at expansion.
+# Diamond topology (blueprint §3): reproduce forks into the fix arm and the
+# falsification arm; they reconverge at green.
+# ==========================================================================
+[[spore.edge]]
+from = "intake"
+to   = "contract"
+type = "feeds"
+
+[[spore.edge]]
+from = "contract"
+to   = "reproduce"
+type = "feeds"
+
+# reproduce forks: the fix arm (implement) and the falsification arm (falsify).
+[[spore.edge]]
+from = "reproduce"
+to   = "implement"
+type = "feeds"
+
+[[spore.edge]]
+from = "reproduce"
+to   = "falsify"
+type = "verifies"
+
+# diamond reconverges at green: the fix must pass the frozen red AND the test must
+# have survived the anti-tautology falsification.
+[[spore.edge]]
+from = "implement"
+to   = "green"
+type = "feeds"
+
+[[spore.edge]]
+from = "falsify"
+to   = "green"
+type = "verifies"
+
+[[spore.edge]]
+from = "green"
+to   = "ci-gate"
+type = "verifies"
+
+# CI (cheap) before the convergence loop (dear).
+[[spore.edge]]
+from = "ci-gate"
+to   = "converge"
+type = "feeds"
+
+# converge forks into the rehearsal arm and the dissent arm; they reconverge at
+# release.
+[[spore.edge]]
+from = "converge"
+to   = "rehearsal"
+type = "feeds"
+
+[[spore.edge]]
+from = "converge"
+to   = "dissent"
+type = "produces"
+
+[[spore.edge]]
+from = "rehearsal"
+to   = "release"
+type = "feeds"
+
+[[spore.edge]]
+from = "dissent"
+to   = "release"
+type = "verifies"
+
+[[spore.edge]]
+from = "release"
+to   = "confirm"
+type = "verifies"
