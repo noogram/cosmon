@@ -46,6 +46,28 @@ pub struct Surface {
     /// ladder of modes.
     #[serde(default)]
     pub branding: Branding,
+    /// Whether the target repository is **public**.
+    ///
+    /// Defaults to `false` (private repo). When `true`, a `github-issues`
+    /// surface runs in *ID-free publication mode* (delib-20260721-f0b1):
+    ///
+    /// - The invisible `<!-- cosmon:molecule:ID -->` marker is **suppressed**
+    ///   from every issue body. On a public repo that marker is not plumbing,
+    ///   it is a leak: it exposes the internal molecule ID to any recipient
+    ///   (sporarium PROTOCOL P4.11; the blank-context CLEAN standard).
+    /// - Dedup is re-keyed off the surface-side mapping table in
+    ///   `.cosmon/state/surfaces/github/…` (the local mirror) instead of a
+    ///   remote `gh issue list --search 'cosmon:molecule:… in:body'` call.
+    ///   Because the marker no longer exists on the remote, the body-search
+    ///   fallback would leak the ID *and* find nothing; it is skipped.
+    /// - Publication is **fail-closed**: an automated `cs reconcile`
+    ///   (auto-reconcile) must not irreversibly create/edit issues on a public
+    ///   repo without an explicit operator gesture (`COSMON_SURFACE_PUBLISH=1`).
+    ///
+    /// This is a projection-level property, not a claim about the repo's real
+    /// GitHub visibility — the operator asserts it so cosmon can fail closed.
+    #[serde(default)]
+    pub public: bool,
 }
 
 /// Controls how visible cosmon vocabulary is on a rendered surface.
@@ -106,6 +128,15 @@ impl Surface {
     #[must_use]
     pub fn accepts_kind(&self, kind: MoleculeKind) -> bool {
         self.molecule_kinds.is_empty() || self.molecule_kinds.contains(&kind)
+    }
+
+    /// Whether this surface publishes to a repository the operator has
+    /// declared **public**, and must therefore run in ID-free mode.
+    ///
+    /// See the [`public`](Surface::public) field for the full contract.
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.public
     }
 }
 
@@ -217,6 +248,40 @@ mod tests {
         assert!(config.surface[0].accepts_kind(MoleculeKind::Deliberation));
         assert!(!config.surface[0].accepts_kind(MoleculeKind::Idea));
         assert!(!config.surface[0].accepts_kind(MoleculeKind::Task));
+    }
+
+    #[test]
+    fn test_public_defaults_to_false() {
+        // A github-issues surface with no `public` field is private by
+        // default — the marker stays, dedup can fall back to remote search.
+        let config = SurfaceConfig::parse(
+            r#"
+            [[surface]]
+            referent = "project.issues"
+            kind = "github-issues"
+            repo = "owner/repo"
+            "#,
+        )
+        .unwrap();
+        assert!(!config.surface[0].public);
+        assert!(!config.surface[0].is_public());
+    }
+
+    #[test]
+    fn test_public_true_parses() {
+        // ID-free publication mode is opt-in via `public = true`.
+        let config = SurfaceConfig::parse(
+            r#"
+            [[surface]]
+            referent = "project.issues"
+            kind = "github-issues"
+            repo = "owner/repo"
+            public = true
+            "#,
+        )
+        .unwrap();
+        assert!(config.surface[0].public);
+        assert!(config.surface[0].is_public());
     }
 
     #[test]

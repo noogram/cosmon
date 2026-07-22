@@ -5,12 +5,25 @@
 //! Projects molecules onto GitHub Issues using the `gh` CLI.
 //! Only molecules with projectable kinds (Issue, Task, Idea) are synced.
 //! Decisions and Signals are skipped.
+//!
+//! # Private vs public repositories (delib-20260721-f0b1)
+//!
+//! By default a surface targets a **private** repo: an invisible
+//! `<!-- cosmon:molecule:ID -->` marker is written to each issue body and used
+//! as the dedup / reconciliation key. On a repo the operator has declared
+//! **public** ([`Surface::public`]) that marker is a leak — it carries the
+//! internal molecule ID into a recipient-facing artifact — so the surface runs
+//! in *ID-free mode*: the marker is suppressed, dedup is re-keyed off the
+//! local mapping table, and publication is fail-closed behind an explicit
+//! operator gesture. Use [`preview_github_issues`] to render the exact bodies
+//! locally before any irreversible API call.
 
 use std::fmt::Write;
 use std::process::Output;
 
 use cosmon_core::expiry::format_expiry_badge_static;
 use cosmon_core::formula::Formula;
+use cosmon_core::id::MoleculeId;
 use cosmon_core::interaction::MoleculeLink;
 use cosmon_core::kind::MoleculeKind;
 use cosmon_core::molecule::MoleculeStatus;
@@ -278,6 +291,63 @@ fn is_open(mol: &MoleculeData) -> bool {
     mol.status.is_alive()
 }
 
+/// Environment gesture that authorizes publication to a **public** repo.
+///
+/// ID-free publication is fail-closed: creating or editing issues on a public
+/// GitHub repo is an irreversible, un-previewable act (GitHub has no dry-run),
+/// so an automated `cs reconcile` must not do it silently. The human operator
+/// mints this gesture by exporting `COSMON_SURFACE_PUBLISH=1` (or `true`) for
+/// the one invocation that is meant to publish, the same shape as biblion's
+/// `COSMON_OPERATOR_GESTURE`. Private surfaces ignore the gesture entirely.
+const PUBLISH_GESTURE_ENV: &str = "COSMON_SURFACE_PUBLISH";
+
+/// Read [`PUBLISH_GESTURE_ENV`] and decide whether the operator authorized a
+/// publish to a public repo this run.
+fn publish_gesture_present() -> bool {
+    std::env::var(PUBLISH_GESTURE_ENV)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// The invisible molecule marker for an issue body, or `None` in public
+/// (ID-free) mode.
+///
+/// On a **private** repo the `<!-- cosmon:molecule:ID -->` comment is pure
+/// plumbing: GitHub never renders HTML comments, and `project_github_issues`
+/// searches for it to keep the sync idempotent. On a **public** repo the same
+/// bytes are a leak — they carry the internal molecule ID into a
+/// recipient-facing artifact — so the marker is suppressed and dedup is
+/// re-keyed off the local mapping table instead (see [`Surface::public`]).
+fn molecule_marker(mol_id: &MoleculeId, public: bool) -> Option<String> {
+    if public {
+        None
+    } else {
+        Some(format!("<!-- cosmon:molecule:{mol_id} -->"))
+    }
+}
+
+/// Fail-closed gate for touching the GitHub API on a **public** repo.
+///
+/// Returns `Ok(())` for every private surface (`public == false`). For a
+/// public surface it requires the operator gesture (`gesture == true`);
+/// otherwise it returns an actionable error so an automated `cs reconcile`
+/// aborts *before* any irreversible `gh issue create`/`edit` call. This is
+/// the "hard ban on auto-reconcile when the remote is public" from
+/// delib-20260721-f0b1 (Tier-2), kept as a pure function so it is unit
+/// testable without spawning `gh`.
+fn publish_gate(public: bool, gesture: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if public && !gesture {
+        return Err(format!(
+            "refusing to publish to a public repo without an explicit operator \
+             gesture. Creating/editing GitHub issues is irreversible and GitHub \
+             has no dry-run; review the rendered bodies with `cs project --check` \
+             first, then re-run with {PUBLISH_GESTURE_ENV}=1 to publish."
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Render the GitHub Issue body for a molecule.
 ///
 /// The visible shape depends on `branding`:
@@ -290,30 +360,37 @@ fn is_open(mol: &MoleculeData) -> bool {
 ///   without mentioning cosmon. The host project owns the surface.
 /// - [`Branding::None`] drops the metadata block and omits the footer.
 ///
-/// In all modes, the HTML comment marker (`<!-- cosmon:molecule:ID -->`)
-/// remains as invisible plumbing — `project_github_issues` uses it to find
-/// existing issues via `gh issue list --search ... in:body` and keep the
-/// sync idempotent. This comment is not rendered by GitHub's HTML pipeline,
-/// so no "cosmon" string appears in the visible issue body under
-/// host-native branding.
+/// On a **private** repo (`public == false`) the HTML comment marker
+/// (`<!-- cosmon:molecule:ID -->`) is emitted as invisible plumbing —
+/// `project_github_issues` uses it to find existing issues via
+/// `gh issue list --search ... in:body` and keep the sync idempotent. This
+/// comment is not rendered by GitHub's HTML pipeline, so no "cosmon" string
+/// appears in the visible issue body under host-native branding.
+///
+/// On a **public** repo (`public == true`) the marker is *suppressed*: on a
+/// recipient-facing repo it would leak the internal molecule ID. Dedup is
+/// then re-keyed off the local mapping table (see [`Surface::public`]).
 ///
 /// The `formulas` map supplies the formula declaration used by
 /// [`render_steps_as_todo`] to emit a progress checklist for the molecule;
 /// molecules whose formula is absent from the map simply skip the step
 /// section.
-fn render_issue_body(
+fn render_issue_body_inner(
     mol: &MoleculeData,
     kind: MoleculeKind,
     kind_emoji: &str,
     formulas: &FormulaMap,
     branding: Branding,
+    public: bool,
 ) -> String {
     let mut body = String::new();
 
     // Invisible molecule marker — required by the existing-issue search in
-    // `project_github_issues`. This is plumbing, not a visible cosmon
-    // reference: GitHub never renders HTML comments in the issue body.
-    let _ = writeln!(body, "<!-- cosmon:molecule:{} -->", mol.id);
+    // `project_github_issues` on private repos. Suppressed entirely in
+    // public (ID-free) mode, where it would leak the molecule ID.
+    if let Some(marker) = molecule_marker(&mol.id, public) {
+        let _ = writeln!(body, "{marker}");
+    }
 
     // Attributed mode keeps the full metadata block. Host-native and none
     // drop it entirely — the operator does not want jargon like "Formula"
@@ -439,6 +516,114 @@ fn render_issue_body(
     body
 }
 
+/// Private-repo convenience wrapper over [`render_issue_body_inner`] used by
+/// the unit tests, which pin the default (marker-present) behavior. Production
+/// code calls `render_issue_body_inner` directly with the surface's `public`
+/// flag so the ID-free path is always explicit at the call site.
+#[cfg(test)]
+fn render_issue_body(
+    mol: &MoleculeData,
+    kind: MoleculeKind,
+    kind_emoji: &str,
+    formulas: &FormulaMap,
+    branding: Branding,
+) -> String {
+    render_issue_body_inner(mol, kind, kind_emoji, formulas, branding, false)
+}
+
+/// A single molecule's projected GitHub issue, rendered **without any API
+/// call** — the previewable dry-run for the github leg (delib-20260721-f0b1
+/// Tier-2). GitHub has no native dry-run, so the only way to review exactly
+/// what would be published is to render the bytes locally first.
+#[derive(Debug, Clone)]
+pub struct IssuePreview {
+    /// The molecule this issue projects.
+    pub molecule_id: String,
+    /// The exact title that would be sent to `gh issue create`/`edit`.
+    pub title: String,
+    /// The exact body that would be sent — including (or, in public mode,
+    /// omitting) the molecule marker, so the reviewer sees the real payload.
+    pub body: String,
+    /// What the sync would do to the remote, decided from the local mapping
+    /// table only (never a live `gh` call).
+    pub action: PreviewAction,
+}
+
+/// What `project_github_issues` would do to a remote issue, computed offline
+/// for [`IssuePreview`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewAction {
+    /// No mirror exists — a new issue would be created.
+    Create,
+    /// A mirror exists and the body/state changed — issue #n would be edited.
+    Update(u64),
+    /// A mirror exists and nothing changed — issue #n would be skipped.
+    Unchanged(u64),
+}
+
+/// Render the exact issues that a `github-issues` sync would publish, without
+/// touching the network. This is the real dry-run for the github leg: the
+/// caller can write each [`IssuePreview::body`] to a local file for human
+/// review before any irreversible API call.
+///
+/// The create/update/unchanged decision is derived purely from the local
+/// mapping table (the mirror files under `state_dir`) — the same source
+/// `project_github_issues` prefers — so the preview matches what a live sync
+/// would do, minus the remote body-search fallback (which is itself a leak on
+/// public repos and is never used here).
+#[must_use]
+pub fn preview_github_issues(
+    surface: &Surface,
+    molecules: &[MoleculeData],
+    state_dir: Option<&std::path::Path>,
+    formulas: &FormulaMap,
+    declarations: &DeclarationMap,
+) -> Vec<IssuePreview> {
+    let mirrors = match (state_dir, surface.repo.as_deref()) {
+        (Some(sd), Some(repo)) => crate::github_mirror::load_all_mirrors(sd, repo),
+        _ => std::collections::HashMap::new(),
+    };
+
+    let mut previews = Vec::new();
+    for mol in molecules {
+        if !is_projectable(mol) {
+            continue;
+        }
+        let kind = mol.kind.unwrap_or(MoleculeKind::Task);
+        let kind_emoji = kind.emoji();
+        let title = compute_issue_title(mol, kind, kind_emoji, formulas, declarations);
+        let body = render_issue_body_inner(
+            mol,
+            kind,
+            kind_emoji,
+            formulas,
+            surface.branding,
+            surface.public,
+        );
+        let body_hash = crate::github_mirror::hash_content(&body);
+
+        let action = match mirrors.get(mol.id.as_str()) {
+            Some(mirror) => {
+                let want_state = if is_open(mol) { "open" } else { "closed" };
+                if mirror.body_hash == body_hash && mirror.state == want_state {
+                    PreviewAction::Unchanged(mirror.issue_number)
+                } else {
+                    PreviewAction::Update(mirror.issue_number)
+                }
+            }
+            None => PreviewAction::Create,
+        };
+
+        previews.push(IssuePreview {
+            molecule_id: mol.id.as_str().to_string(),
+            title,
+            body,
+            action,
+        });
+    }
+    previews
+}
+
 /// Project molecules onto GitHub Issues.
 ///
 /// Uses the `gh` CLI. Returns the number of issues created/updated.
@@ -458,6 +643,13 @@ pub fn project_github_issues(
         .repo
         .as_deref()
         .ok_or("github-issues surface requires 'repo' field (owner/repo)")?;
+
+    // Fail-closed publish gate. On a public repo, creating/editing issues is
+    // irreversible and un-previewable (GitHub has no dry-run), so an automated
+    // reconcile must not do it without an explicit operator gesture. Checked
+    // *before* the gh probes so the operator gets the actionable "review then
+    // re-run with the gesture" message rather than a downstream auth error.
+    publish_gate(surface.public, publish_gesture_present())?;
 
     // Check gh is available and authenticated.
     check_gh_available()?;
@@ -484,7 +676,14 @@ pub fn project_github_issues(
         // human-legible heading instead of their raw id.
         let title = compute_issue_title(mol, kind, kind_emoji, formulas, declarations);
 
-        let body = render_issue_body(mol, kind, kind_emoji, formulas, surface.branding);
+        let body = render_issue_body_inner(
+            mol,
+            kind,
+            kind_emoji,
+            formulas,
+            surface.branding,
+            surface.public,
+        );
 
         // Skip if unchanged (compare body hash against mirror).
         let body_hash = crate::github_mirror::hash_content(&body);
@@ -511,6 +710,13 @@ pub fn project_github_issues(
         // regression test `decide_reconcile_action_*` in this module.
         let existing_number = if let Some(num) = resolve_existing_issue_number(mol, &mirrors) {
             Some(num)
+        } else if surface.public {
+            // ID-free mode: the remote body-search keys off the molecule
+            // marker, which we suppressed precisely because it leaks the ID.
+            // Searching would both leak the ID *and* find nothing (the marker
+            // is not in the body). The local mapping table is the sole dedup
+            // key here; absent a mirror we create a fresh issue.
+            None
         } else {
             let search_output = std::process::Command::new("gh")
                 .args([
@@ -1599,5 +1805,190 @@ description = "Run the gates."
                 "branding {branding:?} must keep variables table"
             );
         }
+    }
+
+    // --- ID-free publication mode (delib-20260721-f0b1) ---------------------
+    //
+    // On a public repo the molecule marker is a leak, not plumbing. These
+    // tests pin the three load-bearing invariants: the marker is suppressed,
+    // dedup no longer depends on it, and publication is fail-closed.
+
+    #[test]
+    fn molecule_marker_present_on_private_repo() {
+        let id = MoleculeId::new("task-20260721-abcd").unwrap();
+        let marker = molecule_marker(&id, false).expect("private repo keeps the marker");
+        assert_eq!(marker, "<!-- cosmon:molecule:task-20260721-abcd -->");
+    }
+
+    #[test]
+    fn molecule_marker_suppressed_on_public_repo() {
+        let id = MoleculeId::new("task-20260721-abcd").unwrap();
+        assert_eq!(
+            molecule_marker(&id, true),
+            None,
+            "public repo must suppress the ID-leaking marker"
+        );
+    }
+
+    #[test]
+    fn public_body_carries_no_molecule_id_marker() {
+        // The whole point: no rendered byte on a public repo may carry the
+        // internal molecule id in the cosmon marker envelope.
+        let mol = test_molecule();
+        let body = render_issue_body_inner(
+            &mol,
+            MoleculeKind::Task,
+            "\u{1f527}",
+            &fm(),
+            Branding::HostNative,
+            true,
+        );
+        assert!(
+            !body.contains("cosmon:molecule:"),
+            "public body must not contain the molecule marker:\n{body}"
+        );
+        assert!(
+            !body.contains(mol.id.as_str()),
+            "public body must not leak the raw molecule id:\n{body}"
+        );
+    }
+
+    #[test]
+    fn private_body_keeps_marker_for_dedup() {
+        // Regression guard: the default (private) path must still emit the
+        // marker so remote body-search dedup keeps working.
+        let mol = test_molecule();
+        let body = render_issue_body_inner(
+            &mol,
+            MoleculeKind::Task,
+            "\u{1f527}",
+            &fm(),
+            Branding::HostNative,
+            false,
+        );
+        assert!(body.contains(&format!("<!-- cosmon:molecule:{} -->", mol.id)));
+    }
+
+    #[test]
+    fn publish_gate_allows_private_without_gesture() {
+        // Private repos never require the gesture — behavior is unchanged.
+        assert!(publish_gate(false, false).is_ok());
+        assert!(publish_gate(false, true).is_ok());
+    }
+
+    #[test]
+    fn publish_gate_blocks_public_without_gesture() {
+        let err = publish_gate(true, false).expect_err("public without gesture must fail closed");
+        let msg = err.to_string();
+        assert!(
+            msg.contains(PUBLISH_GESTURE_ENV),
+            "error must name the gesture: {msg}"
+        );
+        assert!(
+            msg.contains("--check"),
+            "error must point at the dry-run: {msg}"
+        );
+    }
+
+    #[test]
+    fn publish_gate_allows_public_with_gesture() {
+        assert!(
+            publish_gate(true, true).is_ok(),
+            "explicit operator gesture unlocks publication"
+        );
+    }
+
+    #[test]
+    fn preview_create_when_no_mirror() {
+        // With no mapping-table entry, the preview reports a create — and the
+        // rendered body honours the surface's public flag.
+        let mol = test_molecule();
+        let surface = Surface {
+            referent: "project.issues".to_string(),
+            kind: crate::config::SurfaceKind::GithubIssues,
+            path: String::new(),
+            template: None,
+            repo: Some("owner/repo".to_string()),
+            labels: vec![],
+            molecule_kinds: vec![],
+            branding: Branding::HostNative,
+            public: true,
+        };
+        let previews =
+            preview_github_issues(&surface, std::slice::from_ref(&mol), None, &fm(), &dm());
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].action, PreviewAction::Create);
+        assert_eq!(previews[0].molecule_id, mol.id.as_str());
+        assert!(
+            !previews[0].body.contains("cosmon:molecule:"),
+            "public preview body must not leak the marker"
+        );
+    }
+
+    #[test]
+    fn preview_unchanged_and_update_from_mirror() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path();
+        let mol = test_molecule();
+        let surface = Surface {
+            referent: "project.issues".to_string(),
+            kind: crate::config::SurfaceKind::GithubIssues,
+            path: String::new(),
+            template: None,
+            repo: Some("owner/repo".to_string()),
+            labels: vec![],
+            molecule_kinds: vec![],
+            branding: Branding::HostNative,
+            public: false,
+        };
+
+        // Render the exact body a sync would send, then plant a mirror with a
+        // matching hash → the preview must report Unchanged.
+        let kind = MoleculeKind::Task;
+        let body = render_issue_body_inner(
+            &mol,
+            kind,
+            kind.emoji(),
+            &fm(),
+            surface.branding,
+            surface.public,
+        );
+        let hash = crate::github_mirror::hash_content(&body);
+        let mirror = crate::github_mirror::IssueMirror {
+            molecule_id: mol.id.as_str().to_string(),
+            issue_number: 7,
+            repo: "owner/repo".to_string(),
+            title: "t".to_string(),
+            body_hash: hash,
+            state: "open".to_string(),
+            kind: "task".to_string(),
+            status: "running".to_string(),
+            projected_at: chrono::Utc::now().to_rfc3339(),
+        };
+        crate::github_mirror::save_mirror(state_dir, &mirror).unwrap();
+
+        let previews = preview_github_issues(
+            &surface,
+            std::slice::from_ref(&mol),
+            Some(state_dir),
+            &fm(),
+            &dm(),
+        );
+        assert_eq!(previews[0].action, PreviewAction::Unchanged(7));
+
+        // Now stale the mirror hash → the preview must report Update(7).
+        let stale = crate::github_mirror::IssueMirror {
+            body_hash: "deadbeef".to_string(),
+            ..mirror
+        };
+        crate::github_mirror::save_mirror(state_dir, &stale).unwrap();
+        let previews = preview_github_issues(
+            &surface,
+            std::slice::from_ref(&mol),
+            Some(state_dir),
+            &fm(),
+            &dm(),
+        );
+        assert_eq!(previews[0].action, PreviewAction::Update(7));
     }
 }

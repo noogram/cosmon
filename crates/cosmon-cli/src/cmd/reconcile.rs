@@ -360,7 +360,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     if args.check {
-        run_check(&config, &project_root, &fleet, &molecules, &formulas, &snap);
+        run_check(
+            &config,
+            &project_root,
+            &state_dir,
+            &fleet,
+            &molecules,
+            &formulas,
+            &declarations,
+            &snap,
+        );
         return Ok(());
     }
 
@@ -617,23 +626,38 @@ fn check_no_profile_requirement_downgrade(cosmon_dir: &Path) -> Vec<String> {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_check(
     config: &SurfaceConfig,
     project_root: &Path,
+    state_dir: &Path,
     fleet: &cosmon_state::Fleet,
     molecules: &[cosmon_state::MoleculeData],
     formulas: &FormulaMap,
+    declarations: &DeclarationMap,
     snap: &cosmon_surface::snapshot::ProjectionSnapshot,
 ) {
     let mut action_count = 0;
 
     for surface in &config.surface {
         if surface.kind == cosmon_surface::SurfaceKind::GithubIssues {
-            println!(
-                "  {} → {} (github: skipped in dry-run)",
-                surface.referent,
-                surface.repo.as_deref().unwrap_or("?")
-            );
+            // Real dry-run for the github leg (delib-20260721-f0b1 Tier-2):
+            // GitHub has no native preview, so render the exact issue bodies
+            // to local files the operator can review before any irreversible
+            // API call. Filter molecules by the surface's kind filter to
+            // match what a live sync would consider.
+            let filtered: Vec<cosmon_state::MoleculeData> =
+                cosmon_surface::filter_by_surface_kinds(surface, molecules)
+                    .into_iter()
+                    .cloned()
+                    .collect();
+            let state_ref = if state_dir.is_dir() {
+                Some(state_dir)
+            } else {
+                None
+            };
+            action_count +=
+                report_github_preview(surface, &filtered, state_ref, formulas, declarations);
             continue;
         }
 
@@ -725,6 +749,98 @@ fn run_check(
     if action_count > 0 {
         std::process::exit(1);
     }
+}
+
+/// Render every issue a `github-issues` surface would publish to local files
+/// under `<state_dir>/surfaces/github/<repo>/preview/` and print a summary.
+///
+/// This is the previewable dry-run for the github leg: GitHub itself offers
+/// no way to see what an issue create/edit would produce, so `cs project
+/// --check` materializes the exact bodies (marker-suppressed on public repos)
+/// for human review before any irreversible API call. Returns the number of
+/// issues that would create-or-update (unchanged issues do not count as
+/// "attention"), so the caller can fold it into the overall action count.
+fn report_github_preview(
+    surface: &cosmon_surface::Surface,
+    molecules: &[cosmon_state::MoleculeData],
+    state_dir: Option<&Path>,
+    formulas: &FormulaMap,
+    declarations: &DeclarationMap,
+) -> usize {
+    let repo = surface.repo.as_deref().unwrap_or("?");
+    let previews = cosmon_surface::preview_github_issues(
+        surface,
+        molecules,
+        state_dir,
+        formulas,
+        declarations,
+    );
+
+    let visibility = if surface.is_public() {
+        "public, ID-free"
+    } else {
+        "private"
+    };
+    println!("  {} → {repo} ({visibility}):", surface.referent);
+
+    if previews.is_empty() {
+        println!("    (no projectable molecules)");
+        return 0;
+    }
+
+    // Write the exact bodies to a local preview directory for human review.
+    // Best-effort: a write failure must not abort the dry-run, only warn.
+    let preview_dir = state_dir.map(|sd| {
+        sd.join("surfaces")
+            .join("github")
+            .join(repo.replace('/', "-"))
+            .join("preview")
+    });
+    if let Some(dir) = &preview_dir {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            eprintln!("    ⚠ could not create preview dir {}: {e}", dir.display());
+        }
+    }
+
+    let (mut creates, mut updates, mut unchanged) = (0usize, 0usize, 0usize);
+    for p in &previews {
+        let action = match p.action {
+            cosmon_surface::PreviewAction::Create => {
+                creates += 1;
+                "create".to_string()
+            }
+            cosmon_surface::PreviewAction::Update(n) => {
+                updates += 1;
+                format!("update #{n}")
+            }
+            cosmon_surface::PreviewAction::Unchanged(n) => {
+                unchanged += 1;
+                format!("unchanged #{n}")
+            }
+        };
+        println!("    [{action}] {}", p.title);
+
+        if let Some(dir) = &preview_dir {
+            let file = dir.join(format!("{}.md", p.molecule_id));
+            let contents = format!("<!-- {action} -->\n# {}\n\n{}", p.title, p.body);
+            if let Err(e) = std::fs::write(&file, contents) {
+                eprintln!("    ⚠ could not write {}: {e}", file.display());
+            }
+        }
+    }
+
+    if let Some(dir) = &preview_dir {
+        println!("    Bodies rendered for review: {}", dir.display());
+    }
+    if surface.is_public() {
+        println!(
+            "    Public repo: re-run with COSMON_SURFACE_PUBLISH=1 to publish \
+             (fail-closed until then)."
+        );
+    }
+    println!("    {creates} create, {updates} update, {unchanged} unchanged.");
+
+    creates + updates
 }
 
 /// Render the content of a single markdown surface, or `None` if the

@@ -83,6 +83,7 @@ fn status_surface() -> Surface {
         labels: vec![],
         molecule_kinds: vec![],
         branding: Branding::HostNative,
+        public: false,
     }
 }
 
