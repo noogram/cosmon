@@ -1,0 +1,225 @@
+formula = "converge-clean-room"
+version = 1
+description = """
+The §6bis DOUBLE clean-room review loop of the `cosmon-dev` spore — iterate a
+provider-diverse two-engine review until BOTH engines return CLEAN in the same
+round, or `blocked` + human escalation at `max_rounds`. It replaces the DAG's
+G6 (breaker+dissent) and G7 (judge chambre-blanche) with ONE auto-conducted
+convergence loop (blueprint §6bis).
+
+REUSE, DO NOT REINVENT — this formula is PURE WIRING over two existing primitives:
+  * `while`  (../../../.cosmon/formulas/while.formula.toml) — the iterate-until-
+    condition loop. Its `max_iterations` cap IS our `max_rounds` (a FATAL cap, not
+    a benign exit). We do NOT re-implement the loop; we drive `while` with a
+    condition_check that reads the two verdict.json.
+  * `cross-provider-committee` (../../../.cosmon/formulas/cross-provider-committee.formula.toml,
+    ADR-147) — the jury that is provider-diverse BY CONSTRUCTION (adapter-pinned
+    seats). Each round nucleates ONE committee with a claude seat and a codex-sol
+    (gpt-5.6-sol) seat. We do NOT re-implement the seat DAG or the diversity
+    witnesses; we convene a committee per round.
+NEVER a deep-think panel: N claude personas share weights/policy/framing ->
+"rationalisation collective deguisee en debat" (janis). A→A is an echo, not a
+witness. The bloc-claude counts for ONE voice; codex-sol is the second SUBSTRATE
+(keystone K4).
+
+THE ROUND (3+ nodes, nucleated FORWARD each iteration):
+      artefact courant
+      ├──> review-claude    (adapter claude, clean-room)   ─┐
+      └──> review-codex-sol (adapter codex, gpt-5.6-sol)    ─┤
+                                                             v
+                                                         converge-check
+                                       CLEAN and CLEAN ? ──yes──> verdict CLEAN, debloque l'aval
+                                            │
+                                           no -> cs nucleate: fix(UNION of the 2 reports)
+                                                  -> review-claude || review-codex-sol -> converge-check' (round n+1)
+                                                  (all --blocked-by the current converge-check)
+
+CLEAN = CONJUNCTION. Both engines must return CLEAN in the SAME round. A single
+FINDINGS (claude OR codex) is NOT-CLEAN -> next round. The `fix` corrects the
+UNION of the two reports (a finding either engine raised).
+
+ACYCLICITY BY INITIALISATION. There is never a cycle: germinating round 1 is the
+INITIALISATION. Each NOT-CLEAN nucleates FORWARD (fresh ids, `--blocked-by` the
+current converge-check) -> a strictly acyclic temporal chain. `cs run --resident`
+absorbs the descendants nucleated mid-run (ADR-038); the auto-parent contract
+`COSMON_PARENT_MOL_ID` wires the new round to this molecule.
+
+TERMINATION + GARDE-FOU. Converge when both are CLEAN (the quality fixpoint). At
+`max_rounds` exhaustion: NEVER a silent pass -> state `blocked` + human escalation
+(NOT-CONVERGED blocks like NOT-RUN). `molecule_quota_exceeded` (exit 91) is the
+runaway backstop. The `while` collapse on `max_iterations` is the mechanical
+enforcement of this cap.
+
+FAIL-CLOSED VERDICT CONTRACT (codex-sol #28). Each reviewer emits BOTH:
+  * referee-report.md — human-readable; first line `VERDICT: CLEAN` |
+    `VERDICT: FINDINGS (N)`, then {line, quote, fix} per severity;
+  * verdict.json sidecar — {verdict: "CLEAN"|"FINDINGS", count, findings:[...]}.
+The converge-check reads the TWO verdict.json and FAIL-CLOSES if either is absent
+or malformed (a gate that cannot fail is not a gate).
+
+review_scale: `mission` => one loop wraps the whole deliverable (the oxymake
+style). `submission` => each gate/sub-mission carries its own nested loop.
+
+VARIABLES:
+  - topic        : the convergence task (the spore interpolates the issue).
+  - issue        : the reported defect id (for briefing the reviewers).
+  - max_rounds   : the hard cap (default 5) -> `while` max_iterations.
+  - risk         : normal | release | security -> the committee jury floor.
+  - review_scale : mission | submission.
+
+ARTIFACT PATHS — all artifacts (rounds.md, converge-verdict.json, per-round
+referee-report.md + verdict.json) MUST be written to the MOLECULE STATE DIRECTORY
+(the `molecule_dir` field from `cs --json observe {mol_id}`), NEVER the worktree.
+"""
+id_prefix = "converge"
+freeze_on_last_step = false
+
+[vars.topic]
+description = "The convergence task, stated in one or more sentences."
+required = true
+
+[vars.issue]
+description = "The reported defect id — briefs the two review engines."
+required = true
+
+[vars.max_rounds]
+description = "Hard cap on convergence rounds -> `while` max_iterations. Exhaustion is `blocked` + escalation, never a silent pass."
+default = "5"
+
+[vars.risk]
+description = "normal | release | security — drives the cross-provider-committee jury floor (normal=2 families, release/security=>=3, conjunctive)."
+default = "normal"
+
+[vars.review_scale]
+description = "mission (one loop wraps the deliverable) | submission (each gate carries its own nested loop)."
+default = "mission"
+
+# Tier 1 — this is the ONE non-Tier-0 node of the spore: it nucleates children
+# (fix + two review seats + a converge-check) FORWARD each round. `measure =
+# "iterations"` is the finite bound = max_rounds, declared up front; the `while`
+# max_iterations cap enforces it and a future verifier reads rounds.md to confirm
+# the loop terminated within bound.
+[tier]
+level = 1
+measure = "iterations"
+
+[[steps]]
+id = "init-round-1"
+title = "Initialise: convene round 1 (the loop initialisation, not a cycle)"
+description = """
+MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` —
+NEVER the worktree.
+
+Germinating round 1 IS the initialisation (acyclicity by construction). Set up the
+loop ledger and convene the first committee.
+
+  1. Parse ${max_rounds} (default 5). Create MOLECULE_DIR/rounds.md with a header:
+       | round | fix_id | review-claude | review-codex-sol | clean? |
+     and record the artefact under review (the ci-gate-passed fixed tree).
+  2. Convene the round-1 committee by nucleating cross-provider-committee — do NOT
+     re-implement the seats. The committee is the double clean-room review:
+       cs nucleate cross-provider-committee \\
+         --decayed-from {this_mol_id} --tag temp:warm --tag converge-round:1 \\
+         --var target="<the fixed tree / the implement molecule id>" \\
+         --var symptom="${issue} — audit the fix as ARTEFACTS, not testimony" \\
+         --var stake="<normal->root | release/security->max>"
+     The committee's roster enforces provider diversity on the RESOLVED endpoint
+     (not the adapter NAME): one claude seat (`--adapter claude`) and one codex-sol
+     seat (`--adapter codex`, model gpt-5.6-sol). At risk security/release the jury
+     floor is >=3 distinct families, conjunctive.
+  3. Each seat MUST emit the fail-closed verdict contract: referee-report.md (first
+     line `VERDICT: CLEAN` | `VERDICT: FINDINGS (N)`) AND verdict.json sidecar
+     {verdict, count, findings:[{loc,quote,fix,severity}]}. Inject that contract
+     into each seat's briefing (the committee's dispatch-seats step does the
+     injection; record the contract_hash).
+
+Write rounds.md row for round 1 with the committee id and the two seat ids.
+"""
+acceptance = "MOLECULE_DIR/rounds.md initialised with the header and the round-1 committee (a cross-provider-committee nucleation, NOT a reimplemented panel) carrying a claude seat and a codex-sol seat, each bound to the referee-report.md + verdict.json fail-closed contract. The stake maps risk->jury floor. Round 1 is the initialisation, wired --decayed-from this molecule."
+
+[[steps]]
+id = "loop-until-clean"
+title = "Iterate the double review until CLEAN and CLEAN, or block at max_rounds"
+description = """
+Drive the loop with the `while` discipline (../../../.cosmon/formulas/while.formula.toml)
+— do NOT re-implement it. The condition is "not (CLEAN and CLEAN)"; the body is
+"fix(union) + reconvene the two-engine committee".
+
+Pseudocode (round = 1 already convened by init):
+    while round <= max_rounds:
+        wait for BOTH seats of the current round to reach terminal (cs wait)
+        read seat_claude/verdict.json AND seat_codex/verdict.json
+        # FAIL-CLOSE (codex-sol #28): either absent/malformed => treat as FINDINGS,
+        # never CLEAN. A missing verdict is NOT a pass.
+        if either verdict.json absent or malformed:
+            record NOT-CLEAN (reason: missing/malformed verdict), continue to fix
+        clean = (claude.verdict == "CLEAN") and (codex.verdict == "CLEAN")
+        append rounds.md row with both verdicts + clean?
+        if clean:
+            break                       # the quality fixpoint — natural exit
+        if round == max_rounds:
+            # exhaustion — NEVER a silent pass
+            cs collapse {this_mol_id} --reason "converge: max_rounds exhausted, NOT-CONVERGED"
+            # or emit blocked + escalate; NOT-CONVERGED blocks like NOT-RUN
+            break
+        # NOT-CLEAN and rounds remain: nucleate the next round FORWARD (acyclic)
+        fix_id = cs nucleate task-work --kind task \\
+                   --decayed-from {this_mol_id} --tag temp:warm \\
+                   --tag converge-round:<round+1> \\
+                   --var topic="Fix the UNION of the two referee reports of round
+                   <round> for ${issue}: address every finding either the claude
+                   seat OR the codex-sol seat raised. Smallest patch; keep the
+                   frozen red green; keep the domain I/O-free."
+        # blocked-by the current converge state so the chain stays strictly forward
+        committee_id = cs nucleate cross-provider-committee \\
+                   --blocked-by fix_id --decayed-from {this_mol_id} \\
+                   --tag temp:warm --tag converge-round:<round+1> \\
+                   --var target="<fix_id>" --var symptom="${issue}" \\
+                   --var stake="<risk-derived>"
+        round += 1
+
+MANDATORY (same discipline as `while`):
+  1. Every nucleation carries `--decayed-from {this_mol_id}` (typed lineage) and
+     `--tag converge-round:<n>` (auditability). `cs run --resident` absorbs them.
+  2. NEVER advance a round while the previous review is still running — `cs wait`
+     first. Parallel rounds would break the acyclic-forward invariant.
+  3. NEVER skip the max_rounds check — a runaway loop is the primary safety hazard;
+     the `while` cap + exit 91 are the backstops.
+  4. A missing verdict.json is NOT-CLEAN, never CLEAN (fail-closed).
+
+review_scale=submission: run this loop PER gate/sub-mission instead of once over
+the whole deliverable — the loop body is identical, only the `target` scope narrows.
+"""
+needs = ["init-round-1"]
+acceptance = "MOLECULE_DIR/rounds.md records every round with both seat verdicts and the clean? flag. The loop exits naturally when both engines return CLEAN in one round, or COLLAPSES/BLOCKS at max_rounds (never a silent pass). Each not-clean round nucleated a fix(union) + a fresh two-engine committee FORWARD (--decayed-from, --blocked-by), strictly acyclic. A missing/malformed verdict.json was treated as NOT-CLEAN. `while` was driven, not reimplemented."
+
+[[steps]]
+id = "emit-converge-verdict"
+title = "Emit the fail-closed convergence verdict"
+description = """
+Fold the loop into the machine-readable verdict the release gate reads.
+
+Write MOLECULE_DIR/converge-verdict.json:
+  {
+    "verdict": "CLEAN" | "BLOCKED",
+    "rounds_run": <k>,
+    "max_rounds": ${max_rounds},
+    "exit_reason": "clean-fixpoint" | "max-rounds-exhausted",
+    "final_round": {
+      "review_claude": "CLEAN" | "FINDINGS",
+      "review_codex_sol": "CLEAN" | "FINDINGS"
+    },
+    "findings_history": [ per-round {round, claude, codex, union_count} ]
+  }
+
+verdict "CLEAN" iff the loop reached the fixpoint (BOTH engines CLEAN in the final
+round) within max_rounds. Exhaustion => "BLOCKED" with exit_reason
+"max-rounds-exhausted" and an escalation note for the human. FAIL-CLOSED: a missing
+or malformed converge-verdict.json is read by the release gate as BLOCKED.
+
+Also write MOLECULE_DIR/synthesis.md: the round-by-round trace (blueprint §6bis),
+the two substrates that had to both sign CLEAN, and — if blocked — the exact
+findings that never converged (for the human escalation).
+"""
+needs = ["loop-until-clean"]
+acceptance = "MOLECULE_DIR/converge-verdict.json written with verdict/rounds_run/max_rounds/exit_reason/final_round/findings_history. CLEAN only when both engines returned CLEAN within max_rounds; exhaustion is BLOCKED with an escalation note, never a silent pass. synthesis.md carries the round-by-round trace."

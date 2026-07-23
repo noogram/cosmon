@@ -208,3 +208,7 @@ crates/cosmon-rpp-adapter/deploy/state/**/oidc-identity.toml
 
 # spore-e2e build staging (external drop, never tracked)
 docker/spore-e2e/_spore_stage/
+
+# Stray per-run germination output (a #21 G5 gate record a worker wrote to
+# repo root). Run-outputs do not belong in the tree — see cosmon-dev findings.
+/reproduction.md
