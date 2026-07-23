@@ -238,11 +238,7 @@ pub fn validate_node_id(id: &str) -> Result<(), SporeError> {
     if id.len() > MAX_NODE_ID_LEN {
         return reject("it is too long");
     }
-    if !id
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphanumeric())
-    {
+    if !id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
         return reject("it does not start with an ASCII letter or digit");
     }
     if let Some(bad) = id

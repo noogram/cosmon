@@ -436,7 +436,9 @@ type = "feeds"
         let repo = Path::new("/repo");
         let spore_dir = Path::new("/repo/spores/cosmon-dev");
         let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
-        let good = node_output_dir(&run, "intake").unwrap().join("verdict.json");
+        let good = node_output_dir(&run, "intake")
+            .unwrap()
+            .join("verdict.json");
         assert_eq!(forbidden_gate_output(&good, spore_dir, repo), None);
     }
 
