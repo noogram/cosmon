@@ -32,10 +32,15 @@
 //!    world-readable in shared temp. See `write_briefing_file` and
 //!    `build_headless_command` (issue #6 security follow-up,
 //!    task-20260721-7a68 review of `claude.rs:206-227`).
-//! 3. **Root escape valve.** Under euid 0 a bypass permission mode is
-//!    refused unless `IS_SANDBOX=1` is exported (many container
-//!    deployments run as root); the spawn path forces it in that exact
-//!    intersection.
+//! 3. **Root demotion, not an escape valve.** Under euid 0 a bypass
+//!    permission mode is refused by Claude Code's root guard (many
+//!    container deployments run as root). Rather than re-arm the old
+//!    `IS_SANDBOX=1` bypass to keep a *root* worker alive, the spawn path
+//!    now demotes the cognitive worker to a non-root uid before exec (or
+//!    refuses before a live worker exists) — COSMON-DEV #20 / contract-20A,
+//!    see [`cosmon_core::root_spawn_policy`]. An out-of-worktree
+//!    writable-dir grant (`--add-dir`) rides along so the demoted worker can
+//!    still write the molecule state dir (facet B).
 //!
 //! # ADR-097 Worker-Spawn Port IFBDD trail
 //!
@@ -52,7 +57,7 @@
 
 use std::fmt;
 use std::fmt::Write as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use chrono::Utc;
 use cosmon_core::clearance::Clearance;
@@ -166,6 +171,51 @@ pub struct ClaudeSessionConfig {
     /// so a tmux collision becomes auditable. `None` is the normal
     /// path; only set when the caller actively probed for a collision.
     pub pre_existing_worker: Option<WorkerId>,
+
+    /// Extra directories the worker must be allowed to **write** beyond its
+    /// working directory (cwd = the worker's worktree).
+    ///
+    /// # The bug this closes (COSMON-DEV #20 facet B, task-20260723-2aa4)
+    ///
+    /// This mirrors the codex adapter's fix (commit `dcba4e0`,
+    /// [`crate::codex::CodexSessionConfig::writable_roots`]): a cosmon worker's
+    /// cwd is its isolated worktree (`<main-repo>/.worktrees/<mol>/`), but the
+    /// fleet lock / molecule state / `events.jsonl` it must write on
+    /// `cs evolve` / `cs complete` live in the **main** repo's out-of-worktree
+    /// `.cosmon/state/` (walk-up discovery redirects a worktree's state host to
+    /// the main checkout, see
+    /// `cosmon_filestore::walk_up_find_cosmon_dir_from`). That path is a
+    /// *sibling-of-an-ancestor* of the worktree — outside the cwd subtree.
+    ///
+    /// Claude Code's `--permission-mode acceptEdits` only auto-accepts edits
+    /// **inside** the working directory, so every out-of-worktree write to the
+    /// molecule state dir trips a permission prompt an unattended worker cannot
+    /// answer — the interactive spawn hangs in a root container (the exact
+    /// failure Jesse Thaler reported, 2026-07-22). Empirically confirmed
+    /// 2026-07-23 in a Debian/arm64/CC-2.1.215 root container: from a worktree
+    /// cwd, `claude -p '<write outside cwd>' --permission-mode acceptEdits`
+    /// hangs on the permission prompt and creates no file (RED); adding
+    /// `--add-dir <out-of-worktree dir>` makes the same write auto-accept
+    /// (GREEN).
+    ///
+    /// Each root here is declared writable via Claude Code's first-class
+    /// `--add-dir <DIR>` flag ("Additional directories to allow tool access
+    /// to", verified against the installed `claude` 2.1.218). It is resolved
+    /// from the worker's worktree with the same
+    /// `walk_up_find_cosmon_dir_from` redirect `cs evolve` uses, so the two
+    /// agree by construction. Emitting the flag also carries a
+    /// `--allowedTools Bash Edit Write` grant so the *other* prompt class Jesse
+    /// hit (a Bash prompt under `acceptEdits`) never stalls the worker either.
+    ///
+    /// **Structural, not preferential** — like the `IS_SANDBOX` escape valve,
+    /// the grant is emitted regardless of permission mode so a worker demoted
+    /// from `bypassPermissions` to a hardened `acceptEdits` posture (the
+    /// non-root hardening shipping alongside as task-20260723-d1f4) never
+    /// thereby re-breaks its ability to write its own completion lock. Empty
+    /// (the absence-default — a bare CI checkout with no `.cosmon/` ancestor)
+    /// emits no `--add-dir` and leaves the command byte-identical to the
+    /// pre-fix shape.
+    pub writable_roots: Vec<PathBuf>,
 }
 
 /// Shell-quote a string for safe embedding in the spawn command.
@@ -239,6 +289,38 @@ fn write_briefing_file(briefing: &str) -> Result<String, ClaudeError> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Build the `--add-dir …/--allowedTools …` grant fragment that lets an
+/// unattended claude worker write the out-of-worktree cosmon state dir and
+/// run Bash without a permission prompt (COSMON-DEV #20 facet B).
+///
+/// Returns a leading-space fragment
+/// `" --add-dir <r1> <r2>… --allowedTools Bash Edit Write"` for a non-empty
+/// `roots`, or the empty string for empty `roots` — so an absent grant leaves
+/// the command byte-identical to the pre-fix shape. Each root is
+/// [`shell_quote`]d; the tool names are literal (no user input, no quoting).
+///
+/// The two flags close the two prompt classes an interactive worker faces
+/// under `--permission-mode acceptEdits`: `--add-dir` makes writes to the
+/// declared out-of-worktree dir auto-accept (empirically the load-bearing
+/// fix — see [`ClaudeSessionConfig::writable_roots`]), and `--allowedTools`
+/// pre-grants the Bash/Edit/Write tools so the Bash prompt never stalls the
+/// worker either. Both are documented first-class flags on the installed
+/// `claude` 2.1.218.
+fn writable_grants_fragment(roots: &[PathBuf]) -> String {
+    if roots.is_empty() {
+        return String::new();
+    }
+    let mut frag = String::from(" --add-dir");
+    for root in roots {
+        frag.push(' ');
+        frag.push_str(&shell_quote(&root.to_string_lossy()));
+    }
+    // Literal tool names — the Bash/Edit/Write grant the cs pipeline needs so
+    // an unattended worker never faces the `acceptEdits` Bash prompt class.
+    frag.push_str(" --allowedTools Bash Edit Write");
+    frag
+}
+
 /// Build the shell command string for a headless claude spawn.
 ///
 /// Pure and side-effect-free so the byte shape is unit-testable without
@@ -268,12 +350,19 @@ fn write_briefing_file(briefing: &str) -> Result<String, ClaudeError> {
 /// ([`RootSpawnDecision::SpawnAsIs`]) yields a command byte-identical to
 /// pre-#20.
 ///
+/// `writable_roots` declares out-of-worktree directories writable via
+/// `--add-dir` (plus a `--allowedTools Bash Edit Write` grant) so an
+/// unattended worker never trips a permission prompt on the molecule state
+/// dir that sits outside its worktree — COSMON-DEV #20 facet B, mirroring the
+/// codex adapter's `--add-dir` fix. Empty leaves the command byte-identical.
+///
 /// `briefing_file` is `None` for a bare TUI spawn (caller delivers via
 /// send-keys) and `Some(path)` for a headless briefing delivery.
 fn build_headless_command(
     permission_mode: PermissionMode,
     briefing_file: Option<&str>,
     decision: &RootSpawnDecision,
+    writable_roots: &[PathBuf],
 ) -> String {
     // Privilege-drop prefix, spliced immediately before the binary. Empty for
     // the non-root path and (defensively) for a `Refuse` the caller should
@@ -282,6 +371,7 @@ fn build_headless_command(
         RootSpawnDecision::Demote { to_uid } => demotion_command_prefix(*to_uid),
         RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => String::new(),
     };
+    let grants = writable_grants_fragment(writable_roots);
     match briefing_file {
         // issue #6.1 + #6.3 + security follow-up: `-p` with the briefing on
         // stdin from a file that is unlinked while still open. POSIX applies
@@ -293,11 +383,11 @@ fn build_headless_command(
             let mut cmd = String::new();
             let _ = write!(
                 cmd,
-                "{{ rm -f {q}; {demote}claude --permission-mode {permission_mode} -p; }} < {q}"
+                "{{ rm -f {q}; {demote}claude --permission-mode {permission_mode}{grants} -p; }} < {q}"
             );
             cmd
         }
-        None => format!("{demote}claude --permission-mode {permission_mode}"),
+        None => format!("{demote}claude --permission-mode {permission_mode}{grants}"),
     }
 }
 
@@ -329,7 +419,9 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
     // Root-spawn policy (COSMON-DEV #20 / contract-20A). Production callers
     // read the real effective uid; when root, demote the worker to a non-root
     // uid before exec (or refuse before a live worker exists if demotion is
-    // disabled), never re-arm the old `IS_SANDBOX=1` root bypass.
+    // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
+    // out-of-worktree writable-dir grant (facet B) rides along on the same
+    // command regardless of the root decision.
     let running_uid = nix::unistd::Uid::effective().as_raw();
     let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
     let decision = decide_root_spawn(running_uid, demote_target);
@@ -342,8 +434,12 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
         }
         return Err(ClaudeError::RootSpawnRefused(reason.to_string()));
     }
-    let claude_cmd =
-        build_headless_command(config.permission_mode, briefing_file.as_deref(), &decision);
+    let claude_cmd = build_headless_command(
+        config.permission_mode,
+        briefing_file.as_deref(),
+        &decision,
+        &config.writable_roots,
+    );
 
     // ADR-097 / WS-1 — record the spawn attempt *before* the backend
     // call so a crash mid-spawn still leaves a trail. The event uses
@@ -565,6 +661,7 @@ pub fn session_config(
         prompt,
         telemetry: None,
         pre_existing_worker: None,
+        writable_roots: Vec::new(),
     }
 }
 
@@ -664,6 +761,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             Some("/tmp/cosmon-briefing-polecat-42.txt"),
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert_eq!(
             cmd,
@@ -687,6 +785,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             Some("/tmp/cosmon-briefing-xyz.txt"),
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert!(
             cmd.starts_with("{ rm -f /tmp/cosmon-briefing-xyz.txt;"),
@@ -712,9 +811,128 @@ mod tests {
             PermissionMode::AcceptEdits,
             None,
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert_eq!(cmd, "claude --permission-mode acceptEdits");
         assert!(!cmd.contains(" -p"), "no briefing → no -p: {cmd}");
+    }
+
+    // -- COSMON-DEV #20 facet B: out-of-worktree writable-dir grant --
+
+    /// The deterministic repro that fails for the RIGHT reason before the fix.
+    /// A cosmon worker's cwd is its worktree, but the molecule state dir it
+    /// must write on `cs evolve` / `cs complete` sits OUTSIDE the worktree in
+    /// the main repo's `.cosmon/state/`. Claude Code's `acceptEdits` only
+    /// auto-accepts edits inside the cwd, so that write prompts and an
+    /// unattended worker hangs. The launched command MUST declare the resolved
+    /// dir writable via `--add-dir` (empirically confirmed 2026-07-23 as the
+    /// load-bearing fix) — before the fix `writable_roots` was absent from the
+    /// struct entirely and no `--add-dir` could be emitted, so a headless
+    /// worker could never write out of its worktree.
+    #[test]
+    fn writable_root_declares_out_of_worktree_state_dir_via_add_dir() {
+        let state = PathBuf::from("/Users/op/galaxies/cosmon/.cosmon");
+        // Both a bare TUI spawn and a briefing spawn must carry the grant.
+        let bare = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            std::slice::from_ref(&state),
+        );
+        assert!(
+            bare.contains("--add-dir /Users/op/galaxies/cosmon/.cosmon"),
+            "state dir not declared writable in bare spawn: {bare}"
+        );
+        let briefed = build_headless_command(
+            PermissionMode::AcceptEdits,
+            Some("/tmp/b.txt"),
+            &RootSpawnDecision::SpawnAsIs,
+            std::slice::from_ref(&state),
+        );
+        assert!(
+            briefed.contains("--add-dir /Users/op/galaxies/cosmon/.cosmon"),
+            "state dir not declared writable in briefing spawn: {briefed}"
+        );
+    }
+
+    /// The grant also pre-allows the Bash/Edit/Write tools so the *other*
+    /// prompt class Jesse Thaler hit (a Bash prompt under `acceptEdits`) never
+    /// stalls an unattended worker either.
+    #[test]
+    fn writable_root_grants_bash_edit_write_tools() {
+        let state = PathBuf::from("/main/.cosmon");
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            std::slice::from_ref(&state),
+        );
+        assert!(
+            cmd.contains("--allowedTools Bash Edit Write"),
+            "Bash/Edit/Write grant missing: {cmd}"
+        );
+    }
+
+    /// The `--add-dir` grant is emitted **regardless of permission mode** —
+    /// like the `IS_SANDBOX` valve it is structural, so a worker demoted from
+    /// `bypassPermissions` to a hardened `acceptEdits` posture (task-20260723-
+    /// d1f4) never thereby re-breaks its out-of-worktree write.
+    #[test]
+    fn writable_root_survives_every_permission_mode() {
+        let state = PathBuf::from("/main/.cosmon");
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::BypassPermissions,
+        ] {
+            let cmd = build_headless_command(
+                mode,
+                None,
+                &RootSpawnDecision::SpawnAsIs,
+                std::slice::from_ref(&state),
+            );
+            assert!(
+                cmd.contains("--add-dir /main/.cosmon"),
+                "grant dropped under {mode:?}: {cmd}"
+            );
+        }
+    }
+
+    /// A path with an unsafe character is single-quoted (shell round-trip),
+    /// and multiple roots each ride the one `--add-dir` (it takes a
+    /// space-separated list, verified against `claude --help` 2.1.218).
+    #[test]
+    fn writable_roots_are_escaped_and_repeatable() {
+        let roots = [
+            PathBuf::from("/space dir/.cosmon"),
+            PathBuf::from("/plain/.cosmon"),
+        ];
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &roots,
+        );
+        assert!(
+            cmd.contains("--add-dir '/space dir/.cosmon' /plain/.cosmon"),
+            "{cmd}"
+        );
+    }
+
+    /// Empty `writable_roots` (the absence-default — a bare CI checkout with no
+    /// `.cosmon/` ancestor) emits neither `--add-dir` nor `--allowedTools`, so
+    /// the command is byte-identical to the pre-fix shape.
+    #[test]
+    fn empty_writable_roots_emit_no_grant() {
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
+        assert_eq!(cmd, "claude --permission-mode acceptEdits");
+        assert!(!cmd.contains("--add-dir"));
+        assert!(!cmd.contains("--allowedTools"));
     }
 
     /// COSMON-DEV #20 / contract-20A: a root dispatcher demotes the worker to
@@ -723,7 +941,7 @@ mod tests {
     #[test]
     fn headless_command_demotes_the_worker_under_root() {
         let decision = decide_root_spawn(0, Some(10001));
-        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, &decision);
+        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, &decision, &[]);
         assert_eq!(
             cmd,
             "setpriv --reuid 10001 --regid 10001 --clear-groups -- \
@@ -745,6 +963,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             Some("/tmp/brief.txt"),
             &decision,
+            &[],
         );
         assert!(
             cmd.contains("rm -f /tmp/brief.txt; setpriv --reuid 10001"),
@@ -764,6 +983,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             None,
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert!(
             !cmd.contains("IS_SANDBOX"),
@@ -787,6 +1007,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             Some(&path),
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert!(
             cmd.contains("-p; } < "),
@@ -807,6 +1028,7 @@ mod tests {
             PermissionMode::BypassPermissions,
             Some("/tmp/My Dir/brief.txt"),
             &RootSpawnDecision::SpawnAsIs,
+            &[],
         );
         assert!(
             cmd.starts_with("{ rm -f '/tmp/My Dir/brief.txt';"),

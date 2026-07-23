@@ -28,6 +28,7 @@ fn absent_cb_and_env_yields_byte_identical_legacy_command() {
         "task-20260522-62c3",
         "/usr/local/bin/claude",
         "bypassPermissions",
+        &[],
         || None,
         |_| None,
     );
@@ -54,6 +55,7 @@ fn cb_next_success_derives_config_dir_from_email() {
         "task-20260522-62c3",
         "claude",
         "bypassPermissions",
+        &[],
         || Some("user-b@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -75,6 +77,7 @@ fn cb_next_takes_precedence_over_env_var() {
         "task-20260522-62c3",
         "claude",
         "bypassPermissions",
+        &[],
         || Some("operator@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -95,6 +98,7 @@ fn env_fallback_when_cb_fails() {
         "task-20260522-62c3",
         "claude",
         "bypassPermissions",
+        &[],
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| value.to_owned()),
     );
@@ -121,6 +125,7 @@ fn empty_claude_config_dir_is_treated_as_absent() {
         "task-20260522-62c3",
         "claude",
         "bypassPermissions",
+        &[],
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(String::new),
     );
@@ -135,6 +140,7 @@ fn path_with_spaces_is_shell_quoted() {
         "task-Y",
         "claude",
         "bypassPermissions",
+        &[],
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/Foo Bar/.claude".to_owned()),
     );
@@ -149,6 +155,7 @@ fn path_with_embedded_quote_is_posix_escaped() {
         "task-Y",
         "claude",
         "bypassPermissions",
+        &[],
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/it's/me".to_owned()),
     );
@@ -163,6 +170,7 @@ fn cb_next_whitespace_only_falls_through() {
         "task-Y",
         "claude",
         "bypassPermissions",
+        &[],
         || Some("  \n".to_owned()),
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/fallback".to_owned()),
     );

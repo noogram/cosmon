@@ -107,6 +107,7 @@ fn cross_adapter_event_lineage_equivalence_modulo_adapter_name() {
         prompt: Some("noop".into()),
         telemetry: Some(tc.clone()),
         pre_existing_worker: None,
+        writable_roots: vec![],
     });
     let _ = claude::kill_session(TEST_SOCKET, wc.as_str(), Some(&tc));
 
@@ -223,6 +224,7 @@ fn cross_adapter_event_lineage_early_kill_emits_terminal_without_consume() {
         prompt: Some("noop".into()),
         telemetry: Some(t.clone()),
         pre_existing_worker: None,
+        writable_roots: vec![],
     });
     // Immediate kill — no probe, no consume_briefing.
     let _ = claude::kill_session(TEST_SOCKET, w.as_str(), Some(&t));
