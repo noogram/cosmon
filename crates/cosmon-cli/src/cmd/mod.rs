@@ -256,6 +256,45 @@ pub(crate) fn tmux_socket_name(ctx: &Context) -> String {
 /// Worker repo paths are stored relative to the project root (portability).
 /// Legacy fleet.json files may contain absolute paths — those are used as-is.
 /// Falls back to `$HOME` if no repo is set and no project root is available.
+/// Build the [`ClaudeSessionConfig`](cosmon_transport::claude::ClaudeSessionConfig)
+/// for a **respawn** — `cs thaw` and the
+/// patrol backstop — with the out-of-worktree writable grant already filled.
+///
+/// # The fault this closes (COSMON-DEV #20 defect A4)
+///
+/// `cosmon_transport::claude::session_config` hardcodes
+/// `writable_roots: Vec::new()`, which is the right default for a generic
+/// constructor and the wrong value for a real worker. A cosmon worker's cwd is
+/// its worktree, but the molecule state, fleet lock, and `events.jsonl` it
+/// writes on `cs evolve` / `cs complete` live in the MAIN repo's
+/// out-of-worktree `.cosmon/`; under `acceptEdits` only writes *inside* the cwd
+/// auto-accept, so that write trips a permission prompt an unattended worker
+/// cannot answer, and the worker hangs looking alive. The interactive `cs
+/// tackle` path fills the grant (facet B); thaw and patrol never did, so every
+/// thawed or patrol-respawned worker re-entered the exact hang facet B was
+/// opened to close (task-20260723-7e12 F4). A resumed worker is not a lesser
+/// worker — it writes the same state through the same verbs.
+///
+/// The root is resolved with [`cosmon_filestore::walk_up_find_cosmon_dir_from`],
+/// the same helper `cs evolve` and the tackle path use, so the grant and the
+/// actual write target agree by construction rather than by coincidence. A
+/// workdir with no `.cosmon/` ancestor yields an empty grant and a command
+/// byte-identical to the pre-fix shape.
+pub(crate) fn respawn_session_config(
+    socket: &str,
+    session_name: &str,
+    workdir: &str,
+    clearance: cosmon_core::clearance::Clearance,
+) -> cosmon_transport::claude::ClaudeSessionConfig {
+    let mut config =
+        cosmon_transport::claude::session_config(socket, session_name, workdir, clearance, None);
+    config.writable_roots =
+        cosmon_filestore::walk_up_find_cosmon_dir_from(std::path::Path::new(workdir))
+            .into_iter()
+            .collect();
+    config
+}
+
 pub(crate) fn resolve_worker_workdir(
     worker: &cosmon_state::WorkerData,
     project_root: Option<&std::path::Path>,

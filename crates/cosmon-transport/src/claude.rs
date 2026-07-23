@@ -645,6 +645,20 @@ pub fn consume_briefing(
 /// want the Worker-Spawn Port events emitted should populate
 /// [`ClaudeSessionConfig::telemetry`] after construction or use
 /// [`session_config_with_telemetry`].
+///
+/// # `writable_roots` is empty here — fill it for a real worker
+///
+/// This constructor cannot resolve the out-of-worktree `.cosmon/` a worker
+/// writes on `cs evolve` / `cs complete`: it does not know whether the caller
+/// is spawning a fleet worker or a one-off session, and the transport crate
+/// has no business walking the caller's filesystem. So it leaves
+/// [`ClaudeSessionConfig::writable_roots`] empty, and **every caller that
+/// spawns a real worker must fill it** — otherwise the command carries no
+/// `--add-dir` and the worker hangs on a permission prompt it cannot answer
+/// (COSMON-DEV #20 facet B). `cs thaw` and the patrol backstop both shipped
+/// with this gap; they now go through `cosmon_cli::cmd::respawn_session_config`,
+/// which resolves the root before constructing. An empty value is correct only
+/// for a session with genuinely nothing to write outside its cwd.
 #[must_use]
 pub fn session_config(
     socket: impl Into<String>,

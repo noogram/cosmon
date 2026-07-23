@@ -15,7 +15,7 @@ use chrono::Utc;
 use cosmon_core::id::WorkerId;
 use cosmon_core::transport::TransportBackend;
 use cosmon_core::worker::{DesiredState, WorkerStatus};
-use cosmon_transport::claude::{session_config, spawn_claude_session};
+use cosmon_transport::claude::spawn_claude_session;
 use cosmon_transport::TmuxBackend;
 
 use super::Context;
@@ -66,13 +66,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let workdir = super::resolve_worker_workdir(worker, store.project_root().as_deref());
 
         let socket = super::tmux_socket_name(ctx);
-        let config = session_config(
-            &socket,
-            worker_id.as_str(),
-            &workdir,
-            worker.clearance,
-            None,
-        );
+        // COSMON-DEV #20 defect A4: a thawed worker writes the same
+        // out-of-worktree molecule state as a freshly tackled one, so it needs
+        // the same `--add-dir` grant. `session_config` alone leaves
+        // `writable_roots` empty and the resumed worker hangs on its own
+        // completion write.
+        let config =
+            super::respawn_session_config(&socket, worker_id.as_str(), &workdir, worker.clearance);
 
         spawn_claude_session(&config)
             .map_err(|e| anyhow::anyhow!("failed to respawn Claude session: {e}"))?;
@@ -185,6 +185,56 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// COSMON-DEV #20 defect A4 — a thawed worker must carry the same
+    /// out-of-worktree writable grant a freshly tackled one does.
+    ///
+    /// Before the fix `cs thaw` built its session with
+    /// `cosmon_transport::claude::session_config`, whose `writable_roots` is
+    /// hardcoded empty, so the respawned command carried neither `--add-dir`
+    /// nor `--allowedTools` and the resumed worker hung on the very
+    /// out-of-worktree completion write facet B exists to unblock. The grant
+    /// is what the transport turns into `--add-dir` (pinned in
+    /// `cosmon_transport::claude`), so asserting the resolved dir is present
+    /// here asserts the flag reaches the command.
+    #[test]
+    fn thawed_worker_gets_the_out_of_worktree_writable_grant() {
+        let tmp = TempDir::new().unwrap();
+        let cosmon_dir = tmp.path().join(".cosmon");
+        std::fs::create_dir_all(&cosmon_dir).unwrap();
+        std::fs::write(cosmon_dir.join("config.toml"), "").unwrap();
+        let workdir = tmp.path().join("sub");
+        std::fs::create_dir_all(&workdir).unwrap();
+
+        let config = super::super::respawn_session_config(
+            "cosmon",
+            "worker-1",
+            &workdir.to_string_lossy(),
+            Clearance::Write,
+        );
+
+        let expected = cosmon_filestore::walk_up_find_cosmon_dir_from(&workdir)
+            .expect("the fixture has a .cosmon ancestor");
+        assert!(
+            config.writable_roots.contains(&expected),
+            "a thawed worker cannot write its own molecule state: {:?}",
+            config.writable_roots
+        );
+    }
+
+    /// A workdir with no `.cosmon/` ancestor (a bare checkout) grants nothing,
+    /// leaving the respawn command byte-identical to the pre-fix shape.
+    #[test]
+    fn thawed_worker_without_a_cosmon_ancestor_grants_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let config = super::super::respawn_session_config(
+            "cosmon",
+            "worker-1",
+            &tmp.path().to_string_lossy(),
+            Clearance::Write,
+        );
+        assert!(config.writable_roots.is_empty());
+    }
 
     fn make_frozen_worker(
         name: &str,
