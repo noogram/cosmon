@@ -66,7 +66,22 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 /// Resident dispatches must never silently inherit a paid adapter default.
-/// A directional policy can replace this floor through [`EnsembleMolecule::adapter`].
+///
+/// Two — and only two — things replace this floor, in precedence order:
+///
+/// 1. a per-molecule pin ([`EnsembleMolecule::adapter`], the directional
+///    routing selection), and
+/// 2. an **explicit, opt-in** run-wide directive
+///    ([`ReadyFrontierScheduler::with_run_adapter`], set by `cs run --adapter
+///    <name>`).
+///
+/// A *config* default never surclasses this floor under the resident loop —
+/// that is the deliberate anti-silent-spend guard (F3 of the cosmon-dev
+/// dogfooding findings, 2026-07-23). The run directive is safe precisely
+/// because it is per-invocation and explicit: the operator consciously chooses
+/// to spend on a paid adapter for *this* run, so the "must never *silently*
+/// inherit a paid default" invariant holds. Without the flag the floor stays
+/// `local` and behaviour is unchanged.
 const SAFE_DEFAULT_ADAPTER: &str = "local";
 
 /// Failure modes of the resident loop. Soft-contract: every error is also
@@ -482,6 +497,16 @@ pub trait ResidentScheduler: Send {
 pub struct ReadyFrontierScheduler {
     tackled: std::collections::HashSet<String>,
     merged: std::collections::HashSet<String>,
+    /// Explicit, opt-in run-wide adapter directive (`cs run --adapter <name>`).
+    ///
+    /// When `Some`, it replaces the [`SAFE_DEFAULT_ADAPTER`] floor for every
+    /// **pin-less** molecule this run dispatches — static frontier nodes AND
+    /// children a worker nucleates dynamically mid-run (the frontier is
+    /// re-derived from the fresh ensemble each tick, so a molecule that only
+    /// appears later inherits the directive by construction). A per-molecule
+    /// pin ([`EnsembleMolecule::adapter`]) still wins over it. `None` (the
+    /// default) leaves the floor untouched — the anti-silent-spend guard.
+    run_adapter: Option<String>,
 }
 
 impl ReadyFrontierScheduler {
@@ -490,6 +515,21 @@ impl ReadyFrontierScheduler {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the explicit, opt-in run-wide adapter directive.
+    ///
+    /// `Some(name)` (from `cs run --adapter <name>`) replaces the `local` floor
+    /// for pin-less molecules dispatched this run; `None` keeps the floor. This
+    /// is the deliberate opt-in that lets a resident run drive cognitive nodes
+    /// on a paid adapter without breaking the "never *silently* inherit a paid
+    /// default" invariant (the operator chose it consciously, per invocation).
+    /// A per-molecule pin still overrides the directive. See the
+    /// `SAFE_DEFAULT_ADAPTER` floor.
+    #[must_use]
+    pub fn with_run_adapter(mut self, run_adapter: Option<String>) -> Self {
+        self.run_adapter = run_adapter;
+        self
     }
 }
 
@@ -586,9 +626,16 @@ impl ResidentScheduler for ReadyFrontierScheduler {
             if unblocked {
                 out.push(Decision::Tackle {
                     molecule_id: m.id.clone(),
+                    // Adapter resolution, highest precedence first:
+                    //   1. per-molecule pin (`m.adapter`),
+                    //   2. explicit opt-in run directive (`self.run_adapter`),
+                    //   3. the safe `local` floor (`SAFE_DEFAULT_ADAPTER`).
+                    // A config default is intentionally absent here — it must
+                    // never surclass the floor under the resident loop (F3).
                     adapter: Some(
                         m.adapter
                             .clone()
+                            .or_else(|| self.run_adapter.clone())
                             .unwrap_or_else(|| SAFE_DEFAULT_ADAPTER.to_owned()),
                     ),
                 });
@@ -1753,6 +1800,100 @@ mod tests {
                 "--adapter",
                 "codex",
             ]
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_overrides_local_floor_for_pinless() {
+        // DELIVERABLE 1 (F3+F4): an explicit, opt-in `cs run --adapter claude`
+        // directive replaces the `local` floor for a PIN-LESS molecule so a
+        // resident run can drive cognitive nodes on a paid adapter the operator
+        // consciously chose. Without the directive the floor stays local
+        // (anti-silent-spend guard preserved).
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("task-pinless", "pending", &[])],
+        };
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-pinless".into(),
+                adapter: Some("claude".into()),
+            }],
+            "an explicit run directive must replace the local floor for a pin-less molecule"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_absent_keeps_local_floor() {
+        // Without the opt-in directive, a pin-less molecule stays on the safe
+        // `local` floor — the anti-silent-spend guard is untouched.
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("task-pinless", "pending", &[])],
+        };
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_adapter(None);
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-pinless".into(),
+                adapter: Some("local".into()),
+            }],
+            "no run directive must leave the local floor in place"
+        );
+    }
+
+    #[test]
+    fn molecule_pin_beats_run_adapter_directive() {
+        // Resolution precedence: a per-molecule pin (`m.adapter`) is a stronger,
+        // more specific intent than the run-wide directive, so it wins. The
+        // directive only ever replaces the *floor*, never a real pin.
+        let snapshot = EnsembleSnapshot::from_json(
+            r#"{"molecule_states":[{"id":"task-codex","status":"pending","adapter":"codex"}]}"#,
+        )
+        .unwrap();
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-codex".into(),
+                adapter: Some("codex".into()),
+            }],
+            "a per-molecule pin must beat the run-wide directive"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_applies_to_dynamically_nucleated_child() {
+        // F4: the floor also hit children nucleated dynamically mid-run by
+        // workers (the `converge` loop), making self-drive impossible without
+        // per-node pins. Because the directive lives on the scheduler and the
+        // frontier is re-derived from the fresh ensemble each tick, a pin-less
+        // molecule that only *appears* on a later tick inherits the directive
+        // too — no static pin required.
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        // Tick 1: only the parent is present.
+        let tick1 = EnsembleSnapshot {
+            molecules: vec![mol("parent", "pending", &[])],
+        };
+        let _ = scheduler.next_decisions(&tick1);
+        // Tick 2: a worker nucleated a pin-less child (blocker torn down).
+        let tick2 = EnsembleSnapshot {
+            molecules: vec![mol("child", "pending", &[])],
+        };
+        let decisions = scheduler.next_decisions(&tick2);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "child".into(),
+                adapter: Some("claude".into()),
+            }],
+            "a dynamically-nucleated pin-less child must inherit the run directive"
         );
     }
 

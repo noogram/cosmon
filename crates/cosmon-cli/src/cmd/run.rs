@@ -192,6 +192,27 @@ pub struct Args {
     /// load for the first bucket.
     #[arg(long)]
     pub resident_model: Option<String>,
+
+    /// **Opt-in run-wide adapter directive** (resident mode only).
+    ///
+    /// By default `cs run --resident` floors every **pin-less** molecule to the
+    /// safe `local` adapter — a deliberate anti-silent-spend guard: a resident
+    /// dispatch must never silently inherit a paid adapter from a config
+    /// default. Passing `--adapter <name>` is the operator's **explicit,
+    /// conscious** choice to spend on that adapter for *this run*: it replaces
+    /// the `local` floor for every pin-less molecule dispatched — both static
+    /// frontier nodes and children a worker nucleates dynamically mid-run (the
+    /// converge/committee loop). A per-molecule pin still wins over it. Omit the
+    /// flag and behaviour is unchanged (floor stays `local`).
+    ///
+    /// This differs from `cs tackle`, whose adapter chain layers a config
+    /// default *below* the flag/env tiers; the resident loop deliberately
+    /// excludes the config tier so a paid default can never leak into an
+    /// unattended run. Only the flag (or a per-molecule pin) unlocks a paid
+    /// adapter here. See `docs/adr` (ADR-095) and the `cs tackle` adapter-chain
+    /// docs for the reconciled resolution order.
+    #[arg(long, value_name = "NAME")]
+    pub adapter: Option<String>,
 }
 
 /// Execute the `run` command.
@@ -717,7 +738,14 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         config.cs_binary = self_exe;
     }
 
-    let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
+    // Opt-in run-wide adapter directive (F3+F4 of the 2026-07-23 cosmon-dev
+    // dogfooding findings): when the operator passes `--adapter <name>`, it
+    // replaces the safe `local` floor for pin-less molecules this run — static
+    // AND dynamically-nucleated. Without it the floor stays `local`, so the
+    // anti-silent-spend guard is untouched. An empty value is treated as unset.
+    let run_adapter = args.adapter.clone().filter(|s| !s.is_empty());
+    let scheduler: Box<dyn ResidentScheduler> =
+        Box::new(ReadyFrontierScheduler::new().with_run_adapter(run_adapter));
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();
 

@@ -50,6 +50,10 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
    Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
 
    Every invocation (with or without the flag) emits an [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`) can answer "which Adapter ran for this molecule?" without parsing shell history.
+
+   # Divergence from `cs run --resident` (the issue-#21 wart, made explicit)
+
+   The resident loop (`cs run --resident`) does **not** honour this full six-level chain. It deliberately drops the two *config* tiers so an unattended run can never silently inherit a paid adapter from a config default (F3 of the 2026-07-23 cosmon-dev dogfooding findings). Under the resident loop the resolution is only: per-molecule pin → the opt-in `cs run --adapter <name>` run directive → the built-in `local` floor. A bare `[adapters.default] = "claude"` therefore takes effect via `cs tackle` but is ignored under `cs run --resident`; unlocking a paid adapter there requires the explicit `--adapter` flag (or a per-molecule pin). See `cs run --help` (`--adapter`) and `cosmon_runtime::resident` (`SAFE_DEFAULT_ADAPTER`).
 * `--model <MODEL_ID>` — Per-molecule model pin — the model sibling of `--adapter` (see ADR-097).
 
    Resolution order (highest priority first): this flag → formula-step `model = "<id>"` pin → `$COSMON_DEFAULT_MODEL` (else the legacy `$ANTHROPIC_MODEL`) env var → per-galaxy `.cosmon/config.toml::[adapters.<name>].default_model` → global `~/.config/cosmon/config.toml::[adapters.<name>].default_model` → **floor `None`** (cosmon pins no model; the adapter's own default applies — byte-identical to today's no-pin behaviour).
@@ -264,6 +268,11 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
 
    Off by default: cloud dispatch (many models, no resident constraint) keeps pure critical-path order. The reorder is a permutation — the DAG semantics and the set of dispatched molecules are unchanged; only the order within a ready batch differs. Legacy DAG-policy mode only (not `--resident`).
 * `--resident-model <RESIDENT_MODEL>` — Model already warm in the oracle's VRAM at runtime start, so the affinity reorder drains its bucket first with no reload. Only read when `--affinity` is set; a cold start (unset) simply pays one extra load for the first bucket
+* `--adapter <NAME>` — **Opt-in run-wide adapter directive** (resident mode only).
+
+   By default `cs run --resident` floors every **pin-less** molecule to the safe `local` adapter — a deliberate anti-silent-spend guard: a resident dispatch must never silently inherit a paid adapter from a config default. Passing `--adapter <name>` is the operator's **explicit, conscious** choice to spend on that adapter for *this run*: it replaces the `local` floor for every pin-less molecule dispatched — both static frontier nodes and children a worker nucleates dynamically mid-run (the converge/committee loop). A per-molecule pin still wins over it. Omit the flag and behaviour is unchanged (floor stays `local`).
+
+   This differs from `cs tackle`, whose adapter chain layers a config default *below* the flag/env tiers; the resident loop deliberately excludes the config tier so a paid default can never leak into an unattended run. Only the flag (or a per-molecule pin) unlocks a paid adapter here. See `docs/adr` (ADR-095) and the `cs tackle` adapter-chain docs for the reconciled resolution order.
 
 
 

@@ -87,6 +87,13 @@ Options:
       --resident-model <RESIDENT_MODEL>
           Model already warm in the oracle's VRAM at runtime start, so the affinity reorder drains its bucket first with no reload. Only read when `--affinity` is set; a cold start (unset) simply pays one extra load for the first bucket
 
+      --adapter <NAME>
+          **Opt-in run-wide adapter directive** (resident mode only).
+          
+          By default `cs run --resident` floors every **pin-less** molecule to the safe `local` adapter — a deliberate anti-silent-spend guard: a resident dispatch must never silently inherit a paid adapter from a config default. Passing `--adapter <name>` is the operator's **explicit, conscious** choice to spend on that adapter for *this run*: it replaces the `local` floor for every pin-less molecule dispatched — both static frontier nodes and children a worker nucleates dynamically mid-run (the converge/committee loop). A per-molecule pin still wins over it. Omit the flag and behaviour is unchanged (floor stays `local`).
+          
+          This differs from `cs tackle`, whose adapter chain layers a config default *below* the flag/env tiers; the resident loop deliberately excludes the config tier so a paid default can never leak into an unattended run. Only the flag (or a per-molecule pin) unlocks a paid adapter here. See `docs/adr` (ADR-095) and the `cs tackle` adapter-chain docs for the reconciled resolution order.
+
   -h, --help
           Print help (see a summary with '-h')
 

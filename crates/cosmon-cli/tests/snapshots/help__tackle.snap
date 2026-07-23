@@ -57,6 +57,10 @@ Options:
           Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
           
           Every invocation (with or without the flag) emits an [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`) can answer "which Adapter ran for this molecule?" without parsing shell history.
+          
+          # Divergence from `cs run --resident` (the issue-#21 wart, made explicit)
+          
+          The resident loop (`cs run --resident`) does **not** honour this full six-level chain. It deliberately drops the two *config* tiers so an unattended run can never silently inherit a paid adapter from a config default (F3 of the 2026-07-23 cosmon-dev dogfooding findings). Under the resident loop the resolution is only: per-molecule pin → the opt-in `cs run --adapter <name>` run directive → the built-in `local` floor. A bare `[adapters.default] = "claude"` therefore takes effect via `cs tackle` but is ignored under `cs run --resident`; unlocking a paid adapter there requires the explicit `--adapter` flag (or a per-molecule pin). See `cs run --help` (`--adapter`) and `cosmon_runtime::resident` (`SAFE_DEFAULT_ADAPTER`).
 
       --model <MODEL_ID>
           Per-molecule model pin — the model sibling of `--adapter` (see ADR-097).
