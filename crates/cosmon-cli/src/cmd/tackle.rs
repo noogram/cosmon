@@ -4150,40 +4150,41 @@ fn spawn_claude_and_prompt(
     // with a cause instead of spawning a doomed session. `effective_model`
     // is `Some(chosen)` when a pin resolved, or `None` on operator opt-out
     // (`claude_model = ""`), which preserves today's no-pin behaviour.
-    let effective_model = resolve_worker_model(
-        preferred_model,
-        &claude_bin,
-        mol_state_dir,
-        config_dir.as_deref(),
-        strong_set,
-    )?;
-
-    // Root-spawn policy (COSMON-DEV #20 / contract-20A). The pre-#20 path
-    // forced `IS_SANDBOX=1` under root+bypass purely to make Claude Code's own
-    // root guard let a *root worker* run — the forbidden third outcome (a live
-    // cognitive worker with root's blast radius). We replace that bypass with
-    // the proven-robust fix (F8): when the dispatcher is root, demote the
-    // worker to a non-root uid before `exec` (it then never trips the guard,
-    // regardless of `IS_SANDBOX`), or — if demotion is disabled — refuse
-    // *before* any live worker exists with a typed root-refusal (never a
-    // silent no-op).
+    //
+    // ORDER IS LOAD-BEARING (COSMON-DEV #20 defect A2). That chain probes by
+    // *running a real `claude -p ping`*, so it must never precede the
+    // root-spawn policy: under `sudo cs tackle` with demotion disabled it
+    // would put a live, paid, root cognitive process on the machine before
+    // cosmon decides to refuse. `preflight_root_then_model` owns both steps
+    // and only calls the probe on the non-root path, so the ordering cannot
+    // be undone by a later edit that moves two statements past each other.
     let running_uid = nix::unistd::Uid::effective().as_raw();
     let demote_target =
         cosmon_core::root_spawn_policy::resolve_demote_target(|k| std::env::var(k).ok());
-    let root_decision =
-        cosmon_core::root_spawn_policy::decide_root_spawn(running_uid, demote_target);
-
-    if let cosmon_core::root_spawn_policy::RootSpawnDecision::Refuse { reason } = &root_decision {
-        // Outcome 2: no worker process is ever created; record the typed
-        // root-refusal so an audit tells this apart from a crash, then bail.
-        record_root_spawn_refusal(mol_state_dir, &mol.id, wid, reason);
-        return Err(anyhow::anyhow!(
-            "cs tackle: {reason} (molecule {}). Set COSMON_WORKER_UID to a \
-             non-zero uid to enable privilege-drop demotion, or run cs as a \
-             non-root user.",
-            mol.id.as_str(),
-        ));
-    }
+    let (root_decision, effective_model) =
+        match preflight_root_then_model(running_uid, demote_target, preferred_model, || {
+            resolve_worker_model(
+                preferred_model,
+                &claude_bin,
+                mol_state_dir,
+                config_dir.as_deref(),
+                strong_set,
+            )
+        })? {
+            // Outcome 2: no worker process — and no cognitive process — was ever
+            // created; record the typed root-refusal so an audit tells this apart
+            // from a crash, then bail.
+            SpawnPreflight::Refused(reason) => {
+                record_root_spawn_refusal(mol_state_dir, &mol.id, wid, &reason);
+                return Err(anyhow::anyhow!(
+                    "cs tackle: {reason} (molecule {}). Set COSMON_WORKER_UID to a \
+                 non-zero uid to enable privilege-drop demotion, or run cs as a \
+                 non-root user.",
+                    mol.id.as_str(),
+                ));
+            }
+            SpawnPreflight::Proceed { decision, model } => (decision, model),
+        };
 
     // COSMON-DEV #20 facet B (task-20260723-2aa4): a claude worker's cwd is its
     // worktree, but the molecule state / fleet lock / events.jsonl it writes on
@@ -4420,6 +4421,80 @@ fn confirm_briefing_submitted(
             return;
         }
         std::thread::sleep(BRIEFING_SUBMIT_POLL);
+    }
+}
+
+/// The outcome of the ordered pre-flight a claude spawn runs before it
+/// creates anything live. See [`preflight_root_then_model`].
+#[derive(Debug, PartialEq, Eq)]
+enum SpawnPreflight {
+    /// The root-spawn policy refused. No cognitive process ran, no worker
+    /// exists; the caller records the typed refusal and aborts.
+    Refused(cosmon_core::root_spawn_policy::RootRefusalReason),
+    /// The dispatch may proceed under `decision`, spawning on `model`.
+    Proceed {
+        /// How the worker must be spawned (as-is, or behind a privilege drop).
+        decision: cosmon_core::root_spawn_policy::RootSpawnDecision,
+        /// The model to pin, or `None` for the adapter's own default.
+        model: Option<String>,
+    },
+}
+
+/// Run a claude spawn's pre-flight in the only order contract-20A permits:
+/// **the root-spawn policy first, cognition second**.
+///
+/// # The fault this closes (COSMON-DEV #20 defect A2)
+///
+/// `spawn_claude_and_prompt` used to call [`resolve_worker_model`] — which
+/// runs [`probe_claude_model`], i.e. a real `claude --model <m> -p ping` via
+/// `Command::spawn()` — seventeen lines *before* it computed the root-spawn
+/// decision. Under `sudo cs tackle` with demotion disabled, that paid, live
+/// Claude process had already run to completion **as uid 0** by the time
+/// cosmon decided to refuse. Contract-20A requires the refusal to precede any
+/// live cognitive process, not merely the tmux worker (task-20260723-d66d F3,
+/// task-20260723-7e12 F1).
+///
+/// The ordering is enforced structurally rather than by statement adjacency:
+/// [`gate_cognitive_preflight`](cosmon_core::root_spawn_policy::gate_cognitive_preflight)
+/// owns the probe closure and only ever calls it on the non-root path. Under
+/// `Demote` the dispatcher is *still root*, so the probe is skipped there too
+/// and `preferred` passes through unprobed — the same behaviour the
+/// `COSMON_MODEL_FALLBACK=0` hatch gives, and the honest one: a probe run as
+/// root would authenticate as the wrong identity for a worker that will run as
+/// the demote target.
+///
+/// `resolve_model` is injected so the ordering is observable in a unit test
+/// without being root and without spawning a real `claude`.
+///
+/// # Errors
+///
+/// Propagates a model-resolution failure (the whole fallback chain probed
+/// unreachable). A *refusal* is not an error here — it is
+/// [`SpawnPreflight::Refused`], so the caller can record the typed event
+/// before turning it into its own error.
+fn preflight_root_then_model<M>(
+    running_uid: u32,
+    demote_target: Option<u32>,
+    preferred: Option<&str>,
+    resolve_model: M,
+) -> anyhow::Result<SpawnPreflight>
+where
+    M: FnOnce() -> anyhow::Result<Option<String>>,
+{
+    use cosmon_core::root_spawn_policy::{decide_root_spawn, gate_cognitive_preflight};
+
+    let decision = decide_root_spawn(running_uid, demote_target);
+    match gate_cognitive_preflight(&decision, resolve_model) {
+        Err(reason) => Ok(SpawnPreflight::Refused(reason)),
+        // Root + demote: probe skipped, the operator's pin passes through.
+        Ok(None) => Ok(SpawnPreflight::Proceed {
+            decision,
+            model: preferred.map(str::to_owned),
+        }),
+        Ok(Some(resolved)) => Ok(SpawnPreflight::Proceed {
+            decision,
+            model: resolved?,
+        }),
     }
 }
 
@@ -7225,6 +7300,92 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    // ── COSMON-DEV #20 defect A2: no live cognition before the refuse ──
+    //
+    // `resolve_model` here stands in for the real `resolve_worker_model`,
+    // whose first act is `probe_claude_model` → `claude --model <m> -p ping`
+    // via `Command::spawn()`. Counting its invocations is counting live,
+    // paid Claude processes. The seam exists precisely so this is observable
+    // from a test that is not root and spawns nothing.
+
+    /// Under a root dispatcher with demotion disabled (`COSMON_WORKER_UID=off`
+    /// and friends), the pre-flight must refuse having spawned NOTHING
+    /// cognitive. Before the fix the probe ran first, so a root `claude`
+    /// process existed before cosmon declined.
+    #[test]
+    fn root_refuse_spawns_no_cognitive_probe() {
+        let probes = std::cell::Cell::new(0_u32);
+        let outcome = preflight_root_then_model(0, None, Some("claude-fable-5"), || {
+            probes.set(probes.get() + 1);
+            Ok(Some("claude-fable-5".to_owned()))
+        })
+        .expect("a refusal is an outcome, not an error");
+        assert_eq!(
+            probes.get(),
+            0,
+            "a live claude process ran as root before the refusal"
+        );
+        assert_eq!(
+            outcome,
+            SpawnPreflight::Refused(
+                cosmon_core::root_spawn_policy::RootRefusalReason::NoNonRootTarget
+            )
+        );
+    }
+
+    /// The demote path is still a root dispatcher, so no probe runs there
+    /// either; the operator's pin passes through unprobed.
+    #[test]
+    fn root_demote_spawns_no_cognitive_probe_and_keeps_the_pin() {
+        let probes = std::cell::Cell::new(0_u32);
+        let outcome = preflight_root_then_model(0, Some(10001), Some("claude-fable-5"), || {
+            probes.set(probes.get() + 1);
+            Ok(Some("probed-instead".to_owned()))
+        })
+        .expect("demote proceeds");
+        assert_eq!(probes.get(), 0, "no cognitive process may run as root");
+        assert_eq!(
+            outcome,
+            SpawnPreflight::Proceed {
+                decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
+                    to_uid: 10001
+                },
+                model: Some("claude-fable-5".to_owned()),
+            }
+        );
+    }
+
+    /// The entire non-root fleet path is unchanged: the probe runs exactly
+    /// once and its verdict — not the raw pin — is what the worker spawns on.
+    #[test]
+    fn non_root_probes_once_and_spawns_on_the_probed_model() {
+        let probes = std::cell::Cell::new(0_u32);
+        let outcome = preflight_root_then_model(1000, Some(10001), Some("claude-fable-5"), || {
+            probes.set(probes.get() + 1);
+            Ok(Some("probe-selected".to_owned()))
+        })
+        .expect("non-root proceeds");
+        assert_eq!(probes.get(), 1);
+        assert_eq!(
+            outcome,
+            SpawnPreflight::Proceed {
+                decision: cosmon_core::root_spawn_policy::RootSpawnDecision::SpawnAsIs,
+                model: Some("probe-selected".to_owned()),
+            }
+        );
+    }
+
+    /// A model-resolution failure on the non-root path still propagates —
+    /// the ordering fix must not swallow the "no reachable model" abort that
+    /// keeps a doomed worker from being spawned at all.
+    #[test]
+    fn non_root_model_failure_still_aborts() {
+        let outcome = preflight_root_then_model(1000, Some(10001), Some("m"), || {
+            Err(anyhow::anyhow!("no reachable model"))
+        });
+        assert!(outcome.is_err(), "a dead model chain must still abort");
+    }
 
     // ── BUG #6: spawn-time briefing-submit confirmation ─────────────────
     // The paste-sans-submit stall (2026-07-20 knowledge fleet). The pure
