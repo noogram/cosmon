@@ -227,6 +227,7 @@ pub mod reconcile;
 pub mod reproducibility;
 #[doc(hidden)]
 pub mod rig;
+pub mod root_spawn_policy;
 #[doc(hidden)]
 pub mod run_state;
 #[doc(hidden)]

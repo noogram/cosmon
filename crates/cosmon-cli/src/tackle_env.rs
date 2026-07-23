@@ -31,6 +31,8 @@
 //! `docs/architectural-invariants.md` §8m (multi-account adapter env)
 //! for the structural rule this helper enforces.
 
+use cosmon_core::root_spawn_policy::{demotion_command_prefix, RootSpawnDecision};
+
 /// MCP servers that drive a **browser attached to the operator's
 /// desktop** and therefore can never respond inside a headless fleet
 /// worker.
@@ -238,27 +240,49 @@ where
     env_lookup("CB_SESSION_ROLE").and_then(|v| SessionRole::from_env(&v))
 }
 
-/// Whether a claude worker spawn must force `IS_SANDBOX=1` to survive
-/// Claude Code v2.x's root guard (task-20260720-18bb / BUG #6).
+/// Apply the root-spawn policy (COSMON-DEV #20 / contract-20A) to an
+/// already-assembled claude worker command.
 ///
-/// Claude Code refuses a bypass permission mode when `getuid() == 0` unless
-/// `IS_SANDBOX=1` (or `CLAUDE_CODE_BUBBLEWRAP`) is set, then `exit(1)`. We
-/// force the escape valve **only** in that exact intersection — running as
-/// root *and* a bypass mode — so a non-root worker's env is untouched and a
-/// non-bypass mode (which the guard never trips) gains nothing spurious.
+/// The pre-#20 path forced `IS_SANDBOX=1` in front of the binary purely so
+/// Claude Code's root guard would *let a root worker run* — the forbidden
+/// third outcome (a live cognitive worker with root's blast radius). This
+/// replaces that bypass with the proven-robust fix: when the dispatcher is
+/// root, [`decide_root_spawn`] resolves a
+/// [`Demote`](RootSpawnDecision::Demote) and this function splices the
+/// [`demotion_command_prefix`] immediately before the worker binary, so the
+/// worker `exec`s as a non-root uid and never trips the guard in the first
+/// place (F8: a non-root worker runs cleanly *regardless* of `IS_SANDBOX`).
 ///
-/// Pure: `is_root` is injected so the decision is unit-testable without
-/// actually being root. Production callers pass `geteuid() == 0`.
+/// - [`RootSpawnDecision::SpawnAsIs`] (the entire non-root fleet path) returns
+///   `cmd` unchanged — byte-identical to pre-#20.
+/// - [`RootSpawnDecision::Demote`] splices the privilege-drop wrapper before
+///   the binary.
+/// - [`RootSpawnDecision::Refuse`] must be handled by the caller *before*
+///   assembling a command (no live worker may be created); reaching here with
+///   a `Refuse` is a caller bug, so the command is returned unchanged and the
+///   caller's pre-spawn refusal is what actually blocks the spawn.
+///
+/// The splice anchors on `"{claude_bin} --permission-mode"`, a substring
+/// unique within the command (a `CLAUDE_CONFIG_DIR` path may contain the token
+/// `claude`, but never `claude --permission-mode`), so the demotion lands on
+/// the binary and never on a look-alike inside the env prefix.
 #[must_use]
-pub fn force_sandbox_escape(perm_mode: &str, is_root: bool) -> bool {
-    // The v2.x guard fires for `bypassPermissions` and the equivalent
-    // `--dangerously-skip-permissions`; cosmon only ever passes the former,
-    // but match both so a future mode change stays covered.
-    is_root
-        && matches!(
-            perm_mode,
-            "bypassPermissions" | "dangerously-skip-permissions"
-        )
+pub fn apply_root_spawn_policy(
+    cmd: String,
+    claude_bin: &str,
+    decision: &RootSpawnDecision,
+) -> String {
+    match decision {
+        RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => cmd,
+        RootSpawnDecision::Demote { to_uid } => {
+            let anchor = format!("{claude_bin} --permission-mode");
+            let replacement = format!(
+                "{}{claude_bin} --permission-mode",
+                demotion_command_prefix(*to_uid)
+            );
+            cmd.replacen(&anchor, &replacement, 1)
+        }
+    }
 }
 
 /// Assemble the shell command string passed to
@@ -475,17 +499,64 @@ mod tests {
         );
     }
 
+    /// COSMON-DEV #20 / contract-20A — the frozen contract test. Under a root
+    /// dispatcher, the assembled command must **demote** the worker to a
+    /// non-root uid and must NOT preserve the old root bypass. Reverting the
+    /// fix (dropping the demotion splice) re-reds this test — the differential
+    /// refutation the contract demands.
     #[test]
-    fn force_sandbox_escape_only_under_root_and_bypass() {
-        // BUG #6: the escape valve is forced ONLY in the exact intersection
-        // (root AND a bypass mode). Every other combination leaves the
-        // worker env untouched.
-        assert!(force_sandbox_escape("bypassPermissions", true));
-        assert!(force_sandbox_escape("dangerously-skip-permissions", true));
-        assert!(!force_sandbox_escape("bypassPermissions", false));
-        assert!(!force_sandbox_escape("acceptEdits", true));
-        assert!(!force_sandbox_escape("default", true));
-        assert!(!force_sandbox_escape("acceptEdits", false));
+    fn root_dispatch_demotes_the_worker_and_drops_the_root_bypass() {
+        let bin = "/usr/local/bin/claude";
+        let cmd = build_claude_command(
+            "/tmp/state/mol-X",
+            "task-20260723-d1f4",
+            bin,
+            "bypassPermissions",
+            cb_absent,
+            |_| None,
+        );
+        // A root dispatcher with the default worker uid available → Demote.
+        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        let demoted = apply_root_spawn_policy(cmd, bin, &decision);
+        // The worker execs behind a privilege-drop to the non-root uid.
+        assert!(
+            demoted.contains("setpriv --reuid 10001 --regid 10001 --clear-groups --"),
+            "root dispatch must demote the worker to a non-root uid: {demoted}"
+        );
+        // The demotion sits immediately before the binary, not inside the
+        // env prefix.
+        assert!(
+            demoted.contains(&format!("--clear-groups -- {bin} --permission-mode")),
+            "the privilege-drop must wrap the worker binary: {demoted}"
+        );
+        // The forbidden third outcome is gone: no IS_SANDBOX bypass keeping a
+        // root worker alive.
+        assert!(
+            !demoted.contains("IS_SANDBOX"),
+            "the root path must not re-arm the IS_SANDBOX root bypass: {demoted}"
+        );
+    }
+
+    /// A non-root dispatcher (the entire normal fleet path) is untouched by
+    /// the policy — byte-identical to pre-#20.
+    #[test]
+    fn non_root_dispatch_is_byte_identical() {
+        let bin = "/usr/local/bin/claude";
+        let cmd = build_claude_command(
+            "/tmp/state/mol-X",
+            "task-20260723-d1f4",
+            bin,
+            "bypassPermissions",
+            cb_absent,
+            |_| None,
+        );
+        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(1000, Some(10001));
+        let after = apply_root_spawn_policy(cmd.clone(), bin, &decision);
+        assert_eq!(after, cmd, "non-root path must be untouched");
+        assert!(
+            !after.contains("setpriv"),
+            "no demotion for a non-root dispatcher"
+        );
     }
 
     #[test]
