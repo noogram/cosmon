@@ -568,6 +568,11 @@ reason = "list-mode filter — cs-thin observe is single-id only."
 
 [[flag_only_in_cs]]
 verb = "nucleate"
+flag = "--adapter"
+reason = "durable adapter pin on the molecule — a local dispatch concern; the RPP tenant does not choose the executing adapter, the Noyau does."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
 flag = "--assign"
 reason = "explicit worker assignment — local fleet concern."
 
