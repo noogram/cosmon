@@ -240,52 +240,6 @@ where
     env_lookup("CB_SESSION_ROLE").and_then(|v| SessionRole::from_env(&v))
 }
 
-/// Apply the root-spawn policy (COSMON-DEV #20 / contract-20A) to an
-/// already-assembled claude worker command.
-///
-/// The pre-#20 path forced `IS_SANDBOX=1` in front of the binary purely so
-/// Claude Code's root guard would *let a root worker run* — the forbidden
-/// third outcome (a live cognitive worker with root's blast radius). This
-/// replaces that bypass with the proven-robust fix: when the dispatcher is
-/// root, [`decide_root_spawn`](cosmon_core::root_spawn_policy::decide_root_spawn)
-/// resolves a
-/// [`Demote`](RootSpawnDecision::Demote) and this function splices the
-/// [`demotion_command_prefix`] immediately before the worker binary, so the
-/// worker `exec`s as a non-root uid and never trips the guard in the first
-/// place (F8: a non-root worker runs cleanly *regardless* of `IS_SANDBOX`).
-///
-/// - [`RootSpawnDecision::SpawnAsIs`] (the entire non-root fleet path) returns
-///   `cmd` unchanged — byte-identical to pre-#20.
-/// - [`RootSpawnDecision::Demote`] splices the privilege-drop wrapper before
-///   the binary.
-/// - [`RootSpawnDecision::Refuse`] must be handled by the caller *before*
-///   assembling a command (no live worker may be created); reaching here with
-///   a `Refuse` is a caller bug, so the command is returned unchanged and the
-///   caller's pre-spawn refusal is what actually blocks the spawn.
-///
-/// The splice anchors on `"{claude_bin} --permission-mode"`, a substring
-/// unique within the command (a `CLAUDE_CONFIG_DIR` path may contain the token
-/// `claude`, but never `claude --permission-mode`), so the demotion lands on
-/// the binary and never on a look-alike inside the env prefix.
-#[must_use]
-pub fn apply_root_spawn_policy(
-    cmd: String,
-    claude_bin: &str,
-    decision: &RootSpawnDecision,
-) -> String {
-    match decision {
-        RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => cmd,
-        RootSpawnDecision::Demote { to_uid } => {
-            let anchor = format!("{claude_bin} --permission-mode");
-            let replacement = format!(
-                "{}{claude_bin} --permission-mode",
-                demotion_command_prefix(*to_uid)
-            );
-            cmd.replacen(&anchor, &replacement, 1)
-        }
-    }
-}
-
 /// Assemble the shell command string passed to
 /// `TransportBackend::spawn_worker` for a `claude` adapter worker.
 ///
@@ -326,9 +280,36 @@ pub fn apply_root_spawn_policy(
 /// When `env_lookup("IS_SANDBOX")` yields a non-empty value it is re-emitted
 /// as a command prefix (value-agnostic, like the model pin) so an
 /// operator-exported value survives the tmux boundary. Absent → no prefix.
-/// The root path is **no longer** handled here by forcing this variable to
-/// preserve a root worker — see [`apply_root_spawn_policy`], which demotes the
-/// worker to a non-root uid instead (COSMON-DEV #20 / contract-20A).
+/// The root path is **no longer** handled by forcing this variable to preserve
+/// a root worker — see the root-spawn policy below, which demotes the worker to
+/// a non-root uid instead (COSMON-DEV #20 / contract-20A).
+///
+/// # Root-spawn policy (COSMON-DEV #20 / contract-20A)
+///
+/// `decision` is the [`RootSpawnDecision`] the caller resolved *before* this
+/// function — and, for a [`Refuse`](RootSpawnDecision::Refuse), before any live
+/// worker could exist. On [`Demote`](RootSpawnDecision::Demote) the
+/// [`demotion_command_prefix`] is composed **at the binary token**, in the same
+/// `format!` that emits the binary, exactly as
+/// `cosmon_transport::claude::build_headless_command` does.
+///
+/// That structural composition is the fix, not a detail. The predecessor
+/// spliced the prefix into the already-assembled string with
+/// `replacen("{claude_bin} --permission-mode", …, 1)`, on the documented but
+/// unenforced assumption that the anchor was unique. It is not: every value in
+/// the env prefix ahead of the binary is caller-influenced, and `replacen`
+/// matches **inside** shell quotes. A `CLAUDE_CONFIG_DIR` (or `ANTHROPIC_MODEL`,
+/// `IS_SANDBOX`, or the molecule state path) carrying that token sequence put
+/// the privilege drop inside a quoted value — inert — and the real `claude`
+/// exec'd as uid 0 with no error, no event, no log line: contract-20A's
+/// forbidden third outcome, silently. Reproduced by two independent reviewers
+/// (task-20260723-d66d F1, task-20260723-7e12 F2) and pinned by
+/// `demotion_wraps_the_real_binary_despite_hostile_env_values`. Composing at
+/// the token makes the collision unreachable by construction: there is no
+/// search, so there is nothing to divert.
+///
+/// [`SpawnAsIs`](RootSpawnDecision::SpawnAsIs) — the entire non-root fleet path
+/// — emits no prefix, leaving the command byte-identical to pre-#20.
 ///
 /// # Out-of-worktree writable-dir grant (COSMON-DEV #20 facet B)
 ///
@@ -346,16 +327,25 @@ pub fn apply_root_spawn_policy(
 /// mirrors the codex adapter's `--add-dir` fix (`build_codex_command`).
 /// **Structural**, like the `IS_SANDBOX` valve: emitted regardless of
 /// permission mode so a worker demoted to a hardened `acceptEdits` posture
-/// (the non-root root-spawn policy, [`apply_root_spawn_policy`]) never thereby
+/// (the non-root root-spawn policy above) never thereby
 /// re-breaks its own completion write. Empty (a bare checkout with no
 /// resolvable `.cosmon/`) emits nothing and leaves the command byte-identical
 /// to the pre-fix shape.
+// Eight parameters, one over clippy's threshold. The eighth is `decision`, and
+// bundling it into a struct is exactly what must NOT happen: the whole point of
+// threading it here is that the privilege drop is composed by the same code
+// that emits the binary token, in one place, with no intermediate
+// representation a later caller could forget to apply. The predecessor's
+// separate `apply_root_spawn_policy` step was the smaller argument list — and
+// the security hole. See the root-spawn-policy section above.
+#[allow(clippy::too_many_arguments)]
 pub fn build_claude_command<C, F>(
     mol_dir_str: &str,
     parent_id_str: &str,
     claude_bin: &str,
     perm_mode: &str,
     writable_roots: &[std::path::PathBuf],
+    decision: &RootSpawnDecision,
     cb_runner: C,
     env_lookup: F,
 ) -> String
@@ -421,9 +411,22 @@ where
     // unattended worker never trips a permission prompt (COSMON-DEV #20 facet
     // B). Empty roots emit nothing → byte-identical to the pre-fix shape.
     let grants = writable_grants_fragment(writable_roots);
+    // Privilege-drop prefix, composed AT the binary token (never spliced into
+    // an assembled string — see the doc comment). Empty for the non-root path
+    // and, defensively, for a `Refuse` the caller must have intercepted.
+    let demote = match decision {
+        RootSpawnDecision::Demote { to_uid } => demotion_command_prefix(*to_uid),
+        RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => String::new(),
+    };
+    // Both molecule identifiers are shell-quoted like every other value in the
+    // prefix. `shell_quote` returns a safe path verbatim, so an ordinary state
+    // path keeps the command byte-identical; a path carrying a space or a
+    // shell metacharacter stops being an injection surface.
+    let mol_dir_q = shell_quote(mol_dir_str);
+    let parent_id_q = shell_quote(parent_id_str);
     format!(
-        "{prefix}COSMON_MOL_DIR={mol_dir_str} COSMON_PARENT_MOL_ID={parent_id_str} \
-         {claude_bin} --permission-mode {perm_mode}{grants} {disallowed}2> {worker_stderr}"
+        "{prefix}COSMON_MOL_DIR={mol_dir_q} COSMON_PARENT_MOL_ID={parent_id_q} \
+         {demote}{claude_bin} --permission-mode {perm_mode}{grants} {disallowed}2> {worker_stderr}"
     )
 }
 
@@ -466,6 +469,7 @@ mod tests {
             "/usr/local/bin/claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -502,6 +506,7 @@ mod tests {
             "claude",
             "acceptEdits",
             std::slice::from_ref(&state),
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -529,6 +534,7 @@ mod tests {
                 "claude",
                 mode,
                 std::slice::from_ref(&state),
+                &RootSpawnDecision::SpawnAsIs,
                 cb_absent,
                 |_| None,
             );
@@ -550,6 +556,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -570,6 +577,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -599,6 +607,7 @@ mod tests {
             "/usr/local/bin/claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -620,6 +629,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -632,23 +642,23 @@ mod tests {
     /// COSMON-DEV #20 / contract-20A — the frozen contract test. Under a root
     /// dispatcher, the assembled command must **demote** the worker to a
     /// non-root uid and must NOT preserve the old root bypass. Reverting the
-    /// fix (dropping the demotion splice) re-reds this test — the differential
+    /// fix (dropping the demotion prefix) re-reds this test — the differential
     /// refutation the contract demands.
     #[test]
     fn root_dispatch_demotes_the_worker_and_drops_the_root_bypass() {
         let bin = "/usr/local/bin/claude";
-        let cmd = build_claude_command(
+        // A root dispatcher with the default worker uid available → Demote.
+        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        let demoted = build_claude_command(
             "/tmp/state/mol-X",
             "task-20260723-d1f4",
             bin,
             "bypassPermissions",
             &[],
+            &decision,
             cb_absent,
             |_| None,
         );
-        // A root dispatcher with the default worker uid available → Demote.
-        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
-        let demoted = apply_root_spawn_policy(cmd, bin, &decision);
         // The worker execs behind a privilege-drop to the non-root uid.
         assert!(
             demoted.contains("setpriv --reuid 10001 --regid 10001 --clear-groups --"),
@@ -673,18 +683,25 @@ mod tests {
     #[test]
     fn non_root_dispatch_is_byte_identical() {
         let bin = "/usr/local/bin/claude";
-        let cmd = build_claude_command(
-            "/tmp/state/mol-X",
-            "task-20260723-d1f4",
-            bin,
-            "bypassPermissions",
-            &[],
-            cb_absent,
-            |_| None,
-        );
+        let build = |decision: &RootSpawnDecision| {
+            build_claude_command(
+                "/tmp/state/mol-X",
+                "task-20260723-d1f4",
+                bin,
+                "bypassPermissions",
+                &[],
+                decision,
+                cb_absent,
+                |_| None,
+            )
+        };
         let decision = cosmon_core::root_spawn_policy::decide_root_spawn(1000, Some(10001));
-        let after = apply_root_spawn_policy(cmd.clone(), bin, &decision);
-        assert_eq!(after, cmd, "non-root path must be untouched");
+        let after = build(&decision);
+        assert_eq!(
+            after,
+            build(&RootSpawnDecision::SpawnAsIs),
+            "non-root path must be untouched"
+        );
         assert!(
             !after.contains("setpriv"),
             "no demotion for a non-root dispatcher"
@@ -702,6 +719,7 @@ mod tests {
             "/usr/local/bin/claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -733,6 +751,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -752,6 +771,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -775,6 +795,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -795,6 +816,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -817,6 +839,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             || Some("user-b@example.org".to_owned()),
             |k| match k {
                 "HOME" => Some("/Users/you".to_owned()),
@@ -838,6 +861,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             || None, // cb failed
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -858,6 +882,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             || Some("  \n".to_owned()), // whitespace-only
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -878,6 +903,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -898,6 +924,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -918,6 +945,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             || Some("user+tag@example.com".to_owned()),
             |k| {
                 if k == "HOME" {
@@ -941,6 +969,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -977,6 +1006,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1002,6 +1032,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -1016,6 +1047,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1059,6 +1091,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |k| (k == "CB_DEPTH").then(|| "2".to_owned()),
         );
@@ -1073,6 +1106,7 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
@@ -1087,10 +1121,140 @@ mod tests {
             "claude",
             "bypassPermissions",
             &[],
+            &RootSpawnDecision::SpawnAsIs,
             cb_absent,
             |_| None,
         );
         assert!(cmd.contains("CB_SESSION_ROLE=worker"), "got: {cmd}");
+    }
+
+    // -- COSMON-DEV #20 / contract-20A: anchor-collision adversarial suite --
+
+    /// Split a shell command into tokens, honouring POSIX single quotes.
+    ///
+    /// Deliberately naive (no double quotes, no escapes outside `'…'`) — the
+    /// commands under test are assembled by [`build_claude_command`], which
+    /// only ever emits bare words and [`shell_quote`]d single-quoted words.
+    fn shell_tokens(cmd: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut started = false;
+        let mut in_quotes = false;
+        for ch in cmd.chars() {
+            match ch {
+                '\'' => {
+                    in_quotes = !in_quotes;
+                    started = true;
+                }
+                c if c.is_whitespace() && !in_quotes => {
+                    if started {
+                        tokens.push(std::mem::take(&mut current));
+                        started = false;
+                    }
+                }
+                c => {
+                    current.push(c);
+                    started = true;
+                }
+            }
+        }
+        if started {
+            tokens.push(current);
+        }
+        tokens
+    }
+
+    /// The token the shell would actually `exec`: the first token that is not
+    /// a leading `NAME=value` environment assignment.
+    ///
+    /// This is the *positional* observation the contract needs. A mere
+    /// `contains("setpriv … -- <bin>")` substring check is satisfied by the
+    /// hostile case too — the fragment is present, just inside a quoted env
+    /// value, where the shell treats it as data and the real binary runs
+    /// unwrapped as uid 0.
+    fn executed_token(cmd: &str) -> String {
+        let is_assignment = |t: &str| {
+            t.split_once('=').is_some_and(|(name, _)| {
+                !name.is_empty()
+                    && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            })
+        };
+        shell_tokens(cmd)
+            .into_iter()
+            .find(|t| !is_assignment(t))
+            .unwrap_or_default()
+    }
+
+    /// The reviewers' reproduced blocker (task-20260723-d66d F1 /
+    /// task-20260723-7e12 F2). Every value spliced into the env prefix ahead
+    /// of the binary is caller-influenced. If any of them contains the token
+    /// sequence `<bin> --permission-mode`, a `replacen`-based splice lands the
+    /// privilege drop **inside that value** — inert — and the real `claude`
+    /// execs as uid 0 with no error, no event, no log line: contract-20A's
+    /// forbidden third outcome, silently.
+    ///
+    /// The assertion is positional: whatever the env prefix says, the token
+    /// the shell actually executes must be `setpriv`, and the real binary must
+    /// follow the `--` terminator.
+    #[test]
+    fn demotion_wraps_the_real_binary_despite_hostile_env_values() {
+        let bin = "/usr/local/bin/claude";
+        let hostile = format!("{bin} --permission-mode");
+        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+
+        for var in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_MODEL", "IS_SANDBOX"] {
+            let cmd = build_claude_command(
+                "/tmp/state/mol-X",
+                "task-20260723-778a",
+                bin,
+                "bypassPermissions",
+                &[],
+                &decision,
+                cb_absent,
+                |k| (k == var).then(|| hostile.clone()),
+            );
+            assert_eq!(
+                executed_token(&cmd),
+                "setpriv",
+                "hostile {var} diverted the privilege drop away from the binary: {cmd}"
+            );
+            let tokens = shell_tokens(&cmd);
+            let sep = tokens
+                .iter()
+                .position(|t| t == "--")
+                .expect("the setpriv argument terminator must be present");
+            assert_eq!(
+                tokens.get(sep + 1).map(String::as_str),
+                Some(bin),
+                "the token executed under the privilege drop must be the real binary: {cmd}"
+            );
+        }
+    }
+
+    /// The same collision reachable through the molecule state path, which was
+    /// interpolated **raw** (no `shell_quote` at all) — so a state dir whose
+    /// name carries the anchor both diverted the splice and was an independent
+    /// shell-injection surface the new security control had come to depend on.
+    #[test]
+    fn demotion_wraps_the_real_binary_despite_a_hostile_state_path() {
+        let bin = "/usr/local/bin/claude";
+        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        let cmd = build_claude_command(
+            &format!("/tmp/state/{bin} --permission-mode"),
+            "task-20260723-778a",
+            bin,
+            "bypassPermissions",
+            &[],
+            &decision,
+            cb_absent,
+            |_| None,
+        );
+        assert_eq!(
+            executed_token(&cmd),
+            "setpriv",
+            "a hostile COSMON_MOL_DIR diverted the privilege drop: {cmd}"
+        );
     }
 
     #[test]

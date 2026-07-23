@@ -4208,6 +4208,11 @@ fn spawn_claude_and_prompt(
         &claude_bin,
         perm_mode,
         &writable_roots,
+        // Root-spawn policy (contract-20A). The decision is composed AT the
+        // binary token inside the builder — never spliced into the assembled
+        // string, where a caller-influenced env value could divert it and
+        // leave the real worker running as uid 0 (task-20260723-778a A1).
+        &root_decision,
         // The account was already resolved above; do not call `cb next`
         // a second time (it would double-advance the balancer).
         || None,
@@ -4222,11 +4227,6 @@ fn spawn_claude_and_prompt(
             other => std::env::var(other).ok(),
         },
     );
-    // Splice the privilege-drop wrapper when the dispatcher is root
-    // (`Demote`); a non-root dispatcher (`SpawnAsIs`) leaves the command
-    // byte-identical.
-    let claude_cmd =
-        cosmon_cli::tackle_env::apply_root_spawn_policy(claude_cmd, &claude_bin, &root_decision);
 
     backend.spawn_worker(session_name, &worktree_path.to_string_lossy(), &claude_cmd)?;
 
