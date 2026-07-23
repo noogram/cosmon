@@ -208,6 +208,10 @@ publish_globs = []
 # `cs tackle --adapter openai`. Activate by exporting MISTRAL_API_KEY;
 # revert the whole hedge by deleting this block (reversible in seconds —
 # carnot's audit).
+[adapters]
+# Galaxy adapter default (bootstrap for the resident dispatcher, issue #21).
+default = "claude"
+
 [adapters.openai]
 api_key_env = "MISTRAL_API_KEY"
 base_url = "https://api.mistral.ai"
