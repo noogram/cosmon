@@ -247,7 +247,8 @@ where
 /// Claude Code's root guard would *let a root worker run* — the forbidden
 /// third outcome (a live cognitive worker with root's blast radius). This
 /// replaces that bypass with the proven-robust fix: when the dispatcher is
-/// root, [`decide_root_spawn`] resolves a
+/// root, [`decide_root_spawn`](cosmon_core::root_spawn_policy::decide_root_spawn)
+/// resolves a
 /// [`Demote`](RootSpawnDecision::Demote) and this function splices the
 /// [`demotion_command_prefix`] immediately before the worker binary, so the
 /// worker `exec`s as a non-root uid and never trips the guard in the first
@@ -320,13 +321,14 @@ pub fn apply_root_spawn_policy(
 /// `cb_runner` is a closure that attempts to call `cb next` and returns
 /// `Some(email)` on success. Production callers pass [`run_cb_next`].
 ///
-/// # Root escape valve (`IS_SANDBOX`)
+/// # `IS_SANDBOX` pass-through
 ///
 /// When `env_lookup("IS_SANDBOX")` yields a non-empty value it is re-emitted
-/// as a command prefix (value-agnostic, like the model pin). The production
-/// caller forces `Some("1")` only when the worker will run as root under a
-/// bypass permission mode — see [`force_sandbox_escape`] — so Claude Code
-/// v2.x does not refuse the spawn under root. Absent → no prefix.
+/// as a command prefix (value-agnostic, like the model pin) so an
+/// operator-exported value survives the tmux boundary. Absent → no prefix.
+/// The root path is **no longer** handled here by forcing this variable to
+/// preserve a root worker — see [`apply_root_spawn_policy`], which demotes the
+/// worker to a non-root uid instead (COSMON-DEV #20 / contract-20A).
 pub fn build_claude_command<C, F>(
     mol_dir_str: &str,
     parent_id_str: &str,
