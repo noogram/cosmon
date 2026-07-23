@@ -34,6 +34,33 @@
 //! for `running_uid == 0` the decision is always [`RootSpawnDecision::Demote`]
 //! or [`RootSpawnDecision::Refuse`], and [`RootSpawnDecision::SpawnAsIs`] is
 //! structurally reachable only for a non-root dispatcher.
+//!
+//! # What this module does NOT yet do (named follow-up)
+//!
+//! [`enforce_demote_provisioning`] *detects* that a demote target cannot reach
+//! its config home, worktree, or state dir and turns that into a typed refusal.
+//! It does not **provision** the identity. Making the demote path complete
+//! needs three gestures cosmon does not perform today, in this order:
+//!
+//! 1. **Env rewrite on demote.** `HOME` (and `CLAUDE_CONFIG_DIR` when it points
+//!    into root's home) must be re-pointed at a directory the target uid owns,
+//!    emitted in the same env prefix as everything else. The demotion prefix
+//!    deliberately omits `--reset-env`, so today the worker inherits root's
+//!    `HOME=/root` and looks for credentials behind mode 0700.
+//! 2. **Credential transfer.** The demoted identity needs a usable Claude
+//!    login in that home. Copying root's credentials is one option; mounting
+//!    the target uid's own is the better one, and is an operator decision, not
+//!    a cosmon default.
+//! 3. **Ownership transfer of what the worker writes.** `cs tackle` as root
+//!    creates the worktree and `.cosmon/state/` root-owned; the demoted worker
+//!    must own (or be able to write) both, or its own `cs evolve` /
+//!    `cs complete` fail. `--add-dir` cannot help — it is a Claude
+//!    authorization grant, not an OS `chown`.
+//!
+//! Until those land, a root dispatcher on an unprovisioned host refuses with
+//! [`RootRefusalReason::UnprovisionedTarget`] naming the path and the remedy.
+//! That is strictly better than the pre-A3 behaviour (start, look live, wedge
+//! on `EACCES`), and strictly less than a working root-container path.
 
 /// The conventional non-root uid a demoted cognitive worker runs as.
 ///
@@ -56,6 +83,81 @@ pub enum RootRefusalReason {
     /// (the operator disabled demotion, or pinned the target back to uid 0).
     /// Spawning would produce a live root worker, so cosmon refuses instead.
     NoNonRootTarget,
+    /// Demotion is possible, but the target uid cannot reach something the
+    /// worker provably needs — its Claude config home, its worktree, or the
+    /// out-of-worktree cosmon state it writes on `cs evolve` / `cs complete`.
+    /// Spawning would produce a live worker that wedges on `EACCES` partway
+    /// through, so cosmon refuses up front and says which path is the problem.
+    UnprovisionedTarget {
+        /// The uid the worker would have been demoted to.
+        uid: u32,
+        /// What the path is *for* — see [`DemoteResource`].
+        resource: DemoteResource,
+        /// The path the target uid cannot use.
+        path: String,
+    },
+}
+
+/// What a path the demoted worker needs is *for*.
+///
+/// Named rather than free-text so the refusal message tells an operator which
+/// provisioning step is missing, not merely that some path failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DemoteResource {
+    /// The Claude config home the worker authenticates from (`CLAUDE_CONFIG_DIR`,
+    /// or `$HOME/.claude`). Root's `HOME=/root` is mode 0700 and root-owned, so
+    /// a worker demoted with the environment preserved looks for credentials it
+    /// cannot read.
+    ConfigHome,
+    /// The git worktree the worker runs in. `cs tackle` as root creates it
+    /// root-owned.
+    Worktree,
+    /// The out-of-worktree `.cosmon/` the worker writes on `cs evolve` /
+    /// `cs complete`. `--add-dir` is a Claude *authorization* grant, not an OS
+    /// `chown` — it cannot override `EACCES`.
+    StateDir,
+}
+
+impl DemoteResource {
+    /// A short human label used in the refusal message.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            DemoteResource::ConfigHome => "claude config home",
+            DemoteResource::Worktree => "worktree",
+            DemoteResource::StateDir => "cosmon state dir",
+        }
+    }
+
+    /// The concrete provisioning gesture that fixes this resource.
+    #[must_use]
+    pub fn remedy(self) -> &'static str {
+        match self {
+            DemoteResource::ConfigHome => {
+                "point CLAUDE_CONFIG_DIR at a directory the uid owns (and set \
+                 HOME accordingly), or run cs as that uid"
+            }
+            DemoteResource::Worktree => "chown the worktree to the uid before tackling",
+            DemoteResource::StateDir => "chown the .cosmon state dir to the uid",
+        }
+    }
+}
+
+/// One resource the demoted worker needs, and whether the target uid can use
+/// it.
+///
+/// The *verdict* is computed by the caller — resolving it requires `stat(2)`,
+/// which is I/O and therefore belongs behind a port, not in this module. This
+/// struct is the port's output: the pure policy in
+/// [`enforce_demote_provisioning`] decides what to do with it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DemoteResourceAccess {
+    /// What the path is for.
+    pub resource: DemoteResource,
+    /// The path checked.
+    pub path: String,
+    /// Whether the demote target can use it (read+write as appropriate).
+    pub usable: bool,
 }
 
 impl RootRefusalReason {
@@ -67,6 +169,9 @@ impl RootRefusalReason {
     pub fn as_token(&self) -> &'static str {
         match self {
             RootRefusalReason::NoNonRootTarget => "root-spawn-refused:no-non-root-target",
+            RootRefusalReason::UnprovisionedTarget { .. } => {
+                "root-spawn-refused:unprovisioned-demote-target"
+            }
         }
     }
 }
@@ -78,6 +183,18 @@ impl std::fmt::Display for RootRefusalReason {
                 "refusing to spawn a cognitive worker as root and no non-root \
                  demote target is configured (set COSMON_WORKER_UID to a \
                  non-zero uid to enable privilege-drop demotion)",
+            ),
+            RootRefusalReason::UnprovisionedTarget {
+                uid,
+                resource,
+                path,
+            } => write!(
+                f,
+                "cannot provision uid {uid}: {} `{path}` is not usable by it \
+                 (a worker demoted there would start and then wedge on EACCES) \
+                 — {}",
+                resource.label(),
+                resource.remedy(),
             ),
         }
     }
@@ -171,6 +288,54 @@ where
                 },
             }
         }
+    }
+}
+
+/// Downgrade a [`Demote`](RootSpawnDecision::Demote) to a typed refusal when
+/// the target uid cannot reach something the worker provably needs.
+///
+/// # The fault this closes (COSMON-DEV #20 defect A3)
+///
+/// [`demotion_command_prefix`] deliberately omits `--reset-env` so the env
+/// prefix survives the `setpriv` exec. The cost is that the demoted worker also
+/// keeps **root's `HOME`**: under `docker run -u 0` that is `/root`, mode 0700
+/// and root-owned, so `claude` looks for `/root/.claude` and gets `EACCES`.
+/// The same asymmetry hits state: `cs tackle` running as root creates the
+/// worktree and `.cosmon/state/` entries root-owned, and the demoted worker
+/// then fails its own `cs evolve` / `cs complete` writes. `--add-dir` cannot
+/// repair either — it is a Claude *authorization* grant, not an OS `chown`
+/// (task-20260723-d66d F2, task-20260723-7e12 F3).
+///
+/// The failure mode is the worst class in a fleet: the worker starts, the
+/// readiness probe calls it live, and it wedges partway through on a syscall
+/// error nobody is holding. This function converts that into a refusal the
+/// operator can read, naming the uid, the path, and the gesture that fixes it.
+///
+/// **This is detection, not provisioning.** Cosmon still does not create the
+/// demoted identity's config home or chown its worktree; it now declines
+/// loudly instead of starting a worker that cannot finish. Full provisioning
+/// (a `--reset-env`-style env rewrite plus ownership transfer on the demote
+/// path) is the named follow-up.
+///
+/// Non-demote decisions pass through untouched, and an empty `checks` slice is
+/// a no-op — a caller that cannot probe is not thereby refused.
+#[must_use]
+pub fn enforce_demote_provisioning(
+    decision: RootSpawnDecision,
+    checks: &[DemoteResourceAccess],
+) -> RootSpawnDecision {
+    let RootSpawnDecision::Demote { to_uid } = decision else {
+        return decision;
+    };
+    match checks.iter().find(|c| !c.usable) {
+        Some(blocked) => RootSpawnDecision::Refuse {
+            reason: RootRefusalReason::UnprovisionedTarget {
+                uid: to_uid,
+                resource: blocked.resource,
+                path: blocked.path.clone(),
+            },
+        },
+        None => RootSpawnDecision::Demote { to_uid },
     }
 }
 
@@ -414,5 +579,119 @@ mod tests {
         });
         assert_eq!(ran.get(), 1);
         assert_eq!(outcome, Ok(Some("some-model".to_owned())));
+    }
+
+    // ── COSMON-DEV #20 defect A3: provisioning of the demoted identity ──
+
+    fn access(resource: DemoteResource, path: &str, usable: bool) -> DemoteResourceAccess {
+        DemoteResourceAccess {
+            resource,
+            path: path.to_owned(),
+            usable,
+        }
+    }
+
+    /// The load-bearing A3 property: a demote whose target cannot reach its
+    /// credentials becomes a REFUSAL, never a live worker that wedges later.
+    /// Before the fix nothing checked this at all — the worker started as
+    /// uid 10001, looked for root's 0700 `/root/.claude`, and got EACCES with
+    /// the readiness probe already calling it live.
+    #[test]
+    fn unreachable_config_home_refuses_instead_of_demoting() {
+        let decision = decide_root_spawn(0, Some(CONVENTIONAL_WORKER_UID));
+        let out = enforce_demote_provisioning(
+            decision,
+            &[access(DemoteResource::ConfigHome, "/root/.claude", false)],
+        );
+        match out {
+            RootSpawnDecision::Refuse {
+                reason:
+                    RootRefusalReason::UnprovisionedTarget {
+                        uid,
+                        resource,
+                        ref path,
+                    },
+            } => {
+                assert_eq!(uid, CONVENTIONAL_WORKER_UID);
+                assert_eq!(resource, DemoteResource::ConfigHome);
+                assert_eq!(path, "/root/.claude");
+            }
+            other => panic!("must refuse, not start a doomed worker: {other:?}"),
+        }
+    }
+
+    /// The state dir is the other half of the same failure: `--add-dir` is a
+    /// Claude authorization grant, so a root-owned `.cosmon/` still blocks the
+    /// demoted worker's own `cs evolve` write.
+    #[test]
+    fn unwritable_state_dir_refuses_because_add_dir_is_not_chown() {
+        let decision = decide_root_spawn(0, Some(10001));
+        let out = enforce_demote_provisioning(
+            decision,
+            &[
+                access(DemoteResource::ConfigHome, "/home/worker/.claude", true),
+                access(DemoteResource::StateDir, "/repo/.cosmon", false),
+            ],
+        );
+        assert!(matches!(out, RootSpawnDecision::Refuse { .. }));
+    }
+
+    /// The refusal is TYPED and LOUD: a stable machine token an audit can key
+    /// on, and a message naming the uid, the path, and the fix.
+    #[test]
+    fn provisioning_refusal_is_typed_and_names_the_remedy() {
+        let reason = RootRefusalReason::UnprovisionedTarget {
+            uid: 10001,
+            resource: DemoteResource::Worktree,
+            path: "/w/tree".to_owned(),
+        };
+        assert_eq!(
+            reason.as_token(),
+            "root-spawn-refused:unprovisioned-demote-target"
+        );
+        assert!(
+            reason.as_token().contains("root"),
+            "the repro harness keys on `root` in the token"
+        );
+        let msg = reason.to_string();
+        assert!(msg.contains("10001"), "must name the uid: {msg}");
+        assert!(msg.contains("/w/tree"), "must name the path: {msg}");
+        assert!(msg.contains("chown"), "must name the remedy: {msg}");
+    }
+
+    /// A fully provisioned target still demotes — the check must not become a
+    /// blanket refusal of the demote path.
+    #[test]
+    fn fully_provisioned_target_still_demotes() {
+        let decision = decide_root_spawn(0, Some(10001));
+        let out = enforce_demote_provisioning(
+            decision,
+            &[
+                access(DemoteResource::ConfigHome, "/home/worker/.claude", true),
+                access(DemoteResource::Worktree, "/w/tree", true),
+                access(DemoteResource::StateDir, "/repo/.cosmon", true),
+            ],
+        );
+        assert_eq!(out, RootSpawnDecision::Demote { to_uid: 10001 });
+    }
+
+    /// Non-demote decisions pass through untouched, and a caller that could
+    /// probe nothing is not thereby refused.
+    #[test]
+    fn provisioning_check_is_a_noop_off_the_demote_path() {
+        assert_eq!(
+            enforce_demote_provisioning(RootSpawnDecision::SpawnAsIs, &[]),
+            RootSpawnDecision::SpawnAsIs
+        );
+        let refused = decide_root_spawn(0, None);
+        assert_eq!(
+            enforce_demote_provisioning(refused.clone(), &[]),
+            refused,
+            "an existing refusal keeps its own reason"
+        );
+        assert_eq!(
+            enforce_demote_provisioning(RootSpawnDecision::Demote { to_uid: 10001 }, &[]),
+            RootSpawnDecision::Demote { to_uid: 10001 }
+        );
     }
 }
