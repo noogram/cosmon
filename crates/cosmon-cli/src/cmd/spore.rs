@@ -187,20 +187,42 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     // definition tree or at the repo root (the cosmon-dev dogfooding F9
     // anti-pattern). The id is a runtime value (date + entropy), which is why the
     // pure `expand` cannot compute it: it is resolved here, in the shell.
+    //
+    // Injection is pure path arithmetic, so it happens BEFORE the seal gate; the
+    // directory it names is created only AFTER the gate authorizes germination
+    // (below). A refused run must leave zero durable trace.
     let germination_id = mint_germination_id();
     let run_dir = cosmon_core::spore::run_dir(&store_dir, &germination_id);
-    cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir);
-    // Create the home eagerly so the very first worker (the always-on `trace`
-    // sidecar) finds a real directory rather than racing to `mkdir -p` it.
-    std::fs::create_dir_all(&run_dir).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to create run output home {}: {e}",
-            run_dir.display()
-        )
-    })?;
-    eprintln!("run home: {}", run_dir.display());
+    cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir)?;
 
-    // Seal gate (ADR-140 D4, N4) — fail closed before any state is written.
+    // Active containment refusal, not a dormant detector: every handed
+    // `output_dir` must be inside the run home and outside the two documented
+    // anti-pattern homes (the spore definition tree, the repo root).
+    let repo_root = store_dir
+        .parent()
+        .and_then(std::path::Path::parent)
+        .unwrap_or(&store_dir)
+        .to_path_buf();
+    for call in &calls {
+        let Some(out) = call.vars.get(cosmon_core::spore::OUTPUT_DIR_VAR) else {
+            continue;
+        };
+        if let Some(violation) = cosmon_core::spore::forbidden_gate_output(
+            std::path::Path::new(out),
+            &manifest_dir,
+            &repo_root,
+        ) {
+            anyhow::bail!(
+                "node \"{}\" would be handed a forbidden output home {out} ({violation:?}); \
+                 refusing to germinate (ADR-161)",
+                call.alias
+            );
+        }
+    }
+
+    // Seal gate (ADR-140 D4, N4) — fail closed BEFORE any state is written.
+    // The run-output home is deliberately not created yet: a refused seal must
+    // leave no durable `spore-runs/<id>` artifact behind (F7).
     // DELIVERABLE 2 (F1): wire the REAL TLC runner + persistent verdict cache so
     // a working JRE + tla2tools.jar actually verifies the seal (no longer
     // hardcoded to "unavailable"). On a JRE-less box the runner reports
@@ -222,6 +244,18 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     )?;
     // The status note goes to stderr so `--json` stdout stays clean NDJSON.
     eprintln!("{seal_status}");
+
+    // Germination is authorized: NOW create the run home. Eagerly, so the very
+    // first worker (the always-on `trace` sidecar) finds a real directory rather
+    // than racing to `mkdir -p` it.
+    std::fs::create_dir_all(&run_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create run output home {}: {e}",
+            run_dir.display()
+        )
+    })?;
+    eprintln!("run home: {}", run_dir.display());
+
     let fleet_id =
         FleetId::new(&args.fleet).map_err(|e| anyhow::anyhow!("invalid fleet id: {e}"))?;
     let (project_id, energy_default) = resolve_project_context(ctx);
@@ -854,6 +888,48 @@ acceptance = "any evidence"
         dir
     }
 
+    /// Review finding F7, frozen as a red-first regression — and the composed
+    /// test the earlier suites lacked (they exercised `gate_seal` and the
+    /// output-home injection in isolation, never their *ordering*).
+    ///
+    /// A sealed spore whose `.tla` cannot be read resolves to
+    /// `UncheckedToolUnavailable`, so the gate refuses — deterministically, with
+    /// or without a JRE on the box. The contract is that this refusal costs
+    /// **nothing durable**: before the fix `run_run` created
+    /// `<state>/spore-runs/<germination-id>/` at line 195 and only *then* ran
+    /// the gate, leaving an orphan empty directory behind and falsifying the
+    /// comment that promised a fail-close "before any state is written".
+    #[test]
+    fn a_refused_seal_leaves_no_run_output_directory_behind() {
+        let dir = fixture(SEALED); // sealed manifest, but NO spore.tla written
+        let state = tempfile::tempdir().unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: None,
+        };
+        let args = RunArgs {
+            reference: dir.path().join("spore.toml"),
+            vars: vec![],
+            allow_unchecked_seal: false,
+            fleet: "default".to_string(),
+            store_dir: Some(state.path().to_path_buf()),
+        };
+
+        let err = run_run(&ctx, &args).expect_err("an unreadable proof must fail closed");
+        assert!(
+            format!("{err}").contains("NOT verified"),
+            "the refusal must be the seal gate's, not an incidental error: {err}"
+        );
+
+        let runs = state.path().join(cosmon_core::spore::SPORE_RUNS_DIR);
+        assert!(
+            !runs.exists(),
+            "a refused germination must write ZERO state, but {} exists",
+            runs.display()
+        );
+    }
+
     #[test]
     fn seal_gate_absent_proceeds() {
         let spore = Spore::parse(SPORE).unwrap();
@@ -985,7 +1061,7 @@ acceptance = "any evidence"
 
         let state = tempfile::tempdir().unwrap();
         let run_dir = cosmon_core::spore::run_dir(state.path(), "germ-20260723-0000abcd");
-        cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir);
+        cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir).unwrap();
 
         let run_str = run_dir.to_string_lossy().into_owned();
         assert!(
