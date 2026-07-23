@@ -4125,11 +4125,29 @@ fn spawn_claude_and_prompt(
     let is_root = nix::unistd::Uid::effective().is_root();
     let force_sandbox = cosmon_cli::tackle_env::force_sandbox_escape(perm_mode, is_root);
 
+    // COSMON-DEV #20 facet B (task-20260723-2aa4): a claude worker's cwd is its
+    // worktree, but the molecule state / fleet lock / events.jsonl it writes on
+    // `cs evolve` / `cs complete` live in the MAIN repo's out-of-worktree
+    // `.cosmon/state/` (walk-up redirects a worktree's state host to the main
+    // checkout). The interactive TUI runs under `acceptEdits`, which only
+    // auto-accepts edits INSIDE the cwd, so that out-of-worktree write trips a
+    // permission prompt an unattended worker cannot answer — the root-container
+    // hang Jesse Thaler reported. Declare the main-repo `.cosmon/` dir writable
+    // via claude's first-class `--add-dir` (empirically confirmed 2026-07-23),
+    // resolved with the SAME `walk_up_find_cosmon_dir_from` redirect `cs evolve`
+    // uses, so the two agree by construction. `None` (no `.cosmon/` ancestor)
+    // leaves the grant empty and the command byte-identical. Mirrors codex
+    // dcba4e0.
+    let writable_roots = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree_path)
+        .into_iter()
+        .collect::<Vec<_>>();
+
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
         parent_id_str,
         &claude_bin,
         perm_mode,
+        &writable_roots,
         // The account was already resolved above; do not call `cb next`
         // a second time (it would double-advance the balancer).
         || None,

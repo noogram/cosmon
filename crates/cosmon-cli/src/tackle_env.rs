@@ -303,11 +303,32 @@ pub fn force_sandbox_escape(perm_mode: &str, is_root: bool) -> bool {
 /// caller forces `Some("1")` only when the worker will run as root under a
 /// bypass permission mode — see [`force_sandbox_escape`] — so Claude Code
 /// v2.x does not refuse the spawn under root. Absent → no prefix.
+///
+/// # Out-of-worktree writable-dir grant (COSMON-DEV #20 facet B)
+///
+/// `writable_roots` lists directories the worker must be allowed to **write**
+/// beyond its worktree cwd — in practice the main repo's out-of-worktree
+/// `.cosmon/` (which holds `state/`, the fleet lock, and `events.jsonl` the
+/// worker writes on `cs evolve` / `cs complete`). The interactive default
+/// `cs tackle --adapter claude` path runs the TUI under a permission mode
+/// whose `acceptEdits` only auto-accepts edits **inside** the cwd, so an
+/// out-of-worktree write to the molecule state dir trips a permission prompt
+/// an unattended worker cannot answer — the root-container hang Jesse Thaler
+/// reported. Each root is declared writable via Claude Code's first-class
+/// `--add-dir <DIR>` flag (empirically confirmed 2026-07-23 as the fix), plus
+/// a `--allowedTools Bash Edit Write` grant for the Bash prompt class. This
+/// mirrors the codex adapter's `--add-dir` fix (`build_codex_command`).
+/// **Structural**, like the `IS_SANDBOX` valve: emitted regardless of
+/// permission mode so a worker demoted to a hardened `acceptEdits` posture
+/// (task-20260723-d1f4) never thereby re-breaks its own completion write.
+/// Empty (a bare checkout with no resolvable `.cosmon/`) emits nothing and
+/// leaves the command byte-identical to the pre-fix shape.
 pub fn build_claude_command<C, F>(
     mol_dir_str: &str,
     parent_id_str: &str,
     claude_bin: &str,
     perm_mode: &str,
+    writable_roots: &[std::path::PathBuf],
     cb_runner: C,
     env_lookup: F,
 ) -> String
@@ -369,10 +390,36 @@ where
     // Strip operator-bound browser MCP servers from the headless worker's
     // toolset so a call fails fast instead of deadlocking (task-20260704-f153).
     let disallowed = disallowed_browser_tools_fragment();
+    // Declare the out-of-worktree cosmon state dir writable + grant Bash so an
+    // unattended worker never trips a permission prompt (COSMON-DEV #20 facet
+    // B). Empty roots emit nothing → byte-identical to the pre-fix shape.
+    let grants = writable_grants_fragment(writable_roots);
     format!(
         "{prefix}COSMON_MOL_DIR={mol_dir_str} COSMON_PARENT_MOL_ID={parent_id_str} \
-         {claude_bin} --permission-mode {perm_mode} {disallowed}2> {worker_stderr}"
+         {claude_bin} --permission-mode {perm_mode}{grants} {disallowed}2> {worker_stderr}"
     )
+}
+
+/// Build the `--add-dir …/--allowedTools …` grant fragment for
+/// [`build_claude_command`] (COSMON-DEV #20 facet B).
+///
+/// Returns a leading-space fragment
+/// `" --add-dir <r1> <r2>… --allowedTools Bash Edit Write"` for a non-empty
+/// `roots`, or the empty string for empty `roots` — so an absent grant leaves
+/// the command byte-identical. Each root is [`shell_quote`]d; the tool names
+/// are literal. Mirrors `cosmon_transport::claude::writable_grants_fragment`
+/// and the codex adapter's `push_writable_roots`.
+fn writable_grants_fragment(roots: &[std::path::PathBuf]) -> String {
+    if roots.is_empty() {
+        return String::new();
+    }
+    let mut frag = String::from(" --add-dir");
+    for root in roots {
+        frag.push(' ');
+        frag.push_str(&shell_quote(&root.to_string_lossy()));
+    }
+    frag.push_str(" --allowedTools Bash Edit Write");
+    frag
 }
 
 #[cfg(test)]
@@ -391,6 +438,7 @@ mod tests {
             "task-20260522-62c3",
             "/usr/local/bin/claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -406,6 +454,82 @@ mod tests {
         assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
     }
 
+    // -- COSMON-DEV #20 facet B: out-of-worktree writable-dir grant --
+
+    /// The deterministic repro that fails for the RIGHT reason before the fix.
+    /// A cosmon worker's cwd is its worktree, but the molecule state dir it
+    /// writes on `cs evolve` / `cs complete` sits OUTSIDE the worktree in the
+    /// main repo's `.cosmon/`. The interactive TUI's `acceptEdits` only
+    /// auto-accepts edits inside the cwd, so that write prompts and an
+    /// unattended worker hangs (the root-container hang Jesse Thaler reported).
+    /// The launched command MUST declare the resolved dir writable via
+    /// `--add-dir` and grant Bash — before the fix `build_claude_command` took
+    /// no writable roots and emitted neither, so the worker could never write
+    /// out of its worktree unattended.
+    #[test]
+    fn writable_root_declares_out_of_worktree_state_dir_and_grants_bash() {
+        let state = std::path::PathBuf::from("/Users/op/galaxies/cosmon/.cosmon");
+        let cmd = build_claude_command(
+            "/tmp/state/mol-X",
+            "task-20260723-2aa4",
+            "claude",
+            "acceptEdits",
+            std::slice::from_ref(&state),
+            cb_absent,
+            |_| None,
+        );
+        assert!(
+            cmd.contains("--add-dir /Users/op/galaxies/cosmon/.cosmon"),
+            "state dir not declared writable: {cmd}"
+        );
+        assert!(
+            cmd.contains("--allowedTools Bash Edit Write"),
+            "Bash/Edit/Write grant missing: {cmd}"
+        );
+    }
+
+    /// The grant is **structural** — emitted regardless of permission mode, so
+    /// a worker demoted from `bypassPermissions` to a hardened `acceptEdits`
+    /// posture (task-20260723-d1f4) never thereby re-breaks its out-of-worktree
+    /// write. A path with a space is single-quoted for the shell round-trip.
+    #[test]
+    fn writable_root_survives_modes_and_is_shell_escaped() {
+        let state = std::path::PathBuf::from("/space dir/.cosmon");
+        for mode in ["plan", "acceptEdits", "bypassPermissions"] {
+            let cmd = build_claude_command(
+                "/tmp/state/mol-X",
+                "task-20260723-2aa4",
+                "claude",
+                mode,
+                std::slice::from_ref(&state),
+                cb_absent,
+                |_| None,
+            );
+            assert!(
+                cmd.contains("--add-dir '/space dir/.cosmon'"),
+                "grant dropped or unquoted under {mode}: {cmd}"
+            );
+        }
+    }
+
+    /// Empty `writable_roots` (a bare checkout with no resolvable `.cosmon/`)
+    /// emits neither `--add-dir` nor `--allowedTools`, leaving the command
+    /// byte-identical to the pre-fix shape (backward compatible).
+    #[test]
+    fn empty_writable_roots_emit_no_grant() {
+        let cmd = build_claude_command(
+            "/tmp/state/mol-X",
+            "task-20260723-2aa4",
+            "claude",
+            "bypassPermissions",
+            &[],
+            cb_absent,
+            |_| None,
+        );
+        assert!(!cmd.contains("--add-dir"), "{cmd}");
+        assert!(!cmd.contains("--allowedTools"), "{cmd}");
+    }
+
     #[test]
     fn operator_bound_browser_mcps_are_disallowed_for_headless_worker() {
         // task-20260704-f153: a headless worker has no attached Chrome,
@@ -418,6 +542,7 @@ mod tests {
             "task-20260704-f153",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -446,6 +571,7 @@ mod tests {
             "task-20260522-62c3",
             "/usr/local/bin/claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -466,6 +592,7 @@ mod tests {
             "task-20260522-62c3",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -498,6 +625,7 @@ mod tests {
             "task-20260720-18bb",
             "/usr/local/bin/claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -528,6 +656,7 @@ mod tests {
             "task-20260720-18bb",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -546,6 +675,7 @@ mod tests {
             "task-20260720-18bb",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -568,6 +698,7 @@ mod tests {
             "task-20260522-62c3",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -587,6 +718,7 @@ mod tests {
             "task-20260522-62c3",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -608,6 +740,7 @@ mod tests {
             "task-20260522-62c3",
             "claude",
             "bypassPermissions",
+            &[],
             || Some("user-b@example.org".to_owned()),
             |k| match k {
                 "HOME" => Some("/Users/you".to_owned()),
@@ -628,6 +761,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             || None, // cb failed
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -647,6 +781,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             || Some("  \n".to_owned()), // whitespace-only
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -666,6 +801,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -685,6 +821,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -704,6 +841,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             || Some("user+tag@example.com".to_owned()),
             |k| {
                 if k == "HOME" {
@@ -726,6 +864,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -761,6 +900,7 @@ mod tests {
             "task-20260610-3791",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -785,6 +925,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -798,6 +939,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -840,6 +982,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |k| (k == "CB_DEPTH").then(|| "2".to_owned()),
         );
@@ -853,6 +996,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
@@ -866,6 +1010,7 @@ mod tests {
             "task-Y",
             "claude",
             "bypassPermissions",
+            &[],
             cb_absent,
             |_| None,
         );
