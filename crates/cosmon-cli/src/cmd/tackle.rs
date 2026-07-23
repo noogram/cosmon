@@ -2283,6 +2283,46 @@ fn emit_gate_failed(
     );
 }
 
+/// Record a typed root-spawn refusal (COSMON-DEV #20 / contract-20A outcome 2).
+///
+/// Appended to `state/events.jsonl` as a `tackle_refused` line carrying the
+/// [`RootRefusalReason`](cosmon_core::root_spawn_policy::RootRefusalReason)
+/// token *before* any worker exists, so an audit (and the container repro
+/// harness, which keys on `type == "tackle_refused"` and a `reason` matching
+/// `root`) can tell a deliberate root-refusal apart from a crash. A refusal is
+/// never a silent no-op — the anti-silent-spend discipline applied to the
+/// privilege boundary. Best-effort: a write failure must not mask the refusal
+/// the caller already returns.
+fn record_root_spawn_refusal(
+    mol_state_dir: &Path,
+    mol_id: &MoleculeId,
+    wid: &WorkerId,
+    reason: &cosmon_core::root_spawn_policy::RootRefusalReason,
+) {
+    let line = serde_json::json!({
+        "type": "tackle_refused",
+        "molecule_id": mol_id.as_str(),
+        "worker_id": wid.as_str(),
+        "reason": reason.as_token(),
+        "detail": reason.to_string(),
+    });
+    // Write to the global state events.jsonl (the sink `emit_gate_*` and the
+    // repro harness read) and, defensively, to the molecule-local log so the
+    // refusal is co-located with the molecule that triggered it.
+    for events_path in [
+        cosmon_filestore::resolve_state_dir(None).join("events.jsonl"),
+        mol_state_dir.join("events.jsonl"),
+    ] {
+        if let Ok(mut f) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&events_path)
+        {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+}
+
 /// Write captured gate output to `MOLECULE_DIR/gate-output.log`.
 fn write_gate_log(
     mol_dir: &Path,
@@ -4044,7 +4084,10 @@ pub(super) fn finalize_inprocess_molecule(
 }
 
 /// Claude branch of [`spawn_and_prompt`] — the historical path.
+// Composes two COSMON-DEV #20 fixes (root-spawn demotion + the out-of-worktree
+// writable-dir grant), which together push this one line over the pedantic cap.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)]
 fn spawn_claude_and_prompt(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
@@ -4115,15 +4158,32 @@ fn spawn_claude_and_prompt(
         strong_set,
     )?;
 
-    // Root escape valve (task-20260720-18bb / BUG #6): Claude Code v2.x
-    // `exit(1)`s at spawn under a bypass permission mode when euid == 0
-    // unless `IS_SANDBOX=1` is set. A worker that exits at spawn never
-    // reaches its composer, so the briefing send-keys lands in a dead pane —
-    // the reported "runtime hang". Force the escape valve only in that exact
-    // intersection; otherwise defer to whatever the operator already exported
-    // (the tmux env-freeze means an exported value must still be re-emitted).
-    let is_root = nix::unistd::Uid::effective().is_root();
-    let force_sandbox = cosmon_cli::tackle_env::force_sandbox_escape(perm_mode, is_root);
+    // Root-spawn policy (COSMON-DEV #20 / contract-20A). The pre-#20 path
+    // forced `IS_SANDBOX=1` under root+bypass purely to make Claude Code's own
+    // root guard let a *root worker* run — the forbidden third outcome (a live
+    // cognitive worker with root's blast radius). We replace that bypass with
+    // the proven-robust fix (F8): when the dispatcher is root, demote the
+    // worker to a non-root uid before `exec` (it then never trips the guard,
+    // regardless of `IS_SANDBOX`), or — if demotion is disabled — refuse
+    // *before* any live worker exists with a typed root-refusal (never a
+    // silent no-op).
+    let running_uid = nix::unistd::Uid::effective().as_raw();
+    let demote_target =
+        cosmon_core::root_spawn_policy::resolve_demote_target(|k| std::env::var(k).ok());
+    let root_decision =
+        cosmon_core::root_spawn_policy::decide_root_spawn(running_uid, demote_target);
+
+    if let cosmon_core::root_spawn_policy::RootSpawnDecision::Refuse { reason } = &root_decision {
+        // Outcome 2: no worker process is ever created; record the typed
+        // root-refusal so an audit tells this apart from a crash, then bail.
+        record_root_spawn_refusal(mol_state_dir, &mol.id, wid, reason);
+        return Err(anyhow::anyhow!(
+            "cs tackle: {reason} (molecule {}). Set COSMON_WORKER_UID to a \
+             non-zero uid to enable privilege-drop demotion, or run cs as a \
+             non-root user.",
+            mol.id.as_str(),
+        ));
+    }
 
     // COSMON-DEV #20 facet B (task-20260723-2aa4): a claude worker's cwd is its
     // worktree, but the molecule state / fleet lock / events.jsonl it writes on
@@ -4152,22 +4212,21 @@ fn spawn_claude_and_prompt(
         // a second time (it would double-advance the balancer).
         || None,
         // Feed back the already-resolved config dir and the probe-selected
-        // model; every other variable falls through to the real env.
+        // model; every other variable falls through to the real env. We no
+        // longer force `IS_SANDBOX` here — an operator-exported value still
+        // passes through value-agnostically, but the root path is handled by
+        // demotion below, not by re-arming the guard bypass.
         |k| match k {
             "ANTHROPIC_MODEL" => effective_model.clone(),
             "CLAUDE_CONFIG_DIR" => config_dir.clone(),
-            // Force the root escape valve when required; else preserve any
-            // operator-exported value across the tmux boundary.
-            "IS_SANDBOX" => {
-                if force_sandbox {
-                    Some("1".to_owned())
-                } else {
-                    std::env::var("IS_SANDBOX").ok()
-                }
-            }
             other => std::env::var(other).ok(),
         },
     );
+    // Splice the privilege-drop wrapper when the dispatcher is root
+    // (`Demote`); a non-root dispatcher (`SpawnAsIs`) leaves the command
+    // byte-identical.
+    let claude_cmd =
+        cosmon_cli::tackle_env::apply_root_spawn_policy(claude_cmd, &claude_bin, &root_decision);
 
     backend.spawn_worker(session_name, &worktree_path.to_string_lossy(), &claude_cmd)?;
 

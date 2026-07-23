@@ -32,10 +32,15 @@
 //!    world-readable in shared temp. See `write_briefing_file` and
 //!    `build_headless_command` (issue #6 security follow-up,
 //!    task-20260721-7a68 review of `claude.rs:206-227`).
-//! 3. **Root escape valve.** Under euid 0 a bypass permission mode is
-//!    refused unless `IS_SANDBOX=1` is exported (many container
-//!    deployments run as root); the spawn path forces it in that exact
-//!    intersection.
+//! 3. **Root demotion, not an escape valve.** Under euid 0 a bypass
+//!    permission mode is refused by Claude Code's root guard (many
+//!    container deployments run as root). Rather than re-arm the old
+//!    `IS_SANDBOX=1` bypass to keep a *root* worker alive, the spawn path
+//!    now demotes the cognitive worker to a non-root uid before exec (or
+//!    refuses before a live worker exists) — COSMON-DEV #20 / contract-20A,
+//!    see [`cosmon_core::root_spawn_policy`]. An out-of-worktree
+//!    writable-dir grant (`--add-dir`) rides along so the demoted worker can
+//!    still write the molecule state dir (facet B).
 //!
 //! # ADR-097 Worker-Spawn Port IFBDD trail
 //!
@@ -58,6 +63,9 @@ use chrono::Utc;
 use cosmon_core::clearance::Clearance;
 use cosmon_core::event_v2::{AdapterHandleState, AdapterProbeKind, AdapterProbeResult};
 use cosmon_core::id::WorkerId;
+use cosmon_core::root_spawn_policy::{
+    decide_root_spawn, demotion_command_prefix, resolve_demote_target, RootSpawnDecision,
+};
 use cosmon_state::events::worker_spawn::{
     emit_adapter_briefing_consumed, emit_adapter_handle_reconciled, emit_adapter_liveness_probed,
     emit_worker_spawn_attempted, emit_worker_spawn_failed,
@@ -124,6 +132,13 @@ pub enum ClaudeError {
     /// An I/O error occurred.
     #[error("I/O error: {0}")]
     Io(String),
+
+    /// Refused to spawn a cognitive worker as root because demotion to a
+    /// non-root uid was disabled (COSMON-DEV #20 / contract-20A outcome 2).
+    /// No live worker was created — the typed alternative to the forbidden
+    /// root-bypass spawn.
+    #[error("root-spawn refused: {0}")]
+    RootSpawnRefused(String),
 }
 
 /// Configuration for spawning a Claude session.
@@ -201,29 +216,6 @@ pub struct ClaudeSessionConfig {
     /// emits no `--add-dir` and leaves the command byte-identical to the
     /// pre-fix shape.
     pub writable_roots: Vec<PathBuf>,
-}
-
-/// Whether a headless claude spawn must force `IS_SANDBOX=1` to survive
-/// Claude Code v2.x's root guard (issue #6.2 / Jesse Thaler).
-///
-/// Claude Code refuses a bypass permission mode when `getuid() == 0` unless
-/// `IS_SANDBOX=1` (or `CLAUDE_CODE_BUBBLEWRAP`) is set, then `exit(1)`. We
-/// force the escape valve **only** in that exact intersection — running as
-/// root *and* the bypass mode — so a non-root worker's env is untouched and
-/// a non-bypass mode (which the guard never trips) gains nothing spurious.
-///
-/// This mirrors [`cosmon_cli::tackle_env::force_sandbox_escape`], the copy on
-/// the TUI send-keys path. The canonical predicate cannot be imported here:
-/// `cosmon-cli` depends on `cosmon-transport`, not the reverse, so inverting
-/// the edge to share a three-line pure fn would be far more disruptive than
-/// duplicating it. The two copies are kept in lock-step by name and by the
-/// shared issue-#6 reference. Pure: `is_root` is injected so the decision is
-/// unit-testable without actually being root.
-///
-/// [`cosmon_cli::tackle_env::force_sandbox_escape`]: https://docs.rs/cosmon-cli
-#[must_use]
-fn force_sandbox_escape(perm_mode: PermissionMode, is_root: bool) -> bool {
-    is_root && matches!(perm_mode, PermissionMode::BypassPermissions)
 }
 
 /// Shell-quote a string for safe embedding in the spawn command.
@@ -342,7 +334,21 @@ fn writable_grants_fragment(roots: &[PathBuf]) -> String {
 ///   unlinks the name, and `claude` reads the briefing from the surviving
 ///   open fd, so the private briefing never lingers in temp (issue #6
 ///   security follow-up, task-20260721-7a68);
-/// - an `IS_SANDBOX=1` prefix when [`force_sandbox_escape`] fires.
+/// - a privilege-drop wrapper before the binary when the root-spawn policy
+///   resolves a [`RootSpawnDecision::Demote`] (COSMON-DEV #20 / contract-20A).
+///
+/// # Root-spawn policy (COSMON-DEV #20)
+///
+/// The pre-#20 headless path forced `IS_SANDBOX=1` under root so Claude Code's
+/// own root guard would let a *root worker* run — the forbidden third outcome
+/// (a live cognitive worker with root's blast radius). This replaces that
+/// bypass: [`RootSpawnDecision::Demote`] splices [`demotion_command_prefix`]
+/// before the binary so the worker `exec`s as a non-root uid (F8: a non-root
+/// worker runs cleanly regardless of `IS_SANDBOX`), and
+/// [`RootSpawnDecision::Refuse`] is handled by the caller *before* this
+/// function is reached (no live worker is created). A non-root dispatcher
+/// ([`RootSpawnDecision::SpawnAsIs`]) yields a command byte-identical to
+/// pre-#20.
 ///
 /// `writable_roots` declares out-of-worktree directories writable via
 /// `--add-dir` (plus a `--allowedTools Bash Edit Write` grant) so an
@@ -355,16 +361,15 @@ fn writable_grants_fragment(roots: &[PathBuf]) -> String {
 fn build_headless_command(
     permission_mode: PermissionMode,
     briefing_file: Option<&str>,
-    is_root: bool,
+    decision: &RootSpawnDecision,
     writable_roots: &[PathBuf],
 ) -> String {
-    // Re-emitted inline (not via the process env) because the tmux server
-    // froze its env at startup and drops later shell overrides; the value
-    // must ride the command string to reach the worker.
-    let sandbox = if force_sandbox_escape(permission_mode, is_root) {
-        "IS_SANDBOX=1 "
-    } else {
-        ""
+    // Privilege-drop prefix, spliced immediately before the binary. Empty for
+    // the non-root path and (defensively) for a `Refuse` the caller should
+    // have intercepted; non-empty only for `Demote`.
+    let demote = match decision {
+        RootSpawnDecision::Demote { to_uid } => demotion_command_prefix(*to_uid),
+        RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => String::new(),
     };
     let grants = writable_grants_fragment(writable_roots);
     match briefing_file {
@@ -378,11 +383,11 @@ fn build_headless_command(
             let mut cmd = String::new();
             let _ = write!(
                 cmd,
-                "{{ rm -f {q}; {sandbox}claude --permission-mode {permission_mode}{grants} -p; }} < {q}"
+                "{{ rm -f {q}; {demote}claude --permission-mode {permission_mode}{grants} -p; }} < {q}"
             );
             cmd
         }
-        None => format!("{sandbox}claude --permission-mode {permission_mode}{grants}"),
+        None => format!("{demote}claude --permission-mode {permission_mode}{grants}"),
     }
 }
 
@@ -411,13 +416,28 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
         Some(ref prompt) => Some(write_briefing_file(prompt)?),
         None => None,
     };
-    // Production callers read the real effective uid; the guard fires only
-    // under root + bypass (see `force_sandbox_escape`).
-    let is_root = nix::unistd::Uid::effective().is_root();
+    // Root-spawn policy (COSMON-DEV #20 / contract-20A). Production callers
+    // read the real effective uid; when root, demote the worker to a non-root
+    // uid before exec (or refuse before a live worker exists if demotion is
+    // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
+    // out-of-worktree writable-dir grant (facet B) rides along on the same
+    // command regardless of the root decision.
+    let running_uid = nix::unistd::Uid::effective().as_raw();
+    let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
+    let decision = decide_root_spawn(running_uid, demote_target);
+    if let RootSpawnDecision::Refuse { reason } = &decision {
+        // Outcome 2: refuse before creating a live worker. Reap the briefing
+        // temp file (no spawn will consume+unlink it) so the private briefing
+        // never lingers, then surface a typed root-refusal.
+        if let Some(ref path) = briefing_file {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(ClaudeError::RootSpawnRefused(reason.to_string()));
+    }
     let claude_cmd = build_headless_command(
         config.permission_mode,
         briefing_file.as_deref(),
-        is_root,
+        &decision,
         &config.writable_roots,
     );
 
@@ -668,7 +688,10 @@ pub fn session_config_with_telemetry(
 impl From<ClaudeError> for SpawnError {
     fn from(e: ClaudeError) -> Self {
         match e {
-            ClaudeError::SpawnFailed(m) => Self::SpawnFailed(m),
+            // A root-spawn refusal is a spawn that never happened; it shares
+            // the generic spawn-error envelope, which carries the typed reason
+            // string.
+            ClaudeError::SpawnFailed(m) | ClaudeError::RootSpawnRefused(m) => Self::SpawnFailed(m),
             ClaudeError::KillFailed(m) => Self::KillFailed(m),
             ClaudeError::Io(m) => Self::Io(m),
         }
@@ -737,7 +760,7 @@ mod tests {
         let cmd = build_headless_command(
             PermissionMode::BypassPermissions,
             Some("/tmp/cosmon-briefing-polecat-42.txt"),
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             &[],
         );
         assert_eq!(
@@ -761,7 +784,7 @@ mod tests {
         let cmd = build_headless_command(
             PermissionMode::BypassPermissions,
             Some("/tmp/cosmon-briefing-xyz.txt"),
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             &[],
         );
         assert!(
@@ -784,7 +807,12 @@ mod tests {
     /// thaw / patrol respawn callers, which pass `prompt: None`.
     #[test]
     fn headless_command_without_briefing_is_bare_tui() {
-        let cmd = build_headless_command(PermissionMode::AcceptEdits, None, false, &[]);
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
         assert_eq!(cmd, "claude --permission-mode acceptEdits");
         assert!(!cmd.contains(" -p"), "no briefing → no -p: {cmd}");
     }
@@ -808,7 +836,7 @@ mod tests {
         let bare = build_headless_command(
             PermissionMode::AcceptEdits,
             None,
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             std::slice::from_ref(&state),
         );
         assert!(
@@ -818,7 +846,7 @@ mod tests {
         let briefed = build_headless_command(
             PermissionMode::AcceptEdits,
             Some("/tmp/b.txt"),
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             std::slice::from_ref(&state),
         );
         assert!(
@@ -836,7 +864,7 @@ mod tests {
         let cmd = build_headless_command(
             PermissionMode::AcceptEdits,
             None,
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             std::slice::from_ref(&state),
         );
         assert!(
@@ -857,7 +885,12 @@ mod tests {
             PermissionMode::AcceptEdits,
             PermissionMode::BypassPermissions,
         ] {
-            let cmd = build_headless_command(mode, None, false, std::slice::from_ref(&state));
+            let cmd = build_headless_command(
+                mode,
+                None,
+                &RootSpawnDecision::SpawnAsIs,
+                std::slice::from_ref(&state),
+            );
             assert!(
                 cmd.contains("--add-dir /main/.cosmon"),
                 "grant dropped under {mode:?}: {cmd}"
@@ -874,7 +907,12 @@ mod tests {
             PathBuf::from("/space dir/.cosmon"),
             PathBuf::from("/plain/.cosmon"),
         ];
-        let cmd = build_headless_command(PermissionMode::AcceptEdits, None, false, &roots);
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &roots,
+        );
         assert!(
             cmd.contains("--add-dir '/space dir/.cosmon' /plain/.cosmon"),
             "{cmd}"
@@ -886,50 +924,72 @@ mod tests {
     /// the command is byte-identical to the pre-fix shape.
     #[test]
     fn empty_writable_roots_emit_no_grant() {
-        let cmd = build_headless_command(PermissionMode::AcceptEdits, None, false, &[]);
+        let cmd = build_headless_command(
+            PermissionMode::AcceptEdits,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
         assert_eq!(cmd, "claude --permission-mode acceptEdits");
         assert!(!cmd.contains("--add-dir"));
         assert!(!cmd.contains("--allowedTools"));
     }
 
-    /// #6.2: root + bypass forces `IS_SANDBOX=1` in front of the binary so
-    /// Claude Code v2.x does not `exit(1)` under euid 0. Container
-    /// deployments frequently run as root.
+    /// COSMON-DEV #20 / contract-20A: a root dispatcher demotes the worker to
+    /// a non-root uid before exec, and NEVER re-arms the old `IS_SANDBOX=1`
+    /// root bypass. Reverting the fix (dropping the demotion) re-reds this.
     #[test]
-    fn headless_command_forces_is_sandbox_under_root_bypass() {
-        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, true, &[]);
+    fn headless_command_demotes_the_worker_under_root() {
+        let decision = decide_root_spawn(0, Some(10001));
+        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, &decision, &[]);
+        assert_eq!(
+            cmd,
+            "setpriv --reuid 10001 --regid 10001 --clear-groups -- \
+             claude --permission-mode bypassPermissions",
+            "root must demote to a non-root uid: {cmd}"
+        );
         assert!(
-            cmd.starts_with("IS_SANDBOX=1 claude"),
-            "root + bypass must prefix IS_SANDBOX=1: {cmd}"
+            !cmd.contains("IS_SANDBOX"),
+            "the root path must not re-arm the IS_SANDBOX bypass: {cmd}"
         );
     }
 
-    /// The escape valve fires ONLY in the exact intersection (root AND a
-    /// bypass mode) — every other combination leaves the command untouched.
+    /// A root dispatcher with a briefing demotes the `claude` invocation
+    /// *inside* the self-deleting brace group, not the `rm`.
     #[test]
-    fn force_sandbox_escape_only_under_root_and_bypass() {
-        assert!(force_sandbox_escape(
+    fn headless_command_demotes_only_the_binary_with_briefing() {
+        let decision = decide_root_spawn(0, Some(10001));
+        let cmd = build_headless_command(
             PermissionMode::BypassPermissions,
-            true
-        ));
-        assert!(!force_sandbox_escape(
-            PermissionMode::BypassPermissions,
-            false
-        ));
-        assert!(!force_sandbox_escape(PermissionMode::AcceptEdits, true));
-        assert!(!force_sandbox_escape(PermissionMode::Plan, true));
-        assert!(!force_sandbox_escape(PermissionMode::AcceptEdits, false));
+            Some("/tmp/brief.txt"),
+            &decision,
+            &[],
+        );
+        assert!(
+            cmd.contains("rm -f /tmp/brief.txt; setpriv --reuid 10001"),
+            "the rm runs as root; only the worker binary is demoted: {cmd}"
+        );
+        assert!(
+            cmd.contains("--clear-groups -- claude --permission-mode"),
+            "the privilege-drop must wrap the claude binary: {cmd}"
+        );
     }
 
-    /// A non-root worker's command is byte-identical to the no-sandbox shape
+    /// A non-root worker's command is byte-identical to the pre-#20 shape
     /// even under a bypass mode — the common fleet path is untouched.
     #[test]
     fn headless_command_non_root_has_no_sandbox_prefix() {
-        let cmd = build_headless_command(PermissionMode::BypassPermissions, None, false, &[]);
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
         assert!(
             !cmd.contains("IS_SANDBOX"),
             "non-root must not gain an IS_SANDBOX prefix: {cmd}"
         );
+        assert!(!cmd.contains("setpriv"), "non-root must not demote: {cmd}");
     }
 
     /// #6.3: the briefing content rides a file on stdin, never the command
@@ -943,8 +1003,12 @@ mod tests {
         let read_back = std::fs::read_to_string(&path).expect("briefing file readable");
         assert_eq!(read_back, briefing, "briefing bytes must round-trip");
 
-        let cmd =
-            build_headless_command(PermissionMode::BypassPermissions, Some(&path), false, &[]);
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            Some(&path),
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
         assert!(
             cmd.contains("-p; } < "),
             "must redirect stdin from the file: {cmd}"
@@ -963,7 +1027,7 @@ mod tests {
         let cmd = build_headless_command(
             PermissionMode::BypassPermissions,
             Some("/tmp/My Dir/brief.txt"),
-            false,
+            &RootSpawnDecision::SpawnAsIs,
             &[],
         );
         assert!(
