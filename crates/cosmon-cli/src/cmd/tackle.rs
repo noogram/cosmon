@@ -145,6 +145,20 @@ pub struct Args {
     /// envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`)
     /// can answer "which Adapter ran for this molecule?" without parsing
     /// shell history.
+    ///
+    /// # Divergence from `cs run --resident` (the issue-#21 wart, made explicit)
+    ///
+    /// The resident loop (`cs run --resident`) does **not** honour this full
+    /// six-level chain. It deliberately drops the two *config* tiers so an
+    /// unattended run can never silently inherit a paid adapter from a config
+    /// default (F3 of the 2026-07-23 cosmon-dev dogfooding findings). Under the
+    /// resident loop the resolution is only: per-molecule pin → the opt-in
+    /// `cs run --adapter <name>` run directive → the built-in `local` floor. A
+    /// bare `[adapters.default] = "claude"` therefore takes effect via `cs
+    /// tackle` but is ignored under `cs run --resident`; unlocking a paid
+    /// adapter there requires the explicit `--adapter` flag (or a per-molecule
+    /// pin). See `cs run --help` (`--adapter`) and
+    /// `cosmon_runtime::resident` (`SAFE_DEFAULT_ADAPTER`).
     #[arg(long, value_name = "NAME")]
     pub adapter: Option<String>,
 
