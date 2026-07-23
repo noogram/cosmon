@@ -178,12 +178,30 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     let params = coerce_vars(&spore, &args.vars)?;
     let calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
 
-    // Seal gate (ADR-140 D4) — fail closed before any state is written.
-    let seal_status = gate_seal(&spore, args.allow_unchecked_seal)?;
-    // The status note goes to stderr so `--json` stdout stays clean NDJSON.
-    eprintln!("seal: {seal_status}");
-
     let store_dir = cosmon_filestore::resolve_state_dir(args.store_dir.as_deref());
+
+    // Seal gate (ADR-140 D4, N4) — fail closed before any state is written.
+    // DELIVERABLE 2 (F1): wire the REAL TLC runner + persistent verdict cache so
+    // a working JRE + tla2tools.jar actually verifies the seal (no longer
+    // hardcoded to "unavailable"). On a JRE-less box the runner reports
+    // unavailable and the gate stays fail-closed exactly as before.
+    let tlc = cosmon_cli::spore_seal::RealTlcRunner::detect();
+    // Persistent verdict cache under `.cosmon/cache/seal/<hash>` (sibling of
+    // the state dir, which is `.cosmon/state`).
+    let cache_dir = store_dir.parent().map_or_else(
+        || store_dir.join("cache").join("seal"),
+        |cosmon| cosmon.join("cache").join("seal"),
+    );
+    let cache = cosmon_cli::spore_seal::FileSealVerdictCache::new(cache_dir);
+    let seal_status = gate_seal(
+        &spore,
+        &manifest_dir,
+        args.allow_unchecked_seal,
+        &tlc,
+        &cache,
+    )?;
+    // The status note goes to stderr so `--json` stdout stays clean NDJSON.
+    eprintln!("{seal_status}");
     let fleet_id =
         FleetId::new(&args.fleet).map_err(|e| anyhow::anyhow!("invalid fleet id: {e}"))?;
     let (project_id, energy_default) = resolve_project_context(ctx);
@@ -406,19 +424,83 @@ fn coerce_one(spore: &Spore, key: &str, value: &str) -> anyhow::Result<toml::Val
     })
 }
 
-/// The seal gate (ADR-140 D4). Returns the honest status line or fails
-/// closed. Never returns a "verified" status — TLC verification is N4's
-/// contract and is not wired here, so a present seal is at best
-/// "present, NOT verified".
-fn gate_seal(spore: &Spore, allow_unchecked: bool) -> anyhow::Result<&'static str> {
-    match &spore.seal {
-        None => Ok("none"),
-        Some(_) if allow_unchecked => Ok("present, NOT verified"),
-        Some(_) => anyhow::bail!(
-            "spore carries a [spore.seal] but its .tla proof was not verified \
-             (TLC unavailable); refusing to germinate (fail-closed, ADR-140 D4). \
-             Re-run with --allow-unchecked-seal to opt into the risk."
-        ),
+/// The seal gate (ADR-140 D4, N4). Verifies the spore's `.tla` proof through
+/// the injected [`TlcRunner`](cosmon_core::spore::TlcRunner) +
+/// [`SealVerdictCache`](cosmon_core::spore::SealVerdictCache), then returns the
+/// honest status line or fails closed.
+///
+/// This is the DELIVERABLE 2 (F1) fix: the gate used to be hardcoded to bail
+/// "TLC unavailable" for *every* sealed spore, so a seal could never be
+/// verified even on a machine with a working JRE + `tla2tools.jar`. Now the
+/// gate actually runs the pure orchestration
+/// ([`verify_seal`](cosmon_core::spore::verify_seal) →
+/// [`gate`](cosmon_core::spore::gate)):
+///
+/// * TLC available + proof passes → `seal: verified <hash>`, germinate WITHOUT
+///   `--allow-unchecked-seal`.
+/// * TLC unavailable → `seal: present, NOT verified`, fail-closed unless
+///   `allow_unchecked` (the existing, correct behaviour on a JRE-less box).
+/// * TLC available + proof rejected → refuse **unconditionally** (the opt-in
+///   flag does not rescue a known-unsafe proof).
+///
+/// The proof bytes are read relative to `manifest_dir`. The honesty invariant
+/// lives entirely in the pure core; this shell only reads files and threads the
+/// I/O seams. Returns the honest report line on germinate, or an error carrying
+/// the honest refusal line.
+///
+/// # Errors
+/// Bails when the gate refuses (fail-closed seal / rejected proof) or the
+/// verdict cache backend errors.
+fn gate_seal(
+    spore: &Spore,
+    manifest_dir: &Path,
+    allow_unchecked: bool,
+    tlc: &dyn cosmon_core::spore::TlcRunner,
+    cache: &dyn cosmon_core::spore::SealVerdictCache,
+) -> anyhow::Result<String> {
+    use cosmon_core::spore::{gate, verify_seal, ResolvedSeal};
+
+    // Read the proof bytes off disk so the core can hash them (cache key) and
+    // hand the paths to TLC. A seal whose files cannot be read resolves to
+    // `None` here; `verify_seal` then reports it honestly as unchecked, never
+    // as verified.
+    let module_path;
+    let config_path;
+    let module_bytes;
+    let config_bytes;
+    let resolved = match &spore.seal {
+        Some(seal) => {
+            module_path = manifest_dir.join(&seal.module);
+            config_path = seal.config.as_ref().map(|c| manifest_dir.join(c));
+            match std::fs::read(&module_path) {
+                Ok(bytes) => {
+                    module_bytes = bytes;
+                    config_bytes = match &config_path {
+                        Some(p) => std::fs::read(p).ok(),
+                        None => None,
+                    };
+                    Some(ResolvedSeal {
+                        module_path: module_path.as_path(),
+                        config_path: config_path.as_deref(),
+                        module_bytes: module_bytes.as_slice(),
+                        config_bytes: config_bytes.as_deref(),
+                    })
+                }
+                // Proof module unreadable — pass `None` so the core reports it
+                // as unchecked (fail-closed by default), never verified.
+                Err(_) => None,
+            }
+        }
+        None => None,
+    };
+
+    let status = verify_seal(spore.seal.as_ref(), resolved.as_ref(), cache, tlc)
+        .map_err(|e| anyhow::anyhow!("seal verification failed: {e}"))?;
+    let decision = gate(&status, allow_unchecked);
+    if decision.germinates() {
+        Ok(decision.report().to_string())
+    } else {
+        anyhow::bail!("{} (fail-closed, ADR-140 D4)", decision.report())
     }
 }
 
@@ -726,25 +808,87 @@ acceptance = "any evidence"
         assert!(format!("{err}").contains("expected key=value"));
     }
 
-    #[test]
-    fn seal_gate_absent_proceeds() {
-        let spore = Spore::parse(SPORE).unwrap();
-        assert_eq!(gate_seal(&spore, false).unwrap(), "none");
+    /// Write a sealed-spore fixture: manifest + formula + a `.tla`/`.cfg` pair
+    /// so `gate_seal` can read the proof bytes off disk.
+    fn sealed_fixture() -> tempfile::TempDir {
+        let dir = fixture(SEALED);
+        std::fs::write(
+            dir.path().join("spore.tla"),
+            b"---- MODULE spore ----\n====",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("spore.cfg"), b"INVARIANT Termination\n").unwrap();
+        dir
     }
 
     #[test]
-    fn seal_gate_present_fails_closed_by_default() {
+    fn seal_gate_absent_proceeds() {
+        let spore = Spore::parse(SPORE).unwrap();
+        let cache = cosmon_core::spore::InMemorySealVerdictCache::new();
+        let tlc = cosmon_core::spore::FakeTlcRunner::unavailable();
+        let status = gate_seal(&spore, Path::new("."), false, &tlc, &cache).unwrap();
+        assert_eq!(status, "seal: none");
+    }
+
+    #[test]
+    fn seal_gate_present_fails_closed_by_default_when_tlc_unavailable() {
+        let dir = sealed_fixture();
         let spore = Spore::parse(SEALED).unwrap();
-        let err = gate_seal(&spore, false).unwrap_err();
-        assert!(format!("{err}").contains("fail-closed"));
+        let cache = cosmon_core::spore::InMemorySealVerdictCache::new();
+        let tlc = cosmon_core::spore::FakeTlcRunner::unavailable();
+        let err = gate_seal(&spore, dir.path(), false, &tlc, &cache).unwrap_err();
+        // Fail-closed refusal names the missing verifier, not a stale hardcode.
+        assert!(format!("{err}").contains("NOT verified"));
     }
 
     #[test]
     fn seal_gate_present_proceeds_under_flag_but_never_claims_verified() {
+        let dir = sealed_fixture();
         let spore = Spore::parse(SEALED).unwrap();
-        let status = gate_seal(&spore, true).unwrap();
-        assert_eq!(status, "present, NOT verified");
-        assert!(!status.contains("verified ") && !status.starts_with("verified"));
+        let cache = cosmon_core::spore::InMemorySealVerdictCache::new();
+        let tlc = cosmon_core::spore::FakeTlcRunner::unavailable();
+        let status = gate_seal(&spore, dir.path(), true, &tlc, &cache).unwrap();
+        assert!(status.contains("NOT verified"));
+        // The honest line never claims a bare "verified".
+        assert!(!status.contains("verified (") || status.contains("NOT verified"));
+    }
+
+    /// DELIVERABLE 2 (F1): the seal-gate REGRESSION. When TLC is actually
+    /// available and the proof passes, `cs spore run` must VERIFY the seal and
+    /// germinate WITHOUT `--allow-unchecked-seal`. The old `gate_seal` was
+    /// hardcoded to bail "TLC unavailable" no matter what — this is the root
+    /// cause of Jesse's seal-gate observation.
+    #[test]
+    fn seal_gate_verifies_when_tlc_available_and_proof_passes() {
+        let dir = sealed_fixture();
+        let spore = Spore::parse(SEALED).unwrap();
+        let cache = cosmon_core::spore::InMemorySealVerdictCache::new();
+        let tlc = cosmon_core::spore::FakeTlcRunner::available_with(
+            cosmon_core::spore::TlcOutcome::Passed,
+        );
+        // allow_unchecked = false: a real TLC pass must NOT need the escape hatch.
+        let status = gate_seal(&spore, dir.path(), false, &tlc, &cache).unwrap();
+        assert!(
+            status.contains("verified") && !status.contains("NOT verified"),
+            "an available TLC pass must report a verified seal, got: {status}"
+        );
+    }
+
+    /// The other honest branch: TLC available but the proof FAILS → refuse
+    /// unconditionally, even under the opt-in flag (a rejected proof is
+    /// known-unsafe).
+    #[test]
+    fn seal_gate_refuses_failed_proof_even_under_flag() {
+        let dir = sealed_fixture();
+        let spore = Spore::parse(SEALED).unwrap();
+        let cache = cosmon_core::spore::InMemorySealVerdictCache::new();
+        let tlc = cosmon_core::spore::FakeTlcRunner::available_with(
+            cosmon_core::spore::TlcOutcome::Failed {
+                detail: "Invariant Termination violated".to_string(),
+            },
+        );
+        let err = gate_seal(&spore, dir.path(), true, &tlc, &cache).unwrap_err();
+        assert!(format!("{err}").contains("FAILED"));
     }
 
     #[test]

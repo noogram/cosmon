@@ -153,6 +153,13 @@ pub struct NucleateRequest {
     /// `cs nucleate --blocked-by`. This is what lets a tenant nucleate
     /// a drainable DAG through the §8p surface.
     pub blocked_by: Vec<String>,
+    /// Durable per-molecule adapter pin (rung-1 provider-family intent).
+    ///
+    /// Persisted to [`MoleculeData::adapter`] verbatim so a committee seat's
+    /// intended provider family survives a `cs run --resident --adapter <X>`
+    /// run directive (committee-20260723-c0a1). `None` stamps no pin — the
+    /// molecule resolves its adapter through the canonical `cs tackle` chain.
+    pub adapter: Option<String>,
 }
 
 impl NucleateRequest {
@@ -174,6 +181,7 @@ impl NucleateRequest {
             tags: Vec::new(),
             fleet: FleetId::new("default").expect("`default` is a valid fleet id"),
             blocked_by: Vec::new(),
+            adapter: None,
         }
     }
 }
@@ -298,6 +306,7 @@ pub fn nucleate(
         tags,
         fleet,
         blocked_by,
+        adapter,
     } = request;
 
     // --- 2. Load + parse formula.
@@ -365,6 +374,7 @@ pub fn nucleate(
         mol_kind,
         &parsed_tags,
         &blockers,
+        adapter.as_deref(),
     )?;
 
     // --- 6. Reload the persisted record so we hand back the canonical
@@ -420,6 +430,7 @@ fn persist_and_record(
     kind: Option<MoleculeKind>,
     tags: &[Tag],
     blockers: &[cosmon_core::id::MoleculeId],
+    adapter: Option<&str>,
 ) -> Result<PathBuf, NucleateError> {
     let mut data = MoleculeData {
         id: result.id.clone(),
@@ -472,6 +483,7 @@ fn persist_and_record(
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: adapter.map(str::to_owned),
     };
 
     store
@@ -888,6 +900,47 @@ description = "."
             .tags
             .iter()
             .any(|t| t.key() == "temp" && t.value() == Some("warm")));
+    }
+
+    #[test]
+    fn nucleate_persists_durable_adapter_pin() {
+        // A committee seat nucleated for a distinct provider family must carry
+        // that family from birth (committee-20260723-c0a1): the durable pin
+        // survives any later run directive because it is stored on the record,
+        // not derived from a process that does not exist yet.
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        let formulas_dir = tmp.path().join("formulas");
+        write_minimal_formula(&formulas_dir, "task-work");
+
+        let store = FakeStore::default();
+        let mut req = NucleateRequest::for_formula("task-work");
+        req.adapter = Some("mistral".into());
+        let view = nucleate(&store, &state_dir, &formulas_dir, &Subject::operator(), req).unwrap();
+
+        assert_eq!(view.data.adapter.as_deref(), Some("mistral"));
+        // The pin is durable: it is on the persisted record, before any tackle.
+        let loaded = store.load_molecule(&view.data.id).unwrap();
+        assert_eq!(loaded.adapter.as_deref(), Some("mistral"));
+    }
+
+    #[test]
+    fn nucleate_without_adapter_leaves_pin_unset() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        let formulas_dir = tmp.path().join("formulas");
+        write_minimal_formula(&formulas_dir, "task-work");
+
+        let store = FakeStore::default();
+        let view = nucleate(
+            &store,
+            &state_dir,
+            &formulas_dir,
+            &Subject::operator(),
+            NucleateRequest::for_formula("task-work"),
+        )
+        .unwrap();
+        assert_eq!(view.data.adapter, None);
     }
 
     #[test]

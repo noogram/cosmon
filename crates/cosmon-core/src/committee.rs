@@ -93,6 +93,65 @@ use crate::provider_diversity::{resolve_endpoint_tuple, EndpointTuple};
 /// the current policy recognises.
 pub const ADVERSARIAL_BRIEFING_VERSION: u32 = 1;
 
+/// Basename of the **regeneration-stable** durable file that carries a
+/// committee seat's adversarial posture contract.
+///
+/// # Why a separate file, not `briefing.md`
+///
+/// Witness (2) requires the seat's per-step briefing to *deliver* the
+/// adversarial contract ([`AdversarialBriefing::injected`]). The natural place
+/// to write it — inline in `briefing.md` under a `## Committee posture`
+/// heading — is **clobbered on every step advance**: `cs evolve` regenerates
+/// `briefing.md` wholesale from the formula step, dropping any injected
+/// section (committee-20260723-c0a1, witness 2 = `BriefingNotInjected`). So the
+/// contract lives here instead, in a file *no* regeneration touches, and the
+/// regenerated `briefing.md` only carries a stable *pointer* to it
+/// ([`committee_posture_reference`]). The contract therefore survives every
+/// step advance, while the pointer is cheaply re-established each time.
+pub const COMMITTEE_POSTURE_FILE: &str = "committee-posture.md";
+
+/// Render the durable committee-posture document written once to
+/// `MOLECULE_DIR/`[`COMMITTEE_POSTURE_FILE`] at injection time.
+///
+/// The header pins the contract's [`ADVERSARIAL_BRIEFING_VERSION`] and content
+/// hash so an audit can confirm *which* contract a seat received; `body` is the
+/// adversarial contract prose itself. This file is **never** rewritten by
+/// `cs evolve`, so the hash it declares is the one the seat carries for its
+/// whole life.
+#[must_use]
+pub fn render_committee_posture(version: u32, contract_hash: &str, body: &str) -> String {
+    format!(
+        "# Committee posture (adversarial contract)\n\n\
+         <!-- This file is DURABLE and regeneration-stable. `cs evolve` does NOT\n\
+              rewrite it; the per-step `briefing.md` only points here. Editing or\n\
+              deleting it breaks the seat's persona witness. -->\n\n\
+         - **contract-version:** {version}\n\
+         - **contract-hash:** {contract_hash}\n\n\
+         ---\n\n\
+         {body}\n"
+    )
+}
+
+/// The stable pointer stanza a regenerated per-step `briefing.md` carries so a
+/// seat is always directed to its durable adversarial contract.
+///
+/// `cs evolve` re-appends this constant stanza after it regenerates
+/// `briefing.md`, but only when [`COMMITTEE_POSTURE_FILE`] exists in the
+/// molecule directory. Because the stanza is a constant and the contract lives
+/// in the separate durable file, the delivery survives every step advance — the
+/// exact hole (`BriefingNotInjected`) this closes.
+#[must_use]
+pub const fn committee_posture_reference() -> &'static str {
+    "## Committee posture\n\n\
+     This molecule is a **cross-provider committee seat**. Its adversarial \
+     contract is authoritative and lives in the durable, regeneration-stable \
+     file `committee-posture.md` in this molecule's directory. Read it now and \
+     honour it: it is NOT reproduced inline here because `cs evolve` \
+     regenerates this briefing on every step and would clobber an inline copy. \
+     `committee-posture.md` is never regenerated — it is the contract you were \
+     seated under.\n"
+}
+
 /// The role a seat plays on the committee.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -165,6 +224,37 @@ pub struct AdversarialBriefing {
 }
 
 impl AdversarialBriefing {
+    /// Build an [`AdversarialBriefing`] whose `injected` flag is derived from
+    /// the **durable-file delivery** two-fact test, closing the
+    /// `BriefingNotInjected` hole (committee-20260723-c0a1).
+    ///
+    /// The contract counts as delivered — and the persona witness passes — only
+    /// when BOTH facts hold:
+    ///
+    /// - `posture_file_present`: the durable [`COMMITTEE_POSTURE_FILE`] exists
+    ///   in the seat's molecule directory (the contract survives regeneration
+    ///   because *this* file is never rewritten by `cs evolve`), and
+    /// - `briefing_references_posture`: the seat's regenerated per-step
+    ///   `briefing.md` carries the stable [`committee_posture_reference`]
+    ///   pointer at it.
+    ///
+    /// An inline `## Committee posture` section written straight into
+    /// `briefing.md` is *not* durable delivery — the next `cs evolve` clobbers
+    /// it — so it can never satisfy this constructor.
+    #[must_use]
+    pub fn from_durable_injection(
+        version: u32,
+        contract_hash: impl Into<String>,
+        posture_file_present: bool,
+        briefing_references_posture: bool,
+    ) -> Self {
+        Self {
+            version,
+            contract_hash: contract_hash.into(),
+            injected: posture_file_present && briefing_references_posture,
+        }
+    }
+
     /// Whether this briefing is a valid, current, *delivered* adversarial
     /// contract: recognised version, non-empty hash, and really injected.
     #[must_use]
@@ -949,6 +1039,83 @@ mod tests {
     #[test]
     fn empty_jury_cannot_confirm() {
         assert_eq!(committee_verdict(&[]), CommitteeVerdict::Inconclusive);
+    }
+
+    // ── durable committee-posture delivery (witness 2 hole) ──────────────
+
+    #[test]
+    fn posture_document_pins_version_and_hash() {
+        let doc = render_committee_posture(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:cafe",
+            "Refute the fix. Try to make the falsifier go red.",
+        );
+        assert!(doc.contains(&format!(
+            "contract-version:** {ADVERSARIAL_BRIEFING_VERSION}"
+        )));
+        assert!(doc.contains("contract-hash:** blake3:cafe"));
+        assert!(doc.contains("Refute the fix"));
+        // States its own durability so a reader (or a script) is warned off.
+        assert!(doc.to_lowercase().contains("durable"));
+    }
+
+    #[test]
+    fn posture_reference_names_the_durable_file_not_an_inline_copy() {
+        let stanza = committee_posture_reference();
+        assert!(stanza.contains(COMMITTEE_POSTURE_FILE));
+        // The pointer must explain *why* it is a pointer, not an inline copy —
+        // that is the whole point of surviving regeneration.
+        assert!(stanza.contains("cs evolve"));
+    }
+
+    #[test]
+    fn durable_injection_requires_both_file_and_reference() {
+        // Both facts present → delivered → witness passes.
+        let ok = AdversarialBriefing::from_durable_injection(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:cafe",
+            true,
+            true,
+        );
+        assert!(ok.injected);
+        assert!(ok.is_valid());
+
+        // File present but briefing does not reference it → not delivered.
+        let no_ref = AdversarialBriefing::from_durable_injection(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:cafe",
+            true,
+            false,
+        );
+        assert!(!no_ref.injected);
+        assert!(!no_ref.is_valid());
+
+        // Briefing references the file but the durable file is missing → the
+        // pointer is dangling, so the contract was never actually delivered.
+        let dangling = AdversarialBriefing::from_durable_injection(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:cafe",
+            false,
+            true,
+        );
+        assert!(!dangling.injected);
+    }
+
+    #[test]
+    fn a_seat_with_durable_posture_delivery_is_admitted() {
+        // End-to-end: a refuter whose contract is delivered via the durable
+        // file (not a clobbered inline section) passes witness 2.
+        let gen = seat("gen", SeatRole::Generator, "anthropic", "author");
+        let mut delivered = seat("delivered", SeatRole::Refuter, "openai", "skeptic");
+        delivered.persona.briefing = Some(AdversarialBriefing::from_durable_injection(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:cafe",
+            true,
+            true,
+        ));
+        let plan = plan_committee(&gen, &[delivered], root_req());
+        assert_eq!(plan.admitted.len(), 1);
+        assert!(plan.rejected.is_empty());
     }
 
     #[test]

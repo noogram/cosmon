@@ -1213,6 +1213,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 
@@ -1939,6 +1940,7 @@ description = "write"
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         store.save_molecule(&p, &p_data).unwrap();
 
@@ -2040,6 +2042,7 @@ description = "write"
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         store
             .save_molecule(

@@ -103,6 +103,7 @@ fn write_mol(store: &FileStore, id: &str, links: Vec<MoleculeLink>) {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(&mol.id, &mol).expect("save molecule");
 }

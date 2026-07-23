@@ -683,6 +683,7 @@ pub(crate) mod test_support {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         use cosmon_state::StateStore as _;
         store.save_molecule(mol, &data).unwrap();

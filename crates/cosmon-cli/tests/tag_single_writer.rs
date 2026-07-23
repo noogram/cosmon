@@ -104,6 +104,7 @@ fn seed_molecule(state_dir: &Path, id: &str) -> MoleculeId {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }; // intentional newline to keep imports sorted above
 
     store.save_molecule(&mol_id, &mol).unwrap();

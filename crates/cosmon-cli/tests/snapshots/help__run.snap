@@ -87,6 +87,13 @@ Options:
       --resident-model <RESIDENT_MODEL>
           Model already warm in the oracle's VRAM at runtime start, so the affinity reorder drains its bucket first with no reload. Only read when `--affinity` is set; a cold start (unset) simply pays one extra load for the first bucket
 
+      --adapter <NAME>
+          **Opt-in run-wide adapter directive** (resident mode only).
+          
+          The resident scheduler owns exactly one run-wide flag intent — this flag — and nothing below it (COSMON-DEV #21). Passing `--adapter <name>` is the operator's **explicit, conscious** choice to spend on that adapter for *this run*: it stamps every **pin-less** molecule dispatched — both static frontier nodes and children a worker nucleates dynamically mid-run (the converge/committee loop). A per-molecule pin still wins over it.
+          
+          When this flag is **absent**, the scheduler stamps nothing: the shelled `cs tackle` inherits the environment and runs the *full* canonical resolution chain itself (formula step → `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config → the built-in `local` floor). So the operator's live env, session hammer, and committed config are all honoured under `--resident` exactly as they are under a bare `cs tackle` — the resident loop no longer masks them with a rung-1 `--adapter local` floor (the #21 defect). The `local` floor is still reached iff nothing higher speaks, so an *inadvertent* paid dispatch remains impossible: a paid adapter is chosen only by a conscious flag, formula step, env export, or committed config. See `docs/adr` (ADR-095) and the `cs tackle` adapter-chain docs for the single canonical resolution order.
+
   -h, --help
           Print help (see a summary with '-h')
 

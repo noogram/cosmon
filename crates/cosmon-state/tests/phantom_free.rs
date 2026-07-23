@@ -94,6 +94,7 @@ fn pending_mol(id: &str) -> MoleculeData {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }
 }
 

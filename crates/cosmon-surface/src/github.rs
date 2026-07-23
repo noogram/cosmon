@@ -304,9 +304,7 @@ const PUBLISH_GESTURE_ENV: &str = "COSMON_SURFACE_PUBLISH";
 /// Read [`PUBLISH_GESTURE_ENV`] and decide whether the operator authorized a
 /// publish to a public repo this run.
 fn publish_gesture_present() -> bool {
-    std::env::var(PUBLISH_GESTURE_ENV)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
+    std::env::var(PUBLISH_GESTURE_ENV).is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
 }
 
 /// The invisible molecule marker for an issue body, or `None` in public
@@ -911,6 +909,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 

@@ -153,10 +153,20 @@ pub(crate) fn build_molecule_states(
                 blocked_by,
                 merged_at: m.merged_at,
                 stuck_at: m.stuck_at,
-                adapter: m
-                    .process
-                    .as_ref()
-                    .and_then(|process| process.adapter_name.clone()),
+                // Prefer the durable per-molecule pin
+                // ([`MoleculeData::adapter`], stamped by `cs nucleate
+                // --adapter`) over the process-stamped adapter. A committee
+                // seat nucleated for a distinct family must project that
+                // family *before* it is tackled, so the resident scheduler's
+                // per-molecule pin (`m.adapter`) wins over a run-wide
+                // `cs run --adapter` directive (committee-20260723-c0a1). The
+                // process fallback keeps the pre-pin contract for molecules
+                // that carry no durable pin but have already been tackled.
+                adapter: m.adapter.clone().or_else(|| {
+                    m.process
+                        .as_ref()
+                        .and_then(|process| process.adapter_name.clone())
+                }),
             }
         })
         .collect();
@@ -1576,7 +1586,50 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
+    }
+
+    #[test]
+    fn molecule_states_prefer_durable_adapter_pin_over_process() {
+        use cosmon_core::process::MoleculeProcess;
+
+        // (1) A durable pin with no process yet — the committee-seat case: the
+        // family must project *before* the seat is ever tackled so the resident
+        // scheduler's per-molecule pin wins over its run directive.
+        let mut pinned = make_molecule("aaaa", MoleculeStatus::Pending);
+        pinned.adapter = Some("mistral".into());
+        pinned.process = None;
+
+        // (2) No durable pin, but a tackled process stamped an adapter — the
+        // pre-pin contract must still project the process adapter.
+        let mut process_only = make_molecule("bbbb", MoleculeStatus::Running);
+        process_only.adapter = None;
+        process_only.process = Some(
+            MoleculeProcess::new(
+                cosmon_core::id::WorkerId::new("w-bbbb").unwrap(),
+                "sess-bbbb",
+            )
+            .with_adapter_name("claude"),
+        );
+
+        // (3) Both present — the durable pin wins; a run directive that later
+        // stamped the process must never override the seat's family intent.
+        let mut both = make_molecule("cccc", MoleculeStatus::Running);
+        both.adapter = Some("mistral".into());
+        both.process = Some(
+            MoleculeProcess::new(
+                cosmon_core::id::WorkerId::new("w-cccc").unwrap(),
+                "sess-cccc",
+            )
+            .with_adapter_name("claude"),
+        );
+
+        let states = build_molecule_states(&[pinned, process_only, both]);
+        // build_molecule_states sorts by id: aaaa, bbbb, cccc.
+        assert_eq!(states[0].adapter.as_deref(), Some("mistral"));
+        assert_eq!(states[1].adapter.as_deref(), Some("claude"));
+        assert_eq!(states[2].adapter.as_deref(), Some("mistral"));
     }
 
     #[test]

@@ -57,6 +57,10 @@ Options:
           Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
           
           Every invocation (with or without the flag) emits an [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`) can answer "which Adapter ran for this molecule?" without parsing shell history.
+          
+          # Composition with `cs run --resident` (issue-#21, reconciled)
+          
+          The resident loop (`cs run --resident`) is **not a second resolver**; it is a composer that delegates to this one chain. Its scheduler owns only the two rung-1 flag intents — a per-molecule pin and the opt-in `cs run --adapter <name>` run directive — and stamps them onto the shelled `cs tackle`. When neither is present it stamps **no** `--adapter` flag, so this full six-level chain runs unchanged in the child: formula step → `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config → the `local` floor. The floor is therefore reached under `--resident` iff it is reached under a bare `cs tackle`, and the operator's env and committed config are honoured identically on both paths — the #21 fix removed the resident-only `--adapter local` stamp that used to mask them. See `cs run --help` (`--adapter`) and `cosmon_runtime::resident`.
 
       --model <MODEL_ID>
           Per-molecule model pin — the model sibling of `--adapter` (see ADR-097).

@@ -105,6 +105,7 @@ fn seed_molecule(store: &dyn StateStore, id: &MoleculeId, freeze: bool) {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(id, &data).expect("save molecule");
 }

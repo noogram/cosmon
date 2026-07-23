@@ -1839,6 +1839,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 
@@ -2068,6 +2069,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         store.save_molecule(&mol.id.clone(), &mol).unwrap();
 
@@ -2551,6 +2553,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 }

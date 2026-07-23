@@ -314,6 +314,40 @@ pub struct CodexSessionConfig {
     /// and env beats config. `None` leaves the command byte-identical to the
     /// pre-194b shape (a bare CI checkout with no resolvable identity).
     pub git_identity: Option<GitIdentity>,
+
+    /// Extra directories the codex sandbox must treat as **writable**, beyond
+    /// the primary workspace (cwd = the worker's worktree).
+    ///
+    /// # The bug this closes (task-20260723-91db, Blocage 2)
+    ///
+    /// A cosmon worker's cwd is its isolated worktree
+    /// (`<main-repo>/.worktrees/<mol>/`), but the fleet state it must write —
+    /// the `fleet.lock` / `trunk.lock` advisory locks, molecule state, and
+    /// `events.jsonl` — lives in the **main** repo's `.cosmon/state/`
+    /// (walk-up discovery redirects a worktree's state host to the main
+    /// checkout, see `cosmon_filestore::walk_up_find_cosmon_dir_from`). That
+    /// path is a sibling-of-an-ancestor of the worktree, i.e. *outside* the
+    /// cwd subtree. Codex's `workspace-write` seatbelt/landlock sandbox makes
+    /// only the cwd (and `$TMPDIR`) writable by default, so `cs evolve` /
+    /// `cs complete` writing the lock there fails with `Operation not
+    /// permitted` — the codex worker does the work but can never persist it
+    /// or self-complete, and the molecule wedges `running` with a dead pane
+    /// (observed 2× — eb9f, e559). The morphological fix is codex's own
+    /// first-class `--add-dir <DIR>` flag ("Additional directories that
+    /// should be writable alongside the primary workspace"): each root here
+    /// is emitted as one `--add-dir` on the spawn command.
+    ///
+    /// **Structural, not preferential.** Like [`NO_STARTUP_UPDATE_OVERRIDE`],
+    /// these `--add-dir` flags are emitted in *both* launch modes and are
+    /// **not** part of the [`DEFAULT_INTERACTIVE_ARGS`] set an
+    /// `[adapters.codex].extra_args` row replaces — an operator who overrides
+    /// the flags to adopt a genuine `--sandbox workspace-write` posture (the
+    /// escape hatch that *drops* the nuclear
+    /// `--dangerously-bypass-approvals-and-sandbox` default) must never
+    /// thereby lose the worker's ability to write its own completion lock.
+    /// Empty (the absence-default) emits no `--add-dir` and leaves the command
+    /// byte-identical to the pre-fix shape.
+    pub writable_roots: Vec<PathBuf>,
 }
 
 /// An operator git identity — the `(name, email)` pinned into the author and
@@ -352,6 +386,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             let mut cmd = bin;
             cmd.push_str(" exec");
             push_no_update_override(&mut cmd);
+            push_writable_roots(&mut cmd, &config.writable_roots);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -369,6 +404,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             // claude-mirror that also fixes the submission bug).
             let mut cmd = format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} {bin}");
             push_no_update_override(&mut cmd);
+            push_writable_roots(&mut cmd, &config.writable_roots);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -399,6 +435,21 @@ fn push_no_update_override(cmd: &mut String) {
     for token in NO_STARTUP_UPDATE_OVERRIDE {
         cmd.push(' ');
         cmd.push_str(token);
+    }
+}
+
+/// Append one structural `--add-dir <root>` flag per extra writable root
+/// (task-20260723-91db, Blocage 2). Each path is [`shell_escape`]d.
+///
+/// This declares the out-of-worktree cosmon state dir writable to codex's
+/// sandbox so a codex worker can persist its own `cs evolve` / `cs complete`
+/// lock. See [`CodexSessionConfig::writable_roots`] for why this is
+/// structural (emitted in both modes, surviving an `extra_args` override).
+/// An empty slice appends nothing.
+fn push_writable_roots(cmd: &mut String, roots: &[PathBuf]) {
+    for root in roots {
+        cmd.push_str(" --add-dir ");
+        cmd.push_str(&shell_escape(&root.to_string_lossy()));
     }
 }
 
@@ -937,6 +988,7 @@ mod tests {
             telemetry: None,
             pre_existing_worker: None,
             git_identity: None,
+            writable_roots: vec![],
         }
     }
 
@@ -1040,6 +1092,69 @@ mod tests {
             build_codex_command(&c),
             "codex exec -c check_for_update_on_startup=false 'it'\\''s done'"
         );
+    }
+
+    /// Blocage 2 (task-20260723-91db) — the deterministic repro that fails for
+    /// the RIGHT reason before the fix. A cosmon worker's cwd is its worktree,
+    /// but the fleet lock it must write on `cs evolve` / `cs complete` lives in
+    /// the main repo's out-of-worktree `.cosmon/state/`. Codex's
+    /// `workspace-write` sandbox denies that write (`Operation not permitted`)
+    /// unless the state dir is declared writable. The assembled command MUST
+    /// therefore carry a `--add-dir <state-dir>` for the resolved root; without
+    /// the fix `writable_roots` was absent from the struct entirely and no
+    /// `--add-dir` could be emitted, so a codex worker could never self-close.
+    #[test]
+    fn writable_root_declares_out_of_worktree_state_dir_writable() {
+        let state = PathBuf::from("/Users/op/galaxies/cosmon/.cosmon");
+        for mode in [CodexMode::Interactive, CodexMode::Exec] {
+            let mut c = cfg(mode, Some("audit"), vec![]);
+            c.writable_roots = vec![state.clone()];
+            let cmd = build_codex_command(&c);
+            assert!(
+                cmd.contains("--add-dir /Users/op/galaxies/cosmon/.cosmon"),
+                "state dir not declared writable in {mode:?}: {cmd:?}"
+            );
+        }
+    }
+
+    /// The `--add-dir` declaration is **structural**: like the self-update
+    /// kill, it survives an `extra_args` override that adopts a genuine
+    /// `--sandbox workspace-write` posture (dropping the nuclear bypass
+    /// default). Otherwise an operator hardening the sandbox would silently
+    /// re-break the worker's ability to write its own completion lock.
+    #[test]
+    fn writable_root_survives_extra_args_override() {
+        let mut c = cfg(
+            CodexMode::Interactive,
+            None,
+            vec!["--sandbox".into(), "workspace-write".into()],
+        );
+        c.writable_roots = vec![PathBuf::from("/main/.cosmon")];
+        let cmd = build_codex_command(&c);
+        assert!(cmd.contains("--sandbox workspace-write"), "{cmd:?}");
+        assert!(cmd.contains("--add-dir /main/.cosmon"), "{cmd:?}");
+    }
+
+    /// A path with an unsafe character is single-quoted (shell round-trip),
+    /// and multiple roots each get their own `--add-dir`.
+    #[test]
+    fn writable_roots_are_escaped_and_repeatable() {
+        let mut c = cfg(CodexMode::Exec, Some("go"), vec![]);
+        c.writable_roots = vec![
+            PathBuf::from("/space dir/.cosmon"),
+            PathBuf::from("/plain/.cosmon"),
+        ];
+        let cmd = build_codex_command(&c);
+        assert!(cmd.contains("--add-dir '/space dir/.cosmon'"), "{cmd:?}");
+        assert!(cmd.contains("--add-dir /plain/.cosmon"), "{cmd:?}");
+    }
+
+    /// Empty `writable_roots` (the absence-default) emits no `--add-dir`, so
+    /// the command is byte-identical to the pre-fix shape — backward compatible.
+    #[test]
+    fn empty_writable_roots_emit_no_add_dir() {
+        let c = cfg(CodexMode::Interactive, None, vec![]);
+        assert!(!build_codex_command(&c).contains("--add-dir"));
     }
 
     #[test]

@@ -68,6 +68,7 @@ fn test_mol(id: &str, status: MoleculeStatus) -> MoleculeData {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }
 }
 

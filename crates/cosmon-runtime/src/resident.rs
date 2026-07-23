@@ -65,10 +65,6 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 
-/// Resident dispatches must never silently inherit a paid adapter default.
-/// A directional policy can replace this floor through [`EnsembleMolecule::adapter`].
-const SAFE_DEFAULT_ADAPTER: &str = "local";
-
 /// Failure modes of the resident loop. Soft-contract: every error is also
 /// captured in the NDJSON trace so a post-mortem reads the full record.
 #[derive(Debug, thiserror::Error)]
@@ -482,6 +478,19 @@ pub trait ResidentScheduler: Send {
 pub struct ReadyFrontierScheduler {
     tackled: std::collections::HashSet<String>,
     merged: std::collections::HashSet<String>,
+    /// Explicit, opt-in run-wide adapter directive (`cs run --adapter <name>`).
+    ///
+    /// A rung-1 flag intent the scheduler owns run-wide: when `Some`, every
+    /// **pin-less** molecule this run dispatches is stamped with it — static
+    /// frontier nodes AND children a worker nucleates dynamically mid-run (the
+    /// frontier is re-derived from the fresh ensemble each tick, so a molecule
+    /// that only appears later inherits the directive by construction). A
+    /// per-molecule pin ([`EnsembleMolecule::adapter`]) still wins over it.
+    /// `None` (the default) stamps nothing: the shelled `cs tackle` then runs
+    /// the full canonical precedence chain itself (formula step →
+    /// `$COSMON_DEFAULT_ADAPTER` → config → the `local` floor), so the operator's
+    /// live env/config intent is honoured rather than masked (COSMON-DEV #21).
+    run_adapter: Option<String>,
 }
 
 impl ReadyFrontierScheduler {
@@ -490,6 +499,22 @@ impl ReadyFrontierScheduler {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Set the explicit, opt-in run-wide adapter directive.
+    ///
+    /// `Some(name)` (from `cs run --adapter <name>`) stamps pin-less molecules
+    /// dispatched this run with that adapter; `None` stamps nothing, letting the
+    /// child `cs tackle` resolve the full canonical chain (env, config, then the
+    /// `local` floor) on its own. This is the deliberate opt-in that lets a
+    /// resident run drive cognitive nodes on a paid adapter without breaking the
+    /// "never *silently* inherit a paid default" invariant (the operator chose
+    /// it consciously, per invocation). A per-molecule pin still overrides the
+    /// directive.
+    #[must_use]
+    pub fn with_run_adapter(mut self, run_adapter: Option<String>) -> Self {
+        self.run_adapter = run_adapter;
+        self
     }
 }
 
@@ -586,11 +611,23 @@ impl ResidentScheduler for ReadyFrontierScheduler {
             if unblocked {
                 out.push(Decision::Tackle {
                     molecule_id: m.id.clone(),
-                    adapter: Some(
-                        m.adapter
-                            .clone()
-                            .unwrap_or_else(|| SAFE_DEFAULT_ADAPTER.to_owned()),
-                    ),
+                    // The scheduler owns exactly the two rung-1 flag intents and
+                    // NOTHING below them (COSMON-DEV #21, G1 contract §1):
+                    //   1. a per-molecule pin (`m.adapter`),
+                    //   2. an explicit opt-in run directive (`self.run_adapter`,
+                    //      from `cs run --adapter <name>`).
+                    // When BOTH are absent it emits `None` — no `--adapter`
+                    // flag on the shelled `cs tackle` — so the child runs the
+                    // *full* canonical precedence chain (formula step →
+                    // `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global
+                    // config → the `local` floor). Substituting the floor here
+                    // would render `--adapter local`, occupy rung 1, and mask
+                    // the operator's live env/config intent — the exact defect
+                    // #21 reports. The floor is not deleted; it moves to its
+                    // correct owner, the canonical resolver's rung 6
+                    // (`BUILTIN_FLOOR_ADAPTER`), reached by the child iff no
+                    // higher rung speaks.
+                    adapter: m.adapter.clone().or_else(|| self.run_adapter.clone()),
                 });
                 self.tackled.insert(m.id.clone());
             }
@@ -1757,6 +1794,110 @@ mod tests {
     }
 
     #[test]
+    fn run_adapter_directive_overrides_local_floor_for_pinless() {
+        // DELIVERABLE 1 (F3+F4): an explicit, opt-in `cs run --adapter claude`
+        // directive replaces the `local` floor for a PIN-LESS molecule so a
+        // resident run can drive cognitive nodes on a paid adapter the operator
+        // consciously chose. Without the directive the floor stays local
+        // (anti-silent-spend guard preserved).
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("task-pinless", "pending", &[])],
+        };
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-pinless".into(),
+                adapter: Some("claude".into()),
+            }],
+            "an explicit run directive must replace the local floor for a pin-less molecule"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_absent_emits_no_adapter_flag() {
+        // COSMON-DEV #21 (G1 contract §3.1): with no pin and no run directive
+        // the scheduler owns no flag-rung intent, so it MUST emit `None` — no
+        // `--adapter` argument on the shelled `cs tackle`. The floor is not
+        // stamped here; the child runs the full canonical chain
+        // (`$COSMON_DEFAULT_ADAPTER` → config → the `local` floor) itself. This
+        // is what preserves the operator's live env/config intent instead of
+        // masking it with a rung-1 `--adapter local`.
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("task-pinless", "pending", &[])],
+        };
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_adapter(None);
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-pinless".into(),
+                adapter: None,
+            }],
+            "no pin + no run directive must emit no adapter flag (delegate the full chain to cs tackle)"
+        );
+        // Concretely: no `--adapter` token reaches the child argv.
+        assert!(
+            !shell_out_args(&decisions[0], 7).contains(&"--adapter".to_owned()),
+            "a pin-less, directive-less dispatch must not render --adapter"
+        );
+    }
+
+    #[test]
+    fn molecule_pin_beats_run_adapter_directive() {
+        // Resolution precedence: a per-molecule pin (`m.adapter`) is a stronger,
+        // more specific intent than the run-wide directive, so it wins. The
+        // directive only ever replaces the *floor*, never a real pin.
+        let snapshot = EnsembleSnapshot::from_json(
+            r#"{"molecule_states":[{"id":"task-codex","status":"pending","adapter":"codex"}]}"#,
+        )
+        .unwrap();
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "task-codex".into(),
+                adapter: Some("codex".into()),
+            }],
+            "a per-molecule pin must beat the run-wide directive"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_applies_to_dynamically_nucleated_child() {
+        // F4: the floor also hit children nucleated dynamically mid-run by
+        // workers (the `converge` loop), making self-drive impossible without
+        // per-node pins. Because the directive lives on the scheduler and the
+        // frontier is re-derived from the fresh ensemble each tick, a pin-less
+        // molecule that only *appears* on a later tick inherits the directive
+        // too — no static pin required.
+        let mut scheduler =
+            ReadyFrontierScheduler::new().with_run_adapter(Some("claude".to_owned()));
+        // Tick 1: only the parent is present.
+        let tick1 = EnsembleSnapshot {
+            molecules: vec![mol("parent", "pending", &[])],
+        };
+        let _ = scheduler.next_decisions(&tick1);
+        // Tick 2: a worker nucleated a pin-less child (blocker torn down).
+        let tick2 = EnsembleSnapshot {
+            molecules: vec![mol("child", "pending", &[])],
+        };
+        let decisions = scheduler.next_decisions(&tick2);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "child".into(),
+                adapter: Some("claude".into()),
+            }],
+            "a dynamically-nucleated pin-less child must inherit the run directive"
+        );
+    }
+
+    #[test]
     fn snapshot_parses_kind_and_tags_for_scheduler_policy() {
         let json = r#"{"molecule_states":[{
             "id":"decision","status":"pending","blocked_by":[],
@@ -1779,7 +1920,9 @@ mod tests {
             d1,
             vec![Decision::Tackle {
                 molecule_id: "a".into(),
-                adapter: Some("local".into()),
+                // No pin, no run directive → no flag stamp; the child resolves
+                // the full canonical chain (COSMON-DEV #21).
+                adapter: None,
             }]
         );
         // Same snapshot → no re-tackle.
@@ -1816,7 +1959,8 @@ mod tests {
             decisions,
             vec![Decision::Tackle {
                 molecule_id: "decision".into(),
-                adapter: Some("local".into()),
+                // Pin-less, directive-less → no flag; child runs the full chain.
+                adapter: None,
             }]
         );
     }
@@ -1940,7 +2084,8 @@ mod tests {
                 Decision::Done("a".into()),
                 Decision::Tackle {
                     molecule_id: "b".into(),
-                    adapter: Some("local".into()),
+                    // Pin-less, directive-less → no flag; child runs the chain.
+                    adapter: None,
                 },
             ]
         );
@@ -1990,7 +2135,8 @@ mod tests {
         assert!(
             decisions.contains(&Decision::Tackle {
                 molecule_id: "redteam".into(),
-                adapter: Some("local".into()),
+                // Pin-less, directive-less → no flag; child runs the chain.
+                adapter: None,
             }),
             "fan-in must chain when one blocker is torn down and the other \
              completed, got {decisions:?}"
@@ -2015,7 +2161,8 @@ mod tests {
             decisions,
             vec![Decision::Tackle {
                 molecule_id: "architect".into(),
-                adapter: Some("local".into()),
+                // Pin-less, directive-less → no flag; child runs the chain.
+                adapter: None,
             }],
             "child must tackle behind a delivered (stuck_at=None) frozen \
              mission, got {decisions:?}"

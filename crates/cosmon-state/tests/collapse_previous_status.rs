@@ -105,6 +105,7 @@ fn mol(id: &str, status: MoleculeStatus, stuck: bool) -> MoleculeData {
         stuck_at: if stuck { Some(now) } else { None },
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }
 }
 

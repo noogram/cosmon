@@ -145,6 +145,21 @@ pub struct Args {
     /// envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`)
     /// can answer "which Adapter ran for this molecule?" without parsing
     /// shell history.
+    ///
+    /// # Composition with `cs run --resident` (issue-#21, reconciled)
+    ///
+    /// The resident loop (`cs run --resident`) is **not a second resolver**; it
+    /// is a composer that delegates to this one chain. Its scheduler owns only
+    /// the two rung-1 flag intents — a per-molecule pin and the opt-in
+    /// `cs run --adapter <name>` run directive — and stamps them onto the shelled
+    /// `cs tackle`. When neither is present it stamps **no** `--adapter` flag, so
+    /// this full six-level chain runs unchanged in the child: formula step →
+    /// `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config → the
+    /// `local` floor. The floor is therefore reached under `--resident` iff it is
+    /// reached under a bare `cs tackle`, and the operator's env and committed
+    /// config are honoured identically on both paths — the #21 fix removed the
+    /// resident-only `--adapter local` stamp that used to mask them. See
+    /// `cs run --help` (`--adapter`) and `cosmon_runtime::resident`.
     #[arg(long, value_name = "NAME")]
     pub adapter: Option<String>,
 
@@ -4691,6 +4706,24 @@ fn spawn_codex_and_prompt(
     // PATH at exec time, the same contract `preflight::adapter_binary`
     // already checks ("codex" present on PATH). An absent binary surfaces
     // here as an `[exited]` pane and is caught by the readiness probe below.
+    // Blocage 2 (task-20260723-91db): a codex worker's cwd is its worktree, but
+    // the fleet lock / molecule state / events.jsonl it must write on
+    // `cs evolve` / `cs complete` live in the MAIN repo's out-of-worktree
+    // `.cosmon/state/` (walk-up redirects a worktree's state host to the main
+    // checkout). Codex's `workspace-write` sandbox makes only cwd + /tmp +
+    // $TMPDIR writable, so that write is denied (`Operation not permitted`) and
+    // the worker can never persist its audit or self-complete — the molecule
+    // wedges `running` with a dead pane. Declare the main-repo `.cosmon/` dir
+    // (which contains `state/`) writable via codex's first-class `--add-dir`
+    // flag. `walk_up_find_cosmon_dir_from` resolves that dir from the worktree,
+    // following the `.git` worktree pointer back to the main checkout — exactly
+    // the same redirect `cs evolve` uses to find the state store, so the two
+    // agree by construction. `None` (no `.cosmon/` ancestor — e.g. a bare CI
+    // checkout) leaves `writable_roots` empty and the command byte-identical.
+    let writable_roots = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree_path)
+        .into_iter()
+        .collect::<Vec<_>>();
+
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -4703,6 +4736,7 @@ fn spawn_codex_and_prompt(
         telemetry: None,
         pre_existing_worker: None,
         git_identity,
+        writable_roots,
     };
 
     codex::spawn_codex_session(&config)
@@ -7401,6 +7435,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 

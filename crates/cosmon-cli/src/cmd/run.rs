@@ -192,6 +192,30 @@ pub struct Args {
     /// load for the first bucket.
     #[arg(long)]
     pub resident_model: Option<String>,
+
+    /// **Opt-in run-wide adapter directive** (resident mode only).
+    ///
+    /// The resident scheduler owns exactly one run-wide flag intent — this flag
+    /// — and nothing below it (COSMON-DEV #21). Passing `--adapter <name>` is the
+    /// operator's **explicit, conscious** choice to spend on that adapter for
+    /// *this run*: it stamps every **pin-less** molecule dispatched — both static
+    /// frontier nodes and children a worker nucleates dynamically mid-run (the
+    /// converge/committee loop). A per-molecule pin still wins over it.
+    ///
+    /// When this flag is **absent**, the scheduler stamps nothing: the shelled
+    /// `cs tackle` inherits the environment and runs the *full* canonical
+    /// resolution chain itself (formula step → `$COSMON_DEFAULT_ADAPTER` →
+    /// per-galaxy config → global config → the built-in `local` floor). So the
+    /// operator's live env, session hammer, and committed config are all honoured
+    /// under `--resident` exactly as they are under a bare `cs tackle` — the
+    /// resident loop no longer masks them with a rung-1 `--adapter local` floor
+    /// (the #21 defect). The `local` floor is still reached iff nothing higher
+    /// speaks, so an *inadvertent* paid dispatch remains impossible: a paid
+    /// adapter is chosen only by a conscious flag, formula step, env export, or
+    /// committed config. See `docs/adr` (ADR-095) and the `cs tackle`
+    /// adapter-chain docs for the single canonical resolution order.
+    #[arg(long, value_name = "NAME")]
+    pub adapter: Option<String>,
 }
 
 /// Execute the `run` command.
@@ -672,6 +696,27 @@ fn ctrlc_wire(handle: &cosmon_runtime::ShutdownSignal) -> Result<(), ()> {
     ctrlc::set_handler(move || h.trip()).map_err(|_| ())
 }
 
+/// Resolve the opt-in run-wide adapter directive for `cs run --resident`
+/// (COSMON-DEV #21).
+///
+/// The resident scheduler owns exactly **one** run-wide flag intent: this
+/// `--adapter <name>` flag, the operator's in-the-moment choice to stamp every
+/// pin-less molecule this run. It is a rung-1 selection, on par with a
+/// per-molecule pin.
+///
+/// `$COSMON_DEFAULT_ADAPTER` is deliberately **not** consulted here. Per the G1
+/// behavioural contract, the session hammer is rung 3 of the *single* canonical
+/// chain and MUST be resolved by the child `cs tackle` (which inherits the
+/// environment), yielding source `EnvVar` — not hoisted into a rung-1
+/// `--adapter` that would mask an intervening formula-step pin (rung 2) and
+/// mis-report the selection source. When this flag is absent the scheduler
+/// stamps nothing, so `cs tackle` runs the whole chain (formula step → env →
+/// per-galaxy config → global config → `local` floor) unmasked. An empty flag
+/// string is treated as unset and falls through to that delegation.
+fn resolve_run_adapter(flag: Option<&str>) -> Option<String> {
+    flag.filter(|s| !s.is_empty()).map(str::to_owned)
+}
+
 /// **ADR-095** — Resident Runtime entry point.
 ///
 /// Distinct from the legacy [`run`] body: instantiates the
@@ -717,7 +762,21 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         config.cs_binary = self_exe;
     }
 
-    let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
+    // Opt-in run-wide adapter directive (COSMON-DEV #21, G1 contract §1): the
+    // resident scheduler owns exactly this one run-wide flag intent —
+    // `cs run --adapter <name>` — plus each molecule's own pin. It stamps
+    // pin-less molecules (static AND dynamically-nucleated) with the flag when
+    // present, and stamps NOTHING when absent. In the absent case the shelled
+    // `cs tackle` inherits this process's environment and runs the full
+    // canonical chain itself — `$COSMON_DEFAULT_ADAPTER` (rung 3, source
+    // `EnvVar`), per-galaxy + global config (rungs 4–5), then the `local` floor
+    // (rung 6). We must NOT read the env here and hoist it into a rung-1 flag:
+    // that was the #21 defect (it masked the env/config rungs the operator set).
+    // Delegating keeps the single canonical resolver as the one source of truth
+    // for every dispatch path, resident included.
+    let run_adapter = resolve_run_adapter(args.adapter.as_deref());
+    let scheduler: Box<dyn ResidentScheduler> =
+        Box::new(ReadyFrontierScheduler::new().with_run_adapter(run_adapter));
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();
 
@@ -825,6 +884,45 @@ mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
+    // COSMON-DEV #21 (G1 contract §1): the resident scheduler owns exactly ONE
+    // run-wide flag intent — the `cs run --adapter <name>` flag. It does NOT
+    // consult `$COSMON_DEFAULT_ADAPTER`: the session hammer is rung 3 of the
+    // single canonical chain and is resolved by the child `cs tackle` (source
+    // `EnvVar`), never hoisted into a rung-1 directive here. Exercise the pure
+    // resolver so this boundary is pinned without mutating process-global env.
+    #[test]
+    fn run_adapter_directive_uses_the_flag() {
+        assert_eq!(
+            resolve_run_adapter(Some("claude")),
+            Some("claude".to_owned()),
+            "an explicit --adapter flag is the run-wide directive"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_absent_when_flag_absent() {
+        // No flag → the scheduler stamps nothing; the child `cs tackle` then
+        // resolves the full chain itself (env → config → the `local` floor).
+        // Crucially the env is NOT read here, so it cannot be mis-hoisted to a
+        // rung-1 `--adapter` that would mask a formula-step pin (rung 2).
+        assert_eq!(
+            resolve_run_adapter(None),
+            None,
+            "with no --adapter flag the directive is None (env delegated to cs tackle)"
+        );
+    }
+
+    #[test]
+    fn run_adapter_directive_treats_empty_flag_as_unset() {
+        // `--adapter ''` is treated as unset and falls through to delegation,
+        // never pinning a nonsensical empty adapter name.
+        assert_eq!(
+            resolve_run_adapter(Some("")),
+            None,
+            "an empty --adapter flag must be treated as unset"
+        );
+    }
+
     fn make_store() -> (TempDir, FileStore) {
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
@@ -879,6 +977,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 

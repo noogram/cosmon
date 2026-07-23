@@ -186,6 +186,7 @@ fn seed_molecule(root: &Path, id: &str, status: &str) {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(&data.id.clone(), &data).unwrap();
 }

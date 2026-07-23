@@ -260,6 +260,28 @@ pub struct Args {
     /// fast instead of silently leaking orphans.
     #[arg(long = "require-galaxy")]
     pub(crate) require_galaxy: bool,
+
+    /// Durable per-molecule adapter pin — the **rung-1** provider-family
+    /// intent stamped at nucleation (ADR-097 / C6; committee-20260723-c0a1).
+    ///
+    /// Unlike the transient `cs tackle --adapter` flag (which routes a single
+    /// dispatch), this pin is persisted to
+    /// [`MoleculeData::adapter`](cosmon_state::MoleculeData::adapter) and
+    /// **survives any later run directive**. A `cs run --resident --adapter <X>`
+    /// owns a run-wide directive that stamps every *pin-less* molecule with
+    /// `<X>`; a molecule nucleated with `--adapter <Y>` keeps `<Y>` because the
+    /// per-molecule pin beats the run directive
+    /// (`cosmon_runtime::resident`). This is what lets a cross-provider
+    /// committee pin a seat's *distinct* family (e.g. `mistral`) so a resident
+    /// loop driving the generator's family (e.g. `claude`) cannot auto-tackle
+    /// the seat into a `FamilyCollision`.
+    ///
+    /// Values are validated against the adapter-name grammar (the same check
+    /// `cs tackle --adapter` applies); an empty or malformed name aborts the
+    /// nucleation. `None` (the default) stamps no pin — the molecule resolves
+    /// its adapter through the canonical `cs tackle` chain at dispatch.
+    #[arg(long, value_name = "NAME")]
+    pub(crate) adapter: Option<String>,
 }
 
 impl Args {
@@ -293,6 +315,7 @@ impl Args {
             expiry_policy: None,
             energy_budget: None,
             require_galaxy: false,
+            adapter: None,
         }
     }
 }
@@ -500,6 +523,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             expires_at,
             expiry_policy,
             energy_budget_cap,
+            args.adapter.as_deref(),
         )
     }
 }
@@ -870,6 +894,7 @@ fn run_single(
     expires_at: Option<DateTime<chrono::Utc>>,
     expiry_policy: Option<ExpiryPolicy>,
     energy_budget_cap: u32,
+    adapter: Option<&str>,
 ) -> anyhow::Result<()> {
     let formula = load_formula(formulas_dir, formula_name)?;
     let (result, _path) = nucleate_and_persist(
@@ -894,6 +919,7 @@ fn run_single(
         expires_at,
         expiry_policy,
         energy_budget_cap,
+        adapter,
     )?;
     emit_output(ctx, std::slice::from_ref(&result));
     Ok(())
@@ -964,6 +990,8 @@ fn run_from_declarations(
             None,
             None,
             energy_budget_cap,
+            // Declarations don't carry a per-molecule adapter pin today.
+            None,
         )
         .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
 
@@ -1093,8 +1121,39 @@ pub(crate) fn nucleate_for_spore(req: SporeNucleation<'_>) -> anyhow::Result<Nuc
         None,
         None,
         req.energy_budget_cap,
+        // Spore nodes carry no per-molecule adapter pin today.
+        None,
     )?;
     Ok(result)
+}
+
+/// Validate the *grammar* of a durable `--adapter` pin (not its
+/// registry-membership, which the dispatch seam checks).
+///
+/// An adapter name is a lowercase token: a non-empty run of ASCII
+/// alphanumerics and the separators `-`, `_`, `.` (e.g. `claude`, `llama-cpp`,
+/// `openai`). This rejects the two malformed shapes an operator or generated
+/// formula can slip in — an empty/whitespace pin, and a pin carrying spaces or
+/// shell metacharacters — before either is persisted as an unroutable pin.
+/// Returns the trimmed name on success.
+fn validate_adapter_pin_grammar(name: &str) -> anyhow::Result<String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("invalid --adapter: name is empty (provide a non-blank adapter name)");
+    }
+    if trimmed.len() > 64 {
+        anyhow::bail!("invalid --adapter `{trimmed}`: name exceeds 64 characters");
+    }
+    if let Some(bad) = trimmed
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
+        anyhow::bail!(
+            "invalid --adapter `{trimmed}`: illegal character {bad:?} \
+             (allowed: ASCII letters, digits, `-`, `_`, `.`)"
+        );
+    }
+    Ok(trimmed.to_owned())
 }
 
 /// Core nucleation + persistence path shared by both entrypoints.
@@ -1130,7 +1189,18 @@ fn nucleate_and_persist(
     expires_at: Option<DateTime<chrono::Utc>>,
     expiry_policy: Option<ExpiryPolicy>,
     energy_budget_cap: u32,
+    adapter: Option<&str>,
 ) -> anyhow::Result<(NucleateResult, PathBuf)> {
+    // Validate the durable adapter pin's *grammar* up front so a malformed
+    // family name fails the nucleation rather than being persisted as an
+    // unroutable pin. Authoritative registry-membership (built-in names ∪
+    // project `[adapters]` rows) is enforced later, at the dispatch seam
+    // (`cs tackle`), where the full declared set is loaded — nucleation
+    // deliberately stays decoupled from config loading, exactly as
+    // formula-step / env / config adapter defaults are not membership-checked
+    // here either.
+    let adapter_pin: Option<String> = adapter.map(validate_adapter_pin_grammar).transpose()?;
+
     let assign_id = assign
         .map(WorkerId::new)
         .transpose()
@@ -1253,6 +1323,7 @@ fn nucleate_and_persist(
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: adapter_pin,
     };
 
     // Soft attention-budget warning (non-fatal).
@@ -1698,6 +1769,32 @@ mod tests {
     use super::*;
     use cosmon_filestore::StateDirOrigin;
 
+    #[test]
+    fn adapter_pin_grammar_accepts_valid_names_and_trims() {
+        assert_eq!(validate_adapter_pin_grammar("claude").unwrap(), "claude");
+        assert_eq!(
+            validate_adapter_pin_grammar("llama-cpp").unwrap(),
+            "llama-cpp"
+        );
+        assert_eq!(validate_adapter_pin_grammar("openai").unwrap(), "openai");
+        // Surrounding whitespace is trimmed, not rejected.
+        assert_eq!(
+            validate_adapter_pin_grammar("  mistral ").unwrap(),
+            "mistral"
+        );
+    }
+
+    #[test]
+    fn adapter_pin_grammar_rejects_malformed_names() {
+        // Empty / whitespace-only — a briefless pin.
+        assert!(validate_adapter_pin_grammar("").is_err());
+        assert!(validate_adapter_pin_grammar("   ").is_err());
+        // Embedded space / shell metacharacters — an unroutable pin.
+        assert!(validate_adapter_pin_grammar("with space").is_err());
+        assert!(validate_adapter_pin_grammar("evil;rm").is_err());
+        assert!(validate_adapter_pin_grammar("a/b").is_err());
+    }
+
     /// A deliberate destination (a galaxy found via walk-up, an explicit
     /// `--store-dir`, or `COSMON_STATE_DIR`) is never flagged — the guard
     /// stays silent and returns `Ok`.
@@ -1769,6 +1866,7 @@ mod tests {
             expiry_policy: None,
             energy_budget: None,
             require_galaxy: false,
+            adapter: None,
         }
     }
 

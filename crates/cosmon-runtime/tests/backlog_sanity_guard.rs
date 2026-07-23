@@ -79,6 +79,7 @@ fn sediment_mol(id: &str, age_hours: i64, tags: &[&str]) -> MoleculeData {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }
 }
 

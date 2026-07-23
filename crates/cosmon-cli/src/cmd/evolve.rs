@@ -957,6 +957,15 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
         .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
     }
 
+    // Committee-posture survival: the briefing we just (re)wrote is a fresh
+    // projection of the formula step and carries NO adversarial contract. If
+    // this molecule is a committee seat — i.e. the durable, regeneration-stable
+    // `committee-posture.md` exists in its directory — re-establish the stable
+    // pointer to it so the seat's persona witness stays satisfied across every
+    // step advance (committee-20260723-c0a1, witness 2 = `BriefingNotInjected`).
+    // Runs before the seal below so the seal covers the delivered pointer.
+    reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
+
     // Soft-contract seal: hash the briefing we just wrote and append it
     // to `MoleculeData::briefing_seals`. Defensive — any failure is
     // logged and swallowed; seal emission must never block step advance.
@@ -1318,6 +1327,54 @@ fn move_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Re-establish the committee-posture pointer in a freshly regenerated
+/// `briefing.md`, when — and only when — the molecule is a committee seat.
+///
+/// A committee seat carries its adversarial contract in the durable,
+/// regeneration-stable
+/// [`committee-posture.md`](cosmon_core::committee::COMMITTEE_POSTURE_FILE) file
+/// that `cs evolve` never rewrites. This function appends the stable
+/// [`committee_posture_reference`](cosmon_core::committee::committee_posture_reference)
+/// pointer to the just-regenerated `briefing.md` so the seat's persona witness
+/// keeps seeing a briefing that *references* its contract — closing the
+/// `BriefingNotInjected` hole where wholesale briefing regeneration dropped an
+/// inline `## Committee posture` section (committee-20260723-c0a1).
+///
+/// No-ops for ordinary molecules (no durable file → nothing to point at) and is
+/// idempotent (skips when the pointer is already present), so re-running a step
+/// never stacks duplicate stanzas.
+///
+/// # Errors
+///
+/// Returns an error only if the durable file exists (this *is* a committee
+/// seat) but appending the pointer to `briefing.md` fails — a real I/O fault on
+/// the seat's contract delivery, which must not pass silently.
+fn reinstate_committee_posture_reference(
+    mol_dir: &Path,
+    briefing_path: &Path,
+) -> anyhow::Result<()> {
+    let posture_path = mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE);
+    if !posture_path.exists() {
+        // Not a committee seat — nothing to re-establish.
+        return Ok(());
+    }
+    let reference = cosmon_core::committee::committee_posture_reference();
+    let current = fs::read_to_string(briefing_path).unwrap_or_default();
+    if current.contains(reference.trim()) {
+        // Already delivered this step — stay idempotent.
+        return Ok(());
+    }
+    let mut body = current;
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push('\n');
+    body.push_str(reference);
+    fs::write(briefing_path, body).map_err(|e| {
+        anyhow::anyhow!("failed to re-establish committee-posture pointer in briefing.md: {e}")
+    })
+}
+
 /// Compute a [`BriefingSeal`] over `briefing.md`. Returns `None` if the
 /// file cannot be read — the caller treats this as "no seal", never as
 /// an error. Seal emission is a probe, not a lock.
@@ -1350,6 +1407,63 @@ fn try_seal_briefing(briefing_path: &Path, step: u32) -> Option<BriefingSeal> {
 mod tests {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn posture_reference_is_noop_without_the_durable_file() {
+        // An ordinary (non-committee) molecule: no `committee-posture.md`, so a
+        // regenerated briefing is left exactly as the formula step produced it.
+        let tmp = tempfile::tempdir().unwrap();
+        let mol_dir = tmp.path();
+        let briefing_path = mol_dir.join("briefing.md");
+        let original = "# Molecule Briefing\n\n## Current Step 1 of 2\n";
+        fs::write(&briefing_path, original).unwrap();
+
+        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+
+        assert_eq!(fs::read_to_string(&briefing_path).unwrap(), original);
+    }
+
+    #[test]
+    fn posture_reference_survives_regeneration_and_is_idempotent() {
+        // A committee seat: the durable contract lives in `committee-posture.md`.
+        let tmp = tempfile::tempdir().unwrap();
+        let mol_dir = tmp.path();
+        fs::write(
+            mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+            cosmon_core::committee::render_committee_posture(
+                cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
+                "blake3:cafe",
+                "Refute the fix.",
+            ),
+        )
+        .unwrap();
+
+        // Simulate `cs evolve` regenerating briefing.md wholesale (no contract).
+        let briefing_path = mol_dir.join("briefing.md");
+        fs::write(
+            &briefing_path,
+            "# Molecule Briefing\n\n## Current Step 2 of 3\n",
+        )
+        .unwrap();
+
+        // First advance: the pointer is (re-)established.
+        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+        let after_first = fs::read_to_string(&briefing_path).unwrap();
+        assert!(after_first.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE));
+        assert!(after_first.contains("## Committee posture"));
+
+        // Second advance on the same briefing: idempotent — no duplicate stanza.
+        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+        let after_second = fs::read_to_string(&briefing_path).unwrap();
+        assert_eq!(after_first, after_second);
+        assert_eq!(after_second.matches("## Committee posture").count(), 1);
+
+        // The durable contract file itself is never touched by this path.
+        let posture =
+            fs::read_to_string(mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE))
+                .unwrap();
+        assert!(posture.contains("Refute the fix."));
+    }
 
     fn init_repo(dir: &Path) {
         for args in [

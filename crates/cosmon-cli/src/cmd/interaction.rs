@@ -143,6 +143,7 @@ pub fn run_decay(ctx: &Context, args: &DecayArgs) -> anyhow::Result<()> {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         store.save_molecule(&nuc.id, &product)?;
         product_ids.push(nuc.id);
@@ -369,6 +370,7 @@ pub fn run_merge(ctx: &Context, args: &MergeArgs) -> anyhow::Result<()> {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(&nuc.id, &product)?;
 

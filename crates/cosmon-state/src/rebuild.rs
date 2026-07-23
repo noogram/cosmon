@@ -627,6 +627,9 @@ fn empty_molecule_data(
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        // The durable adapter pin is not event-sourced today; a rebuild from
+        // the event log alone cannot recover it and leaves it unpinned.
+        adapter: None,
     }
 }
 
@@ -1144,6 +1147,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
 
         let mol_dir = dir.path().join("mol");
@@ -1269,6 +1273,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         std::fs::write(&state_path, serde_json::to_string_pretty(&cache).unwrap()).unwrap();
         let bytes_before = std::fs::read(&state_path).unwrap();

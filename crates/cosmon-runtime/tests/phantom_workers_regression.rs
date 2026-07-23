@@ -108,6 +108,7 @@ fn seed_molecule(
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(id, &data).expect("save molecule");
 }
@@ -227,6 +228,7 @@ fn pre_fix_phantom_pathway_is_now_blocked() {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     };
     store.save_molecule(&root, &root_data).expect("save root");
     seed_molecule(

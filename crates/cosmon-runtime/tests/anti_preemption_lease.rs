@@ -158,6 +158,7 @@ fn seed(
         stuck_at: None,
         tackled_by: tackled_by.clone(),
         tackled_at: tackled_by.map(|_| now),
+        adapter: None,
     };
     store.save_molecule(id, &data).expect("save molecule");
 }

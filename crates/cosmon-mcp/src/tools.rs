@@ -760,6 +760,7 @@ impl CosmonService {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
 
         store
@@ -1709,6 +1710,7 @@ impl CosmonService {
                 stuck_at: None,
                 tackled_by: None,
                 tackled_at: None,
+                adapter: None,
             };
             store
                 .save_molecule(&nuc.id, &product)
@@ -1861,6 +1863,7 @@ impl CosmonService {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         };
         store
             .save_molecule(&nuc.id, &product)
@@ -3251,6 +3254,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 

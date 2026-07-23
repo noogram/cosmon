@@ -635,6 +635,32 @@ pub struct MoleculeData {
     /// `log.md`. `None` for legacy molecules and never-tackled pendings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tackled_at: Option<DateTime<Utc>>,
+
+    /// Durable per-molecule adapter pin, stamped at nucleation by
+    /// `cs nucleate --adapter <name>` (and the lib-direct
+    /// [`ops::nucleate`](mod@crate::ops::nucleate) request).
+    ///
+    /// This is the **rung-1** provider-family intent that survives *any*
+    /// later run directive. It exists to close the committee provider-diversity
+    /// hole (committee-20260723-c0a1): a `cs run --resident --adapter <X>` owns
+    /// a run-wide directive that stamps every *pin-less* molecule with `<X>`;
+    /// without a durable per-molecule pin, a committee seat nucleated for a
+    /// *distinct* family (e.g. `mistral`) is auto-tackled under the generator's
+    /// family and collapses to a `FamilyCollision`
+    /// ([`cosmon_core::committee::SeatRejection::FamilyCollision`]). Stamping the
+    /// intended family here at nucleation makes [`Self::adapter`] `Some(family)`
+    /// *before* the resident loop can raffle the seat, so the per-molecule pin
+    /// wins over the run directive (`cosmon_runtime::resident`,
+    /// `m.adapter.or(run_adapter)`).
+    ///
+    /// The projection consumed by the resident scheduler
+    /// (`cs ensemble --json`'s per-molecule `adapter`) prefers this durable pin
+    /// and falls back to the process-stamped adapter only when it is `None`, so
+    /// a seat carries its family intent from birth, not merely from the first
+    /// `cs tackle`. `None` for legacy molecules and nucleations that pass no
+    /// `--adapter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
 }
 
 /// Serde skip predicate — keeps zero-valued `u32` counters out of the
@@ -1205,6 +1231,7 @@ mod tests {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 
@@ -2043,6 +2070,7 @@ mod tests {
                         stuck_at: None,
                         tackled_by: None,
                         tackled_at: None,
+                        adapter: None,
                     }
                 },
             )

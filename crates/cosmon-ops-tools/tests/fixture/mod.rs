@@ -83,5 +83,6 @@ fn make_molecule(id: &str, status: &str, tags: &[&str]) -> MoleculeData {
         stuck_at: None,
         tackled_by: None,
         tackled_at: None,
+        adapter: None,
     }
 }

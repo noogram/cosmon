@@ -247,6 +247,7 @@ pub(crate) mod test_fixture {
             stuck_at: None,
             tackled_by: None,
             tackled_at: None,
+            adapter: None,
         }
     }
 }

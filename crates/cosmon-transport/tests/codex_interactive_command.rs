@@ -46,6 +46,7 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         telemetry: None,
         pre_existing_worker: None,
         git_identity: None,
+        writable_roots: vec![],
     }
 }
 
@@ -155,6 +156,44 @@ fn interactive_extra_args_override_replaces_defaults() {
     // Overriding drops the nuclear default flag.
     assert!(!cmd.contains("--dangerously-bypass-approvals-and-sandbox"));
     assert!(!cmd.contains("ignored"));
+}
+
+/// Blocage 2 (task-20260723-91db): a codex worker's cwd is its worktree, but
+/// the fleet lock it must write on `cs evolve` / `cs complete` lives in the
+/// main repo's out-of-worktree `.cosmon/state/`. Declaring that dir via
+/// codex's first-class `--add-dir` flag is what lets the worker persist its
+/// own completion under a `workspace-write` sandbox. The flag is emitted in
+/// both launch modes and survives an `extra_args` override (structural,
+/// like the self-update kill).
+#[test]
+fn writable_root_is_declared_in_both_modes_and_survives_override() {
+    let root = PathBuf::from("/main-repo/.cosmon");
+
+    let mut interactive = config(CodexMode::Interactive, Some("audit"), vec![]);
+    interactive.writable_roots = vec![root.clone()];
+    assert!(
+        build_codex_command(&interactive).contains("--add-dir /main-repo/.cosmon"),
+        "interactive spawn must declare the state dir writable"
+    );
+
+    let mut exec = config(CodexMode::Exec, Some("audit"), vec![]);
+    exec.writable_roots = vec![root.clone()];
+    assert!(
+        build_codex_command(&exec).contains("--add-dir /main-repo/.cosmon"),
+        "exec spawn must declare the state dir writable"
+    );
+
+    // A hardened `--sandbox workspace-write` override (which drops the nuclear
+    // bypass default) must NOT strip the completion-lock writability.
+    let mut overridden = config(
+        CodexMode::Interactive,
+        None,
+        vec!["--sandbox".to_owned(), "workspace-write".to_owned()],
+    );
+    overridden.writable_roots = vec![root];
+    let cmd = build_codex_command(&overridden);
+    assert!(cmd.contains("--sandbox workspace-write"), "got {cmd:?}");
+    assert!(cmd.contains("--add-dir /main-repo/.cosmon"), "got {cmd:?}");
 }
 
 /// Config-string parsing fails *open* to the steerable interactive mode —

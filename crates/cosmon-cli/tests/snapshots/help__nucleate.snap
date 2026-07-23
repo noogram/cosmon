@@ -133,6 +133,13 @@ Options:
           
           By default, running `cs nucleate` from a directory with no `.cosmon/config.toml` in cwd or any ancestor falls back to the host-global state dir (`$HOME/.cosmon/state`) and prints a warning to stderr — the molecule is born into a fleet invisible to every galaxy. `--require-galaxy` turns that warning into a hard error (exit ≠ 0), so scripts and tooling that must write galaxy-scoped state can fail fast instead of silently leaking orphans.
 
+      --adapter <NAME>
+          Durable per-molecule adapter pin — the **rung-1** provider-family intent stamped at nucleation (ADR-097 / C6; committee-20260723-c0a1).
+          
+          Unlike the transient `cs tackle --adapter` flag (which routes a single dispatch), this pin is persisted to [`MoleculeData::adapter`](cosmon_state::MoleculeData::adapter) and **survives any later run directive**. A `cs run --resident --adapter <X>` owns a run-wide directive that stamps every *pin-less* molecule with `<X>`; a molecule nucleated with `--adapter <Y>` keeps `<Y>` because the per-molecule pin beats the run directive (`cosmon_runtime::resident`). This is what lets a cross-provider committee pin a seat's *distinct* family (e.g. `mistral`) so a resident loop driving the generator's family (e.g. `claude`) cannot auto-tackle the seat into a `FamilyCollision`.
+          
+          Values are validated against the adapter-name grammar (the same check `cs tackle --adapter` applies); an empty or malformed name aborts the nucleation. `None` (the default) stamps no pin — the molecule resolves its adapter through the canonical `cs tackle` chain at dispatch.
+
   -h, --help
           Print help (see a summary with '-h')
 
