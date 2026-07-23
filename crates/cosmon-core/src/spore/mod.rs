@@ -28,7 +28,13 @@
 //! - an **unknown node kind** ([`SporeError::UnknownNodeKind`]) — `kind` is
 //!   explicit, not inferred (ADR-140 D1), so a typo is a hard error;
 //! - a **param type mismatch** ([`SporeError::ParamTypeMismatch`]) — a
-//!   param's declared `default` must satisfy its declared `type`.
+//!   param's declared `default` must satisfy its declared `type`;
+//! - a **node id that is not a safe path slug**
+//!   ([`SporeError::InvalidNodeId`]) — the id becomes the germination alias,
+//!   and the alias becomes a directory name under the ADR-161 run home, so
+//!   `../../tracked-output` or `/tmp/x` would point a worker outside its own
+//!   run home. The grammar is the first containment boundary; see
+//!   [`validate_node_id`].
 //!
 //! A handful of structural checks ride along (duplicate node ids, dangling
 //! edge endpoints, unknown formula aliases, unknown edge types); they
@@ -81,8 +87,8 @@ pub mod seal;
 
 pub use expand::{expand, ExpandError, NucleateCall};
 pub use output::{
-    forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, ForbiddenOutput,
-    OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,
+    forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, EscapedOutputHome,
+    ForbiddenOutput, OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,
 };
 pub use seal::{
     gate, proof_hash, verify_seal, FakeTlcRunner, InMemorySealVerdictCache, ResolvedSeal, SealGate,
