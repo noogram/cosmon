@@ -76,9 +76,14 @@ use serde::Deserialize;
 use crate::fleet::CrossProviderReview;
 
 pub mod expand;
+pub mod output;
 pub mod seal;
 
 pub use expand::{expand, ExpandError, NucleateCall};
+pub use output::{
+    forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, ForbiddenOutput,
+    OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,
+};
 pub use seal::{
     gate, proof_hash, verify_seal, FakeTlcRunner, InMemorySealVerdictCache, ResolvedSeal, SealGate,
     SealStatus, SealVerdictCache, TlcOutcome, TlcRunner,

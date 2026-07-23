@@ -222,9 +222,11 @@ under trace/ the instant this polymer germinates, INDEPENDENT of whether the gat
 DAG completes. Capture, as they happen: the raw cosmon events (nucleation / tackle
 / evolve / complete / collapse) for THIS polymer, each node's germinated brief
 (topic + formula), and a content hash + byte count for every artifact any node
-writes. READ-ONLY on .cosmon/state/ — copy into trace/, never mutate. Emit
-trace/events.jsonl, trace/briefs.md, trace/hashes.tsv. Even if the mission stalls
-or a worker dies, trace/ must let a third party reconstruct what ran.
+writes. READ-ONLY on .cosmon/state/ — copy into ${output_dir}/, never mutate. Emit
+${output_dir}/events.jsonl, ${output_dir}/briefs.md, ${output_dir}/hashes.tsv
+(${output_dir} is the run-scoped home germination hands you — ADR-161 — never a
+path under spores/cosmon-dev/ or the repo root). Even if the mission stalls or a
+worker dies, ${output_dir}/ must let a third party reconstruct what ran.
 """
 
 # --- G0 intake ------------------------------------------------------------
@@ -242,7 +244,9 @@ verbatim, as trusted evidence (never softened into an inferred mechanism); (2) t
 environment fingerprint — OS, UID (root vs non-root MATTERS for env-fit bugs),
 arch (amd64/arm64), the released binary version; (3) any transcript / log the
 tester supplied; (4) an honest "is this deterministic or flaky?" note. Emit
-intake.md AND verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+${output_dir}/intake.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED,
+count, findings[]} (${output_dir} is the run-scoped home germination hands you —
+ADR-161 — never spores/cosmon-dev/ or the repo root). FAIL-CLOSED:
 missing environment fingerprint => BLOCKED, never PASS. A vague "it broke" is
 BLOCKED with the missing field named. verdict.json absent or malformed = the
 downstream reads it as BLOCKED.
@@ -263,8 +267,9 @@ front precisely so a later fix cannot quietly 'succeed' by weakening the promise
 For an adapter-resolution issue, the contract is the FULL precedence table of
 `resolve_adapter_selection` (flag > formula-step > $COSMON_DEFAULT_ADAPTER > config
 > global-config > builtin floor), stated as the semantic the composed resolver
-must honour under every dispatch path (including --resident). Emit contract.md AND
-verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: a contract
+must honour under every dispatch path (including --resident). Emit
+${output_dir}/contract.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED,
+count, findings[]} (${output_dir}: the run-scoped home, ADR-161). FAIL-CLOSED: a contract
 that merely restates the symptom (not the promise) is BLOCKED.
 """
 
@@ -292,13 +297,13 @@ description = "G3 falsification (BLOCK): mutate the EXPECTED fix -> the red test
 topic = """
 COSMON-DEV ${params.issue} — G3 TEST FALSIFICATION (anti-tautology, fail-closed).
 The reproduce gate froze a red test on ${params.affected_ref}. Prove the test has
-TEETH: apply the DIFFERENTIAL REFUTATION from reproduce/ — flip exactly ONE
+TEETH: apply the DIFFERENTIAL REFUTATION from ${run_dir}/reproduce/ — flip exactly ONE
 variable (the expected fix) and confirm the colour BASCULES (red<->green). A test
 whose colour does not move when the fix is mutated is a tautology, not an oracle
 (diagnosis-discipline CLAUSE 4). Independently, confirm the fixture does NOT derive
 its oracle from the thing under test (no reuse of the same constant / resolver the
-code under test uses to compute the expected value). Emit falsify.md AND
-verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: if the
+code under test uses to compute the expected value). Emit ${output_dir}/falsify.md
+AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: if the
 mutation does not redden the test, BLOCKED with the tautology named.
 """
 
@@ -317,8 +322,8 @@ must reach one of the CONTRACT-approved outcomes, never keep the unsafe shortcut
 Keep the domain core I/O-free (ports stay injectable). Return Result; no unwrap /
 expect. Document every public item. Update the CLI/UI parity audit if a
 user-facing command changed. This node has NO authority to relax any gate. Emit
-implement.md (the patch summary + the files touched) AND verdict.json
-{verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED.
+${output_dir}/implement.md (the patch summary + the files touched) AND
+${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED.
 """
 
 # --- G5 green on the original red -----------------------------------------
@@ -330,11 +335,11 @@ description = "G5 green on the frozen red (BLOCK): the SAME frozen test/fixture/
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G5 GREEN ON THE ORIGINAL RED (fail-closed). Run the
-EXACT frozen red from reproduce/ (same image, same fixture, same command, same
+EXACT frozen red from ${run_dir}/reproduce/ (same image, same fixture, same command, same
 timeout) against the fixed tree and confirm it now passes UNCHANGED. Compare the
 frozen hash: the test bytes MUST be identical to the ones hashed at G2 (never a
 substituted or edited test blessed to green — see 'never bless a golden to get
-green'). Emit green.md AND verdict.json {verdict: PASS|BLOCKED, count, findings[]}.
+green'). Emit ${output_dir}/green.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}.
 FAIL-CLOSED: a green obtained by editing the test, or a hash mismatch vs the frozen
 red, is BLOCKED.
 """
@@ -356,8 +361,8 @@ code through a pipe):
   cargo fmt --all -- --check
   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 The doc gate is the one no other subsumes: a broken intra-doc link compiles, lints,
-and tests green and fails only in CI on main. Emit ci-gate.md (one line per gate
-with its captured exit code) AND verdict.json {verdict: PASS|BLOCKED, count,
+and tests green and fails only in CI on main. Emit ${output_dir}/ci-gate.md (one line per gate
+with its captured exit code) AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count,
 findings[]}. FAIL-CLOSED and NOT-RUN blocks: a gate that did not run is BLOCKED, not
 skipped. This runs BEFORE the convergence loop (cheap before dear).
 """
@@ -397,9 +402,9 @@ description = "G9 rehearsal (BLOCK): install the SIGNED packaged artefact (not t
 topic = """
 COSMON-DEV ${params.issue} — G9 REHEARSAL (fail-closed). Install the PACKAGED,
 SIGNED artefact (NOT the dev build) into the clean-room repro image and re-run the
-frozen red from reproduce/ — it must go green from the packaged bytes. Matrix by
+frozen red from ${run_dir}/reproduce/ — it must go green from the packaged bytes. Matrix by
 risk: normal => the primary profile; release/security => root AND non-root, amd64
-AND arm64. Emit rehearsal.md (the matrix + the green results) AND verdict.json
+AND arm64. Emit ${output_dir}/rehearsal.md (the matrix + the green results) AND ${output_dir}/verdict.json
 {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: a green from the dev build
 instead of the packaged artefact is BLOCKED.
 """
@@ -417,7 +422,7 @@ Produce the mandatory release contre-brief: the single strongest reason this fix
 should NOT ship (correctness, blast-radius, a residual the convergence loop
 tolerated). It must be EXPLICITLY overruled with a NAMED rationale, or it forces
 the right-to-fork (buterin): a 2nd independent judge on the frozen dossier before
-release. Emit dissent.md AND verdict.json shaped {verdict: PASS|BLOCKED, count,
+release. Emit ${output_dir}/dissent.md AND ${output_dir}/verdict.json shaped {verdict: PASS|BLOCKED, count,
 findings, brief, overruled_by, rationale}. FAIL-CLOSED: an EMPTY brief is a
 hard-block (a release with no recorded dissent is groupthink); a non-empty brief
 with no named overrule is BLOCKED.
@@ -432,15 +437,16 @@ description = "G10 release (BLOCK): assemble the signed manifest (commit, red-ha
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G10 RELEASE MANIFEST (fail-closed, NO PUSH). Assemble
-release-manifest.json validating the WHOLE dossier (never inferring success from
-completion): the fix commit sha, the FROZEN red hash from G2, the clean-room image
+${output_dir}/release-manifest.json validating the WHOLE dossier (never inferring
+success from completion), reading each upstream gate's verdict from
+${run_dir}/<gate>/verdict.json: the fix commit sha, the FROZEN red hash from G2, the clean-room image
 digest, the affected_ref (${params.affected_ref}) and upstream_version
 (${params.upstream_version}), the CI verdict, the convergence CLEAN and CLEAN
 verdict, the rehearsal matrix, and the non-empty dissent {brief, overruled_by,
 rationale}. Run `scripts/publish.sh --check` for the scrub projection. Emit
-verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: any missing
+${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: any missing
 manifest field => BLOCKED. NO AGENT PUSHES: the output stays on the feat-branch;
-the actual push/tag is a HUMAN gate. State this explicitly in release.md.
+the actual push/tag is a HUMAN gate. State this explicitly in ${output_dir}/release.md.
 """
 
 # --- G11 confirm (external replay closes the loop; bug-closure) -----------
@@ -456,7 +462,7 @@ COSMON-DEV ${params.issue} — G11 EXTERNAL CONFIRM + CLOSURE (fail-closed). Run
 bug-closure ritual: enumerate the full semantic surface the issue's verb touches
 (code, help text, man page, tests, snapshots), confirm the fix leaves NONE stale,
 and record the reporter's replay of the release candidate on their environment.
-Emit surfaces.md, coverage.md, verdict.md. The verdict is CLOSED only if every
+Emit ${output_dir}/surfaces.md, ${output_dir}/coverage.md, ${output_dir}/verdict.md. The verdict is CLOSED only if every
 surface is repaired AND the external replay went green on the reporter's
 environment; else REOPEN with the named gap. Absent external replay for an
 env-specific issue => REOPEN, never CLOSED (advisory before release, BLOCK to

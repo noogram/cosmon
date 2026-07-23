@@ -68,8 +68,11 @@ VARIABLES:
   - review_scale : mission | submission.
 
 ARTIFACT PATHS — all artifacts (rounds.md, converge-verdict.json, per-round
-referee-report.md + verdict.json) MUST be written to the MOLECULE STATE DIRECTORY
-(the `molecule_dir` field from `cs --json observe {mol_id}`), NEVER the worktree.
+referee-report.md + verdict.json) MUST be written to the RUN-SCOPED OUTPUT HOME
+germination hands this node in the `output_dir` variable (`${output_dir}` =
+`<state>/spore-runs/<germination-id>/converge/`, ADR-161). MOLECULE_DIR below is
+that handed `${output_dir}`. NEVER the worktree (destroyed by `cs done`), NEVER
+the spore definition tree, NEVER the repo root (F9).
 """
 id_prefix = "converge"
 freeze_on_last_step = false
@@ -107,8 +110,8 @@ measure = "iterations"
 id = "init-round-1"
 title = "Initialise: convene round 1 (the loop initialisation, not a cycle)"
 description = """
-MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` —
-NEVER the worktree.
+MOLECULE_DIR is the run-scoped `${output_dir}` germination handed you (ADR-161) —
+NEVER the worktree, NEVER the spore definition tree, NEVER the repo root.
 
 Germinating round 1 IS the initialisation (acyclicity by construction). Set up the
 loop ledger and convene the first committee.

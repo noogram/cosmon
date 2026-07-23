@@ -176,9 +176,29 @@ fn run_validate(ctx: &Context, args: &ValidateArgs) -> anyhow::Result<()> {
 fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     let (spore, manifest_dir) = load_spore(&args.reference)?;
     let params = coerce_vars(&spore, &args.vars)?;
-    let calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
+    let mut calls = expand(&spore, &params).map_err(|e| anyhow::anyhow!("expand failed: {e}"))?;
 
     let store_dir = cosmon_filestore::resolve_state_dir(args.store_dir.as_deref());
+
+    // Run-scoped output home (ADR-161). Mint a germination id and hand every
+    // node its output directory under `<state>/spore-runs/<germination-id>/`, so
+    // a germinated worker writes its gate records where it is TOLD — inside the
+    // gitignored state store — never a path it invents inside the spore
+    // definition tree or at the repo root (the cosmon-dev dogfooding F9
+    // anti-pattern). The id is a runtime value (date + entropy), which is why the
+    // pure `expand` cannot compute it: it is resolved here, in the shell.
+    let germination_id = mint_germination_id();
+    let run_dir = cosmon_core::spore::run_dir(&store_dir, &germination_id);
+    cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir);
+    // Create the home eagerly so the very first worker (the always-on `trace`
+    // sidecar) finds a real directory rather than racing to `mkdir -p` it.
+    std::fs::create_dir_all(&run_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create run output home {}: {e}",
+            run_dir.display()
+        )
+    })?;
+    eprintln!("run home: {}", run_dir.display());
 
     // Seal gate (ADR-140 D4, N4) — fail closed before any state is written.
     // DELIVERABLE 2 (F1): wire the REAL TLC runner + persistent verdict cache so
@@ -231,6 +251,19 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Mint a per-run germination id: `germ-<YYYYMMDD>-<hex>`.
+///
+/// The date segment makes a run human-sortable; the entropy suffix makes two
+/// runs of the *same* params land in distinct output homes (namespacing —
+/// the seal's `NoResourceCollision` across runs). Same shape as a
+/// [`MoleculeId`], a wall-clock read the pure core deliberately cannot make,
+/// which is why it is minted here in the shell.
+fn mint_germination_id() -> String {
+    let date = chrono::Utc::now().format("%Y%m%d");
+    let suffix: u32 = rand::random();
+    format!("germ-{date}-{suffix:08x}")
 }
 
 /// Replay the expanded call list against the live state store, mapping each
@@ -936,6 +969,46 @@ acceptance = "any evidence"
             )
         });
         assert!(blocks_on_frame, "fanout instance must be blocked by frame");
+    }
+
+    /// ADR-161: a germinated node is HANDED its run-scoped output home. After
+    /// `inject_run_outputs`, every call carries an `output_dir` var under the
+    /// state store's `spore-runs/<germ>/` tree — never a path the worker must
+    /// invent inside the spore definition dir. This mirrors what `run_run` does
+    /// between `expand` and `germinate`.
+    #[test]
+    fn germination_hands_each_node_a_run_scoped_output_dir() {
+        let dir = fixture(SPORE);
+        let (spore, _manifest_dir) = load_spore(dir.path()).unwrap();
+        let params = coerce_vars(&spore, &["subject=octopus".to_string()]).unwrap();
+        let mut calls = expand(&spore, &params).unwrap();
+
+        let state = tempfile::tempdir().unwrap();
+        let run_dir = cosmon_core::spore::run_dir(state.path(), "germ-20260723-0000abcd");
+        cosmon_core::spore::inject_run_outputs(&mut calls, &run_dir);
+
+        let run_str = run_dir.to_string_lossy().into_owned();
+        assert!(
+            run_str.contains("spore-runs/germ-20260723-0000abcd"),
+            "run home must be namespaced under spore-runs/: {run_str}"
+        );
+        for call in &calls {
+            let out = call
+                .vars
+                .get(cosmon_core::spore::OUTPUT_DIR_VAR)
+                .expect("every node handed an output_dir");
+            assert!(out.starts_with(&run_str), "output_dir {out} under run home");
+            // Never the spore definition dir nor the repo root.
+            assert!(
+                cosmon_core::spore::forbidden_gate_output(
+                    std::path::Path::new(out),
+                    dir.path(),
+                    state.path(),
+                )
+                .is_none(),
+                "the handed output home must not be a forbidden destination: {out}"
+            );
+        }
     }
 
     #[test]
