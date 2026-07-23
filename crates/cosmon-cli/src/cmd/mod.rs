@@ -256,7 +256,8 @@ pub(crate) fn tmux_socket_name(ctx: &Context) -> String {
 /// Worker repo paths are stored relative to the project root (portability).
 /// Legacy fleet.json files may contain absolute paths — those are used as-is.
 /// Falls back to `$HOME` if no repo is set and no project root is available.
-/// Build the [`ClaudeSessionConfig`] for a **respawn** — `cs thaw` and the
+/// Build the [`ClaudeSessionConfig`](cosmon_transport::claude::ClaudeSessionConfig)
+/// for a **respawn** — `cs thaw` and the
 /// patrol backstop — with the out-of-worktree writable grant already filled.
 ///
 /// # The fault this closes (COSMON-DEV #20 defect A4)

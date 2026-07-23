@@ -17,6 +17,7 @@
 //! closure (so tests do not need subprocess or env mutation).
 
 use cosmon_cli::tackle_env::build_claude_command;
+use cosmon_core::root_spawn_policy::RootSpawnDecision;
 
 /// When both cb and env are absent, the assembled command has no
 /// `CLAUDE_CONFIG_DIR` token but does include the Gödel self-reference
@@ -29,6 +30,7 @@ fn absent_cb_and_env_yields_byte_identical_legacy_command() {
         "/usr/local/bin/claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || None,
         |_| None,
     );
@@ -56,6 +58,7 @@ fn cb_next_success_derives_config_dir_from_email() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || Some("user-b@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -78,6 +81,7 @@ fn cb_next_takes_precedence_over_env_var() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || Some("operator@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -99,6 +103,7 @@ fn env_fallback_when_cb_fails() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| value.to_owned()),
     );
@@ -126,6 +131,7 @@ fn empty_claude_config_dir_is_treated_as_absent() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(String::new),
     );
@@ -141,6 +147,7 @@ fn path_with_spaces_is_shell_quoted() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/Foo Bar/.claude".to_owned()),
     );
@@ -156,6 +163,7 @@ fn path_with_embedded_quote_is_posix_escaped() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/it's/me".to_owned()),
     );
@@ -171,6 +179,7 @@ fn cb_next_whitespace_only_falls_through() {
         "claude",
         "bypassPermissions",
         &[],
+        &RootSpawnDecision::SpawnAsIs,
         || Some("  \n".to_owned()),
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/fallback".to_owned()),
     );
