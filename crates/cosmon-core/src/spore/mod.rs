@@ -28,7 +28,13 @@
 //! - an **unknown node kind** ([`SporeError::UnknownNodeKind`]) — `kind` is
 //!   explicit, not inferred (ADR-140 D1), so a typo is a hard error;
 //! - a **param type mismatch** ([`SporeError::ParamTypeMismatch`]) — a
-//!   param's declared `default` must satisfy its declared `type`.
+//!   param's declared `default` must satisfy its declared `type`;
+//! - a **node id that is not a safe path slug**
+//!   ([`SporeError::InvalidNodeId`]) — the id becomes the germination alias,
+//!   and the alias becomes a directory name under the ADR-161 run home, so
+//!   `../../tracked-output` or `/tmp/x` would point a worker outside its own
+//!   run home. The grammar is the first containment boundary; see
+//!   [`validate_node_id`].
 //!
 //! A handful of structural checks ride along (duplicate node ids, dangling
 //! edge endpoints, unknown formula aliases, unknown edge types); they
@@ -81,8 +87,8 @@ pub mod seal;
 
 pub use expand::{expand, ExpandError, NucleateCall};
 pub use output::{
-    forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, ForbiddenOutput,
-    OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,
+    forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, EscapedOutputHome,
+    ForbiddenOutput, OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,
 };
 pub use seal::{
     gate, proof_hash, verify_seal, FakeTlcRunner, InMemorySealVerdictCache, ResolvedSeal, SealGate,
@@ -188,6 +194,70 @@ pub enum SporeError {
     /// The typed edges form a cycle; the DAG is not acyclic.
     #[error("edge cycle detected involving node \"{0}\"")]
     EdgeCycle(String),
+
+    /// A node `id` is not a safe path slug. The id becomes the node's
+    /// germination alias, and the alias becomes a **directory name** under the
+    /// run-scoped output home (ADR-161). An id carrying a path separator, a
+    /// `..`, a drive prefix, or a leading `/` would let the composed
+    /// `output_dir` escape `<state>/spore-runs/<germination-id>/` and point a
+    /// worker at the tracked tree. Refused at parse time, before any path is
+    /// composed.
+    #[error("node id \"{node}\" is not a safe path slug: {reason} (allowed: ASCII letters, digits, `_`, `-`; must start with a letter or digit; max {max} chars)", max = MAX_NODE_ID_LEN)]
+    InvalidNodeId {
+        /// The offending node id, verbatim.
+        node: String,
+        /// Which rule it broke.
+        reason: &'static str,
+    },
+}
+
+/// The longest node id the grammar accepts. A node id becomes a directory name
+/// under the run home, so it stays well inside every filesystem's component
+/// limit (255 bytes) even after the `__<index>` fan-out suffix.
+pub const MAX_NODE_ID_LEN: usize = 64;
+
+/// Validate that a node id is a safe path slug.
+///
+/// The id is not merely a label: [`expand`](mod@expand) turns it into the node's
+/// germination **alias**, and [`node_output_dir`] turns the alias into a
+/// directory under the run home. So the id grammar *is* the first containment
+/// boundary of ADR-161 — an id like `../../tracked-output` or `/tmp/x` would
+/// otherwise compose an `output_dir` outside the run home.
+///
+/// Accepts ASCII letters, digits, `_` and `-`, starting with a letter or digit,
+/// at most [`MAX_NODE_ID_LEN`] characters. Everything else — path separators,
+/// `..`, `.`, `:`, NUL, non-ASCII, leading `-` — is refused.
+///
+/// # Errors
+/// Returns [`SporeError::InvalidNodeId`] naming the rule that was broken.
+pub fn validate_node_id(id: &str) -> Result<(), SporeError> {
+    let reject = |reason: &'static str| {
+        Err(SporeError::InvalidNodeId {
+            node: id.to_string(),
+            reason,
+        })
+    };
+
+    if id.is_empty() {
+        return reject("it is empty");
+    }
+    if id.len() > MAX_NODE_ID_LEN {
+        return reject("it is too long");
+    }
+    if !id.chars().next().is_some_and(|c| c.is_ascii_alphanumeric()) {
+        return reject("it does not start with an ASCII letter or digit");
+    }
+    if let Some(bad) = id
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-'))
+    {
+        return match bad {
+            '/' | '\\' => reject("it contains a path separator"),
+            '.' => reject("it contains a `.` (path traversal risk)"),
+            _ => reject("it contains a character outside the safe slug alphabet"),
+        };
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -640,8 +710,8 @@ fn build_formulas(raw: BTreeMap<String, RawFormulaRef>) -> BTreeMap<String, Form
         .collect()
 }
 
-/// Build and validate nodes: unique ids, known kinds, emergent bounds,
-/// fan-out `for_each`, and resolvable formula aliases.
+/// Build and validate nodes: safe-slug ids, unique ids, known kinds, emergent
+/// bounds, fan-out `for_each`, and resolvable formula aliases.
 fn build_nodes(
     raw: Vec<RawNode>,
     formulas: &BTreeMap<String, FormulaRef>,
@@ -650,6 +720,11 @@ fn build_nodes(
     let mut out = Vec::with_capacity(raw.len());
 
     for n in raw {
+        // The id becomes the germination alias, which becomes a directory name
+        // under the ADR-161 run home. Refuse a hostile slug here, before any
+        // path is composed from it.
+        validate_node_id(&n.id)?;
+
         if !seen.insert(n.id.clone()) {
             return Err(SporeError::DuplicateNodeId(n.id));
         }
@@ -1347,6 +1422,65 @@ formula = "work"
             Spore::parse(toml),
             Err(SporeError::DuplicateNodeId("a".to_string()))
         );
+    }
+
+    /// Review finding F6, frozen as a red-first regression at the parse seam.
+    ///
+    /// A node id is not just a label: it becomes the germination alias, and the
+    /// alias becomes a directory name under the run home (ADR-161). An id like
+    /// `../../tracked-output` or `/tmp/cosmon-output` parsed cleanly before this
+    /// fix — uniqueness, kind, bounds and formula ref all passed — and the
+    /// composed `output_dir` then pointed a worker outside the run home. The
+    /// grammar refuses it here, before any path exists.
+    #[test]
+    fn hostile_node_ids_are_refused_at_parse_time() {
+        let hostile = [
+            "../../tracked-output",
+            "..",
+            "/tmp/cosmon-output",
+            "a/b",
+            "a\\b",
+            "./x",
+            ".",
+            ".hidden",
+            "-leading-dash",
+            "",
+            "a:b",
+        ];
+        for id in hostile {
+            let toml = format!(
+                r#"
+[spore]
+name = "t"
+
+[spore.formulas.work]
+path = "formulas/work.formula.toml"
+
+[[spore.node]]
+id = '{id}'
+formula = "work"
+"#
+            );
+            let parsed = Spore::parse(&toml);
+            assert!(
+                matches!(&parsed, Err(SporeError::InvalidNodeId { node, .. }) if node == id),
+                "node id {id:?} must be refused as an unsafe path slug, got {parsed:?}"
+            );
+        }
+    }
+
+    /// The grammar must not break the ids real spores actually use.
+    #[test]
+    fn safe_node_id_slugs_are_accepted() {
+        for id in ["intake", "ci-gate", "green", "a_b-1", "n0", "A", "9"] {
+            assert!(
+                validate_node_id(id).is_ok(),
+                "benign node id {id:?} must be accepted"
+            );
+        }
+        // The bound is real, not decorative.
+        assert!(validate_node_id(&"a".repeat(MAX_NODE_ID_LEN)).is_ok());
+        assert!(validate_node_id(&"a".repeat(MAX_NODE_ID_LEN + 1)).is_err());
     }
 
     #[test]

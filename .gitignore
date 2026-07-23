@@ -56,6 +56,12 @@ docs/paper/*.synctex.gz
 .cosmon/*.lock
 .cosmon/*.tmp
 .cosmon/state/
+# Seal verdict cache (`.cosmon/cache/seal/<proof-hash>`) — `cs spore run`
+# writes it as a SIBLING of `.cosmon/state/`, so the rule above never covered
+# it. Pure derived state: every entry is regenerable by re-running TLC, and a
+# tracked verdict would be a cached "this proof passed" claim travelling
+# between machines that never ran it.
+.cosmon/cache/
 .cosmon/state.next/
 .cosmon/state.prev/
 .cosmon/migration-manifest.pre.json

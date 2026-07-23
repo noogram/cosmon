@@ -89,9 +89,39 @@ pub fn run_dir(state_root: &Path, germination_id: &str) -> PathBuf {
 /// `<node-id>__<index>` for a fan-out instance), so each node — and each
 /// round-indexed emergent instance — writes a distinct path. This is the seal's
 /// `NoResourceCollision` property made concrete.
-#[must_use]
-pub fn node_output_dir(run_dir: &Path, alias: &str) -> PathBuf {
-    run_dir.join(alias)
+///
+/// **Containment is checked, not assumed.** `Path::join` with an absolute alias
+/// *replaces* the base, and a `..` component traverses out of it — so a hostile
+/// node id could otherwise hand a worker a path outside the run home. The alias
+/// grammar ([`validate_node_id`](super::validate_node_id)) already refuses such
+/// ids at parse time; this is the second, independent line of defence, on the
+/// composition itself.
+///
+/// # Errors
+/// Returns [`ForbiddenOutput::EscapesRunHome`] when the composed path is not
+/// strictly under `run_dir`.
+pub fn node_output_dir(run_dir: &Path, alias: &str) -> Result<PathBuf, ForbiddenOutput> {
+    // The alias must name exactly ONE ordinary directory component. This alone
+    // rules out `/tmp/x` (a root component), `../x` (a parent component), `a/b`
+    // (two components), and `.` (no component at all).
+    let mut components = Path::new(alias).components();
+    match (components.next(), components.next()) {
+        (Some(Component::Normal(one)), None) if one == alias => {}
+        _ => return Err(ForbiddenOutput::EscapesRunHome),
+    }
+
+    let composed = run_dir.join(alias);
+
+    // Lexical containment: resolve `.` and `..` against the base, then require
+    // the result to be strictly *under* the run home. Purely lexical, so the
+    // zero-I/O core keeps its property (no `canonicalize`, no symlink probe);
+    // conservative, because it never widens the accepted set.
+    let base = resolve_traversal(run_dir);
+    let resolved = resolve_traversal(&composed);
+    if resolved == base || !resolved.starts_with(&base) {
+        return Err(ForbiddenOutput::EscapesRunHome);
+    }
+    Ok(composed)
 }
 
 /// Hand every call its run-scoped output home: substitute the reserved tokens in
@@ -106,10 +136,29 @@ pub fn node_output_dir(run_dir: &Path, alias: &str) -> PathBuf {
 /// sees `${output_dir}` already resolved inside its `topic`) and writes its gate
 /// records there — inside the state store, never the spore definition tree or the
 /// repo root.
-pub fn inject_run_outputs(calls: &mut [NucleateCall], run_dir: &Path) {
+///
+/// # Errors
+/// Returns [`EscapedOutputHome`] when an alias would compose a path outside the
+/// run home. Germination is refused as a whole: no call is handed a home if any
+/// one of them escapes, so a hostile node cannot be silently dropped while its
+/// siblings run.
+pub fn inject_run_outputs(
+    calls: &mut [NucleateCall],
+    run_dir: &Path,
+) -> Result<(), EscapedOutputHome> {
+    // Check every alias BEFORE mutating anything, so a refusal leaves the call
+    // list untouched: all-or-nothing, never a half-injected polymer.
+    for call in calls.iter() {
+        node_output_dir(run_dir, &call.alias).map_err(|_| EscapedOutputHome {
+            alias: call.alias.clone(),
+        })?;
+    }
+
     let run_dir_str = run_dir.to_string_lossy().into_owned();
     for call in calls.iter_mut() {
-        let output_dir = node_output_dir(run_dir, &call.alias);
+        let output_dir = node_output_dir(run_dir, &call.alias).map_err(|_| EscapedOutputHome {
+            alias: call.alias.clone(),
+        })?;
         let output_dir_str = output_dir.to_string_lossy().into_owned();
 
         // Resolve the reserved tokens anywhere they appear in a var value
@@ -131,6 +180,19 @@ pub fn inject_run_outputs(calls: &mut [NucleateCall], run_dir: &Path) {
         call.vars
             .insert(RUN_DIR_VAR.to_string(), run_dir_str.clone());
     }
+    Ok(())
+}
+
+/// A germination alias would compose an output directory outside the run home.
+///
+/// Returned by [`inject_run_outputs`] so the germination shell **refuses** the
+/// run rather than handing a worker a path it must not write to. Carrying the
+/// alias makes the refusal actionable: it names the node to fix.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("node alias \"{alias}\" would compose an output directory outside the run-scoped output home (ADR-161); refusing to germinate")]
+pub struct EscapedOutputHome {
+    /// The offending germination alias (node id, or `<node-id>__<index>`).
+    pub alias: String,
 }
 
 /// Why a candidate gate-output path is refused (the two documented anti-patterns).
@@ -144,6 +206,11 @@ pub enum ForbiddenOutput {
     /// The path is dumped **directly at the repo root** (a top-level file such as
     /// `reproduction.md`), the other place a home-less worker improvises into.
     RepoRoot,
+    /// The path leaves the run-scoped output home (`<state>/spore-runs/<id>/`)
+    /// — an absolute alias that replaced the base, or a `..` that traversed out
+    /// of it. Run isolation is the point of the home; a path outside it is
+    /// refused rather than silently written.
+    EscapesRunHome,
 }
 
 /// Detect the germinated-worker anti-pattern: a gate-record path that lands in
@@ -186,6 +253,30 @@ pub fn forbidden_gate_output(
 /// Collapse `.` components so lexical prefix/parent comparisons are stable. Does
 /// not resolve symlinks or `..` (kept pure — no filesystem access); `..` is
 /// preserved verbatim, which only ever makes the guard *more* conservative.
+/// Collapse `.` **and** `..` components lexically, so a containment test cannot
+/// be fooled by `<run>/../../elsewhere`.
+///
+/// Unlike [`lexically_normalize`] this *does* resolve `..` (popping the previous
+/// normal component), because the caller is deciding containment rather than
+/// comparing author-written prefixes. It still performs no I/O: symlinks are not
+/// resolved. A leading `..` with nothing to pop is kept, which can only make the
+/// result fail a `starts_with` check — i.e. refuse.
+fn resolve_traversal(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 fn lexically_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -264,7 +355,7 @@ type = "feeds"
     fn inject_hands_every_node_an_output_dir_under_the_run_root() {
         let mut calls = expanded();
         let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-xyz");
-        inject_run_outputs(&mut calls, &run);
+        inject_run_outputs(&mut calls, &run).unwrap();
 
         let run_str = run.to_string_lossy().into_owned();
         for call in &calls {
@@ -294,7 +385,7 @@ type = "feeds"
     fn inject_resolves_the_reserved_tokens_in_topics() {
         let mut calls = expanded();
         let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-xyz");
-        inject_run_outputs(&mut calls, &run);
+        inject_run_outputs(&mut calls, &run).unwrap();
 
         let green = calls.iter().find(|c| c.alias == "green").unwrap();
         let topic = green.vars.get("topic").unwrap();
@@ -345,7 +436,68 @@ type = "feeds"
         let repo = Path::new("/repo");
         let spore_dir = Path::new("/repo/spores/cosmon-dev");
         let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
-        let good = node_output_dir(&run, "intake").join("verdict.json");
+        let good = node_output_dir(&run, "intake")
+            .unwrap()
+            .join("verdict.json");
         assert_eq!(forbidden_gate_output(&good, spore_dir, repo), None);
+    }
+
+    /// Review finding F6, frozen as a red-first regression.
+    ///
+    /// `run_dir.join(alias)` is not containment: an **absolute** alias replaces
+    /// the base outright, and a `..` traverses out of it lexically. A spore that
+    /// parses cleanly could therefore hand a worker an `output_dir` outside
+    /// `<state>/spore-runs/<germination-id>/` — pointing it at the tracked tree.
+    /// Composition must refuse, independently of the id grammar upstream.
+    #[test]
+    fn hostile_aliases_never_compose_a_path_outside_the_run_home() {
+        let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
+        let hostile = [
+            "../../tracked-output", // traverses out of the run home
+            "..",                   // the run home's parent itself
+            "/tmp/cosmon-output",   // absolute: `join` replaces the base
+            "a/b",                  // more than one component
+            "./x",                  // a relative prefix
+            ".",                    // no component at all
+            "",                     // empty
+        ];
+        for alias in hostile {
+            let composed = node_output_dir(&run, alias);
+            assert_eq!(
+                composed,
+                Err(ForbiddenOutput::EscapesRunHome),
+                "alias {alias:?} must be refused, got {composed:?}"
+            );
+            // The property that matters, stated directly: whatever a caller
+            // ends up with, it is never outside the run home.
+            if let Ok(path) = composed {
+                assert!(
+                    path.starts_with(&run) && path != run,
+                    "alias {alias:?} escaped the run home: {}",
+                    path.display()
+                );
+            }
+        }
+
+        // The benign shapes the convention actually produces still work.
+        for alias in ["intake", "green", "analyse__0", "ci-gate", "a_b-1"] {
+            let path = node_output_dir(&run, alias).expect("benign alias");
+            assert_eq!(path, run.join(alias));
+        }
+    }
+
+    /// The refusal must reach the germination shell, not merely the pure
+    /// composer: `inject_run_outputs` refuses the whole call list and leaves it
+    /// untouched, so no worker is ever handed an escaping home.
+    #[test]
+    fn injection_refuses_a_call_list_carrying_an_escaping_alias() {
+        let mut calls = expanded();
+        calls[0].alias = "../../tracked-output".to_string();
+        let before = calls.clone();
+        let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
+
+        let err = inject_run_outputs(&mut calls, &run).expect_err("must refuse");
+        assert_eq!(err.alias, "../../tracked-output");
+        assert_eq!(calls, before, "a refused injection mutates nothing");
     }
 }

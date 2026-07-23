@@ -74,15 +74,33 @@ use super::Seal;
 /// a different hash, so the cached "passed" verdict for the old bytes is never
 /// reused for the new ones.
 ///
+/// The encoding is **injective**: the module is length-prefixed and the config's
+/// presence is tagged, so two different `(module, config)` pairs never share a
+/// cache key. A plain concatenation would let a config-less seal collide with a
+/// config-bearing one, and a cache entry is an authority to skip TLC - a
+/// collision there is a false `verified`.
+///
 /// Returned as lowercase hex (64 chars).
 #[must_use]
 pub fn proof_hash(module_bytes: &[u8], config_bytes: Option<&[u8]>) -> String {
     // Concatenate `.tla || .cfg` and hash with the same BLAKE3 primitive the
     // rest of cosmon uses (no new hashing primitive - ADR-140 D5 / ADR-043).
-    let mut buf = Vec::with_capacity(module_bytes.len() + config_bytes.map_or(0, <[u8]>::len));
+    let mut buf = Vec::with_capacity(module_bytes.len() + config_bytes.map_or(0, <[u8]>::len) + 17);
+    // Length-prefix the module so the `.tla || .cfg` concatenation is injective:
+    // without it, `(module="AB", cfg="C")` and `(module="ABC", cfg=None)` hash
+    // the same, and a config-less seal collides with a config-bearing one over a
+    // shifted split. The cache key must separate proofs that are not the same
+    // proof.
+    buf.extend_from_slice(&(module_bytes.len() as u64).to_le_bytes());
     buf.extend_from_slice(module_bytes);
-    if let Some(cfg) = config_bytes {
-        buf.extend_from_slice(cfg);
+    // Domain-separate "no config declared" from "empty config": a tag byte, so
+    // the two can never share a cache entry.
+    match config_bytes {
+        Some(cfg) => {
+            buf.push(1);
+            buf.extend_from_slice(cfg);
+        }
+        None => buf.push(0),
     }
     cosmon_hash::Hash::of_bytes(&buf).to_hex()
 }
@@ -356,6 +374,19 @@ pub fn verify_seal(
             proof_hash: "<proof files unreadable>".to_string(),
         });
     };
+
+    // A seal that DECLARES a config but whose config bytes are missing is not a
+    // module-only seal: the shell could not read the `.cfg`, so part of the
+    // proof was never seen. Without this branch the hash would be
+    // `BLAKE3(module)` — byte-identical to a genuinely config-less seal over the
+    // same module — and a cached pass for THAT seal would return `Verified`
+    // without TLC ever seeing the declared configuration (review finding F5).
+    // Refuse before the cache is consulted: honestly unchecked, fail-closed.
+    if resolved.config_path.is_some() && resolved.config_bytes.is_none() {
+        return Ok(SealStatus::UncheckedToolUnavailable {
+            proof_hash: "<seal config unreadable>".to_string(),
+        });
+    }
 
     let hash = proof_hash(resolved.module_bytes, resolved.config_bytes);
 
@@ -656,6 +687,94 @@ mod tests {
     }
 
     // --- verify_seal orchestration ----------------------------------------
+
+    /// Review finding F5, frozen as a red-first regression.
+    ///
+    /// Two-step scenario. **Step 1**: verify a config-less seal over module
+    /// bytes `M` — TLC passes, the verdict lands in the cache. **Step 2**: a
+    /// seal over the *same* `M` that DOES declare a `.cfg`, whose bytes the
+    /// shell could not read (`config_path: Some`, `config_bytes: None`).
+    ///
+    /// Before the fix the step-2 hash was `BLAKE3(M)` again, the step-1 cache
+    /// entry hit, and `verify_seal` returned `Verified { from_cache: true }` —
+    /// the CLI printed `seal: verified` and germinated although the declared
+    /// configuration was never read, let alone checked. The honesty invariant
+    /// says a seal is never *claimed* verified when part of its proof was not
+    /// seen.
+    #[test]
+    fn declared_but_unreadable_config_never_reuses_a_module_only_cache_entry() {
+        let cache = InMemorySealVerdictCache::new();
+        let tlc = FakeTlcRunner::available_with(TlcOutcome::Passed);
+        let mp = PathBuf::from("spore.tla");
+
+        // Step 1 — a genuinely config-less seal over M passes and is cached.
+        let module_only = Seal {
+            module: "spore.tla".to_string(),
+            config: None,
+            properties: vec!["Termination".to_string()],
+        };
+        let r1 = ResolvedSeal {
+            module_path: &mp,
+            config_path: None,
+            module_bytes: b"MODULE spore",
+            config_bytes: None,
+        };
+        let first = verify_seal(Some(&module_only), Some(&r1), &cache, &tlc).unwrap();
+        assert!(
+            matches!(first, SealStatus::Verified { .. }),
+            "step 1 must verify: {first:?}"
+        );
+        assert_eq!(cache.len(), 1, "step 1 seeded the cache");
+
+        // Step 2 — same module bytes, but a DECLARED config the shell could not
+        // read. The declared-yet-unseen config must not ride the step-1 entry.
+        let cp = PathBuf::from("spore.cfg");
+        let with_unreadable_cfg = ResolvedSeal {
+            module_path: &mp,
+            config_path: Some(&cp),
+            module_bytes: b"MODULE spore",
+            config_bytes: None,
+        };
+        let runs_before = tlc.run_count();
+        let second = verify_seal(Some(&seal()), Some(&with_unreadable_cfg), &cache, &tlc).unwrap();
+
+        assert!(
+            !matches!(second, SealStatus::Verified { .. }),
+            "a seal whose declared config was never read must NOT report verified: {second:?}"
+        );
+        assert!(
+            !gate(&second, false).germinates(),
+            "and the default gate must refuse it"
+        );
+        assert_eq!(
+            tlc.run_count(),
+            runs_before,
+            "refusal happens before TLC; no run is attributed to an unread proof"
+        );
+    }
+
+    /// The cache key must separate proofs that are not the same proof. A plain
+    /// `module || config` concatenation collides across the split
+    /// (`("AB","C")` vs `("ABC", none)`), and a cache entry is an authority to
+    /// skip TLC — so a collision there is a false `verified`.
+    #[test]
+    fn proof_hash_separates_config_presence_and_the_module_config_split() {
+        assert_ne!(
+            proof_hash(b"MODULE spore", None),
+            proof_hash(b"MODULE spore", Some(b"")),
+            "no config declared must not hash like an empty config"
+        );
+        assert_ne!(
+            proof_hash(b"AB", Some(b"C")),
+            proof_hash(b"ABC", None),
+            "the module/config split must be recoverable from the hash input"
+        );
+        assert_ne!(
+            proof_hash(b"AB", Some(b"C")),
+            proof_hash(b"A", Some(b"BC")),
+            "shifting the split must change the key"
+        );
+    }
 
     #[test]
     fn no_seal_resolves_to_absent() {
