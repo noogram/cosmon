@@ -5,8 +5,10 @@ spore_TTrace_*.bin
 *.st
 
 # Per-run germination outputs (gate records written by `cs spore run`).
-# These are run traces, not the spore definition — they collide across runs
-# and their documentary value lives in the knowledge/ dogfooding findings.
+# DEFENSE-IN-DEPTH ONLY since ADR-161: germination now hands every node a
+# run-scoped home under `.cosmon/state/spore-runs/<germination-id>/` (already
+# gitignored), so gate records no longer land here in the first place. These
+# rules remain as a backstop against a stray legacy write.
 # (Future gate-output dirs follow the same pattern: <gate-name-plural>/issue-*/.)
 intakes/
 contracts/

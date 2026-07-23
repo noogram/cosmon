@@ -125,3 +125,5 @@
 | 147-prompt-injection-resistance-clause-and-data-role-primitive | [147-prompt-injection-resistance-clause-and-data-role-primitive.md](docs/adr/147-prompt-injection-resistance-clause-and-data-role-primitive.md) |
 | 149-doc-site-topology-one-noogram-kernel-section | [149-doc-site-topology-one-noogram-kernel-section.md](docs/adr/149-doc-site-topology-one-noogram-kernel-section.md) |
 | 155-macos-egress-enforcement-seatbelt | [155-macos-egress-enforcement-seatbelt.md](docs/adr/155-macos-egress-enforcement-seatbelt.md) |
+| 160-spore-export-ex-post-manifest | [160-spore-export-ex-post-manifest.md](docs/adr/160-spore-export-ex-post-manifest.md) |
+| 161-spore-run-scoped-output-home | [161-spore-run-scoped-output-home.md](docs/adr/161-spore-run-scoped-output-home.md) |

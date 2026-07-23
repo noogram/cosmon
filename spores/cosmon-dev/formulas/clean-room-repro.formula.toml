@@ -35,9 +35,12 @@ VARIABLES:
                     (root/non-root, amd64/arm64) at higher stakes.
 
 ARTIFACT PATHS — all artifacts (reproduce.md, red/, freeze.sha256, verdict.json)
-MUST be written to the MOLECULE STATE DIRECTORY (the `molecule_dir` field from
-`cs --json observe {mol_id}`), NEVER the worktree — the worktree is destroyed by
-`cs done`.
+MUST be written to the RUN-SCOPED OUTPUT HOME germination hands this node in the
+`output_dir` variable (`${output_dir}` = `<state>/spore-runs/<germination-id>/<gate>/`,
+ADR-161). MOLECULE_DIR below is that handed `${output_dir}`. NEVER the worktree
+(destroyed by `cs done`), NEVER the spore definition tree (`spores/cosmon-dev/…`),
+NEVER the repo root — those are the reusable moule and the public surface (F9).
+A sibling gate's output is read through `${run_dir}/<gate>/`.
 """
 id_prefix = "repro"
 freeze_on_last_step = false
@@ -67,8 +70,8 @@ level = 0
 id = "locate-the-seam"
 title = "Locate the seam and the pre-oracle decision"
 description = """
-MOLECULE_DIR is the `molecule_dir` field from `cs --json observe {mol_id}` —
-NEVER the worktree.
+MOLECULE_DIR is the run-scoped `${output_dir}` germination handed you (ADR-161) —
+NEVER the worktree, NEVER the spore definition tree, NEVER the repo root.
 
 Read the G1 contract (contract.md from the upstream node) and the issue's verbatim
 symptom. Before writing any test, decide WHERE the assertion reads:

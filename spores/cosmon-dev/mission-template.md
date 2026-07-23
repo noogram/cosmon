@@ -30,10 +30,29 @@ gate is the only door to the world).
 wins and the proof becomes the bug.** (codex-sol, blueprint §9.) A green test
 suite is not a witness that the tester's world is fixed; the red-that-flips is.
 
+## Where gate records go (the run-scoped output home, ADR-161)
+
+Germination hands every node a durable place to write, so no worker has to
+invent one. Two variables are interpolated into each node's brief:
+
+| variable | value | use |
+|----------|-------|-----|
+| `${output_dir}` | `<state>/spore-runs/<germination-id>/<gate>/` | this node's OWN gate records (`verdict.json`, `intake.md`, …) |
+| `${run_dir}` | `<state>/spore-runs/<germination-id>/` | the SHARED root, for cross-node reads (`${run_dir}/reproduce/`) |
+
+The home lives under `.cosmon/state/` (gitignored) and is namespaced by a
+per-run germination id, so it is durable across `cs done` teardown, shared so a
+downstream gate can read an upstream gate's output, and collision-free across
+runs. **A germinated worker MUST NOT write gate records into the spore
+definition tree (`spores/cosmon-dev/…`) or the repo root** — those are the
+reusable moule and the public surface; writing an instance there pollutes both
+and collides on the next germination (dogfooding finding F9). Always write to
+`${output_dir}`; reference a sibling gate through `${run_dir}/<gate>/`.
+
 ## The gate contract (every node obeys this)
 
-- Every gate writes a machine-readable `verdict.json` to its molecule state
-  directory: `{ "verdict": "PASS"|"BLOCKED"|"CLEAN"|"FINDINGS", "count": <int>,
+- Every gate writes a machine-readable `verdict.json` to **`${output_dir}`**:
+  `{ "verdict": "PASS"|"BLOCKED"|"CLEAN"|"FINDINGS", "count": <int>,
   "findings": [ { "loc", "quote", "fix", "severity" } ] }`.
 - A gate is **fail-closed**: an absent or malformed `verdict.json` is `BLOCKED`,
   never `PASS`. A gate that cannot fail is not a gate (codex-sol #28).
