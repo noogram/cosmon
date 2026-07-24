@@ -861,7 +861,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // `--dry-run` too (COSMON #23). The dry run is precisely where a
         // newcomer inspects what a dispatch would do; staying silent there
         // is what made the local model look hardcoded.
-        eprintln!("{}", local_model_notice(&effective_model, origin, &base_url));
+        eprintln!(
+            "{}",
+            local_model_notice(&effective_model, origin, &base_url)
+        );
 
         if !args.dry_run && std::env::var(SKIP_PREFLIGHT_ENV).ok().as_deref() != Some("1") {
             if let Err(e) = preflight_local_adapter_model(

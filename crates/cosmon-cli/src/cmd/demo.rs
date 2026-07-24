@@ -142,12 +142,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     emit_event(ctx, "nucleated", &[("molecule", mol_id.as_str())]);
     progress_line(ctx, &format!("nucleated {mol_id}"));
 
-    step_tackle(
-        ctx,
-        &mol_id,
-        args.adapter.as_deref(),
-        args.model.as_deref(),
-    )?;
+    step_tackle(ctx, &mol_id, args.adapter.as_deref(), args.model.as_deref())?;
     let mut tackled_fields = vec![("molecule", mol_id.as_str())];
     if let Some(name) = args.adapter.as_deref() {
         tackled_fields.push(("adapter", name));

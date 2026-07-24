@@ -90,7 +90,11 @@ title = "Step 1"
 description = "Solo step — the worker would do the work."
 acceptance = "Done"
 "#;
-    fs::write(formulas_dir.join("local-model-test.formula.toml"), formula_toml).unwrap();
+    fs::write(
+        formulas_dir.join("local-model-test.formula.toml"),
+        formula_toml,
+    )
+    .unwrap();
 
     let output = cosmon_bin_in(tmp.path())
         .args([
