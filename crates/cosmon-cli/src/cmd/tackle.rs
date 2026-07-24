@@ -848,25 +848,32 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //       `cs tackle --dry-run` fail on a machine without the local model
     //       server up (e.g. CI) - a spurious coupling. The preflight guards a
     //       real dispatch, which dry-run is not.
-    if !args.dry_run
-        && matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama")
-        && std::env::var(SKIP_PREFLIGHT_ENV).ok().as_deref() != Some("1")
-    {
+    if matches!(adapter.as_str(), BUILTIN_FLOOR_ADAPTER | "ollama") {
         let adapter_entry = project_config
             .adapters
             .as_ref()
             .and_then(|cfg| cfg.entry(adapter.as_str()));
         let base_url = resolve_local_base_url(adapter_entry);
-        let effective_model = resolve_local_model(preferred_model.as_deref(), adapter_entry);
-        if let Err(e) = preflight_local_adapter_model(
-            &base_url,
-            &effective_model,
-            std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS),
-        ) {
-            return Err(anyhow::anyhow!(
-                "{e}\n\n(bypass with {SKIP_PREFLIGHT_ENV}=1 if you intend to \
-                 dispatch anyway)"
-            ));
+        let (effective_model, origin) =
+            resolve_local_model_with_origin(preferred_model.as_deref(), adapter_entry);
+
+        // Announce the resolved model *before* the preflight, and on
+        // `--dry-run` too (COSMON #23). The dry run is precisely where a
+        // newcomer inspects what a dispatch would do; staying silent there
+        // is what made the local model look hardcoded.
+        eprintln!("{}", local_model_notice(&effective_model, origin, &base_url));
+
+        if !args.dry_run && std::env::var(SKIP_PREFLIGHT_ENV).ok().as_deref() != Some("1") {
+            if let Err(e) = preflight_local_adapter_model(
+                &base_url,
+                &effective_model,
+                std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS),
+            ) {
+                return Err(anyhow::anyhow!(
+                    "{e}\n\n(bypass with {SKIP_PREFLIGHT_ENV}=1 if you intend to \
+                     dispatch anyway)"
+                ));
+            }
         }
     }
 
@@ -5358,16 +5365,90 @@ fn resolve_local_model(
     preferred_model: Option<&str>,
     adapter_entry: Option<&AdapterEntry>,
 ) -> String {
-    preferred_model
-        .filter(|s| !s.is_empty())
-        .map(std::borrow::ToOwned::to_owned)
-        .or_else(|| adapter_entry.and_then(|e| e.default_model.clone()))
-        .or_else(|| {
-            std::env::var("COSMON_LOCAL_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| DEFAULT_LOCAL_MODEL.to_owned())
+    resolve_local_model_with_origin(preferred_model, adapter_entry).0
+}
+
+/// Where the effective local model came from (COSMON #23).
+///
+/// Exists because the model alone is not actionable: a user who reads
+/// `qwen3:8b` still cannot tell whether their config row was ignored or
+/// never consulted. Naming the origin turns the notice from a fact into
+/// a repair instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalModelOrigin {
+    /// A chain-resolved pin reached the floor — `--model`, a formula-step
+    /// `model =` pin, `$COSMON_DEFAULT_MODEL`, or an
+    /// `[adapters.<name>].default_model` row read by the generic model
+    /// chain. The chain's own `ModelSelectionSource` (carried on the
+    /// `ModelSelected` event) records which of those it was; the notice
+    /// only needs to say "something pinned this, it is not the default".
+    Pin,
+    /// The `[adapters.local].default_model` row, read directly by this
+    /// resolver (the path taken when the generic chain did not surface
+    /// the row — e.g. under the `ollama` adapter alias).
+    ConfigRow,
+    /// The `COSMON_LOCAL_MODEL` environment variable.
+    EnvVar,
+    /// Nothing selected a model: the compile-time
+    /// [`DEFAULT_LOCAL_MODEL`].
+    BuiltinDefault,
+}
+
+impl LocalModelOrigin {
+    /// Human label naming the *mechanism*, so the user can find it again.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Pin => "--model / formula pin / config default_model",
+            Self::ConfigRow => "[adapters.local].default_model",
+            Self::EnvVar => "COSMON_LOCAL_MODEL",
+            Self::BuiltinDefault => "built-in default",
+        }
+    }
+}
+
+/// [`resolve_local_model`], plus the origin of the answer.
+fn resolve_local_model_with_origin(
+    preferred_model: Option<&str>,
+    adapter_entry: Option<&AdapterEntry>,
+) -> (String, LocalModelOrigin) {
+    if let Some(pin) = preferred_model.filter(|s| !s.is_empty()) {
+        return (pin.to_owned(), LocalModelOrigin::Pin);
+    }
+    if let Some(row) = adapter_entry.and_then(|e| e.default_model.clone()) {
+        return (row, LocalModelOrigin::ConfigRow);
+    }
+    if let Ok(env) = std::env::var("COSMON_LOCAL_MODEL") {
+        if !env.is_empty() {
+            return (env, LocalModelOrigin::EnvVar);
+        }
+    }
+    (
+        DEFAULT_LOCAL_MODEL.to_owned(),
+        LocalModelOrigin::BuiltinDefault,
+    )
+}
+
+/// The line every local dispatch prints on **stderr** naming the model it
+/// resolved and the three ways to change it (COSMON #23).
+///
+/// Why this exists: an external tester ran the local floor repeatedly,
+/// always got `qwen3:8b`, and concluded cosmon could not run any other
+/// local model — the mechanisms existed but were reachable only from the
+/// source. Discoverability is not a documentation problem when the tool
+/// is already speaking: the dispatch itself is the cheapest place to say
+/// what it chose and how to choose differently.
+///
+/// **stderr, not stdout**, on purpose: `cs tackle --dry-run` prints the
+/// bootstrap prompt (or a JSON envelope) on stdout, and a notice mixed
+/// into that stream would corrupt every downstream parse.
+fn local_model_notice(model: &str, origin: LocalModelOrigin, base_url: &str) -> String {
+    format!(
+        "local adapter: model {model} (from {}), backend {base_url}\n  \
+         change it with `--model <id>`, `[adapters.local].default_model = \"<id>\"` \
+         in .cosmon/config.toml, or COSMON_LOCAL_MODEL=<id> \
+         (default {DEFAULT_LOCAL_MODEL}; see docs/guides/local-model-selection.md)",
+        origin.label()
+    )
 }
 
 /// Escape hatch for [`preflight_local_adapter_model`]. Set to `1` to
@@ -8926,6 +9007,50 @@ mod tests {
             "llama3:8b",
             "an empty pin is unset, not an empty model id"
         );
+    }
+
+    #[test]
+    fn local_model_origin_tracks_the_mechanism_that_answered() {
+        // COSMON #23 — the model alone is not actionable. A user who reads
+        // `qwen3:8b` cannot tell whether their config row lost or was never
+        // consulted; the origin is what turns the notice into a repair.
+        // Only the two top tiers are exercised: they short-circuit above the
+        // env tier and so are safe under test parallelism.
+        let cfg = cosmon_core::config::AdapterEntry {
+            default_model: Some("llama3:8b".to_owned()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_local_model_with_origin(Some("qwen2.5:32b"), Some(&cfg)),
+            ("qwen2.5:32b".to_owned(), LocalModelOrigin::Pin)
+        );
+        assert_eq!(
+            resolve_local_model_with_origin(None, Some(&cfg)),
+            ("llama3:8b".to_owned(), LocalModelOrigin::ConfigRow)
+        );
+    }
+
+    #[test]
+    fn local_model_notice_names_every_override() {
+        // This one line is the whole discoverability surface: the reported
+        // defect was a user concluding the model was hardcoded because
+        // nothing ever named a knob. Each mechanism must appear verbatim,
+        // spelled exactly as it is typed.
+        let notice = local_model_notice(
+            "qwen3:8b",
+            LocalModelOrigin::BuiltinDefault,
+            "http://localhost:11434",
+        );
+        for needle in [
+            "qwen3:8b",
+            "--model",
+            "[adapters.local].default_model",
+            "COSMON_LOCAL_MODEL",
+            "built-in default",
+            "http://localhost:11434",
+        ] {
+            assert!(notice.contains(needle), "missing `{needle}` in: {notice}");
+        }
     }
 
     #[test]

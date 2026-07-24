@@ -530,6 +530,11 @@ CLI seam — both invocations route to the same in-process adapter.
    Mirrors `cs tackle --adapter`: when set, the value is threaded through to the `cs tackle` invocation that `cs demo` spawns under the hood, so the demo cycle can exercise any registered Adapter (e.g. `llama-cpp`, `claude`, `aider`, `openai-chat`). Optional — the default resolution path (`.cosmon/config.toml::[adapters.default]` → built-in [`BUILTIN_FLOOR_ADAPTER`](cosmon_core::config::BUILTIN_FLOOR_ADAPTER), currently `"local"`, the Ollama-backed in-process loop — never Claude) is preserved when the flag is omitted.
 
    Per ADR-106 the canonical name for the in-process llama.cpp adapter is `llama-cpp`; the legacy alias `llama` is accepted at the CLI seam (canonicalises via `cs tackle`'s `validate_adapter_name`).
+* `--model <MODEL_ID>` — Model to run, threaded verbatim to `cs tackle --model` (COSMON #23).
+
+   For the default `local` adapter this is the Ollama model tag, e.g. `--model qwen2.5:32b` or `--model llama3.2:3b`. It must already be pulled (`ollama pull <id>`); the dispatch preflight refuses rather than collapsing a molecule against a model the daemon cannot serve.
+
+   Precedence for the local adapter, highest first: this flag → formula-step `model =` pin → `[adapters.local].default_model` in `.cosmon/config.toml` → `COSMON_LOCAL_MODEL` → the built-in default `qwen3:8b`. Every local dispatch prints the model it resolved and its origin on stderr, so the effective choice is never a guess. Point the adapter at another daemon with `[adapters.local].base_url`, `COSMON_LOCAL_BASE_URL`, or the native `OLLAMA_HOST`. Full guide: `docs/guides/local-model-selection.md`.
 
 
 
