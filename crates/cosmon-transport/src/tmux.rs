@@ -91,9 +91,11 @@ const SUBMIT_POLL_INTERVAL_MS: u64 = 300;
 /// **This is defensive hardening, not the fix for the observed stall.** The
 /// 2026-07-20 symptom — a worker parked forever on `❯ [Pasted text #1 +NN
 /// lines]` — is removed by the *deadline and escalation* change in
-/// `cs tackle`'s briefing-submit confirmation (`BRIEFING_SUBMIT_INBAND_CAP` and
-/// its out-of-band backstop), which keeps pressing submit instead of giving up
-/// at 90 s. That is the load-bearing mechanism. The spelling below is a
+/// `cs tackle`'s briefing-submit confirmation (`BRIEFING_SUBMIT_INBAND_CAP`),
+/// which keeps re-pressing submit across that whole window instead of pressing
+/// once and giving up. That is the load-bearing mechanism, and it is bounded:
+/// nothing presses submit after the window closes, since a durable
+/// cross-process backstop is COSMON #26 and is deferred. The spelling below is a
 /// separate, cheaper property: it removes a *class* of possible re-encodings
 /// rather than a measured one. A later reader must not conclude that changing
 /// the spelling is what unstuck those workers — a double-model review
@@ -1313,8 +1315,10 @@ mod tests {
         // pre-fix `Enter` spelling also yields `\r` on the hosts measured — so
         // reverting `press_submit` to `Enter` leaves this green. The reader must
         // not take it as evidence that the spelling was the cause of the
-        // observed stall; the load-bearing fix is the submit deadline and its
-        // out-of-band backstop in `cs tackle`. See [`SUBMIT_KEY_HEX`].
+        // observed stall; the load-bearing fix is the bounded in-band submit
+        // retry in `cs tackle`. (A durable out-of-band continuation was claimed
+        // by an earlier fix and removed as unrunnable — COSMON #26.) See
+        // [`SUBMIT_KEY_HEX`].
         //
         // It is still a real guard, and the assertions below make it a genuine
         // falsifier for the drift it CAN see: a submit that arrives as `\n`

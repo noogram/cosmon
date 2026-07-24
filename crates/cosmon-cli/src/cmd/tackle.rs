@@ -4454,15 +4454,18 @@ fn spawn_claude_and_prompt(
     // nudge until a patrol (which never fired here) notices. Manual recovery
     // was a single `tmux send-keys Enter` once the TUI settled.
     //
-    // This backstop keeps confirming submission on a spawn-scale window: it
-    // stops the instant the worker is visibly `Working` (⏺ / Thinking — the
-    // acceptance signal that the mission is producing tokens) and otherwise
-    // re-nudges `Enter` for as long as the composer still shows the
+    // This confirmation keeps pressing submit on a spawn-scale window: it stops
+    // the instant the worker is visibly `Working` (⏺ / Thinking — the acceptance
+    // signal that the mission is producing tokens) and otherwise re-nudges the
+    // submit key for as long as the composer still shows the
     // pasted-but-unsubmitted briefing.
     //
-    // The dispatcher pays only [`BRIEFING_SUBMIT_INBAND_CAP`] of that patience;
-    // the rest runs on a detached backstop thread, so a single stuck composer
-    // cannot cost a serial dispatcher a quarter of an hour of throughput.
+    // The guarantee is exactly one window wide: [`BRIEFING_SUBMIT_INBAND_CAP`],
+    // paid in band so a single stuck composer cannot cost a serial dispatcher a
+    // quarter of an hour of throughput. Nothing in this process presses submit
+    // after that window closes — a *durable* backstop that outlives the dispatch
+    // is COSMON #26 (design A) and is not implemented here. See
+    // [`BriefingSubmitDisposition::ProceedStillPending`].
     let outcome = confirm_briefing_submitted(backend, wid, prompt, BRIEFING_SUBMIT_INBAND_CAP);
     match briefing_submit_disposition(outcome) {
         BriefingSubmitDisposition::Proceed => {
@@ -4480,67 +4483,62 @@ fn spawn_claude_and_prompt(
             }
             Ok(())
         }
-        // The composer STILL holds the pasted briefing. Hand the remaining
-        // patience to a thread that blocks nobody and return the dispatcher to
-        // the fleet. Deliberately NOT a teardown: "still pending" is a
-        // heuristic read of a pane, and a misread must not destroy a worker
-        // that may be doing real work (see [`BriefingSubmitDisposition`]).
-        BriefingSubmitDisposition::ProceedWithBackstop => {
+        // The composer STILL holds the pasted briefing when the in-band window
+        // closed. Release the dispatcher and say so loudly. Deliberately NOT a
+        // teardown: "still pending" is a heuristic read of a pane, and a misread
+        // must not destroy a worker that may be doing real work (see
+        // [`BriefingSubmitDisposition`]). Equally deliberately NOT a promise of
+        // further nudging: this process stops pressing here, and only `cs
+        // patrol` runs on a longer clock.
+        BriefingSubmitDisposition::ProceedStillPending => {
             tracing::warn!(
                 worker = %wid.name(),
                 session = %session_name,
                 inband_seconds = BRIEFING_SUBMIT_INBAND_CAP.as_secs(),
-                hard_cap_seconds = BRIEFING_SUBMIT_HARD_CAP.as_secs(),
                 socket = %backend.socket(),
                 "briefing still sat unsubmitted in the composer when the in-band \
-                 window closed; releasing the dispatcher and continuing to nudge \
-                 out of band. Inspect with \
-                 `tmux -L <socket> capture-pane -pS - -t <session>`"
+                 window closed; releasing the dispatcher and pressing no further. \
+                 Recover with a bare submit (`tmux -L <socket> send-keys -H 0d -t \
+                 <session>`) or wait for `cs patrol`. Inspect with \
+                 `tmux -L <socket> capture-pane -pS - -t <session>`. A durable \
+                 cross-process backstop is COSMON #26 and is not implemented yet."
             );
-            spawn_briefing_submit_backstop(backend, wid, prompt);
             Ok(())
         }
     }
 }
 
 /// How long the spawn-time confirmation keeps re-nudging while the composer is
-/// *visibly* still holding the unsubmitted briefing.
+/// *visibly* still holding the unsubmitted briefing — and, because it runs on
+/// the dispatch path, the whole of the submit guarantee cosmon offers today.
 ///
-/// # Why the old 90 s window was the bug (task-20260724-c014)
+/// # What this window is, and what it is not (COSMON #26)
 ///
-/// The previous single window was 90 s, after which the loop emitted a
-/// `tracing::warn!` and returned — a silent give-up. That is a **bounded**
-/// retry against an **unbounded-delay** environment: when startup is slow (MCP
-/// servers needing auth, a loaded machine, a large multi-block paste
-/// re-rendering) the TUI swallows every nudge for longer than 90 s, the loop
-/// quits, and nobody presses submit again. Workers were observed sitting on
+/// The field incident (task-20260724-c014) was workers sitting on
 /// `❯ [Pasted text #1 +NN lines]` for >20 minutes with a 0-byte
 /// `worker.stderr` and an empty worktree; a single manual submit at t+20 min
-/// started them instantly, because by then the TUI was finally idle.
+/// started them instantly, because by then the TUI was finally idle. The lesson
+/// was that a *bounded* retry faces an *unbounded-delay* environment, and the
+/// answer looked like "keep pressing far past this window".
 ///
-/// So the cap here is not "how long a worker is allowed to be slow" — it is
-/// only the point at which a still-unsubmitted paste stops being a slow start
-/// and becomes a typed failure. As long as the composer keeps showing the
-/// paste, the loop keeps pressing: bounded work, unbounded patience.
-const BRIEFING_SUBMIT_HARD_CAP: std::time::Duration = std::time::Duration::from_secs(900);
-
-/// How long the confirmation is allowed to run **in band**, on the dispatch
-/// path, before the rest of its patience is handed to an out-of-band backstop.
+/// It cannot be paid here. `confirm_briefing_submitted` is called from
+/// `spawn_claude_and_prompt`, which is called from `cs tackle`. Whatever waits
+/// there is the *dispatcher*: `cs run`, a patrol pass, a fleet loop — usually
+/// serial. A window of a quarter of an hour fixed the worker at the whole
+/// fleet's expense (the dispatch-blocking regression, A2).
 ///
-/// # Why the hard cap could not also be the in-band cap (A2)
+/// An earlier attempt handed the residual patience to a detached thread. That
+/// was a false promise: `cs tackle` returns within seconds of this call, and
+/// `cs run` launches `cs tackle` as a child and waits on it, so the thread died
+/// with the process long before it could nudge anything. It was removed rather
+/// than kept as decoration. A backstop that genuinely outlives the dispatch —
+/// a detached child process, a state file the patrol keys on, a supervisor-owned
+/// task — is COSMON #26 (design A) and is deferred to a future release.
 ///
-/// `confirm_briefing_submitted` is called from `spawn_claude_and_prompt`, which
-/// is called from `cs tackle`. Whatever waits there is the *dispatcher*: `cs
-/// run`, a patrol pass, a fleet loop — usually serial. Letting the in-band wait
-/// run to [`BRIEFING_SUBMIT_HARD_CAP`] fixed the worker at the dispatcher's
-/// expense: one poisoned spawn cost the whole fleet a quarter of an hour of
-/// dispatch throughput, worse for everyone else than the 90 s it replaced.
-///
-/// Patience is still the right answer — a nudge at t+20 min really did unstall
-/// the observed workers. It just must not be *charged to the dispatcher*. So the
-/// dispatcher waits roughly the old order of magnitude and then moves on, and a
-/// detached thread keeps pressing to the hard cap ([`spawn_briefing_submit_backstop`]).
-/// Bounded blocking, unbounded patience — the two are no longer the same clock.
+/// So: this cap is the honest edge of the guarantee. Inside it, a still-pending
+/// composer is nudged every [`BRIEFING_SUBMIT_POLL`]. Past it, the outcome is
+/// typed [`BriefingSubmitOutcome::StuckPasted`], logged loudly, and nothing in
+/// this process presses again — only `cs patrol`, on a much longer clock.
 const BRIEFING_SUBMIT_INBAND_CAP: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// What the dispatcher does with a confirmation outcome.
@@ -4556,15 +4554,21 @@ const BRIEFING_SUBMIT_INBAND_CAP: std::time::Duration = std::time::Duration::fro
 ///
 /// A worker that genuinely never submitted does no work and is cheap to notice
 /// later; a worker destroyed by a misread is expensive and silent. So the
-/// dispatch always proceeds, and the stuck case earns extra out-of-band nudging
-/// rather than a teardown.
+/// dispatch always proceeds, and the stuck case earns a loud warning rather
+/// than a teardown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BriefingSubmitDisposition {
     /// Nothing more to do: the briefing is in, or plausibly so.
     Proceed,
-    /// The composer still held the paste when the in-band budget ran out. Let
-    /// the dispatcher go and keep pressing out of band.
-    ProceedWithBackstop,
+    /// The composer still held the paste when the in-band budget ran out.
+    ///
+    /// The dispatcher is released and the condition is logged with the manual
+    /// recovery command. This variant promises **no further nudging**: the only
+    /// thing that presses submit after this point is `cs patrol`, on its own
+    /// clock. A durable cross-process backstop is COSMON #26 (design A) and is
+    /// deferred — see [`BRIEFING_SUBMIT_INBAND_CAP`] for why the thread-based
+    /// attempt was removed instead of relabelled.
+    ProceedStillPending,
 }
 
 impl BriefingSubmitDisposition {
@@ -4576,7 +4580,7 @@ impl BriefingSubmitDisposition {
     /// absence of an enum arm, which no future reader would notice being added.
     #[cfg(test)]
     fn proceeds(self) -> bool {
-        matches!(self, Self::Proceed | Self::ProceedWithBackstop)
+        matches!(self, Self::Proceed | Self::ProceedStillPending)
     }
 }
 
@@ -4586,59 +4590,8 @@ fn briefing_submit_disposition(outcome: BriefingSubmitOutcome) -> BriefingSubmit
         BriefingSubmitOutcome::Submitted | BriefingSubmitOutcome::Unconfirmed => {
             BriefingSubmitDisposition::Proceed
         }
-        BriefingSubmitOutcome::StuckPasted => BriefingSubmitDisposition::ProceedWithBackstop,
+        BriefingSubmitOutcome::StuckPasted => BriefingSubmitDisposition::ProceedStillPending,
     }
-}
-
-/// Keep pressing submit on a still-pending composer **off the dispatch path**,
-/// for the remainder of [`BRIEFING_SUBMIT_HARD_CAP`].
-///
-/// Detached on purpose: the thread is never joined, so `cs tackle` returns as
-/// soon as the in-band budget is spent. It owns everything it touches (a fresh
-/// `TmuxBackend` on the same socket, a cloned worker id, an owned prompt), so it
-/// cannot outlive a borrow. If the process exits first the thread dies with it
-/// — acceptable, because the patrol backstop covers the same stall on a longer
-/// clock, and the worker is left alive either way.
-fn spawn_briefing_submit_backstop(
-    backend: &TmuxBackend,
-    wid: &cosmon_core::id::WorkerId,
-    prompt: &str,
-) {
-    let socket = backend.socket().to_owned();
-    let wid = wid.clone();
-    let prompt = prompt.to_owned();
-    let remaining = BRIEFING_SUBMIT_HARD_CAP.saturating_sub(BRIEFING_SUBMIT_INBAND_CAP);
-    std::thread::Builder::new()
-        .name("briefing-submit-backstop".to_owned())
-        .spawn(move || {
-            let backend = TmuxBackend::new(socket);
-            let outcome = confirm_briefing_submitted(&backend, &wid, &prompt, remaining);
-            match outcome {
-                BriefingSubmitOutcome::StuckPasted => tracing::warn!(
-                    worker = %wid.name(),
-                    seconds = BRIEFING_SUBMIT_HARD_CAP.as_secs(),
-                    "briefing-submit backstop gave up: the composer still showed the \
-                     pasted-but-unsubmitted briefing. The worker is left alive for the \
-                     patrol to judge — a 'still pending' reading is a heuristic and must \
-                     not tear down a session on its own."
-                ),
-                other => tracing::info!(
-                    worker = %wid.name(),
-                    outcome = ?other,
-                    "briefing-submit backstop resolved out of band"
-                ),
-            }
-        })
-        .map_or_else(
-            |error| {
-                tracing::warn!(
-                    error = %error,
-                    "could not start the briefing-submit backstop; \
-                     the patrol remains the backstop of last resort"
-                );
-            },
-            |_handle| (),
-        );
 }
 
 /// How long the confirmation waits when the composer looks *clear* but the
@@ -4681,8 +4634,10 @@ enum BriefingSubmitOutcome {
     /// The composer is clear but `Working` was never observed. Ambiguous and
     /// most likely fine — non-fatal, logged.
     Unconfirmed,
-    /// The composer still holds the pasted-but-unsubmitted briefing after
-    /// [`BRIEFING_SUBMIT_HARD_CAP`]. A typed dispatch failure.
+    /// The composer still holds the pasted-but-unsubmitted briefing after the
+    /// whole budget ([`BRIEFING_SUBMIT_INBAND_CAP`] in production). A typed
+    /// give-up, not a silent one — and the end of the guarantee, since nothing
+    /// presses submit after it (COSMON #26).
     StuckPasted,
 }
 
@@ -4692,7 +4647,7 @@ enum BriefingSubmitOutcome {
 ///
 /// Pure so the two deadlines are unit-testable without a live tmux server: the
 /// load-bearing property is that a *pending* composer is never abandoned
-/// silently — it is nudged until the hard cap and then escalated as
+/// silently — it is nudged for the whole `budget` and then escalated as
 /// [`BriefingSubmitOutcome::StuckPasted`].
 ///
 /// The two clocks are separate on purpose. `total` bounds how long we press a
@@ -4740,8 +4695,8 @@ fn briefing_submit_step(
 
 /// Keep confirming that a freshly-delivered briefing actually left the
 /// composer, re-nudging the submit key until the worker is `Working`, the
-/// composer clears, or [`BRIEFING_SUBMIT_HARD_CAP`] turns a visibly-stuck
-/// paste into a typed [`BriefingSubmitOutcome::StuckPasted`].
+/// composer clears, or `budget` turns a visibly-stuck paste into a typed
+/// [`BriefingSubmitOutcome::StuckPasted`].
 ///
 /// Best-effort at the *tmux* seam: every read/write is allowed to fail without
 /// escalating a delivered briefing into a hard spawn error (the worker may
@@ -8680,30 +8635,38 @@ mod tests {
 
     // ── task-20260724-c014: bounded retry vs unbounded-delay TUI ────────
     // The 2026-07-24 recurrence of BUG #6. The step kernel above was already
-    // right; what hung the fleet was the *deadline* kernel around it — a 90 s
-    // window that expired into a `warn!` + `return`, i.e. a silent give-up
-    // while the composer was visibly still holding the briefing.
+    // right; what hung the fleet was the *deadline* kernel around it — a window
+    // that expired into a `warn!` + `return`, i.e. a silent give-up while the
+    // composer was visibly still holding the briefing.
+    //
+    // These deadline tests drive the kernel with an explicit budget, so they pin
+    // the kernel's arithmetic, NOT the size of the production window. The
+    // production window is [`BRIEFING_SUBMIT_INBAND_CAP`] and is pinned
+    // separately by `the_in_band_window_is_the_whole_submit_guarantee`.
+    const A_BUDGET_WELL_PAST_THE_QUIET_WINDOW: std::time::Duration =
+        std::time::Duration::from_secs(900);
+
     #[test]
-    fn briefing_submit_deadline_keeps_nudging_a_pending_composer_past_the_old_window() {
+    fn briefing_submit_deadline_keeps_nudging_a_pending_composer_for_the_whole_budget() {
         use std::time::Duration;
-        // The exact stall: at t+90 s (the pre-fix cliff) the composer still
-        // shows the unsubmitted paste. The loop must NOT stop here — the
-        // observed workers submitted fine on a nudge at t+20 min.
+        // A pending composer inside the budget is never abandoned: the observed
+        // workers submitted fine on a later nudge, so every tick that still sees
+        // the paste must keep the loop alive.
         assert_eq!(
             briefing_submit_deadline(
                 Duration::from_secs(91),
                 Duration::ZERO,
                 BriefingSubmitStep::Nudge,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             None
         );
         assert_eq!(
             briefing_submit_deadline(
-                BRIEFING_SUBMIT_HARD_CAP - Duration::from_secs(1),
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW - Duration::from_secs(1),
                 Duration::ZERO,
                 BriefingSubmitStep::Nudge,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             None
         );
@@ -8711,16 +8674,15 @@ mod tests {
 
     #[test]
     fn briefing_submit_deadline_escalates_a_stuck_paste_rather_than_giving_up() {
-        // Past the hard cap with the paste still in the composer: the worker
-        // has done zero work. This must be a TYPED failure the caller turns
-        // into a dispatch error, never a silent return that leaves a phantom
-        // `running` molecule holding a fleet slot.
+        // Past the budget with the paste still in the composer: the worker has
+        // done zero work. This must be a TYPED give-up the caller can log and
+        // name, never a silent return indistinguishable from a real submit.
         assert_eq!(
             briefing_submit_deadline(
-                BRIEFING_SUBMIT_HARD_CAP,
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW,
                 std::time::Duration::ZERO,
                 BriefingSubmitStep::Nudge,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             Some(BriefingSubmitOutcome::StuckPasted)
         );
@@ -8734,16 +8696,16 @@ mod tests {
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
                 BriefingSubmitStep::Done,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             Some(BriefingSubmitOutcome::Submitted)
         );
         assert_eq!(
             briefing_submit_deadline(
-                BRIEFING_SUBMIT_HARD_CAP * 10,
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW * 10,
                 BRIEFING_SUBMIT_QUIET_WINDOW * 10,
                 BriefingSubmitStep::Done,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             Some(BriefingSubmitOutcome::Submitted)
         );
@@ -8760,7 +8722,7 @@ mod tests {
                 std::time::Duration::from_secs(10_000),
                 BRIEFING_SUBMIT_QUIET_WINDOW - std::time::Duration::from_secs(1),
                 BriefingSubmitStep::Wait,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             None
         );
@@ -8769,7 +8731,7 @@ mod tests {
                 BRIEFING_SUBMIT_QUIET_WINDOW,
                 BRIEFING_SUBMIT_QUIET_WINDOW,
                 BriefingSubmitStep::Wait,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             Some(BriefingSubmitOutcome::Unconfirmed)
         );
@@ -8783,10 +8745,10 @@ mod tests {
         // pending sighting, so a recently-nudged session still gets to wait.
         assert_eq!(
             briefing_submit_deadline(
-                BRIEFING_SUBMIT_HARD_CAP - std::time::Duration::from_secs(1),
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW - std::time::Duration::from_secs(1),
                 std::time::Duration::from_secs(1),
                 BriefingSubmitStep::Wait,
-                BRIEFING_SUBMIT_HARD_CAP
+                A_BUDGET_WELL_PAST_THE_QUIET_WINDOW
             ),
             None
         );
@@ -8821,10 +8783,9 @@ mod tests {
     /// quarter of an hour of throughput.
     ///
     /// Patience is still right; charging it to the serial dispatcher is not. The
-    /// in-band wait must be bounded near the old ~90 s order, with the residual
-    /// escalation handed to a backstop that runs out of band.
+    /// in-band wait must stay bounded near the old ~90 s order.
     #[test]
-    fn a_stuck_composer_releases_the_dispatcher_long_before_the_hard_cap() {
+    fn a_stuck_composer_releases_the_dispatcher_at_the_in_band_cap() {
         // The composer never clears — the exact stall, worst case.
         let (outcome, waited, nudges) =
             simulate_briefing_submit(BRIEFING_SUBMIT_INBAND_CAP, |_| true);
@@ -8839,42 +8800,61 @@ mod tests {
             "the dispatcher must be released at the in-band cap, waited {waited:?}"
         );
         assert!(
-            waited * 4 < BRIEFING_SUBMIT_HARD_CAP,
-            "the in-band wait must be a small fraction of the hard cap, not the \
-             whole of it: waited {waited:?} against a {BRIEFING_SUBMIT_HARD_CAP:?} cap"
-        );
-        assert!(
             nudges > 1,
             "the in-band window must still press submit repeatedly, not once"
         );
     }
 
-    /// The other half of the same trade: handing off must not *shorten* the
-    /// patience that made the fix work in the field. The backstop, which runs
-    /// out of band and blocks nobody, keeps pressing to the full hard cap — the
-    /// nudge at t+20 min that unstalled the observed workers.
+    /// The honest statement of today's submit guarantee (COSMON #26).
+    ///
+    /// An earlier fix claimed a *durable* out-of-band continuation: a detached
+    /// thread was to keep nudging for ~810 s after the dispatcher was released.
+    /// It could never run — `cs tackle` returns within seconds and `cs run`
+    /// waits on `cs tackle` as a child, so the thread died with the process. Two
+    /// tests asserted that continuation and stayed green anyway; they were
+    /// removed with the mechanism.
+    ///
+    /// What is left is what the build actually delivers, and this test pins its
+    /// two halves so neither can be quietly widened or narrowed:
+    ///
+    /// - the window is a *dispatcher-scale* one (~90 s), not a quarter of an
+    ///   hour of blocked fleet throughput (the A2 regression);
+    /// - it is nonetheless long enough to be worth calling a retry, not the one
+    ///   swallowed `Enter` that started BUG #6.
+    ///
+    /// A durable cross-process backstop is design A, deferred; when it lands,
+    /// this test is what must be rewritten to describe the wider guarantee.
     #[test]
-    fn the_out_of_band_backstop_keeps_its_full_patience() {
-        let (outcome, waited, _) = simulate_briefing_submit(BRIEFING_SUBMIT_HARD_CAP, |_| true);
-
-        assert_eq!(outcome, BriefingSubmitOutcome::StuckPasted);
+    fn the_in_band_window_is_the_whole_submit_guarantee() {
         assert!(
-            waited >= BRIEFING_SUBMIT_HARD_CAP,
-            "the backstop must press until the hard cap, waited {waited:?}"
+            BRIEFING_SUBMIT_INBAND_CAP <= std::time::Duration::from_secs(120),
+            "the submit confirmation runs synchronously inside `cs tackle`; a \
+             window of {BRIEFING_SUBMIT_INBAND_CAP:?} blocks every serial \
+             dispatcher for that long. Nothing continues it out of band — see \
+             COSMON #26."
+        );
+        assert!(
+            BRIEFING_SUBMIT_INBAND_CAP >= std::time::Duration::from_secs(30),
+            "the window is the entire guarantee; shrinking it to \
+             {BRIEFING_SUBMIT_INBAND_CAP:?} reinstates BUG #6, where a TUI busy \
+             rendering a large paste swallowed every nudge before the retry gave up"
         );
     }
 
-    /// A composer that clears late — after the in-band cap but before the hard
-    /// cap — is exactly why the backstop exists: the dispatcher has already been
-    /// released, and the nudging that finally lands happens off the dispatch
-    /// path.
+    /// A composer that clears *inside* the window — the common slow start — must
+    /// be caught, and the loop must stop the moment it is.
+    ///
+    /// This is the actual field win the fix keeps: repeated submit presses across
+    /// the whole window, not a single one at t+0.
     #[test]
-    fn a_late_submit_is_still_caught_by_the_out_of_band_backstop() {
+    fn a_late_submit_inside_the_window_is_still_caught() {
         use cosmon_transport::readiness::SessionStatus;
-        let late = BRIEFING_SUBMIT_INBAND_CAP * 3;
+        // Well past the first nudge, comfortably inside the window.
+        let late = BRIEFING_SUBMIT_INBAND_CAP / 2;
         let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let nudges = std::cell::Cell::new(0_usize);
         let outcome = run_briefing_submit_loop(
-            BRIEFING_SUBMIT_HARD_CAP,
+            BRIEFING_SUBMIT_INBAND_CAP,
             &mut || {
                 // Past the late mark the nudge lands and the worker starts
                 // producing tokens.
@@ -8884,12 +8864,17 @@ mod tests {
                     (SessionStatus::Ready, true)
                 }
             },
-            &mut || {},
+            &mut || nudges.set(nudges.get() + 1),
             &mut || clock.get(),
             &mut || clock.set(clock.get() + BRIEFING_SUBMIT_POLL),
         );
         assert_eq!(outcome, BriefingSubmitOutcome::Submitted);
-        assert!(clock.get() >= late && clock.get() < BRIEFING_SUBMIT_HARD_CAP);
+        assert!(clock.get() >= late && clock.get() <= BRIEFING_SUBMIT_INBAND_CAP);
+        assert!(
+            nudges.get() > 1,
+            "the paste must be re-submitted on every pending tick until it lands, \
+             not pressed once and abandoned"
+        );
     }
 
     /// REGRESSION (double-model review, A3). A "still pending" reading is a
@@ -8910,10 +8895,11 @@ mod tests {
                 "{outcome:?} must not abort the dispatch: {disposition:?}"
             );
         }
-        // ...and the stuck case is the one that earns the out-of-band backstop.
+        // ...and the stuck case is the one that earns the loud warning. It
+        // promises no further nudging: a durable backstop is COSMON #26.
         assert_eq!(
             briefing_submit_disposition(BriefingSubmitOutcome::StuckPasted),
-            BriefingSubmitDisposition::ProceedWithBackstop
+            BriefingSubmitDisposition::ProceedStillPending
         );
         assert_eq!(
             briefing_submit_disposition(BriefingSubmitOutcome::Submitted),
