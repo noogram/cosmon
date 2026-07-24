@@ -4569,6 +4569,12 @@ enum BriefingSubmitDisposition {
 
 impl BriefingSubmitDisposition {
     /// Whether the dispatch continues. Always true — see the type's docs.
+    ///
+    /// Test-only because production has nothing to branch on: the invariant it
+    /// states is enforced by the type having no abort variant. It exists so the
+    /// regression test can assert that invariant by name rather than by the
+    /// absence of an enum arm, which no future reader would notice being added.
+    #[cfg(test)]
     fn proceeds(self) -> bool {
         matches!(self, Self::Proceed | Self::ProceedWithBackstop)
     }
