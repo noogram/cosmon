@@ -4156,8 +4156,10 @@ fn spawn_claude_and_prompt(
     // root-spawn policy: under `sudo cs tackle` with demotion disabled it
     // would put a live, paid, root cognitive process on the machine before
     // cosmon decides to refuse. `preflight_root_then_model` owns both steps
-    // and only calls the probe on the non-root path, so the ordering cannot
-    // be undone by a later edit that moves two statements past each other.
+    // and chooses the probe's *identity* — never root: refused dispatches
+    // never probe at all, and a demote probes as the demoted uid. The ordering
+    // cannot be undone by a later edit that moves two statements past each
+    // other.
     let running_uid = nix::unistd::Uid::effective().as_raw();
     let demote_target =
         cosmon_core::root_spawn_policy::resolve_demote_target(|k| std::env::var(k).ok());
@@ -4486,12 +4488,15 @@ enum SpawnPreflight {
 ///
 /// The ordering is enforced structurally rather than by statement adjacency:
 /// [`gate_cognitive_preflight`](cosmon_core::root_spawn_policy::gate_cognitive_preflight)
-/// owns the probe closure and only ever calls it on the non-root path. Under
-/// `Demote` the dispatcher is *still root*, so the probe is skipped there too
-/// and `preferred` passes through unprobed — the same behaviour the
-/// `COSMON_MODEL_FALLBACK=0` hatch gives, and the honest one: a probe run as
-/// root would authenticate as the wrong identity for a worker that will run as
-/// the demote target.
+/// owns the probe closure and hands it a
+/// [`PreflightIdentity`](cosmon_core::root_spawn_policy::PreflightIdentity)
+/// rather than a yes/no. On `Refuse` the closure is never invoked, so no live
+/// cognitive process precedes the refusal. On `Demote` the probe *does* run —
+/// as the demoted uid, behind the same `setpriv` privilege drop the worker
+/// gets — so the model the worker will use is resolved by the identity that
+/// will use it, and never by root (COSMON-DEV #20 defect ND1). Only the
+/// non-root path (`SpawnAsIs`) probes as the dispatcher itself, byte-identical
+/// to pre-#20.
 ///
 /// `provision_check` is consulted only on the demote path (COSMON-DEV #20
 /// defect A3): it reports whether the target uid can actually reach its config

@@ -412,16 +412,26 @@ fn build_headless_command(
 /// Returns [`ClaudeError::Io`] if the briefing temp file cannot be written,
 /// or [`ClaudeError::SpawnFailed`] if the tmux session cannot be created.
 pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeError> {
-    let briefing_file = match config.prompt {
-        Some(ref prompt) => Some(write_briefing_file(prompt)?),
-        None => None,
-    };
-    // Root-spawn policy (COSMON-DEV #20 / contract-20A). Production callers
-    // read the real effective uid; when root, demote the worker to a non-root
-    // uid before exec (or refuse before a live worker exists if demotion is
-    // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
-    // out-of-worktree writable-dir grant (facet B) rides along on the same
-    // command regardless of the root decision.
+    // The only place the process identity is read. Everything below takes it as
+    // a value, so the root branch is reachable from a test on a non-root box
+    // (COSMON-DEV #20 defect ND3, iteration 4).
+    spawn_claude_session_as(config, nix::unistd::Uid::effective().as_raw())
+}
+
+/// The root-spawn decision `spawn_claude_session` takes, as a function of an
+/// **injected** uid rather than of the process.
+///
+/// # Why this is a separate function (COSMON-DEV #20 defect ND3)
+///
+/// A3 was "two demote call sites, one of them unchecked". The fix routes both
+/// through [`crate::demote_provisioning::decide_root_spawn_provisioned`], and
+/// the tackle side is pinned by tests because its guard sits inside a function
+/// whose uid is a parameter. This side read `Uid::effective()` inline, so no
+/// test could reach its root branch: swapping the provisioned port back for the
+/// bare `decide_root_spawn` reintroduced A3 with the whole suite green. Taking
+/// the uid as a value is what makes the recurrence mode testable.
+fn decide_for_config(running_uid: u32, config: &ClaudeSessionConfig) -> RootSpawnDecision {
+    let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
     // A demote is only real if the target can actually use what the worker
     // needs (COSMON-DEV #20 defect A3, iteration 2). This path — `cs thaw` and
     // the patrol respawn backstop — used to call `decide_root_spawn` bare, so a
@@ -429,9 +439,7 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
     // or write the root-owned `.cosmon/state/`, and the worker started, was
     // declared live, and wedged on EACCES. Both demote call sites now route
     // through the one shared port.
-    let running_uid = nix::unistd::Uid::effective().as_raw();
-    let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
-    let decision = crate::demote_provisioning::decide_root_spawn_provisioned(
+    crate::demote_provisioning::decide_root_spawn_provisioned(
         running_uid,
         demote_target,
         |to_uid| {
@@ -446,7 +454,30 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
                 &config.writable_roots,
             )
         },
-    );
+    )
+}
+
+/// [`spawn_claude_session`] with the dispatcher's uid injected.
+///
+/// Production passes `Uid::effective()`; tests pass `0` to drive the root
+/// branch — the refusal, the briefing reaping, and the "no live worker is
+/// created" property are all asserted at *this* call site, not one level below
+/// it at the port (defect ND3).
+fn spawn_claude_session_as(
+    config: &ClaudeSessionConfig,
+    running_uid: u32,
+) -> Result<(), ClaudeError> {
+    let briefing_file = match config.prompt {
+        Some(ref prompt) => Some(write_briefing_file(prompt)?),
+        None => None,
+    };
+    // Root-spawn policy (COSMON-DEV #20 / contract-20A). Production callers
+    // read the real effective uid; when root, demote the worker to a non-root
+    // uid before exec (or refuse before a live worker exists if demotion is
+    // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
+    // out-of-worktree writable-dir grant (facet B) rides along on the same
+    // command regardless of the root decision.
+    let decision = decide_for_config(running_uid, config);
     if let RootSpawnDecision::Refuse { reason } = &decision {
         // Outcome 2: refuse before creating a live worker. Reap the briefing
         // temp file (no spawn will consume+unlink it) so the private briefing
@@ -762,6 +793,63 @@ mod tests {
             .filter(|l| !l.trim().is_empty())
             .map(|l| Envelope::from_line(l).expect("envelope must parse"))
             .collect()
+    }
+
+    /// COSMON-DEV #20 defect ND3, iteration 4 — the transport-side A3 guard,
+    /// pinned **at its call site** instead of one level below at the port.
+    ///
+    /// Before the uid became a parameter, `spawn_claude_session` read
+    /// `Uid::effective()` inline, so no test on a non-root box could reach its
+    /// root branch: replacing
+    /// `demote_provisioning::decide_root_spawn_provisioned` with the bare
+    /// `decide_root_spawn` reintroduced A3 with the entire suite green. This
+    /// drives uid 0 through the seam against a worktree the demote target
+    /// (uid 10001, never the test user) cannot write, and asserts the refusal —
+    /// so the recurrence mode A3 is named after cannot come back silently.
+    #[test]
+    fn transport_root_spawn_refuses_when_the_demote_target_cannot_use_the_worktree() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let tmp = tempdir().unwrap();
+        let work_dir = tmp.path().join("worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+        // Owner-only: uid 10001 is neither owner nor group, so `other` decides
+        // and `other` has nothing. The demote is therefore unusable.
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let config = session_config(
+            "cosmon-test-nd3",
+            "nd3-never-spawned",
+            &work_dir,
+            Clearance::Write,
+            Some("private briefing that must not reach a wedged worker".to_owned()),
+        );
+
+        let err = spawn_claude_session_as(&config, 0)
+            .expect_err("a root dispatch whose demote target cannot use the worktree must refuse");
+        assert!(
+            matches!(err, ClaudeError::RootSpawnRefused(_)),
+            "expected a typed root refusal before any live worker, got {err:?}"
+        );
+    }
+
+    /// The same seam on the ordinary non-root path is byte-identical to
+    /// pre-#20: the decision is `SpawnAsIs`, so no provisioning check runs and
+    /// no refusal is manufactured for the fleet's normal dispatch.
+    #[test]
+    fn transport_non_root_spawn_decides_as_is() {
+        let tmp = tempdir().unwrap();
+        let config = session_config(
+            "cosmon-test-nd3",
+            "nd3-non-root",
+            tmp.path(),
+            Clearance::Write,
+            None,
+        );
+        assert_eq!(
+            decide_for_config(1000, &config),
+            RootSpawnDecision::SpawnAsIs
+        );
     }
 
     #[test]
