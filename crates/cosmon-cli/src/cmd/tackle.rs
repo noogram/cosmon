@@ -5952,41 +5952,46 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         };
     }
 
-    // Commit what the worker produced, on its own branch (noogram/cosmon #25).
-    // A local worker has no shell and no git, so until now its output stayed
-    // *uncommitted* in the worktree — and `cs done` then refused teardown with
-    // "worktree has uncommitted changes (1 file(s)) — use --force to override:
-    // ?? main.rs". The documented `cs init` → `git init` → `cs demo` path
-    // dead-ended on a flag no first-contact user has any reason to know.
-    // Committing here is the honest fix: teardown is clean *and* `cs done`
-    // merges the branch, so the deliverable lands in the project the operator
-    // started in instead of a `.worktrees/` directory that teardown deletes.
-    // Best-effort by construction — the work is already on disk and already
-    // published to the artifact dir, so a commit failure is a warning on the
-    // worker log, never a lost molecule.
-    let committed = match commit_worktree_deliverables(&job.worktree_path, &mol_id) {
-        Ok(committed) => committed,
-        Err(error) => {
-            let _ = append_local_worker_failure(&job.molecule_dir, &error);
-            false
-        }
-    };
-
-    // Replace the model's guess about where its files went with cosmon's
-    // ground truth, read off the disk (noogram/cosmon #24). The brief now
-    // names the sandbox root, so a well-behaved worker already reports a true
-    // path; this section holds even when the model reports nothing at all.
-    if let Err(error) =
-        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed)
-    {
-        let _ = append_local_worker_failure(&job.molecule_dir, &error);
-    }
+    publish_local_worker_output(&job, &mol_id);
 
     mark_detached_local_worker_stopped(&store, &mol_id, &wid)?;
 
     let adapter =
         validate_adapter_name(&job.adapter_name, std::slice::from_ref(&job.adapter_name))?.0;
     finalize_inprocess_molecule(&store, &job.state_dir, &mol_id, &adapter)
+}
+
+/// Hand a finished local worker's output to the operator: commit it, then
+/// state on `synthesis.md` where it actually is.
+///
+/// Commit (noogram/cosmon #25): a local worker has no shell and no git, so its
+/// output used to stay *uncommitted* in the worktree — and `cs done` then
+/// refused teardown with "worktree has uncommitted changes (1 file(s)) — use
+/// --force to override: ?? main.rs". The documented `cs init` → `git init` →
+/// `cs demo` path dead-ended on a flag no first-contact user has any reason to
+/// know. Committing is the honest fix: teardown is clean *and* `cs done` merges
+/// the branch, so the deliverable lands in the project the operator started in
+/// rather than in a `.worktrees/` directory teardown deletes.
+///
+/// Report (noogram/cosmon #24): the model's own account of where its files went
+/// is prose. cosmon appends the ground truth, read off the disk.
+///
+/// Best-effort by construction: the work is already on disk and already
+/// published to the artifact dir, so either failure is a line on the worker log,
+/// never a lost molecule.
+fn publish_local_worker_output(job: &LocalWorkerJob, mol_id: &MoleculeId) {
+    let committed = match commit_worktree_deliverables(&job.worktree_path, mol_id) {
+        Ok(committed) => committed,
+        Err(error) => {
+            let _ = append_local_worker_failure(&job.molecule_dir, &error);
+            false
+        }
+    };
+    if let Err(error) =
+        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed)
+    {
+        let _ = append_local_worker_failure(&job.molecule_dir, &error);
+    }
 }
 
 /// Commit every deliverable a local worker left in its worktree, onto the
