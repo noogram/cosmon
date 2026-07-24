@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The filesystem port behind
-//! [`enforce_demote_provisioning`](cosmon_core::root_spawn_policy::enforce_demote_provisioning)
+//! [`cosmon_core::root_spawn_policy::enforce_demote_provisioning`]
 //! — COSMON-DEV #20 defect A3.
 //!
 //! # Why this lives here and not in the CLI

@@ -41,6 +41,17 @@
 //! Defence in depth: the lexical grammar upstream stays exactly as it is. This is
 //! the second, filesystem-aware line, and it is the one that runs immediately
 //! before a worker is handed the path.
+//!
+//! # What it does not claim
+//!
+//! A residual TOCTOU window remains: an attacker who can write inside the run
+//! home *after* this pass could still swap a verified directory for a symlink
+//! before the worker writes into it. Closing that needs `openat`/`O_NOFOLLOW`
+//! handles held open across the germination, which the current germinate seam
+//! does not thread. What this pass does close is the reproduced attack — a link
+//! planted *before* germination, which every lexical guard accepted — and it
+//! narrows the window from "the whole run" to "between provisioning and the
+//! worker's first write". Stated plainly rather than implied away.
 
 use std::path::{Path, PathBuf};
 
