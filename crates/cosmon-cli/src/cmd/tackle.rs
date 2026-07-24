@@ -4459,37 +4459,46 @@ fn spawn_claude_and_prompt(
     // acceptance signal that the mission is producing tokens) and otherwise
     // re-nudges `Enter` for as long as the composer still shows the
     // pasted-but-unsubmitted briefing.
-    match confirm_briefing_submitted(backend, wid, prompt) {
-        BriefingSubmitOutcome::Submitted => Ok(()),
-        // The composer is clear but the worker never visibly reached `Working`
-        // inside the quiet window. It most likely *did* submit and is thinking
-        // off the captured viewport, so this stays non-fatal — but it is logged
-        // rather than swallowed.
-        BriefingSubmitOutcome::Unconfirmed => {
-            tracing::warn!(
-                worker = %wid.name(),
-                "briefing left the composer but the worker was not observed \
-                 Working within the quiet window; proceeding"
-            );
+    //
+    // The dispatcher pays only [`BRIEFING_SUBMIT_INBAND_CAP`] of that patience;
+    // the rest runs on a detached backstop thread, so a single stuck composer
+    // cannot cost a serial dispatcher a quarter of an hour of throughput.
+    let outcome = confirm_briefing_submitted(backend, wid, prompt, BRIEFING_SUBMIT_INBAND_CAP);
+    match briefing_submit_disposition(outcome) {
+        BriefingSubmitDisposition::Proceed => {
+            if outcome == BriefingSubmitOutcome::Unconfirmed {
+                // The composer is clear but the worker never visibly reached
+                // `Working` inside the quiet window. It most likely *did*
+                // submit and is thinking off the captured viewport, so this
+                // stays non-fatal — but it is logged rather than swallowed.
+                tracing::warn!(
+                    worker = %wid.name(),
+                    session = %session_name,
+                    "briefing left the composer but the worker was not observed \
+                     Working within the quiet window; proceeding"
+                );
+            }
             Ok(())
         }
-        // The composer STILL holds the pasted briefing after the hard cap.
-        // This is the stall the fleet kept hitting; make it a typed spawn
-        // failure the runtime can act on (re-dispatch / patrol) instead of a
-        // `warn!` + `return` that leaves a phantom `running` molecule burning a
-        // slot with an empty worktree.
-        BriefingSubmitOutcome::StuckPasted => {
-            maybe_terminate(backend, wid);
-            Err(anyhow::anyhow!(
-                "cs tackle: claude session {session_name} never submitted its \
-                 briefing — the composer still showed the pasted-but-unsubmitted \
-                 text after {}s of re-nudging. The worker did no work; it has \
-                 been torn down so the molecule can be re-dispatched. Inspect a \
-                 repro with `tmux -L {} capture-pane -pS - -t {session_name}` \
-                 (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)",
-                BRIEFING_SUBMIT_HARD_CAP.as_secs(),
-                backend.socket(),
-            ))
+        // The composer STILL holds the pasted briefing. Hand the remaining
+        // patience to a thread that blocks nobody and return the dispatcher to
+        // the fleet. Deliberately NOT a teardown: "still pending" is a
+        // heuristic read of a pane, and a misread must not destroy a worker
+        // that may be doing real work (see [`BriefingSubmitDisposition`]).
+        BriefingSubmitDisposition::ProceedWithBackstop => {
+            tracing::warn!(
+                worker = %wid.name(),
+                session = %session_name,
+                inband_seconds = BRIEFING_SUBMIT_INBAND_CAP.as_secs(),
+                hard_cap_seconds = BRIEFING_SUBMIT_HARD_CAP.as_secs(),
+                socket = %backend.socket(),
+                "briefing still sat unsubmitted in the composer when the in-band \
+                 window closed; releasing the dispatcher and continuing to nudge \
+                 out of band. Inspect with \
+                 `tmux -L <socket> capture-pane -pS - -t <session>`"
+            );
+            spawn_briefing_submit_backstop(backend, wid, prompt);
+            Ok(())
         }
     }
 }
@@ -4514,6 +4523,123 @@ fn spawn_claude_and_prompt(
 /// and becomes a typed failure. As long as the composer keeps showing the
 /// paste, the loop keeps pressing: bounded work, unbounded patience.
 const BRIEFING_SUBMIT_HARD_CAP: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// How long the confirmation is allowed to run **in band**, on the dispatch
+/// path, before the rest of its patience is handed to an out-of-band backstop.
+///
+/// # Why the hard cap could not also be the in-band cap (A2)
+///
+/// `confirm_briefing_submitted` is called from `spawn_claude_and_prompt`, which
+/// is called from `cs tackle`. Whatever waits there is the *dispatcher*: `cs
+/// run`, a patrol pass, a fleet loop — usually serial. Letting the in-band wait
+/// run to [`BRIEFING_SUBMIT_HARD_CAP`] fixed the worker at the dispatcher's
+/// expense: one poisoned spawn cost the whole fleet a quarter of an hour of
+/// dispatch throughput, worse for everyone else than the 90 s it replaced.
+///
+/// Patience is still the right answer — a nudge at t+20 min really did unstall
+/// the observed workers. It just must not be *charged to the dispatcher*. So the
+/// dispatcher waits roughly the old order of magnitude and then moves on, and a
+/// detached thread keeps pressing to the hard cap ([`spawn_briefing_submit_backstop`]).
+/// Bounded blocking, unbounded patience — the two are no longer the same clock.
+const BRIEFING_SUBMIT_INBAND_CAP: std::time::Duration = std::time::Duration::from_secs(90);
+
+/// What the dispatcher does with a confirmation outcome.
+///
+/// # Why no variant aborts (A3)
+///
+/// "Still pending" is a *heuristic* read of a captured pane. The escalation
+/// commit turned a persistently-true reading into `maybe_terminate` plus a
+/// dispatch error, where the pre-fix code merely logged. That inverts the cost
+/// of a detector misread: a false positive used to cost a `warn!` line, and
+/// would now kill a worker that may be doing real work and fail an otherwise
+/// live dispatch.
+///
+/// A worker that genuinely never submitted does no work and is cheap to notice
+/// later; a worker destroyed by a misread is expensive and silent. So the
+/// dispatch always proceeds, and the stuck case earns extra out-of-band nudging
+/// rather than a teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BriefingSubmitDisposition {
+    /// Nothing more to do: the briefing is in, or plausibly so.
+    Proceed,
+    /// The composer still held the paste when the in-band budget ran out. Let
+    /// the dispatcher go and keep pressing out of band.
+    ProceedWithBackstop,
+}
+
+impl BriefingSubmitDisposition {
+    /// Whether the dispatch continues. Always true — see the type's docs.
+    ///
+    /// Test-only because production has nothing to branch on: the invariant it
+    /// states is enforced by the type having no abort variant. It exists so the
+    /// regression test can assert that invariant by name rather than by the
+    /// absence of an enum arm, which no future reader would notice being added.
+    #[cfg(test)]
+    fn proceeds(self) -> bool {
+        matches!(self, Self::Proceed | Self::ProceedWithBackstop)
+    }
+}
+
+/// Map a confirmation outcome onto what the dispatcher does next.
+fn briefing_submit_disposition(outcome: BriefingSubmitOutcome) -> BriefingSubmitDisposition {
+    match outcome {
+        BriefingSubmitOutcome::Submitted | BriefingSubmitOutcome::Unconfirmed => {
+            BriefingSubmitDisposition::Proceed
+        }
+        BriefingSubmitOutcome::StuckPasted => BriefingSubmitDisposition::ProceedWithBackstop,
+    }
+}
+
+/// Keep pressing submit on a still-pending composer **off the dispatch path**,
+/// for the remainder of [`BRIEFING_SUBMIT_HARD_CAP`].
+///
+/// Detached on purpose: the thread is never joined, so `cs tackle` returns as
+/// soon as the in-band budget is spent. It owns everything it touches (a fresh
+/// `TmuxBackend` on the same socket, a cloned worker id, an owned prompt), so it
+/// cannot outlive a borrow. If the process exits first the thread dies with it
+/// — acceptable, because the patrol backstop covers the same stall on a longer
+/// clock, and the worker is left alive either way.
+fn spawn_briefing_submit_backstop(
+    backend: &TmuxBackend,
+    wid: &cosmon_core::id::WorkerId,
+    prompt: &str,
+) {
+    let socket = backend.socket().to_owned();
+    let wid = wid.clone();
+    let prompt = prompt.to_owned();
+    let remaining = BRIEFING_SUBMIT_HARD_CAP.saturating_sub(BRIEFING_SUBMIT_INBAND_CAP);
+    std::thread::Builder::new()
+        .name("briefing-submit-backstop".to_owned())
+        .spawn(move || {
+            let backend = TmuxBackend::new(socket);
+            let outcome = confirm_briefing_submitted(&backend, &wid, &prompt, remaining);
+            match outcome {
+                BriefingSubmitOutcome::StuckPasted => tracing::warn!(
+                    worker = %wid.name(),
+                    seconds = BRIEFING_SUBMIT_HARD_CAP.as_secs(),
+                    "briefing-submit backstop gave up: the composer still showed the \
+                     pasted-but-unsubmitted briefing. The worker is left alive for the \
+                     patrol to judge — a 'still pending' reading is a heuristic and must \
+                     not tear down a session on its own."
+                ),
+                other => tracing::info!(
+                    worker = %wid.name(),
+                    outcome = ?other,
+                    "briefing-submit backstop resolved out of band"
+                ),
+            }
+        })
+        .map_or_else(
+            |error| {
+                tracing::warn!(
+                    error = %error,
+                    "could not start the briefing-submit backstop; \
+                     the patrol remains the backstop of last resort"
+                );
+            },
+            |_handle| (),
+        );
+}
 
 /// How long the confirmation waits when the composer looks *clear* but the
 /// worker has not been observed `Working`.
@@ -4578,11 +4704,12 @@ fn briefing_submit_deadline(
     total: std::time::Duration,
     quiet: std::time::Duration,
     step: BriefingSubmitStep,
+    budget: std::time::Duration,
 ) -> Option<BriefingSubmitOutcome> {
     match step {
         BriefingSubmitStep::Done => Some(BriefingSubmitOutcome::Submitted),
         BriefingSubmitStep::Nudge => {
-            (total >= BRIEFING_SUBMIT_HARD_CAP).then_some(BriefingSubmitOutcome::StuckPasted)
+            (total >= budget).then_some(BriefingSubmitOutcome::StuckPasted)
         }
         BriefingSubmitStep::Wait => {
             (quiet >= BRIEFING_SUBMIT_QUIET_WINDOW).then_some(BriefingSubmitOutcome::Unconfirmed)
@@ -4628,32 +4755,66 @@ fn confirm_briefing_submitted(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
     prompt: &str,
+    budget: std::time::Duration,
 ) -> BriefingSubmitOutcome {
     use cosmon_transport::readiness::classify_output;
     let started = std::time::Instant::now();
-    // Seeded at the start so a composer that never once looks pending still
-    // trips the short quiet window rather than the long hard cap.
-    let mut last_pending = started;
-    loop {
-        let status = backend.capture_output(wid, 30).map_or(
-            cosmon_transport::readiness::SessionStatus::Unknown,
-            |pane| classify_output(&pane),
-        );
-        let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
+    run_briefing_submit_loop(
+        budget,
+        &mut || {
+            let status = backend.capture_output(wid, 30).map_or(
+                cosmon_transport::readiness::SessionStatus::Unknown,
+                |pane| classify_output(&pane),
+            );
+            let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
+            (status, still_pending)
+        },
+        // Empty input == a bare submit keystroke (see `send_input`), which is
+        // exactly the manual recovery that unstalled these workers.
+        &mut || {
+            let _ = backend.send_input(wid, "");
+        },
+        &mut || started.elapsed(),
+        &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
+    )
+}
 
+/// The transport-free core of [`confirm_briefing_submitted`]: poll, decide,
+/// nudge, check the deadlines, sleep.
+///
+/// Factored out with an injected clock and sleep so the *wall-clock cost of the
+/// loop itself* is testable. That cost is the load-bearing property here — the
+/// dispatch-blocking regression this seam exists to pin is not about which
+/// outcome is returned but about **how long the caller waits for it**, and a
+/// test that has to spend real minutes to observe a minutes-long block is not a
+/// test anybody runs.
+///
+/// `now` returns elapsed-since-start, not an absolute instant, so a test can
+/// drive virtual time by simply advancing a counter in `sleep`.
+fn run_briefing_submit_loop(
+    budget: std::time::Duration,
+    probe: &mut dyn FnMut() -> (cosmon_transport::readiness::SessionStatus, bool),
+    nudge: &mut dyn FnMut(),
+    now: &mut dyn FnMut() -> std::time::Duration,
+    sleep: &mut dyn FnMut(),
+) -> BriefingSubmitOutcome {
+    // Seeded at zero so a composer that never once looks pending still trips
+    // the short quiet window rather than the long submit budget.
+    let mut last_pending = std::time::Duration::ZERO;
+    loop {
+        let (status, still_pending) = probe();
         let step = briefing_submit_step(&status, still_pending);
         if step == BriefingSubmitStep::Nudge {
-            last_pending = std::time::Instant::now();
-            // Empty input == a bare submit keystroke (see `send_input`), which
-            // is exactly the manual recovery that unstalled these workers.
-            let _ = backend.send_input(wid, "");
+            last_pending = now();
+            nudge();
         }
-
-        let now = std::time::Instant::now();
-        if let Some(outcome) = briefing_submit_deadline(now - started, now - last_pending, step) {
+        let elapsed = now();
+        if let Some(outcome) =
+            briefing_submit_deadline(elapsed, elapsed.saturating_sub(last_pending), step, budget)
+        {
             return outcome;
         }
-        std::thread::sleep(BRIEFING_SUBMIT_POLL);
+        sleep();
     }
 }
 
@@ -6173,31 +6334,74 @@ fn publish_local_worker_output(
     mol_id: &MoleculeId,
     baseline: &WorktreeBaseline,
 ) {
-    let committed = match commit_worktree_deliverables(&job.worktree_path, mol_id, baseline) {
-        Ok(committed) => committed,
+    let outcome = match commit_worktree_deliverables(&job.worktree_path, mol_id, baseline) {
+        Ok(outcome) => outcome,
         Err(error) => {
             let _ = append_local_worker_failure(&job.molecule_dir, &error);
-            false
+            LocalPublishOutcome::default()
         }
     };
     if let Err(error) =
-        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed, baseline)
+        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, &outcome, baseline)
     {
         let _ = append_local_worker_failure(&job.molecule_dir, &error);
     }
 }
 
-/// Commit every deliverable a local worker produced **during this turn**, onto
-/// the branch its worktree has checked out. Returns whether those deliverables
-/// are in `HEAD` when this returns.
+/// What the publisher actually did with this turn's deliverables.
 ///
-/// Scoped twice over. By path: cosmon-internal paths (`.cosmon/`, `target/`,
-/// `.git/`) are never staged, so the molecule's own state never rides along in
-/// a work commit. By *turn*: only paths that changed since `baseline` was
-/// captured are staged ([`turn_scoped_deliverables`]), so pre-existing operator
-/// work — untracked files, earlier commits on the branch — is never swept into
-/// a worker's commit. The second scope is what makes the publisher safe on
-/// `--no-worktree`, where the "worktree" is the operator's own checkout.
+/// A bare `bool` could not express the third possibility the same-file
+/// collision creates — *"the worker changed this file, and cosmon deliberately
+/// did not commit it"* — so a refusal was indistinguishable from an ordinary
+/// uncommitted deliverable and the operator was never told which files were
+/// held back or why.
+#[derive(Debug, Clone, Default)]
+struct LocalPublishOutcome {
+    /// Whether the *published* deliverables are in `HEAD` when publishing ends.
+    committed: bool,
+    /// Deliverables deliberately NOT committed because the operator already had
+    /// uncommitted work in the same file. See [`WorktreeBaseline::pre_dirty`].
+    withheld: Vec<PathBuf>,
+}
+
+/// A git pathspec that matches exactly one path, with no wildmatch expansion.
+///
+/// # Why this is not decoration (double-model review of #24/#25, Claude D1)
+///
+/// Git pathspecs are wildmatch *patterns*. `--` ends option parsing; it does
+/// **not** disable globbing. So a worker file literally named `a[bc].txt` also
+/// matches an unrelated `ab.txt`, and `git add -- 'a[bc].txt'` stages the
+/// operator's file too — re-opening, through git's own expansion, the exact
+/// "never commit pre-existing operator work" hole the turn-scoping closed. The
+/// `:(literal)` magic prefix turns the pattern back into a name.
+fn literal_pathspec(rel_path: &Path) -> String {
+    format!(":(literal){}", rel_path.to_string_lossy())
+}
+
+/// Commit every deliverable a local worker produced **during this turn**, onto
+/// the branch its worktree has checked out.
+///
+/// Scoped three times over. By path: cosmon-internal paths (`.cosmon/`,
+/// `target/`, `.git/`) are never staged, so the molecule's own state never
+/// rides along in a work commit. By *turn*: only paths that changed since
+/// `baseline` was captured are staged ([`turn_scoped_deliverables`]), so
+/// pre-existing operator work — untracked files, earlier commits on the branch
+/// — is never swept into a worker's commit. By *authorship*: a path the
+/// operator already had **uncommitted** content in when the turn began is
+/// refused outright and reported, never committed.
+///
+/// That third scope is the answer to the same-file collision. Turn-scoping is
+/// path-scoped, not hunk-scoped: it stores one whole-file fingerprint, so when
+/// operator and worker edit the same file it can only say *"this path changed"*
+/// — and `git commit -- <path>` then publishes the whole file, operator hunks
+/// included. A before-hash cannot separate the hunks, so the publisher does the
+/// only safe thing it can prove: it declines, leaves the file exactly as the
+/// worker left it on disk, and hands the decision to the operator. Refusing is
+/// not discarding.
+///
+/// Every pathspec is `:(literal)` ([`literal_pathspec`]) — git pathspecs glob,
+/// and a worker filename containing `[`, `*` or `?` would otherwise match, stage
+/// and commit unrelated operator files.
 ///
 /// The commit carries an explicit pathspec, so a change the operator had staged
 /// in the index but not committed is left staged rather than published by a
@@ -6213,9 +6417,10 @@ fn commit_worktree_deliverables(
     worktree: &Path,
     mol_id: &MoleculeId,
     baseline: &WorktreeBaseline,
-) -> anyhow::Result<bool> {
+) -> anyhow::Result<LocalPublishOutcome> {
     let rels = turn_scoped_deliverables(worktree, baseline)?;
     let mut staged: Vec<String> = Vec::new();
+    let mut withheld: Vec<PathBuf> = Vec::new();
     for rel in &rels {
         if ignored_artifact_path(rel) {
             continue;
@@ -6227,10 +6432,23 @@ fn commit_worktree_deliverables(
         {
             anyhow::bail!("git reported an unsafe worktree path: {rel:?}");
         }
-        staged.push(rel_path.to_string_lossy().into_owned());
+        if baseline.collides_with_operator_work(rel) {
+            tracing::warn!(
+                path = %rel_path.display(),
+                "not auto-committing this worker deliverable: the operator already \
+                 had uncommitted changes in the same file, and a whole-file commit \
+                 would publish them under the worker's authorship"
+            );
+            withheld.push(rel_path);
+            continue;
+        }
+        staged.push(literal_pathspec(&rel_path));
     }
     if staged.is_empty() {
-        return Ok(false);
+        return Ok(LocalPublishOutcome {
+            committed: false,
+            withheld,
+        });
     }
     let mut add_args = vec!["add", "--"];
     add_args.extend(staged.iter().map(String::as_str));
@@ -6243,7 +6461,10 @@ fn commit_worktree_deliverables(
     let mut cached_args = vec!["diff", "--cached", "--quiet", "--"];
     cached_args.extend(staged.iter().map(String::as_str));
     if git_stdout(worktree, &cached_args).is_ok() {
-        return Ok(true);
+        return Ok(LocalPublishOutcome {
+            committed: true,
+            withheld,
+        });
     }
 
     let message = format!("feat({mol_id}): local worker output");
@@ -6268,7 +6489,10 @@ fn commit_worktree_deliverables(
     args.extend(staged.iter().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     git_stdout(worktree, &arg_refs)?;
-    Ok(true)
+    Ok(LocalPublishOutcome {
+        committed: true,
+        withheld,
+    })
 }
 
 /// Whether this repository can produce a commit without an injected identity.
@@ -6291,14 +6515,14 @@ fn git_identity_configured(worktree: &Path) -> bool {
 fn append_local_artifact_report(
     molecule_dir: &Path,
     worktree: &Path,
-    committed: bool,
+    outcome: &LocalPublishOutcome,
     baseline: &WorktreeBaseline,
 ) -> anyhow::Result<()> {
     let synthesis_path = molecule_dir.join("synthesis.md");
     if !synthesis_path.exists() {
         return Ok(());
     }
-    let report = local_artifact_report(worktree, committed, baseline)?;
+    let report = local_artifact_report(worktree, outcome, baseline)?;
     if report.is_empty() {
         return Ok(());
     }
@@ -6324,7 +6548,7 @@ fn append_local_artifact_report(
 /// worker produced nothing (the real-work guard has its own, louder say).
 fn local_artifact_report(
     worktree: &Path,
-    committed: bool,
+    outcome: &LocalPublishOutcome,
     baseline: &WorktreeBaseline,
 ) -> anyhow::Result<String> {
     use std::fmt::Write;
@@ -6349,21 +6573,37 @@ fn local_artifact_report(
             );
         }
     }
-    if lines.is_empty() {
+    if lines.is_empty() && outcome.withheld.is_empty() {
         return Ok(String::new());
     }
 
     let mut out = String::from("\n---\n\n## Files this worker produced (verified on disk)\n\n");
     out.push_str(&lines);
     out.push('\n');
-    out.push_str(if committed {
-        "These files are committed on this molecule's branch. `cs done` merges \
-         that branch, which is what puts them at the `after cs done` path above; \
-         the worktree itself is removed by teardown.\n"
-    } else {
-        "These files are NOT committed — `cs done` will refuse teardown until \
-         they are (or will need `--force`, which discards them).\n"
-    });
+    if !lines.is_empty() {
+        out.push_str(if outcome.committed {
+            "These files are committed on this molecule's branch. `cs done` merges \
+             that branch, which is what puts them at the `after cs done` path above; \
+             the worktree itself is removed by teardown.\n"
+        } else {
+            "These files are NOT committed — `cs done` will refuse teardown until \
+             they are (or will need `--force`, which discards them).\n"
+        });
+    }
+    if !outcome.withheld.is_empty() {
+        out.push_str(
+            "\n### Not auto-committed (pre-existing operator changes)\n\n\
+             The worker changed these files, but each already held uncommitted \
+             changes of yours when the turn began. Committing the whole file would \
+             publish your hunks under the worker's authorship, and a whole-file \
+             fingerprint cannot separate them — so cosmon left them alone. They are \
+             on disk exactly as the worker left them; review and commit what you \
+             want:\n\n",
+        );
+        for rel_path in &outcome.withheld {
+            let _ = writeln!(out, "- `{}`", worktree.join(rel_path).display());
+        }
+    }
     Ok(out)
 }
 
@@ -6519,6 +6759,20 @@ struct WorktreeBaseline {
     /// fingerprinted. Two unfingerprintable observations compare equal, so an
     /// unreadable pre-existing file is never claimed as this turn's output.
     entries: std::collections::BTreeMap<Vec<u8>, Option<u64>>,
+    /// Paths that already held **uncommitted** content when the turn began:
+    /// dirty tracked files (staged or not) plus pre-existing untracked files.
+    ///
+    /// These are the collision candidates. A worker that edits one of them
+    /// produces a file whose bytes are part operator, part worker, and the
+    /// fingerprint cannot say which is which — so [`commit_worktree_deliverables`]
+    /// refuses to publish it rather than commit the operator's hunks.
+    ///
+    /// Deliberately *not* every pre-existing difference: a path that differs
+    /// from `main` because an earlier turn **committed** it is safe to commit
+    /// wholesale, because `HEAD` already contains that content and the new
+    /// commit's diff is only what changed since. Only uncommitted content can
+    /// ride along.
+    pre_dirty: std::collections::BTreeSet<Vec<u8>>,
     /// Whether the pre-run snapshot could be taken at all.
     ///
     /// `false` fails the turn-scoped filter **closed**: nothing is attributed
@@ -6535,6 +6789,7 @@ impl WorktreeBaseline {
     fn pristine() -> Self {
         Self {
             entries: std::collections::BTreeMap::new(),
+            pre_dirty: std::collections::BTreeSet::new(),
             observed: true,
         }
     }
@@ -6546,16 +6801,33 @@ impl WorktreeBaseline {
     /// as "attribute everything".
     fn capture(worktree: &Path) -> Self {
         match discover_worktree_deliverables(worktree) {
-            Ok(rels) => Self {
-                entries: rels
-                    .into_iter()
-                    .map(|rel| {
-                        let fingerprint = fingerprint_worktree_path(worktree, &rel);
-                        (rel, fingerprint)
-                    })
-                    .collect(),
-                observed: true,
-            },
+            Ok(rels) => {
+                // Conservative on failure: if we cannot tell which paths were
+                // already dirty, treat every pre-existing difference as a
+                // collision candidate. Refusing to auto-commit is recoverable
+                // (the files are on disk and reported); committing an
+                // operator's uncommitted work is not.
+                let pre_dirty = uncommitted_worktree_paths(worktree).unwrap_or_else(|error| {
+                    tracing::warn!(
+                        worktree = %worktree.display(),
+                        error = %error,
+                        "could not read the pre-run dirty set; treating every pre-existing \
+                         difference as operator work"
+                    );
+                    rels.iter().cloned().collect()
+                });
+                Self {
+                    entries: rels
+                        .into_iter()
+                        .map(|rel| {
+                            let fingerprint = fingerprint_worktree_path(worktree, &rel);
+                            (rel, fingerprint)
+                        })
+                        .collect(),
+                    pre_dirty,
+                    observed: true,
+                }
+            }
             Err(error) => {
                 tracing::warn!(
                     worktree = %worktree.display(),
@@ -6572,6 +6844,38 @@ impl WorktreeBaseline {
         let now = fingerprint_worktree_path(worktree, rel);
         !matches!(self.entries.get(rel), Some(before) if *before == now)
     }
+
+    /// Whether publishing `rel` would commit content the operator wrote.
+    ///
+    /// True exactly when the operator already had uncommitted content in that
+    /// path before the turn began — the same-file collision. See
+    /// [`WorktreeBaseline::pre_dirty`].
+    fn collides_with_operator_work(&self, rel: &[u8]) -> bool {
+        self.pre_dirty.contains(rel)
+    }
+}
+
+/// Paths whose on-disk content is not what `HEAD` records — dirty tracked files
+/// (staged or unstaged) plus untracked files — as git-native byte paths.
+///
+/// This is a strictly narrower question than "how does this worktree differ from
+/// `main`?": it asks what is *uncommitted*, which is the only content a
+/// whole-file worker commit can wrongly attribute. Read before the worker runs,
+/// it is the operator's claim on those files.
+fn uncommitted_worktree_paths(
+    worktree: &Path,
+) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
+    let mut rels: std::collections::BTreeSet<Vec<u8>> = git_nul_paths(
+        worktree,
+        &["ls-files", "-z", "--others", "--exclude-standard"],
+    )?
+    .into_iter()
+    .collect();
+    rels.extend(git_nul_paths(
+        worktree,
+        &["diff", "-z", "--name-only", "HEAD"],
+    )?);
+    Ok(rels)
 }
 
 /// Content fingerprint of one worktree-relative path, or `None` when it is not
@@ -8389,7 +8693,8 @@ mod tests {
             briefing_submit_deadline(
                 Duration::from_secs(91),
                 Duration::ZERO,
-                BriefingSubmitStep::Nudge
+                BriefingSubmitStep::Nudge,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             None
         );
@@ -8397,7 +8702,8 @@ mod tests {
             briefing_submit_deadline(
                 BRIEFING_SUBMIT_HARD_CAP - Duration::from_secs(1),
                 Duration::ZERO,
-                BriefingSubmitStep::Nudge
+                BriefingSubmitStep::Nudge,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             None
         );
@@ -8413,7 +8719,8 @@ mod tests {
             briefing_submit_deadline(
                 BRIEFING_SUBMIT_HARD_CAP,
                 std::time::Duration::ZERO,
-                BriefingSubmitStep::Nudge
+                BriefingSubmitStep::Nudge,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             Some(BriefingSubmitOutcome::StuckPasted)
         );
@@ -8426,7 +8733,8 @@ mod tests {
             briefing_submit_deadline(
                 std::time::Duration::ZERO,
                 std::time::Duration::ZERO,
-                BriefingSubmitStep::Done
+                BriefingSubmitStep::Done,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             Some(BriefingSubmitOutcome::Submitted)
         );
@@ -8434,7 +8742,8 @@ mod tests {
             briefing_submit_deadline(
                 BRIEFING_SUBMIT_HARD_CAP * 10,
                 BRIEFING_SUBMIT_QUIET_WINDOW * 10,
-                BriefingSubmitStep::Done
+                BriefingSubmitStep::Done,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             Some(BriefingSubmitOutcome::Submitted)
         );
@@ -8450,7 +8759,8 @@ mod tests {
             briefing_submit_deadline(
                 std::time::Duration::from_secs(10_000),
                 BRIEFING_SUBMIT_QUIET_WINDOW - std::time::Duration::from_secs(1),
-                BriefingSubmitStep::Wait
+                BriefingSubmitStep::Wait,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             None
         );
@@ -8458,7 +8768,8 @@ mod tests {
             briefing_submit_deadline(
                 BRIEFING_SUBMIT_QUIET_WINDOW,
                 BRIEFING_SUBMIT_QUIET_WINDOW,
-                BriefingSubmitStep::Wait
+                BriefingSubmitStep::Wait,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             Some(BriefingSubmitOutcome::Unconfirmed)
         );
@@ -8474,9 +8785,139 @@ mod tests {
             briefing_submit_deadline(
                 BRIEFING_SUBMIT_HARD_CAP - std::time::Duration::from_secs(1),
                 std::time::Duration::from_secs(1),
-                BriefingSubmitStep::Wait
+                BriefingSubmitStep::Wait,
+                BRIEFING_SUBMIT_HARD_CAP
             ),
             None
+        );
+    }
+
+    /// Drive the confirmation loop on virtual time and report how long the
+    /// caller was made to wait, plus how many nudges landed.
+    fn simulate_briefing_submit(
+        budget: std::time::Duration,
+        mut pending_for: impl FnMut(std::time::Duration) -> bool,
+    ) -> (BriefingSubmitOutcome, std::time::Duration, usize) {
+        use cosmon_transport::readiness::SessionStatus;
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let nudges = std::cell::Cell::new(0_usize);
+        let outcome = run_briefing_submit_loop(
+            budget,
+            &mut || (SessionStatus::Ready, pending_for(clock.get())),
+            &mut || nudges.set(nudges.get() + 1),
+            &mut || clock.get(),
+            &mut || clock.set(clock.get() + BRIEFING_SUBMIT_POLL),
+        );
+        (outcome, clock.get(), nudges.get())
+    }
+
+    /// REGRESSION (double-model review of the #24/#25 fix, A2 — the
+    /// dispatch-blocking one).
+    ///
+    /// `confirm_briefing_submitted` runs **synchronously inside `cs tackle`**.
+    /// Raising its window from 90 s to the 900 s hard cap moved the worst case
+    /// off the worker and onto the *dispatcher*: one stuck composer stalls
+    /// whatever is dispatching — `cs run`, a patrol pass, a fleet loop — for a
+    /// quarter of an hour of throughput.
+    ///
+    /// Patience is still right; charging it to the serial dispatcher is not. The
+    /// in-band wait must be bounded near the old ~90 s order, with the residual
+    /// escalation handed to a backstop that runs out of band.
+    #[test]
+    fn a_stuck_composer_releases_the_dispatcher_long_before_the_hard_cap() {
+        // The composer never clears — the exact stall, worst case.
+        let (outcome, waited, nudges) =
+            simulate_briefing_submit(BRIEFING_SUBMIT_INBAND_CAP, |_| true);
+
+        assert_eq!(
+            outcome,
+            BriefingSubmitOutcome::StuckPasted,
+            "a composer still holding the paste is not 'submitted'"
+        );
+        assert!(
+            waited <= BRIEFING_SUBMIT_INBAND_CAP + BRIEFING_SUBMIT_POLL,
+            "the dispatcher must be released at the in-band cap, waited {waited:?}"
+        );
+        assert!(
+            waited * 4 < BRIEFING_SUBMIT_HARD_CAP,
+            "the in-band wait must be a small fraction of the hard cap, not the \
+             whole of it: waited {waited:?} against a {BRIEFING_SUBMIT_HARD_CAP:?} cap"
+        );
+        assert!(
+            nudges > 1,
+            "the in-band window must still press submit repeatedly, not once"
+        );
+    }
+
+    /// The other half of the same trade: handing off must not *shorten* the
+    /// patience that made the fix work in the field. The backstop, which runs
+    /// out of band and blocks nobody, keeps pressing to the full hard cap — the
+    /// nudge at t+20 min that unstalled the observed workers.
+    #[test]
+    fn the_out_of_band_backstop_keeps_its_full_patience() {
+        let (outcome, waited, _) = simulate_briefing_submit(BRIEFING_SUBMIT_HARD_CAP, |_| true);
+
+        assert_eq!(outcome, BriefingSubmitOutcome::StuckPasted);
+        assert!(
+            waited >= BRIEFING_SUBMIT_HARD_CAP,
+            "the backstop must press until the hard cap, waited {waited:?}"
+        );
+    }
+
+    /// A composer that clears late — after the in-band cap but before the hard
+    /// cap — is exactly why the backstop exists: the dispatcher has already been
+    /// released, and the nudging that finally lands happens off the dispatch
+    /// path.
+    #[test]
+    fn a_late_submit_is_still_caught_by_the_out_of_band_backstop() {
+        use cosmon_transport::readiness::SessionStatus;
+        let late = BRIEFING_SUBMIT_INBAND_CAP * 3;
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let outcome = run_briefing_submit_loop(
+            BRIEFING_SUBMIT_HARD_CAP,
+            &mut || {
+                // Past the late mark the nudge lands and the worker starts
+                // producing tokens.
+                if clock.get() >= late {
+                    (SessionStatus::Working, false)
+                } else {
+                    (SessionStatus::Ready, true)
+                }
+            },
+            &mut || {},
+            &mut || clock.get(),
+            &mut || clock.set(clock.get() + BRIEFING_SUBMIT_POLL),
+        );
+        assert_eq!(outcome, BriefingSubmitOutcome::Submitted);
+        assert!(clock.get() >= late && clock.get() < BRIEFING_SUBMIT_HARD_CAP);
+    }
+
+    /// REGRESSION (double-model review, A3). A "still pending" reading is a
+    /// *heuristic* over a captured pane. Before the fix a false positive cost a
+    /// `warn!`; after it, it killed the worker and errored the dispatch. A
+    /// detector misread must not destroy an otherwise-live worker, so no
+    /// confirmation outcome maps to a fatal dispatch error any more.
+    #[test]
+    fn no_briefing_submit_outcome_kills_the_dispatch() {
+        for outcome in [
+            BriefingSubmitOutcome::Submitted,
+            BriefingSubmitOutcome::Unconfirmed,
+            BriefingSubmitOutcome::StuckPasted,
+        ] {
+            let disposition = briefing_submit_disposition(outcome);
+            assert!(
+                disposition.proceeds(),
+                "{outcome:?} must not abort the dispatch: {disposition:?}"
+            );
+        }
+        // ...and the stuck case is the one that earns the out-of-band backstop.
+        assert_eq!(
+            briefing_submit_disposition(BriefingSubmitOutcome::StuckPasted),
+            BriefingSubmitDisposition::ProceedWithBackstop
+        );
+        assert_eq!(
+            briefing_submit_disposition(BriefingSubmitOutcome::Submitted),
+            BriefingSubmitDisposition::Proceed
         );
     }
 
@@ -9096,6 +9537,146 @@ mod tests {
         assert!(
             scoped.contains(b"shared.txt".as_slice()),
             "an edited pre-existing file is this turn's output: {scoped:?}"
+        );
+    }
+
+    /// Read the paths one commit touched, newest first.
+    fn head_paths(root: &Path) -> Vec<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["show", "--name-only", "--format=", "HEAD"])
+            .env("LC_ALL", "C")
+            .output()
+            .expect("git show");
+        assert!(out.status.success(), "git show failed");
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The content of `rel` as `HEAD` records it, or `None` when `HEAD` has no
+    /// such path.
+    fn head_blob(root: &Path, rel: &str) -> Option<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["show", &format!("HEAD:{rel}")])
+            .env("LC_ALL", "C")
+            .output()
+            .expect("git show blob");
+        out.status
+            .success()
+            .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    fn test_mol_id() -> MoleculeId {
+        MoleculeId::new("task-20260724-73f5").expect("molecule id")
+    }
+
+    /// REGRESSION (double-model review of the #24/#25 fix, "same-file
+    /// collision" — reported independently by both reviewers).
+    ///
+    /// The turn-scoped baseline is **path**-scoped, not hunk-scoped: it stores
+    /// one whole-file fingerprint per already-differing path. So when the
+    /// operator has an *uncommitted* edit to a file and the `--no-worktree`
+    /// worker edits the SAME file, the fingerprint changes, the path is
+    /// selected as this turn's output, and `git commit -- <path>` publishes the
+    /// whole resulting file — operator hunks included. That is a narrow
+    /// re-opening of the exact hole the turn-scoping was written to close.
+    ///
+    /// The publisher must refuse the collision rather than guess: the operator's
+    /// pre-existing work must not reach `HEAD` under a worker's authorship.
+    #[test]
+    fn worker_commit_refuses_a_file_the_operator_had_already_edited() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("shared.txt"), "committed line\n").unwrap();
+        git_in(&root, &[], &["add", "-A"]);
+        git_in(&root, &[], &["commit", "-q", "-m", "shared"]);
+
+        // The operator edits it and does NOT commit — a dirty tracked file.
+        std::fs::write(root.join("shared.txt"), "committed line\nOPERATOR HUNK\n").unwrap();
+
+        let baseline = WorktreeBaseline::capture(&root);
+
+        // The worker (running `--no-worktree`, i.e. in the operator's own
+        // checkout) appends to that same file, and writes a file of its own.
+        std::fs::write(
+            root.join("shared.txt"),
+            "committed line\nOPERATOR HUNK\nworker line\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("worker-only.txt"), "the worker's\n").unwrap();
+
+        let outcome =
+            commit_worktree_deliverables(&root, &test_mol_id(), &baseline).expect("publish");
+
+        let touched = head_paths(&root);
+        assert!(
+            touched.contains(&"worker-only.txt".to_owned()),
+            "the worker's own file must still be published: {touched:?}"
+        );
+        assert!(
+            !touched.contains(&"shared.txt".to_owned()),
+            "a file the operator had already edited must NOT be committed by the \
+             worker — its pre-existing hunks would ride along: {touched:?}"
+        );
+        assert_eq!(
+            head_blob(&root, "shared.txt").as_deref(),
+            Some("committed line\n"),
+            "the operator's uncommitted hunk must not have reached HEAD"
+        );
+        assert!(
+            outcome
+                .withheld
+                .iter()
+                .any(|p| p == Path::new("shared.txt")),
+            "the refusal must be surfaced to the operator, not silent: {:?}",
+            outcome.withheld
+        );
+        // The operator's edit is untouched on disk — refusing to publish must
+        // not mean discarding.
+        assert_eq!(
+            std::fs::read_to_string(root.join("shared.txt")).unwrap(),
+            "committed line\nOPERATOR HUNK\nworker line\n"
+        );
+    }
+
+    /// REGRESSION (Claude review D1). Git pathspecs are wildmatch patterns, not
+    /// literals — `--` ends *option* parsing, it does not disable globbing. A
+    /// worker file named `a[bc].txt` therefore also matches the operator's
+    /// untouched `ab.txt`, which `git add`/`git commit` then sweep into the
+    /// worker's commit. Every pathspec must be `:(literal)`.
+    #[test]
+    fn worker_commit_does_not_glob_operator_files_into_the_commit() {
+        let (_tmp, root) = init_repo();
+        // The operator's file. Pre-existing, untracked, never touched by the
+        // worker — and a wildmatch of the worker's filename.
+        std::fs::write(root.join("ab.txt"), "OPERATOR FILE\n").unwrap();
+
+        let baseline = WorktreeBaseline::capture(&root);
+
+        // The worker's file this turn. Its name contains glob metacharacters.
+        std::fs::write(root.join("a[bc].txt"), "worker\n").unwrap();
+
+        commit_worktree_deliverables(&root, &test_mol_id(), &baseline).expect("publish");
+
+        let touched = head_paths(&root);
+        assert!(
+            touched.iter().any(|p| p.contains("a[bc].txt")),
+            "the worker's own file must be published: {touched:?}"
+        );
+        assert!(
+            !touched.contains(&"ab.txt".to_owned()),
+            "a pathspec glob must not sweep an untouched operator file into the \
+             worker's commit: {touched:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("ab.txt")).unwrap(),
+            "OPERATOR FILE\n",
+            "the operator's file must survive byte-identical"
         );
     }
 
@@ -10381,8 +10962,12 @@ mod tests {
         }
         fs::write(repo.join("main.rs"), "fn main() {}\n").expect("deliverable");
 
-        let report =
-            local_artifact_report(repo, false, &WorktreeBaseline::pristine()).expect("report");
+        let report = local_artifact_report(
+            repo,
+            &LocalPublishOutcome::default(),
+            &WorktreeBaseline::pristine(),
+        )
+        .expect("report");
         let claimed = repo.join("main.rs");
         assert!(
             report.contains(&claimed.display().to_string()),

@@ -88,11 +88,24 @@ const SUBMIT_POLL_INTERVAL_MS: u64 = 300;
 ///
 /// # Why the byte and not the key name (task-20260724-c014)
 ///
-/// `send-keys Enter` and `send-keys C-m` are *not* stable spellings of that
-/// byte: tmux re-encodes named keys when the server option `extended-keys` is
-/// on and the pane's application has negotiated an extended-key mode (Claude
-/// Code v2.x asks for one at startup). Measured against tmux 3.5a with a pane
-/// that requests both the kitty and `modifyOtherKeys` protocols:
+/// **This is defensive hardening, not the fix for the observed stall.** The
+/// 2026-07-20 symptom — a worker parked forever on `❯ [Pasted text #1 +NN
+/// lines]` — is removed by the *deadline and escalation* change in
+/// `cs tackle`'s briefing-submit confirmation (`BRIEFING_SUBMIT_INBAND_CAP` and
+/// its out-of-band backstop), which keeps pressing submit instead of giving up
+/// at 90 s. That is the load-bearing mechanism. The spelling below is a
+/// separate, cheaper property: it removes a *class* of possible re-encodings
+/// rather than a measured one. A later reader must not conclude that changing
+/// the spelling is what unstuck those workers — a double-model review
+/// (task-20260724-6aed, task-20260724-ac64) measured the pre-fix spelling and
+/// found it already produced the right byte on the reviewed hosts.
+///
+/// `send-keys Enter` and `send-keys C-m` are *not guaranteed* stable spellings
+/// of that byte: tmux may re-encode named keys when the server option
+/// `extended-keys` is on and the pane's application has negotiated an
+/// extended-key mode (Claude Code v2.x asks for one at startup). One
+/// measurement, on tmux 3.5a with a pane requesting both the kitty and
+/// `modifyOtherKeys` protocols:
 ///
 /// | spelling         | `extended-keys off` | `extended-keys on`     |
 /// |------------------|---------------------|------------------------|
@@ -101,11 +114,24 @@ const SUBMIT_POLL_INTERVAL_MS: u64 = 300;
 /// | `C-j`            | `\n`                | `\x1b[27;5;106~`       |
 /// | **`-H 0d`**      | `\r`                | `\r`                   |
 ///
-/// So the folk remedy "send `C-m`, not `Enter`" is backwards: `C-m` is the
-/// spelling that silently degrades into a modified-key escape sequence the
-/// composer ignores, on exactly the hosts that enable extended keys. `-H 0d`
-/// bypasses tmux's key table entirely and writes the byte, so the submit is
-/// byte-identical on every host regardless of operator tmux configuration.
+/// The `C-m` row did **not** reproduce on two other hosts, where every named
+/// spelling except `C-j` yielded `\r` under all three `extended-keys` settings.
+/// Treat the table as one host's observation, not as a portable law — which is
+/// exactly the argument for not depending on any of it. `-H 0d` bypasses tmux's
+/// key table entirely and writes the byte, so the submit is byte-identical on
+/// every host regardless of operator tmux configuration and of which tmux
+/// release is installed.
+///
+/// # Blast radius
+///
+/// [`TmuxBackend::press_submit`] is **shared by every tmux adapter** (claude,
+/// codex, aider, opencode) and by every `send_input` caller — propulsion, thaw,
+/// resume, patrol nudges. It is not claude-scoped, and any claim that it is is
+/// wrong. This is safe rather than accidental: `-H 0d` writes the same `\r` the
+/// previous `Enter` spelling produced on every host measured, so no adapter's
+/// behaviour changes; only the *guarantee* is stronger. The claude-only part of
+/// the 2026-07-24 work is the briefing-submit confirmation in `cs tackle`,
+/// which has exactly one caller.
 const SUBMIT_KEY_HEX: &str = "0d";
 
 /// Auto-scale the submit-retry budget with the size of the pasted input.
@@ -1277,16 +1303,25 @@ mod tests {
 
     #[test]
     fn submit_is_a_carriage_return_even_under_extended_keys() {
-        // task-20260724-c014 regression, at the byte seam.
+        // task-20260724-c014, at the byte seam.
         //
-        // Claude Code v2.x negotiates an extended-key protocol at startup. On a
-        // host whose tmux server has `extended-keys on`, tmux answers a *named*
-        // key by re-encoding it: `send-keys C-m` becomes `\x1b[27;5;109~`, which
-        // no composer reads as "submit" — the worker then sits forever on
-        // `❯ [Pasted text …]`. This probe is a tiny TUI that requests both the
-        // `modifyOtherKeys` and kitty protocols and records the raw pty byte of
-        // one submit. The oracle is the application's own capture, so it fails
-        // the moment the submit stops being a bare CR.
+        // WHAT THIS TEST DOES AND DOES NOT PROVE (double-model review,
+        // task-20260724-6aed A1 / task-20260724-ac64). It pins one property:
+        // whatever spelling `press_submit` uses, the byte that reaches the
+        // application under `extended-keys on` is a bare CR. It is NOT a
+        // mutation-falsifier for the `Enter` → `-H 0d` change, because the
+        // pre-fix `Enter` spelling also yields `\r` on the hosts measured — so
+        // reverting `press_submit` to `Enter` leaves this green. The reader must
+        // not take it as evidence that the spelling was the cause of the
+        // observed stall; the load-bearing fix is the submit deadline and its
+        // out-of-band backstop in `cs tackle`. See [`SUBMIT_KEY_HEX`].
+        //
+        // It is still a real guard, and the assertions below make it a genuine
+        // falsifier for the drift it CAN see: a submit that arrives as `\n`
+        // (`C-j`), as a modified-key escape (`\x1b[27;…~`), or as nothing at
+        // all. The probe is a tiny TUI requesting both the `modifyOtherKeys`
+        // and kitty protocols, recording the raw pty byte; the oracle is the
+        // application's own capture, not the implementation under test.
         let sock = format!("cosmon-test-extkeys-{}", std::process::id());
         cleanup(&sock);
         let backend = TmuxBackend::new(&sock);
@@ -1320,8 +1355,10 @@ mod tests {
         let captured = std::fs::read(capture.path()).expect("read pty capture");
         assert_eq!(
             captured, b"\r",
-            "submit must reach the pty as a bare CR under `extended-keys on`; \
-             a named key would arrive re-encoded and never submit"
+            "submit must reach the pty as a bare CR under `extended-keys on`. \
+             `\\n` means the spelling drifted to C-j; a leading ESC means it \
+             drifted to a spelling tmux re-encodes as a modified key, which no \
+             composer reads as submit; empty means no submit was delivered at all"
         );
 
         let _ = backend.terminate(&worker.id);

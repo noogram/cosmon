@@ -469,12 +469,20 @@ branch, and the output lands in the project you started in — no `--force`, and
 nothing left behind in `.worktrees/`. The molecule's `synthesis.md` names both
 locations (see "Files this worker produced").
 
-Two limits are worth knowing:
+Three limits are worth knowing:
 
 - **Publishing is best-effort.** A commit failure is recorded on the worker log
   and the molecule still finalises, so `cs done` can still refuse with the
   dirty-worktree message above. When it does, the manual recipe applies
   unchanged.
+- **A file you were already editing is not committed for you.** Scoping is by
+  path, not by hunk: if you had uncommitted changes in a file and the worker
+  edited that same file, cosmon cannot tell your lines from the worker's, and
+  committing the file would publish your work under the worker's name. So it
+  does not commit that file at all. It stays on disk exactly as the worker left
+  it, and `synthesis.md` lists it under "Not auto-committed (pre-existing
+  operator changes)" for you to review and commit yourself. This only ever comes
+  up on `--no-worktree`, where the worker runs in your own checkout.
 - **`--no-worktree` is not covered.** That mode (behind
   `COSMON_ALLOW_NO_WORKTREE=1`) runs the worker on your current checkout, where
   there is no molecule worktree or branch to merge. Cosmon still commits what
