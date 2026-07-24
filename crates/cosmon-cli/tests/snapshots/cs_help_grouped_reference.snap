@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-cs 0.2.2 — Cosmon agent orchestrator
+cs 0.3.0 — Cosmon agent orchestrator
 
 Usage: cs [OPTIONS] <COMMAND>
 
