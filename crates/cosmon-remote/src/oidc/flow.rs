@@ -36,7 +36,7 @@ use chrono::{DateTime, Utc};
 
 use super::discovery::{ClientRegistry, ProviderMetadata};
 use super::error::OidcError;
-use super::exchange;
+use super::exchange::{self, TokenResponse};
 use super::loopback::{self, LoopbackServer};
 use super::pkce_s256::{CodeVerifier, Nonce};
 use crate::credential::{
@@ -217,7 +217,15 @@ pub async fn discover(
         }
         None => loopback::redirect_uri(loopback::DEFAULT_REDIRECT_PORT),
     };
-    let scopes = client.scopes.clone().unwrap_or(fallback_scopes);
+    // We present the OIDC `id_token` as the cosmon bearer (see
+    // [`identity_bearer`]); Forgejo only mints an `id_token` when `openid` is in
+    // the authorization request. Guarantee it regardless of what the profile or
+    // the reverse-discovery document publishes — a server that omits it
+    // (`scopes: []`) would otherwise silently downgrade us to an `access_token`
+    // that carries no `iss`/`aud`/`sub`, which the resource server rejects as a
+    // malformed JWT. Requesting `openid` also matches the scope of any prior
+    // consent grant, avoiding Forgejo's `a grant exists with different scope`.
+    let scopes = ensure_openid(client.scopes.clone().unwrap_or(fallback_scopes));
     Ok(OidcEndpoints::new(
         meta.issuer,
         meta.authorization_endpoint,
@@ -226,6 +234,24 @@ pub async fn discover(
         redirect_uri,
         scopes,
     ))
+}
+
+/// Guarantee `openid` is among the requested scopes. We present the OIDC
+/// `id_token` as the cosmon bearer (see [`identity_bearer`]); Forgejo only mints
+/// an `id_token` when `openid` is in the authorization request. Enforcing it
+/// here — regardless of what the profile or the reverse-discovery document
+/// publishes — stops a server that omits it (`scopes: []`) from silently
+/// downgrading us to an `access_token` that carries no `iss`/`aud`/`sub` (which
+/// the resource server rejects as a malformed JWT). Requesting `openid` also
+/// matches the scope of any prior consent grant, avoiding Forgejo's
+/// `a grant exists with different scope`. Prepended (not appended) so it leads
+/// the space-delimited `scope` parameter, and only when absent — never
+/// duplicated.
+fn ensure_openid(mut scopes: Vec<String>) -> Vec<String> {
+    if !scopes.iter().any(|s| s == "openid") {
+        scopes.insert(0, "openid".to_string());
+    }
+    scopes
 }
 
 /// Build the `authorization_endpoint` URL carrying the PKCE `code_challenge`
@@ -314,10 +340,12 @@ pub async fn login(
     )
     .await?;
 
-    // 7. Persist the triple.
+    // 7. Persist the triple. The bearer is the OIDC id_token, not the access
+    // token — see `identity_bearer` for why (Forgejo's access token carries no
+    // identity claims).
     let key = endpoints.credential_key(sub);
     let cred = build_credential(
-        &tokens.access_token,
+        identity_bearer(&tokens),
         &tokens.refresh_token,
         tokens.expires_in,
         now,
@@ -474,8 +502,11 @@ async fn rotate(
             .await
             {
                 Ok(tokens) => {
+                    // Forgejo re-issues the id_token on every `openid` refresh, so
+                    // the rotated bearer is the fresh id_token too (see
+                    // `identity_bearer`).
                     let refreshed = build_credential(
-                        &tokens.access_token,
+                        identity_bearer(&tokens),
                         &tokens.refresh_token,
                         tokens.expires_in,
                         now,
@@ -541,6 +572,30 @@ fn redirect_port(redirect_uri: &str) -> u16 {
         .ok()
         .and_then(|u| u.port())
         .unwrap_or(loopback::DEFAULT_REDIRECT_PORT)
+}
+
+/// Pick the bearer cosmon-server validates out of a token-endpoint response.
+///
+/// The server's [`JwtVerifier::validate`] (crate `cosmon`) decodes the bearer as
+/// a self-bearing OIDC JWT: it reads `iss` + `sub` to resolve the noyau binding
+/// `(iss, sub) -> noyau`, and checks `aud` against the closed JWKS allowlist. An
+/// OIDC provider (Forgejo, `scope=openid`) puts those identity claims in the
+/// **id_token** — its `access_token` is a JWT carrying only provider-internal
+/// bookkeeping (`{gnt, tt, exp, iat}`), so presenting *that* fails
+/// `malformed_jwt`. Hence: when the response carries an `id_token`, that is the
+/// bearer.
+///
+/// The fallback to `access_token` when `id_token` is empty keeps the two
+/// identity-JWT-without-an-id_token deployments working unchanged: a non-OIDC
+/// token endpoint, and the JWT-minting test mock whose `access_token` *is* a
+/// full-claim JWT. This is a prefer-then-fall-back, never a silent swap — an
+/// OIDC login always has an id_token and always uses it.
+fn identity_bearer(tokens: &TokenResponse) -> &str {
+    if tokens.id_token.is_empty() {
+        &tokens.access_token
+    } else {
+        &tokens.id_token
+    }
 }
 
 /// Copy the access token out of a credential for the one legitimate use — the
@@ -671,6 +726,28 @@ mod tests {
         assert!(
             !url.contains("nonce="),
             "authorize URL must not carry an OIDC nonce: {url}"
+        );
+    }
+
+    #[test]
+    fn ensure_openid_prepends_when_absent() {
+        // A reverse-discovery document that publishes `scopes: []` (present but
+        // empty) or a profile carrying only cosmon authz scopes must not leave
+        // `openid` out — otherwise Forgejo mints no id_token and the bearer
+        // downgrades to a claim-less access token. `openid` leads the list.
+        assert_eq!(ensure_openid(vec![]), vec!["openid".to_string()]);
+        assert_eq!(
+            ensure_openid(vec!["cosmon:molecule:read".into()]),
+            vec!["openid".to_string(), "cosmon:molecule:read".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_openid_never_duplicates() {
+        // Idempotent: an already-present `openid` is neither moved nor doubled.
+        assert_eq!(
+            ensure_openid(vec!["openid".into(), "profile".into()]),
+            vec!["openid".to_string(), "profile".to_string()]
         );
     }
 
@@ -871,6 +948,33 @@ mod tests {
                 .expect("a present refresh token is always kept");
             assert_eq!(fresh.refresh_token().expose(), "rotated-refresh");
         }
+    }
+
+    fn token_response(access: &str, id: &str) -> TokenResponse {
+        TokenResponse {
+            access_token: access.to_owned(),
+            refresh_token: "rt".to_owned(),
+            expires_in: 900,
+            token_type: "bearer".to_owned(),
+            id_token: id.to_owned(),
+        }
+    }
+
+    #[test]
+    fn identity_bearer_prefers_the_id_token() {
+        // The real-OIDC case: Forgejo returns both. The bearer MUST be the
+        // id_token (it carries iss/aud/sub); the access_token carries no identity
+        // claims and would fail `malformed_jwt` server-side (task-20260720-71fd).
+        let tokens = token_response("access.no.identity", "id.with.identity");
+        assert_eq!(identity_bearer(&tokens), "id.with.identity");
+    }
+
+    #[test]
+    fn identity_bearer_falls_back_to_access_when_id_token_absent() {
+        // The JWT-mock / non-OIDC case: no id_token, and the access_token IS a
+        // full-claim JWT. Fall back to it so those deployments stay green.
+        let tokens = token_response("access.is.a.full.jwt", "");
+        assert_eq!(identity_bearer(&tokens), "access.is.a.full.jwt");
     }
 
     #[test]

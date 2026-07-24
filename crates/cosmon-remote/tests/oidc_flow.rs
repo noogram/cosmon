@@ -63,6 +63,9 @@ impl Respond for OidcMock {
                     "refresh_token": rt,
                     "expires_in": 900,
                     "token_type": "bearer",
+                    // A real OIDC provider (scope=openid) returns the identity
+                    // assertion here; the client stores THIS as the bearer.
+                    "id_token": format!("id-{n}"),
                 }))
             }
             "refresh_token" => {
@@ -78,6 +81,8 @@ impl Respond for OidcMock {
                         "refresh_token": rt,
                         "expires_in": 900,
                         "token_type": "bearer",
+                        // Forgejo re-issues the id_token on every openid refresh.
+                        "id_token": format!("id-{n}"),
                     }))
                 } else {
                     ResponseTemplate::new(400).set_body_json(serde_json::json!({
@@ -182,7 +187,13 @@ async fn refresh_rotates_and_rejects_reuse() {
         TokenState::Valid(t) => t.expose().to_owned(),
         TokenState::NeedsLogin => panic!("expected Valid, got NeedsLogin"),
     };
-    assert!(first.starts_with("at-"));
+    // The bearer is the id_token the mock returned (`id-N`), NOT the access
+    // token (`at-N`): the refresh path stores the OIDC identity assertion, the
+    // only bearer cosmon-server accepts (task-20260720-71fd).
+    assert!(
+        first.starts_with("id-"),
+        "refreshed bearer must be the id_token, got {first:?}"
+    );
     assert_eq!(count.load(Ordering::SeqCst), 1);
 
     // Manually reuse the now-spent seed token → the mock rejects it → the flow
@@ -500,7 +511,19 @@ async fn login_end_to_end_persists_the_credential() {
         .load(&outcome.key)
         .unwrap()
         .expect("credential persisted");
-    assert!(stored.access_token().expose().starts_with("at-"));
+    // The persisted bearer is the OIDC id_token (`id-N`), NOT Forgejo's
+    // access token (`at-N`): the access token carries no iss/aud/sub, so
+    // cosmon-server would reject it with `malformed_jwt`. This is the
+    // end-to-end regression guard for task-20260720-71fd.
+    let bearer = stored.access_token().expose();
+    assert!(
+        bearer.starts_with("id-"),
+        "login must persist the id_token as the bearer, got {bearer:?}"
+    );
+    assert!(
+        !bearer.starts_with("at-"),
+        "the Forgejo access token must never be the stored bearer"
+    );
     assert!(stored.has_refresh());
 }
 
