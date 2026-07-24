@@ -739,6 +739,7 @@ mod tests {
     use super::*;
     use cosmon_core::event_v2::{Envelope, EventV2};
     use cosmon_core::id::MoleculeId;
+    use cosmon_core::root_spawn_policy::decide_root_spawn;
     use std::fs;
     use tempfile::tempdir;
 
