@@ -459,12 +459,27 @@ Or force teardown (loses uncommitted work):
 cs done <mol-id> --force
 ```
 
-This does not apply to the `local` / `ollama` floor: a local worker has no
-shell and no git, so cosmon commits the deliverables it left in the worktree
-on its behalf before the molecule finalises. `cs done` therefore finds a clean
-worktree, merges the branch, and the output lands in the project you started
-in — no `--force`, and nothing left behind in `.worktrees/`. The molecule's
-`synthesis.md` names both locations (see "Files this worker produced").
+On the `local` / `ollama` floor you usually do not have to do this yourself: a
+local worker has no shell and no git, so cosmon commits the deliverables it
+produced — and **only** those, not anything that was already in the worktree
+before the turn — on its behalf before the molecule finalises. On the ordinary
+dispatch (a dedicated `.worktrees/<mol-id>/` worktree on the molecule's own
+branch), when that commit succeeds `cs done` finds a clean worktree, merges the
+branch, and the output lands in the project you started in — no `--force`, and
+nothing left behind in `.worktrees/`. The molecule's `synthesis.md` names both
+locations (see "Files this worker produced").
+
+Two limits are worth knowing:
+
+- **Publishing is best-effort.** A commit failure is recorded on the worker log
+  and the molecule still finalises, so `cs done` can still refuse with the
+  dirty-worktree message above. When it does, the manual recipe applies
+  unchanged.
+- **`--no-worktree` is not covered.** That mode (behind
+  `COSMON_ALLOW_NO_WORKTREE=1`) runs the worker on your current checkout, where
+  there is no molecule worktree or branch to merge. Cosmon still commits what
+  the worker produced this turn, but it lands on whatever branch you have
+  checked out, and `cs done` has no worktree to tear down.
 
 ### Dry-run teardown plan
 
