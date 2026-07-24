@@ -26,6 +26,7 @@ pub mod beads;
 pub mod claude;
 pub mod codex;
 pub mod command_runner;
+pub mod demote_provisioning;
 pub mod dispatch;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;

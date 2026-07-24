@@ -4181,25 +4181,29 @@ fn spawn_claude_and_prompt(
     let (root_decision, effective_model) = match preflight_root_then_model(
         running_uid,
         demote_target,
-        preferred_model,
         // Consulted only on the demote path (defect A3): `--add-dir` grants
         // Claude *authorization*, never OS ownership, so the same dirs the
         // grant names must also be reachable by the demote target.
         |to_uid| {
             demote_resource_checks(
                 to_uid,
-                demote_config_home(config_dir.as_deref()).as_deref(),
+                demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()).as_deref(),
                 worktree_path,
                 &writable_roots,
             )
         },
-        || {
+        // The probe now runs under the identity the WORKER will hold — as the
+        // demote target on a root dispatch, as the dispatcher otherwise — so
+        // model resolution survives demotion (regression ND1) without any live
+        // root cognition (defect A2).
+        |identity| {
             resolve_worker_model(
                 preferred_model,
                 &claude_bin,
                 mol_state_dir,
                 config_dir.as_deref(),
                 strong_set,
+                identity,
             )
         },
     )? {
@@ -4439,101 +4443,16 @@ fn confirm_briefing_submitted(
     }
 }
 
-/// Whether `uid` could create and modify entries under `path` — the
-/// filesystem port behind
-/// [`enforce_demote_provisioning`](cosmon_core::root_spawn_policy::enforce_demote_provisioning)
-/// (COSMON-DEV #20 defect A3).
-///
-/// Answers by *arithmetic on the mode bits*, not by attempting the write: the
-/// dispatcher is root, so a real trial write would succeed for root and prove
-/// nothing about the uid the worker will actually run as. That is the whole
-/// trap — every check on the demote path must be asked about the target
-/// identity, never about the one holding the file descriptor.
-///
-/// A directory needs both write and search (`x`) to be usable. When `path`
-/// does not exist yet the question moves to the nearest existing ancestor: the
-/// worker would have to create it, which is a write to the parent. `setpriv
-/// --regid <uid>` sets the primary gid to the same numeric value as the uid, so
-/// the group bits are checked against `uid` too.
-///
-/// This is a *necessary* condition, not a sufficient one — it does not walk
-/// every ancestor for the search bit, and it cannot see ACLs or mount flags. It
-/// catches the failure that actually happens (root-owned 0700), and a `true`
-/// verdict is never a promise that nothing else can go wrong.
-fn path_usable_by_uid(path: &std::path::Path, uid: u32) -> bool {
-    use std::os::unix::fs::MetadataExt as _;
-
-    // The nearest existing ancestor: creating a missing dir is a write to it.
-    let mut probe = path;
-    let meta = loop {
-        match std::fs::metadata(probe) {
-            Ok(m) => break m,
-            Err(_) => match probe.parent() {
-                Some(parent) => probe = parent,
-                // No existing ancestor at all — nothing usable to report.
-                None => return false,
-            },
-        }
-    };
-
-    let mode = meta.mode();
-    let (write, exec) = if meta.uid() == uid {
-        (0o200, 0o100)
-    } else if meta.gid() == uid {
-        (0o020, 0o010)
-    } else {
-        (0o002, 0o001)
-    };
-    mode & write != 0 && mode & exec != 0
-}
-
-/// Probe every path a demoted worker must be able to use, for
-/// [`enforce_demote_provisioning`](cosmon_core::root_spawn_policy::enforce_demote_provisioning).
-///
-/// `config_home` is the Claude config dir the worker will authenticate from —
-/// `CLAUDE_CONFIG_DIR` when set, else `$HOME/.claude`. Under `docker run -u 0`
-/// with the environment preserved (the demotion prefix deliberately omits
-/// `--reset-env`) that resolves to root's `/root/.claude`, mode 0700 — the
-/// exact `EACCES` the reviewers predicted.
-fn demote_resource_checks(
-    uid: u32,
-    config_home: Option<&std::path::Path>,
-    worktree: &std::path::Path,
-    state_dirs: &[std::path::PathBuf],
-) -> Vec<cosmon_core::root_spawn_policy::DemoteResourceAccess> {
-    use cosmon_core::root_spawn_policy::{DemoteResource, DemoteResourceAccess};
-
-    let mut checks = Vec::new();
-    let mut push = |resource: DemoteResource, path: &std::path::Path| {
-        checks.push(DemoteResourceAccess {
-            resource,
-            path: path.to_string_lossy().into_owned(),
-            usable: path_usable_by_uid(path, uid),
-        });
-    };
-    if let Some(home) = config_home {
-        push(DemoteResource::ConfigHome, home);
-    }
-    push(DemoteResource::Worktree, worktree);
-    for dir in state_dirs {
-        push(DemoteResource::StateDir, dir);
-    }
-    checks
-}
-
-/// Resolve the Claude config home a demoted worker would authenticate from.
-///
-/// `CLAUDE_CONFIG_DIR` when the spawn path resolved one, else `$HOME/.claude`
-/// — `HOME` being the *dispatcher's*, because the demotion prefix preserves
-/// the environment. `None` when neither is knowable, in which case the check
-/// is skipped rather than guessed at.
-fn demote_config_home(config_dir: Option<&str>) -> Option<std::path::PathBuf> {
-    config_dir.map(std::path::PathBuf::from).or_else(|| {
-        std::env::var("HOME")
-            .ok()
-            .map(|h| std::path::Path::new(&h).join(".claude"))
-    })
-}
+// The demote-provisioning port (`path_usable_by_uid`, `demote_resource_checks`,
+// `demote_config_home`) used to live here, in the CLI only. That is precisely
+// how COSMON-DEV #20 defect A3 survived its first fix: the transport spawn path
+// — `cs thaw`, the patrol respawn backstop — had no copy, so a root dispatcher
+// demoted through that door with no provisioning check at all. The port now
+// lives in `cosmon_transport::demote_provisioning` and BOTH demote call sites
+// import it, so the asymmetry cannot be reintroduced by editing one crate.
+use cosmon_transport::demote_provisioning::{
+    decide_root_spawn_provisioned, demote_config_home, demote_resource_checks,
+};
 
 /// The outcome of the ordered pre-flight a claude spawn runs before it
 /// creates anything live. See [`preflight_root_then_model`].
@@ -4593,34 +4512,24 @@ enum SpawnPreflight {
 fn preflight_root_then_model<M, P>(
     running_uid: u32,
     demote_target: Option<u32>,
-    preferred: Option<&str>,
     provision_check: P,
     resolve_model: M,
 ) -> anyhow::Result<SpawnPreflight>
 where
-    M: FnOnce() -> anyhow::Result<Option<String>>,
+    M: FnOnce(cosmon_core::root_spawn_policy::PreflightIdentity) -> anyhow::Result<Option<String>>,
     P: FnOnce(u32) -> Vec<cosmon_core::root_spawn_policy::DemoteResourceAccess>,
 {
-    use cosmon_core::root_spawn_policy::{
-        decide_root_spawn, enforce_demote_provisioning, gate_cognitive_preflight, RootSpawnDecision,
-    };
+    use cosmon_core::root_spawn_policy::gate_cognitive_preflight;
 
-    let decision = decide_root_spawn(running_uid, demote_target);
-    // A demote is only real if the target can use what the worker needs.
-    let decision = match decision {
-        RootSpawnDecision::Demote { to_uid } => {
-            enforce_demote_provisioning(decision, &provision_check(to_uid))
-        }
-        other => other,
-    };
+    // A demote is only real if the target can use what the worker needs — the
+    // same shared port the transport spawn path calls (defect A3).
+    let decision = decide_root_spawn_provisioned(running_uid, demote_target, provision_check);
     match gate_cognitive_preflight(&decision, resolve_model) {
         Err(reason) => Ok(SpawnPreflight::Refused(reason)),
-        // Root + demote: probe skipped, the operator's pin passes through.
-        Ok(None) => Ok(SpawnPreflight::Proceed {
-            decision,
-            model: preferred.map(str::to_owned),
-        }),
-        Ok(Some(resolved)) => Ok(SpawnPreflight::Proceed {
+        // Both surviving arms resolve a model; the gate chose WHICH IDENTITY
+        // the probe ran as (regression ND1). A demoted dispatch is no longer
+        // handed an unverified pin.
+        Ok(resolved) => Ok(SpawnPreflight::Proceed {
             decision,
             model: resolved?,
         }),
@@ -4668,6 +4577,10 @@ fn resolve_worker_model(
     // never silently escalates a cheap pin to a strong model — the
     // `task-20260705-ba98` fix. Empty when none is declared (fail-open).
     strong_set: &[String],
+    // The identity the probe must run as (COSMON-DEV #20 A2 / ND1). On a root
+    // dispatch this is the demote target, so the probe measures the account the
+    // worker will really authenticate with — and never runs as root.
+    identity: cosmon_core::root_spawn_policy::PreflightIdentity,
 ) -> anyhow::Result<Option<String>> {
     use cosmon_core::model_chain::{decide_worker_model, DecidedModel};
 
@@ -4681,7 +4594,7 @@ fn resolve_worker_model(
     // Probe with the same Claude account the worker will run under, so
     // the verdict reflects the worker's real auth path.
     let decided = decide_worker_model(preferred, strong_set, |model| {
-        probe_claude_model(claude_bin, model, config_dir)
+        probe_claude_model(claude_bin, model, config_dir, identity)
     });
 
     match decided {
@@ -4757,11 +4670,29 @@ fn probe_claude_model(
     claude_bin: &str,
     model: &str,
     config_dir: Option<&str>,
+    identity: cosmon_core::root_spawn_policy::PreflightIdentity,
 ) -> cosmon_core::model_chain::ProbeOutcome {
     use cosmon_core::model_chain::ProbeOutcome;
     use std::process::{Command, Stdio};
 
-    let mut cmd = Command::new(claude_bin);
+    // Under a root dispatcher the probe is demoted with the SAME `setpriv`
+    // privilege drop the worker gets, so no live cognition ever runs as root
+    // (defect A2) and the verdict is measured against the worker's real
+    // identity (regression ND1).
+    let mut cmd = match identity {
+        cosmon_core::root_spawn_policy::PreflightIdentity::AsIs => Command::new(claude_bin),
+        cosmon_core::root_spawn_policy::PreflightIdentity::Demoted { to_uid } => {
+            let mut c = Command::new("setpriv");
+            c.arg("--reuid")
+                .arg(to_uid.to_string())
+                .arg("--regid")
+                .arg(to_uid.to_string())
+                .arg("--clear-groups")
+                .arg("--")
+                .arg(claude_bin);
+            c
+        }
+    };
     cmd.arg("--model")
         .arg(model)
         .arg("-p")
@@ -7427,6 +7358,7 @@ mod tests {
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_filestore::FileStore;
     use cosmon_state::{MoleculeData, StateStore};
+    use cosmon_transport::demote_provisioning::{path_usable_by_uid, RequiredAccess};
     use tempfile::TempDir;
 
     use super::*;
@@ -7449,9 +7381,8 @@ mod tests {
         let outcome = preflight_root_then_model(
             0,
             None,
-            Some("claude-fable-5"),
             |_| vec![],
-            || {
+            |_identity| {
                 probes.set(probes.get() + 1);
                 Ok(Some("claude-fable-5".to_owned()))
             },
@@ -7470,51 +7401,94 @@ mod tests {
         );
     }
 
-    /// The demote path is still a root dispatcher, so no probe runs there
-    /// either; the operator's pin passes through unprobed.
+    /// COSMON-DEV #20 regression ND1, frozen as a red-first regression.
+    ///
+    /// The previous fix bought "no root cognition" by SKIPPING the probe on the
+    /// demote path and passing the operator's pin through unverified — so a
+    /// demoted worker whose account has lost the preferred model got the very
+    /// false-active/idle worker the model pre-flight exists to prevent. Both
+    /// properties must hold at once: the probe RUNS (the worker receives the
+    /// fallback it selected) and it runs AS THE DEMOTE TARGET, never as root.
     #[test]
-    fn root_demote_spawns_no_cognitive_probe_and_keeps_the_pin() {
-        let probes = std::cell::Cell::new(0_u32);
+    fn root_demote_probes_as_the_demoted_uid_and_uses_the_resolved_model() {
+        use cosmon_core::root_spawn_policy::PreflightIdentity;
+
+        let identities = std::cell::RefCell::new(Vec::new());
         let outcome = preflight_root_then_model(
             0,
             Some(10001),
-            Some("claude-fable-5"),
             |_| vec![],
-            || {
-                probes.set(probes.get() + 1);
-                Ok(Some("probed-instead".to_owned()))
+            |identity| {
+                identities.borrow_mut().push(identity);
+                // The preferred pin was unreachable; this is the fallback the
+                // probe selected. The demoted worker must get THIS.
+                Ok(Some("probed-fallback".to_owned()))
             },
         )
         .expect("demote proceeds");
-        assert_eq!(probes.get(), 0, "no cognitive process may run as root");
+
+        assert_eq!(
+            *identities.borrow(),
+            vec![PreflightIdentity::Demoted { to_uid: 10001 }],
+            "the probe must run exactly once, demoted — as root it is defect \
+             A2, not at all it is regression ND1",
+        );
+        assert!(
+            !identities.borrow().contains(&PreflightIdentity::AsIs),
+            "a root dispatcher must never run cognition as itself",
+        );
         assert_eq!(
             outcome,
             SpawnPreflight::Proceed {
                 decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
                     to_uid: 10001
                 },
-                model: Some("claude-fable-5".to_owned()),
-            }
+                model: Some("probed-fallback".to_owned()),
+            },
+            "the demoted worker must spawn on the RESOLVED model, not an \
+             unverified pin",
+        );
+    }
+
+    /// A demote whose whole model chain is unreachable still aborts rather than
+    /// spawning a worker that would freeze — the probe's abort survives
+    /// demotion exactly as it does on the non-root path.
+    #[test]
+    fn root_demote_model_failure_still_aborts() {
+        let outcome = preflight_root_then_model(
+            0,
+            Some(10001),
+            |_| vec![],
+            |_identity| Err(anyhow::anyhow!("no reachable model")),
+        );
+        assert!(
+            outcome.is_err(),
+            "a demoted dispatch with a dead model chain must abort, not spawn"
         );
     }
 
     /// The entire non-root fleet path is unchanged: the probe runs exactly
-    /// once and its verdict — not the raw pin — is what the worker spawns on.
+    /// once, as the dispatcher, and its verdict — not the raw pin — is what the
+    /// worker spawns on.
     #[test]
     fn non_root_probes_once_and_spawns_on_the_probed_model() {
+        use cosmon_core::root_spawn_policy::PreflightIdentity;
+
         let probes = std::cell::Cell::new(0_u32);
+        let seen = std::cell::Cell::new(None);
         let outcome = preflight_root_then_model(
             1000,
             Some(10001),
-            Some("claude-fable-5"),
             |_| vec![],
-            || {
+            |identity| {
                 probes.set(probes.get() + 1);
+                seen.set(Some(identity));
                 Ok(Some("probe-selected".to_owned()))
             },
         )
         .expect("non-root proceeds");
         assert_eq!(probes.get(), 1);
+        assert_eq!(seen.get(), Some(PreflightIdentity::AsIs));
         assert_eq!(
             outcome,
             SpawnPreflight::Proceed {
@@ -7532,9 +7506,8 @@ mod tests {
         let outcome = preflight_root_then_model(
             1000,
             Some(10001),
-            Some("m"),
             |_| vec![],
-            || Err(anyhow::anyhow!("no reachable model")),
+            |_identity| Err(anyhow::anyhow!("no reachable model")),
         );
         assert!(outcome.is_err(), "a dead model chain must still abort");
     }
@@ -7552,21 +7525,31 @@ mod tests {
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         // 4_294_967_000 is not the owner, not the gid, and `other` has no bits.
         assert!(
-            !path_usable_by_uid(tmp.path(), 4_294_967_000),
+            !path_usable_by_uid(tmp.path(), 4_294_967_000, RequiredAccess::Write),
             "a 0700 dir must not read as usable by a uid that does not own it"
         );
         // The owner, by the same arithmetic, can use it.
         let owner = std::fs::metadata(tmp.path()).unwrap().uid();
-        assert!(path_usable_by_uid(tmp.path(), owner));
+        assert!(path_usable_by_uid(
+            tmp.path(),
+            owner,
+            RequiredAccess::ReadWrite
+        ));
     }
 
-    /// A world-writable directory (the `chown`-or-`chmod` remedy applied) is
-    /// usable by any uid — so the check is not a blanket refusal of demotion.
+    /// The check is not a blanket refusal: applying the `chmod` remedy makes
+    /// the same directory usable again by the uid that will run there.
     #[test]
-    fn a_world_writable_dir_is_usable_by_any_uid() {
+    fn the_chmod_remedy_makes_a_dir_usable_again() {
         let tmp = TempDir::new().unwrap();
+        let owner = std::fs::metadata(tmp.path()).unwrap().uid();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(
+            !path_usable_by_uid(tmp.path(), owner, RequiredAccess::Write),
+            "a read-only dir cannot host the worker's `cs evolve` writes"
+        );
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(path_usable_by_uid(tmp.path(), 4_294_967_000));
+        assert!(path_usable_by_uid(tmp.path(), owner, RequiredAccess::Write));
     }
 
     /// A path that does not exist yet is judged by its nearest existing
@@ -7574,11 +7557,12 @@ mod tests {
     #[test]
     fn a_missing_path_is_judged_by_its_nearest_existing_ancestor() {
         let tmp = TempDir::new().unwrap();
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let owner = std::fs::metadata(tmp.path()).unwrap().uid();
         let missing = tmp.path().join("does/not/exist");
-        assert!(!path_usable_by_uid(&missing, 4_294_967_000));
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        assert!(path_usable_by_uid(&missing, 4_294_967_000));
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        assert!(!path_usable_by_uid(&missing, owner, RequiredAccess::Write));
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(path_usable_by_uid(&missing, owner, RequiredAccess::Write));
     }
 
     /// End-to-end through the ordered pre-flight: a root dispatcher WITH a
@@ -7593,17 +7577,19 @@ mod tests {
         std::fs::create_dir_all(&state).unwrap();
         // The worktree is reachable; ONLY the out-of-worktree state dir is not
         // — the precise root-owned-`.cosmon` shape `cs tackle` leaves behind
-        // when it runs as root, and the one `--add-dir` cannot repair.
+        // when it runs as root, and the one `--add-dir` cannot repair. It is
+        // modelled read+search but not writable, so the target reaches it and
+        // still cannot perform the write.
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let target = std::fs::metadata(tmp.path()).unwrap().uid();
 
         let probes = std::cell::Cell::new(0_u32);
         let outcome = preflight_root_then_model(
             0,
-            Some(4_294_967_000),
-            Some("claude-fable-5"),
+            Some(target),
             |uid| demote_resource_checks(uid, None, tmp.path(), &[state.clone()]),
-            || {
+            |_| {
                 probes.set(probes.get() + 1);
                 Ok(Some("claude-fable-5".to_owned()))
             },
@@ -7623,7 +7609,7 @@ mod tests {
                     ..
                 },
             ) => {
-                assert_eq!(uid, 4_294_967_000);
+                assert_eq!(uid, target);
                 assert!(
                     path.contains(".cosmon"),
                     "the refusal must name the unreachable path: {path}"
@@ -7631,6 +7617,7 @@ mod tests {
             }
             other => panic!("expected a typed provisioning refusal, got {other:?}"),
         }
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
 
     /// A demote target that CAN reach everything still demotes — the check
@@ -7639,21 +7626,21 @@ mod tests {
     fn provisioned_demote_target_still_demotes() {
         let tmp = TempDir::new().unwrap();
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let target = std::fs::metadata(tmp.path()).unwrap().uid();
         let outcome = preflight_root_then_model(
             0,
-            Some(4_294_967_000),
-            Some("claude-fable-5"),
+            Some(target),
             |uid| demote_resource_checks(uid, None, tmp.path(), &[]),
-            || Ok(Some("unused".to_owned())),
+            |_| Ok(Some("resolved-under-the-demoted-identity".to_owned())),
         )
         .expect("demote proceeds");
         assert_eq!(
             outcome,
             SpawnPreflight::Proceed {
                 decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
-                    to_uid: 4_294_967_000
+                    to_uid: target
                 },
-                model: Some("claude-fable-5".to_owned()),
+                model: Some("resolved-under-the-demoted-identity".to_owned()),
             }
         );
     }
@@ -7845,7 +7832,12 @@ mod tests {
     #[test]
     fn probe_missing_binary_is_unavailable_not_panic() {
         use cosmon_core::model_chain::ProbeOutcome;
-        let outcome = probe_claude_model("/nonexistent/claude-binary-xyz", "claude-fable-5", None);
+        let outcome = probe_claude_model(
+            "/nonexistent/claude-binary-xyz",
+            "claude-fable-5",
+            None,
+            cosmon_core::root_spawn_policy::PreflightIdentity::AsIs,
+        );
         match outcome {
             ProbeOutcome::Unavailable(reason) => assert!(reason.contains("probe spawn failed")),
             ProbeOutcome::Available => panic!("a missing binary cannot be available"),

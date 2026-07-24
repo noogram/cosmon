@@ -256,6 +256,24 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     })?;
     eprintln!("run home: {}", run_dir.display());
 
+    // REAL containment, not lexical (COSMON-DEV #21 defect B2, iteration 2).
+    // Everything above is path arithmetic on strings; a symlink planted at
+    // `<run_home>/<alias>` is lexically inside the home and really outside it.
+    // Create every node home ourselves with no-follow semantics and canonicalize
+    // it against the real run home, so what the worker is handed is proven to be
+    // inside — by the filesystem, immediately before the germination.
+    let node_homes: Vec<(String, std::path::PathBuf)> = calls
+        .iter()
+        .filter_map(|call| {
+            call.vars
+                .get(cosmon_core::spore::OUTPUT_DIR_VAR)
+                .map(|out| (call.alias.clone(), std::path::PathBuf::from(out)))
+        })
+        .collect();
+    cosmon_cli::spore_containment::provision_contained_node_dirs(&run_dir, &node_homes).map_err(
+        |breach| anyhow::anyhow!("{breach}; refusing to germinate (ADR-161, defect B2)"),
+    )?;
+
     let fleet_id =
         FleetId::new(&args.fleet).map_err(|e| anyhow::anyhow!("invalid fleet id: {e}"))?;
     let (project_id, energy_default) = resolve_project_context(ctx);

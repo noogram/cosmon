@@ -64,7 +64,7 @@ use cosmon_core::clearance::Clearance;
 use cosmon_core::event_v2::{AdapterHandleState, AdapterProbeKind, AdapterProbeResult};
 use cosmon_core::id::WorkerId;
 use cosmon_core::root_spawn_policy::{
-    decide_root_spawn, demotion_command_prefix, resolve_demote_target, RootSpawnDecision,
+    demotion_command_prefix, resolve_demote_target, RootSpawnDecision,
 };
 use cosmon_state::events::worker_spawn::{
     emit_adapter_briefing_consumed, emit_adapter_handle_reconciled, emit_adapter_liveness_probed,
@@ -422,9 +422,31 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
     // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
     // out-of-worktree writable-dir grant (facet B) rides along on the same
     // command regardless of the root decision.
+    // A demote is only real if the target can actually use what the worker
+    // needs (COSMON-DEV #20 defect A3, iteration 2). This path — `cs thaw` and
+    // the patrol respawn backstop — used to call `decide_root_spawn` bare, so a
+    // root container demoted to a uid that cannot read root's `/root/.claude`
+    // or write the root-owned `.cosmon/state/`, and the worker started, was
+    // declared live, and wedged on EACCES. Both demote call sites now route
+    // through the one shared port.
     let running_uid = nix::unistd::Uid::effective().as_raw();
     let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
-    let decision = decide_root_spawn(running_uid, demote_target);
+    let decision = crate::demote_provisioning::decide_root_spawn_provisioned(
+        running_uid,
+        demote_target,
+        |to_uid| {
+            let config_home = crate::demote_provisioning::demote_config_home(
+                std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+                |k| std::env::var(k).ok(),
+            );
+            crate::demote_provisioning::demote_resource_checks(
+                to_uid,
+                config_home.as_deref(),
+                std::path::Path::new(&config.work_dir),
+                &config.writable_roots,
+            )
+        },
+    );
     if let RootSpawnDecision::Refuse { reason } = &decision {
         // Outcome 2: refuse before creating a live worker. Reap the briefing
         // temp file (no spawn will consume+unlink it) so the private briefing
@@ -717,6 +739,7 @@ mod tests {
     use super::*;
     use cosmon_core::event_v2::{Envelope, EventV2};
     use cosmon_core::id::MoleculeId;
+    use cosmon_core::root_spawn_policy::decide_root_spawn;
     use std::fs;
     use tempfile::tempdir;
 

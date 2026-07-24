@@ -1,0 +1,7 @@
+# Insta snapshots capture `clap`'s help rendering byte-for-byte, and clap pads
+# its help columns with trailing spaces on otherwise-blank lines. That padding is
+# intrinsic to the captured output — regenerating the snapshot reproduces it —
+# so `git diff --check` flagging it as whitespace damage is a false positive on
+# a generated file we must not hand-edit (COSMON-DEV #20 finding C3: both
+# adversarial reviewers confirmed it is clap padding, not source sloppiness).
+crates/cosmon-cli/tests/snapshots/*.snap -whitespace

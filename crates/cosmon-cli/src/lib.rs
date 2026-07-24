@@ -42,6 +42,12 @@ pub mod adr;
 /// lives in [`cosmon_core::spore::seal`]; `cs spore run` (N5) wires these in.
 pub mod spore_seal;
 
+/// Filesystem-aware containment of a germination's per-node output homes
+/// (ADR-161). The lexical grammar in [`cosmon_core::spore`] closes the *string*
+/// attacks; this module closes the *symlink* one, by creating each home with
+/// no-follow semantics and canonicalizing it against the real run home.
+pub mod spore_containment;
+
 /// Git commit SHA this binary was built from, stamped by `build.rs`.
 ///
 /// The substrate for deploy verification: `cs done`
