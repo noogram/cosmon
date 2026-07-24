@@ -1313,8 +1313,10 @@ mod tests {
         // pre-fix `Enter` spelling also yields `\r` on the hosts measured — so
         // reverting `press_submit` to `Enter` leaves this green. The reader must
         // not take it as evidence that the spelling was the cause of the
-        // observed stall; the load-bearing fix is the submit deadline and its
-        // out-of-band backstop in `cs tackle`. See [`SUBMIT_KEY_HEX`].
+        // observed stall; the load-bearing fix is the bounded in-band submit
+        // retry in `cs tackle`. (A durable out-of-band continuation was claimed
+        // by an earlier fix and removed as unrunnable — COSMON #26.) See
+        // [`SUBMIT_KEY_HEX`].
         //
         // It is still a real guard, and the assertions below make it a genuine
         // falsifier for the drift it CAN see: a submit that arrives as `\n`
