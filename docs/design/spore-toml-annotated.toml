@@ -6,7 +6,8 @@
 # (grace-business-analysis) and extended with the four ADR-140 decisions:
 #
 #   D1  explicit node-kind taxonomy   (fixed / fanout / emergent)
-#   D2  emergent zones declare bounds (output_type, max_instances, stop)
+#   D2  emergent zones declare bounds (output_type, max_instances, stop,
+#       and the optional instances_var that binds the loop to the ceiling)
 #   D5  the `deterministic` formula trait (content-addressable cache)
 #   D6  the [spore.astra] descriptive-emission stanza
 #
@@ -170,8 +171,17 @@ description = "Adversarially refute each finding; downgrade any verdict that did
 output_type    = "finding"   # the type of item the upstream node emits
 max_instances  = 64          # hard ceiling on the fan-out: the foaming variant
 stop_condition = "every finding from analyse-axis consumed exactly once"
+# OPTIONAL: which of this node's vars carries the run-time instance count. The
+# ceiling above bounds the seal; the LOOP is driven by a var handed to the
+# formula. Naming the var here ties the two together, and expand() refuses at
+# validate/run time when the var resolves above max_instances (a zone sealed at
+# 64 that hands its formula 500 is a bound on paper only). Absent this field,
+# the conventional names (max_rounds, max_iterations, rounds, iterations) are
+# checked instead, so pre-existing spores are covered unedited.
+instances_var  = "max_verifications"
 [spore.node.vars]
-finding = "${finding}"
+finding           = "${finding}"
+max_verifications = "64"
 
 # --- two more fixed nodes: the synthesis and the gate ---------------------
 [[spore.node]]

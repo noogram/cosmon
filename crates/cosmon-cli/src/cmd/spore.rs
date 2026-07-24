@@ -761,6 +761,7 @@ fn call_to_json(call: &NucleateCall) -> serde_json::Value {
             "output_type": b.output_type,
             "max_instances": b.max_instances,
             "stop_condition": b.stop_condition,
+            "instances_var": b.instances_var,
         })),
     })
 }

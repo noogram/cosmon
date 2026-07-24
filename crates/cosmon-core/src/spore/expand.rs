@@ -25,6 +25,10 @@
 //!    germination (its `for_each` ranges over a *runtime* value), so it expands
 //!    to a single controller call carrying its `[bounds]` block and runtime
 //!    `for_each`. The controller is the static handle the seal quantifies over.
+//!    The zone's own loop parameter is checked against its `[bounds]`
+//!    `max_instances` here (see [`ExpandError::EmergentBoundExceeded`]): a zone
+//!    sealed at five rounds that hands its formula a hundred is refused, not
+//!    germinated.
 //! 5. **Topologically order** by the typed edges and set each call's
 //!    `blocked_by` to its predecessors' aliases. A cycle is a hard error.
 //!
@@ -119,6 +123,39 @@ pub enum ExpandError {
     /// The typed edges form a cycle; the DAG cannot be linearised.
     #[error("edge cycle detected involving node \"{0}\"")]
     EdgeCycle(String),
+
+    /// An emergent zone's loop-bound var resolved to a count **larger** than the
+    /// `max_instances` its own `[bounds]` block seals. The zone would foam past
+    /// the ceiling the seal quantifies over, so the expansion is refused before
+    /// anything germinates.
+    #[error(
+        "emergent node \"{node}\": var \"{var}\" = {value} exceeds its own [bounds] max_instances = {max_instances}"
+    )]
+    EmergentBoundExceeded {
+        /// The offending emergent node id.
+        node: String,
+        /// The var carrying the run-time instance count.
+        var: String,
+        /// The resolved (too large) count.
+        value: u64,
+        /// The sealed ceiling it broke.
+        max_instances: u64,
+    },
+
+    /// A `[bounds]` block declared `instances_var`, but that var did not resolve
+    /// to a whole non-negative number at expansion — so the ceiling cannot be
+    /// checked. An uncheckable bound refuses (fail-closed); it never passes.
+    #[error(
+        "emergent node \"{node}\": bounds.instances_var \"{var}\" resolved to \"{value}\", which is not a whole non-negative count; the [bounds] ceiling cannot be checked"
+    )]
+    EmergentBoundUnresolved {
+        /// The offending emergent node id.
+        node: String,
+        /// The var that should have carried the count.
+        var: String,
+        /// What it actually resolved to.
+        value: String,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -277,6 +314,9 @@ pub fn expand(
                 // for_each ranges over a runtime value), so it expands to one
                 // call carrying the runtime for_each and the declared bounds.
                 let vars = substitute_vars(node, &resolved, None)?;
+                // The ceiling is only a ceiling if the loop parameter is held
+                // under it. Check BEFORE emitting the controller call.
+                check_instance_ceiling(&node.id, node.bounds.as_ref(), &vars)?;
                 produced.push(node.id.clone());
                 out.push(NucleateCall {
                     alias: node.id.clone(),
@@ -293,6 +333,81 @@ pub fn expand(
     }
 
     Ok(out)
+}
+
+// ---------------------------------------------------------------------------
+// Emergent instance ceiling
+// ---------------------------------------------------------------------------
+
+/// Refuse an emergent zone whose own loop parameter overruns the `max_instances`
+/// its `[bounds]` block seals.
+///
+/// `max_instances` is the number the seal's Termination argument quantifies
+/// over, but the loop is driven by a *var* handed to the node's formula. Left
+/// unchecked the two drift silently: `max_instances = 5` next to
+/// `max_rounds = 100` is a zone bounded on paper and unbounded in the run. This
+/// closes that gap at expansion, so `cs spore validate` and `cs spore run` both
+/// fail closed on the contradiction.
+///
+/// Which var carries the count:
+///
+/// - `bounds.instances_var` when the author named one — checked **exactly**, and
+///   a value that is not a whole non-negative number refuses (an uncheckable
+///   ceiling is not a ceiling).
+/// - otherwise every [conventional name](super::CONVENTIONAL_INSTANCE_VARS) the
+///   node binds, checked when it resolves to a whole number. A var still holding
+///   an unresolved `${...}` runtime reference is left to the run-time controller;
+///   nothing static can bound it here.
+fn check_instance_ceiling(
+    node_id: &str,
+    bounds: Option<&Bounds>,
+    vars: &BTreeMap<String, String>,
+) -> Result<(), ExpandError> {
+    let Some(bounds) = bounds else {
+        return Ok(());
+    };
+
+    if let Some(var) = &bounds.instances_var {
+        // The parser guarantees the node declares the var; treat an absent one
+        // as unresolved rather than skipping the check.
+        let raw = vars.get(var).map_or("", String::as_str);
+        let count =
+            raw.trim()
+                .parse::<u64>()
+                .map_err(|_| ExpandError::EmergentBoundUnresolved {
+                    node: node_id.to_string(),
+                    var: var.clone(),
+                    value: raw.to_string(),
+                })?;
+        return enforce_ceiling(node_id, var, count, bounds.max_instances);
+    }
+
+    for var in super::CONVENTIONAL_INSTANCE_VARS {
+        if let Some(raw) = vars.get(*var) {
+            if let Ok(count) = raw.trim().parse::<u64>() {
+                enforce_ceiling(node_id, var, count, bounds.max_instances)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The comparison itself, shared by the exact and conventional paths.
+fn enforce_ceiling(
+    node_id: &str,
+    var: &str,
+    count: u64,
+    max_instances: u64,
+) -> Result<(), ExpandError> {
+    if count > max_instances {
+        return Err(ExpandError::EmergentBoundExceeded {
+            node: node_id.to_string(),
+            var: var.to_string(),
+            value: count,
+            max_instances,
+        });
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -988,5 +1103,175 @@ formula = "work"
         assert!(calls
             .iter()
             .all(|c| c.formula == "formulas/work.formula.toml"));
+    }
+
+    // -- the emergent instance ceiling -------------------------------------
+    //
+    // The shape of the cosmon-dev `converge` zone: a loop bound (`max_rounds`)
+    // handed to the formula, next to a `[bounds]` ceiling the seal quantifies
+    // over. The two must not be allowed to drift apart.
+
+    /// A sealed loop zone: ceiling 5, round count driven by `params.max_rounds`.
+    /// `instances_var` is templated in by the caller so both the explicit and
+    /// the conventional path share one fixture.
+    fn loop_spore(instances_var: &str) -> String {
+        format!(
+            r#"
+[spore]
+name = "loop"
+
+[spore.params.max_rounds]
+type = "int"
+default = 5
+
+[spore.formulas.work]
+path = "formulas/work.formula.toml"
+
+[[spore.node]]
+id = "converge"
+kind = "emergent"
+for_each = "${{nodes.converge.rounds}}"
+formula = "work"
+[spore.node.bounds]
+output_type = "review-round"
+max_instances = 5
+stop_condition = "both engines CLEAN in one round"
+{instances_var}
+[spore.node.vars]
+max_rounds = "${{params.max_rounds}}"
+"#
+        )
+    }
+
+    #[test]
+    fn test_loop_param_at_the_ceiling_expands() {
+        let spore = Spore::parse(&loop_spore("instances_var = \"max_rounds\"")).unwrap();
+        let calls = expand(&spore, &binding(&[("max_rounds", 5.into())])).unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].vars.get("max_rounds").map(String::as_str),
+            Some("5")
+        );
+    }
+
+    #[test]
+    fn test_loop_param_above_the_ceiling_is_refused() {
+        // The reported defect: max_instances = 5 sealed the zone, and
+        // --var max_rounds=100 germinated a hundred-round loop anyway.
+        let spore = Spore::parse(&loop_spore("instances_var = \"max_rounds\"")).unwrap();
+        let err = expand(&spore, &binding(&[("max_rounds", 100.into())])).unwrap_err();
+        assert_eq!(
+            err,
+            ExpandError::EmergentBoundExceeded {
+                node: "converge".to_string(),
+                var: "max_rounds".to_string(),
+                value: 100,
+                max_instances: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn test_conventional_loop_var_is_checked_without_an_explicit_binding() {
+        // A spore written before `instances_var` existed still fails closed:
+        // `max_rounds` is one of the conventional names.
+        let spore = Spore::parse(&loop_spore("")).unwrap();
+        assert!(expand(&spore, &binding(&[("max_rounds", 5.into())])).is_ok());
+        let err = expand(&spore, &binding(&[("max_rounds", 6.into())])).unwrap_err();
+        assert!(matches!(
+            err,
+            ExpandError::EmergentBoundExceeded { value: 6, .. }
+        ));
+    }
+
+    #[test]
+    fn test_explicit_instances_var_that_does_not_resolve_to_a_count_refuses() {
+        // An uncheckable ceiling is not a ceiling: when the author declared
+        // WHICH var is the count, that var must be a whole number here.
+        let toml = r#"
+[spore]
+name = "loop"
+
+[spore.formulas.work]
+path = "formulas/work.formula.toml"
+
+[[spore.node]]
+id = "converge"
+kind = "emergent"
+for_each = "${nodes.converge.rounds}"
+formula = "work"
+[spore.node.bounds]
+output_type = "review-round"
+max_instances = 5
+stop_condition = "both engines CLEAN in one round"
+instances_var = "max_rounds"
+[spore.node.vars]
+max_rounds = "${nodes.upstream.rounds}"
+"#;
+        let spore = Spore::parse(toml).unwrap();
+        let err = expand(&spore, &BTreeMap::new()).unwrap_err();
+        assert_eq!(
+            err,
+            ExpandError::EmergentBoundUnresolved {
+                node: "converge".to_string(),
+                var: "max_rounds".to_string(),
+                value: "${nodes.upstream.rounds}".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_unresolved_conventional_var_is_left_to_the_runtime_controller() {
+        // Without an explicit binding, a var still holding a runtime reference
+        // carries no static count. Nothing here can bound it, and inventing a
+        // refusal would break legitimate spores.
+        let toml = r#"
+[spore]
+name = "loop"
+
+[spore.formulas.work]
+path = "formulas/work.formula.toml"
+
+[[spore.node]]
+id = "converge"
+kind = "emergent"
+for_each = "${nodes.converge.rounds}"
+formula = "work"
+[spore.node.bounds]
+output_type = "review-round"
+max_instances = 5
+stop_condition = "both engines CLEAN in one round"
+[spore.node.vars]
+max_rounds = "${nodes.upstream.rounds}"
+"#;
+        let spore = Spore::parse(toml).unwrap();
+        assert!(expand(&spore, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn test_non_loop_int_vars_are_not_mistaken_for_the_count() {
+        // A timeout is not a round count. Only the declared / conventional
+        // names are compared against the ceiling.
+        let toml = r#"
+[spore]
+name = "loop"
+
+[spore.formulas.work]
+path = "formulas/work.formula.toml"
+
+[[spore.node]]
+id = "converge"
+kind = "emergent"
+for_each = "${nodes.converge.rounds}"
+formula = "work"
+[spore.node.bounds]
+output_type = "review-round"
+max_instances = 5
+stop_condition = "both engines CLEAN in one round"
+[spore.node.vars]
+timeout_secs = "600"
+"#;
+        let spore = Spore::parse(toml).unwrap();
+        assert!(expand(&spore, &BTreeMap::new()).is_ok());
     }
 }
