@@ -82,6 +82,32 @@ const LINES_PER_PASTE_BLOCK: usize = 12;
 /// Pause between submit-verification polls, in milliseconds.
 const SUBMIT_POLL_INTERVAL_MS: u64 = 300;
 
+/// The submit keystroke, spelled as a raw hex byte for `tmux send-keys -H`.
+///
+/// `0d` is ASCII carriage return — the byte a TUI reads as "submit".
+///
+/// # Why the byte and not the key name (task-20260724-c014)
+///
+/// `send-keys Enter` and `send-keys C-m` are *not* stable spellings of that
+/// byte: tmux re-encodes named keys when the server option `extended-keys` is
+/// on and the pane's application has negotiated an extended-key mode (Claude
+/// Code v2.x asks for one at startup). Measured against tmux 3.5a with a pane
+/// that requests both the kitty and `modifyOtherKeys` protocols:
+///
+/// | spelling         | `extended-keys off` | `extended-keys on`     |
+/// |------------------|---------------------|------------------------|
+/// | `Enter`          | `\r`                | `\r`                   |
+/// | `C-m`            | `\r`                | `\x1b[27;5;109~`       |
+/// | `C-j`            | `\n`                | `\x1b[27;5;106~`       |
+/// | **`-H 0d`**      | `\r`                | `\r`                   |
+///
+/// So the folk remedy "send `C-m`, not `Enter`" is backwards: `C-m` is the
+/// spelling that silently degrades into a modified-key escape sequence the
+/// composer ignores, on exactly the hosts that enable extended keys. `-H 0d`
+/// bypasses tmux's key table entirely and writes the byte, so the submit is
+/// byte-identical on every host regardless of operator tmux configuration.
+const SUBMIT_KEY_HEX: &str = "0d";
+
 /// Auto-scale the submit-retry budget with the size of the pasted input.
 ///
 /// The fixed-budget pre-fix (`SUBMIT_RETRY_BUDGET = 5`, ≈2s of polling)
@@ -377,6 +403,19 @@ impl TmuxBackend {
         Ok(())
     }
 
+    /// Press "submit" in `session_name`'s composer.
+    ///
+    /// The one place the submit keystroke is spelled. Every submit — the bare
+    /// nudge, the post-paste Enter, and each re-`Enter` of the retry loop —
+    /// funnels through here so the encoding cannot drift between call sites
+    /// (the asymmetry that let one path be fixed while another kept hanging).
+    /// See [`SUBMIT_KEY_HEX`] for why the byte is sent rather than a key name.
+    fn press_submit(&self, session_name: &str) -> Result<(), TransportError> {
+        self.tmux_cmd(&["send-keys", "-t", session_name, "-H", SUBMIT_KEY_HEX])
+            .map(|_| ())
+            .map_err(|e| TransportError::Io(format!("send-keys submit failed: {e}")))
+    }
+
     /// Best-effort check: is `input` still sitting unsubmitted in the
     /// worker's TUI input box?
     ///
@@ -562,8 +601,7 @@ impl TransportBackend for TmuxBackend {
                 .iter()
                 .find(|s| s.worker_id == *id)
                 .ok_or_else(|| TransportError::NotFound(id.clone()))?;
-            self.tmux_cmd(&["send-keys", "-t", &session.session_name, "Enter"])
-                .map_err(|e| TransportError::Io(format!("send-keys failed: {e}")))?;
+            self.press_submit(&session.session_name)?;
             return Ok(());
         }
 
@@ -587,8 +625,7 @@ impl TransportBackend for TmuxBackend {
         // Brief pause to let the paste complete and the UI render.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        self.tmux_cmd(&["send-keys", "-t", &session_name, "Enter"])
-            .map_err(|e| TransportError::Io(format!("send-keys Enter failed: {e}")))?;
+        self.press_submit(&session_name)?;
 
         // The Enter above is fire-and-forget: when the TUI is busy the
         // keypress is dropped silently and the paste sits unsubmitted — and
@@ -622,7 +659,7 @@ impl TransportBackend for TmuxBackend {
                 self.input_still_pending(&session_name, input)
             },
             || {
-                let _ = self.tmux_cmd(&["send-keys", "-t", &session_name, "Enter"]);
+                let _ = self.press_submit(&session_name);
             },
         );
 
@@ -1236,6 +1273,59 @@ mod tests {
 
         let _ = backend.terminate(&worker.id);
         cleanup(sock);
+    }
+
+    #[test]
+    fn submit_is_a_carriage_return_even_under_extended_keys() {
+        // task-20260724-c014 regression, at the byte seam.
+        //
+        // Claude Code v2.x negotiates an extended-key protocol at startup. On a
+        // host whose tmux server has `extended-keys on`, tmux answers a *named*
+        // key by re-encoding it: `send-keys C-m` becomes `\x1b[27;5;109~`, which
+        // no composer reads as "submit" — the worker then sits forever on
+        // `❯ [Pasted text …]`. This probe is a tiny TUI that requests both the
+        // `modifyOtherKeys` and kitty protocols and records the raw pty byte of
+        // one submit. The oracle is the application's own capture, so it fails
+        // the moment the submit stops being a bare CR.
+        let sock = format!("cosmon-test-extkeys-{}", std::process::id());
+        cleanup(&sock);
+        let backend = TmuxBackend::new(&sock);
+        let config = test_config(&sock);
+        let capture = tempfile::NamedTempFile::new().expect("create pty capture");
+        let capture_path = capture.path().to_string_lossy();
+        let script = format!(
+            "stty -icanon -echo -icrnl -inlcr -igncr min 1 time 0; \
+             printf '\\033[>4;2m\\033[>1u'; dd bs=1 count=1 of={} 2>/dev/null",
+            TmuxBackend::shell_quote(&capture_path),
+        );
+        let agent = AgentDefinition {
+            id: AgentId::new("extkeys-agent").unwrap(),
+            role: AgentRole::Implementation,
+            command: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), script],
+        };
+        let worker = backend.spawn(&agent, &config).expect("spawn probe TUI");
+        // Turn the hostile server option on *for this socket only*, so the test
+        // reproduces the operator configuration that breaks a named key.
+        backend
+            .tmux_cmd(&["set", "-s", "extended-keys", "on"])
+            .expect("enable extended-keys");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        backend
+            .send_input(&worker.id, "")
+            .expect("bare submit failed");
+        std::thread::sleep(std::time::Duration::from_millis(300));
+
+        let captured = std::fs::read(capture.path()).expect("read pty capture");
+        assert_eq!(
+            captured, b"\r",
+            "submit must reach the pty as a bare CR under `extended-keys on`; \
+             a named key would arrive re-encoded and never submit"
+        );
+
+        let _ = backend.terminate(&worker.id);
+        cleanup(&sock);
     }
 
     #[test]

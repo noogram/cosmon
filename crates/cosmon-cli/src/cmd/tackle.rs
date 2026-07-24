@@ -4459,19 +4459,71 @@ fn spawn_claude_and_prompt(
     // acceptance signal that the mission is producing tokens) and otherwise
     // re-nudges `Enter` for as long as the composer still shows the
     // pasted-but-unsubmitted briefing.
-    confirm_briefing_submitted(backend, wid, prompt);
-    Ok(())
+    match confirm_briefing_submitted(backend, wid, prompt) {
+        BriefingSubmitOutcome::Submitted => Ok(()),
+        // The composer is clear but the worker never visibly reached `Working`
+        // inside the quiet window. It most likely *did* submit and is thinking
+        // off the captured viewport, so this stays non-fatal — but it is logged
+        // rather than swallowed.
+        BriefingSubmitOutcome::Unconfirmed => {
+            tracing::warn!(
+                worker = %wid.name(),
+                "briefing left the composer but the worker was not observed \
+                 Working within the quiet window; proceeding"
+            );
+            Ok(())
+        }
+        // The composer STILL holds the pasted briefing after the hard cap.
+        // This is the stall the fleet kept hitting; make it a typed spawn
+        // failure the runtime can act on (re-dispatch / patrol) instead of a
+        // `warn!` + `return` that leaves a phantom `running` molecule burning a
+        // slot with an empty worktree.
+        BriefingSubmitOutcome::StuckPasted => {
+            maybe_terminate(backend, wid);
+            Err(anyhow::anyhow!(
+                "cs tackle: claude session {session_name} never submitted its \
+                 briefing — the composer still showed the pasted-but-unsubmitted \
+                 text after {}s of re-nudging. The worker did no work; it has \
+                 been torn down so the molecule can be re-dispatched. Inspect a \
+                 repro with `tmux -L {} capture-pane -pS - -t {session_name}` \
+                 (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)",
+                BRIEFING_SUBMIT_HARD_CAP.as_secs(),
+                backend.socket(),
+            ))
+        }
+    }
 }
 
-/// Upper bound on the spawn-time briefing-submit confirmation
-/// ([`confirm_briefing_submitted`]).
+/// How long the spawn-time confirmation keeps re-nudging while the composer is
+/// *visibly* still holding the unsubmitted briefing.
 ///
-/// Sized to outlast the window in which a fresh Claude worker on a loaded
-/// fleet stays busy rendering a large briefing paste and swallows re-`Enter`s
-/// — the ~90 min stalls on 2026-07-20 never left that busy window on their
-/// own. `send_input`'s own budget (~6 s) is the fast path; this is the
-/// belt-and-suspenders that turns "never started" into "started".
-const BRIEFING_SUBMIT_WINDOW: std::time::Duration = std::time::Duration::from_secs(90);
+/// # Why the old 90 s window was the bug (task-20260724-c014)
+///
+/// The previous single window was 90 s, after which the loop emitted a
+/// `tracing::warn!` and returned — a silent give-up. That is a **bounded**
+/// retry against an **unbounded-delay** environment: when startup is slow (MCP
+/// servers needing auth, a loaded machine, a large multi-block paste
+/// re-rendering) the TUI swallows every nudge for longer than 90 s, the loop
+/// quits, and nobody presses submit again. Workers were observed sitting on
+/// `❯ [Pasted text #1 +NN lines]` for >20 minutes with a 0-byte
+/// `worker.stderr` and an empty worktree; a single manual submit at t+20 min
+/// started them instantly, because by then the TUI was finally idle.
+///
+/// So the cap here is not "how long a worker is allowed to be slow" — it is
+/// only the point at which a still-unsubmitted paste stops being a slow start
+/// and becomes a typed failure. As long as the composer keeps showing the
+/// paste, the loop keeps pressing: bounded work, unbounded patience.
+const BRIEFING_SUBMIT_HARD_CAP: std::time::Duration = std::time::Duration::from_secs(900);
+
+/// How long the confirmation waits when the composer looks *clear* but the
+/// worker has not been observed `Working`.
+///
+/// This is the ambiguous case: the briefing may have submitted and the worker
+/// may simply be thinking off the captured viewport. There is nothing to nudge
+/// — pressing submit into a session that already submitted only risks an empty
+/// turn — so the loop just waits, and gives up quickly and non-fatally. This
+/// keeps the pre-fix 90 s behaviour for the one branch where it was correct.
+const BRIEFING_SUBMIT_QUIET_WINDOW: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Interval between briefing-submit confirmation polls.
 const BRIEFING_SUBMIT_POLL: std::time::Duration = std::time::Duration::from_secs(1);
@@ -4489,6 +4541,53 @@ enum BriefingSubmitStep {
     /// `Working`. Wait one poll rather than injecting a stray `Enter` into a
     /// session that may be mid-submit.
     Wait,
+}
+
+/// How the spawn-time briefing-submit confirmation ended.
+///
+/// Replaces the pre-fix `()` return, which conflated "the worker is producing
+/// tokens" with "we gave up after 90 s" — the conflation that turned a stuck
+/// submit into a silent hang instead of a dispatch failure.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BriefingSubmitOutcome {
+    /// The worker reached `Working`: the briefing is in.
+    Submitted,
+    /// The composer is clear but `Working` was never observed. Ambiguous and
+    /// most likely fine — non-fatal, logged.
+    Unconfirmed,
+    /// The composer still holds the pasted-but-unsubmitted briefing after
+    /// [`BRIEFING_SUBMIT_HARD_CAP`]. A typed dispatch failure.
+    StuckPasted,
+}
+
+/// Decide whether the confirmation loop may keep going, given how long it has
+/// run in total, how long since it last *saw* the unsubmitted paste, and what
+/// this tick decided to do.
+///
+/// Pure so the two deadlines are unit-testable without a live tmux server: the
+/// load-bearing property is that a *pending* composer is never abandoned
+/// silently — it is nudged until the hard cap and then escalated as
+/// [`BriefingSubmitOutcome::StuckPasted`].
+///
+/// The two clocks are separate on purpose. `total` bounds how long we press a
+/// visibly-stuck composer. `quiet` — measured from the last tick that saw the
+/// paste — bounds the ambiguous branch, so a composer that flickers between
+/// pending and clear keeps earning nudges instead of tripping the short window
+/// on whichever tick happened to look clear.
+fn briefing_submit_deadline(
+    total: std::time::Duration,
+    quiet: std::time::Duration,
+    step: BriefingSubmitStep,
+) -> Option<BriefingSubmitOutcome> {
+    match step {
+        BriefingSubmitStep::Done => Some(BriefingSubmitOutcome::Submitted),
+        BriefingSubmitStep::Nudge => {
+            (total >= BRIEFING_SUBMIT_HARD_CAP).then_some(BriefingSubmitOutcome::StuckPasted)
+        }
+        BriefingSubmitStep::Wait => {
+            (quiet >= BRIEFING_SUBMIT_QUIET_WINDOW).then_some(BriefingSubmitOutcome::Unconfirmed)
+        }
+    }
 }
 
 /// Decide the next action for the briefing-submit confirmation loop.
@@ -4513,48 +4612,46 @@ fn briefing_submit_step(
 }
 
 /// Keep confirming that a freshly-delivered briefing actually left the
-/// composer, re-nudging `Enter` until the worker is `Working` or the
-/// spawn-scale [`BRIEFING_SUBMIT_WINDOW`] elapses.
+/// composer, re-nudging the submit key until the worker is `Working`, the
+/// composer clears, or [`BRIEFING_SUBMIT_HARD_CAP`] turns a visibly-stuck
+/// paste into a typed [`BriefingSubmitOutcome::StuckPasted`].
 ///
-/// Best-effort by construction: every tmux read/write is allowed to fail
-/// without escalating a delivered briefing into a hard spawn error (the
-/// worker may already be working). A window that expires without the worker
-/// reaching `Working` is logged so a genuinely-stuck submit is visible to
-/// patrol operators rather than silent.
+/// Best-effort at the *tmux* seam: every read/write is allowed to fail without
+/// escalating a delivered briefing into a hard spawn error (the worker may
+/// already be working), and a read error reads as "not pending" so the loop
+/// never manufactures a nudge out of a capture failure.
+///
+/// Not best-effort at the *outcome* seam: the pre-fix version returned `()`
+/// after a 90 s `warn!`, so a worker that never submitted was indistinguishable
+/// from one that did. Every exit is now typed; the caller decides.
 fn confirm_briefing_submitted(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
     prompt: &str,
-) {
+) -> BriefingSubmitOutcome {
     use cosmon_transport::readiness::classify_output;
-    let deadline = std::time::Instant::now() + BRIEFING_SUBMIT_WINDOW;
+    let started = std::time::Instant::now();
+    // Seeded at the start so a composer that never once looks pending still
+    // trips the short quiet window rather than the long hard cap.
+    let mut last_pending = started;
     loop {
         let status = backend.capture_output(wid, 30).map_or(
             cosmon_transport::readiness::SessionStatus::Unknown,
             |pane| classify_output(&pane),
         );
-        // A capture/session failure here reads as "not pending" (the loop
-        // must never manufacture a nudge from a read error).
         let still_pending = backend.input_pending_for(wid, prompt).unwrap_or(false);
 
-        match briefing_submit_step(&status, still_pending) {
-            BriefingSubmitStep::Done => return,
-            BriefingSubmitStep::Nudge => {
-                // Empty input == a bare `Enter` (see `send_input`), which is
-                // exactly the manual recovery that unstalled these workers.
-                let _ = backend.send_input(wid, "");
-            }
-            BriefingSubmitStep::Wait => {}
+        let step = briefing_submit_step(&status, still_pending);
+        if step == BriefingSubmitStep::Nudge {
+            last_pending = std::time::Instant::now();
+            // Empty input == a bare submit keystroke (see `send_input`), which
+            // is exactly the manual recovery that unstalled these workers.
+            let _ = backend.send_input(wid, "");
         }
 
-        if std::time::Instant::now() >= deadline {
-            tracing::warn!(
-                worker = %wid.name(),
-                "briefing-submit confirmation window elapsed without the worker \
-                 reaching Working; the paste may still be unsubmitted — relying \
-                 on patrol backstop"
-            );
-            return;
+        let now = std::time::Instant::now();
+        if let Some(outcome) = briefing_submit_deadline(now - started, now - last_pending, step) {
+            return outcome;
         }
         std::thread::sleep(BRIEFING_SUBMIT_POLL);
     }
@@ -8274,6 +8371,112 @@ mod tests {
         assert_eq!(
             briefing_submit_step(&SessionStatus::Loading, false),
             BriefingSubmitStep::Wait
+        );
+    }
+
+    // ── task-20260724-c014: bounded retry vs unbounded-delay TUI ────────
+    // The 2026-07-24 recurrence of BUG #6. The step kernel above was already
+    // right; what hung the fleet was the *deadline* kernel around it — a 90 s
+    // window that expired into a `warn!` + `return`, i.e. a silent give-up
+    // while the composer was visibly still holding the briefing.
+    #[test]
+    fn briefing_submit_deadline_keeps_nudging_a_pending_composer_past_the_old_window() {
+        use std::time::Duration;
+        // The exact stall: at t+90 s (the pre-fix cliff) the composer still
+        // shows the unsubmitted paste. The loop must NOT stop here — the
+        // observed workers submitted fine on a nudge at t+20 min.
+        assert_eq!(
+            briefing_submit_deadline(
+                Duration::from_secs(91),
+                Duration::ZERO,
+                BriefingSubmitStep::Nudge
+            ),
+            None
+        );
+        assert_eq!(
+            briefing_submit_deadline(
+                BRIEFING_SUBMIT_HARD_CAP - Duration::from_secs(1),
+                Duration::ZERO,
+                BriefingSubmitStep::Nudge
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn briefing_submit_deadline_escalates_a_stuck_paste_rather_than_giving_up() {
+        // Past the hard cap with the paste still in the composer: the worker
+        // has done zero work. This must be a TYPED failure the caller turns
+        // into a dispatch error, never a silent return that leaves a phantom
+        // `running` molecule holding a fleet slot.
+        assert_eq!(
+            briefing_submit_deadline(
+                BRIEFING_SUBMIT_HARD_CAP,
+                std::time::Duration::ZERO,
+                BriefingSubmitStep::Nudge
+            ),
+            Some(BriefingSubmitOutcome::StuckPasted)
+        );
+    }
+
+    #[test]
+    fn briefing_submit_deadline_stops_immediately_once_working() {
+        // Success short-circuits both clocks.
+        assert_eq!(
+            briefing_submit_deadline(
+                std::time::Duration::ZERO,
+                std::time::Duration::ZERO,
+                BriefingSubmitStep::Done
+            ),
+            Some(BriefingSubmitOutcome::Submitted)
+        );
+        assert_eq!(
+            briefing_submit_deadline(
+                BRIEFING_SUBMIT_HARD_CAP * 10,
+                BRIEFING_SUBMIT_QUIET_WINDOW * 10,
+                BriefingSubmitStep::Done
+            ),
+            Some(BriefingSubmitOutcome::Submitted)
+        );
+    }
+
+    #[test]
+    fn briefing_submit_deadline_gives_up_softly_on_a_clear_composer() {
+        // Nothing to nudge: the briefing left the composer, we simply never
+        // caught the worker in `Working`. Bounded by the short quiet window and
+        // non-fatal — the pre-fix behaviour, kept for the one branch where it
+        // was correct.
+        assert_eq!(
+            briefing_submit_deadline(
+                std::time::Duration::from_secs(10_000),
+                BRIEFING_SUBMIT_QUIET_WINDOW - std::time::Duration::from_secs(1),
+                BriefingSubmitStep::Wait
+            ),
+            None
+        );
+        assert_eq!(
+            briefing_submit_deadline(
+                BRIEFING_SUBMIT_QUIET_WINDOW,
+                BRIEFING_SUBMIT_QUIET_WINDOW,
+                BriefingSubmitStep::Wait
+            ),
+            Some(BriefingSubmitOutcome::Unconfirmed)
+        );
+    }
+
+    #[test]
+    fn briefing_submit_deadline_quiet_clock_resets_on_every_pending_sighting() {
+        // A composer that flickers pending/clear (the paste placeholder
+        // repaints) must not trip the short quiet window on whichever tick
+        // happened to look clear: the quiet clock is measured from the last
+        // pending sighting, so a recently-nudged session still gets to wait.
+        assert_eq!(
+            briefing_submit_deadline(
+                BRIEFING_SUBMIT_HARD_CAP - std::time::Duration::from_secs(1),
+                std::time::Duration::from_secs(1),
+                BriefingSubmitStep::Wait
+            ),
+            None
         );
     }
 

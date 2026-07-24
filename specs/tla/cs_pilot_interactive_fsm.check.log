@@ -124,3 +124,194 @@ State 4: <SilentTerminate line 174, col 5 to line 179, col 49 of module cs_pilot
 The depth of the complete state graph search is 16.
 Finished in 00s at (2026-06-01 00:11:41)
 Trace exploration spec path: ./cs_pilot_interactive_fsm_TTrace_1780265501.tla
+
+================================================================================
+ APPENDED 2026-07-24 — task-20260724-c014 (delivery layer: paste -> submit)
+================================================================================
+ Why: the 2026-07-20 "paste-sans-submit" stall recurred on Claude Code v2.1.218
+ (Jesse Thaler review issue #6, part 3). The seal above was green because the
+ spec's Init started a worker at pc = "sending" — it ASSUMED the briefing had
+ been submitted, so the reachable bad state "pasted-but-not-submitted -> idle
+ forever" was not in the state space at all. An abstraction gap, not a proof.
+
+ The spec now models the handshake one floor lower: a worker starts at
+ pc = "delivering" with delivery = "pasted", against an ADVERSARIAL TUI whose
+ readiness is UNFAIR (may stay FALSE for unboundedly many ticks). Weak fairness
+ sits on the Delivery group — the confirm loop keeps trying — never on the
+ environment. So no fixed retry window can be sufficient, by construction.
+
+ New safety  : NoSilentAbandon, NoWorkBeforeSubmit, InteractiveSkipsDelivery
+ New liveness: BriefingResolves ==
+                 (delivery = "pasted") ~> (delivery \in {"submitted","escalated"})
+
+ Three runs are recorded.
+   RUN 3 (shipped cfg, BoundedNudgeBudget = FALSE) — must PASS.
+   RUN 4 (adversarial, BoundedNudgeBudget = TRUE)  — must FAIL on
+         NoSilentAbandon, proving the delivery layer is not vacuous. Its
+         4-state counterexample IS the field trace: paste, two swallowed
+         submits, budget spent, silent give-up, pc = "delivering" forever.
+   RUN 5 (adversarial, INVARIANTS reduced to TypeOK so TLC gets past the
+         safety violation and reaches the temporal check) — must FAIL on
+         BriefingResolves (and NoLivelock). Reproduce that cfg with:
+           python3 -c "import re; s=open('cs_pilot_interactive_fsm_bounded_nudge.cfg').read(); \
+             open('/tmp/c014_liveness.cfg','w').write( \
+             re.sub(r'INVARIANTS\n(?:    \w+\n)+\n','INVARIANTS\n    TypeOK\n\n',s))"
+
+ Verdict: RUN 3 passed; RUNs 4 and 5 produced the expected counterexamples.
+ The pre-fix bounded-window-then-silent-return design is now mechanically
+ refuted; only confirm-or-escalate model-checks clean.
+
+================================================================================
+ RUN 3 — cs_pilot_interactive_fsm.cfg  (BoundedNudgeBudget = FALSE) — PASS
+================================================================================
+Starting... (2026-07-24 10:22:06)
+Implied-temporal checking--satisfiability problem has 2 branches.
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-07-24 10:22:06.
+Progress(16) at 2026-07-24 10:22:06: 341 states generated, 166 distinct states found, 0 states left on queue.
+Checking 2 branches of temporal properties for the complete state space with 332 total distinct states at (2026-07-24 10:22:06)
+Finished checking temporal properties in 00s at 2026-07-24 10:22:06
+Model checking completed. No error has been found.
+  Estimates of the probability that TLC did not check all reachable states
+  because two distinct states had the same fingerprint:
+  calculated (optimistic):  val = 1.6E-15
+341 states generated, 166 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 16.
+The average outdegree of the complete state graph is 1 (minimum is 0, the maximum 3 and the 95th percentile is 2).
+Finished in 00s at (2026-07-24 10:22:06)
+================================================================================
+ RUN 4 — cs_pilot_interactive_fsm_bounded_nudge.cfg (TRUE) — EXPECTED FAILURE
+================================================================================
+Starting... (2026-07-24 10:22:07)
+Implied-temporal checking--satisfiability problem has 2 branches.
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-07-24 10:22:07.
+Error: Invariant NoSilentAbandon is violated.
+Error: The behavior up to this point is:
+State 1: <Initial predicate>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 0
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 2: <SubmitSwallowed line 256, col 5 to line 261, col 32 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 1
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 3: <SubmitSwallowed line 256, col 5 to line 261, col 32 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 4: <GiveUpSilently line 282, col 5 to line 287, col 29 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "abandoned"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+103 states generated, 61 distinct states found, 13 states left on queue.
+The depth of the complete state graph search is 9.
+Finished in 00s at (2026-07-24 10:22:07)
+Trace exploration spec path: ./cs_pilot_interactive_fsm_TTrace_1784881327.tla
+================================================================================
+ RUN 5 — liveness-only adversarial cfg — EXPECTED FAILURE (BriefingResolves)
+================================================================================
+Starting... (2026-07-24 10:22:08)
+Implied-temporal checking--satisfiability problem has 2 branches.
+Computing initial states...
+Computed 2 initial states...
+Finished computing initial states: 4 distinct states generated at 2026-07-24 10:22:08.
+Progress(17) at 2026-07-24 10:22:09: 341 states generated, 166 distinct states found, 0 states left on queue.
+Checking 2 branches of temporal properties for the complete state space with 332 total distinct states at (2026-07-24 10:22:09)
+Error: Temporal properties NoLivelock and BriefingResolves were violated.
+
+Error: The following behavior constitutes a counter-example:
+
+State 1: <Initial predicate>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 0
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 2: <SubmitSwallowed line 256, col 5 to line 261, col 32 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 1
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 3: <SubmitSwallowed line 256, col 5 to line 261, col 32 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "pasted"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 4: <GiveUpSilently line 282, col 5 to line 287, col 29 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "abandoned"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+State 5: <TuiBecomesReady line 229, col 5 to line 232, col 29 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "abandoned"
+/\ pc = "delivering"
+/\ tui_ready = TRUE
+/\ operator_quit = FALSE
+
+State 6: <TuiBusy line 236, col 5 to line 239, col 29 of module cs_pilot_interactive_fsm>
+/\ op_turns = 0
+/\ turn_count = 0
+/\ mode = "worker"
+/\ nudges = 2
+/\ delivery = "abandoned"
+/\ pc = "delivering"
+/\ tui_ready = FALSE
+/\ operator_quit = FALSE
+
+Back to state 5: <TuiBecomesReady line 229, col 5 to line 232, col 29 of module cs_pilot_interactive_fsm>
+
+Finished checking temporal properties in 00s at 2026-07-24 10:22:09
+341 states generated, 166 distinct states found, 0 states left on queue.
+The depth of the complete state graph search is 17.
+Finished in 00s at (2026-07-24 10:22:09)
+Trace exploration spec path: ./cs_pilot_interactive_fsm_TTrace_1784881328.tla
