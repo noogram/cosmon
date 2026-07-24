@@ -143,6 +143,20 @@ pub enum SporeError {
         kind: String,
     },
 
+    /// A `[spore.node.bounds]` block declares an `instances_var` that the node
+    /// does not bind in its `[spore.node.vars]` table. The declaration would
+    /// then guard nothing, so it is refused at parse time rather than becoming
+    /// a check that quietly never runs.
+    #[error(
+        "node \"{node}\": bounds.instances_var = \"{var}\" names a var the node does not declare"
+    )]
+    UnknownInstancesVar {
+        /// The offending node id.
+        node: String,
+        /// The dangling var name.
+        var: String,
+    },
+
     /// An emergent node is missing its mandatory `[spore.node.bounds]` block.
     #[error("emergent node \"{0}\" must declare a [spore.node.bounds] block (ADR-140 D2)")]
     EmergentWithoutBounds(String),
@@ -415,10 +429,25 @@ impl NodeKind {
 
 /// The declared bounds of an emergent zone (`[spore.node.bounds]`, ADR-140 D2).
 ///
-/// The three fields map one-to-one onto three seal properties: `max_instances`
-/// feeds bounded termination, `stop_condition` feeds the fail-closed gate, and
-/// `output_type` feeds deterministic accounting / no resource collision.
+/// The three mandatory fields map one-to-one onto three seal properties:
+/// `max_instances` feeds bounded termination, `stop_condition` feeds the
+/// fail-closed gate, and `output_type` feeds deterministic accounting / no
+/// resource collision.
+///
+/// # Why the fourth field exists
+///
+/// `max_instances` is the ceiling the seal quantifies over, but the *loop* an
+/// emergent zone actually runs is driven by one of the node's own `vars` (the
+/// cosmon-dev spore passes `max_rounds` to `converge-clean-room`, which feeds it
+/// to `while`'s `max_iterations`). Nothing structurally tied the two together:
+/// a spore could declare `max_instances = 5` and then hand its own loop
+/// `max_rounds = 100`, so the emergent zone would foam five times past its own
+/// sealed ceiling and both `cs spore validate` and `cs spore run` would say
+/// nothing. [`instances_var`](Bounds::instances_var) names the var that carries
+/// the run-time instance count, so [`expand`](mod@expand) can refuse the
+/// contradiction before a single molecule is germinated.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Bounds {
     /// The type of item the upstream node emits.
     pub output_type: String,
@@ -426,7 +455,26 @@ pub struct Bounds {
     pub max_instances: u64,
     /// The condition under which the downstream gate opens.
     pub stop_condition: String,
+    /// The name of the node var carrying the run-time instance count, if the
+    /// author declared one. When present the var MUST resolve, at expansion, to
+    /// an integer `<= max_instances`; anything else (a bigger number, a value
+    /// that is not a whole number) refuses the expansion. When absent, the
+    /// [conventional loop-bound names](CONVENTIONAL_INSTANCE_VARS) are checked
+    /// instead, so an existing spore is covered without editing its manifest.
+    pub instances_var: Option<String>,
 }
+
+/// Var names conventionally used to carry an emergent zone's run-time instance
+/// count, checked against `max_instances` when `[spore.node.bounds]` declares no
+/// explicit [`instances_var`](Bounds::instances_var).
+///
+/// These are the names the shipped formulas already use — `while` caps its loop
+/// with `max_iterations` and `converge-clean-room` renames that cap `max_rounds`
+/// — so the ceiling is enforced on spores written before the field existed. A
+/// spore that drives its loop from some *other* var declares `instances_var` and
+/// gets the exact check instead of this heuristic one.
+pub const CONVENTIONAL_INSTANCE_VARS: &[&str] =
+    &["max_rounds", "max_iterations", "rounds", "iterations"];
 
 /// One DAG node (`[[spore.node]]`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -739,7 +787,22 @@ fn build_nodes(
             output_type: b.output_type,
             max_instances: b.max_instances,
             stop_condition: b.stop_condition,
+            instances_var: b.instances_var,
         });
+
+        // A declared `instances_var` must name a var the node actually binds,
+        // otherwise the ceiling check would silently apply to nothing — a
+        // fail-open dressed as a declaration.
+        if let Some(b) = &bounds {
+            if let Some(var) = &b.instances_var {
+                if !n.vars.contains_key(var) {
+                    return Err(SporeError::UnknownInstancesVar {
+                        node: n.id,
+                        var: var.clone(),
+                    });
+                }
+            }
+        }
 
         // Emergent zones MUST declare bounds (ADR-140 D2) and a for_each.
         if kind == NodeKind::Emergent {
@@ -905,6 +968,7 @@ struct RawBounds {
     output_type: String,
     max_instances: u64,
     stop_condition: String,
+    instances_var: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1190,6 +1254,58 @@ formula = "work"
             Spore::parse(&toml),
             Err(SporeError::EmergentWithoutBounds("verify".to_string()))
         );
+    }
+
+    #[test]
+    fn test_bounds_instances_var_must_name_a_declared_var() {
+        // A guard pointed at nothing guards nothing: refuse at parse time
+        // rather than ship a ceiling check that quietly never runs.
+        let toml = minimal_with_node(
+            r#"
+[[spore.node]]
+id = "verify"
+kind = "emergent"
+for_each = "${nodes.x.findings}"
+formula = "work"
+[spore.node.bounds]
+output_type = "finding"
+max_instances = 8
+stop_condition = "every finding consumed once"
+instances_var = "max_rounds"
+[spore.node.vars]
+finding = "${finding}"
+"#,
+        );
+        assert_eq!(
+            Spore::parse(&toml),
+            Err(SporeError::UnknownInstancesVar {
+                node: "verify".to_string(),
+                var: "max_rounds".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn test_bounds_instances_var_is_captured() {
+        let toml = minimal_with_node(
+            r#"
+[[spore.node]]
+id = "verify"
+kind = "emergent"
+for_each = "${nodes.x.findings}"
+formula = "work"
+[spore.node.bounds]
+output_type = "finding"
+max_instances = 8
+stop_condition = "every finding consumed once"
+instances_var = "max_rounds"
+[spore.node.vars]
+max_rounds = "8"
+"#,
+        );
+        let spore = Spore::parse(&toml).expect("declared instances_var parses");
+        let bounds = spore.nodes[0].bounds.as_ref().expect("bounds present");
+        assert_eq!(bounds.instances_var.as_deref(), Some("max_rounds"));
     }
 
     #[test]

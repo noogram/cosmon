@@ -383,6 +383,11 @@ description = "§6bis double-engine convergence loop (BLOCK). Composes `while` +
 output_type    = "review-round"
 max_instances  = 5    # the max_rounds ceiling — the foaming variant the seal bounds
 stop_condition = "both review engines (claude AND codex-sol) return CLEAN in the same round, OR max_rounds reached => `blocked` + human escalation (never a silent pass)"
+# WHICH var is the run-time round count. Without this binding the ceiling above
+# and the loop below are two unrelated numbers: `--var max_rounds=100` would
+# germinate a zone that foams twenty times past its own sealed bound and nothing
+# would say a word. Declared here, `cs spore validate` / `cs spore run` refuse it.
+instances_var  = "max_rounds"
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — §6bis DOUBLE CLEAN-ROOM CONVERGENCE (fail-closed).

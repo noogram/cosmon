@@ -347,6 +347,43 @@ extended with the D1 node-kind taxonomy, the D2 `[bounds]` blocks, the D5
 
 ---
 
+## Amendment — `task-20260723-d399` (2026-07-24): `bounds.instances_var`, the ceiling that binds
+
+D2 above declares `max_instances` as the ceiling the seal quantifies over. It
+left one gap open: the ceiling is a number in the `[bounds]` block, while the
+loop an emergent zone actually runs is driven by a **var** handed to that node's
+formula. The cosmon-dev `converge` zone is the live instance — `max_instances = 5`
+next to `max_rounds = "${params.max_rounds}"`, two numbers with nothing tying
+them together. `cs spore validate --var max_rounds=100` printed a clean call list
+and `cs spore run` germinated it: a zone bounded on paper, unbounded in the run,
+with the seal's Termination argument quietly resting on a number the expansion
+had already contradicted.
+
+`[spore.node.bounds]` gains a fourth, optional field:
+
+```toml
+[spore.node.bounds]
+output_type    = "review-round"
+max_instances  = 5
+stop_condition = "both engines CLEAN in the same round"
+instances_var  = "max_rounds"   # WHICH var carries the run-time count
+```
+
+`expand()` (and therefore both `cs spore validate` and `cs spore run`) refuses
+when that var resolves above `max_instances`, and refuses equally when a declared
+`instances_var` does not resolve to a whole count at all — an uncheckable ceiling
+is not a ceiling. The field is optional but not an opt-out: with no explicit
+binding, the conventional loop-bound names the shipped formulas already use
+(`max_rounds`, `max_iterations`, `rounds`, `iterations`) are checked against the
+ceiling, so a spore written before this amendment fails closed without an edit. A
+var still holding an unresolved `${nodes.*}` runtime reference carries no static
+count and is left to the run-time controller; nothing at expansion can bound it.
+
+A dangling `instances_var` — one naming a var the node does not declare — is a
+**parse-time** refusal, not a silently skipped check.
+
+---
+
 ## References
 
 - [ADR-139](139-spore-shareable-polymer-template.md): the `spore` primitive and
