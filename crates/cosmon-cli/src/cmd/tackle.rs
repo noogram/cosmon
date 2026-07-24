@@ -6010,7 +6010,7 @@ fn publish_local_worker_output(job: &LocalWorkerJob, mol_id: &MoleculeId) {
 /// output commit must not be gated on the project's local commit hooks.
 fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow::Result<bool> {
     let rels = discover_worktree_deliverables(worktree)?;
-    let mut staged = 0usize;
+    let mut staged: Vec<String> = Vec::new();
     for rel in &rels {
         if ignored_artifact_path(rel) {
             continue;
@@ -6022,12 +6022,14 @@ fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow:
         {
             anyhow::bail!("git reported an unsafe worktree path: {rel:?}");
         }
-        git_stdout(worktree, &["add", "--", &rel_path.to_string_lossy()])?;
-        staged += 1;
+        staged.push(rel_path.to_string_lossy().into_owned());
     }
-    if staged == 0 {
+    if staged.is_empty() {
         return Ok(false);
     }
+    let mut add_args = vec!["add", "--"];
+    add_args.extend(staged.iter().map(String::as_str));
+    git_stdout(worktree, &add_args)?;
     // Nothing to commit (the worker only touched already-committed content):
     // `git diff --cached --quiet` exits 1 when the index differs from HEAD.
     if git_stdout(worktree, &["diff", "--cached", "--quiet"]).is_ok() {

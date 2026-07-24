@@ -459,6 +459,13 @@ Or force teardown (loses uncommitted work):
 cs done <mol-id> --force
 ```
 
+This does not apply to the `local` / `ollama` floor: a local worker has no
+shell and no git, so cosmon commits the deliverables it left in the worktree
+on its behalf before the molecule finalises. `cs done` therefore finds a clean
+worktree, merges the branch, and the output lands in the project you started
+in — no `--force`, and nothing left behind in `.worktrees/`. The molecule's
+`synthesis.md` names both locations (see "Files this worker produced").
+
 ### Dry-run teardown plan
 
 Before running `cs done`, preview what will happen:
