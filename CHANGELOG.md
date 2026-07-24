@@ -19,24 +19,113 @@ this stage.
 
 ## [Unreleased]
 
-### Fixed: the documented first-run path works on a freshly `git init`'d repo
+## [0.3.0] — 2026-07-24
 
-- A newcomer following the getting-started path — `cs init` → `git init` →
-  `cs demo` — hit a hard wall: `cs: git branch feat/<mol> failed: fatal: not a
-  valid object name: 'main'`. A fresh `git init` leaves an *unborn HEAD* (no
-  commits, the base branch does not resolve yet), so cutting the feature branch
-  from it aborted. The only workaround was an undocumented manual
-  `git commit --allow-empty` right after `git init`. Reported twice by external
-  tester Matteo Cacciari (LPTHE) — 2026-07-18 and again on 0.2.2 (2026-07-22).
-- `cs tackle` / `cs demo` now detect the unborn-HEAD case *specifically* (an
-  unresolvable `HEAD`) and seed a single empty base commit
-  (`cosmon: initial commit`) before branching, so the documented path succeeds
-  out of the box with no hidden manual step. A repository that already has
-  history is left byte-for-byte untouched — cosmon never fabricates a commit
-  over existing work.
-- `cs init`'s "Next steps" now states step 1 accurately: `git init &&
-  git commit --allow-empty -m init`, with a note that cosmon needs at least one
-  commit on the base branch (and seeds one for you if you forget).
+**Root-container safety, hardened by an adversarial double-model review.** The
+`claude` adapter now runs unattended in a root Linux container end-to-end — and
+it does so by *never running the cognitive agent as root* rather than by
+bypassing the guard. The whole #20/#21 surface (reported by @jdthaler) went
+through three rounds of adversarial clean-room review (Claude + codex,
+context-zero, refutation mandate); every defect the reviewers found — including
+two they reproduced as live exploits — is closed and pinned by a test that
+replays the exact attack. A three-pass end-to-end gate in the faithful Claude
+Code 2.1.218 container confirmed the briefing-submit path before release.
+
+Naming convention: issues are cited by their project number and reporters by
+GitHub handle (**@jdthaler** for #20/#21). The reporter behind #22–#26 asked to
+remain unnamed; those are cited by issue number only.
+
+### Security
+
+- **Non-root worker demotion (#20, contract-20A).** On a root dispatcher, cosmon
+  demotes the cognitive worker to a non-root uid before `exec`, or refuses
+  *before any live worker exists* — it never spawns a live agent with root's
+  blast radius. The demotion is composed at the binary token (immune to hostile
+  `CLAUDE_CONFIG_DIR` / `ANTHROPIC_MODEL` / state-path values that could
+  otherwise divert a string-splice), runs its model preflight *as the demoted
+  identity* (never as root), and refuses cleanly with a typed error if the
+  target uid cannot use its config / worktree / state (instead of a silent
+  mid-run `EACCES`).
+- **Out-of-worktree write grant (#20, facet B).** The molecule state a worker
+  must write on `cs evolve` / `cs complete` lives outside its worktree; under
+  `acceptEdits` that write used to prompt and hang an unattended worker. The
+  adapter now declares that directory writable (`--add-dir`) and grants
+  `Bash`/`Edit`/`Write`, on the `cs tackle`, `cs thaw`, and patrol-respawn paths
+  alike.
+- **Spore output containment (ADR-161 + hardening).** Germinated spore nodes
+  write *only* under a canonicalized, symlink-safe run home; parent-component
+  symlinks, regular files planted at a node home, `..` / absolute / `a/b` node
+  ids, and case-collisions are all refused. Containment is real
+  (canonicalization), not lexical.
+- **Spore validation fail-closes** when an emergent loop parameter (e.g.
+  `max_rounds`) exceeds its own sealed `[bounds]` ceiling — an emergent value
+  can no longer overrun its foaming ceiling.
+- **Seal-cache honesty.** An unreadable-but-declared spore config no longer
+  collides with a module-only verification-cache entry and reports `verified`;
+  it fails closed.
+- **Turn-scoped local publishing.** The local-adapter output publisher commits
+  *only* what the current turn produced — never pre-existing untracked files,
+  branch diffs, or an operator's own uncommitted hunks in a file the worker also
+  touched (surfaced-not-committed on that collision).
+
+### Added
+
+- **`cosmon-dev` spore** — the repository's first development spore: red-first
+  container reproduction (a failing test as the validation gate), clean-room LLM
+  judging, and a provider-diverse cross-model committee. TLA+-sealed
+  (`spore.tla` / `spore.cfg`, TLC-verified).
+- **Run-scoped output home for germinated nodes (ADR-161).** Germination now
+  computes a gitignored, germination-id-namespaced home under the state store —
+  `.cosmon/state/spore-runs/<germination-id>/<node>/` — and hands it to every
+  node, exactly as molecule state already lives under `.cosmon/state/`. Gate
+  records get a defined home instead of polluting the reusable spore definition
+  or the repo root.
+- **Opt-in `cs run --adapter <name>`.** The resident scheduler can be explicitly
+  directed to dispatch pin-less molecules (static and dynamically-nucleated
+  children) to a named adapter — without weakening the deliberate
+  anti-silent-spend floor (with no flag, pin-less stays `local`).
+- **Real TLC seal-gate verification.** `cs spore run` now *verifies* a spore seal
+  when a TLC toolchain is available (no `--allow-unchecked-seal` needed), and
+  stays fail-closed when it is not.
+- **Selectable local model.** The local (Ollama) adapter's model is now
+  discoverable and selectable rather than hard-pinned to `qwen3:8b` (#23).
+- **Always-on polymer trace sidecar** (+ script and test).
+- **codex adapter self-close** — the out-of-worktree cosmon state dir is
+  declared writable so a codex worker can persist its audit and complete.
+
+### Fixed
+
+- **Adapter resolution under the resident (#21).** The resident used to silently
+  floor every pin-less molecule to the local adapter, making a documented
+  `[adapters.default]` workaround a no-op. It now delegates to the same canonical
+  resolution chain as `cs tackle` and honours `COSMON_DEFAULT_ADAPTER`; the two
+  paths' agreement is documented.
+- **First-run on a freshly `git init`'d repo (#22).** A newcomer following the
+  getting-started path — `cs init` → `git init` → `cs demo` — hit
+  `cs: git branch feat/<mol> failed: fatal: not a valid object name: 'main'`: a
+  fresh `git init` leaves an *unborn HEAD*, so cutting the feature branch
+  aborted, and the only workaround was an undocumented manual
+  `git commit --allow-empty`. `cs tackle` / `cs demo` now detect the unborn-HEAD
+  case and seed a single `cosmon: initial commit` before branching, so the
+  documented path succeeds with no hidden step. A repository that already has
+  history is left byte-for-byte untouched — cosmon never fabricates a commit over
+  existing work. `cs init`'s "Next steps" now states the step accurately.
+- **Local-adapter output honesty (#24).** The local adapter's `synthesis.md` used
+  to report a fabricated `Code written to .../.cosmon/state/.../main.rs` path
+  while the file was actually in the worktree; it now reports the real location.
+- **Local-adapter first-run friction (#25).** On the documented demo, the local
+  worker left its output uncommitted so `cs done` refused without `--force`, and
+  the result was buried in `.worktrees/`; the worker now commits its own output
+  and the location is surfaced, so the demo completes end-to-end with no
+  `--force`.
+- **Briefing submit reliability (#26).** On Claude Code v2.1.218 the briefing's
+  submit keystroke did not reliably fire, leaving a worker idle with the briefing
+  queued (periodic nudges had been masking it). The submit is now a raw carriage
+  return with a bounded in-band retry; the guarantee is one window wide. A
+  *durable* cross-process backstop beyond that window is tracked as **#26 (open)**
+  for a future release; the honest limit is documented in the code.
+- **`cs nucleate --adapter` test gate** — allowlisted for the thin-cli parity
+  check; the harness's git-identity handling is now environment-independent.
 
 ## [0.2.2] — 2026-07-21
 

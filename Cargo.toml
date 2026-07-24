@@ -131,7 +131,7 @@ members = [
 # (`scripts/release-version-conformance.sh`). Both prior packaging defects
 # (gnu-vs-musl, the missing connector) shipped because nothing checked.
 # See task-20260610-ccce version-cut-report.md for the library audit table.
-version = "0.2.2"
+version = "0.3.0"
 rust-version = "1.88"
 # Default cosmon licence is AGPL-3.0-only (core, runtime, end-to-end binaries).
 # Frontier crates (libs/SDKs that a third party would `cargo add`) override
