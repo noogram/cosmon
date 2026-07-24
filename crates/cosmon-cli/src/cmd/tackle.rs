@@ -4803,12 +4803,9 @@ fn run_briefing_submit_loop(
             nudge();
         }
         let elapsed = now();
-        if let Some(outcome) = briefing_submit_deadline(
-            elapsed,
-            elapsed.saturating_sub(last_pending),
-            step,
-            budget,
-        ) {
+        if let Some(outcome) =
+            briefing_submit_deadline(elapsed, elapsed.saturating_sub(last_pending), step, budget)
+        {
             return outcome;
         }
         sleep();
@@ -9607,7 +9604,8 @@ mod tests {
         .unwrap();
         std::fs::write(root.join("worker-only.txt"), "the worker's\n").unwrap();
 
-        let outcome = commit_worktree_deliverables(&root, &test_mol_id(), &baseline).expect("publish");
+        let outcome =
+            commit_worktree_deliverables(&root, &test_mol_id(), &baseline).expect("publish");
 
         let touched = head_paths(&root);
         assert!(
