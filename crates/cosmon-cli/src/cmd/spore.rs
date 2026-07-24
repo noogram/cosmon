@@ -261,7 +261,11 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     // `<run_home>/<alias>` is lexically inside the home and really outside it.
     // Create every node home ourselves with no-follow semantics and canonicalize
     // it against the real run home, so what the worker is handed is proven to be
-    // inside — by the filesystem, immediately before the germination.
+    // inside — by the filesystem, immediately before the germination. The state
+    // dir is handed in as the outer frame: `create_dir_all(run_dir)` above follows
+    // symlinks on every component, so a link planted at the fixed name
+    // `<state>/spore-runs` would otherwise relocate the whole home and every
+    // per-node check would pass against it (defect ND2, iteration 4).
     let node_homes: Vec<(String, std::path::PathBuf)> = calls
         .iter()
         .filter_map(|call| {
@@ -270,9 +274,10 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
                 .map(|out| (call.alias.clone(), std::path::PathBuf::from(out)))
         })
         .collect();
-    cosmon_cli::spore_containment::provision_contained_node_dirs(&run_dir, &node_homes).map_err(
-        |breach| anyhow::anyhow!("{breach}; refusing to germinate (ADR-161, defect B2)"),
-    )?;
+    cosmon_cli::spore_containment::provision_contained_node_dirs(&store_dir, &run_dir, &node_homes)
+        .map_err(|breach| {
+            anyhow::anyhow!("{breach}; refusing to germinate (ADR-161, defect B2)")
+        })?;
 
     let fleet_id =
         FleetId::new(&args.fleet).map_err(|e| anyhow::anyhow!("invalid fleet id: {e}"))?;
