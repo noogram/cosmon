@@ -100,6 +100,24 @@ pub struct Args {
     /// (canonicalises via `cs tackle`'s `validate_adapter_name`).
     #[arg(long, value_name = "NAME")]
     pub adapter: Option<String>,
+
+    /// Model to run, threaded verbatim to `cs tackle --model` (COSMON #23).
+    ///
+    /// For the default `local` adapter this is the Ollama model tag, e.g.
+    /// `--model qwen2.5:32b` or `--model llama3.2:3b`. It must already be
+    /// pulled (`ollama pull <id>`); the dispatch preflight refuses rather
+    /// than collapsing a molecule against a model the daemon cannot serve.
+    ///
+    /// Precedence for the local adapter, highest first: this flag →
+    /// formula-step `model =` pin → `[adapters.local].default_model` in
+    /// `.cosmon/config.toml` → `COSMON_LOCAL_MODEL` → the built-in default
+    /// `qwen3:8b`. Every local dispatch prints the model it resolved and
+    /// its origin on stderr, so the effective choice is never a guess.
+    /// Point the adapter at another daemon with
+    /// `[adapters.local].base_url`, `COSMON_LOCAL_BASE_URL`, or the native
+    /// `OLLAMA_HOST`. Full guide: `docs/guides/local-model-selection.md`.
+    #[arg(long, value_name = "MODEL_ID")]
+    pub model: Option<String>,
 }
 
 /// Run the `demo` subcommand end-to-end.
@@ -124,10 +142,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     emit_event(ctx, "nucleated", &[("molecule", mol_id.as_str())]);
     progress_line(ctx, &format!("nucleated {mol_id}"));
 
-    step_tackle(ctx, &mol_id, args.adapter.as_deref())?;
+    step_tackle(ctx, &mol_id, args.adapter.as_deref(), args.model.as_deref())?;
     let mut tackled_fields = vec![("molecule", mol_id.as_str())];
     if let Some(name) = args.adapter.as_deref() {
         tackled_fields.push(("adapter", name));
+    }
+    if let Some(id) = args.model.as_deref() {
+        tackled_fields.push(("model", id));
     }
     emit_event(ctx, "tackled", &tackled_fields);
     progress_line(ctx, &format!("tackled {mol_id} (worker dispatched)"));
@@ -191,6 +212,19 @@ fn resolve_prompt(args: &Args) -> anyhow::Result<String> {
              no key, no spend. Pass --adapter claude/openai to use a hosted model."
                 .dimmed()
         );
+        // COSMON #23: the local model is selectable, and the demo is where
+        // a first-contact user decides whether cosmon can run *their*
+        // model. One dimmed line naming the flag beats a guide they will
+        // never open. `cs tackle` prints the model it actually resolved.
+        if args.model.is_none() {
+            eprintln!(
+                "{}",
+                "Local model defaults to qwen3:8b — choose another with \
+                 --model <id> (e.g. --model qwen2.5:32b), \
+                 [adapters.local].default_model, or COSMON_LOCAL_MODEL."
+                    .dimmed()
+            );
+        }
     }
     // Chatbot-style prompt. Keep it simple — a single line is enough for
     // the wedge; multi-line editing can come later.
@@ -361,8 +395,13 @@ fn step_nucleate(
     Ok(id)
 }
 
-fn step_tackle(ctx: &Context, mol_id: &str, adapter: Option<&str>) -> anyhow::Result<()> {
-    let args = build_tackle_args(mol_id, adapter);
+fn step_tackle(
+    ctx: &Context,
+    mol_id: &str,
+    adapter: Option<&str>,
+    model: Option<&str>,
+) -> anyhow::Result<()> {
+    let args = build_tackle_args(mol_id, adapter, model);
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     spawn_with_inherited_stderr(ctx, &arg_refs, ctx.json)?;
     Ok(())
@@ -375,11 +414,25 @@ fn step_tackle(ctx: &Context, mol_id: &str, adapter: Option<&str>) -> anyhow::Re
 /// the canonicalisation lives in `cs tackle`'s `validate_adapter_name`,
 /// not in the demo orchestrator, so the alias (`llama` → `llama-cpp`)
 /// path is exercised by the same code on both invocation surfaces.
-pub(crate) fn build_tackle_args(mol_id: &str, adapter: Option<&str>) -> Vec<String> {
+///
+/// `--model <id>` is threaded the same way and for the same reason
+/// (COSMON #23): the whole resolution chain — pin, formula step, config
+/// row, `COSMON_LOCAL_MODEL`, built-in default — lives in `cs tackle`, so
+/// the demo must add a pass-through, never a second resolver that could
+/// drift from it.
+pub(crate) fn build_tackle_args(
+    mol_id: &str,
+    adapter: Option<&str>,
+    model: Option<&str>,
+) -> Vec<String> {
     let mut args = vec!["tackle".to_owned(), mol_id.to_owned()];
     if let Some(name) = adapter {
         args.push("--adapter".to_owned());
         args.push(name.to_owned());
+    }
+    if let Some(id) = model {
+        args.push("--model".to_owned());
+        args.push(id.to_owned());
     }
     args
 }
@@ -540,7 +593,7 @@ mod tests {
         // the historical `cs tackle <mol>` argv shape, so the
         // [adapters.default] / built-in resolution path inside tackle
         // remains the canonical fallback.
-        let argv = build_tackle_args("task-20260519-dd69", None);
+        let argv = build_tackle_args("task-20260519-dd69", None, None);
         assert_eq!(argv, vec!["tackle", "task-20260519-dd69"]);
     }
 
@@ -549,7 +602,7 @@ mod tests {
         // ADR-106 D4 — `llama-cpp` is the canonical name; `cs demo` threads
         // it verbatim into `cs tackle` so the AdapterSelected event records
         // the canonical form (not the alias).
-        let argv = build_tackle_args("task-20260519-dd69", Some("llama-cpp"));
+        let argv = build_tackle_args("task-20260519-dd69", Some("llama-cpp"), None);
         assert_eq!(
             argv,
             vec!["tackle", "task-20260519-dd69", "--adapter", "llama-cpp"]
@@ -561,10 +614,41 @@ mod tests {
         // ADR-106 — canonicalisation lives in `cs tackle`, not in `cs demo`.
         // The orchestrator forwards `llama` verbatim and lets the validator
         // map it to `llama-cpp` so both invocation surfaces share one path.
-        let argv = build_tackle_args("task-20260519-dd69", Some("llama"));
+        let argv = build_tackle_args("task-20260519-dd69", Some("llama"), None);
         assert_eq!(
             argv,
             vec!["tackle", "task-20260519-dd69", "--adapter", "llama"]
+        );
+    }
+
+    #[test]
+    fn tackle_args_forward_model_pin() {
+        // COSMON #23 — `cs demo --model` must reach `cs tackle --model`
+        // verbatim. The demo resolves nothing itself: a second resolver
+        // would be free to disagree with tackle's chain, and the user
+        // would have no way to tell which one answered.
+        let argv = build_tackle_args("task-20260519-dd69", None, Some("qwen2.5:32b"));
+        assert_eq!(
+            argv,
+            vec!["tackle", "task-20260519-dd69", "--model", "qwen2.5:32b"]
+        );
+    }
+
+    #[test]
+    fn tackle_args_forward_adapter_and_model_together() {
+        // The two axes are independent: choosing a local model must not
+        // require naming the adapter, and vice versa.
+        let argv = build_tackle_args("task-20260519-dd69", Some("local"), Some("llama3.2:3b"));
+        assert_eq!(
+            argv,
+            vec![
+                "tackle",
+                "task-20260519-dd69",
+                "--adapter",
+                "local",
+                "--model",
+                "llama3.2:3b"
+            ]
         );
     }
 }

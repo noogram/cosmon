@@ -36,6 +36,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [LaunchAgent — `cs-api` resident HTTP adapter](launchagent-cs-api.md)
 - [LaunchAgent — `matrix-echo-tick` scheduler](launchagent-matrix-tick.md)
 - [Local-default container test](local-default-container-test.md)
+- [Choosing the local (Ollama) model](local-model-selection.md)
 - [mac-pilot — Developer signing setup](mac-pilot-signing-setup.md)
 - [mac-pilot — piloter cosmon depuis la barre de menu](mac-pilot.md)
 - [Markdown rendering — Swift pilot surfaces](markdown-rendering.md)
