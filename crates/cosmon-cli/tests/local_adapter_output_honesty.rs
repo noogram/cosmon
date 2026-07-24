@@ -39,7 +39,7 @@ use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// The file the mocked worker creates in its sandbox.
 const DELIVERABLE: &str = "main.rs";
@@ -56,36 +56,71 @@ const DELIVERABLE_BODY: &str = "fn main() {\n    println!(\"hello from cosmon\")
 /// and two `POST /v1/chat/completions` turns.
 struct MockOllama {
     base_url: String,
+    /// Every `POST /v1/chat/completions` body the mock received, in order.
+    ///
+    /// This is the *provider request* — the only place that proves a selected
+    /// model actually reached the wire rather than merely parsing (Defect 4 of
+    /// the double-model review of #23).
+    chat_requests: Arc<Mutex<Vec<String>>>,
     _handle: std::thread::JoinHandle<()>,
+}
+
+/// What the mocked model does with its turn.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Script {
+    /// Turn 1 writes `main.rs`, turn 2 reports where it went (the #24/#25 run).
+    WriteDeliverable,
+    /// The model produces prose and nothing else — the no-op turn.
+    Chatter,
 }
 
 impl MockOllama {
     /// Bind an ephemeral loopback port and serve until the test process exits.
     fn start(model: &str) -> Self {
+        Self::start_with(model, Script::WriteDeliverable)
+    }
+
+    /// As [`MockOllama::start`], with an explicit behaviour script.
+    fn start_with(model: &str, script: Script) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock ollama");
         let addr = listener.local_addr().expect("mock addr");
         let model = model.to_owned();
         let turns = Arc::new(AtomicUsize::new(0));
+        let chat_requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&chat_requests);
         let handle = std::thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(stream) = stream else { continue };
                 let model = model.clone();
                 let turns = Arc::clone(&turns);
+                let recorded = Arc::clone(&recorded);
                 // One thread per connection: reqwest may keep several alive.
                 std::thread::spawn(move || {
-                    let _ = serve_one(stream, &model, &turns);
+                    let _ = serve_one(stream, &model, &turns, script, &recorded);
                 });
             }
         });
         Self {
             base_url: format!("http://{addr}"),
+            chat_requests,
             _handle: handle,
         }
+    }
+
+    /// Snapshot of the chat-completions bodies received so far.
+    fn chat_requests(&self) -> Vec<String> {
+        self.chat_requests.lock().expect("mock lock").clone()
     }
 }
 
 /// Handle a single HTTP request on `stream`.
-fn serve_one(mut stream: TcpStream, model: &str, turns: &AtomicUsize) -> std::io::Result<()> {
+fn serve_one(
+    mut stream: TcpStream,
+    model: &str,
+    turns: &AtomicUsize,
+    script: Script,
+    recorded: &Mutex<Vec<String>>,
+) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut request_line = String::new();
     if reader.read_line(&mut request_line)? == 0 {
@@ -117,11 +152,12 @@ fn serve_one(mut stream: TcpStream, model: &str, turns: &AtomicUsize) -> std::io
     let payload = if request_line.contains("/v1/models") {
         format!(r#"{{"object":"list","data":[{{"id":"{model}","object":"model"}}]}}"#)
     } else {
+        recorded.lock().expect("mock lock").push(body.clone());
         let turn = turns.fetch_add(1, Ordering::SeqCst);
-        if turn == 0 {
-            tool_call_turn(model)
-        } else {
-            stop_turn(model, &body)
+        match script {
+            Script::WriteDeliverable if turn == 0 => tool_call_turn(model),
+            Script::WriteDeliverable => stop_turn(model, &body),
+            Script::Chatter => chatter_turn(model),
         }
     };
     let response = format!(
@@ -188,6 +224,23 @@ fn stop_turn(model: &str, request_body: &str) -> String {
     .to_string()
 }
 
+/// A no-op turn: the model answers in prose and touches no file. This is the
+/// Jesse #4 "hello." shape, and the shape a re-tackle takes when the model has
+/// nothing left to do.
+fn chatter_turn(model: &str) -> String {
+    serde_json::json!({
+        "id": "mock-chatter",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": "Everything already looks done.\n" },
+            "finish_reason": "stop"
+        }]
+    })
+    .to_string()
+}
+
 /// First `` `…` ``-quoted absolute path in a chat-completions request body.
 ///
 /// The briefing arrives JSON-escaped inside `messages`; backticks and `/` both
@@ -219,6 +272,11 @@ fn cs(project: &Path, mock: &MockOllama) -> Command {
         .env_remove("COSMON_MOL_DIR")
         .env_remove("COSMON_STATE_DIR")
         .env_remove("COSMON_DEFAULT_ADAPTER")
+        // Ambient session model pins outrank the per-project config row, so a
+        // worker environment that exports one would decide which model these
+        // tests dispatch. Strip them: the model must come from the test.
+        .env_remove("COSMON_DEFAULT_MODEL")
+        .env_remove("ANTHROPIC_MODEL")
         .env_remove("COSMON_ARTIFACT_DIR")
         .env_remove("OLLAMA_HOST")
         .env_remove("OPENAI_BASE_URL")
@@ -326,48 +384,93 @@ fn molecule_dir(state_dir: &Path, mol_id: &str) -> PathBuf {
         .join(mol_id)
 }
 
-/// Run the mocked local worker to completion and return the molecule id.
-///
-/// `cs tackle` detaches the local worker, so we poll the molecule dir for the
-/// `synthesis.md` the loop writes on its way out (bounded — a hang is a
-/// finding, never an infinite wait).
+/// Run the mocked local worker to completion and return its molecule dir.
 fn tackle_and_wait(project: &Path, mock: &MockOllama, mol_id: &str) -> PathBuf {
-    let out = cs(project, mock)
-        // `--model` is pinned explicitly: the chain resolver otherwise inherits
-        // the ambient session model, which the mock does not serve.
-        .args([
-            "tackle",
-            mol_id,
-            "--adapter",
-            "local",
-            "--model",
-            MOCK_MODEL,
-        ])
-        .output()
-        .expect("spawn cs tackle");
-    assert!(
-        out.status.success(),
-        "cs tackle --adapter local failed:\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    // `--model` is pinned explicitly: the chain resolver otherwise inherits
+    // the ambient session model, which the mock does not serve.
+    tackle_extra_and_wait(project, mock, mol_id, &["--model", MOCK_MODEL], &[])
+}
 
-    let mol_dir = molecule_dir(&project.join(".cosmon").join("state"), mol_id);
-    let synthesis = mol_dir.join("synthesis.md");
+/// Block until the detached local worker has finished its whole post-loop
+/// sequence, and return its molecule dir.
+///
+/// The barrier is the worker's own lifecycle record, not a file the loop
+/// happens to write early: `run_local_worker` marks the worker `stopped` as its
+/// *last* act on both the success and the guard-refusal path, strictly after
+/// publishing. Waiting for `synthesis.md` plus a fixed sleep — the earlier
+/// shape — raced the publisher under load and made this file intermittently
+/// red. Bounded: a hang is a finding, never an infinite wait.
+fn wait_for_worker_to_stop(mol_dir: &Path) {
+    let state = mol_dir.join("state.json");
     for _ in 0..600 {
-        if synthesis.exists() {
-            // The worker writes synthesis.md before its post-loop steps; give
-            // the detached process a moment to finish them.
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            return mol_dir;
+        let stopped = fs::read_to_string(&state)
+            .ok()
+            .and_then(|body| serde_json::from_str::<serde_json::Value>(&body).ok())
+            .and_then(|v| v.get("process")?.get("status")?.as_str().map(str::to_owned))
+            .is_some_and(|status| status == "stopped");
+        if stopped {
+            return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let log = fs::read_to_string(mol_dir.join("local-worker.log")).unwrap_or_default();
     panic!(
-        "detached local worker never wrote {} within 60s.\nlocal-worker.log:\n{log}",
-        synthesis.display()
+        "detached local worker never reached `stopped` under {} within 60s.\n\
+         local-worker.log:\n{log}",
+        mol_dir.display()
     );
+}
+
+/// Run `cs tackle` with extra arguments, then wait for the detached worker.
+fn tackle_extra_and_wait(
+    project: &Path,
+    mock: &MockOllama,
+    mol_id: &str,
+    extra: &[&str],
+    envs: &[(&str, &str)],
+) -> PathBuf {
+    let mut cmd = cs(project, mock);
+    for (key, value) in envs {
+        // An empty value means "unset it" — `cs` reads several of these as
+        // present-but-blank otherwise.
+        if value.is_empty() {
+            cmd.env_remove(key);
+        } else {
+            cmd.env(key, value);
+        }
+    }
+    let mut args = vec!["tackle", mol_id, "--adapter", "local"];
+    args.extend_from_slice(extra);
+    let out = cmd.args(&args).output().expect("spawn cs tackle");
+    assert!(
+        out.status.success(),
+        "cs tackle {args:?} failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let mol_dir = molecule_dir(&project.join(".cosmon").join("state"), mol_id);
+    wait_for_worker_to_stop(&mol_dir);
+    mol_dir
+}
+
+/// `git status --porcelain` of the project, as raw lines.
+fn porcelain(dir: &Path) -> String {
+    let out = Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(dir)
+        .output()
+        .expect("spawn git status");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("spawn git");
+    String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// The path a synthesis line of the form ``Code written to `…` `` claims.
@@ -481,4 +584,189 @@ fn local_worker_output_survives_cs_done_without_force() {
         fs::read_to_string(&landed).expect("read merged deliverable"),
         DELIVERABLE_BODY,
     );
+}
+
+// ---------------------------------------------------------------------------
+// REGRESSION — the publisher must be turn-scoped, not branch-wide
+// ---------------------------------------------------------------------------
+
+/// **Defect 1 of the double-model review of #24/#25 (data safety).**
+///
+/// `--no-worktree` parks the worker on the operator's own checkout. The
+/// publisher introduced for #25 discovered deliverables *branch-wide* — every
+/// tracked difference from `merge-base(HEAD, main)` plus every untracked
+/// non-ignored file — and committed that whole set. On this path there is no
+/// molecule branch, so the commit landed on whatever the operator had checked
+/// out. A local run could therefore sweep unrelated user work into a worker
+/// commit, commonly straight onto `main`.
+///
+/// The contract: a worker publishes what *it* changed during *its* turn, and
+/// nothing else. Pre-existing untracked files stay untracked; a pre-existing
+/// branch commit is not re-published.
+#[test]
+fn no_worktree_run_commits_only_this_turns_output() {
+    let mock = MockOllama::start(MOCK_MODEL);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path();
+    setup_project(project);
+
+    // The operator's own state, none of it this worker's doing:
+    //  - a branch that already differs from `main` (a committed file), and
+    //  - an untracked file sitting in the working tree.
+    git(project, &["checkout", "-q", "-b", "operator-branch"]);
+    fs::write(
+        project.join("operator-committed.txt"),
+        "operator's commit\n",
+    )
+    .unwrap();
+    git(project, &["add", "operator-committed.txt"]);
+    git(project, &["commit", "-q", "-m", "operator work"]);
+    fs::write(project.join("operator-notes.txt"), "operator's scratch\n").unwrap();
+
+    let head_before = git_stdout(project, &["rev-parse", "HEAD"]);
+    let mol_id = nucleate(project, &mock);
+    tackle_extra_and_wait(
+        project,
+        &mock,
+        &mol_id,
+        &["--model", MOCK_MODEL, "--no-worktree"],
+        &[("COSMON_ALLOW_NO_WORKTREE", "1")],
+    );
+
+    // The worker's own file was published — the fix must not disable the
+    // publisher, only scope it.
+    let head_after = git_stdout(project, &["rev-parse", "HEAD"]);
+    assert_ne!(
+        head_before, head_after,
+        "the worker's deliverable must still be committed"
+    );
+    let committed_files = git_stdout(
+        project,
+        &["show", "--pretty=format:", "--name-only", "HEAD"],
+    );
+    let committed: Vec<&str> = committed_files.split_whitespace().collect();
+    assert_eq!(
+        committed,
+        vec![DELIVERABLE],
+        "the worker's commit must contain ONLY what the worker wrote this turn, \
+         got {committed:?}"
+    );
+
+    // The operator's untracked scratch file is untouched — still untracked,
+    // still its original content.
+    let status = porcelain(project);
+    assert!(
+        status.contains("?? operator-notes.txt"),
+        "a pre-existing untracked file must not be swept into a worker commit: \
+         {status:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(project.join("operator-notes.txt")).unwrap(),
+        "operator's scratch\n"
+    );
+}
+
+/// **Defect 2 of the same review.** A no-op turn on a branch that already
+/// differs from `main` must not be rescued by the *previous* turn's output:
+/// the real-work guard is turn-scoped, so it refuses, nothing is committed, and
+/// no synthesis section tells the operator their already-committed files are
+/// "NOT committed" and need `--force`.
+#[test]
+fn no_op_retackle_on_a_diverged_branch_commits_nothing_and_recommends_no_force() {
+    let mock = MockOllama::start_with(MOCK_MODEL, Script::Chatter);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path();
+    setup_project(project);
+
+    git(project, &["checkout", "-q", "-b", "operator-branch"]);
+    fs::write(
+        project.join("earlier-deliverable.txt"),
+        "from a prior turn\n",
+    )
+    .unwrap();
+    git(project, &["add", "earlier-deliverable.txt"]);
+    git(project, &["commit", "-q", "-m", "prior turn"]);
+    fs::write(project.join("operator-notes.txt"), "operator's scratch\n").unwrap();
+
+    let head_before = git_stdout(project, &["rev-parse", "HEAD"]);
+    let mol_id = nucleate(project, &mock);
+    let mol_dir = tackle_extra_and_wait(
+        project,
+        &mock,
+        &mol_id,
+        &["--model", MOCK_MODEL, "--no-worktree"],
+        &[("COSMON_ALLOW_NO_WORKTREE", "1")],
+    );
+
+    assert_eq!(
+        head_before,
+        git_stdout(project, &["rev-parse", "HEAD"]),
+        "a turn that produced nothing must create no commit"
+    );
+    let status = porcelain(project);
+    assert!(
+        status.contains("?? operator-notes.txt"),
+        "the operator's untracked file must survive a no-op turn: {status:?}"
+    );
+
+    let synthesis = fs::read_to_string(mol_dir.join("synthesis.md")).unwrap_or_default();
+    assert!(
+        !synthesis.contains("--force"),
+        "a no-op turn must not recommend --force over files it never produced:\n{synthesis}"
+    );
+    assert!(
+        !synthesis.contains("## Files this worker produced (verified on disk)"),
+        "a no-op turn produced no files, so it must claim none:\n{synthesis}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #23 — the selected model must reach the provider request, not just parse
+// ---------------------------------------------------------------------------
+
+/// **Defect 4 of the same review.** Every #23 model-selection test runs
+/// `--dry-run`, which proves only that a configured value *parses*. It never
+/// looks at the request the local adapter builds, so a resolver that dropped
+/// the selection on the way to the provider would still pass.
+///
+/// This closes that gap end-to-end: `[adapters.local].default_model` is the
+/// only place the model is named — no `--model` flag, no `COSMON_LOCAL_MODEL` —
+/// and the assertion is on the `model` field of the actual
+/// `POST /v1/chat/completions` body the adapter sent.
+#[test]
+fn config_selected_model_reaches_the_provider_request() {
+    let mock = MockOllama::start(MOCK_MODEL);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project = tmp.path();
+    setup_project(project);
+
+    // The durable, per-project mechanism — and the ONLY statement of the model.
+    fs::write(
+        project.join(".cosmon").join("config.toml"),
+        format!(
+            "[project]\nproject_id = \"local-output-honesty-2cdb\"\n\n\
+             [adapters.local]\ndefault_model = \"{MOCK_MODEL}\"\n"
+        ),
+    )
+    .unwrap();
+
+    let mol_id = nucleate(project, &mock);
+    tackle_extra_and_wait(project, &mock, &mol_id, &[], &[("COSMON_LOCAL_MODEL", "")]);
+
+    let requests = mock.chat_requests();
+    assert!(
+        !requests.is_empty(),
+        "the local adapter must have sent at least one chat-completions request"
+    );
+    for body in &requests {
+        let value: serde_json::Value =
+            serde_json::from_str(body).expect("chat request body must be JSON");
+        assert_eq!(
+            value.get("model").and_then(serde_json::Value::as_str),
+            Some(MOCK_MODEL),
+            "the configured local model must be the model the provider is asked \
+             for — a selection that only parses is not a selection (COSMON #23).\n\
+             request body:\n{body}"
+        );
+    }
 }

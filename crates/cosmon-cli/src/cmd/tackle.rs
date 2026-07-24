@@ -5929,6 +5929,14 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // work (Jesse #4, the "older than step start" clause).
     let step_start = std::time::SystemTime::now();
 
+    // Snapshot the worktree BEFORE the loop so publishing can be turn-scoped.
+    // Everything downstream — the real-work guard, the artifact boundary, the
+    // commit, the synthesis listing — asks "what changed since this instant?",
+    // never "how does this branch differ from main?". On `--no-worktree` the
+    // worker sits on the operator's own checkout, where those two questions
+    // have very different answers (see [`WorktreeBaseline`]).
+    let baseline = WorktreeBaseline::capture(&job.worktree_path);
+
     let result = run_local_agent_loop(
         &job.adapter_name,
         &wid,
@@ -5962,7 +5970,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // a weak local model honoring the formula's RESULT CONTRACT. This closes the
     // gap where `GET /v1/molecules/{id}/artifacts` returned nothing even though
     // the worker committed real code to the worktree (cosmon-ward b127).
-    if let Err(error) = sync_worktree_deliverables_to_artifact_dir(&job.worktree_path) {
+    if let Err(error) = sync_worktree_deliverables_to_artifact_dir(&job.worktree_path, &baseline) {
         let _ = append_local_worker_failure(&job.molecule_dir, &error);
         return match mark_detached_local_worker_stopped(&store, &mol_id, &wid) {
             Ok(()) => Err(error),
@@ -5985,7 +5993,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // otherwise, and fail LOUDLY with a repair-naming message. The molecule is
     // left Running with the worker stopped — recoverable and re-tacklable —
     // rather than collapsed (terminal, work lost) or completed (false success).
-    if !local_worker_produced_real_work(&job.worktree_path) {
+    if !local_worker_produced_real_work(&job.worktree_path, &baseline) {
         let guard_error = anyhow::anyhow!(
             "cs local-worker: the local agent loop returned but produced NO real work \
              product — the worktree branch is empty (no file created or edited) and the \
@@ -6036,7 +6044,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         };
     }
 
-    publish_local_worker_output(&job, &mol_id);
+    publish_local_worker_output(&job, &mol_id, &baseline);
 
     mark_detached_local_worker_stopped(&store, &mol_id, &wid)?;
 
@@ -6063,8 +6071,12 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
 /// Best-effort by construction: the work is already on disk and already
 /// published to the artifact dir, so either failure is a line on the worker log,
 /// never a lost molecule.
-fn publish_local_worker_output(job: &LocalWorkerJob, mol_id: &MoleculeId) {
-    let committed = match commit_worktree_deliverables(&job.worktree_path, mol_id) {
+fn publish_local_worker_output(
+    job: &LocalWorkerJob,
+    mol_id: &MoleculeId,
+    baseline: &WorktreeBaseline,
+) {
+    let committed = match commit_worktree_deliverables(&job.worktree_path, mol_id, baseline) {
         Ok(committed) => committed,
         Err(error) => {
             let _ = append_local_worker_failure(&job.molecule_dir, &error);
@@ -6072,19 +6084,27 @@ fn publish_local_worker_output(job: &LocalWorkerJob, mol_id: &MoleculeId) {
         }
     };
     if let Err(error) =
-        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed)
+        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed, baseline)
     {
         let _ = append_local_worker_failure(&job.molecule_dir, &error);
     }
 }
 
-/// Commit every deliverable a local worker left in its worktree, onto the
-/// molecule's own branch. Returns whether a commit was actually created.
+/// Commit every deliverable a local worker produced **during this turn**, onto
+/// the branch its worktree has checked out. Returns whether those deliverables
+/// are in `HEAD` when this returns.
 ///
-/// Scoped deliberately to the paths [`discover_worktree_deliverables`] already
-/// treats as the worker's output: cosmon-internal paths (`.cosmon/`, `target/`,
+/// Scoped twice over. By path: cosmon-internal paths (`.cosmon/`, `target/`,
 /// `.git/`) are never staged, so the molecule's own state never rides along in
-/// a work commit.
+/// a work commit. By *turn*: only paths that changed since `baseline` was
+/// captured are staged ([`turn_scoped_deliverables`]), so pre-existing operator
+/// work — untracked files, earlier commits on the branch — is never swept into
+/// a worker's commit. The second scope is what makes the publisher safe on
+/// `--no-worktree`, where the "worktree" is the operator's own checkout.
+///
+/// The commit carries an explicit pathspec, so a change the operator had staged
+/// in the index but not committed is left staged rather than published by a
+/// worker that never touched it.
 ///
 /// The committer identity falls back to a cosmon-owned one only when the
 /// repository has none configured — a fresh `git init` on a machine with no
@@ -6092,8 +6112,12 @@ fn publish_local_worker_output(job: &LocalWorkerJob, mol_id: &MoleculeId) {
 /// `git commit` there fails with "Please tell me who you are". An operator who
 /// *has* an identity keeps it. Hooks are skipped (`--no-verify`): a worker's
 /// output commit must not be gated on the project's local commit hooks.
-fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow::Result<bool> {
-    let rels = discover_worktree_deliverables(worktree)?;
+fn commit_worktree_deliverables(
+    worktree: &Path,
+    mol_id: &MoleculeId,
+    baseline: &WorktreeBaseline,
+) -> anyhow::Result<bool> {
+    let rels = turn_scoped_deliverables(worktree, baseline)?;
     let mut staged: Vec<String> = Vec::new();
     for rel in &rels {
         if ignored_artifact_path(rel) {
@@ -6114,10 +6138,15 @@ fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow:
     let mut add_args = vec!["add", "--"];
     add_args.extend(staged.iter().map(String::as_str));
     git_stdout(worktree, &add_args)?;
-    // Nothing to commit (the worker only touched already-committed content):
-    // `git diff --cached --quiet` exits 1 when the index differs from HEAD.
-    if git_stdout(worktree, &["diff", "--cached", "--quiet"]).is_ok() {
-        return Ok(false);
+    // Nothing left to commit *for these paths*: their content already matches
+    // HEAD, so the deliverables are committed and no empty commit is minted.
+    // `git diff --cached --quiet -- <paths>` exits 1 when they differ. The
+    // pathspec matters: without it, an unrelated staged change would make this
+    // look like work to publish.
+    let mut cached_args = vec!["diff", "--cached", "--quiet", "--"];
+    cached_args.extend(staged.iter().map(String::as_str));
+    if git_stdout(worktree, &cached_args).is_ok() {
+        return Ok(true);
     }
 
     let message = format!("feat({mol_id}): local worker output");
@@ -6135,10 +6164,11 @@ fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow:
         );
     }
     args.extend(
-        ["commit", "--no-verify", "-q", "-m", &message]
+        ["commit", "--no-verify", "-q", "-m", &message, "--"]
             .iter()
             .map(|s| (*s).to_owned()),
     );
+    args.extend(staged.iter().cloned());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     git_stdout(worktree, &arg_refs)?;
     Ok(true)
@@ -6165,12 +6195,13 @@ fn append_local_artifact_report(
     molecule_dir: &Path,
     worktree: &Path,
     committed: bool,
+    baseline: &WorktreeBaseline,
 ) -> anyhow::Result<()> {
     let synthesis_path = molecule_dir.join("synthesis.md");
     if !synthesis_path.exists() {
         return Ok(());
     }
-    let report = local_artifact_report(worktree, committed)?;
+    let report = local_artifact_report(worktree, committed, baseline)?;
     if report.is_empty() {
         return Ok(());
     }
@@ -6194,12 +6225,16 @@ fn append_local_artifact_report(
 
 /// Render the ground-truth artifact section, or the empty string when the
 /// worker produced nothing (the real-work guard has its own, louder say).
-fn local_artifact_report(worktree: &Path, committed: bool) -> anyhow::Result<String> {
+fn local_artifact_report(
+    worktree: &Path,
+    committed: bool,
+    baseline: &WorktreeBaseline,
+) -> anyhow::Result<String> {
     use std::fmt::Write;
 
     let repo_root = repo_root_of_worktree(worktree);
     let mut lines = String::new();
-    for rel in discover_worktree_deliverables(worktree)? {
+    for rel in turn_scoped_deliverables(worktree, baseline)? {
         if ignored_artifact_path(&rel) {
             continue;
         }
@@ -6272,12 +6307,15 @@ fn repo_root_of_worktree(worktree: &Path) -> Option<PathBuf> {
 /// report success without publishing its promised artifacts.
 ///
 /// A no-op when `$COSMON_ARTIFACT_DIR` is unset (non-RPP tackle).
-fn sync_worktree_deliverables_to_artifact_dir(worktree: &Path) -> anyhow::Result<()> {
+fn sync_worktree_deliverables_to_artifact_dir(
+    worktree: &Path,
+    baseline: &WorktreeBaseline,
+) -> anyhow::Result<()> {
     let artifact_dir = match std::env::var("COSMON_ARTIFACT_DIR") {
         Ok(d) if !d.is_empty() => PathBuf::from(d),
         _ => return Ok(()),
     };
-    sync_worktree_deliverables(worktree, &artifact_dir)
+    sync_worktree_deliverables(worktree, &artifact_dir, baseline)
 }
 
 /// The declared `acceptance_artifacts` a detached-local turn failed to produce,
@@ -6333,11 +6371,16 @@ fn missing_declared_acceptance_artifacts(
 /// mission that produces no file at all is chatter, not a task-work
 /// deliverable, and must not be booked completed.
 ///
+/// Turn-scoped, not branch-wide: the deliverable must have appeared or changed
+/// since `baseline` was captured at the start of this turn. Re-tackling a
+/// molecule whose branch already differs from `main` therefore no longer passes
+/// the guard on the strength of a *previous* turn's output.
+///
 /// Fail-closed: if the worktree cannot even be inspected (git failure) we
 /// cannot prove work happened, so we report `false` and let the caller surface
 /// the molecule for attention rather than complete it on faith.
-fn local_worker_produced_real_work(worktree: &Path) -> bool {
-    match discover_worktree_deliverables(worktree) {
+fn local_worker_produced_real_work(worktree: &Path, baseline: &WorktreeBaseline) -> bool {
+    match turn_scoped_deliverables(worktree, baseline) {
         Ok(rels) => rels.iter().any(|rel| !ignored_artifact_path(rel)),
         Err(error) => {
             tracing::warn!(
@@ -6353,6 +6396,134 @@ fn local_worker_produced_real_work(worktree: &Path) -> bool {
 /// Maximum artifact size accepted at the RPP boundary (16 MiB).
 const MAX_SYNCED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
+/// The worktree's deliverable state *before* a local worker ran — the "before"
+/// half of the turn-scoped diff.
+///
+/// [`discover_worktree_deliverables`] answers "how does this worktree differ
+/// from `main`?", which is a **branch-wide** question. Publishing needs a
+/// narrower one: "what did *this* worker change during *this* turn?". The two
+/// coincide only in the ordinary case — a freshly created molecule worktree
+/// that starts identical to `main`.
+///
+/// They diverge, dangerously, on `--no-worktree` (gated behind
+/// `COSMON_ALLOW_NO_WORKTREE=1`), where the worker is parked on the operator's
+/// own checkout: every pre-existing untracked file and every pre-existing
+/// branch commit is "a difference from `main`" that the worker never touched.
+/// Staging and committing that set puts unrelated operator work into a
+/// worker's commit, on whatever branch the operator has checked out — commonly
+/// `main`. Snapshotting first, and publishing only the set-difference, is what
+/// makes the publisher safe on that path (and stops a no-op re-tackle on an
+/// already-diverged branch from passing the real-work guard).
+#[derive(Debug, Clone, Default)]
+struct WorktreeBaseline {
+    /// Fingerprint per already-differing path.
+    ///
+    /// `None` = the path existed in the pre-run difference but could not be
+    /// fingerprinted. Two unfingerprintable observations compare equal, so an
+    /// unreadable pre-existing file is never claimed as this turn's output.
+    entries: std::collections::BTreeMap<Vec<u8>, Option<u64>>,
+    /// Whether the pre-run snapshot could be taken at all.
+    ///
+    /// `false` fails the turn-scoped filter **closed**: nothing is attributed
+    /// to this turn. Without a "before" we cannot prove the worker authored
+    /// anything, and a publisher that cannot prove authorship must not commit.
+    observed: bool,
+}
+
+impl WorktreeBaseline {
+    /// A worktree that differed from `main` in no way before the turn — the
+    /// ordinary freshly linked molecule worktree, where turn-scoped and
+    /// branch-wide discovery coincide.
+    #[cfg(test)]
+    fn pristine() -> Self {
+        Self {
+            entries: std::collections::BTreeMap::new(),
+            observed: true,
+        }
+    }
+
+    /// Snapshot the worktree's pre-run deliverable state.
+    ///
+    /// Discovery failure is not fatal here: it yields an *unobserved* baseline,
+    /// which the filter treats as "attribute nothing to this turn" rather than
+    /// as "attribute everything".
+    fn capture(worktree: &Path) -> Self {
+        match discover_worktree_deliverables(worktree) {
+            Ok(rels) => Self {
+                entries: rels
+                    .into_iter()
+                    .map(|rel| {
+                        let fingerprint = fingerprint_worktree_path(worktree, &rel);
+                        (rel, fingerprint)
+                    })
+                    .collect(),
+                observed: true,
+            },
+            Err(error) => {
+                tracing::warn!(
+                    worktree = %worktree.display(),
+                    error = %error,
+                    "could not snapshot pre-run worktree state; this turn will publish nothing"
+                );
+                Self::default()
+            }
+        }
+    }
+
+    /// Whether `rel` looks different now than it did before the turn.
+    fn changed_since(&self, worktree: &Path, rel: &[u8]) -> bool {
+        let now = fingerprint_worktree_path(worktree, rel);
+        !matches!(self.entries.get(rel), Some(before) if *before == now)
+    }
+}
+
+/// Content fingerprint of one worktree-relative path, or `None` when it is not
+/// a readable regular file.
+///
+/// Content, not mtime: a worker that rewrites a file within the filesystem's
+/// timestamp granularity must still be seen to have changed it.
+fn fingerprint_worktree_path(worktree: &Path, rel: &[u8]) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+
+    let rel_path = git_path_to_path(rel);
+    if !rel_path
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return None;
+    }
+    let path = worktree.join(rel_path);
+    let metadata = fs::symlink_metadata(&path).ok()?;
+    if !metadata.file_type().is_file() {
+        return None;
+    }
+    let bytes = fs::read(&path).ok()?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    metadata.len().hash(&mut hasher);
+    bytes.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+/// The deliverables *this turn* produced: branch-wide discovery restricted to
+/// the paths that actually changed since `baseline` was captured.
+///
+/// This is the single definition of "the worker's output" used by the real-work
+/// guard, the artifact boundary, the commit, and the synthesis report, so the
+/// four can never disagree about what the worker did.
+fn turn_scoped_deliverables(
+    worktree: &Path,
+    baseline: &WorktreeBaseline,
+) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
+    let discovered = discover_worktree_deliverables(worktree)?;
+    if !baseline.observed {
+        return Ok(std::collections::BTreeSet::new());
+    }
+    Ok(discovered
+        .into_iter()
+        .filter(|rel| baseline.changed_since(worktree, rel))
+        .collect())
+}
+
 /// Discover the paths a local worker produced in its worktree, as
 /// git-native NUL-safe byte paths relative to the worktree root.
 ///
@@ -6362,9 +6533,10 @@ const MAX_SYNCED_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 /// [`ignored_artifact_path`] themselves so both the artifact-sync boundary and
 /// the real-work guard share one discovery.
 ///
-/// Shared by [`sync_worktree_deliverables`] (which publishes the paths) and
-/// [`local_worker_produced_real_work`] (which only counts them), so the two
-/// can never disagree about what the worker actually produced.
+/// This is the **branch-wide** half of the answer. Every consumer goes through
+/// [`turn_scoped_deliverables`], which subtracts the pre-run
+/// [`WorktreeBaseline`], so nobody attributes pre-existing differences to this
+/// turn's worker.
 fn discover_worktree_deliverables(
     worktree: &Path,
 ) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
@@ -6402,8 +6574,12 @@ fn discover_worktree_deliverables(
     Ok(rels)
 }
 
-fn sync_worktree_deliverables(worktree: &Path, artifact_dir: &Path) -> anyhow::Result<()> {
-    let rels = discover_worktree_deliverables(worktree)?;
+fn sync_worktree_deliverables(
+    worktree: &Path,
+    artifact_dir: &Path,
+    baseline: &WorktreeBaseline,
+) -> anyhow::Result<()> {
+    let rels = turn_scoped_deliverables(worktree, baseline)?;
     if rels.is_empty() {
         return Ok(());
     }
@@ -8537,7 +8713,7 @@ mod tests {
         std::fs::write(root.join("src__result.md"), "flat").unwrap();
         std::fs::write(root.join("line\nbreak.md"), "newline").unwrap();
 
-        sync_worktree_deliverables(&root, &artifacts).unwrap();
+        sync_worktree_deliverables(&root, &artifacts, &WorktreeBaseline::pristine()).unwrap();
 
         let nested = artifact_filename(b"src/result.md");
         let flat = artifact_filename(b"src__result.md");
@@ -8578,7 +8754,7 @@ mod tests {
         .unwrap();
 
         let artifacts = root.join("artifacts");
-        sync_worktree_deliverables(root, &artifacts).unwrap();
+        sync_worktree_deliverables(root, &artifacts, &WorktreeBaseline::pristine()).unwrap();
 
         assert_eq!(
             std::fs::read_to_string(artifacts.join(artifact_filename(b"src/lib.rs"))).unwrap(),
@@ -8594,7 +8770,8 @@ mod tests {
         let artifacts = root.join("artifacts");
         std::os::unix::fs::symlink("/etc/passwd", root.join("result.md")).unwrap();
 
-        let error = sync_worktree_deliverables(&root, &artifacts).unwrap_err();
+        let error = sync_worktree_deliverables(&root, &artifacts, &WorktreeBaseline::pristine())
+            .unwrap_err();
 
         assert!(error.to_string().contains("non-regular"));
         assert!(
@@ -8612,7 +8789,9 @@ mod tests {
         std::fs::write(root.join("result.md"), "deliverable").unwrap();
         std::fs::write(&artifact_file, "blocker").unwrap();
 
-        let error = sync_worktree_deliverables(&root, &artifact_file).unwrap_err();
+        let error =
+            sync_worktree_deliverables(&root, &artifact_file, &WorktreeBaseline::pristine())
+                .unwrap_err();
 
         assert!(error
             .to_string()
@@ -8629,7 +8808,10 @@ mod tests {
     fn real_work_guard_rejects_chatter_only_no_op() {
         let (_tmp, root) = init_repo();
         // Whatever the model said, an empty branch is not a work product.
-        assert!(!local_worker_produced_real_work(&root));
+        assert!(!local_worker_produced_real_work(
+            &root,
+            &WorktreeBaseline::pristine()
+        ));
     }
 
     /// Jesse #4: a clean worktree (a weak model's no-op turn) is refused —
@@ -8637,7 +8819,10 @@ mod tests {
     #[test]
     fn real_work_guard_rejects_clean_worktree() {
         let (_tmp, root) = init_repo();
-        assert!(!local_worker_produced_real_work(&root));
+        assert!(!local_worker_produced_real_work(
+            &root,
+            &WorktreeBaseline::pristine()
+        ));
     }
 
     /// Jesse #4: a worktree deliverable is real work — a model that wrote code
@@ -8647,7 +8832,10 @@ mod tests {
         let (_tmp, root) = init_repo();
         std::fs::create_dir(root.join("src")).unwrap();
         std::fs::write(root.join("src/lib.rs"), "pub fn f() {}").unwrap();
-        assert!(local_worker_produced_real_work(&root));
+        assert!(local_worker_produced_real_work(
+            &root,
+            &WorktreeBaseline::pristine()
+        ));
     }
 
     /// Jesse #4: a text deliverable honouring the RESULT CONTRACT — the model
@@ -8658,7 +8846,87 @@ mod tests {
     fn real_work_guard_accepts_result_md_text_deliverable() {
         let (_tmp, root) = init_repo();
         std::fs::write(root.join("result.md"), "# Answer\n\nThe reply is: hello.\n").unwrap();
-        assert!(local_worker_produced_real_work(&root));
+        assert!(local_worker_produced_real_work(
+            &root,
+            &WorktreeBaseline::pristine()
+        ));
+    }
+
+    /// REGRESSION (double-model review of #24/#25, Defect 1). Publishing must
+    /// be **turn-scoped**: a file that already differed from `main` before the
+    /// worker ran is the operator's, not the worker's, and must never be
+    /// staged. Branch-wide discovery cannot tell the two apart, which is how
+    /// `--no-worktree` could commit unrelated user work.
+    #[test]
+    fn turn_scoped_discovery_excludes_pre_existing_untracked_files() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("operator-notes.txt"), "mine, not the worker's").unwrap();
+
+        let baseline = WorktreeBaseline::capture(&root);
+        std::fs::write(root.join("worker-output.txt"), "the worker's").unwrap();
+
+        let scoped = turn_scoped_deliverables(&root, &baseline).unwrap();
+
+        assert!(
+            scoped.contains(b"worker-output.txt".as_slice()),
+            "this turn's file must be published: {scoped:?}"
+        );
+        assert!(
+            !scoped.contains(b"operator-notes.txt".as_slice()),
+            "a file that pre-dated the turn is not this worker's output: {scoped:?}"
+        );
+    }
+
+    /// The counterpart: a pre-existing file the worker *edits* IS this turn's
+    /// output. Turn-scoping must not be a blanket "ignore what was already
+    /// there" — it compares content, so an edit is seen.
+    #[test]
+    fn turn_scoped_discovery_includes_pre_existing_files_the_worker_edits() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("shared.txt"), "before").unwrap();
+
+        let baseline = WorktreeBaseline::capture(&root);
+        std::fs::write(root.join("shared.txt"), "after — the worker changed it").unwrap();
+
+        let scoped = turn_scoped_deliverables(&root, &baseline).unwrap();
+
+        assert!(
+            scoped.contains(b"shared.txt".as_slice()),
+            "an edited pre-existing file is this turn's output: {scoped:?}"
+        );
+    }
+
+    /// REGRESSION (Defect 2). A no-op turn on a worktree that already differs
+    /// from `main` produces nothing — the real-work guard must say so instead
+    /// of counting the previous turn's deliverable as this turn's.
+    #[test]
+    fn real_work_guard_rejects_no_op_turn_on_an_already_diverged_worktree() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("previous-turn.txt"), "produced earlier").unwrap();
+
+        let baseline = WorktreeBaseline::capture(&root);
+        // The worker does nothing at all.
+
+        assert!(
+            !local_worker_produced_real_work(&root, &baseline),
+            "a turn that changed nothing is not real work, however dirty the branch already was"
+        );
+    }
+
+    /// Fail-closed: an unobservable pre-run state attributes NOTHING to this
+    /// turn. Without a "before" there is no proof of authorship, and a
+    /// publisher that cannot prove authorship must not commit.
+    #[test]
+    fn unobserved_baseline_publishes_nothing() {
+        let (_tmp, root) = init_repo();
+        std::fs::write(root.join("result.md"), "deliverable").unwrap();
+
+        let scoped = turn_scoped_deliverables(&root, &WorktreeBaseline::default()).unwrap();
+
+        assert!(
+            scoped.is_empty(),
+            "an unobserved baseline must attribute nothing: {scoped:?}"
+        );
     }
 
     /// Jesse #4: a file produced only under a cosmon-internal path (`.cosmon/`,
@@ -8671,7 +8939,10 @@ mod tests {
         std::fs::write(root.join("target/build-artifact"), "noise").unwrap();
         std::fs::create_dir(root.join(".cosmon")).unwrap();
         std::fs::write(root.join(".cosmon/state"), "internal").unwrap();
-        assert!(!local_worker_produced_real_work(&root));
+        assert!(!local_worker_produced_real_work(
+            &root,
+            &WorktreeBaseline::pristine()
+        ));
     }
 
     /// Create branch `feat/{id}` off `main`, add a commit dated `unix_ts`,
@@ -9907,7 +10178,8 @@ mod tests {
         }
         fs::write(repo.join("main.rs"), "fn main() {}\n").expect("deliverable");
 
-        let report = local_artifact_report(repo, false).expect("report");
+        let report =
+            local_artifact_report(repo, false, &WorktreeBaseline::pristine()).expect("report");
         let claimed = repo.join("main.rs");
         assert!(
             report.contains(&claimed.display().to_string()),

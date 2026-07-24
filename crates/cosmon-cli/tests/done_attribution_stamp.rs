@@ -38,10 +38,31 @@ use cosmon_state::events::worker_spawn::emit_model_selected;
 const OPERATOR_NAME: &str = "Test";
 const OPERATOR_EMAIL: &str = "test@example.com";
 
+/// Strip the ambient git identity from a command's environment.
+///
+/// `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` / `GIT_COMMITTER_NAME` /
+/// `GIT_COMMITTER_EMAIL` **override** `git config`, so a caller that exports
+/// them decides who authored every commit in this file's temp repos — the repo
+/// -local `Test <test@example.com>` identity is simply ignored. Cosmon workers
+/// export exactly those variables as the operator, which is why this suite went
+/// red whenever it was run from inside a worker rather than a bare shell.
+///
+/// Removing them (rather than setting them to the test identity) is what keeps
+/// the C2 case honest: that test blanks the repo identity to prove `cs done`
+/// fails closed with **no** identity available, which an injected environment
+/// identity would silently supply.
+fn scrub_ambient_git_identity(cmd: &mut Command) -> &mut Command {
+    cmd.env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
+}
+
 fn cs() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.env_remove("COSMON_PARENT_MOL_ID")
         .env_remove("COSMON_MOL_DIR");
+    scrub_ambient_git_identity(&mut cmd);
     cmd
 }
 
@@ -60,8 +81,9 @@ fn cs_isolated(repo: &Path) -> Command {
 fn git(repo: &Path, args: &[&str]) -> std::process::Output {
     let mut full: Vec<&str> = vec!["-C", repo.to_str().unwrap()];
     full.extend_from_slice(args);
-    Command::new("git")
-        .args(&full)
+    let mut cmd = Command::new("git");
+    cmd.args(&full);
+    scrub_ambient_git_identity(&mut cmd)
         .output()
         .expect("git spawn failed")
 }
@@ -440,5 +462,57 @@ fn cs_done_warns_when_attribution_has_no_coauthor_email() {
     assert!(
         stdout.contains("coauthor_email"),
         "the unstamped integration must be warned about: {stdout}"
+    );
+}
+
+/// REGRESSION (double-model review of #23/#24/#25, Defect 5). This suite is
+/// only meaningful if the identity in its commits is the one the *repo*
+/// configures. `GIT_AUTHOR_*` / `GIT_COMMITTER_*` in the caller's environment
+/// override `git config`, so without scrubbing them, running
+/// `cargo test --workspace` from inside a cosmon worker — which exports the
+/// operator identity — rewrote every fixture commit's author and the
+/// operator-authorship assertions failed on a *product* that was fine.
+///
+/// This test is deterministic regardless of the ambient environment: it injects
+/// a foreign identity explicitly and asserts the scrub wins.
+#[test]
+fn harness_git_identity_survives_a_foreign_ambient_environment() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    setup_repo(repo, FULL_ATTRIBUTION);
+
+    fs::write(repo.join("f.txt"), "x\n").unwrap();
+
+    // A caller (a cosmon worker, a CI runner) exporting its own identity.
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", repo.to_str().unwrap(), "add", "f.txt"])
+        .env("GIT_AUTHOR_NAME", "Ambient Operator")
+        .env("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ambient Operator")
+        .env("GIT_COMMITTER_EMAIL", "ambient@example.invalid");
+    assert!(scrub_ambient_git_identity(&mut cmd)
+        .output()
+        .expect("git add")
+        .status
+        .success());
+
+    let mut cmd = Command::new("git");
+    cmd.args(["-C", repo.to_str().unwrap(), "commit", "-qm", "seed"])
+        .env("GIT_AUTHOR_NAME", "Ambient Operator")
+        .env("GIT_AUTHOR_EMAIL", "ambient@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Ambient Operator")
+        .env("GIT_COMMITTER_EMAIL", "ambient@example.invalid");
+    assert!(scrub_ambient_git_identity(&mut cmd)
+        .output()
+        .expect("git commit")
+        .status
+        .success());
+
+    assert_eq!(
+        git_stdout(repo, &["log", "-1", "--format=%an|%ae|%cn|%ce"]),
+        format!("{OPERATOR_NAME}|{OPERATOR_EMAIL}|{OPERATOR_NAME}|{OPERATOR_EMAIL}"),
+        "the repo-configured identity must decide authorship, not the caller's \
+         environment — otherwise this suite's operator-authorship assertions \
+         test the environment, not cosmon"
     );
 }
