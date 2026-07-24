@@ -335,7 +335,14 @@ fn tackle_and_wait(project: &Path, mock: &MockOllama, mol_id: &str) -> PathBuf {
     let out = cs(project, mock)
         // `--model` is pinned explicitly: the chain resolver otherwise inherits
         // the ambient session model, which the mock does not serve.
-        .args(["tackle", mol_id, "--adapter", "local", "--model", MOCK_MODEL])
+        .args([
+            "tackle",
+            mol_id,
+            "--adapter",
+            "local",
+            "--model",
+            MOCK_MODEL,
+        ])
         .output()
         .expect("spawn cs tackle");
     assert!(
@@ -407,6 +414,21 @@ fn local_synthesis_reports_the_path_the_file_is_actually_at() {
         DELIVERABLE_BODY,
         "the file at the reported path must be the worker's deliverable",
     );
+    // Refutation of a trivial green: the claim must land in the worker's
+    // sandbox, not merely on *some* file that happens to exist.
+    assert!(
+        claimed.contains(&format!(".worktrees/{mol_id}/")),
+        "the reported path must be inside the worker's sandbox, got `{claimed}`",
+    );
+    // And cosmon's own ground-truth section must name the same file.
+    assert!(
+        synthesis.contains("## Files this worker produced (verified on disk)"),
+        "synthesis.md must carry cosmon's verified artifact listing:\n{synthesis}",
+    );
+    assert!(
+        synthesis.contains(&claimed),
+        "the verified listing must name the deliverable:\n{synthesis}",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -424,7 +446,15 @@ fn local_worker_output_survives_cs_done_without_force() {
     let project = tmp.path();
     setup_project(project);
     let mol_id = nucleate(project, &mock);
-    tackle_and_wait(project, &mock, &mol_id);
+    let mol_dir = tackle_and_wait(project, &mock, &mol_id);
+
+    // Discoverability half: before teardown the synthesis already tells the
+    // operator where the file is and where it will be afterwards.
+    let synthesis = fs::read_to_string(mol_dir.join("synthesis.md")).expect("read synthesis.md");
+    assert!(
+        synthesis.contains("after teardown: `") && synthesis.contains(DELIVERABLE),
+        "synthesis.md must say where the deliverable lands after teardown:\n{synthesis}",
+    );
 
     let out = cs(project, &mock)
         .args(["done", &mol_id])

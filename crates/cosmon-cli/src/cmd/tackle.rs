@@ -921,6 +921,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
 
     // 5. Build bootstrap prompt.
+    //
+    // The worker's writable root is predicted here rather than read back
+    // after step 7, because `--dry-run` returns before any worktree exists
+    // and must still print the prompt the real dispatch would use. The
+    // prediction is the same expression step 7 evaluates, so the two cannot
+    // disagree: `--workdir` if given, else `<repo>/.worktrees/<id>`, else the
+    // repo root under `--no-worktree`. `None` (no git repository) degrades to
+    // a relative-paths-only wording rather than a wrong absolute path.
+    let sandbox_root = predicted_sandbox_root(
+        args.workdir.as_deref(),
+        args.no_worktree,
+        mol_id.as_str(),
+        find_repo_root().ok().as_deref(),
+    );
     let prompt = build_prompt(
         &mol,
         formula.as_ref(),
@@ -928,6 +942,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &project_config,
         &mol_dir,
         adapter.as_str(),
+        sandbox_root.as_deref(),
     );
 
     // 6. Dry-run: just print the prompt.
@@ -2819,7 +2834,43 @@ fn render_test_stall_guidance(test_cmd: &str) -> String {
     note
 }
 
+/// Example relative artifact path shown to a local worker, so the brief
+/// demonstrates the shape it must use instead of an absolute path.
+const DEFAULT_LOCAL_ARTIFACT_EXAMPLE: &str = "result.md";
+
+/// The directory this dispatch's worker will actually run in — computed
+/// *before* it exists, so `--dry-run` prints the same brief the real
+/// dispatch would.
+///
+/// Mirrors the `worktree_path` expression in [`run`] exactly (`--workdir`
+/// override → `<repo>/.worktrees/<id>` → repo root under `--no-worktree`);
+/// the two must never drift, or a local worker is told a root it does not
+/// write into (noogram/cosmon #24). Pure over its inputs so the mapping is
+/// unit-testable without a git repository.
+fn predicted_sandbox_root(
+    workdir: Option<&str>,
+    no_worktree: bool,
+    mol_id: &str,
+    repo_root: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(dir) = workdir {
+        return Some(PathBuf::from(dir));
+    }
+    let repo_root = repo_root?;
+    if no_worktree {
+        Some(repo_root.to_owned())
+    } else {
+        Some(repo_root.join(".worktrees").join(mol_id))
+    }
+}
+
 /// Build the bootstrap prompt that gives the agent full context.
+///
+/// `sandbox_root` is the directory the worker's tools actually write into —
+/// the git worktree for a normal dispatch, the workdir for `--no-worktree`.
+/// It is `None` only when the path cannot be resolved (no git repository).
+/// A **local** worker is told this root and nothing else, because its
+/// confined tool registry refuses every path outside it (noogram/cosmon #24).
 #[allow(clippy::too_many_lines, clippy::comparison_chain)]
 fn build_prompt(
     mol: &MoleculeData,
@@ -2828,6 +2879,7 @@ fn build_prompt(
     config: &ProjectConfig,
     molecule_dir: &Path,
     adapter_name: &str,
+    sandbox_root: Option<&Path>,
 ) -> String {
     use std::fmt::Write;
     let mut out = String::new();
@@ -2941,24 +2993,76 @@ fn build_prompt(
     }
 
     // ── ARTIFACT PATHS ──────────────────────────────────────────
-    // Hand the worker the EXACT absolute, already-resolved canonical
-    // molecule_dir so it never has to re-derive the path from prose and
-    // never abbreviates to the non-canonical `.cosmon/molecules/<id>/`.
-    // The git worktree (`.worktrees/<id>/`) is destroyed at `cs done`, so
-    // durable artifacts written there are lost. Generic across all formulas
-    // (advisory backstop for the artifact-path-hygiene class; cf.
-    // idea-20260531-107d, delib-20260410-b79f data-loss recurrence).
-    let _ = writeln!(
-        out,
-        "## Artifact paths — write durable output HERE\n\n\
-         Canonical molecule directory (resolved): `{}`\n\n\
-         Write all durable artifacts (synthesis.md, frame.md, responses/, \
-         outcomes.md, plan.md, …) to that absolute path. NEVER write them to \
-         the git worktree (`.worktrees/{}/`) — it is DESTROYED when `cs done` \
-         tears the session down, and anything left there is lost.\n",
-        molecule_dir.display(),
-        mol.id
-    );
+    // Adapter-aware, because the two worker classes have *different*
+    // writable roots and handing either the other one's root produces a
+    // worker that reports a path its file is not at (noogram/cosmon #24).
+    //
+    // - A coding-agent worker (claude & friends) drives a real shell: it
+    //   can write anywhere, so it gets the EXACT absolute, already-resolved
+    //   canonical molecule_dir — it never has to re-derive the path from
+    //   prose, and never abbreviates to the non-canonical
+    //   `.cosmon/molecules/<id>/`. The git worktree (`.worktrees/<id>/`) is
+    //   destroyed at `cs done`, so durable artifacts written there are lost.
+    //   (advisory backstop for the artifact-path-hygiene class; cf.
+    //   idea-20260531-107d, delib-20260410-b79f data-loss recurrence).
+    //
+    // - A local worker runs inside the confined tool registry
+    //   (`local_sandbox_registry`), whose `sanitize_join` REFUSES absolute
+    //   paths and `..` escapes. The molecule directory is outside its
+    //   sandbox: every write there fails. Naming it as the output location
+    //   was the root cause of the false "Code written to <molecule_dir>/…"
+    //   report an external tester filed as noogram/cosmon #24 — the worker
+    //   echoed the only absolute directory the brief named, while its file
+    //   had landed in the worktree. So the local worker is told the truth:
+    //   its sandbox root, and that relative paths land under it.
+    if cosmon_core::egress::adapter_is_local(adapter_name) {
+        out.push_str("## Where your output goes\n\n");
+        match sandbox_root {
+            Some(root) => {
+                let _ = writeln!(
+                    out,
+                    "Your sandbox root — the ONLY directory you can write to — is:\n\n\
+                     `{}`\n\n\
+                     Give every file a path RELATIVE to that root (`{}`, \
+                     `docs/plan.md`). Absolute paths and `..` escapes are refused \
+                     by your tools. A file you create as `{}` is at \
+                     `{}` — when you report where your output is, report THAT \
+                     path and no other.",
+                    root.display(),
+                    DEFAULT_LOCAL_ARTIFACT_EXAMPLE,
+                    DEFAULT_LOCAL_ARTIFACT_EXAMPLE,
+                    root.join(DEFAULT_LOCAL_ARTIFACT_EXAMPLE).display(),
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "Give every file a path RELATIVE to your working directory \
+                     (`{DEFAULT_LOCAL_ARTIFACT_EXAMPLE}`, `docs/plan.md`). Absolute \
+                     paths and `..` escapes are refused by your tools.",
+                );
+            }
+        }
+        out.push_str(
+            "\ncosmon commits what you produce and merges it back into the \
+             project when the molecule is torn down — you do not need to move, \
+             copy, or commit anything. Do NOT try to write into the molecule's \
+             state directory under `.cosmon/`: it is outside your sandbox and \
+             every such write fails.\n\n",
+        );
+    } else {
+        let _ = writeln!(
+            out,
+            "## Artifact paths — write durable output HERE\n\n\
+             Canonical molecule directory (resolved): `{}`\n\n\
+             Write all durable artifacts (synthesis.md, frame.md, responses/, \
+             outcomes.md, plan.md, …) to that absolute path. NEVER write them to \
+             the git worktree (`.worktrees/{}/`) — it is DESTROYED when `cs done` \
+             tears the session down, and anything left there is lost.\n",
+            molecule_dir.display(),
+            mol.id
+        );
+    }
 
     // ── FULL STEP CHECKLIST (inline, not separate file) ─────────
     if let Some(formula) = formula {
@@ -3153,15 +3257,16 @@ fn build_local_worker_protocol(out: &mut String, mol: &MoleculeData) {
     );
     out.push_str(
         "Your one job is to PRODUCE THE DELIVERABLE this molecule declares and \
-         write it into the canonical molecule directory named above.\n\n",
+         write it into your sandbox root, using a relative path (see \"Where \
+         your output goes\" above).\n\n",
     );
     out.push_str("For EACH step:\n");
     out.push_str("1. Read the step's description and exit criteria above.\n");
     out.push_str(
-        "2. Write the artifact it asks for as a real file in the canonical \
-         molecule directory (Markdown unless the step names another format). \
-         Empty chatter is not a deliverable — the file must contain the actual \
-         work.\n",
+        "2. Write the artifact it asks for as a real file under your sandbox \
+         root, with a relative path (Markdown unless the step names another \
+         format). Empty chatter is not a deliverable — the file must contain \
+         the actual work.\n",
     );
     out.push_str("3. Move straight to the next step. Do NOT pause.\n\n");
 
@@ -5847,11 +5952,215 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
         };
     }
 
+    // Commit what the worker produced, on its own branch (noogram/cosmon #25).
+    // A local worker has no shell and no git, so until now its output stayed
+    // *uncommitted* in the worktree — and `cs done` then refused teardown with
+    // "worktree has uncommitted changes (1 file(s)) — use --force to override:
+    // ?? main.rs". The documented `cs init` → `git init` → `cs demo` path
+    // dead-ended on a flag no first-contact user has any reason to know.
+    // Committing here is the honest fix: teardown is clean *and* `cs done`
+    // merges the branch, so the deliverable lands in the project the operator
+    // started in instead of a `.worktrees/` directory that teardown deletes.
+    // Best-effort by construction — the work is already on disk and already
+    // published to the artifact dir, so a commit failure is a warning on the
+    // worker log, never a lost molecule.
+    let committed = match commit_worktree_deliverables(&job.worktree_path, &mol_id) {
+        Ok(committed) => committed,
+        Err(error) => {
+            let _ = append_local_worker_failure(&job.molecule_dir, &error);
+            false
+        }
+    };
+
+    // Replace the model's guess about where its files went with cosmon's
+    // ground truth, read off the disk (noogram/cosmon #24). The brief now
+    // names the sandbox root, so a well-behaved worker already reports a true
+    // path; this section holds even when the model reports nothing at all.
+    if let Err(error) =
+        append_local_artifact_report(&job.molecule_dir, &job.worktree_path, committed)
+    {
+        let _ = append_local_worker_failure(&job.molecule_dir, &error);
+    }
+
     mark_detached_local_worker_stopped(&store, &mol_id, &wid)?;
 
     let adapter =
         validate_adapter_name(&job.adapter_name, std::slice::from_ref(&job.adapter_name))?.0;
     finalize_inprocess_molecule(&store, &job.state_dir, &mol_id, &adapter)
+}
+
+/// Commit every deliverable a local worker left in its worktree, onto the
+/// molecule's own branch. Returns whether a commit was actually created.
+///
+/// Scoped deliberately to the paths [`discover_worktree_deliverables`] already
+/// treats as the worker's output: cosmon-internal paths (`.cosmon/`, `target/`,
+/// `.git/`) are never staged, so the molecule's own state never rides along in
+/// a work commit.
+///
+/// The committer identity falls back to a cosmon-owned one only when the
+/// repository has none configured — a fresh `git init` on a machine with no
+/// global `user.email` is exactly the first-contact case #25 came from, and
+/// `git commit` there fails with "Please tell me who you are". An operator who
+/// *has* an identity keeps it. Hooks are skipped (`--no-verify`): a worker's
+/// output commit must not be gated on the project's local commit hooks.
+fn commit_worktree_deliverables(worktree: &Path, mol_id: &MoleculeId) -> anyhow::Result<bool> {
+    let rels = discover_worktree_deliverables(worktree)?;
+    let mut staged = 0usize;
+    for rel in &rels {
+        if ignored_artifact_path(rel) {
+            continue;
+        }
+        let rel_path = git_path_to_path(rel);
+        if !rel_path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+        {
+            anyhow::bail!("git reported an unsafe worktree path: {rel:?}");
+        }
+        git_stdout(worktree, &["add", "--", &rel_path.to_string_lossy()])?;
+        staged += 1;
+    }
+    if staged == 0 {
+        return Ok(false);
+    }
+    // Nothing to commit (the worker only touched already-committed content):
+    // `git diff --cached --quiet` exits 1 when the index differs from HEAD.
+    if git_stdout(worktree, &["diff", "--cached", "--quiet"]).is_ok() {
+        return Ok(false);
+    }
+
+    let message = format!("feat({mol_id}): local worker output");
+    let mut args: Vec<String> = Vec::new();
+    if !git_identity_configured(worktree) {
+        args.extend(
+            [
+                "-c",
+                "user.name=cosmon local worker",
+                "-c",
+                "user.email=worker@cosmon.local",
+            ]
+            .iter()
+            .map(|s| (*s).to_owned()),
+        );
+    }
+    args.extend(
+        ["commit", "--no-verify", "-q", "-m", &message]
+            .iter()
+            .map(|s| (*s).to_owned()),
+    );
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    git_stdout(worktree, &arg_refs)?;
+    Ok(true)
+}
+
+/// Whether this repository can produce a commit without an injected identity.
+fn git_identity_configured(worktree: &Path) -> bool {
+    ["user.email", "user.name"].iter().all(|key| {
+        git_stdout(worktree, &["config", "--get", key])
+            .is_ok_and(|out| !String::from_utf8_lossy(&out).trim().is_empty())
+    })
+}
+
+/// Append cosmon's ground-truth listing of what the local worker produced to
+/// `synthesis.md` (noogram/cosmon #24 + #25 discoverability half).
+///
+/// The model's prose is left untouched — it is the worker's account of its own
+/// work — but the *authoritative* answer to "where is my output?" is appended
+/// underneath it, read off the disk rather than from the model. Every path is
+/// absolute and verified to exist, and the section names both locations that
+/// matter to the operator: where the file is now, and where `cs done` will
+/// leave it once the branch is merged.
+fn append_local_artifact_report(
+    molecule_dir: &Path,
+    worktree: &Path,
+    committed: bool,
+) -> anyhow::Result<()> {
+    let synthesis_path = molecule_dir.join("synthesis.md");
+    if !synthesis_path.exists() {
+        return Ok(());
+    }
+    let report = local_artifact_report(worktree, committed)?;
+    if report.is_empty() {
+        return Ok(());
+    }
+    let mut body = fs::read_to_string(&synthesis_path).map_err(|e| {
+        anyhow::anyhow!(
+            "cs local-worker: could not read {}: {e}",
+            synthesis_path.display()
+        )
+    })?;
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    body.push_str(&report);
+    fs::write(&synthesis_path, body).map_err(|e| {
+        anyhow::anyhow!(
+            "cs local-worker: could not write {}: {e}",
+            synthesis_path.display()
+        )
+    })
+}
+
+/// Render the ground-truth artifact section, or the empty string when the
+/// worker produced nothing (the real-work guard has its own, louder say).
+fn local_artifact_report(worktree: &Path, committed: bool) -> anyhow::Result<String> {
+    use std::fmt::Write;
+
+    let repo_root = repo_root_of_worktree(worktree);
+    let mut lines = String::new();
+    for rel in discover_worktree_deliverables(worktree)? {
+        if ignored_artifact_path(&rel) {
+            continue;
+        }
+        let rel_path = git_path_to_path(&rel);
+        let absolute = worktree.join(&rel_path);
+        if !absolute.is_file() {
+            continue;
+        }
+        let _ = writeln!(lines, "- `{}`", absolute.display());
+        if let Some(root) = repo_root.as_deref() {
+            let _ = writeln!(
+                lines,
+                "  - after teardown: `{}`",
+                root.join(&rel_path).display()
+            );
+        }
+    }
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut out = String::from("\n---\n\n## Files this worker produced (verified on disk)\n\n");
+    out.push_str(&lines);
+    out.push('\n');
+    out.push_str(if committed {
+        "These files are committed on this molecule's branch. `cs done` merges \
+         that branch, which is what puts them at the `after cs done` path above; \
+         the worktree itself is removed by teardown.\n"
+    } else {
+        "These files are NOT committed — `cs done` will refuse teardown until \
+         they are (or will need `--force`, which discards them).\n"
+    });
+    Ok(out)
+}
+
+/// The main checkout of the repository a linked worktree belongs to.
+///
+/// `git rev-parse --git-common-dir` resolves to the *shared* `.git` directory
+/// (the main checkout's), whose parent is the repository root the operator
+/// started in — the answer to "where will my file be after teardown?".
+fn repo_root_of_worktree(worktree: &Path) -> Option<PathBuf> {
+    let raw = git_stdout(
+        worktree,
+        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()?;
+    let common = String::from_utf8(raw).ok()?;
+    let common = Path::new(common.trim());
+    if common.as_os_str().is_empty() {
+        return None;
+    }
+    common.parent().map(Path::to_owned)
 }
 
 /// Mirror the files a local worker produced in its worktree into the RPP
@@ -9251,6 +9560,7 @@ mod tests {
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("idea-20260407-abcd"));
@@ -9300,7 +9610,7 @@ mod tests {
         // Every local-inference adapter (egress::adapter_is_local) drops the
         // coding-agent directives.
         for adapter in ["local", "ollama", "llama-cpp", "llama"] {
-            let prompt = build_prompt(&mol, None, None, &config, mol_dir, adapter);
+            let prompt = build_prompt(&mol, None, None, &config, mol_dir, adapter, None);
             assert!(
                 !prompt.contains("cargo"),
                 "{adapter}: local briefing must not tell the worker to run cargo"
@@ -9333,7 +9643,7 @@ mod tests {
         }
 
         // The `claude` coding-agent briefing keeps the full contract.
-        let claude = build_prompt(&mol, None, None, &config, mol_dir, "claude");
+        let claude = build_prompt(&mol, None, None, &config, mol_dir, "claude", None);
         assert!(
             claude.contains("cargo check --workspace"),
             "claude briefing must still run the gate toolchain"
@@ -9352,6 +9662,143 @@ mod tests {
         );
     }
 
+    /// noogram/cosmon #24, unit half. A local worker's brief must name the
+    /// directory its tools actually write into — never the molecule state
+    /// directory, which its confined registry refuses. The molecule dir is what
+    /// the tester's model echoed back as the (false) location of its output.
+    #[test]
+    fn local_brief_names_the_sandbox_root_not_the_molecule_dir() {
+        let mol = sample_molecule("task-20260724-2cdb", MoleculeStatus::Pending);
+        let mol_dir = Path::new("/abs/state/fleets/default/molecules/task-20260724-2cdb");
+        let sandbox = Path::new("/abs/repo/.worktrees/task-20260724-2cdb");
+        let config = ProjectConfig::default();
+
+        for adapter in ["local", "ollama", "llama-cpp", "llama"] {
+            let prompt = build_prompt(&mol, None, None, &config, mol_dir, adapter, Some(sandbox));
+            assert!(
+                prompt.contains(&sandbox.display().to_string()),
+                "{adapter}: the brief must name the sandbox root the worker writes into"
+            );
+            assert!(
+                !prompt.contains(&mol_dir.display().to_string()),
+                "{adapter}: the brief must NOT point a sandboxed worker at the molecule \
+                 directory — it cannot write there, and reporting it is a false claim \
+                 (noogram/cosmon #24)"
+            );
+            assert!(
+                prompt.contains("Where your output goes"),
+                "{adapter}: the brief must carry the output-location section"
+            );
+        }
+
+        // The coding-agent brief is untouched: it *can* write to the molecule
+        // dir, and durable artifacts belong there.
+        let claude = build_prompt(&mol, None, None, &config, mol_dir, "claude", Some(sandbox));
+        assert!(
+            claude.contains("## Artifact paths — write durable output HERE"),
+            "the coding-agent brief must keep the canonical molecule-dir section"
+        );
+        assert!(claude.contains(&mol_dir.display().to_string()));
+    }
+
+    /// With no resolvable repository the local brief degrades to
+    /// relative-paths-only wording rather than inventing an absolute path.
+    #[test]
+    fn local_brief_without_a_sandbox_root_states_no_absolute_path() {
+        let mol = sample_molecule("task-20260724-2cdb", MoleculeStatus::Pending);
+        let mol_dir = Path::new("/abs/state/fleets/default/molecules/task-20260724-2cdb");
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &ProjectConfig::default(),
+            mol_dir,
+            "local",
+            None,
+        );
+        assert!(prompt.contains("Where your output goes"));
+        assert!(prompt.contains("RELATIVE to your working directory"));
+        assert!(!prompt.contains(&mol_dir.display().to_string()));
+    }
+
+    /// The predicted sandbox root must reproduce the dispatch expression for
+    /// each of its three shapes; drift between them re-opens #24.
+    #[test]
+    fn predicted_sandbox_root_mirrors_the_dispatch_expression() {
+        let repo = Path::new("/abs/repo");
+        assert_eq!(
+            predicted_sandbox_root(None, false, "task-1", Some(repo)),
+            Some(repo.join(".worktrees").join("task-1")),
+        );
+        assert_eq!(
+            predicted_sandbox_root(None, true, "task-1", Some(repo)),
+            Some(repo.to_owned()),
+        );
+        assert_eq!(
+            predicted_sandbox_root(Some("/elsewhere"), false, "task-1", Some(repo)),
+            Some(PathBuf::from("/elsewhere")),
+        );
+        // No repository, no worktree override → no absolute claim at all.
+        assert_eq!(predicted_sandbox_root(None, false, "task-1", None), None);
+    }
+
+    /// noogram/cosmon #24 + #25. cosmon's own artifact report names the file
+    /// where it actually is, plus where teardown will leave it — and says
+    /// plainly when the output is not yet committed.
+    #[test]
+    fn local_artifact_report_names_real_paths_only() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let repo = tmp.path();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.email", "test@cosmon.test"],
+            vec!["config", "user.name", "cosmon-test"],
+        ] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        fs::write(repo.join("README.md"), "# seed\n").expect("seed");
+        for args in [vec!["add", "."], vec!["commit", "-q", "-m", "seed"]] {
+            let out = std::process::Command::new("git")
+                .args(&args)
+                .current_dir(repo)
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {args:?} failed");
+        }
+        fs::write(repo.join("main.rs"), "fn main() {}\n").expect("deliverable");
+
+        let report = local_artifact_report(repo, false).expect("report");
+        let claimed = repo.join("main.rs");
+        assert!(
+            report.contains(&claimed.display().to_string()),
+            "the report must name the deliverable's real absolute path.\n{report}"
+        );
+        assert!(
+            report.contains("NOT committed"),
+            "an uncommitted deliverable must be reported as such.\n{report}"
+        );
+
+        // Every absolute path the report claims exists on disk — the point of
+        // the section is that it is verified, not narrated.
+        for line in report.lines().filter(|l| l.trim_start().starts_with("- ")) {
+            let Some(path) = line.split('`').nth(1) else {
+                continue;
+            };
+            if !path.starts_with('/') {
+                continue;
+            }
+            assert!(
+                Path::new(path).exists(),
+                "report claims `{path}`, which does not exist"
+            );
+        }
+    }
+
     #[test]
     fn test_build_prompt_no_attribution_block_is_byte_identical() {
         // Passive-helper discipline (ADR-128, mirrors CLAUDE_CONFIG_DIR):
@@ -9366,6 +9813,7 @@ mod tests {
             &ProjectConfig::default(),
             mol_dir,
             "claude",
+            None,
         );
         assert!(!baseline.contains("## External attribution"));
         assert!(!baseline.contains("External attribution for this fleet"));
@@ -9378,7 +9826,7 @@ mod tests {
         let mut config = ProjectConfig::default();
         config.attribution.public_name = "Noogram".to_owned();
         config.attribution.public_url = "noogram.org".to_owned();
-        let prompt = build_prompt(&mol, None, None, &config, mol_dir, "claude");
+        let prompt = build_prompt(&mol, None, None, &config, mol_dir, "claude", None);
 
         assert!(prompt.contains("## External attribution"));
         assert!(prompt.contains("External attribution for this fleet is `Noogram` (noogram.org)."));
@@ -9417,6 +9865,7 @@ mod tests {
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         // Step checklist rendered inline.
@@ -9436,6 +9885,7 @@ mod tests {
             &ProjectConfig::default(),
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("## Briefing"));
@@ -9459,6 +9909,7 @@ mod tests {
             &ProjectConfig::default(),
             mol_dir,
             "claude",
+            None,
         );
 
         // The block header and its imperative are present.
@@ -10131,6 +10582,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("Do NOT push to remote"));
@@ -10150,6 +10602,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("git push -u origin HEAD"));
@@ -10168,6 +10621,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(!prompt.contains("cargo check"));
@@ -10191,6 +10645,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("cargo check --workspace"));
@@ -10225,6 +10680,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("cargo doc --workspace --no-deps"));
@@ -10250,6 +10706,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("sphinx-build -W docs docs/_build"));
@@ -10270,6 +10727,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("uv sync"));
@@ -10329,6 +10787,7 @@ mod tests {
             &config,
             Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
             "claude",
+            None,
         );
 
         assert!(prompt.contains("git push -u origin HEAD"));
