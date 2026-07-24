@@ -339,10 +339,31 @@ pub fn enforce_demote_provisioning(
     }
 }
 
-/// Gate a **cognitive pre-flight** on the root-spawn decision, so no live
-/// cognitive process is ever created before the decision is known.
+/// Which identity a cognitive pre-flight must run **as**.
 ///
-/// # The fault this closes (COSMON-DEV #20 defect A2)
+/// Handed to the pre-flight closure by [`gate_cognitive_preflight`] so the
+/// probe cannot silently inherit the dispatcher's identity: the closure is told
+/// who it is, and the type makes forgetting impossible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreflightIdentity {
+    /// The dispatcher's own identity — the non-root fleet path, unchanged.
+    AsIs,
+    /// The demote target. The dispatcher is root here, so the probe **must**
+    /// drop privileges to `to_uid` before exec (the same `setpriv` prefix
+    /// [`demotion_command_prefix`] builds for the worker). Two things follow:
+    /// no live root cognition (defect A2), and a verdict measured against the
+    /// identity the worker will actually authenticate as.
+    Demoted {
+        /// The uid the probe — and later the worker — runs as.
+        to_uid: u32,
+    },
+}
+
+/// Gate a **cognitive pre-flight** on the root-spawn decision, so no live
+/// cognitive process is ever created before the decision is known — and so the
+/// one that *is* created runs as the right identity.
+///
+/// # The faults this closes (COSMON-DEV #20 defect A2, and its regression ND1)
 ///
 /// [`decide_root_spawn`] answers *may this dispatch create a live cognitive
 /// worker*. That answer is worthless if something cognitive has already run.
@@ -351,25 +372,28 @@ pub fn enforce_demote_provisioning(
 /// invocation via `Command::spawn()` — under the dispatcher's **unchanged euid
 /// 0**, and only afterwards computed the decision. On the refuse path a root
 /// Claude process had already run to completion before cosmon declined.
-/// Contract-20A requires the refusal to precede any live cognitive process,
-/// not merely the *tmux* worker (task-20260723-d66d F3, task-20260723-7e12 F1).
 ///
-/// Ordering is not a property a reader can check by looking at two adjacent
-/// statements six months from now — so it is made structural here: the
-/// pre-flight is a closure this function owns, and the only path that calls it
-/// is the one where the dispatcher is not root.
+/// The first fix bought that ordering by **skipping** the probe on the demote
+/// path. That closed A2 and opened ND1: a demoted worker whose account cannot
+/// reach the preferred model no longer got the probe's fallback, so it received
+/// an unverified pin and could re-enter the false-active/idle symptom the model
+/// pre-flight exists to prevent. Skipping was never the safe composition —
+/// *demoting* was.
+///
+/// So the gate no longer chooses between "probe" and "no probe". It chooses the
+/// **identity** the probe runs as, and hands it to the closure:
 ///
 /// - [`Refuse`](RootSpawnDecision::Refuse) → `Err(reason)`, `preflight`
-///   **never invoked**.
-/// - [`Demote`](RootSpawnDecision::Demote) → `Ok(None)`, `preflight`
-///   **never invoked**. The dispatcher is still root here, so probing would
-///   itself be a live root cognitive process — and it would measure the wrong
-///   identity anyway: the probe would authenticate as root while the worker
-///   runs as `to_uid`. Skipping is both the safe and the honest answer; the
-///   caller falls back to passing its preferred model through unprobed,
-///   exactly as the `COSMON_MODEL_FALLBACK=0` hatch already does.
-/// - [`SpawnAsIs`](RootSpawnDecision::SpawnAsIs) → `Ok(Some(preflight()))`.
+///   **never invoked**. Nothing cognitive precedes a refusal.
+/// - [`Demote`](RootSpawnDecision::Demote) → `Ok(preflight(Demoted { to_uid }))`.
+///   The probe runs, but as the demote target — never as root — so model
+///   resolution survives and the verdict reflects the worker's real auth path.
+/// - [`SpawnAsIs`](RootSpawnDecision::SpawnAsIs) → `Ok(preflight(AsIs))`.
 ///   The entire non-root fleet path, unchanged.
+///
+/// Ordering stays structural rather than a property of two adjacent statements:
+/// the pre-flight is a closure this function owns, and the refuse arm is the one
+/// arm that never calls it.
 ///
 /// # Errors
 ///
@@ -378,14 +402,16 @@ pub fn enforce_demote_provisioning(
 pub fn gate_cognitive_preflight<T, F>(
     decision: &RootSpawnDecision,
     preflight: F,
-) -> Result<Option<T>, RootRefusalReason>
+) -> Result<T, RootRefusalReason>
 where
-    F: FnOnce() -> T,
+    F: FnOnce(PreflightIdentity) -> T,
 {
     match decision {
         RootSpawnDecision::Refuse { reason } => Err(reason.clone()),
-        RootSpawnDecision::Demote { .. } => Ok(None),
-        RootSpawnDecision::SpawnAsIs => Ok(Some(preflight())),
+        RootSpawnDecision::Demote { to_uid } => {
+            Ok(preflight(PreflightIdentity::Demoted { to_uid: *to_uid }))
+        }
+        RootSpawnDecision::SpawnAsIs => Ok(preflight(PreflightIdentity::AsIs)),
     }
 }
 
@@ -535,7 +561,7 @@ mod tests {
     fn refuse_never_runs_a_cognitive_preflight() {
         let ran = std::cell::Cell::new(0_u32);
         let decision = decide_root_spawn(0, None);
-        let outcome = gate_cognitive_preflight(&decision, || {
+        let outcome = gate_cognitive_preflight(&decision, |_identity| {
             ran.set(ran.get() + 1);
             "some-model".to_owned()
         });
@@ -547,38 +573,58 @@ mod tests {
         assert_eq!(outcome, Err(RootRefusalReason::NoNonRootTarget));
     }
 
-    /// The demote path is still a ROOT dispatcher, so the pre-flight is
-    /// skipped there too: probing would be a live root cognitive process, and
-    /// it would authenticate as root while the worker runs as the demote
-    /// target — the wrong identity measured at root privilege.
+    /// COSMON-DEV #20 regression ND1 — the demote path keeps its model
+    /// resolution, and buys it by DEMOTING the probe rather than skipping it.
+    ///
+    /// Two properties in one observation: the pre-flight does run (so a demoted
+    /// worker still gets the fallback the probe selects), and the identity it is
+    /// handed is the demote target, never root (so A2 is not reopened). The
+    /// previous fix satisfied the second by sacrificing the first.
     #[test]
-    fn demote_never_runs_a_cognitive_preflight_either() {
-        let ran = std::cell::Cell::new(0_u32);
+    fn demote_runs_the_preflight_as_the_demoted_identity_never_as_root() {
+        let seen = std::cell::RefCell::new(Vec::new());
         let decision = decide_root_spawn(0, Some(CONVENTIONAL_WORKER_UID));
-        let outcome = gate_cognitive_preflight(&decision, || {
-            ran.set(ran.get() + 1);
-            "some-model".to_owned()
+        let outcome = gate_cognitive_preflight(&decision, |identity| {
+            seen.borrow_mut().push(identity);
+            "probe-selected-fallback".to_owned()
         });
-        assert_eq!(ran.get(), 0, "no cognitive process may run as root");
+        assert_eq!(
+            *seen.borrow(),
+            vec![PreflightIdentity::Demoted {
+                to_uid: CONVENTIONAL_WORKER_UID
+            }],
+            "the probe must run exactly once, as the demote target — a root \
+             probe is defect A2, and no probe at all is regression ND1",
+        );
         assert_eq!(
             outcome,
-            Ok(None),
-            "the caller falls back to an unprobed pin"
+            Ok("probe-selected-fallback".to_owned()),
+            "the demoted worker must receive the resolved model, not an \
+             unverified pin",
+        );
+        // Stated as the property, not just the value: no arm may hand the
+        // pre-flight root's identity when the dispatcher is root.
+        assert!(
+            !seen.borrow().contains(&PreflightIdentity::AsIs),
+            "a root dispatcher must never run cognition as itself",
         );
     }
 
     /// The entire non-root fleet path is unchanged: the pre-flight runs
-    /// exactly once and its value is handed back.
+    /// exactly once, as the dispatcher, and its value is handed back.
     #[test]
     fn non_root_runs_the_cognitive_preflight_exactly_once() {
         let ran = std::cell::Cell::new(0_u32);
+        let seen = std::cell::Cell::new(None);
         let decision = decide_root_spawn(1000, Some(CONVENTIONAL_WORKER_UID));
-        let outcome = gate_cognitive_preflight(&decision, || {
+        let outcome = gate_cognitive_preflight(&decision, |identity| {
             ran.set(ran.get() + 1);
+            seen.set(Some(identity));
             "some-model".to_owned()
         });
         assert_eq!(ran.get(), 1);
-        assert_eq!(outcome, Ok(Some("some-model".to_owned())));
+        assert_eq!(seen.get(), Some(PreflightIdentity::AsIs));
+        assert_eq!(outcome, Ok("some-model".to_owned()));
     }
 
     // ── COSMON-DEV #20 defect A3: provisioning of the demoted identity ──
