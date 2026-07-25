@@ -239,3 +239,12 @@ default_model = "mistral-large-latest"
 # only-downgrade guard (`cs reconcile --check`) stays dormant on this default.
 [adapters.claude]
 default_model = "claude-opus-5"
+
+# XAI/Grok arm — third provider family for cross-provider committee seats
+# (committee-20260725-525c, round 3 of converge-20260724-2014 / issue #27).
+# api.x.ai resolves to family "xai" via provider_diversity::provider_family.
+# Activate with `cs tackle --adapter xai`. Key: XAI_API_KEY.
+[adapters.xai]
+api_key_env = "XAI_API_KEY"
+base_url = "https://api.x.ai/v1"
+default_model = "grok-3"
