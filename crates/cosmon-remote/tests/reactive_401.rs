@@ -19,6 +19,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use base64::Engine as _;
 use chrono::{Duration as ChronoDuration, Utc};
 use cosmon_remote::client::{Client, ListFilters, ReactiveRefresh};
 use cosmon_remote::config::Profile;
@@ -45,6 +46,23 @@ fn profile(host: &str, oidc_url: &str) -> Profile {
 
 fn key() -> CredentialKey {
     CredentialKey::new("https://forge.example", "operator", "client-A")
+}
+
+/// The fresh bearer the token endpoint mints: a real identity JWT (iss ∧ sub ∧
+/// aud), since the refresh path now validates bearer suitability before
+/// persisting (round-1 finding 2) — an opaque string would fail the rotation.
+fn fresh_bearer() -> String {
+    let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = eng.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+    let body = eng.encode(
+        serde_json::to_vec(&serde_json::json!({
+            "iss": "https://forge.example",
+            "sub": "operator",
+            "aud": "client-A",
+        }))
+        .unwrap(),
+    );
+    format!("{header}.{body}.sig")
 }
 
 /// The full round-trip: a `401` on a locally-valid bearer triggers one silent
@@ -74,7 +92,7 @@ async fn reactive_401_forces_one_refresh_and_retries_transparently() {
         .respond_with(move |_: &wiremock::Request| {
             refreshes_probe.fetch_add(1, Ordering::SeqCst);
             ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "access_token": "fresh-at",
+                "access_token": fresh_bearer(),
                 "refresh_token": "rt-2",
                 "expires_in": 900,
                 "token_type": "bearer",
@@ -94,7 +112,10 @@ async fn reactive_401_forces_one_refresh_and_retries_transparently() {
         .await;
     Mock::given(method("GET"))
         .and(path("/v1/molecules"))
-        .and(header("authorization", "Bearer fresh-at"))
+        .and(header(
+            "authorization",
+            format!("Bearer {}", fresh_bearer()).as_str(),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "request_id": "req-1",
             "ensemble": { "molecules": [] },

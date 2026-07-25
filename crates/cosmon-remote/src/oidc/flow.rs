@@ -32,6 +32,7 @@
 
 use std::time::Duration;
 
+use base64::Engine as _;
 use chrono::{DateTime, Utc};
 
 use super::discovery::{ClientRegistry, ProviderMetadata};
@@ -236,21 +237,25 @@ pub async fn discover(
     ))
 }
 
-/// Guarantee `openid` is among the requested scopes. We present the OIDC
-/// `id_token` as the cosmon bearer (see [`identity_bearer`]); Forgejo only mints
-/// an `id_token` when `openid` is in the authorization request. Enforcing it
-/// here — regardless of what the profile or the reverse-discovery document
+/// Guarantee `openid` leads the requested scopes, exactly once. We present the
+/// OIDC `id_token` as the cosmon bearer (see [`identity_bearer`]); Forgejo only
+/// mints an `id_token` when `openid` is in the authorization request. Enforcing
+/// it here — regardless of what the profile or the reverse-discovery document
 /// publishes — stops a server that omits it (`scopes: []`) from silently
 /// downgrading us to an `access_token` that carries no `iss`/`aud`/`sub` (which
 /// the resource server rejects as a malformed JWT). Requesting `openid` also
 /// matches the scope of any prior consent grant, avoiding Forgejo's
-/// `a grant exists with different scope`. Prepended (not appended) so it leads
-/// the space-delimited `scope` parameter, and only when absent — never
-/// duplicated.
+/// `a grant exists with different scope`.
+///
+/// The output is *normalized*, not merely patched: every exact `openid` entry
+/// in the input is removed first, then a single `openid` is inserted at index 0.
+/// A published scope list carrying `openid` in a non-leading position — or
+/// carrying it twice — therefore composes to the same canonical shape as an
+/// absent one (review round-1, finding 1): `openid` leads the space-delimited
+/// `scope` parameter and is never duplicated.
 fn ensure_openid(mut scopes: Vec<String>) -> Vec<String> {
-    if !scopes.iter().any(|s| s == "openid") {
-        scopes.insert(0, "openid".to_string());
-    }
+    scopes.retain(|s| s != "openid");
+    scopes.insert(0, "openid".to_string());
     scopes
 }
 
@@ -340,12 +345,13 @@ pub async fn login(
     )
     .await?;
 
-    // 7. Persist the triple. The bearer is the OIDC id_token, not the access
-    // token — see `identity_bearer` for why (Forgejo's access token carries no
-    // identity claims).
+    // 7. Persist the triple. The bearer is whichever returned token carries the
+    // OIDC identity claims — see `identity_bearer` for why (Forgejo's access
+    // token carries none; a claim-less response fails here, loud, instead of
+    // persisting a bearer the server would 401).
     let key = endpoints.credential_key(sub);
     let cred = build_credential(
-        identity_bearer(&tokens),
+        identity_bearer(&tokens)?,
         &tokens.refresh_token,
         tokens.expires_in,
         now,
@@ -504,9 +510,10 @@ async fn rotate(
                 Ok(tokens) => {
                     // Forgejo re-issues the id_token on every `openid` refresh, so
                     // the rotated bearer is the fresh id_token too (see
-                    // `identity_bearer`).
+                    // `identity_bearer`). A claim-less rotation fails here, loud,
+                    // before it can clobber the store with a doomed bearer.
                     let refreshed = build_credential(
-                        identity_bearer(&tokens),
+                        identity_bearer(&tokens)?,
                         &tokens.refresh_token,
                         tokens.expires_in,
                         now,
@@ -574,7 +581,8 @@ fn redirect_port(redirect_uri: &str) -> u16 {
         .unwrap_or(loopback::DEFAULT_REDIRECT_PORT)
 }
 
-/// Pick the bearer cosmon-server validates out of a token-endpoint response.
+/// Pick the bearer cosmon-server validates out of a token-endpoint response —
+/// by inspecting what each candidate *carries*, never by trusting field names.
 ///
 /// The server's [`JwtVerifier::validate`] (crate `cosmon`) decodes the bearer as
 /// a self-bearing OIDC JWT: it reads `iss` + `sub` to resolve the noyau binding
@@ -582,20 +590,92 @@ fn redirect_port(redirect_uri: &str) -> u16 {
 /// OIDC provider (Forgejo, `scope=openid`) puts those identity claims in the
 /// **id_token** — its `access_token` is a JWT carrying only provider-internal
 /// bookkeeping (`{gnt, tt, exp, iat}`), so presenting *that* fails
-/// `malformed_jwt`. Hence: when the response carries an `id_token`, that is the
-/// bearer.
+/// `malformed_jwt`.
 ///
-/// The fallback to `access_token` when `id_token` is empty keeps the two
-/// identity-JWT-without-an-id_token deployments working unchanged: a non-OIDC
-/// token endpoint, and the JWT-minting test mock whose `access_token` *is* a
-/// full-claim JWT. This is a prefer-then-fall-back, never a silent swap — an
-/// OIDC login always has an id_token and always uses it.
-fn identity_bearer(tokens: &TokenResponse) -> &str {
-    if tokens.id_token.is_empty() {
-        &tokens.access_token
-    } else {
-        &tokens.id_token
+/// The selection is therefore a *suitability check*, not a blind
+/// prefer-then-fall-back (review round-1, finding 2): each candidate — the
+/// `id_token` first, then the `access_token` — is decoded locally and the first
+/// one that *usably* carries all three identity claims (`iss` ∧ `sub` ∧ `aud`,
+/// each in a shape the allowlist can actually match — see
+/// [`carries_identity_claims`]) wins. The
+/// `access_token` path keeps the two identity-JWT-without-an-id_token
+/// deployments working (a non-OIDC token endpoint, and the JWT-minting test
+/// mock whose `access_token` *is* a full-claim JWT) — but only because their
+/// access token genuinely carries the claims. When **neither** candidate does,
+/// the flow fails loud with [`OidcError::NoIdentityBearer`] rather than
+/// persisting a bearer the server is guaranteed to reject `401 malformed_jwt`.
+fn identity_bearer(tokens: &TokenResponse) -> Result<&str> {
+    [tokens.id_token.as_str(), tokens.access_token.as_str()]
+        .into_iter()
+        .find(|t| carries_identity_claims(t))
+        .ok_or_else(|| OidcError::NoIdentityBearer.into())
+}
+
+/// Whether `token` decodes as a JWT whose payload carries a *usable* OIDC
+/// identity claim set — the suitability oracle behind [`identity_bearer`].
+/// Pure: a local base64url decode + JSON parse, no signature verification (the
+/// client presents, the server validates) and no I/O.
+///
+/// Usability, not mere presence (round-2 referee finding): the server resolves
+/// `(iss, sub)` and matches `aud` against a closed allowlist, so a claim that
+/// is present but degenerate — `"aud": null`, `"aud": ""`, `"aud": []` — can
+/// never match and arms the very `401` this selection exists to prevent. Per
+/// RFC 7519 §4.1.3, `iss` and `sub` must be non-empty strings and `aud` must
+/// be a non-empty string or a non-empty array of non-empty strings; anything
+/// else marks the candidate unsuitable so selection falls through to the next
+/// one (or fails loud with [`OidcError::NoIdentityBearer`]).
+fn carries_identity_claims(token: &str) -> bool {
+    match decode_jwt_claims(token) {
+        Some(claims) => {
+            is_nonempty_string(claims.get("iss"))
+                && is_nonempty_string(claims.get("sub"))
+                && is_usable_audience(claims.get("aud"))
+        }
+        None => false,
     }
+}
+
+/// Whether a claim value is a non-empty JSON string — the usable shape for
+/// `iss` and `sub` ([RFC 7519 §4.1.1/§4.1.2]: StringOrURI).
+fn is_nonempty_string(value: Option<&serde_json::Value>) -> bool {
+    matches!(value.and_then(serde_json::Value::as_str), Some(s) if !s.is_empty())
+}
+
+/// Whether an `aud` claim value can possibly match an allowlist entry
+/// ([RFC 7519 §4.1.3]: one StringOrURI, or an array of them). `null`, `""`,
+/// `[]`, an array containing an empty string, and every non-string shape are
+/// unmatchable and therefore unusable.
+fn is_usable_audience(value: Option<&serde_json::Value>) -> bool {
+    match value {
+        Some(serde_json::Value::String(s)) => !s.is_empty(),
+        Some(serde_json::Value::Array(entries)) => {
+            !entries.is_empty()
+                && entries
+                    .iter()
+                    .all(|e| matches!(e, serde_json::Value::String(s) if !s.is_empty()))
+        }
+        _ => false,
+    }
+}
+
+/// Decode the payload segment of a compact-serialized JWT (`header.payload.sig`)
+/// into its JSON claim set. `None` when `token` is not a three-segment JWT, the
+/// payload is not base64url-nopad, or the decoded bytes are not JSON — i.e. the
+/// candidate cannot possibly satisfy the server's claim resolution.
+fn decode_jwt_claims(token: &str) -> Option<serde_json::Value> {
+    let mut segments = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 /// Copy the access token out of a credential for the one legitimate use — the
@@ -743,10 +823,40 @@ mod tests {
     }
 
     #[test]
-    fn ensure_openid_never_duplicates() {
-        // Idempotent: an already-present `openid` is neither moved nor doubled.
+    fn ensure_openid_keeps_a_leading_openid_in_place() {
+        // Idempotent: an already-leading `openid` is neither moved nor doubled.
         assert_eq!(
             ensure_openid(vec!["openid".into(), "profile".into()]),
+            vec!["openid".to_string(), "profile".to_string()]
+        );
+    }
+
+    #[test]
+    fn ensure_openid_moves_a_non_leading_openid_to_the_front() {
+        // Round-1 finding 1: a published list carrying `openid` in a non-leading
+        // position must normalize to the canonical leading shape — removed from
+        // its published slot, re-inserted exactly once at index 0.
+        assert_eq!(
+            ensure_openid(vec!["profile".into(), "openid".into(), "email".into()]),
+            vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn ensure_openid_collapses_duplicates_to_exactly_one() {
+        // Round-1 finding 1: duplicated `openid` entries (leading or not) must
+        // collapse to a single leading one — never two in the composed `scope`.
+        assert_eq!(
+            ensure_openid(vec![
+                "openid".into(),
+                "profile".into(),
+                "openid".into(),
+                "openid".into(),
+            ]),
             vec!["openid".to_string(), "profile".to_string()]
         );
     }
@@ -960,21 +1070,194 @@ mod tests {
         }
     }
 
-    #[test]
-    fn identity_bearer_prefers_the_id_token() {
-        // The real-OIDC case: Forgejo returns both. The bearer MUST be the
-        // id_token (it carries iss/aud/sub); the access_token carries no identity
-        // claims and would fail `malformed_jwt` server-side (task-20260720-71fd).
-        let tokens = token_response("access.no.identity", "id.with.identity");
-        assert_eq!(identity_bearer(&tokens), "id.with.identity");
+    /// Mint a syntactically valid compact JWT around `payload`. The signature is
+    /// never verified client-side, so its bytes are arbitrary.
+    fn test_jwt(payload: &serde_json::Value) -> String {
+        let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = eng.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+        let body = eng.encode(serde_json::to_vec(payload).unwrap());
+        format!("{header}.{body}.sig")
+    }
+
+    /// A JWT carrying the full OIDC identity claim set, with a marker claim to
+    /// tell candidates apart in assertions.
+    fn identity_jwt(marker: &str) -> String {
+        test_jwt(&serde_json::json!({
+            "iss": "https://forge.example",
+            "sub": "operator",
+            "aud": "client-A",
+            "marker": marker,
+        }))
+    }
+
+    /// A real-but-claim-less JWT — Forgejo's bookkeeping access token shape
+    /// (`{gnt, tt, exp, iat}`, no iss/sub/aud).
+    fn bookkeeping_jwt() -> String {
+        test_jwt(&serde_json::json!({
+            "gnt": "authorization_code",
+            "tt": "access",
+            "iat": 1_700_000_000,
+            "exp": 1_700_000_900,
+        }))
     }
 
     #[test]
-    fn identity_bearer_falls_back_to_access_when_id_token_absent() {
+    fn identity_bearer_prefers_the_claim_bearing_id_token() {
+        // The real-OIDC case: Forgejo returns both. The bearer MUST be the
+        // id_token (it carries iss/aud/sub); the access_token carries no identity
+        // claims and would fail `malformed_jwt` server-side (task-20260720-71fd).
+        let id = identity_jwt("id");
+        let tokens = token_response(&bookkeeping_jwt(), &id);
+        assert_eq!(identity_bearer(&tokens).unwrap(), id);
+    }
+
+    #[test]
+    fn identity_bearer_falls_back_to_a_claim_bearing_access_token() {
         // The JWT-mock / non-OIDC case: no id_token, and the access_token IS a
         // full-claim JWT. Fall back to it so those deployments stay green.
-        let tokens = token_response("access.is.a.full.jwt", "");
-        assert_eq!(identity_bearer(&tokens), "access.is.a.full.jwt");
+        let access = identity_jwt("access");
+        let tokens = token_response(&access, "");
+        assert_eq!(identity_bearer(&tokens).unwrap(), access);
+    }
+
+    #[test]
+    fn identity_bearer_skips_a_claim_less_id_token_for_a_claim_bearing_access() {
+        // Suitability beats field preference (round-1 finding 2): a present but
+        // claim-less id_token must not shadow an access_token that actually
+        // carries the identity claims.
+        let access = identity_jwt("access");
+        let tokens = token_response(&access, &bookkeeping_jwt());
+        assert_eq!(identity_bearer(&tokens).unwrap(), access);
+    }
+
+    #[test]
+    fn identity_bearer_fails_loud_when_no_candidate_carries_identity() {
+        // Round-1 finding 2, the adversarial core: when NEITHER token carries
+        // iss ∧ sub ∧ aud, the old blind fallback would persist the claim-less
+        // access token and guarantee a later 401 malformed_jwt. The fix must
+        // fail explicitly at mint time instead.
+        for (access, id) in [
+            // Claim-less JWT access token, no id_token (the exact #27 shape
+            // minus the fix's openid guarantee).
+            (bookkeeping_jwt(), String::new()),
+            // Both present, both claim-less.
+            (bookkeeping_jwt(), bookkeeping_jwt()),
+            // Not JWTs at all.
+            ("opaque-token".to_owned(), String::new()),
+            // Identity claims incomplete (aud missing).
+            (
+                test_jwt(&serde_json::json!({"iss": "i", "sub": "s"})),
+                String::new(),
+            ),
+        ] {
+            let tokens = token_response(&access, &id);
+            let err = identity_bearer(&tokens).unwrap_err();
+            assert!(
+                matches!(err, Error::Oidc(OidcError::NoIdentityBearer)),
+                "expected NoIdentityBearer, got {err:?}"
+            );
+        }
+    }
+
+    /// The degenerate identity claim sets of the round-2 referee finding: every
+    /// claim is *present*, but at least one is unusable — the tenant's closed
+    /// `(iss, aud)` allowlist can never match it, so selecting such a token
+    /// arms the exact 401 class of issue #27.
+    fn degenerate_identity_payloads() -> Vec<(&'static str, serde_json::Value)> {
+        let base = serde_json::json!({
+            "iss": "https://forge.example",
+            "sub": "operator",
+            "aud": "client-A",
+        });
+        let with = |claim: &str, value: serde_json::Value| {
+            let mut p = base.clone();
+            p[claim] = value;
+            p
+        };
+        vec![
+            ("null aud", with("aud", serde_json::Value::Null)),
+            ("empty-string aud", with("aud", serde_json::json!(""))),
+            ("empty-array aud", with("aud", serde_json::json!([]))),
+            (
+                "array with an empty-string entry",
+                with("aud", serde_json::json!(["client-A", ""])),
+            ),
+            (
+                "non-string array entry",
+                with("aud", serde_json::json!([42])),
+            ),
+            ("non-string iss", with("iss", serde_json::json!(7))),
+            ("empty-string iss", with("iss", serde_json::json!(""))),
+            (
+                "non-string sub",
+                with("sub", serde_json::json!(["operator"])),
+            ),
+            ("empty-string sub", with("sub", serde_json::json!(""))),
+        ]
+    }
+
+    #[test]
+    fn identity_bearer_rejects_present_but_unusable_claims() {
+        // Round-2 referee finding: presence is not usability. An id_token whose
+        // claims exist but cannot match the allowlist must fall through — here
+        // to nothing, so the flow fails loud instead of persisting the doomed
+        // bearer.
+        for (label, payload) in degenerate_identity_payloads() {
+            let tokens = token_response(&bookkeeping_jwt(), &test_jwt(&payload));
+            let err = identity_bearer(&tokens).unwrap_err();
+            assert!(
+                matches!(err, Error::Oidc(OidcError::NoIdentityBearer)),
+                "{label}: expected NoIdentityBearer, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn identity_bearer_falls_through_an_unusable_id_token_to_a_usable_access() {
+        // Fall-through, not fail: an unusable id_token must not shadow an
+        // access_token whose claim set the server can actually resolve.
+        let access = identity_jwt("access");
+        for (label, payload) in degenerate_identity_payloads() {
+            let tokens = token_response(&access, &test_jwt(&payload));
+            assert_eq!(
+                identity_bearer(&tokens).unwrap(),
+                access,
+                "{label}: expected fall-through to the usable access token"
+            );
+        }
+    }
+
+    #[test]
+    fn carries_identity_claims_accepts_a_nonempty_audience_array() {
+        // RFC 7519 §4.1.3 allows `aud` to be an array of StringOrURI values —
+        // a usable shape the tightening must keep accepting.
+        let token = test_jwt(&serde_json::json!({
+            "iss": "https://forge.example",
+            "sub": "operator",
+            "aud": ["client-A", "client-B"],
+        }));
+        assert!(carries_identity_claims(&token));
+    }
+
+    #[test]
+    fn decode_jwt_claims_rejects_malformed_candidates() {
+        // The decoder is the suitability oracle's foundation: anything that is
+        // not exactly `header.payload.sig` with a base64url-nopad JSON payload
+        // must read as "cannot carry claims", never panic.
+        for bad in [
+            "",
+            "only-one-segment",
+            "two.segments",
+            "four.seg.men.ts",
+            "head.!!!not-base64url!!!.sig",
+        ] {
+            assert!(decode_jwt_claims(bad).is_none(), "accepted {bad:?}");
+            assert!(!carries_identity_claims(bad));
+        }
+        // A payload that decodes but is not JSON.
+        let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let not_json = format!("h.{}.s", eng.encode(b"not json"));
+        assert!(decode_jwt_claims(&not_json).is_none());
     }
 
     #[test]

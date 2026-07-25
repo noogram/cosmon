@@ -17,11 +17,63 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use base64::Engine as _;
 use chrono::{Duration as ChronoDuration, Utc};
 use cosmon_remote::credential::{CredentialKey, CredentialStore, SecretToken, StoredCredential};
 use cosmon_remote::oidc::{self, TokenState};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
+
+// --- JWT helpers ---------------------------------------------------------
+//
+// The client now *decodes* every bearer candidate and selects on the identity
+// claims it carries (round-1 finding 2), so the mocks must mint real
+// (base64url) JWTs, not opaque strings — exactly the shapes a real provider
+// returns.
+
+/// Mint a syntactically valid compact JWT around `payload` (the signature is
+/// never verified client-side).
+fn jwt(payload: serde_json::Value) -> String {
+    let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = eng.encode(br#"{"alg":"RS256","typ":"JWT"}"#);
+    let body = eng.encode(serde_json::to_vec(&payload).unwrap());
+    format!("{header}.{body}.sig")
+}
+
+/// The identity assertion a real OIDC provider mints in the `id_token`: carries
+/// iss/sub/aud plus a `marker` claim so assertions can tell tokens apart.
+fn identity_jwt(marker: &str) -> String {
+    jwt(serde_json::json!({
+        "iss": "https://forge.example",
+        "sub": "operator",
+        "aud": "client-A",
+        "marker": marker,
+    }))
+}
+
+/// Forgejo's bookkeeping `access_token` shape: a real JWT with NO identity
+/// claims (`{gnt, tt, iat, exp}`).
+fn bookkeeping_jwt(n: usize) -> String {
+    jwt(serde_json::json!({
+        "gnt": "authorization_code",
+        "tt": "access",
+        "iat": 1_700_000_000 + n as i64,
+        "exp": 1_700_000_900 + n as i64,
+    }))
+}
+
+/// Decode a bearer's `marker` claim (fails the test if the bearer is not one of
+/// this file's minted JWTs).
+fn marker_of(bearer: &str) -> String {
+    let eng = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let payload = bearer.split('.').nth(1).expect("bearer is a JWT");
+    let claims: serde_json::Value =
+        serde_json::from_slice(&eng.decode(payload).expect("base64url payload")).expect("JSON");
+    claims["marker"]
+        .as_str()
+        .unwrap_or("<no marker>")
+        .to_owned()
+}
 
 /// A stateful token endpoint that rotates refresh tokens single-use (Forgejo's
 /// `InvalidateRefreshTokens: true`): each valid refresh mints a fresh
@@ -59,13 +111,13 @@ impl Respond for OidcMock {
                 let rt = format!("rt-{n}");
                 self.valid_refresh.lock().unwrap().insert(rt.clone());
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "access_token": format!("at-{n}"),
+                    "access_token": bookkeeping_jwt(n),
                     "refresh_token": rt,
                     "expires_in": 900,
                     "token_type": "bearer",
                     // A real OIDC provider (scope=openid) returns the identity
                     // assertion here; the client stores THIS as the bearer.
-                    "id_token": format!("id-{n}"),
+                    "id_token": identity_jwt(&format!("id-{n}")),
                 }))
             }
             "refresh_token" => {
@@ -77,12 +129,12 @@ impl Respond for OidcMock {
                     let rt = format!("rt-{n}");
                     valid.insert(rt.clone());
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "access_token": format!("at-{n}"),
+                        "access_token": bookkeeping_jwt(n),
                         "refresh_token": rt,
                         "expires_in": 900,
                         "token_type": "bearer",
                         // Forgejo re-issues the id_token on every openid refresh.
-                        "id_token": format!("id-{n}"),
+                        "id_token": identity_jwt(&format!("id-{n}")),
                     }))
                 } else {
                     ResponseTemplate::new(400).set_body_json(serde_json::json!({
@@ -187,11 +239,11 @@ async fn refresh_rotates_and_rejects_reuse() {
         TokenState::Valid(t) => t.expose().to_owned(),
         TokenState::NeedsLogin => panic!("expected Valid, got NeedsLogin"),
     };
-    // The bearer is the id_token the mock returned (`id-N`), NOT the access
-    // token (`at-N`): the refresh path stores the OIDC identity assertion, the
-    // only bearer cosmon-server accepts (task-20260720-71fd).
+    // The bearer is the id_token the mock returned (marker `id-N`), NOT the
+    // claim-less access token: the refresh path stores the OIDC identity
+    // assertion, the only bearer cosmon-server accepts (task-20260720-71fd).
     assert!(
-        first.starts_with("id-"),
+        marker_of(&first).starts_with("id-"),
         "refreshed bearer must be the id_token, got {first:?}"
     );
     assert_eq!(count.load(Ordering::SeqCst), 1);
@@ -218,13 +270,16 @@ async fn refresh_rotates_and_rejects_reuse() {
 /// A token endpoint that accepts one refresh but returns an **empty**
 /// `refresh_token` on the grant — the ambiguous shape RFC 6749 §5.1 permits.
 /// A rotating provider that does this has still invalidated the presented
-/// token, so the client has nothing live to fall back on.
+/// token, so the client has nothing live to fall back on. Its `access_token`
+/// is a full-claim identity JWT (the non-OIDC-deployment shape), so the
+/// bearer-suitability check is satisfied and the tests isolate the
+/// empty-refresh reconciliation.
 struct EmptyRefreshMock;
 
 impl Respond for EmptyRefreshMock {
     fn respond(&self, _request: &Request) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "access_token": "at-new",
+            "access_token": identity_jwt("at-new"),
             "refresh_token": "",
             "expires_in": 900,
             "token_type": "bearer",
@@ -298,7 +353,7 @@ async fn static_provider_empty_refresh_reuses_previous() {
         .await
         .unwrap();
     match state {
-        TokenState::Valid(t) => assert_eq!(t.expose(), "at-new"),
+        TokenState::Valid(t) => assert_eq!(t.expose(), identity_jwt("at-new")),
         TokenState::NeedsLogin => panic!("expected Valid, got NeedsLogin"),
     }
     let stored = store.load(&k).unwrap().unwrap();
@@ -511,20 +566,312 @@ async fn login_end_to_end_persists_the_credential() {
         .load(&outcome.key)
         .unwrap()
         .expect("credential persisted");
-    // The persisted bearer is the OIDC id_token (`id-N`), NOT Forgejo's
-    // access token (`at-N`): the access token carries no iss/aud/sub, so
+    // The persisted bearer is the OIDC id_token (marker `id-N`), NOT Forgejo's
+    // claim-less access token: the access token carries no iss/aud/sub, so
     // cosmon-server would reject it with `malformed_jwt`. This is the
     // end-to-end regression guard for task-20260720-71fd.
     let bearer = stored.access_token().expose();
     assert!(
-        bearer.starts_with("id-"),
+        marker_of(bearer).starts_with("id-"),
         "login must persist the id_token as the bearer, got {bearer:?}"
     );
-    assert!(
-        !bearer.starts_with("at-"),
-        "the Forgejo access token must never be the stored bearer"
-    );
     assert!(stored.has_refresh());
+}
+
+// --- adversarial: no identity-bearing token in the response (finding 2) --
+
+/// A token endpoint that answers every grant with a claim-less JWT
+/// `access_token` and NO `id_token` — a provider that ignored (or was never
+/// sent) the `openid` scope. Pre-fix, the blind fallback persisted that
+/// claim-less token as the bearer and armed a guaranteed `401 malformed_jwt`.
+struct ClaimlessMock;
+
+impl Respond for ClaimlessMock {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": bookkeeping_jwt(1),
+            "refresh_token": "rt-next",
+            "expires_in": 900,
+            "token_type": "bearer",
+        }))
+    }
+}
+
+#[tokio::test]
+async fn login_fails_loud_when_no_token_carries_identity() {
+    // Finding 2, login seat: a token response where neither candidate carries
+    // iss ∧ sub ∧ aud must fail the login explicitly — and persist NOTHING.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ClaimlessMock)
+        .mount(&server)
+        .await;
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let endpoints = oidc::OidcEndpoints::new(
+        "https://forge.example",
+        "http://unused.example/authorize",
+        format!("{}/token", server.uri()),
+        "client-A",
+        format!("http://127.0.0.1:{port}/callback"),
+        vec!["openid".into()],
+    );
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+
+    let open = |authorize_url: &str| {
+        let url = url::Url::parse(authorize_url).unwrap();
+        let mut redirect_uri = String::new();
+        let mut state = String::new();
+        for (k, v) in url.query_pairs() {
+            match k.as_ref() {
+                "redirect_uri" => redirect_uri = v.into_owned(),
+                "state" => state = v.into_owned(),
+                _ => {}
+            }
+        }
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let cb = format!("{redirect_uri}?code=the-code&state={state}");
+            let _ = reqwest::get(&cb).await;
+        });
+    };
+
+    let http = reqwest::Client::new();
+    let err = oidc::login(
+        &http,
+        &store,
+        &endpoints,
+        "operator",
+        std::time::Duration::from_secs(10),
+        open,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::NoIdentityBearer)
+        ),
+        "expected NoIdentityBearer at login, got {err:?}"
+    );
+    // Nothing was persisted: a doomed bearer must never land in the store.
+    let key = endpoints.credential_key("operator");
+    assert!(store.load(&key).unwrap().is_none());
+}
+
+#[tokio::test]
+async fn refresh_fails_loud_when_rotation_returns_no_identity_bearer() {
+    // Finding 2, refresh seat: the login-only false-green. A fix that selects
+    // the id_token at login but blindly falls back on rotation would re-arm the
+    // 401 at the first 15-minute refresh. The rotation must fail explicitly —
+    // and must NOT clobber the stored credential with the claim-less token.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ClaimlessMock)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+    let k = key();
+    store
+        .store(&k, &expiring_cred("at-seed", "rt-seed"))
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let cfg = oidc::RefreshConfig {
+        token_endpoint: format!("{}/token", server.uri()),
+        client_id: "client-A".into(),
+        rotation: oidc::RefreshRotation::Rotating,
+    };
+    let err = oidc::refresh_credential(&http, &store, &k, &cfg, ChronoDuration::seconds(60))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::NoIdentityBearer)
+        ),
+        "expected NoIdentityBearer at refresh, got {err:?}"
+    );
+    // The store still holds the seed pair — the claim-less rotation never
+    // overwrote it.
+    let stored = store.load(&k).unwrap().unwrap();
+    assert_eq!(stored.access_token().expose(), "at-seed");
+}
+
+// --- adversarial: id_token present but unusable (round-2 finding) --------
+
+/// A token endpoint that answers every grant with the claim-less bookkeeping
+/// `access_token` AND an `id_token` minted around the given payload. With a
+/// degenerate payload (`"aud": null`, `""`, `[]`, non-string `iss`/`sub`) the
+/// pre-fix presence check selected and persisted the `id_token` even though the
+/// server's closed `(iss, aud)` allowlist can never match it — the same 401
+/// class as issue #27.
+struct DegenerateIdMock(serde_json::Value);
+
+impl Respond for DegenerateIdMock {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": bookkeeping_jwt(1),
+            "refresh_token": "rt-next",
+            "expires_in": 900,
+            "token_type": "bearer",
+            "id_token": jwt(self.0.clone()),
+        }))
+    }
+}
+
+/// Identity payloads where every claim is present but at least one is unusable
+/// per RFC 7519 §4.1.3 — the round-2 referee finding's attack surface.
+fn degenerate_identity_payloads() -> Vec<(&'static str, serde_json::Value)> {
+    let base = serde_json::json!({
+        "iss": "https://forge.example",
+        "sub": "operator",
+        "aud": "client-A",
+    });
+    let with = |claim: &str, value: serde_json::Value| {
+        let mut p = base.clone();
+        p[claim] = value;
+        p
+    };
+    vec![
+        ("null aud", with("aud", serde_json::Value::Null)),
+        ("empty-string aud", with("aud", serde_json::json!(""))),
+        ("empty-array aud", with("aud", serde_json::json!([]))),
+        ("non-string iss", with("iss", serde_json::json!(7))),
+        (
+            "non-string sub",
+            with("sub", serde_json::json!(["operator"])),
+        ),
+    ]
+}
+
+/// The fake browser used by the login-seam tests: parse the authorize URL for
+/// `redirect_uri` + `state`, then fire the callback like a real browser would.
+fn fake_browser(authorize_url: &str) {
+    let url = url::Url::parse(authorize_url).unwrap();
+    let mut redirect_uri = String::new();
+    let mut state = String::new();
+    for (k, v) in url.query_pairs() {
+        match k.as_ref() {
+            "redirect_uri" => redirect_uri = v.into_owned(),
+            "state" => state = v.into_owned(),
+            _ => {}
+        }
+    }
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let cb = format!("{redirect_uri}?code=the-code&state={state}");
+        let _ = reqwest::get(&cb).await;
+    });
+}
+
+#[tokio::test]
+async fn login_fails_loud_when_the_id_token_claims_are_unusable() {
+    // Round-2 finding, login persist seam: an id_token whose identity claims
+    // are present but degenerate must not be persisted as the bearer — with no
+    // usable fallback the login fails loud, and NOTHING lands in the store.
+    for (label, payload) in degenerate_identity_payloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(DegenerateIdMock(payload))
+            .mount(&server)
+            .await;
+
+        let port = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap().port()
+        };
+        let endpoints = oidc::OidcEndpoints::new(
+            "https://forge.example",
+            "http://unused.example/authorize",
+            format!("{}/token", server.uri()),
+            "client-A",
+            format!("http://127.0.0.1:{port}/callback"),
+            vec!["openid".into()],
+        );
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = CredentialStore::file_at(tmp.path());
+
+        let http = reqwest::Client::new();
+        let err = oidc::login(
+            &http,
+            &store,
+            &endpoints,
+            "operator",
+            std::time::Duration::from_secs(10),
+            fake_browser,
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                cosmon_remote::Error::Oidc(cosmon_remote::OidcError::NoIdentityBearer)
+            ),
+            "{label}: expected NoIdentityBearer at login, got {err:?}"
+        );
+        let key = endpoints.credential_key("operator");
+        assert!(
+            store.load(&key).unwrap().is_none(),
+            "{label}: an unusable bearer must never land in the store"
+        );
+    }
+}
+
+#[tokio::test]
+async fn refresh_fails_loud_when_the_rotated_id_token_claims_are_unusable() {
+    // Round-2 finding, refresh rotate seam: a rotation whose id_token carries
+    // degenerate claims must fail loud and must NOT clobber the stored
+    // credential with the unusable bearer.
+    for (label, payload) in degenerate_identity_payloads() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(DegenerateIdMock(payload))
+            .mount(&server)
+            .await;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store = CredentialStore::file_at(tmp.path());
+        let k = key();
+        store
+            .store(&k, &expiring_cred("at-seed", "rt-seed"))
+            .unwrap();
+
+        let http = reqwest::Client::new();
+        let cfg = oidc::RefreshConfig {
+            token_endpoint: format!("{}/token", server.uri()),
+            client_id: "client-A".into(),
+            rotation: oidc::RefreshRotation::Rotating,
+        };
+        let err = oidc::refresh_credential(&http, &store, &k, &cfg, ChronoDuration::seconds(60))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                cosmon_remote::Error::Oidc(cosmon_remote::OidcError::NoIdentityBearer)
+            ),
+            "{label}: expected NoIdentityBearer at refresh, got {err:?}"
+        );
+        let stored = store.load(&k).unwrap().unwrap();
+        assert_eq!(
+            stored.access_token().expose(),
+            "at-seed",
+            "{label}: the unusable rotation must not overwrite the store"
+        );
+    }
 }
 
 /// A tiny extension so the single-flight mock can add a response delay without a

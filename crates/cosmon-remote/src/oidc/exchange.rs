@@ -122,7 +122,9 @@ pub struct TokenResponse {
     /// `(iss, sub) -> noyau` and check `aud` against the closed allowlist live in
     /// the ID token instead. Defaults to empty for a non-OIDC token endpoint or
     /// the JWT-minting test mock (whose `access_token` *is* a full-claim JWT), in
-    /// which case the caller falls back to `access_token`.
+    /// which case the caller falls back to `access_token` — but only after
+    /// verifying it actually carries the identity claims; a response where no
+    /// token does fails loud instead (see the flow module's bearer selection).
     #[serde(default)]
     pub id_token: String,
 }
