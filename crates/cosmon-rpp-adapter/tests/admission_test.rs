@@ -141,6 +141,70 @@ fn cross_tenant_audience_yields_pivot() {
     assert!(matches!(err, RppRejectReason::CrossTenantPivot { .. }));
 }
 
+/// The `IdP`-administrator question, pinned (task-20260725-7ce4).
+///
+/// A token signed by the trusted issuer, carrying the pinned audience,
+/// well-formed and unexpired — but whose `sub` no binding file names —
+/// is refused. Being the `IdP`'s own administrator buys nothing here:
+/// authn (the issuer is trusted) and authz (this principal is bound)
+/// are different questions, and only the second one opens a noyau.
+///
+/// The numeric subs mirror the shape a Forgejo-backed deployment
+/// produces (`sub` = the uid): the *declared* tenant is uid 2, the
+/// undeclared instance administrator is uid 1. Both would be signed by
+/// the same issuer with the same `aud`; only the declared one resolves.
+///
+/// Fail-closed means `UnknownSub`, not "attached to some default noyau"
+/// — there is no default noyau to attach to. See
+/// `nucleon_map::tests::undeclared_sub_from_trusted_issuer_never_resolves`
+/// for the map-level half of the same invariant.
+#[test]
+fn undeclared_admin_sub_is_refused_fail_closed() {
+    let td = TempDir::new().unwrap();
+    let map = HabilitationMap::builder()
+        .insert(
+            "https://idp",
+            "2", // the declared tenant
+            HabilitationId::new("nuc-tenant"),
+            Noyau::new("tenant-demo-sandbox"),
+            "cosmon-rpp-tenant",
+        )
+        .build();
+    let lim = IngressRateLimiter::new(td.path().join("rl"), 5.0, 0.0);
+    let dl = DenyList::new(td.path().to_path_buf()).with_ttl(Duration::ZERO);
+    let rig = AdmissionRig {
+        nucleon_map: &map,
+        rate_limiter: &lim,
+        deny_list: &dl,
+        inbox_root: &td.path().join("inbox"),
+        now_ms: 0,
+    };
+
+    // Same issuer, same audience, undeclared `sub` ⇒ UnknownSub.
+    let err = http_request_to_spark(
+        &rig,
+        &jwt("1", "tok-admin", "cosmon-rpp-tenant"),
+        Verb::ObserveMolecule,
+        Some("mol-1"),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, RppRejectReason::UnknownSub),
+        "an undeclared sub must be refused outright, got {err:?}"
+    );
+
+    // The declared tenant is unaffected — the refusal above is about
+    // the missing binding, not about a broken rig.
+    let spark = http_request_to_spark(
+        &rig,
+        &jwt("2", "tok-tenant", "cosmon-rpp-tenant"),
+        Verb::ObserveMolecule,
+        Some("mol-1"),
+    )
+    .expect("the declared tenant is admitted");
+    assert_eq!(spark.noyau.as_str(), "tenant-demo-sandbox");
+}
+
 #[test]
 fn rate_limit_admits_then_rejects() {
     let td = TempDir::new().unwrap();

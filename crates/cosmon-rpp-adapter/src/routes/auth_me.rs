@@ -16,6 +16,25 @@
 //!    asking "who do you see in this token?", not "let me do work".
 //! 5. Project the validated claims to JSON.
 //!
+//! # `noyau` here is a *hint*, not a grant
+//!
+//! Step 4 uses the audience-blind
+//! [`crate::nucleon_map::HabilitationMap::resolve`] and does not verify
+//! the binding seal, because this route is `cs whoami`, not a gate. A
+//! non-null `noyau` therefore means "this principal holds *some*
+//! binding", never "this token opens that noyau". The admission
+//! boundary re-resolves the full `(iss, sub, aud)` triple and
+//! re-checks the seal on every state-touching verb, so a token whose
+//! audience pins another galaxy is still refused with
+//! `cross_tenant_pivot` after `/me` cheerfully printed a noyau name.
+//!
+//! Read `/me` as a debugging aid, not as evidence of access: probing it
+//! with a second identity and concluding from a matching `noyau` that
+//! the identity is *entitled* is a misreading the route invites and
+//! this paragraph exists to head off. The entitlement question is
+//! answered by the binding files alone (declarative, exact-`sub`, no
+//! default row — see the [`crate::nucleon_map`] module docs).
+//!
 //! The response intentionally echoes only what the server already
 //! trusts — `sub`, `aud`, `scopes`, `noyau`, `expires_at`, `issuer`.
 //! Raw token bytes and `jti` are deliberately omitted (turing §8.2.3 —

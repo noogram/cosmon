@@ -1682,16 +1682,19 @@ pub async fn run_molecule(
         });
     }
 
-    // 5. Bounds — resolved from the same sealed binding admission used
-    //    (the read face of `GET /v1/quota` and this enforcement face
-    //    project from one `Resolved`, so they cannot disagree). An
-    //    absent `[drain_bounds]` section resolves to the server
-    //    defaults: a tenant drain is NEVER unbounded (godel Q3, B3
-    //    obligatory).
+    // 5. Bounds — resolved from the same sealed binding admission used,
+    //    audience included (the read face of `GET /v1/quota` and this
+    //    enforcement face project from one `Resolved`, so they cannot
+    //    disagree). Pinning the audience is what makes that true: a
+    //    principal federated on N galaxies holds N bindings, and an
+    //    audience-blind lookup would enforce the first-sorting galaxy's
+    //    budget. An absent `[drain_bounds]` section resolves to the
+    //    server defaults: a tenant drain is NEVER unbounded (godel Q3,
+    //    B3 obligatory).
     let bounds = state
         .nucleon_map
         .load()
-        .resolve(&jwt.iss, &jwt.sub)
+        .resolve_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
         .map_or_else(crate::nucleon_map::DrainBounds::default, |r| r.drain_bounds);
 
     // 6. One resident loop per noyau (MCStitch I1 single-writer-trunk:

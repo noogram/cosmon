@@ -137,7 +137,14 @@ pub async fn phone_home_ingest_layer(
     if let (Some(value), Some(t)) = (header_value, token) {
         if let Ok(jwt) = JwtVerifier::validate(&state.jwks.load(), &t, state.posture) {
             let map = state.nucleon_map.load();
-            if let Some(resolved) = map.resolve(&jwt.iss, &jwt.sub) {
+            // Audience-pinned: the report is materialised UNDER a noyau
+            // directory, so the noyau is an enforced value, not an
+            // informational one. This middleware runs outside the
+            // admission boundary, so an audience-blind lookup would let
+            // a token minted for galaxy B drop telemetry into galaxy
+            // A's tree whenever the principal happens to hold both
+            // grants. Unbound (or wrong-audience) ⇒ nothing is written.
+            if let Some(resolved) = map.resolve_for_audience(&jwt.iss, &jwt.sub, &jwt.aud) {
                 let pairs = parse_header(&value);
                 if !pairs.is_empty() {
                     let reported_at = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
