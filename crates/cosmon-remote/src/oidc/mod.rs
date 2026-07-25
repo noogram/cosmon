@@ -51,9 +51,9 @@ pub use discovery::{ClientRegistry, OAuthClient, ProviderMetadata, CLIENT_REGIST
 pub use error::OidcError;
 pub use exchange::TokenResponse;
 pub use flow::{
-    build_authorize_url, cached_access, discover, ensure_token, force_refresh, login, logout,
-    refresh_credential, CacheState, LoginOutcome, OidcEndpoints, RefreshConfig, RefreshRotation,
-    TokenState, LOGIN_TIMEOUT_SECS, REFRESH_LEEWAY_SECS,
+    bearer_identity, build_authorize_url, cached_access, discover, ensure_token, force_refresh,
+    login, logout, refresh_credential, BearerIdentity, CacheState, LoginOutcome, OidcEndpoints,
+    RefreshConfig, RefreshRotation, TokenState, LOGIN_TIMEOUT_SECS, REFRESH_LEEWAY_SECS,
 };
 pub use loopback::{
     parse_callback_target, redirect_uri, validate_loopback_redirect_uri, CallbackParams,

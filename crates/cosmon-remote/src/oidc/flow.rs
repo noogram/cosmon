@@ -184,6 +184,11 @@ pub struct LoginOutcome {
     pub backend: BackendKind,
     /// When the freshly minted access token expires.
     pub expires_at: DateTime<Utc>,
+    /// The identity the persisted bearer *carries* — the only identity a caller
+    /// may report after a login (see [`BearerIdentity`]). `None` when the
+    /// retained bearer carries no usable identity claim, so a caller can say so
+    /// rather than falling back on the profile's assumed `sub`.
+    pub identity: Option<BearerIdentity>,
 }
 
 /// Resolve the provider endpoints and the provisioned `client_id` for `audience`
@@ -350,12 +355,11 @@ pub async fn login(
     // token carries none; a claim-less response fails here, loud, instead of
     // persisting a bearer the server would 401).
     let key = endpoints.credential_key(sub);
-    let cred = build_credential(
-        identity_bearer(&tokens)?,
-        &tokens.refresh_token,
-        tokens.expires_in,
-        now,
-    );
+    let bearer = identity_bearer(&tokens)?;
+    // Read the identity back out of the bearer we actually retained — not out of
+    // `sub`, which is only what the caller *asked* to log in as.
+    let identity = bearer_identity(bearer);
+    let cred = build_credential(bearer, &tokens.refresh_token, tokens.expires_in, now);
     let expires_at = cred.expires_at();
     // The Env backend was rejected at step 0, so this always persists; the
     // outcome check keeps persist-before-use loud even if that gate ever moves.
@@ -367,6 +371,7 @@ pub async fn login(
         key,
         backend: store.backend_kind(),
         expires_at,
+        identity,
     })
 }
 
@@ -611,6 +616,42 @@ fn identity_bearer(tokens: &TokenResponse) -> Result<&str> {
         .ok_or_else(|| OidcError::NoIdentityBearer.into())
 }
 
+/// Who a bearer *asserts* it is — read out of the token itself.
+///
+/// This is the only identity a client may report after a login. The local
+/// profile's `sub` is a request ("log me in as this"); the token is the
+/// server's answer, and the two can disagree — a profile carrying `sub = "1"`
+/// against a provider that issued `sub = "2"` is exactly the situation where an
+/// operator most needs the display to state the token's truth. Echoing the
+/// profile back would dress a local assumption as an established fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BearerIdentity {
+    /// The `sub` claim — the subject the provider actually issued the token for.
+    pub sub: String,
+    /// The `iss` claim — the issuer that minted it, so a `sub` collision across
+    /// two providers stays legible.
+    pub iss: String,
+}
+
+/// Read the identity a bearer carries, or `None` when it carries none.
+///
+/// Pure and total: a non-JWT bearer, a JWT without usable `iss`/`sub` claims
+/// (the `access_token` fallback a mock or non-OIDC token endpoint returns), or
+/// an unparsable payload all yield `None` — never a guess, and never a silent
+/// substitution of the caller's own expectation. Goes through the same claim
+/// reader as [`carries_identity_claims`], so a bearer accepted by
+/// [`identity_bearer`] always reads back a `Some`.
+#[must_use]
+pub fn bearer_identity(token: &str) -> Option<BearerIdentity> {
+    let claims = decode_jwt_claims(token)?;
+    let sub = nonempty_string(claims.get("sub"))?;
+    let iss = nonempty_string(claims.get("iss"))?;
+    Some(BearerIdentity {
+        sub: sub.to_owned(),
+        iss: iss.to_owned(),
+    })
+}
+
 /// Whether `token` decodes as a JWT whose payload carries a *usable* OIDC
 /// identity claim set — the suitability oracle behind [`identity_bearer`].
 /// Pure: a local base64url decode + JSON parse, no signature verification (the
@@ -638,7 +679,17 @@ fn carries_identity_claims(token: &str) -> bool {
 /// Whether a claim value is a non-empty JSON string — the usable shape for
 /// `iss` and `sub` ([RFC 7519 §4.1.1/§4.1.2]: StringOrURI).
 fn is_nonempty_string(value: Option<&serde_json::Value>) -> bool {
-    matches!(value.and_then(serde_json::Value::as_str), Some(s) if !s.is_empty())
+    nonempty_string(value).is_some()
+}
+
+/// The non-empty string behind a claim value, when it has that shape. The
+/// single reader both the suitability oracle ([`is_nonempty_string`]) and the
+/// identity read-back ([`bearer_identity`]) go through, so what we *display*
+/// can never disagree with what we *accepted*.
+fn nonempty_string(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
 }
 
 /// Whether an `aud` claim value can possibly match an allowlist entry
@@ -1237,6 +1288,56 @@ mod tests {
             "aud": ["client-A", "client-B"],
         }));
         assert!(carries_identity_claims(&token));
+    }
+
+    #[test]
+    fn bearer_identity_reads_the_token_not_the_caller() {
+        // The read-back is the display's only source of truth: whatever `sub`
+        // the profile records, the identity comes out of the token's claims.
+        let token = test_jwt(&serde_json::json!({
+            "iss": "https://forge.example",
+            "sub": "2",
+            "aud": "client-A",
+        }));
+        let id = bearer_identity(&token).expect("identity claims present");
+        assert_eq!(id.sub, "2");
+        assert_eq!(id.iss, "https://forge.example");
+    }
+
+    #[test]
+    fn bearer_identity_is_none_when_the_token_carries_no_identity() {
+        // Forgejo's bookkeeping access_token, a non-JWT opaque bearer, and JWTs
+        // whose `iss`/`sub` are missing or degenerate all read as "no identity"
+        // — the caller must say so rather than substitute its own expectation.
+        assert_eq!(bearer_identity(&bookkeeping_jwt()), None);
+        assert_eq!(bearer_identity("opaque-not-a-jwt"), None);
+        for (label, payload) in [
+            ("no sub", serde_json::json!({"iss": "https://f.example"})),
+            ("no iss", serde_json::json!({"sub": "operator"})),
+            (
+                "empty sub",
+                serde_json::json!({"iss": "https://f.example", "sub": ""}),
+            ),
+            (
+                "non-string iss",
+                serde_json::json!({"iss": 7, "sub": "operator"}),
+            ),
+        ] {
+            assert_eq!(
+                bearer_identity(&test_jwt(&payload)),
+                None,
+                "{label}: must not read back as an identity"
+            );
+        }
+    }
+
+    #[test]
+    fn every_accepted_bearer_reads_back_an_identity() {
+        // The two functions share one claim reader, so acceptance and read-back
+        // can never disagree: anything `identity_bearer` selects has a `Some`.
+        let tokens = token_response(&bookkeeping_jwt(), &identity_jwt("id-1"));
+        let bearer = identity_bearer(&tokens).unwrap();
+        assert!(bearer_identity(bearer).is_some());
     }
 
     #[test]

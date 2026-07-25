@@ -874,6 +874,81 @@ async fn refresh_fails_loud_when_the_rotated_id_token_claims_are_unusable() {
     }
 }
 
+// --- the login outcome reports the TOKEN's identity, not the profile's ---
+
+/// A provider that issues an `id_token` for a subject the caller did NOT ask
+/// for — the live shape of the 2026-07-25 replay, where the local profile
+/// recorded `sub = "1"` while Forgejo minted `sub = "2"`.
+struct DisagreeingSubMock;
+
+impl Respond for DisagreeingSubMock {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": bookkeeping_jwt(1),
+            "refresh_token": "rt-next",
+            "expires_in": 900,
+            "token_type": "bearer",
+            "id_token": jwt(serde_json::json!({
+                "iss": "https://forge.example",
+                "sub": "2",
+                "aud": "client-A",
+            })),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn login_outcome_reports_the_token_subject_not_the_requested_one() {
+    // The profile says "1", the provider issues "2". The login outcome must
+    // carry the token's answer — a client that echoed the requested `sub` would
+    // assert an identity the server never granted.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(DisagreeingSubMock)
+        .mount(&server)
+        .await;
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let endpoints = oidc::OidcEndpoints::new(
+        "https://forge.example",
+        "http://unused.example/authorize",
+        format!("{}/token", server.uri()),
+        "client-A",
+        format!("http://127.0.0.1:{port}/callback"),
+        vec!["openid".into()],
+    );
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+    let http = reqwest::Client::new();
+    let outcome = oidc::login(
+        &http,
+        &store,
+        &endpoints,
+        "1", // what the profile asks for
+        std::time::Duration::from_secs(10),
+        fake_browser,
+    )
+    .await
+    .unwrap();
+
+    let identity = outcome
+        .identity
+        .expect("the retained id_token carries identity claims");
+    assert_eq!(
+        identity.sub, "2",
+        "the reported identity must come from the token, not the requested sub"
+    );
+    assert_eq!(identity.iss, "https://forge.example");
+    // The credential still keys off the requested sub — the slot is a local
+    // filing decision; only the *displayed identity* is the token's.
+    assert_eq!(outcome.key.sub(), "1");
+}
+
 /// A tiny extension so the single-flight mock can add a response delay without a
 /// second `Respond` wrapper type.
 trait WithDelay {
