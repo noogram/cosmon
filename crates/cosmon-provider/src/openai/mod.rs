@@ -1803,6 +1803,31 @@ pub async fn run_agent_loop(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<String, OpenAiError> {
+    run_agent_loop_counted(provider, briefing, work_dir, telemetry)
+        .await
+        .map(|outcome| outcome.synthesis)
+}
+
+/// [`run_agent_loop`] variant that surfaces the [`WorkerOutcome`] — the
+/// synthesis text **and** the tool-dispatch count — instead of the bare
+/// synthesis.
+///
+/// The dispatch site (`spawn_openai_session` in `cs tackle`) needs the count
+/// to distinguish real work from a silent no-op: an in-process Direct-API
+/// molecule whose loop returned `Ok` with zero tool dispatches wrote no
+/// artefact and must be collapsed loudly, never sealed `Completed` (ADR-100
+/// R2; founding witness `cmbverify-20260724-54cd`).
+///
+/// # Errors
+///
+/// Identical to [`run_agent_loop`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted(
+    provider: &OpenAIProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+) -> Result<cosmon_agent_harness::WorkerOutcome, OpenAiError> {
     // Wire telemetry into the provider so `one_turn` can emit the typed
     // `AdapterLivenessProbed { Retried }` trail on each in-place transient
     // retry (delib-20260707-df9b ride-along). The `Provider` trait's
@@ -1811,8 +1836,8 @@ pub async fn run_agent_loop(
     // field. The clone is cheap — a handful of IDs + a path — and leaves
     // the caller's `provider` untouched.
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::run_loop(&provider, briefing, work_dir, telemetry).await {
-        Ok(synthesis) => Ok(synthesis),
+    match cosmon_agent_harness::run_loop_counted(&provider, briefing, work_dir, telemetry).await {
+        Ok(outcome) => Ok(outcome),
         Err(harness_err) => {
             let err = harness_error_to_openai(harness_err);
             emit_silent_failure(telemetry, &err);

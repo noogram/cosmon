@@ -1899,7 +1899,34 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // smoke chronicle `2026-05-18-grok-direct-api-smoke-result-2.md`
     // §"Ce qui n'a pas marché" #2.
     if adapter_completes_inline(&adapter) {
-        finalize_inprocess_molecule(&store, &state_dir, &mol_id, &adapter)?;
+        // L9 completion invariant (ADR-100 R2): a completed molecule must have
+        // executed its steps or collapsed loudly. The synchronous loop witnesses
+        // its own work through the tool-dispatch count carried out on
+        // `SpawnOutcome`. A loop that returned Ok having dispatched ZERO tools
+        // wrote no file and ran no command — its worktree is byte-identical to
+        // the pre-dispatch state and no formula artefact exists. Sealing that as
+        // Completed is exactly the silent-inadmissibility the founding witness
+        // `cmbverify-20260724-54cd` exhibited (sealed 0/4, empty worktree). We
+        // collapse it loudly instead.
+        let tools_dispatched = spawn_outcome
+            .inprocess_work
+            .as_ref()
+            .map_or(0, |w| w.tools_dispatched);
+        if tools_dispatched > 0 {
+            finalize_inprocess_molecule(&store, &state_dir, &mol_id, &adapter)?;
+        } else {
+            let reason = format!(
+                "in-process {} agent loop returned Ok but dispatched zero tools — \
+                 no file written, no command run, worktree untouched; no formula \
+                 step executed and no artefact emitted. Collapsed loudly rather \
+                 than sealed a false Completed (ADR-100 R2 completion invariant). \
+                 A capable model given this briefing must drive its steps through \
+                 the harness tools; a single text-only turn is not admissible work.",
+                adapter.as_str()
+            );
+            eprintln!("cs tackle: {reason}");
+            super::collapse::collapse_one(&store, &state_dir, &mol_id, &reason)?;
+        }
     }
 
     // 10. Output.
@@ -4996,6 +5023,29 @@ pub(super) struct SpawnOutcome {
     /// `None` for every non-claude adapter, and for a claude dispatch that
     /// resolved no explicit config dir (the environment default applies).
     pub claude_config_dir: Option<String>,
+    /// The observable work an in-process Direct-API loop (openai / anthropic)
+    /// performed, or `None` for every tmux / detached arm (whose completion is
+    /// witnessed elsewhere). The dispatch site consults
+    /// [`InprocessWork::tools_dispatched`] to choose *complete* vs *collapse
+    /// loudly*: a loop that dispatched zero tools wrote no artefact and must
+    /// never be sealed `Completed` (ADR-100 R2; founding witness
+    /// `cmbverify-20260724-54cd`).
+    pub inprocess_work: Option<InprocessWork>,
+}
+
+/// The observable output of a synchronous in-process Direct-API agent loop.
+///
+/// Carried out of [`spawn_openai_session`] / [`spawn_anthropic_session`] so
+/// the dispatch site can enforce the completion invariant *a completed
+/// molecule must have executed its steps or collapsed loudly*: `Some` work
+/// with `tools_dispatched == 0` is a silent no-op (the model stopped without
+/// writing a file or running a command) and licenses a **collapse**, not a
+/// completion.
+#[derive(Debug, Clone)]
+pub(super) struct InprocessWork {
+    /// Cumulative count of tool calls the loop dispatched. `0` means no
+    /// observable work — no artefact, untouched worktree.
+    pub tools_dispatched: u32,
 }
 
 /// The PID identity of a freshly-forked detached local worker.
@@ -5115,6 +5165,7 @@ pub(super) fn spawn_and_prompt(
         return Ok(SpawnOutcome {
             detached_local: None,
             claude_config_dir,
+            inprocess_work: None,
         });
     }
     match adapter.as_str() {
@@ -5127,7 +5178,8 @@ pub(super) fn spawn_and_prompt(
             mol,
             adapter_entry,
             preferred_model,
-        ),
+        )
+        .map(|()| SpawnOutcome::default()),
         // Gap#5 (`task-20260615-df30`) — codex joins claude/aider as the
         // third external-CLI subprocess adapter. Same tmux-pane shape as
         // aider: spawn `codex exec '<prompt>'` into a pane, then assert
@@ -5142,13 +5194,15 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             adapter_entry,
             preferred_model,
-        ),
+        )
+        .map(|()| SpawnOutcome::default()),
         // `task-20260615-556a` — opencode joins claude/aider/codex as the
         // fourth external-CLI subprocess adapter. Same tmux-pane shape as
         // codex: spawn `opencode run '<prompt>'` into a pane, then assert
         // liveness through the substrate-agnostic `LiveProbe` contract.
         "opencode" => {
             spawn_opencode_and_prompt(backend, wid, session_name, worktree_path, prompt, mol)
+                .map(|()| SpawnOutcome::default())
         }
         "openai" => spawn_openai_session(
             wid,
@@ -5159,7 +5213,11 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             adapter_entry,
             preferred_model,
-        ),
+        )
+        .map(|work| SpawnOutcome {
+            inprocess_work: Some(work),
+            ..SpawnOutcome::default()
+        }),
         "anthropic" => spawn_anthropic_session(
             wid,
             session_name,
@@ -5169,7 +5227,11 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             adapter_entry,
             preferred_model,
-        ),
+        )
+        .map(|work| SpawnOutcome {
+            inprocess_work: Some(work),
+            ..SpawnOutcome::default()
+        }),
         // C5 of delib-20260519-a20b — `llama-cpp` (canonical) and
         // `llama` (legacy alias per ADR-106) both reach the same arm.
         // The in-process llama.cpp adapter was removed in the
@@ -5187,7 +5249,8 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             adapter_entry,
             preferred_model,
-        ),
+        )
+        .map(|()| SpawnOutcome::default()),
         // The `local` / `ollama` floor is handled by the early return above
         // (it is the only PID-witness arm), so it never reaches this match.
         // `validate_adapter_name` already refused any name not in the
@@ -5200,7 +5263,6 @@ pub(super) fn spawn_and_prompt(
              a runtime path. Add a match arm in spawn_and_prompt."
         )),
     }
-    .map(|()| SpawnOutcome::default())
 }
 
 /// `FeatureNotCompiled` stub for the `llama-cpp` adapter. The in-process
@@ -7015,7 +7077,7 @@ fn spawn_openai_session(
     mol_state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<InprocessWork> {
     let (api_key, base_url) = openai_credentials(adapter_entry).ok_or_else(|| {
         anyhow::anyhow!(
             "cs tackle: --adapter openai requires one of OPENAI_API_KEY / \
@@ -7032,6 +7094,9 @@ fn spawn_openai_session(
         .or_else(|| std::env::var("OPENAI_MODEL").ok().filter(|s| !s.is_empty()))
         .unwrap_or_else(|| "gpt-4o-mini".to_owned());
 
+    // Capture the model id before it is moved into the provider — the
+    // synthesis-persistence trailer names the model that produced the output.
+    let model_label = model.clone();
     let provider = if let Some(url) = base_url {
         cosmon_provider::OpenAIProvider::with_base_url(api_key, model, url)
     } else {
@@ -7067,8 +7132,8 @@ fn spawn_openai_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
-    let synthesis = rt
-        .block_on(cosmon_provider::openai::run_agent_loop(
+    let outcome = rt
+        .block_on(cosmon_provider::openai::run_agent_loop_counted(
             &provider,
             prompt,
             worktree_path,
@@ -7076,14 +7141,54 @@ fn spawn_openai_session(
         ))
         .map_err(|e| anyhow::anyhow!("cs tackle: openai agent loop failed: {e}"))?;
 
+    // Persist the model's synthesis to the molecule state directory as durable
+    // proof-of-work (parity with the local path). Best-effort: a write failure
+    // must not undo a loop that did land real tool work.
+    persist_inprocess_synthesis(mol_state_dir, "openai", &model_label, &outcome.synthesis);
+
     tracing::info!(
         target: "cosmon::tackle::openai",
         molecule = %mol.id.as_str(),
         session = session_name,
-        bytes = synthesis.len(),
+        bytes = outcome.synthesis.len(),
+        tools_dispatched = outcome.tools_dispatched,
         "openai in-process agent loop completed"
     );
-    Ok(())
+    Ok(InprocessWork {
+        tools_dispatched: outcome.tools_dispatched,
+    })
+}
+
+/// Persist an in-process Direct-API loop's synthesis to
+/// `MOLECULE_DIR/synthesis.md` as durable proof-of-work.
+///
+/// The tmux adapters leave their trail in the worktree and session log; the
+/// detached `local` floor writes its own `synthesis.md`. The openai / anthropic
+/// Direct-API loops used to discard the synthesis entirely — leaving a
+/// completed molecule with no on-disk evidence of what the model produced. This
+/// closes that gap: whenever the loop returns, its output lands on disk under
+/// the molecule directory (never the worktree, which `cs done` destroys).
+///
+/// Best-effort by contract: a write failure is logged and swallowed so it can
+/// never mask or undo a loop that already performed real tool work.
+fn persist_inprocess_synthesis(
+    mol_state_dir: &std::path::Path,
+    adapter: &str,
+    model: &str,
+    synthesis: &str,
+) {
+    let path = mol_state_dir.join("synthesis.md");
+    let body = format!(
+        "# {adapter} synthesis\n\n**Model**: `{model}` (ADR-100 Direct-API in-process loop)\n\n---\n\n{synthesis}\n",
+    );
+    if let Err(e) = std::fs::write(&path, body) {
+        tracing::warn!(
+            target: "cosmon::tackle::inprocess",
+            error = %e,
+            path = %path.display(),
+            "failed to write synthesis.md"
+        );
+    }
 }
 
 /// Default Ollama OpenAI-compat host root. The harness loop appends
@@ -7607,6 +7712,9 @@ fn spawn_detached_local_worker(
         }),
         // Not a claude dispatch — no Claude configuration routing to report.
         claude_config_dir: None,
+        // Detached arm: its work is witnessed by the child process, not by an
+        // in-process tool-dispatch count.
+        inprocess_work: None,
     })
 }
 
@@ -8850,7 +8958,7 @@ fn spawn_anthropic_session(
     mol_state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<InprocessWork> {
     let key_env = adapter_entry
         .and_then(|e| e.api_key_env.as_deref())
         .unwrap_or("ANTHROPIC_API_KEY");
@@ -8881,6 +8989,9 @@ fn spawn_anthropic_session(
             .filter(|s| !s.is_empty())
     });
 
+    // Capture the model id before it is moved into the provider — the
+    // synthesis-persistence trailer names the model that produced the output.
+    let model_label = model.clone();
     let provider = if let Some(url) = base_url {
         cosmon_provider::AnthropicProvider::with_base_url(api_key, model, url)
     } else {
@@ -8916,8 +9027,8 @@ fn spawn_anthropic_session(
         .enable_all()
         .build()
         .map_err(|e| anyhow::anyhow!("cs tackle: tokio runtime build failed: {e}"))?;
-    let synthesis = rt
-        .block_on(cosmon_provider::anthropic::run_agent_loop(
+    let outcome = rt
+        .block_on(cosmon_provider::anthropic::run_agent_loop_counted(
             &provider,
             prompt,
             worktree_path,
@@ -8925,14 +9036,19 @@ fn spawn_anthropic_session(
         ))
         .map_err(|e| anyhow::anyhow!("cs tackle: anthropic agent loop failed: {e}"))?;
 
+    persist_inprocess_synthesis(mol_state_dir, "anthropic", &model_label, &outcome.synthesis);
+
     tracing::info!(
         target: "cosmon::tackle::anthropic",
         molecule = %mol.id.as_str(),
         session = session_name,
-        bytes = synthesis.len(),
+        bytes = outcome.synthesis.len(),
+        tools_dispatched = outcome.tools_dispatched,
         "anthropic in-process agent loop completed"
     );
-    Ok(())
+    Ok(InprocessWork {
+        tools_dispatched: outcome.tools_dispatched,
+    })
 }
 
 /// Install the harvest hook on `session_name` so `pane-died` triggers
@@ -11977,6 +12093,32 @@ mod tests {
         );
         assert_eq!(other, None);
         assert!(matches!(other_source, ModelSelectionSource::Default { .. }));
+    }
+
+    #[test]
+    fn cosmon_default_model_env_is_never_scoped_away() {
+        // The explicit, adapter-agnostic `$COSMON_DEFAULT_MODEL` hammer is an
+        // operator's deliberate act: it names a model for whatever adapter is
+        // dispatched, so it must resolve on every one of them. Pinned here
+        // because the env tier is where a namespace-scoping guard would most
+        // plausibly be added, and this hammer is the one env carrier such a
+        // guard must never touch.
+        let env = Some(("mistral-large-latest", "COSMON_DEFAULT_MODEL"));
+        let (model, source) = resolve_model_selection(
+            None,
+            None,
+            env,
+            "openai",
+            None,
+            galaxy_cfg_path(),
+            None,
+            global_cfg_path(),
+        );
+        assert_eq!(model.as_deref(), Some("mistral-large-latest"));
+        assert!(matches!(
+            source,
+            ModelSelectionSource::EnvVar { ref var } if var == "COSMON_DEFAULT_MODEL"
+        ));
     }
 
     #[test]

@@ -879,13 +879,34 @@ pub async fn run_agent_loop(
     work_dir: &Path,
     telemetry: Option<&AdapterTelemetry>,
 ) -> Result<String, AnthropicError> {
+    run_agent_loop_counted(provider, briefing, work_dir, telemetry)
+        .await
+        .map(|outcome| outcome.synthesis)
+}
+
+/// [`run_agent_loop`] variant that surfaces the [`WorkerOutcome`] — the
+/// synthesis text **and** the tool-dispatch count.
+///
+/// Mirrors `openai::run_agent_loop_counted`: the dispatch site needs the count
+/// to refuse a `Completed` seal on a zero-work in-process loop (ADR-100 R2).
+///
+/// # Errors
+///
+/// Identical to [`run_agent_loop`].
+#[cfg(feature = "http")]
+pub async fn run_agent_loop_counted(
+    provider: &AnthropicProvider,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+) -> Result<cosmon_agent_harness::WorkerOutcome, AnthropicError> {
     // Wire telemetry into the provider so `one_turn` can emit the realized-model
     // observation at the response seam (F-01) — the `Provider::one_turn(&self,
     // log)` trait is telemetry-free by design, so the adapter carries it as a
     // field. Cheap clone (a handful of IDs + a path). Mirrors openai.
     let provider = provider.clone().with_telemetry(telemetry.cloned());
-    match cosmon_agent_harness::run_loop(&provider, briefing, work_dir, telemetry).await {
-        Ok(synthesis) => Ok(synthesis),
+    match cosmon_agent_harness::run_loop_counted(&provider, briefing, work_dir, telemetry).await {
+        Ok(outcome) => Ok(outcome),
         Err(harness_err) => {
             let err = harness_error_to_anthropic(harness_err);
             emit_silent_failure(telemetry, &err);
