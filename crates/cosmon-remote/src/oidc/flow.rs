@@ -639,8 +639,8 @@ pub struct BearerIdentity {
 /// (the `access_token` fallback a mock or non-OIDC token endpoint returns), or
 /// an unparsable payload all yield `None` — never a guess, and never a silent
 /// substitution of the caller's own expectation. Goes through the same claim
-/// reader as [`carries_identity_claims`], so a bearer accepted by
-/// [`identity_bearer`] always reads back a `Some`.
+/// reader as the bearer-suitability check, so a bearer this crate accepted as
+/// the identity bearer always reads back a `Some`.
 #[must_use]
 pub fn bearer_identity(token: &str) -> Option<BearerIdentity> {
     let claims = decode_jwt_claims(token)?;

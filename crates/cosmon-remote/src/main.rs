@@ -2061,19 +2061,19 @@ fn login_report(
              {expires_at})"
         );
     };
-    let mut out = format!(
+    let line = format!(
         "✓ Signed in to {host} as {} (issued by {}; credential stored in {backend}; \
          access token expires {expires_at})",
         id.sub, id.iss,
     );
-    if id.sub != profile_sub {
-        out.push_str(&format!(
-            "\n  note: profile {profile_name:?} records sub {profile_sub:?}; the token was \
-             issued for {:?} — the token wins.",
-            id.sub,
-        ));
+    if id.sub == profile_sub {
+        return line;
     }
-    out
+    format!(
+        "{line}\n  note: profile {profile_name:?} records sub {profile_sub:?}; the token was \
+         issued for {:?} — the token wins.",
+        id.sub,
+    )
 }
 
 /// `logout` — forget the persisted cosmon credential for the active profile.
