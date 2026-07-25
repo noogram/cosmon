@@ -1808,9 +1808,9 @@ pub async fn run_agent_loop(
         .map(|outcome| outcome.synthesis)
 }
 
-/// [`run_agent_loop`] variant that surfaces the [`WorkerOutcome`] — the
-/// synthesis text **and** the tool-dispatch count — instead of the bare
-/// synthesis.
+/// [`run_agent_loop`] variant that surfaces the
+/// [`cosmon_agent_harness::WorkerOutcome`] — the synthesis text **and** the
+/// tool-dispatch count — instead of the bare synthesis.
 ///
 /// The dispatch site (`spawn_openai_session` in `cs tackle`) needs the count
 /// to distinguish real work from a silent no-op: an in-process Direct-API

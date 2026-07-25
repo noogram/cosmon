@@ -884,8 +884,9 @@ pub async fn run_agent_loop(
         .map(|outcome| outcome.synthesis)
 }
 
-/// [`run_agent_loop`] variant that surfaces the [`WorkerOutcome`] — the
-/// synthesis text **and** the tool-dispatch count.
+/// [`run_agent_loop`] variant that surfaces the
+/// [`cosmon_agent_harness::WorkerOutcome`] — the synthesis text **and** the
+/// tool-dispatch count.
 ///
 /// Mirrors `openai::run_agent_loop_counted`: the dispatch site needs the count
 /// to refuse a `Completed` seal on a zero-work in-process loop (ADR-100 R2).
