@@ -317,8 +317,25 @@ fn tackle_refuses_a_base_that_does_not_exist() {
 
     let mol_id = nucleate(repo, "unknown base is refused");
 
+    // Pin the harshest environment on purpose: the `local` adapter, whose
+    // backend is a port nothing listens on. On a developer laptop this test
+    // used to pass for an accidental reason — `claude` was on PATH, the
+    // adapter resolved away from `local`, and the backend probe never ran. On
+    // a CI runner the same command resolved to the `local` floor, the probe
+    // fired first, and the refusal named ollama instead of the branch. Fixing
+    // the order is the production change; pinning the adapter here is what
+    // makes this test observe that order on every machine.
     let out = cs_isolated(repo)
-        .args(["tackle", &mol_id, "--base", "release/nope", "--force"])
+        .args([
+            "tackle",
+            &mol_id,
+            "--adapter",
+            "local",
+            "--base",
+            "release/nope",
+            "--force",
+        ])
+        .env("COSMON_LOCAL_BASE_URL", "http://127.0.0.1:1")
         .output()
         .expect("cs tackle");
     let stderr = String::from_utf8_lossy(&out.stderr);

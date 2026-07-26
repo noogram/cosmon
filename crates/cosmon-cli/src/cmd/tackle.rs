@@ -463,6 +463,41 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // 2b. Base branch — validated FIRST, ahead of every adapter probe
+    //     (task-20260726-da99). `--base` names the trunk this molecule's work
+    //     belongs to; asking git whether `refs/heads/<branch>` exists is
+    //     deterministic, instantaneous and free of side effects, whereas the
+    //     adapter preflight below dials a live backend over the network. When
+    //     a cheap certain refusal sits behind an expensive uncertain one, the
+    //     refusal the operator actually gets depends on which services happen
+    //     to be up on the machine — which is how `cs tackle --base <typo>`
+    //     came to answer "ollama is unreachable" on a CI runner and "no such
+    //     branch" on a developer laptop, for the same command.
+    //
+    //     Same discipline the model-budget gate already applies just below:
+    //     the strong-dispatch decision is taken ex ante from local state,
+    //     *before* the availability probe, precisely so that a refusal never
+    //     depends on a reachable service.
+    //
+    //     The resolved base is only *persisted* on the molecule later (step
+    //     7a), once the dispatch has cleared every gate — validating early
+    //     and writing late keeps a refused tackle side-effect-free.
+    //
+    //     `find_repo_root()` is called here **only when `--base` was given**.
+    //     A bare `cs tackle --dry-run` renders a prompt and dispatches nothing,
+    //     and is deliberately runnable outside a git repo (`local_model_selection`
+    //     pins that); hoisting the repo probe unconditionally would have made
+    //     the dry run demand a repository it never uses. With no `--base`, the
+    //     molecule simply keeps whatever base a previous tackle persisted —
+    //     the same value `resolve_tackle_base` returns for `requested = None`.
+    let base_branch = match args.base.as_deref() {
+        Some(requested) => {
+            let repo_root = find_repo_root()?;
+            resolve_tackle_base(&repo_root, Some(requested), mol.base_branch.clone())?
+        }
+        None => mol.base_branch.clone(),
+    };
+
     // 3. Load project config (.cosmon/config.toml).
     let config_path = cosmon_filestore::resolve_config_path(None);
     let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
@@ -1104,16 +1139,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // 7a. Base branch — a property of the molecule, not of the session
     //     (task-20260725-61fa). `--base` names the trunk this molecule's work
-    //     belongs to; we validate it exists locally, persist it on the
-    //     molecule, and cut the worker's branch from it below. `cs done` then
-    //     reads it back from state, so a harvest triggered from a tmux hook —
-    //     whose environment froze when the tmux server started and therefore
-    //     never sees a later `export COSMON_BASE_BRANCH` — still merges onto
-    //     the right trunk. Without `--base` the molecule keeps whatever base
-    //     a previous tackle persisted, and a never-based molecule keeps the
-    //     pre-existing ambient behaviour exactly.
-    let base_branch =
-        resolve_tackle_base(&repo_root, args.base.as_deref(), mol.base_branch.clone())?;
+    //     belongs to; it was validated at step 2b, and here — once every gate
+    //     has cleared — we persist it on the molecule and cut the worker's
+    //     branch from it below. `cs done` then reads it back from state, so a
+    //     harvest triggered from a tmux hook — whose environment froze when
+    //     the tmux server started and therefore never sees a later
+    //     `export COSMON_BASE_BRANCH` — still merges onto the right trunk.
+    //     Without `--base` the molecule keeps whatever base a previous tackle
+    //     persisted, and a never-based molecule keeps the pre-existing ambient
+    //     behaviour exactly.
     if let Some(base) = base_branch.as_deref() {
         if mol.base_branch.as_deref() != Some(base) {
             mol.base_branch = Some(base.to_owned());
