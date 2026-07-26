@@ -34,7 +34,7 @@ its status in a trailing `### Status` block. There is no third state.
 
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
-top-level fleet-split / briefing-seal / events-source sections), §9,
+top-level fleet-split / briefing-seal / events-source sections), §8v, §9,
 §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
@@ -2400,6 +2400,220 @@ exposed path.
 
 ---
 
+## 8v. Dispatch boundary: `Ready` is earned, never inherited
+
+*(ratified — [ADR-162](adr/162-dispatch-boundary-ready-is-earned.md),
+closure verdict of noogram/cosmon#20)*
+
+**No worker is briefed until it has positively proven a work-accepting
+state. A screen cosmon cannot certify is refused, not admitted.**
+
+This is the *closed default*. Its opposite — admit by default, refuse the
+screens we have named — is what shipped for the first three quarters of
+this classifier's life, and it walked through four doors in a row.
+
+The default has to be closed at **both** layers, and that is what M5 adds.
+Closing it only in the classifier left the collapse below it still open by
+default, and a container walked through the gap while every test of the
+layer above stayed green.
+
+### Why the default was closed
+
+Claude Code paints `❯` at the head of its composer's input line **and** as
+the selection cursor of every menu it draws. A classifier that reads that
+character as "ready for input" reads every blocking onboarding screen as a
+worker accepting work. `cs tackle` then types the briefing into a
+two-option menu, exits 0, and the molecule stays `running` forever with
+nothing reporting a fault — a healthy-looking worker that will never
+produce a token.
+
+Three doors were shut by naming one more screen each: `TRUST_PROMPT`,
+`BYPASS_PERMS_WARNING`, `FIRST_RUN_THEME`. Each patch was correct, tested,
+and left the corridor open. The fourth door — Claude Code's login-method
+selector, reported externally against signed `v0.3.0` as
+noogram/cosmon#20 — was simply the first screen nobody had named yet. A
+door is shut by a name; a corridor is shut only by a default.
+
+### The four members
+
+Each member names the seam that enforces it and the tests that pin it.
+All tests below are in `crates/cosmon-transport/src/readiness.rs`
+(`cargo test -p cosmon-transport`) unless stated otherwise.
+
+**M1 — `cs tackle` never briefs a pane that has not positively proven a
+work-accepting state.**
+Seam: `crates/cosmon-cli/src/cmd/tackle.rs`. The `send_input(wid, prompt)`
+that delivers the briefing is reachable only through the
+`Ok(Liveness::Live)` arm of `ClaudeTuiProbe::await_live`; `Dead`,
+`Indeterminate` and probe errors each tear the session down and return a
+diagnostic quoting the pane. Pinned by
+`await_live_refuses_a_worker_parked_on_a_menu` (the verbatim
+login-selector capture **and** an invented menu),
+`await_live_refuses_a_worker_still_parked_on_a_startup_modal` (trust and
+bypass-permissions dialogs) and
+`await_live_refuses_a_pane_still_blocked_when_the_window_closes` (the
+`Blocked` arm, the corridor's widest remaining opening). The first of
+these asserts the mock worker is not `Dead` before asserting the refusal,
+so it cannot pass vacuously.
+
+**M2 — `Ready` is earned by composer evidence, never inherited from a
+chevron.**
+Seam: the private `shows_composer` predicate, consulted before any other
+path to `SessionStatus::Ready`. Two things count as evidence, and both
+need an input line *plus* something that identifies it as the composer's:
+the placeholder sitting **on** a chevron line, or a non-menu chevron line
+standing in the same pane tail as the composer's own footer. All rules are
+scoped to the pane tail — scrollback is history, and history must not
+certify the present. Pinned by
+`a_bare_chevron_without_composer_co_evidence_is_not_ready` (the
+paste-the-authorization-code field),
+`a_bare_box_frame_is_not_composer_evidence` (this TUI boxes its modals as
+readily as its composer, so a frame certifies nothing — offering it as
+co-evidence re-opened this rule once already),
+`test_classify_ready_type_message` (the placeholder quoted in body prose
+is a sentence *about* the composer, not a composer),
+`a_composer_in_scrollback_does_not_certify_a_blocking_menu`, and
+`menu_option_shapes_wider_than_two_characters_are_still_menus` (an option
+shape the refusal cannot see is a menu cursor promoted to composer
+evidence).
+The price-of-the-fix guards are part of the invariant, not decoration:
+`the_composer_is_still_ready` and
+`a_composer_showing_a_suggestion_is_still_ready` fail the moment the
+closed default starts refusing healthy workers.
+
+**M3 — an unrecognised screen is refused, not admitted.**
+Seam: the *end* of `classify_output`'s order. A pane parked at an input
+line this build cannot certify lands on `SessionStatus::AwaitingHuman`; a
+pane matching nothing at all lands on `SessionStatus::Unknown`. Neither
+opens the dispatch gate. Pinned by `an_unrecognised_menu_is_not_ready` —
+whose pane is *deliberately invented*, matching no marker, so that
+shutting a door by naming a screen leaves this test red — and by
+`login_method_selector_is_not_ready` (the verbatim bench capture of door
+4). Scrollback cannot smuggle a verdict past the rule either:
+`stale_tool_use_does_not_promote_a_menu_to_working` and
+`a_stale_permission_question_does_not_block_the_current_screen`.
+
+**M4 — `observe` and `await_live` remain two distinct questions
+(contract clause C0).**
+The spawn postcondition asks *"did the binary run?"*; the dispatch gate
+asks *"is it accepting work?"*. A painted frame is the strongest possible
+yes to the first and no answer at all to the second. Collapsing them turns
+a slow cold start whose first frame is a screen nobody named into a
+torn-down spawn with a diagnostic that says the session printed nothing —
+when it printed a whole menu. Seam:
+`SessionStatus::liveness` maps `AwaitingHuman` to `Liveness::Live`, and
+`ClaudeTuiProbe::await_live` overrides it to `Liveness::Indeterminate`.
+Pinned by `observe_still_counts_an_unnamed_rendered_screen_as_proof_of_life`,
+`observe_still_counts_a_startup_modal_as_proof_of_life`,
+`liveness_maps_every_session_status` (the `AwaitingHuman → Live` row) and
+`a_rendered_frame_without_a_chevron_is_not_nothing` (which also pins the
+`AwaitingHuman` / `Unknown` distinction — a rendered frame is not
+nothing, and nothing recognisable is still nothing).
+`await_live_refuses_a_pane_still_blocked_when_the_window_closes` asserts
+both halves on the same pane in the same test, which is what "two distinct
+questions" means operationally.
+
+**M5 — the dispatch gate is an allow-list: only a status that arrived as
+*evidence* opens it.**
+Seam: `readiness::dispatch_gate_liveness`, the collapse
+`ClaudeTuiProbe::await_live_with_status` applies to `wait_ready`'s return.
+Only `Ready` and `Working` map to `Liveness::Live`; `Dead` maps to
+`Liveness::Dead`; **everything else** — `Loading`, `Unknown`, both consent
+modals, `Blocked`, `AwaitingHuman` — maps to `Liveness::Indeterminate`. The
+rule behind it is one sentence: `wait_ready` returns `Ready` / `Working`
+the moment it *sees* them and returns everything else only by running out
+of window, so "arrived as evidence" and "is `Ready` or `Working`" are the
+same set.
+
+This member was added because M1–M4 were all green while the container
+still dispatched. Instrumenting the loop
+(`COSMON_READINESS_TRACE`, `cosmon_transport::readiness_trace`) showed that
+the pane deciding the dispatch was never the login-method selector every
+test used: for the whole 30-second window it was the **first-run theme
+wizard**, correctly classified `Loading` by M3's own richer-verdict rule,
+handed back by `wait_ready` on timeout, and waved through by a gate that
+was a *deny-list* — four named statuses refused, everything else collapsed
+through `SessionStatus::liveness`. `Loading` was not on the list. The
+briefing then answered the wizard, which is why every capture taken after
+`cs tackle` returned showed the selector instead. A deny-list at the gate
+is the same open default M2 and M3 removed one layer down; this closes it
+at the collapse.
+
+The match in `dispatch_gate_liveness` is exhaustive with **no wildcard
+arm**, deliberately: a future `SessionStatus` cannot inherit a side by
+accident, it breaks the build until someone decides in writing. Pinned by
+`only_ready_and_working_open_the_dispatch_gate` (walks every variant) and
+`await_live_refuses_a_worker_still_on_the_first_run_wizard_when_the_window_closes`
+(the wizard pane verbatim from the instrumented bench run, asserting both
+halves of C0 on the same pane: `observe` says `Live`, the gate says
+`Indeterminate`).
+
+### What this forbids
+
+- **Shutting the next door by naming the next screen.** Adding a marker so
+  that one more onboarding surface stops being `Ready` is the move this
+  invariant exists to refuse. If a marker is added, it must buy a *richer*
+  verdict for an already-refused pane (as `FIRST_RUN_THEME` now does:
+  `Loading`, hence `Live` at the spawn gate), never a path into `Ready`.
+- **Widening `shows_composer` with co-evidence that is not
+  composer-specific.** A box frame is the worked counter-example: this TUI
+  boxes its modals too, so `│ ❯ a) Re-authorise now │` satisfied a
+  box-frame disjunct and became `Ready`. Any new disjunct must say "the
+  input line beside me belongs to the composer" in a way a modal cannot
+  borrow.
+- **Reading scrollback as the current state.** Whole-capture substring
+  scans re-open the corridor from behind: a composer thirty lines ago, a
+  `⏺` from an earlier turn, a permission question answered twenty lines
+  up. Verdict rules are tail-scoped.
+- **Collapsing `AwaitingHuman` into `Unknown`, or either into `Ready`.**
+  The first costs the operator a true diagnostic at the spawn gate; the
+  second is the original bug.
+- **Answering an unnamed screen.** `wait_ready` deliberately sends no
+  keystroke into a pane it cannot read. Cosmon does not drive vendor
+  onboarding; pressing a key into a screen it cannot classify is how a
+  briefing ended up typed into a two-option menu.
+
+### Reviewer rule
+
+A change that lets a new class of pane reach `SessionStatus::Ready`, or
+that lets `cs tackle` reach `send_input` on anything other than
+`Liveness::Live`, must cite this section and carry a test written the way
+`an_unrecognised_menu_is_not_ready` is written: against a pane the build
+has *never seen*, not against the screen that prompted the change.
+The gate is measurable, and the measurement is cheap. Replace
+`shows_composer`'s body with the pre-fix open default —
+`output.contains(markers::READY_TYPE) || pane_tail(output).iter().any(|l|
+l.contains(markers::READY_PROMPT))`, a whole-capture scan for the
+placeholder plus a tail scan for the chevron — and `cargo test -p
+cosmon-transport --lib` goes from 258 passed / 0 failed to 247 / **11
+failed** (measured 2026-07-25 at this head; the figure was 253 → 243 / 10
+before M5's tests landed). A fourth marker would have flipped one of those
+eleven. That number is what this section is worth; a change that lowers it
+is a change that weakens the default.
+
+M5 has its own, cheaper measurement, and it is the one that matters for the
+lesson: put `Loading` back on the `Live` side of `dispatch_gate_liveness`
+and the unit suite loses two tests — but the *bench* is what caught it in
+the first place, and the bench is what must be re-run before believing any
+change to that function.
+
+### Status
+
+**Ratified.** Enforced by the code and the test suite on the trunk today,
+**and by the container bench**. The instrument gap this section used to
+record — arm C deciding its verdict by grepping a pane, and so unable to
+express a correct *refusal* — is closed: arm C now asserts the four
+post-conditions of a refusal, and on 2026-07-25 all four held on a real
+`desktop-linux` container against Claude Code 2.1.220 (rc=1, the refusal
+quoting the screen it refused, the tmux session gone, the molecule back to
+`pending`). See
+[`docs/guides/container-worker-doors-bench.md`](guides/container-worker-doors-bench.md).
+See [ADR-162](adr/162-dispatch-boundary-ready-is-earned.md) for the
+decision record, the rejected options, and the resolution of
+[ADR-093](adr/093-cosmon-transport-liveness-detector.md).
+
+---
+
 ## 11. Strict-ancestry for structural writes
 
 **Structural writes that can silently drop work must verify their
@@ -2466,11 +2680,37 @@ onto the feature branch, the branch is NOT integrated into `main`, and
 `is_branch_merged` must report `false`. Any future regression that
 reverts to a HEAD-based probe will fail the gate.
 
-**Base branch resolution.** `resolve_base_branch(repo_root)` tries, in
-order: `COSMON_BASE_BRANCH` env var → `git symbolic-ref
-refs/remotes/origin/HEAD` → literal `"main"`. The env override exists
-for repos whose default branch is not `main`; the fallback tracks the
-cosmon convention (`cs tackle` branches from `main` by default).
+**Base branch resolution.** The base is a **property of the molecule**,
+not of the session that runs the verb. `cosmon_cli::base_branch::resolve`
+(`crates/cosmon-cli/src/base_branch.rs`) tries, in strict order:
+
+1. the molecule's own `base_branch`, persisted by `cs tackle --base
+   <branch>`, which also cuts `feat/<mol-id>` from that ref instead of the
+   ambient `HEAD`;
+2. the `COSMON_BASE_BRANCH` environment variable;
+3. `git symbolic-ref refs/remotes/origin/HEAD`;
+4. the literal `"main"`.
+
+Steps 2–4 are the historical chain and remain byte-identical for every
+molecule with no persisted base, which is the backward-compatibility
+contract: a legacy molecule, or one tackled without `--base`, behaves
+exactly as it did before rung 1 existed.
+
+Rung 1 exists because rungs 2–4 are *ambient*: they are read at harvest
+time, in the environment of whoever runs `cs done`. A `cs done` fired
+from a tmux hook inherits the environment frozen when the tmux server
+started, never sees a later `export COSMON_BASE_BRANCH`, and refuses the
+merge with `NotOnBase` — a safe failure, but one that forces a manual
+harvest. Piloting several molecules on several trunks from one session
+otherwise required a `git checkout` dance around every `cs tackle` and an
+`export` in front of every `cs done`.
+
+`cs done` resolves the base **once** per run and passes it to every probe
+(`is_branch_merged`, `verify_merge`, `try_merge_branch`, the anti-wipe
+branch-delete guard, the final `unmerged_work_remains` post-condition), so
+no two guards in one teardown can disagree about the trunk. The
+`NotOnBase` pre-flight is unchanged in strength — it is simply evaluated
+against the molecule's base rather than an ambient one.
 
 **Scope.** This invariant binds every structural write, not just `cs
 done`. As new verbs are added (`cs absorb`, `cs archive-drain`, future

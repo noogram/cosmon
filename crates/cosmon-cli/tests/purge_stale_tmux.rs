@@ -60,7 +60,7 @@ fn install_fake_claude(tmp: &Path) -> PathBuf {
     let fake = bin_dir.join("claude");
     fs::write(
         &fake,
-        "#!/bin/sh\nprintf '\\xe2\\x9d\\xaf\\n'\nexec sleep 600\n",
+        "#!/bin/sh\nprintf '\\xe2\\x9d\\xaf Type your message\\n'\nexec sleep 600\n",
     )
     .unwrap();
     let mut perm = fs::metadata(&fake).unwrap().permissions();

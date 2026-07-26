@@ -163,6 +163,25 @@ pub struct Args {
     /// effect when no `pre_done` hook is configured.
     #[arg(long)]
     skip_pre_done_hook: bool,
+
+    /// Run the `[hooks] post_merge` deploy hook even when this harvest merges
+    /// into a parked work branch rather than the reference trunk.
+    ///
+    /// By default the `post_merge` hook is **bounded to the trunk**: it fires
+    /// only when the resolved integration base is the galaxy's reference trunk
+    /// (`origin/HEAD`, or `main` as a last resort). The hook *deploys* — the
+    /// canonical `just install` refreshes the on-disk `cs` binary — so running
+    /// it after a merge into an *older* parked branch would silently rejuvenate
+    /// the operator's tool, dropping whatever the parked branch predates
+    /// (task-20260725-b64f). When the merge targets a parked branch the hook is
+    /// skipped with a warning naming the reason.
+    ///
+    /// This flag is the operator's explicit escape hatch for the rare-but-
+    /// legitimate case of deploying from a parked branch on purpose. No effect
+    /// when no `post_merge` hook is configured or when the merge already targets
+    /// the trunk.
+    #[arg(long)]
+    deploy_off_trunk: bool,
 }
 
 /// Merge strategy used by `cs done` when integrating the worker's branch.
@@ -338,10 +357,14 @@ fn compute_teardown_plan(
     is_terminal: bool,
     socket: &str,
     session_name: &str,
+    persisted_base: Option<&str>,
 ) -> anyhow::Result<TeardownPlan> {
     let branch_name = format!("feat/{mol_id}");
     let wid = WorkerId::new(session_name)?;
     let repo_root = find_repo_root()?;
+    // The plan must judge ancestry against the same trunk the real teardown
+    // would merge into — the molecule's own base when it has one.
+    let base = resolve_base_branch_for(&repo_root, persisted_base);
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
 
     let mut planned_actions = Vec::new();
@@ -364,7 +387,7 @@ fn compute_teardown_plan(
     // Branch state.
     let branch_present = branch_exists(&repo_root, &branch_name);
     let branch_merged = if branch_present {
-        is_branch_merged(&repo_root, &branch_name)
+        is_branch_merged(&repo_root, &branch_name, &base)
     } else {
         false
     };
@@ -373,7 +396,6 @@ fn compute_teardown_plan(
     // needs to know which case applies to verify the payload's fate.
     // See `branch_is_empty_relative_to` and bug `task-20260422-ecf3`.
     let branch_is_empty = if branch_present && branch_merged {
-        let base = resolve_base_branch(&repo_root);
         branch_is_empty_relative_to(&repo_root, &branch_name, &base)
     } else {
         false
@@ -454,7 +476,7 @@ fn compute_teardown_plan(
 ///
 /// Probes git topology directly with
 /// `git merge-base --is-ancestor <branch> <base>`, where `<base>` is
-/// resolved by [`resolve_base_branch`] — usually `main`. Returns true
+/// resolved by [`resolve_base_branch_for`] — usually `main`. Returns true
 /// iff every commit reachable from `branch` is also reachable from the
 /// base branch.
 ///
@@ -473,9 +495,12 @@ fn compute_teardown_plan(
 /// against an ambient `HEAD`, never against commit-subject heuristics.
 /// Earlier regression: a bookkeeping commit on HEAD whose subject matched
 /// `evolve(<mol>): step N/M` fooled a subject-parsing check.
-fn is_branch_merged(repo_root: &Path, branch: &str) -> bool {
-    let base = resolve_base_branch(repo_root);
-    branch_is_ancestor_of(repo_root, branch, &base)
+/// `base` is the molecule's resolved integration base — see
+/// [`resolve_base_branch_for`]. It is a parameter, not a re-resolution, so
+/// every probe in one `cs done` run judges ancestry against the *same* trunk
+/// the merge will target.
+fn is_branch_merged(repo_root: &Path, branch: &str, base: &str) -> bool {
+    branch_is_ancestor_of(repo_root, branch, base)
 }
 
 /// Enforce the invariant `archived ⇒ status.is_terminal()` at the writer.
@@ -638,56 +663,21 @@ fn unmerged_work_remains(repo_root: &Path, branch: &str, base: &str) -> bool {
     branch_exists(repo_root, branch) && !branch_is_empty_relative_to(repo_root, branch, base)
 }
 
-/// Resolve the base branch that the worker's branch is supposed to merge
-/// back into.
+/// Resolve the base branch for a molecule that may carry its own.
 ///
-/// Resolution order (first that works wins):
+/// Full precedence, highest first:
 ///
-/// 1. The `COSMON_BASE_BRANCH` environment variable (explicit operator
-///    override, primarily for tests and non-`main` repos).
-/// 2. `git symbolic-ref refs/remotes/origin/HEAD` stripped of the
-///    `refs/remotes/origin/` prefix — the default branch advertised by
-///    the remote. Gracefully skipped if no `origin` remote exists.
-/// 3. The literal `"main"` as last-resort default — matches the cosmon
-///    convention (`cs tackle` branches from `main` when no blocker
-///    branch is available, see `tackle.rs`).
+/// 1. `persisted` — the molecule's `base_branch`, stamped by
+///    `cs tackle --base <branch>`.
+/// 2. `COSMON_BASE_BRANCH`.
+/// 3. `origin/HEAD`.
+/// 4. `"main"`.
 ///
-/// Returns the branch *name*, not a full ref — callers concatenate it with
-/// `refs/heads/` or pass it directly to `git merge-base --is-ancestor`
-/// which resolves it as a commitish.
-fn resolve_base_branch(repo_root: &Path) -> String {
-    if let Ok(explicit) = std::env::var("COSMON_BASE_BRANCH") {
-        if !explicit.trim().is_empty() {
-            return explicit.trim().to_owned();
-        }
-    }
-
-    let symref = Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "symbolic-ref",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ])
-        .output();
-    if let Ok(o) = symref {
-        if o.status.success() {
-            let raw = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            // `symbolic-ref --short` already trims `refs/remotes/` — result
-            // is e.g. `origin/main`. Strip the remote prefix to get the
-            // local branch name.
-            if let Some(stripped) = raw.strip_prefix("origin/") {
-                if !stripped.is_empty() {
-                    return stripped.to_owned();
-                }
-            } else if !raw.is_empty() {
-                return raw;
-            }
-        }
-    }
-
-    "main".to_owned()
+/// A molecule with no persisted base (every legacy molecule, and every
+/// molecule tackled without `--base`) resolves through the ambient chain
+/// alone — the backward-compatibility contract.
+fn resolve_base_branch_for(repo_root: &Path, persisted: Option<&str>) -> String {
+    cosmon_cli::base_branch::resolve(repo_root, persisted)
 }
 
 /// Verify that the branch tip is an ancestor of the configured *base*
@@ -710,12 +700,12 @@ fn resolve_base_branch(repo_root: &Path) -> String {
 ///   and had to be recovered with `git fsck --lost-found`.
 ///
 /// The fix: compare against the base branch (resolved via
-/// [`resolve_base_branch`]). When the merge landed on the wrong
+/// [`resolve_base_branch_for`], and passed in so one `cs done` run judges
+/// every probe against the same trunk). When the merge landed on the wrong
 /// branch, `base..branch` is non-empty → false → caller surfaces a
 /// typed error instead of a silent success.
-fn verify_merge(repo_root: &Path, branch: &str) -> bool {
-    let base = resolve_base_branch(repo_root);
-    branch_is_ancestor_of(repo_root, branch, &base)
+fn verify_merge(repo_root: &Path, branch: &str, base: &str) -> bool {
+    branch_is_ancestor_of(repo_root, branch, base)
 }
 
 /// Read the current branch name at `repo_root` (e.g. `"main"`).
@@ -1689,7 +1679,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             let reclaimed = if already_merged {
                 find_repo_root().map_or_else(
                     |_| Vec::new(),
-                    |root| reclaim_merged_git_artifacts(&root, &mol_id),
+                    |root| reclaim_merged_git_artifacts(&root, &mol_id, mol.base_branch.as_deref()),
                 )
             } else {
                 Vec::new()
@@ -1737,6 +1727,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             mol.status.is_terminal(),
             &socket,
             &session_name,
+            mol.base_branch.as_deref(),
         )?;
         report_plan(ctx, &plan);
         return Ok(());
@@ -1799,7 +1790,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     empty by default (cosmon is internal; the operator identity is
     //     legitimate here), so this is a zero-cost return for every project
     //     that does not configure the guard.
-    let base_branch = resolve_base_branch(&repo_root);
+    // Resolved ONCE for the whole teardown, molecule-first (task-20260725-61fa):
+    // the base persisted by `cs tackle --base` outranks `COSMON_BASE_BRANCH`,
+    // `origin/HEAD` and the `main` default. Every guard, probe and merge below
+    // reads this binding rather than re-resolving, so they cannot disagree —
+    // and a `cs done` fired from a tmux hook with a frozen environment still
+    // targets the trunk the molecule was cut from.
+    let base_branch = resolve_base_branch_for(&repo_root, mol.base_branch.as_deref());
 
     // 1b'. Range non-emptiness precondition (delib-20260717-194b, F5 / adversary
     //      A6). Every range-scoped gate below scans `<base>..<branch>`. If base
@@ -1813,7 +1810,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //      zero — only a genuine, git-reported zero-but-unmerged branch aborts.
     if !args.no_merge
         && branch_exists(&repo_root, &branch_name)
-        && !is_branch_merged(&repo_root, &branch_name)
+        && !is_branch_merged(&repo_root, &branch_name, &base_branch)
     {
         if let Some(0) = rev_list_count(&repo_root, &base_branch, &branch_name) {
             return Err(anyhow::anyhow!(
@@ -2060,8 +2057,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // *before* the merge so the landing is conflict-free and no manual
     // surgery is needed. Idempotent and non-fatal (see ADR-121).
     if !args.no_merge {
-        let base = resolve_base_branch(&repo_root);
-        match renumber_colliding_adrs(&worktree_path, &base) {
+        match renumber_colliding_adrs(&worktree_path, &base_branch) {
             Ok(plans) if !plans.is_empty() => {
                 for p in &plans {
                     actions.push(format!(
@@ -2158,6 +2154,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &mol_id,
             &repo_root,
             &branch_name,
+            &base_branch,
             args.strategy,
             &session_name,
             &socket,
@@ -2183,11 +2180,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // supposed to. See `classify_already_merged_label`.
                 let label = classify_already_merged_label(
                     mol.merged_at.is_some(),
-                    branch_is_empty_relative_to(
-                        &repo_root,
-                        &branch_name,
-                        &resolve_base_branch(&repo_root),
-                    ),
+                    branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch),
                 );
                 actions.push(label.to_owned());
                 merge_succeeded = true;
@@ -2534,8 +2527,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         //      deletion is a later step). An empty probe result falls back to
         //      the whole-tree scan inside `check_confidential_blocklist`, so a
         //      probe slip never silently skips a real diff.
-        let base = resolve_base_branch(&repo_root);
-        let publish_scope = git_diff_names(&repo_root, &format!("{base}...{branch_name}"));
+        let publish_scope = git_diff_names(&repo_root, &format!("{base_branch}...{branch_name}"));
         let publish_scope = (!publish_scope.is_empty()).then_some(publish_scope);
         let merged_blocklist = effective_confidential_blocklist(&cfg.confidential_blocklist);
         check_confidential_blocklist(&repo_root, &merged_blocklist, publish_scope.as_deref())?;
@@ -2551,97 +2543,144 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
 
         if let Some(ref hook_cmd) = cfg.hooks.post_merge {
-            // Trust gate (B5, RCE-by-clone): the `post_merge` hook is a
-            // repo-supplied shell string. Unlike `pre_done` it is advisory
-            // and runs *after* the merge has already landed, so an untrusted
-            // repository skips the hook with a warning rather than aborting a
-            // now-irreversible teardown.
+            // Trunk-boundary gate (task-20260725-b64f): the `post_merge` hook
+            // DEPLOYS — the canonical `just install` rebuilds and reinstalls
+            // the on-disk `cs` binary from the merged code. That is correct
+            // when the merge lands on the galaxy's trunk, but harmful when it
+            // lands on a *parked* work branch (`feat/…`): the branch may
+            // predate primitives now on the trunk, so reinstalling from it
+            // silently *rejuvenates* the operator's tool — it loses whatever
+            // the parked branch is older than. The incident that motivated
+            // this fix: a parked branch cut before `cs tackle --base` shipped
+            // reinstalled a `cs` without `--base`, and the next `cs done`
+            // resolved the wrong base and refused with `NotOnBase`.
             //
-            // `hook_ran` records whether the deploy actually executed, so the
-            // durable `PostMergeHook` witness below (task-20260720-912f) can
-            // distinguish a real deploy from a `Skipped` / `Failed` no-op —
-            // the record the runtime auto-harvest path used to lose to its
-            // `Stdio::null()` stdout.
-            let hook_ran = match cosmon_cli::trust::ensure_trusted(&repo_root) {
-                Ok(()) => match run_post_merge_hook(&repo_root, hook_cmd) {
-                    Ok(code) => {
-                        actions.push(format!("post_merge: {hook_cmd} (exit {code})"));
-                        Some(code)
-                    }
+            // We consume the base already resolved once for this run
+            // (`base_branch`, resolved at the top of the merge flow — the
+            // task-20260725-61fa primitive) rather than re-deriving it, and
+            // compare it to the galaxy's reference trunk. The trunk is NOT a
+            // hard-coded `"main"`: `reference_trunk` names it through the
+            // explicit `[project] trunk_branch` config → `origin/HEAD` → `main`
+            // chain, so `main` is only ever *assumed* when nothing else answers
+            // and the operator can pin it outright.
+            //
+            // The compile gate above is deliberately NOT bounded this way: it
+            // VERIFIES the merge result (useful on any base), whereas the hook
+            // DEPLOYS (dangerous off-trunk). Verify-everywhere / deploy-only-on-
+            // trunk is the crux of the fix. `--deploy-off-trunk` is the
+            // operator's explicit escape hatch for the rare deliberate case.
+            let trunk = cosmon_cli::base_branch::reference_trunk(
+                &repo_root,
+                cfg.project.trunk_branch.as_deref(),
+            );
+            if let Err(reason) =
+                post_merge_deploy_allowed(&base_branch, &trunk, args.deploy_off_trunk)
+            {
+                warnings.push(format!(
+                    "post_merge hook skipped ({reason}); your `cs` binary was NOT refreshed"
+                ));
+                emit_post_merge_hook_event(
+                    &events_path,
+                    &mol_id,
+                    hook_cmd,
+                    cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
+                    merge_dispatch_seq,
+                    &mut warnings,
+                );
+            } else {
+                // Trust gate (B5, RCE-by-clone): the `post_merge` hook is a
+                // repo-supplied shell string. Unlike `pre_done` it is advisory
+                // and runs *after* the merge has already landed, so an untrusted
+                // repository skips the hook with a warning rather than aborting a
+                // now-irreversible teardown.
+                //
+                // `hook_ran` records whether the deploy actually executed, so the
+                // durable `PostMergeHook` witness below (task-20260720-912f) can
+                // distinguish a real deploy from a `Skipped` / `Failed` no-op —
+                // the record the runtime auto-harvest path used to lose to its
+                // `Stdio::null()` stdout.
+                let hook_ran = match cosmon_cli::trust::ensure_trusted(&repo_root) {
+                    Ok(()) => match run_post_merge_hook(&repo_root, hook_cmd) {
+                        Ok(code) => {
+                            actions.push(format!("post_merge: {hook_cmd} (exit {code})"));
+                            Some(code)
+                        }
+                        Err(e) => {
+                            let reason = e.to_string();
+                            warnings.push(format!("post_merge hook failed: {reason}"));
+                            emit_post_merge_hook_event(
+                                &events_path,
+                                &mol_id,
+                                hook_cmd,
+                                cosmon_core::event_v2::PostMergeHookResult::Failed { reason },
+                                merge_dispatch_seq,
+                                &mut warnings,
+                            );
+                            None
+                        }
+                    },
                     Err(e) => {
-                        let reason = e.to_string();
-                        warnings.push(format!("post_merge hook failed: {reason}"));
+                        let reason = format!("untrusted repo: {e}");
+                        warnings.push(format!("post_merge hook skipped ({reason})"));
                         emit_post_merge_hook_event(
                             &events_path,
                             &mol_id,
                             hook_cmd,
-                            cosmon_core::event_v2::PostMergeHookResult::Failed { reason },
+                            cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
                             merge_dispatch_seq,
                             &mut warnings,
                         );
                         None
                     }
-                },
-                Err(e) => {
-                    let reason = format!("untrusted repo: {e}");
-                    warnings.push(format!("post_merge hook skipped ({reason})"));
+                };
+                // Deploy-hygiene self-check (task-20260607-3ad4): the post_merge
+                // hook deploys to exactly one PATH target, but stale `cs` copies
+                // elsewhere on PATH drift silently and can shadow the fresh build.
+                // Warn loudly when multiplicity is detected — never auto-remove.
+                if let Some(lines) = format_cs_multiplicity_warning(&detect_cs_path_multiplicity())
+                {
+                    for line in lines {
+                        warnings.push(line);
+                    }
+                }
+                // Deploy verification (task-20260607-1403): make the deploy
+                // *verifiable*, not merely *attempted*. The hook above may have
+                // exited 0 yet silently no-op'd (wrong cwd, swallowed failure,
+                // cargo seeing nothing to rebuild). Ask the freshly-installed
+                // binary which commit it was built from and assert it matches
+                // the just-merged HEAD; warn loudly on divergence, never
+                // silently succeed. Sibling guard to the multiplicity check.
+                let deploy = verify_deploy(&repo_root);
+                let (note, warn_lines) = format_deploy_verification(&deploy);
+                if let Some(note) = note {
+                    actions.push(note);
+                }
+                if let Some(lines) = warn_lines {
+                    for line in lines {
+                        warnings.push(line);
+                    }
+                }
+                // Durable, harvest-path-independent witness (task-20260720-912f).
+                // When the hook actually ran, fold the deploy-verification verdict
+                // into the same record so `events.jsonl` answers "did the deploy
+                // refresh the binary?" without replaying stdout the runtime threw
+                // away. The `Skipped` / `Failed` cases already emitted their own
+                // witness above (before this verification, which is meaningless for
+                // a deploy that never happened).
+                if let Some(exit_code) = hook_ran {
                     emit_post_merge_hook_event(
                         &events_path,
                         &mol_id,
                         hook_cmd,
-                        cosmon_core::event_v2::PostMergeHookResult::Skipped { reason },
+                        cosmon_core::event_v2::PostMergeHookResult::Ran {
+                            exit_code,
+                            deploy_verified: matches!(deploy, DeployVerification::Match { .. }),
+                        },
                         merge_dispatch_seq,
                         &mut warnings,
                     );
-                    None
                 }
-            };
-            // Deploy-hygiene self-check (task-20260607-3ad4): the post_merge
-            // hook deploys to exactly one PATH target, but stale `cs` copies
-            // elsewhere on PATH drift silently and can shadow the fresh build.
-            // Warn loudly when multiplicity is detected — never auto-remove.
-            if let Some(lines) = format_cs_multiplicity_warning(&detect_cs_path_multiplicity()) {
-                for line in lines {
-                    warnings.push(line);
-                }
-            }
-            // Deploy verification (task-20260607-1403): make the deploy
-            // *verifiable*, not merely *attempted*. The hook above may have
-            // exited 0 yet silently no-op'd (wrong cwd, swallowed failure,
-            // cargo seeing nothing to rebuild). Ask the freshly-installed
-            // binary which commit it was built from and assert it matches
-            // the just-merged HEAD; warn loudly on divergence, never
-            // silently succeed. Sibling guard to the multiplicity check.
-            let deploy = verify_deploy(&repo_root);
-            let (note, warn_lines) = format_deploy_verification(&deploy);
-            if let Some(note) = note {
-                actions.push(note);
-            }
-            if let Some(lines) = warn_lines {
-                for line in lines {
-                    warnings.push(line);
-                }
-            }
-            // Durable, harvest-path-independent witness (task-20260720-912f).
-            // When the hook actually ran, fold the deploy-verification verdict
-            // into the same record so `events.jsonl` answers "did the deploy
-            // refresh the binary?" without replaying stdout the runtime threw
-            // away. The `Skipped` / `Failed` cases already emitted their own
-            // witness above (before this verification, which is meaningless for
-            // a deploy that never happened).
-            if let Some(exit_code) = hook_ran {
-                emit_post_merge_hook_event(
-                    &events_path,
-                    &mol_id,
-                    hook_cmd,
-                    cosmon_core::event_v2::PostMergeHookResult::Ran {
-                        exit_code,
-                        deploy_verified: matches!(deploy, DeployVerification::Match { .. }),
-                    },
-                    merge_dispatch_seq,
-                    &mut warnings,
-                );
-            }
+            } // end trunk-boundary `else` (task-20260725-b64f)
         }
     }
 
@@ -2824,7 +2863,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //      lost a 491-line payload. See `decide_branch_delete`.
     //    - FIX 2: only delete when merge succeeded or --force.
     let branch_present = branch_exists(&repo_root, &branch_name);
-    let base_branch = resolve_base_branch(&repo_root);
     let branch_in_base =
         branch_present && branch_is_ancestor_of(&repo_root, &branch_name, &base_branch);
     match decide_branch_delete(
@@ -2920,8 +2958,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //    out of integration) and when a real conflict already short-circuited
     //    above (we never reach here in that case).
     if !args.no_merge {
-        let base = resolve_base_branch(&repo_root);
-        if unmerged_work_remains(&repo_root, &branch_name, &base) {
+        let base = &base_branch;
+        if unmerged_work_remains(&repo_root, &branch_name, base) {
             report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
             return Err(anyhow::anyhow!(
                 "teardown reported success but did NOT integrate the work: branch \
@@ -3020,7 +3058,11 @@ fn purge_stale_worker_for(store: &FileStore, mol: &cosmon_state::MoleculeData) -
 ///
 /// Anything unsafe or unexpected is simply left alone for the full `cs done`
 /// path to handle with its warnings and `--force` affordance.
-fn reclaim_merged_git_artifacts(repo_root: &Path, mol_id: &MoleculeId) -> Vec<String> {
+fn reclaim_merged_git_artifacts(
+    repo_root: &Path,
+    mol_id: &MoleculeId,
+    persisted_base: Option<&str>,
+) -> Vec<String> {
     let mut actions = Vec::new();
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
     let branch_name = format!("feat/{mol_id}");
@@ -3036,7 +3078,7 @@ fn reclaim_merged_git_artifacts(repo_root: &Path, mol_id: &MoleculeId) -> Vec<St
     }
 
     if branch_exists(repo_root, &branch_name) {
-        let base_branch = resolve_base_branch(repo_root);
+        let base_branch = resolve_base_branch_for(repo_root, persisted_base);
         // Ancestry is the load-bearing check, not `merged_at` — see the doc
         // comment. If the branch is not reachable from base it is the only
         // copy of the work, and deleting it here would be the 5eba wipe.
@@ -3297,6 +3339,7 @@ fn try_merge_with_escalation(
     mol_id: &MoleculeId,
     repo_root: &Path,
     branch: &str,
+    base: &str,
     strategy: MergeStrategy,
     session_name: &str,
     socket: &str,
@@ -3313,12 +3356,11 @@ fn try_merge_with_escalation(
     let mut last_conflict_files: Vec<String>;
 
     // First attempt — purely mechanical.
-    match try_merge_branch(repo_root, branch, strategy, coauthor_trailers) {
+    match try_merge_branch(repo_root, branch, base, strategy, coauthor_trailers) {
         MergeOutcome::Merged => {
-            if verify_merge(repo_root, branch) {
+            if verify_merge(repo_root, branch, base) {
                 return Ok(MergeLoopOutcome::Merged);
             }
-            let base = resolve_base_branch(repo_root);
             return Err(anyhow::anyhow!(
                 "teardown aborted: merge reported success but post-merge verification failed \
                  (branch {branch} is NOT an ancestor of base {base} after merge — \
@@ -3408,13 +3450,12 @@ fn try_merge_with_escalation(
         std::thread::sleep(std::time::Duration::from_secs(backoff_secs));
 
         // Retry the merge.
-        match try_merge_branch(repo_root, branch, strategy, coauthor_trailers) {
+        match try_merge_branch(repo_root, branch, base, strategy, coauthor_trailers) {
             MergeOutcome::Merged => {
-                if verify_merge(repo_root, branch) {
+                if verify_merge(repo_root, branch, base) {
                     record_escalation(store, mol_id, retry, "merged");
                     return Ok(MergeLoopOutcome::MergedAfterEscalation { retries: retry + 1 });
                 }
-                let base = resolve_base_branch(repo_root);
                 return Err(anyhow::anyhow!(
                     "teardown aborted: merge reported success after escalation but \
                      post-merge verification failed (branch {branch} is NOT an ancestor \
@@ -3564,6 +3605,7 @@ enum MergeOutcome {
 fn try_merge_branch(
     repo_root: &Path,
     branch: &str,
+    base: &str,
     strategy: MergeStrategy,
     coauthor_trailers: &[String],
 ) -> MergeOutcome {
@@ -3585,10 +3627,12 @@ fn try_merge_branch(
     // recovered only after `git fsck --lost-found`. Refuse cleanly
     // here — there is no recovery path that does not start with the
     // operator running `cs done` from the main checkout.
-    let base = resolve_base_branch(repo_root);
     let current = current_branch_name(repo_root).unwrap_or_else(|| "(detached HEAD)".to_owned());
     if current != base {
-        return MergeOutcome::NotOnBase { current, base };
+        return MergeOutcome::NotOnBase {
+            current,
+            base: base.to_owned(),
+        };
     }
 
     // Is it already merged? Probe topology against the *base branch*
@@ -3597,7 +3641,7 @@ fn try_merge_branch(
     // a HEAD-based probe falsely returned AlreadyMerged when `cs done` was
     // invoked outside a main-branch checkout. Bookkeeping commits that
     // share the molecule's name never qualify — only topology does.
-    if is_branch_merged(repo_root, branch) {
+    if is_branch_merged(repo_root, branch, base) {
         return MergeOutcome::AlreadyMerged;
     }
 
@@ -4291,6 +4335,34 @@ fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()>
 /// Spawns the command via `sh -c` so that shell features (pipes, `&&`,
 /// environment expansion) work as expected. Returns the exit code on
 /// success, or an error if the command could not be spawned.
+/// Decide whether the `post_merge` deploy hook may run for this harvest.
+///
+/// The hook *deploys* (rebuilds and reinstalls the on-disk `cs` binary), so it
+/// is bounded to the galaxy's reference trunk: it runs only when the resolved
+/// integration `base` equals the `trunk`. A harvest onto a parked work branch
+/// is refused unless the operator passes `--deploy-off-trunk`, because
+/// reinstalling from a branch older than the trunk silently rejuvenates the
+/// binary (task-20260725-b64f).
+///
+/// Returns `Ok(())` when the hook may run, or `Err(reason)` — the operator-
+/// facing explanation used both for the warning and for the durable
+/// [`PostMergeHookResult::Skipped`](cosmon_core::event_v2::PostMergeHookResult::Skipped)
+/// witness — when it must be skipped.
+fn post_merge_deploy_allowed(
+    base: &str,
+    trunk: &str,
+    deploy_off_trunk: bool,
+) -> Result<(), String> {
+    if base == trunk || deploy_off_trunk {
+        return Ok(());
+    }
+    Err(format!(
+        "merge targeted parked branch `{base}`, not the reference trunk `{trunk}`; the \
+         post_merge hook deploys and would refresh the on-disk binary from a parked (possibly \
+         older) branch — pass `--deploy-off-trunk` to deploy from a branch on purpose"
+    ))
+}
+
 fn run_post_merge_hook(repo_root: &Path, hook_cmd: &str) -> anyhow::Result<i32> {
     let output = Command::new("sh")
         .args(["-c", hook_cmd])
@@ -6182,6 +6254,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,
@@ -6282,6 +6355,7 @@ mod tests {
             propel_message: None,
             max_retries: 3,
             skip_pre_done_hook: false,
+            deploy_off_trunk: false,
         }
     }
 
@@ -6369,7 +6443,7 @@ mod tests {
                 .success()
         );
 
-        let actions = reclaim_merged_git_artifacts(repo, &mol_id);
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None);
 
         assert!(
             actions.contains(&"deleted_branch".to_owned()),
@@ -6397,7 +6471,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         // Deliberately NOT merged.
 
-        let actions = reclaim_merged_git_artifacts(repo, &mol_id);
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None);
 
         assert!(
             !actions.contains(&"deleted_branch".to_owned()),
@@ -6417,7 +6491,7 @@ mod tests {
         init_repo(repo);
 
         let mol_id = MoleculeId::new("cs-20260719-non1").unwrap();
-        assert!(reclaim_merged_git_artifacts(repo, &mol_id).is_empty());
+        assert!(reclaim_merged_git_artifacts(repo, &mol_id, None).is_empty());
     }
 
     #[test]
@@ -7401,7 +7475,7 @@ mod tests {
         // At this point main has a.txt from feat/a. feat/b cannot
         // fast-forward because main has moved. Default strategy must
         // still merge it cleanly via a merge commit.
-        let outcome = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/b", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged, got {outcome:?}"
@@ -7427,7 +7501,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         commit_file(repo, "main.txt", "main advance\n", "chore: advance main");
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::FfOnly, &[]);
         assert!(
             matches!(outcome, MergeOutcome::NotFastForward),
             "expected NotFastForward, got {outcome:?}"
@@ -7508,7 +7582,7 @@ mod tests {
         // Under the fix, `try_merge_branch` injects `LC_ALL=C` into its
         // spawned git regardless of the caller's environment, so the
         // English grep matches and classification is correct.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::FfOnly, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::FfOnly, &[]);
         assert!(
             matches!(outcome, MergeOutcome::NotFastForward),
             "expected NotFastForward under FR-locale operator, got {outcome:?}"
@@ -7535,7 +7609,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         commit_file(repo, "shared.txt", "from main\n", "edit from main");
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &[]);
         match outcome {
             MergeOutcome::Conflict(files) => {
                 assert!(
@@ -7618,7 +7692,7 @@ mod tests {
             "append from main",
         );
 
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after auto-resolution, got {outcome:?}"
@@ -7679,7 +7753,7 @@ mod tests {
         );
 
         let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
-        let outcome = try_merge_branch(repo, "feat/c", MergeStrategy::Merge, &trailers);
+        let outcome = try_merge_branch(repo, "feat/c", "main", MergeStrategy::Merge, &trailers);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after auto-resolution, got {outcome:?}"
@@ -7747,7 +7821,7 @@ mod tests {
             "append from main",
         );
 
-        let outcome = try_merge_branch(repo, "feat/d", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/d", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after auto-resolution, got {outcome:?}"
@@ -7799,7 +7873,7 @@ mod tests {
         commit_file(repo, "work.txt", "child work\n", "evolve(child): work");
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
-        let outcome = try_merge_branch(repo, &branch, MergeStrategy::Merge, &trailers);
+        let outcome = try_merge_branch(repo, &branch, "main", MergeStrategy::Merge, &trailers);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged, got {outcome:?}"
@@ -7878,7 +7952,8 @@ mod tests {
             .success());
         commit_file(repo, "work.txt", "lone work\n", "evolve: lone work");
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
-        let outcome = try_merge_branch(repo, &branch, MergeStrategy::Merge, &merge_trailers);
+        let outcome =
+            try_merge_branch(repo, &branch, "main", MergeStrategy::Merge, &merge_trailers);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged, got {outcome:?}"
@@ -7921,7 +7996,7 @@ mod tests {
             .success());
 
         // Branch is fully merged; both strategies should report it.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::AlreadyMerged),
             "expected AlreadyMerged, got {outcome:?}"
@@ -8087,14 +8162,20 @@ mod tests {
 
         // Topology-correct merged check must report false here.
         assert!(
-            !is_branch_merged(repo, "feat/task-20260419-dc10"),
+            !is_branch_merged(repo, "feat/task-20260419-dc10", "main"),
             "is_branch_merged must use topology — bookkeeping subjects on HEAD \
              must NOT cause a false positive"
         );
 
         // The full merge attempt must therefore actually merge the branch,
         // not short-circuit with AlreadyMerged.
-        let outcome = try_merge_branch(repo, "feat/task-20260419-dc10", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(
+            repo,
+            "feat/task-20260419-dc10",
+            "main",
+            MergeStrategy::Merge,
+            &[],
+        );
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged (topology probe), got {outcome:?} — \
@@ -8188,7 +8269,7 @@ mod tests {
         // The actual invariant: is_branch_merged must refuse to declare
         // already-merged when the branch is not in the base branch.
         assert!(
-            !is_branch_merged(repo, "feat/task-20260421-37c1"),
+            !is_branch_merged(repo, "feat/task-20260421-37c1", "main"),
             "strict-ancestry: is_branch_merged must compare against the \
              base branch (main), not against HEAD — otherwise an operator \
              invoking `cs done` from the worker's worktree silently drops \
@@ -8201,7 +8282,13 @@ mod tests {
         // configured base branch — strictly stronger than the original
         // contract (no false-AlreadyMerged), and on the path that would
         // have silently lost work.
-        let outcome = try_merge_branch(repo, "feat/task-20260421-37c1", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(
+            repo,
+            "feat/task-20260421-37c1",
+            "main",
+            MergeStrategy::Merge,
+            &[],
+        );
         assert!(
             !matches!(outcome, MergeOutcome::AlreadyMerged),
             "try_merge_branch must NOT report AlreadyMerged when the \
@@ -8236,7 +8323,7 @@ mod tests {
 
         // HEAD is on main, branch is fully merged — probe must say so.
         assert!(
-            is_branch_merged(repo, "feat/done-work"),
+            is_branch_merged(repo, "feat/done-work", "main"),
             "strict-ancestry: a genuinely merged branch must still be \
              reported as already merged"
         );
@@ -8247,17 +8334,74 @@ mod tests {
             .status
             .success());
         assert!(
-            is_branch_merged(repo, "feat/done-work"),
+            is_branch_merged(repo, "feat/done-work", "main"),
             "strict-ancestry: verdict must be invariant under HEAD \
              location — depends only on ancestry wrt the base branch"
         );
+    }
+
+    /// Precedence rung 1: the molecule's own base outranks every ambient
+    /// source, including a `COSMON_BASE_BRANCH` the operator exported.
+    #[test]
+    fn molecule_base_outranks_the_ambient_chain() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        assert_eq!(
+            resolve_base_branch_for(repo, Some("release/2.0")),
+            "release/2.0",
+            "a molecule that carries its own base is never overruled by the \
+             environment — that is the whole point of persisting it"
+        );
+    }
+
+    /// Backward compatibility: no persisted base ⇒ the historical chain,
+    /// which in a fresh local repo with no `origin` bottoms out at `main`.
+    #[test]
+    fn absent_molecule_base_falls_back_to_the_historical_chain() {
+        if std::env::var_os("COSMON_BASE_BRANCH").is_some() {
+            return; // the operator's own override is in scope
+        }
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        assert_eq!(resolve_base_branch_for(repo, None), "main");
+    }
+
+    /// The `NotOnBase` pre-flight is not weakened by the molecule's base —
+    /// it is *retargeted*. HEAD on `main` while the molecule belongs to
+    /// `release/2.0` must refuse, and name the molecule's base.
+    #[test]
+    fn not_on_base_guard_uses_the_molecule_base() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["branch", "release/2.0"]).status.success());
+        assert!(git(repo, &["branch", "feat/based", "release/2.0"])
+            .status
+            .success());
+
+        // HEAD is on `main` — the right trunk for a base-less molecule, the
+        // wrong one for this molecule.
+        let outcome =
+            try_merge_branch(repo, "feat/based", "release/2.0", MergeStrategy::Merge, &[]);
+
+        match outcome {
+            MergeOutcome::NotOnBase { current, base } => {
+                assert_eq!(current, "main");
+                assert_eq!(base, "release/2.0");
+            }
+            other => panic!("expected NotOnBase against the molecule base, got {other:?}"),
+        }
     }
 
     #[test]
     fn resolve_base_branch_defaults_to_main_without_origin() {
         // Last-resort default: when no `origin` remote is configured
         // (the common case in local-only test repos and fresh clones
-        // that haven't set `origin/HEAD`), `resolve_base_branch` must
+        // that haven't set `origin/HEAD`), base resolution must
         // fall back to `main` — the cosmon convention documented in
         // `architectural-invariants.md` §11.
         let tmp = TempDir::new().unwrap();
@@ -8274,9 +8418,65 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_base_branch(repo),
+            resolve_base_branch_for(repo, None),
             "main",
             "fallback must be the cosmon default branch name"
+        );
+    }
+
+    /// Reference-trunk resolution, discovery leg: with no `[project]
+    /// trunk_branch` configured, the trunk is what `origin/HEAD` advertises —
+    /// NOT a hard-coded `main`. A remote whose default branch is `trunk`
+    /// resolves to `trunk` (task-20260725-b64f).
+    #[test]
+    fn reference_trunk_discovers_origin_head_when_unconfigured() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        // Point origin/HEAD at a non-`main` default, as a remote with a
+        // `trunk` default branch would advertise after `git remote set-head`.
+        assert!(git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )
+        .status
+        .success());
+
+        assert_eq!(
+            cosmon_cli::base_branch::reference_trunk(repo, None),
+            "trunk",
+            "unconfigured trunk must follow origin/HEAD, not assume main"
+        );
+    }
+
+    /// Reference-trunk resolution, config leg beats discovery: an explicit
+    /// `trunk_branch` wins even when `origin/HEAD` advertises a different
+    /// default. The operator's declaration is authoritative.
+    #[test]
+    fn reference_trunk_config_beats_origin_head() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/trunk",
+            ],
+        )
+        .status
+        .success());
+
+        assert_eq!(
+            cosmon_cli::base_branch::reference_trunk(repo, Some("release/2.0")),
+            "release/2.0",
+            "an explicit trunk_branch must win over origin/HEAD discovery"
         );
     }
 
@@ -8286,7 +8486,13 @@ mod tests {
         let repo = tmp.path();
         init_repo(repo);
 
-        let outcome = try_merge_branch(repo, "feat/does-not-exist", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(
+            repo,
+            "feat/does-not-exist",
+            "main",
+            MergeStrategy::Merge,
+            &[],
+        );
         assert!(
             matches!(outcome, MergeOutcome::NoBranch),
             "expected NoBranch, got {outcome:?}"
@@ -8498,7 +8704,7 @@ mod tests {
         );
 
         // try_merge_branch must flush first, then merge, and report Merged.
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(outcome, MergeOutcome::Merged),
             "expected Merged after pre-merge flush, got {outcome:?}"
@@ -8972,7 +9178,7 @@ mod tests {
             .success());
 
         assert!(
-            verify_merge(repo, "feat/verify"),
+            verify_merge(repo, "feat/verify", "main"),
             "branch tip should be ancestor of HEAD after merge"
         );
     }
@@ -8990,7 +9196,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
         assert!(
-            !verify_merge(repo, "feat/unmerged"),
+            !verify_merge(repo, "feat/unmerged", "main"),
             "unmerged branch should not pass verification"
         );
     }
@@ -9065,6 +9271,51 @@ mod tests {
             repo.join(".post_merge_marker").exists(),
             "hook should run from repo root"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Trunk-boundary gate for the deploying post_merge hook
+    // (task-20260725-b64f)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn post_merge_deploy_runs_when_base_is_the_trunk() {
+        // The common case: a molecule cut from and merged back into the
+        // reference trunk deploys exactly as before this fix.
+        assert!(post_merge_deploy_allowed("main", "main", false).is_ok());
+    }
+
+    #[test]
+    fn post_merge_deploy_skips_when_base_is_a_parked_branch() {
+        // A harvest onto a parked work branch must NOT run the deploy hook,
+        // and must name why — this is the regression the fix closes (the hook
+        // used to fire unconditionally, silently rejuvenating the binary).
+        let refused = post_merge_deploy_allowed("feat/oidc-idtoken-hardening", "main", false);
+        let reason = refused.expect_err("deploy off-trunk must be refused by default");
+        assert!(
+            reason.contains("feat/oidc-idtoken-hardening") && reason.contains("main"),
+            "reason must name both the parked branch and the trunk: {reason}"
+        );
+        assert!(
+            reason.contains("--deploy-off-trunk"),
+            "reason must point at the escape hatch: {reason}"
+        );
+    }
+
+    #[test]
+    fn post_merge_deploy_override_lets_operator_deploy_off_trunk() {
+        // The explicit `--deploy-off-trunk` escape hatch restores deployment
+        // even when the merge targets a parked branch.
+        assert!(post_merge_deploy_allowed("feat/parked", "main", true).is_ok());
+    }
+
+    #[test]
+    fn post_merge_deploy_honours_a_non_main_trunk() {
+        // The trunk is not a hard-coded `"main"`: a galaxy whose reference
+        // trunk is e.g. `trunk` deploys when the base matches it, and refuses
+        // a merge into `main` treated as a parked branch there.
+        assert!(post_merge_deploy_allowed("trunk", "trunk", false).is_ok());
+        assert!(post_merge_deploy_allowed("main", "trunk", false).is_err());
     }
 
     // -----------------------------------------------------------------
@@ -9355,12 +9606,15 @@ mod tests {
         commit_file(repo, "c.txt", "c\n", "feat: c");
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
-        assert!(!is_branch_merged(repo, "feat/chk"), "not yet merged");
+        assert!(
+            !is_branch_merged(repo, "feat/chk", "main"),
+            "not yet merged"
+        );
 
         assert!(git(repo, &["merge", "--no-ff", "--no-edit", "feat/chk"])
             .status
             .success());
-        assert!(is_branch_merged(repo, "feat/chk"), "now merged");
+        assert!(is_branch_merged(repo, "feat/chk", "main"), "now merged");
     }
 
     // -----------------------------------------------------------------
@@ -9410,6 +9664,7 @@ mod tests {
             &mol.id,
             repo,
             "feat/esc-nopropel",
+            "main",
             MergeStrategy::Merge,
             "task-20260411-e001",
             "test-socket",
@@ -9488,6 +9743,7 @@ mod tests {
             &mol.id,
             repo,
             "feat/esc-clean",
+            "main",
             MergeStrategy::Merge,
             "task-20260411-e002",
             "test-socket",
@@ -9520,7 +9776,7 @@ mod tests {
             "merged file must be present on main after a clean merge"
         );
         assert!(
-            is_branch_merged(repo, "feat/esc-clean"),
+            is_branch_merged(repo, "feat/esc-clean", "main"),
             "feat branch must be an ancestor of main after a clean merge"
         );
     }
@@ -9569,6 +9825,7 @@ mod tests {
             &mol.id,
             repo,
             "feat/esc-exhaust",
+            "main",
             MergeStrategy::Merge,
             "task-20260411-e006",
             "test-socket",
@@ -9666,6 +9923,7 @@ mod tests {
             &mol.id,
             repo,
             "feat/esc-already",
+            "main",
             MergeStrategy::Merge,
             "task-20260411-e004",
             "test-socket",
@@ -9700,6 +9958,7 @@ mod tests {
             &mol.id,
             repo,
             "feat/does-not-exist",
+            "main",
             MergeStrategy::Merge,
             "task-20260411-e005",
             "test-socket",
@@ -10001,7 +10260,7 @@ mod tests {
         assert!(err.to_string().contains("creates no merge commit"));
         assert!(err.to_string().contains("--strategy merge"));
         assert_eq!(git(repo, &["rev-parse", "HEAD"]).stdout, head_before);
-        assert!(!is_branch_merged(repo, "feat/ff-attribution"));
+        assert!(!is_branch_merged(repo, "feat/ff-attribution", "main"));
     }
 
     #[test]
@@ -10113,7 +10372,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
         let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
-        let outcome = try_merge_branch(repo, "feat/pre", MergeStrategy::Merge, &trailers);
+        let outcome = try_merge_branch(repo, "feat/pre", "main", MergeStrategy::Merge, &trailers);
         assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
 
         // The worker commit was NOT rewritten: same SHA, same trailer.
@@ -10176,7 +10435,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
         let trailers = vec!["Co-Authored-By: Noogram (claude) <noreply@noogram.org>".to_owned()];
-        let outcome = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &trailers);
+        let outcome = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &trailers);
         assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
 
         // HEAD is now the merge commit — git must parse the single trailer.
@@ -10208,7 +10467,7 @@ mod tests {
         commit_file(repo, "src.rs", "fn main() {}\n", "feat: work");
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
 
-        let outcome = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(repo, "feat/b", "main", MergeStrategy::Merge, &[]);
         assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
         let body = git(repo, &["log", "-1", "--format=%B"]);
         assert!(
@@ -10324,7 +10583,7 @@ mod tests {
         // ff-only merge creates no merge commit (no trailer carrier), which is
         // exactly why author-correctness cannot depend on the merge.
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
-        let outcome = try_merge_branch(repo, "feat/ff", MergeStrategy::FfOnly, &[]);
+        let outcome = try_merge_branch(repo, "feat/ff", "main", MergeStrategy::FfOnly, &[]);
         assert!(matches!(outcome, MergeOutcome::Merged), "got {outcome:?}");
         let parents = git(repo, &["log", "-1", "--format=%P"]);
         // A ff merge leaves HEAD at the single feature-commit parent chain — the
@@ -10608,7 +10867,7 @@ mod tests {
 
         // Land branch A first (fast-forward or merge commit — both fine).
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
-        let merge_a = try_merge_branch(repo, "feat/a", MergeStrategy::Merge, &[]);
+        let merge_a = try_merge_branch(repo, "feat/a", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(merge_a, MergeOutcome::Merged),
             "A must land: {merge_a:?}"
@@ -10616,7 +10875,7 @@ mod tests {
 
         // Land branch B — without relocation this would add/add conflict on
         // `molecule/review.md`. After relocation the paths are disjoint.
-        let merge_b = try_merge_branch(repo, "feat/b", MergeStrategy::Merge, &[]);
+        let merge_b = try_merge_branch(repo, "feat/b", "main", MergeStrategy::Merge, &[]);
         assert!(
             matches!(merge_b, MergeOutcome::Merged),
             "B must land cleanly after relocation: {merge_b:?}"
@@ -11642,12 +11901,18 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         // Sanity: precondition is HEAD ≠ base.
         let head = current_branch_name(repo).unwrap();
         assert_eq!(head, "feat/pilot-elsewhere");
-        assert_ne!(head, resolve_base_branch(repo));
+        assert_ne!(head, resolve_base_branch_for(repo, None));
 
         // The merge attempt MUST refuse — and must NOT advance the
         // current branch (which would be the silent failure).
         let head_before = git(repo, &["rev-parse", "HEAD"]);
-        let outcome = try_merge_branch(repo, "feat/task-20260509-94f0", MergeStrategy::Merge, &[]);
+        let outcome = try_merge_branch(
+            repo,
+            "feat/task-20260509-94f0",
+            "main",
+            MergeStrategy::Merge,
+            &[],
+        );
         let head_after = git(repo, &["rev-parse", "HEAD"]);
 
         match outcome {
@@ -11739,7 +12004,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         // The fixed `verify_merge` must return false — the work did NOT
         // land on `main`.
         assert!(
-            !verify_merge(repo, "feat/task-20260509-94f0"),
+            !verify_merge(repo, "feat/task-20260509-94f0", "main"),
             "verify_merge must be base-relative — silent merge to wrong \
              branch must NOT pass post-merge verification"
         );
@@ -11790,7 +12055,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         .success());
 
         assert!(
-            verify_merge(repo, "feat/task-20260509-94f0"),
+            verify_merge(repo, "feat/task-20260509-94f0", "main"),
             "merges that land on base must verify clean"
         );
     }

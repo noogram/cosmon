@@ -18,7 +18,7 @@ configuration surface without reading cosmon source code.
 
 | Section | Purpose | Required |
 |---------|---------|----------|
-| `[project]` | Project identity (`project_id`) | **yes** |
+| `[project]` | Project identity (`project_id`) and reference trunk (`trunk_branch`) | **yes** |
 | `[worker]` | Worker behavior on completion | no |
 | `[surfaces]` | Auto-reconcile policy | no |
 | `[documentation]` | Doc generation toggle | no |
@@ -193,6 +193,53 @@ branch-protection, outside cosmon's teardown.
 - Ships **absent by default** — every existing project is unaffected.
 
 Origin: cosmon-ward from showroom `delib-20260701-bfdf` (torvalds D1).
+
+### `post_merge` — bounded to the reference trunk
+
+`post_merge` **deploys**: the canonical `just install` rebuilds and reinstalls
+the on-disk `cs` binary from the freshly merged code, keeping the tool in step
+with the trunk. That intent only holds when the merge lands on the galaxy's
+**reference trunk**. So `cs done` runs the hook **only when the harvest's
+resolved integration base is the trunk**; a harvest onto a *parked* work branch
+(`feat/…`) **skips** the hook with a warning naming the reason.
+
+Why the bound exists: reinstalling `cs` from a parked branch that predates a
+primitive now on the trunk silently *rejuvenates* the operator's binary — the
+older the parked branch, the further back the tool regresses. In the motivating
+incident, harvesting onto a branch cut before `cs tackle --base` shipped
+reinstalled a `cs` without `--base`, and the next `cs done` resolved the wrong
+base and refused with `NotOnBase` — a costly, invisible diagnosis
+(`task-20260725-b64f`).
+
+This bound is specific to *deploying* effects. The post-merge **compile gate**
+is deliberately **not** bounded the same way: it *verifies* the merged tree,
+which is useful on any base, whereas the hook *deploys*, which is dangerous
+off-trunk. **Verify everywhere, deploy only on the trunk.**
+
+- **Reference trunk resolution** (first answer wins): the explicit `[project]
+  trunk_branch` key → `git symbolic-ref refs/remotes/origin/HEAD` (what the
+  remote advertises) → the literal `main` (last resort, only when neither
+  answers). `main` is therefore never *assumed* while any other signal exists.
+- **Escape hatch** (human operator only): `cs done --deploy-off-trunk` runs the
+  hook even when the merge targets a parked branch — for the rare, deliberate
+  case of deploying from a branch on purpose. The default stays trunk-only.
+- The skip is **visible**: it lands both as a `cs done` warning and as a durable
+  `PostMergeHook { Skipped }` event in `events.jsonl`, so an operator (or the
+  runtime that discards stdout) can see the binary was *not* refreshed.
+
+## `[project].trunk_branch` — naming the reference trunk
+
+```toml
+[project]
+trunk_branch = "develop"
+```
+
+Optional. Names the galaxy's **reference trunk** — its principal line of
+integration — explicitly, so cosmon never has to *assume* the trunk is called
+`main`. When set it is authoritative for the deploy-bound `post_merge` hook (see
+above). Absent by default: cosmon then follows `origin/HEAD` and falls back to
+`main` only when there is no remote to ask, byte-identical to a galaxy that
+predates the key.
 
 ## `config.toml` vs `CLAUDE.md` — overlap and source of truth
 

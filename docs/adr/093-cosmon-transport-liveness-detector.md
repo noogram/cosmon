@@ -1,6 +1,10 @@
 # ADR-093 — cosmon-transport liveness-driven readiness detector
 
-**Status:** proposed
+**Status:** **Superseded by [ADR-162](162-dispatch-boundary-ready-is-earned.md)
+(2026-07-25).** The pathology this ADR diagnosed is fixed on the trunk, by a
+different mechanism, at the other gate — see the *Supersession notice* below
+before reading any present-tense claim in this document. Nothing in the
+Decision section was implemented.
 **Date:** 2026-05-14
 **Decider:** Noogram
 **Parent idea:** `idea-20260514-28f6`
@@ -11,6 +15,9 @@
   — the three-models triage that motivated this molecule.
 
 **Related ADRs:**
+[ADR-162](162-dispatch-boundary-ready-is-earned.md) (**supersedes this one** —
+the dispatch-boundary invariant §8v, and the clause-by-clause resolution of
+what here was realised, rerouted, reversed or withdrawn),
 [ADR-079](079-worker-spawn-port-and-adapter-contract.md) (worker-spawn
 Port + Adapter vocabulary — this ADR refines a single Adapter's
 internal classifier without touching the Port),
@@ -26,7 +33,51 @@ seal-as-trace family).
 
 ---
 
+## Supersession notice (2026-07-25, `task-20260725-01c3`)
+
+**Superseded by [ADR-162](162-dispatch-boundary-ready-is-earned.md), which
+ratifies invariant [§8v](../architectural-invariants.md#8v-dispatch-boundary-ready-is-earned-never-inherited).**
+The clause-by-clause accounting of what carried over and what did not lives
+in ADR-162 §"Resolution of ADR-093"; the summary is:
+
+- **The diagnosis was right and stands.** A marker table patched quarterly is
+  a corridor, not a door.
+- **The Decision was not implemented.** There is no `SessionStatus::Alive`,
+  no `Aliveness`, no `classify_output_positive`, and no content-hash delta
+  anywhere in the workspace. PRs 3 and 4 of the migration plan are
+  **withdrawn**.
+- **The goal was reached at the other gate.** The shipped fix (noogram/cosmon#20)
+  makes `SessionStatus::Ready` *earned* by positive composer evidence and
+  introduces `SessionStatus::AwaitingHuman` for a pane that painted a frame
+  and is waiting on a human. `AwaitingHuman` is `Live` at the spawn
+  postcondition and `Indeterminate` at the dispatch gate, so an unrecognised
+  wizard is no longer torn down and no longer dispatched into.
+- **One clause is reversed, not rerouted.** Decision clause 6 ("the action-gate
+  markers stay") no longer holds for `Ready`, which is not a marker at all any
+  more. That reversal is why the status is *superseded* rather than *partially
+  realised*.
+- **Alternative D was already reversed** by this document's own 2026-06-02
+  postscript: the spawn window is 12 s and env-configurable
+  (`COSMON_SPAWN_POSTCONDITION_SECS`).
+- **One residual is inherited by nobody.** A pane rendering *plain text only*
+  — no box-drawing characters, no chevron, no marker — still classifies
+  `Unknown` and is torn down. The content-hash delta proposed here would have
+  called it alive. ADR-162 records this as a known open case rather than
+  claiming coverage; it wants fresh evidence, not a revival on the strength of
+  this paragraph.
+
+**Read the Context section below as a historical statement of 2026-05-14.**
+Its claim that an unrecognised wizard "returns `SessionStatus::Unknown`" and is
+"torn down" with the diagnostic *"session never produced live-claude output"*
+was true then and is **no longer true** of the trunk.
+
+---
+
 ## Context
+
+> **Historical — see the supersession notice above.** The pathology described
+> here motivated the fix that shipped; the mechanism described in *Decision*
+> did not ship.
 
 `classify_output` in [`crates/cosmon-transport/src/readiness.rs`](../../crates/cosmon-transport/src/readiness.rs)
 has been patched **three times in ~four months** to recognise a new

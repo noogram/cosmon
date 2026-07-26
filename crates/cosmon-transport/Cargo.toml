@@ -33,6 +33,17 @@ cosmon-core = { workspace = true, features = ["test-harness"] }
 nix.workspace = true
 cosmon-state.workspace = true
 serde.workspace = true
+# `serde_json` reads and rewrites Claude Code's own `.claude.json` config from
+# `claude_trust`: the two startup-consent flags an unattended worker cannot
+# answer interactively live there, and the file must be merged (not
+# overwritten) because it also holds the operator's account and MCP state.
+serde_json.workspace = true
+# `sha2` reproduces the SHA-256 config-dir digest Claude Code hashes into its
+# per-account keychain service name (`claude_login`). The credential-presence
+# preflight must probe the *same* item name the worker will read, and the
+# derivation was verified against a live keychain item — a different hash would
+# report "absent" for a provisioned worker and refuse a working dispatch.
+sha2.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 toml_edit.workspace = true

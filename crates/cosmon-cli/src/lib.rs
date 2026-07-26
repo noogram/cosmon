@@ -37,6 +37,11 @@ pub mod trust;
 
 pub mod adr;
 
+/// Resolution of a molecule's integration base branch — the single place that
+/// answers "which trunk does this molecule's work belong to?" for both the
+/// branch cut (`cs tackle`) and the harvest (`cs done`).
+pub mod base_branch;
+
 /// Shell-side seams for the seal-verification contract (ADR-140 D4, N4):
 /// a real TLC runner and a filesystem verdict cache. The pure decision logic
 /// lives in [`cosmon_core::spore::seal`]; `cs spore run` (N5) wires these in.

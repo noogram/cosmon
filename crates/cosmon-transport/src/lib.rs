@@ -24,6 +24,8 @@
 pub mod aider;
 pub mod beads;
 pub mod claude;
+pub mod claude_login;
+pub mod claude_trust;
 pub mod codex;
 pub mod command_runner;
 pub mod demote_provisioning;
@@ -33,6 +35,7 @@ pub mod mock;
 pub mod opencode;
 pub mod presence_sensor;
 pub mod readiness;
+pub mod readiness_trace;
 pub mod registry;
 pub mod spawn;
 pub mod tmux;

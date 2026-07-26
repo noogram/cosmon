@@ -51,13 +51,19 @@
 //!    login in that home. Copying root's credentials is one option; mounting
 //!    the target uid's own is the better one, and is an operator decision, not
 //!    a cosmon default.
-//! 3. **Ownership transfer of what the worker writes.** `cs tackle` as root
-//!    creates the worktree and `.cosmon/state/` root-owned; the demoted worker
-//!    must own (or be able to write) both, or its own `cs evolve` /
-//!    `cs complete` fail. `--add-dir` cannot help — it is a Claude
-//!    authorization grant, not an OS `chown`.
+//! 3. ~~**Ownership transfer of what the worker writes.**~~ **Landed** (issue
+//!    #20 worktree-ownership catch-22). `cs tackle` as root creates the
+//!    worktree and `.cosmon/state/` root-owned, and the demoted worker must own
+//!    both or its own `cs evolve` / `cs complete` fail — `--add-dir` cannot
+//!    help, it is a Claude authorization grant, not an OS `chown`. The demote
+//!    path now performs that `chown` itself, between worktree creation and the
+//!    spawn, in `cosmon_transport::demote_provisioning::provision_and_decide_root_spawn`
+//!    (named, not linked: the domain core does not depend on the transport).
+//!    The check below still runs **after** the chown and still refuses when it
+//!    did not take: ordering was the bug, the guard was not.
 //!
-//! Until those land, a root dispatcher on an unprovisioned host refuses with
+//! Until the remaining two land, a root dispatcher on an unprovisioned host
+//! refuses with
 //! [`RootRefusalReason::UnprovisionedTarget`] naming the path and the remedy.
 //! That is strictly better than the pre-A3 behaviour (start, look live, wedge
 //! on `EACCES`), and strictly less than a working root-container path.
@@ -137,8 +143,22 @@ impl DemoteResource {
                 "point CLAUDE_CONFIG_DIR at a directory the uid owns (and set \
                  HOME accordingly), or run cs as that uid"
             }
-            DemoteResource::Worktree => "chown the worktree to the uid before tackling",
-            DemoteResource::StateDir => "chown the .cosmon state dir to the uid",
+            // NOT "chown it before tackling": `cs tackle` is what CREATES the
+            // worktree, so for a freshly nucleated molecule that advice is
+            // structurally impossible to follow (issue #20 catch-22). The
+            // demote path now chowns both paths itself, so a refusal here means
+            // the chown did not take.
+            DemoteResource::Worktree => {
+                "cosmon chowns the worktree to the uid on the demote path, so \
+                 this one resisted it — check for a read-only mount, an ACL, a \
+                 parent directory the uid cannot search, or a uid that does not \
+                 exist on the host"
+            }
+            DemoteResource::StateDir => {
+                "cosmon chowns the declared .cosmon state dirs to the uid on the \
+                 demote path, so this one resisted it — check for a read-only \
+                 mount, an ACL, or a parent directory the uid cannot search"
+            }
         }
     }
 }
@@ -311,11 +331,13 @@ where
 /// error nobody is holding. This function converts that into a refusal the
 /// operator can read, naming the uid, the path, and the gesture that fixes it.
 ///
-/// **This is detection, not provisioning.** Cosmon still does not create the
-/// demoted identity's config home or chown its worktree; it now declines
-/// loudly instead of starting a worker that cannot finish. Full provisioning
-/// (a `--reset-env`-style env rewrite plus ownership transfer on the demote
-/// path) is the named follow-up.
+/// **This is detection, not provisioning — and it runs *after* whatever
+/// provisioning the caller performed.** Ownership transfer of the worktree and
+/// the state dirs now happens on the demote path before these checks are
+/// computed (issue #20); this function is what still refuses when that transfer
+/// did not take. Cosmon still does not create the demoted identity's config
+/// home, so a `ConfigHome` refusal remains a pure operator remedy. Ordering was
+/// the bug the caller fixed; the guard below is deliberately unchanged.
 ///
 /// Non-demote decisions pass through untouched, and an empty `checks` slice is
 /// a no-op — a caller that cannot probe is not thereby refused.

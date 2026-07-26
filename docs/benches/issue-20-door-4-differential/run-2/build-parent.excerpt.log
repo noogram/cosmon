@@ -1,0 +1,14 @@
+#1 DONE 0.0s
+#2 DONE 0.6s
+#3 DONE 0.6s
+#4 DONE 0.0s
+#5 [stage-1 1/8] FROM docker.io/library/rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
+#5 resolve docker.io/library/rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa 0.0s done
+#5 DONE 0.0s
+#6 [builder  1/14] FROM docker.io/library/rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0
+#6 resolve docker.io/library/rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 0.0s done
+#6 DONE 0.0s
+#7 DONE 0.2s
+#26 [builder 14/14] RUN cargo build --release -p cosmon-cli --bin cs     && strip /build/target/release/cs
+#28 naming to docker.io/library/cosmon-cwd-diff:parent done
+#28 DONE 2.3s

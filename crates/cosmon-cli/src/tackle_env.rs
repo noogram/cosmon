@@ -316,12 +316,20 @@ where
 /// `writable_roots` lists directories the worker must be allowed to **write**
 /// beyond its worktree cwd — in practice the main repo's out-of-worktree
 /// `.cosmon/` (which holds `state/`, the fleet lock, and `events.jsonl` the
-/// worker writes on `cs evolve` / `cs complete`). The interactive default
-/// `cs tackle --adapter claude` path runs the TUI under a permission mode
-/// whose `acceptEdits` only auto-accepts edits **inside** the cwd, so an
-/// out-of-worktree write to the molecule state dir trips a permission prompt
-/// an unattended worker cannot answer — the root-container hang Jesse Thaler
-/// reported. Each root is declared writable via Claude Code's first-class
+/// worker writes on `cs evolve` / `cs complete`). Under `acceptEdits` only
+/// writes **inside** the cwd auto-accept, so an out-of-worktree write to the
+/// molecule state dir trips a permission prompt an unattended worker cannot
+/// answer — the container hang Jesse Thaler reported.
+///
+/// `acceptEdits` is reached by `cs thaw` and the patrol respawn backstop, which
+/// map a worker's `Clearance::Write` onto it; the interactive `cs tackle
+/// --adapter claude` path runs under `bypassPermissions`
+/// (`cs tackle`'s own `default_permission_mode`) unless the operator passes
+/// `--permission-mode`. An earlier revision of this comment said `tackle` itself
+/// ran under `acceptEdits`; it never did, and the claim was quoted back to us as
+/// evidence in issue #20. The grant is emitted for **every** mode anyway (see
+/// below), so the fix does not depend on which of them a given path picks.
+/// Each root is declared writable via Claude Code's first-class
 /// `--add-dir <DIR>` flag (empirically confirmed 2026-07-23 as the fix), plus
 /// a `--allowedTools Bash Edit Write` grant for the Bash prompt class. This
 /// mirrors the codex adapter's `--add-dir` fix (`build_codex_command`).

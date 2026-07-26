@@ -26,7 +26,28 @@ use std::process::Command;
 fn cosmon_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.env_remove("COSMON_PARENT_MOL_ID")
-        .env_remove("COSMON_MOL_DIR");
+        .env_remove("COSMON_MOL_DIR")
+        // Ambient redirection: inheriting any of these would point the fixture
+        // at the caller's real fleet state instead of its tempdir.
+        .env_remove("COSMON_STATE_DIR")
+        .env_remove("COSMON_CONFIG")
+        .env_remove("COSMON_CONFIG_HOME")
+        .env_remove("COSMON_FORMULAS_DIR");
+    cmd
+}
+
+/// `cs` with its cwd inside the test's own tempdir.
+///
+/// A subprocess inherits the test runner's cwd — under `cargo test`, a live
+/// git worktree holding someone's uncommitted work. `cs nucleate` resolves a
+/// repository from there and appends a registration hint for it to the
+/// developer's real `~/.local/share/neurion/auto-register.jsonl`; sibling
+/// verbs reach further still (see `cli.rs`'s `neutral_cwd`, and the
+/// `evolve` auto-commit it documents). Isolating the store is only half the
+/// fixture — the cwd is the other half.
+fn cosmon_bin_in(cwd: &std::path::Path) -> Command {
+    let mut cmd = cosmon_bin();
+    cmd.current_dir(cwd);
     cmd
 }
 
@@ -56,7 +77,7 @@ fn nucleate_with_cross_galaxy_blocked_by_records_link_locally() {
     // resolver returns `GalaxyUnknown` — the CLI must still record the
     // edge and exit cleanly with a warning, matching the spec's
     // "Phase 1 best-effort" mode.
-    let out = cosmon_bin()
+    let out = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "nucleate",
@@ -118,7 +139,7 @@ fn nucleate_mixes_local_and_cross_galaxy_blockers() {
     fs::write(formulas_dir.join("xg-test.formula.toml"), FORMULA_TOML).unwrap();
 
     // Step 1 — create a local blocker.
-    let upstream = cosmon_bin()
+    let upstream = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "nucleate",
@@ -142,7 +163,7 @@ fn nucleate_mixes_local_and_cross_galaxy_blockers() {
 
     // Step 2 — nucleate a child that is blocked by BOTH the local
     // upstream and a cross-galaxy reference. Both edges must land.
-    let child = cosmon_bin()
+    let child = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "nucleate",
@@ -204,7 +225,7 @@ fn deps_json_emits_cross_galaxy_arrays() {
     fs::create_dir_all(&formulas_dir).unwrap();
     fs::write(formulas_dir.join("xg-test.formula.toml"), FORMULA_TOML).unwrap();
 
-    let nucleated = cosmon_bin()
+    let nucleated = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "nucleate",
@@ -231,7 +252,7 @@ fn deps_json_emits_cross_galaxy_arrays() {
         serde_json::from_str(String::from_utf8_lossy(&nucleated.stdout).trim()).unwrap();
     let mol_id = parsed["id"].as_str().unwrap().to_owned();
 
-    let deps_out = cosmon_bin()
+    let deps_out = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "deps",
@@ -281,7 +302,7 @@ fn nucleate_rejects_malformed_cross_galaxy_ref() {
     fs::create_dir_all(&formulas_dir).unwrap();
     fs::write(formulas_dir.join("xg-test.formula.toml"), FORMULA_TOML).unwrap();
 
-    let out = cosmon_bin()
+    let out = cosmon_bin_in(tmp.path())
         .args([
             "--json",
             "nucleate",

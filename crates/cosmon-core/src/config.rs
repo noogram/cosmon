@@ -1229,6 +1229,27 @@ pub struct ProjectSection {
     /// declared tenant before routing requests in.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub noyau: Option<String>,
+
+    /// The galaxy's **reference trunk** — the branch it treats as its
+    /// principal line of integration, deploy-bound effects target.
+    ///
+    /// This is the explicit, most-authoritative answer to "what is our
+    /// trunk?". When set, it wins over remote discovery. It exists so a
+    /// galaxy never has to *assume* the trunk is called `main`: the resolver
+    /// consults, in order,
+    ///
+    /// 1. this field, when present — the operator's explicit declaration;
+    /// 2. `git symbolic-ref --short refs/remotes/origin/HEAD`, stripped of its
+    ///    `origin/` prefix — what the remote itself advertises as default;
+    /// 3. the literal `"main"` — a last resort, used only when neither of the
+    ///    above answers (e.g. a fresh local repo with no `origin`).
+    ///
+    /// The trunk governs deploy-bound post-merge effects: the `[hooks]
+    /// post_merge` hook runs only when a harvest's integration base equals the
+    /// trunk (see [`HooksConfig::post_merge`]). Leaving it unset preserves the
+    /// remote-discovery behaviour byte for byte (task-20260725-b64f).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trunk_branch: Option<String>,
 }
 
 impl ProjectConfig {
@@ -1419,6 +1440,29 @@ pub struct HooksConfig {
     /// Runs from the repository root. If the command exits non-zero, a
     /// warning is emitted but teardown continues (the merge already landed).
     /// Not set by default (backward compatible).
+    ///
+    /// # Bounded to the reference trunk
+    ///
+    /// This hook *deploys*: the canonical `just install` rebuilds and
+    /// reinstalls the on-disk `cs` binary from the freshly merged code, to
+    /// keep the tool on disk in step with the trunk. That intent only holds
+    /// when the merge lands on the galaxy's **reference trunk**. So `cs done`
+    /// runs the hook **only when the resolved integration base is the trunk**
+    /// (`origin/HEAD`, or `main` as a last resort — the same chain the base
+    /// resolver uses, so there is no hard-coded `"main"` to drift). When a
+    /// harvest merges into a *parked* work branch instead, the hook is
+    /// **skipped** with a warning, because reinstalling from a branch that
+    /// predates primitives now on the trunk would silently *rejuvenate* the
+    /// operator's binary — the older the parked branch, the further back the
+    /// tool regresses (task-20260725-b64f).
+    ///
+    /// This bound is specific to *deploying* hooks. The post-merge compile
+    /// gate is deliberately **not** bounded the same way: it *verifies* the
+    /// merged tree, which is useful on any base, whereas the hook *deploys*,
+    /// which is dangerous off-trunk. Verify-everywhere, deploy-only-on-trunk.
+    ///
+    /// The per-invocation escape hatch for the rare, deliberate case of
+    /// deploying from a parked branch is `cs done --deploy-off-trunk`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_merge: Option<String>,
 }
@@ -1975,6 +2019,48 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.energy.default_step_budget, 0);
+    }
+
+    #[test]
+    fn test_parse_trunk_branch() {
+        // An explicit `[project] trunk_branch` declaration parses into the
+        // authoritative reference-trunk name (task-20260725-b64f).
+        let config = ProjectConfig::parse(
+            r#"
+            [project]
+            trunk_branch = "develop"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.project.trunk_branch.as_deref(), Some("develop"));
+    }
+
+    #[test]
+    fn test_trunk_branch_absent_by_default() {
+        // Unset is the backward-compatible default: no declared trunk, so the
+        // resolver falls through to origin/HEAD → main.
+        let config = ProjectConfig::parse("").unwrap();
+        assert_eq!(config.project.trunk_branch, None);
+    }
+
+    #[test]
+    fn test_trunk_branch_round_trips_through_toml() {
+        // Serialize → parse preserves the declaration; the `skip_serializing_if`
+        // guard means an unset trunk emits nothing rather than a null.
+        let mut config = ProjectConfig::default();
+        config.project.trunk_branch = Some("release/2.0".to_owned());
+        let toml_str = toml::to_string(&config).unwrap();
+        let reparsed = ProjectConfig::parse(&toml_str).unwrap();
+        assert_eq!(
+            reparsed.project.trunk_branch.as_deref(),
+            Some("release/2.0")
+        );
+
+        let default_toml = toml::to_string(&ProjectConfig::default()).unwrap();
+        assert!(
+            !default_toml.contains("trunk_branch"),
+            "unset trunk_branch must not be serialized"
+        );
     }
 
     #[test]

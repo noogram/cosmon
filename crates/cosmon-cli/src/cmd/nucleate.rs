@@ -1302,6 +1302,7 @@ fn nucleate_and_persist(
         expires_at,
         expiry_policy,
         originating_branch: None,
+        base_branch: None,
         pending_step: None,
         merged_at: None,
         prompt_seal: None,

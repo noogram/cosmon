@@ -36,7 +36,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     ANTHROPIC_API_KEY="" \
     CARGO_HOME=/opt/cargo \
     RUSTUP_HOME=/opt/rustup \
-    PATH=/opt/cargo/bin:/usr/local/bin:/usr/bin:/bin
+    PATH=/opt/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 # Deterministic apt from the dated snapshot mirror. On a machine without snapshot
 # access, drop the snapshot line and pin exact package versions instead.
@@ -60,6 +60,10 @@ RUN set -eux; \
     claude --version || true
 
 # The cognitive worker runs demoted to a non-root UID even under repro-root.
+# `useradd` lives in /usr/sbin, which the ENV PATH above used to drop — the step
+# died with `useradd: not found` the first time this image was ever put through a
+# real `docker build` (G2 of issue #20, door 4). The image had been written but
+# never built; the sbin dirs are back in PATH and the layer builds.
 RUN useradd -u 10001 -m -s /bin/bash worker
 
 # The three postures are selected at RUN time by run-clean-room.sh (UID + mounts),

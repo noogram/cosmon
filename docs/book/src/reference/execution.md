@@ -14,6 +14,14 @@ EXAMPLES:
   cs tackle task-example-0001        # worktree + tmux + Claude (one node)
   cs tackle <mol> --dry-run           # print the bootstrap prompt
   cs tackle <mol> --no-worktree       # reuse current directory
+  cs tackle <mol> --base release/2.0  # cut from — and merge back to — that trunk
+
+`--base` makes the integration branch a property of the MOLECULE: the
+worker's branch is cut from it, the name is persisted in the molecule's
+state, and `cs done` merges back into it with no `COSMON_BASE_BRANCH` in
+the environment. Without `--base`, the branch is cut from the ambient
+HEAD and `cs done` falls back to COSMON_BASE_BRANCH → origin/HEAD → main,
+exactly as before.
 
 `cs tackle` is ALWAYS leaf — it spawns one worker on the named node and
 never walks the DAG. To walk a DAG of N≥1 nodes (1 = leaf, N = full
@@ -34,6 +42,9 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
 * `--fleet <FLEET>` — Fleet to use (default: molecule's fleet)
 * `--workdir <WORKDIR>` — Working directory override (default: .worktrees/{mol-id})
+* `--base <BRANCH>` — Integration base branch for this molecule (default: the ambient HEAD of the main checkout).
+
+   The worker's `feat/{mol-id}` branch is cut from this ref instead of whatever the main checkout has checked out, and the branch name is **persisted on the molecule** so `cs done` merges back into it without any `COSMON_BASE_BRANCH` in the environment. Makes the base a property of the molecule rather than of the session that launched it.
 * `--no-worktree` — Skip git worktree creation (use current directory)
 * `--dry-run` — Skip tmux session — print the prompt to stdout instead
 * `--permission-mode <PERMISSION_MODE>` — Permission mode for Claude (default: based on molecule kind)
@@ -100,6 +111,21 @@ touching state when the molecule is not `Completed` or already merged;
 behaves identically to plain `cs done` otherwise. Supersedes the
 former `cs harvest` verb (ADR-052 §D3).
 
+BASE BRANCH — the branch this merge lands on is resolved once per run,
+in this order (first that answers wins):
+
+  1. the molecule's own base, stamped by `cs tackle --base <branch>`
+  2. the COSMON_BASE_BRANCH environment variable
+  3. `git symbolic-ref refs/remotes/origin/HEAD`
+  4. the literal main
+
+Rung 1 is why a `cs done` fired from a tmux hook — whose environment
+froze when the tmux server started and never saw a later `export` —
+still merges onto the right trunk. Molecules tackled without `--base`
+resolve through rungs 2-4 exactly as they always did. `cs done` still
+refuses (NotOnBase) when HEAD is not the resolved base: git merges into
+the current HEAD, never into a branch by name.
+
 SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 
 ###### **Arguments:**
@@ -145,6 +171,11 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
 * `--skip-pre-done-hook` — Skip the blocking `[hooks] pre_done` gate for this invocation.
 
    The `pre_done` hook (when configured) runs before the merge and *aborts* teardown on a non-zero exit — the galaxy-owned Definition-of- Done gate. This flag is the human operator's kill-switch: it bypasses the gate entirely for a deliverable the operator knows is good but the script cannot see (e.g. evidence living outside the repo). Equivalent to setting the `COSMON_SKIP_PRE_DONE_HOOK` environment variable. No effect when no `pre_done` hook is configured.
+* `--deploy-off-trunk` — Run the `[hooks] post_merge` deploy hook even when this harvest merges into a parked work branch rather than the reference trunk.
+
+   By default the `post_merge` hook is **bounded to the trunk**: it fires only when the resolved integration base is the galaxy's reference trunk (`origin/HEAD`, or `main` as a last resort). The hook *deploys* — the canonical `just install` refreshes the on-disk `cs` binary — so running it after a merge into an *older* parked branch would silently rejuvenate the operator's tool, dropping whatever the parked branch predates (task-20260725-b64f). When the merge targets a parked branch the hook is skipped with a warning naming the reason.
+
+   This flag is the operator's explicit escape hatch for the rare-but- legitimate case of deploying from a parked branch on purpose. No effect when no `post_merge` hook is configured or when the merge already targets the trunk.
 
 
 

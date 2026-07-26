@@ -14,7 +14,7 @@
 //! 1. **Claude-TUI-specific layer** — [`SessionStatus`], [`classify_output`],
 //!    the `markers` string table, [`detect_status`] and [`wait_ready`].
 //!    These parse Claude Code's terminal output (`Loading` / trust prompt /
-//!    `❯` ready chevron / `⏺` tool-use / permission prompt) and auto-answer
+//!    composer / `⏺` tool-use / permission prompt) and auto-answer
 //!    the TUI's blocking dialogs. They assume TUI-typical *seconds*-scale
 //!    timeouts and a scrollback to grep. **Nothing here is wrong** — it is
 //!    simply Claude's pane signature, and it stays intact.
@@ -72,6 +72,21 @@ pub enum SessionStatus {
     Working,
     /// Claude is blocked waiting for user input (tool permission, confirmation).
     Blocked,
+    /// The pane has painted a frame and is parked on it, waiting for a human —
+    /// an onboarding menu, a consent screen, a free-text field nobody named.
+    ///
+    /// This is the closed default's *rendered* half, and it exists so the two
+    /// questions of contract C0 stay two questions. Something drew that screen,
+    /// so [`Self::liveness`] calls it [`Liveness::Live`]: the spawn
+    /// postcondition asks *"did the binary run?"* and a painted frame is the
+    /// strongest possible yes. [`ClaudeTuiProbe::await_live`] asks the other
+    /// question — *"is it accepting work?"* — and overrides this to
+    /// [`Liveness::Indeterminate`], because a screen waiting on a human is not
+    /// a worker accepting a briefing.
+    ///
+    /// Distinct from [`Self::Unknown`], which is *nothing recognisable at all*
+    /// (a blank pane, a crash log, output from something that is not the TUI).
+    AwaitingHuman,
     /// The session is alive but the output does not match any known pattern.
     Unknown,
     /// The session is not alive (tmux session doesn't exist).
@@ -87,6 +102,7 @@ impl std::fmt::Display for SessionStatus {
             Self::Ready => f.write_str("idle"),
             Self::Working => f.write_str("working"),
             Self::Blocked => f.write_str("blocked"),
+            Self::AwaitingHuman => f.write_str("awaiting-human"),
             Self::Unknown => f.write_str("unknown"),
             Self::Dead => f.write_str("dead"),
         }
@@ -97,11 +113,19 @@ impl SessionStatus {
     /// Collapse the rich Claude-TUI verdict onto the substrate-agnostic
     /// [`Liveness`] axis.
     ///
-    /// The six states that prove the process *printed something a live
+    /// The seven states that prove the process *printed something a live
     /// claude would print* — `Loading`, `TrustPrompt`, `BypassPermsPrompt`,
-    /// `Ready`, `Working`, `Blocked` — all map to [`Liveness::Live`]. `Dead`
-    /// maps to [`Liveness::Dead`]. `Unknown` (alive-but-unrecognised, or
-    /// nothing rendered yet) maps to [`Liveness::Indeterminate`].
+    /// `Ready`, `Working`, `Blocked`, `AwaitingHuman` — all map to
+    /// [`Liveness::Live`]. `Dead` maps to [`Liveness::Dead`]. `Unknown`
+    /// (nothing recognisable rendered) maps to [`Liveness::Indeterminate`].
+    ///
+    /// `AwaitingHuman` belongs on the `Live` side for the same reason a
+    /// rendered modal does, and this is contract clause C0: the *spawn
+    /// postcondition* asks whether the binary ran, and an unnamed onboarding
+    /// screen is a painted frame, therefore a yes. The refusal that shuts the
+    /// door lives one layer up, in [`ClaudeTuiProbe::await_live`] — keeping the
+    /// two questions apart is what stops a slow cold start whose first frame is
+    /// a screen nobody named from being torn down.
     ///
     /// This is the load-bearing translation between Claude's pane signature
     /// and the contract a TUI-less Adapter answers: the caller never has to
@@ -114,7 +138,8 @@ impl SessionStatus {
             | Self::Loading
             | Self::Ready
             | Self::Working
-            | Self::Blocked => Liveness::Live,
+            | Self::Blocked
+            | Self::AwaitingHuman => Liveness::Live,
             Self::Dead => Liveness::Dead,
             Self::Unknown => Liveness::Indeterminate,
         }
@@ -134,10 +159,34 @@ mod markers {
     /// to know the prompt is waiting for a `2` + Enter, not merely a passing
     /// mention of bypass mode in scrollback.
     pub const BYPASS_PERMS_ACCEPT: &str = "Yes, I accept";
-    /// Claude is ready for input.
+    /// The chevron Claude Code paints at the head of an input line.
+    ///
+    /// **This character alone proves nothing.** It is the composer's prompt
+    /// *and* the selection cursor of every menu the TUI draws — the trust
+    /// dialog, the bypass-permissions consent, the first-run theme wizard, the
+    /// login-method selector. Treating a bare sighting of it as "ready for
+    /// input" is the open default that issue #20 walked through four times;
+    /// see [`shows_composer`] for the evidence rule that replaced it.
     pub const READY_PROMPT: &str = "❯";
-    /// Alternative ready indicator.
+    /// The composer placeholder — an empty input box saying, in words, that it
+    /// is waiting for a message. Positive evidence of a work-accepting pane
+    /// **when it sits on the input line itself**; quoted in body prose it is
+    /// just a sentence about the composer (see [`shows_composer`]).
     pub const READY_TYPE: &str = "Type your message";
+    /// The permission-mode glyph Claude Code paints in the composer's footer.
+    ///
+    /// The next three constants are the composer's own footer — the status /
+    /// hint line the TUI draws directly under the input box, and *only* there.
+    /// They are **composer** evidence, not door names: they say "the input line
+    /// beside me belongs to the composer", which is precisely the co-evidence a
+    /// bare chevron lacks. Naming them does not re-open the corridor C2 shuts,
+    /// because they widen what counts as a *composer*, never what counts as a
+    /// recognised blocking screen.
+    pub const COMPOSER_MODE_GLYPH: &str = "⏵⏵";
+    /// The words of the same footer — the mode-cycling hint.
+    pub const COMPOSER_MODE_HINT: &str = "shift+tab to cycle";
+    /// The default-mode footer, shown when no permission mode is announced.
+    pub const COMPOSER_SHORTCUTS_HINT: &str = "? for shortcuts";
     /// Claude is initializing.
     pub const LOADING: &str = "Loading";
     /// Claude is actively using tools.
@@ -152,18 +201,32 @@ mod markers {
     /// Claude Code v2+ first-run theme wizard.
     ///
     /// Shown the first time `claude` runs in a fresh environment (no
-    /// `~/.claude/config.json` settings yet). The wizard contains the menu
-    /// chevron `❯`, so it must be classified BEFORE the generic
-    /// last-5-lines `❯` scan that would otherwise mis-classify it as Ready.
+    /// `~/.claude/config.json` settings yet). Naming it buys a *richer*
+    /// verdict than the closed default would give: a wizard on screen is a
+    /// cold start still in progress ([`SessionStatus::Loading`], which is
+    /// `Live` for the spawn postcondition), where an unnamed menu is only
+    /// `Unknown`. It is not what keeps the wizard out of `Ready` — that is
+    /// [`shows_composer`]'s job now.
     pub const FIRST_RUN_THEME: &str = "Choose the text style";
     /// Companion marker for the same first-run wizard banner.
     pub const FIRST_RUN_WELCOME: &str = "Let's get started";
 }
 
+/// How many trailing lines of the pane [`detect_status`] asks the backend for.
+///
+/// This is a **scrollback** window, not a screen: `TmuxBackend::capture_output`
+/// captures from the start of history and hands back the last `lines` of it, so
+/// a capture of 30 routinely reaches above the top of the visible pane and
+/// carries output from earlier frames. Everything that classifies on
+/// [`pane_tail`] is immune to that by construction; the whole-capture arms of
+/// [`classify_output`] are not, which is why they are the ones that had to earn
+/// their evidence too (see that function's `Loading` / `Working` arms).
+const CAPTURE_LINES: usize = 30;
+
 /// Inspect a session's terminal output and classify its state.
 ///
-/// Reads the last 30 lines of the session's terminal and matches against
-/// known patterns.
+/// Reads the last `CAPTURE_LINES` (30) lines of the session's terminal and
+/// matches against known patterns.
 ///
 /// # Errors
 ///
@@ -173,12 +236,29 @@ pub fn detect_status(
     worker_id: &WorkerId,
 ) -> Result<SessionStatus, TransportError> {
     if !backend.is_alive(worker_id)? {
+        crate::readiness_trace::record(
+            &crate::readiness_trace::Sample::new("capture", worker_id.as_str())
+                .status(&SessionStatus::Dead)
+                .note("is_alive said no"),
+        );
         return Ok(SessionStatus::Dead);
     }
 
-    let output = backend.capture_output(worker_id, 30)?;
+    let output = backend.capture_output(worker_id, CAPTURE_LINES)?;
+    let status = classify_output(&output);
 
-    Ok(classify_output(&output))
+    // The single most important line in the trace: the classified verdict
+    // beside the exact bytes it was computed from. Arm C's contradiction —
+    // classifier-refuses / dispatch-proceeds — cannot be resolved without
+    // knowing whether the probe was even looking at the same screen the bench
+    // captured afterwards.
+    crate::readiness_trace::record(
+        &crate::readiness_trace::Sample::new("capture", worker_id.as_str())
+            .status(&status)
+            .pane(&output),
+    );
+
+    Ok(status)
 }
 
 /// `true` when captured pane `output` shows Claude Code's bypass-permissions
@@ -194,10 +274,217 @@ pub fn is_bypass_perms_prompt(output: &str) -> bool {
     output.contains(markers::BYPASS_PERMS_WARNING) && output.contains(markers::BYPASS_PERMS_ACCEPT)
 }
 
+/// How many trailing non-empty lines count as "what the pane is showing now".
+///
+/// Anything above this is scrollback: history, not current state.
+const TAIL_LINES: usize = 5;
+
+/// The trailing `TAIL_LINES` non-empty lines of `output`, newest first.
+fn pane_tail(output: &str) -> Vec<&str> {
+    output
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(TAIL_LINES)
+        .collect()
+}
+
+/// The box-drawing characters Claude Code paints around its composer.
+const FRAME_CHARS: [char; 4] = ['│', '|', '┃', '║'];
+
+/// Strip the leading whitespace and box-drawing frame Claude Code paints
+/// around its composer, leaving the line's actual content.
+fn unframe(line: &str) -> &str {
+    line.trim().trim_start_matches(FRAME_CHARS).trim_start()
+}
+
+/// What the chevron on `line` points at, or `None` when the line carries no
+/// chevron at its head.
+///
+/// `Some("")` is the REPL's idle input line; `Some("1. Split panes")` is a
+/// menu's selection cursor; `Some("fix the failing test")` is either a composer
+/// holding unsubmitted text or a menu option that is not numbered. Which of the
+/// three it is cannot be read off this line alone — that is the whole reason
+/// [`shows_composer`] demands co-evidence.
+fn chevron_content(line: &str) -> Option<&str> {
+    unframe(line)
+        .strip_prefix(markers::READY_PROMPT)
+        .map(unframe)
+}
+
+/// The bullet glyphs this TUI draws at the head of an unnumbered menu option.
+///
+/// Deliberately excludes `-` and `*`. Those open a Markdown list at least as
+/// readily as a menu, so a composer holding an unsubmitted draft that begins
+/// with one would be read as a menu and refused — the round-1 F5
+/// over-correction, running in the other direction.
+const MENU_BULLETS: [char; 3] = ['•', '‣', '▸'];
+
+/// `true` when `rest` — the text a chevron points at — has the shape of a menu
+/// option.
+///
+/// The shapes this TUI actually draws: a decimal index of any width followed by
+/// its separator (`1. Split panes`, `10) Work offline`), a single-letter index
+/// (`a) Re-authorise now`), or a bullet (`• Decide later`). The width was the
+/// bug: keying on exactly two characters made `10.` and `a)` invisible, and each
+/// miss turned a menu cursor into "not a menu option", which is the precondition
+/// the boxed-menu escape exploited.
+fn is_menu_option_shape(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if MENU_BULLETS.contains(&first) {
+        return true;
+    }
+    if first.is_ascii_alphabetic() {
+        return chars.next().is_some_and(|c| c == '.' || c == ')');
+    }
+    if !first.is_ascii_digit() {
+        return false;
+    }
+    let after_digits = chars
+        .as_str()
+        .trim_start_matches(|c: char| c.is_ascii_digit());
+    after_digits.starts_with('.') || after_digits.starts_with(')')
+}
+
+/// `true` when the chevron on `line` is a menu's selection cursor resting on an
+/// option — `❯ 1. Split panes`, `❯ b) Work offline`, `❯ • Decide later`.
+///
+/// Keyed on menu *shape* rather than on "the chevron has content", so a
+/// composer holding a suggestion, a reworded placeholder or a localised one is
+/// not swept in with the menus.
+fn is_menu_option_line(line: &str) -> bool {
+    chevron_content(line).is_some_and(is_menu_option_shape)
+}
+
+/// `true` when `line` is the composer's own footer — the mode / shortcuts hint
+/// the TUI paints directly under the input box, and nowhere else.
+fn is_composer_footer_line(line: &str) -> bool {
+    line.contains(markers::COMPOSER_MODE_GLYPH)
+        || line.contains(markers::COMPOSER_MODE_HINT)
+        || line.contains(markers::COMPOSER_SHORTCUTS_HINT)
+}
+
+/// `true` when the pane carries **positive evidence that the composer is on
+/// screen and accepting input** — the closed default that shuts the corridor
+/// behind noogram/cosmon#20 (contract clauses C1 and C2).
+///
+/// [`SessionStatus::Ready`] is *earned* here; it is never inherited from the
+/// mere presence of a chevron. Every rule below is scoped to
+/// [`pane_tail`] — what the pane is showing **now**. Scrollback is history, and
+/// history must not certify the present: a capture that scrolled past a
+/// composer thirty lines ago says nothing about the menu on screen today.
+///
+/// Two things count as evidence, and both need an input line *plus* something
+/// that identifies it as the composer's:
+///
+/// 1. the composer placeholder [`markers::READY_TYPE`] sitting **on** a chevron
+///    line — an empty input box that says in words that it wants a message. In
+///    body prose ("Type your message to get started") the same phrase is a
+///    welcome banner talking *about* the composer, not a composer; and
+/// 2. a chevron line that is not a menu option ([`is_menu_option_line`]),
+///    standing in the same tail as the composer's own footer
+///    ([`is_composer_footer_line`]).
+///
+/// A bare chevron on its own is deliberately **not** enough. It is the shape of
+/// any empty input line, including the paste-the-authorization-code field one
+/// step behind the login-method selector — accepting it would shut one screen
+/// and re-open the corridor on the next.
+///
+/// A **box frame** is not enough either, and offering it as co-evidence is how
+/// this rule briefly opened a door of its own: this TUI boxes its modals as
+/// readily as its composer, so `│ ❯ a) Re-authorise now │` satisfied a
+/// box-frame disjunct and became `Ready`. Only the two composer-*specific*
+/// signals above survive — the placeholder and the footer, each of which says
+/// "the input line beside me belongs to the composer" in a way a frame cannot.
+///
+/// Everything else is refused, including every screen nobody has named yet.
+/// That refusal is the whole point. Claude Code's onboarding and consent
+/// screens are menus, and every menu draws `❯` as its selection cursor, so the
+/// original rule — *scan the last five lines for a chevron* — admitted any
+/// blocking screen as ready. Each door shut so far (`TRUST_PROMPT`,
+/// `BYPASS_PERMS_WARNING`, `FIRST_RUN_THEME`) was shut by adding one more name
+/// to [`markers`], and the login-method selector was simply the first screen
+/// nobody had named yet. Naming it would have shut a door and left the
+/// corridor open. Demanding evidence closes the corridor: a screen this build
+/// has never seen cannot become `Ready`, because it cannot produce, *on the
+/// frame it is painting right now*, a composer it is not showing.
+fn shows_composer(output: &str) -> bool {
+    let tail = pane_tail(output);
+
+    // (1) The placeholder ON the input line.
+    if tail
+        .iter()
+        .any(|l| chevron_content(l).is_some_and(|rest| rest.contains(markers::READY_TYPE)))
+    {
+        return true;
+    }
+
+    // (2) A non-menu input line under the composer's own footer.
+    tail.iter().any(|l| is_composer_footer_line(l))
+        && tail
+            .iter()
+            .any(|l| chevron_content(l).is_some() && !is_menu_option_line(l))
+}
+
+/// `true` when the pane's tail shows an input line that [`shows_composer`] has
+/// already refused — a menu's selection cursor resting on an option, a blocking
+/// free-text field, or a composer holding text nobody has submitted.
+///
+/// Only ever consulted *after* [`shows_composer`] has said no, so by
+/// construction whatever chevron it finds is not certified composer evidence.
+/// The three are not distinguishable from bytes, and they do not need to be:
+/// all three mean the pane is parked waiting on a human, and none is proof of a
+/// worker accepting work.
+///
+/// Its job is to stop *scrollback* from speaking over the current screen — a
+/// `⏺` left from an earlier turn must not report `Working` while a question is
+/// on screen right now. That matters in both directions: it keeps an unnamed
+/// menu out of `Working` (the corridor stays shut even when the pane has
+/// history), and it keeps a pasted-but-unsubmitted briefing out of `Working`
+/// too, which is the signal the briefing-submit confirmation loop reads as
+/// "delivered" before it stops re-pressing Enter.
+fn awaits_a_human_at_a_chevron(output: &str) -> bool {
+    pane_tail(output)
+        .iter()
+        .any(|l| chevron_content(l).is_some())
+}
+
+/// `true` when the pane's tail carries box-drawing characters — the strongest
+/// substrate-free evidence available here that *something painted a frame*.
+///
+/// Used only as the last word before [`SessionStatus::Unknown`], and only to
+/// answer the spawn postcondition's question. A login screen whose field is
+/// drawn with `>` rather than `❯` still paints its box, so
+/// [`awaits_a_human_at_a_chevron`] misses it while this does not; reading such
+/// a pane as "nothing ran" is the surface lie inverted, and it costs the
+/// operator a real diagnostic. It cannot open the dispatch gate:
+/// `AwaitingHuman` is refused by [`ClaudeTuiProbe::await_live`].
+fn pane_painted_a_frame(output: &str) -> bool {
+    pane_tail(output)
+        .iter()
+        .any(|l| l.chars().any(|c| ('\u{2500}'..='\u{257f}').contains(&c)))
+}
+
 /// Classify raw terminal output into a session status.
 ///
 /// Pure function — no I/O. Examines the last lines of output to determine
 /// which state the Claude session is in.
+///
+/// # The closed default (noogram/cosmon#20)
+///
+/// Order is load-bearing, and so is the *end* of the order. A pane parked on an
+/// input line this build cannot certify as a composer lands on
+/// [`SessionStatus::AwaitingHuman`]; a pane matching nothing at all lands on
+/// [`SessionStatus::Unknown`]. Both make [`ClaudeTuiProbe::await_live`] refuse
+/// to dispatch, and they differ where the difference matters: `AwaitingHuman`
+/// is `Live` at the spawn postcondition (something rendered), `Unknown` is
+/// `Indeterminate` there (nothing did). `Ready` is reachable only through
+/// positive evidence that the composer is on screen — the private
+/// `shows_composer` predicate, whose doc comment records why naming one more
+/// screen would not have been a fix.
 #[must_use]
 pub fn classify_output(output: &str) -> SessionStatus {
     // Check from most specific to least specific.
@@ -211,44 +498,62 @@ pub fn classify_output(output: &str) -> SessionStatus {
     // footer as any yes/no dialog, but its default-highlighted option is
     // `1. No, exit`. Treating it as `Blocked` would make `wait_ready` send a
     // bare Enter, which selects "No, exit" and kills the worker — the exact
-    // failure this detection exists to prevent (noogram/cosmon#6). It also
-    // renders the menu chevron `❯`, so it must precede the last-lines `❯`
-    // Ready scan for the same reason the first-run wizard does.
+    // failure this detection exists to prevent (noogram/cosmon#6). Naming it
+    // also earns it the `Live` verdict a rendered dialog deserves at the spawn
+    // postcondition, where the closed default would only say `Unknown`.
     if is_bypass_perms_prompt(output) {
         return SessionStatus::BypassPermsPrompt;
     }
 
     // Check for blocked state — Claude is waiting for permission/confirmation.
-    if output.contains(markers::TOOL_PERMISSION) || output.contains(markers::YES_NO_PROMPT) {
+    //
+    // Tail-scoped, for the same reason `shows_composer` is: history must not
+    // certify the present. Whole-capture, a permission question answered
+    // twenty lines ago forced `Blocked` over whatever screen the pane is
+    // painting now — and `Blocked` is the one arm that runs *before* the
+    // composer evidence rule, so the scrollback verdict won outright.
+    if pane_tail(output)
+        .iter()
+        .any(|l| l.contains(markers::TOOL_PERMISSION) || l.contains(markers::YES_NO_PROMPT))
+    {
         return SessionStatus::Blocked;
     }
 
-    // First-run wizard (Claude Code v2.1.140+) must be detected BEFORE the
-    // generic last-5-lines `❯` scan, because the wizard's menu chevron would
-    // otherwise be mis-classified as Ready and tackle's 2 s spawn
-    // postcondition would never see live-claude output.
+    // First-run wizard (Claude Code v2.1.140+). Named so a cold start caught
+    // mid-wizard reads `Loading` — which is `Live` for the spawn
+    // postcondition — rather than the `Unknown` the closed default would give
+    // any unnamed menu. It no longer has to precede a chevron scan to stay out
+    // of `Ready`; `shows_composer` refuses it on evidence.
     if output.contains(markers::FIRST_RUN_THEME) || output.contains(markers::FIRST_RUN_WELCOME) {
         return SessionStatus::Loading;
     }
 
-    // Check ready prompt FIRST in the last few lines — if the prompt ❯ is
-    // at the bottom, Claude is idle regardless of past ⏺ markers in scrollback.
-    // This fixes false "working" detection from old tool-use output.
-    let last_lines: Vec<&str> = output
-        .lines()
-        .rev()
-        .filter(|l| !l.trim().is_empty())
-        .take(5)
-        .collect();
-
-    for line in &last_lines {
-        if line.contains(markers::READY_PROMPT) || line.contains(markers::READY_TYPE) {
-            return SessionStatus::Ready;
-        }
+    // Check the composer FIRST — if the pane is showing an input box at the
+    // bottom, Claude is idle regardless of past ⏺ markers in scrollback. This
+    // fixes false "working" detection from old tool-use output.
+    //
+    // The evidence rule lives in `shows_composer`, and it is the closed
+    // default that shuts the issue-#20 corridor: a chevron pointing at a menu
+    // option is a cursor, not a prompt, so no unnamed onboarding screen can
+    // arrive here and be called `Ready`.
+    if shows_composer(output) {
+        return SessionStatus::Ready;
     }
 
-    // Only check for work indicators if we didn't find a ready prompt.
-    // This means Claude is mid-output (no ❯ yet).
+    // A pane parked at an input line that is not certified composer evidence
+    // is a pane waiting for a human. Say so *before* the scrollback checks
+    // below, so a `⏺` from an earlier turn cannot report `Working` over a
+    // screen that is asking a question right now.
+    //
+    // `AwaitingHuman`, not `Unknown`: something painted that frame, and the
+    // spawn postcondition is entitled to know it (contract C0). The refusal
+    // that shuts the door is `await_live`'s, one layer up.
+    if awaits_a_human_at_a_chevron(output) {
+        return SessionStatus::AwaitingHuman;
+    }
+
+    // Only check for work indicators if we didn't find a composer.
+    // This means Claude is mid-output (no prompt yet).
     if output.contains(markers::TOOL_USE) || output.contains(markers::THINKING) {
         return SessionStatus::Working;
     }
@@ -258,16 +563,42 @@ pub fn classify_output(output: &str) -> SessionStatus {
         return SessionStatus::Loading;
     }
 
+    // Last word before "nothing recognisable": a painted frame with no chevron
+    // in it is still a painted frame. `AwaitingHuman` rather than `Unknown` so
+    // the spawn postcondition keeps its "did the binary run?" answer — the
+    // dispatch gate refuses both alike.
+    if pane_painted_a_frame(output) {
+        return SessionStatus::AwaitingHuman;
+    }
+
     SessionStatus::Unknown
 }
+
+/// How many times the handshake re-answers one startup modal before giving up.
+///
+/// The predecessor answered each modal exactly once, latched on a `bool`. That
+/// makes a single swallowed keystroke unrecoverable — and a cold container
+/// painting its first frame is precisely where `tmux send-keys` lands before the
+/// TUI's input handler is attached. The pane then sits on the question for the
+/// rest of the window with the answer already "spent". Re-answering costs
+/// nothing when the modal is gone (the arm is only reached while it is still on
+/// screen) and is bounded so a genuinely wedged dialog cannot be hammered for
+/// the whole timeout. Belt to [`crate::claude_trust`]'s braces: with consent
+/// pre-granted the modal should never render at all.
+const MODAL_ANSWER_ATTEMPTS: u32 = 3;
 
 /// Wait for a session to reach `Ready` state, handling blocking prompts.
 ///
 /// Polls the session every `poll_interval` until it is `Ready` or the
-/// `timeout` expires. If a `TrustPrompt` is detected, automatically
-/// sends "1" + Enter to accept it and continues polling.
+/// `timeout` expires. A `TrustPrompt` is answered with Enter (option 1 is
+/// pre-highlighted) and a `BypassPermsPrompt` with `2` + Enter, each up to
+/// `MODAL_ANSWER_ATTEMPTS` times.
 ///
-/// Returns the final [`SessionStatus`] when ready or when timeout expires.
+/// Returns the final [`SessionStatus`] when ready or when timeout expires. A
+/// caller deciding whether the worker will *accept work* must not read a
+/// returned `TrustPrompt` / `BypassPermsPrompt` as success — see
+/// [`ClaudeTuiProbe::await_live`], which maps those to
+/// [`Liveness::Indeterminate`] for exactly that reason.
 ///
 /// # Errors
 ///
@@ -279,38 +610,63 @@ pub fn wait_ready(
     poll_interval: Duration,
 ) -> Result<SessionStatus, TransportError> {
     let start = Instant::now();
-    let mut trust_handled = false;
-    let mut bypass_handled = false;
+    let mut trust_answers = 0_u32;
+    let mut bypass_answers = 0_u32;
 
     while start.elapsed() < timeout {
         let status = detect_status(backend, worker_id)?;
 
         match status {
-            SessionStatus::Ready => return Ok(SessionStatus::Ready),
-            SessionStatus::Working => return Ok(SessionStatus::Working),
+            SessionStatus::Ready => {
+                crate::readiness_trace::record(
+                    &crate::readiness_trace::Sample::new("wait_ready.return", worker_id.as_str())
+                        .elapsed_ms(start.elapsed().as_millis())
+                        .status(&SessionStatus::Ready)
+                        .note("composer evidence — returned before the window closed"),
+                );
+                return Ok(SessionStatus::Ready);
+            }
+            SessionStatus::Working => {
+                crate::readiness_trace::record(
+                    &crate::readiness_trace::Sample::new("wait_ready.return", worker_id.as_str())
+                        .elapsed_ms(start.elapsed().as_millis())
+                        .status(&SessionStatus::Working)
+                        .note("work evidence — returned before the window closed"),
+                );
+                return Ok(SessionStatus::Working);
+            }
             SessionStatus::Dead => return Err(TransportError::NotFound(worker_id.clone())),
             SessionStatus::TrustPrompt => {
-                if !trust_handled {
+                if trust_answers < MODAL_ANSWER_ATTEMPTS {
                     // The trust prompt is a TUI selection menu where option 1
-                    // ("Yes, I trust this folder") is already highlighted.
-                    // Send Enter to confirm the selection, then a second Enter
-                    // after a brief pause to dismiss any follow-up prompt.
+                    // ("Yes, I trust this folder") is already highlighted, so a
+                    // bare Enter confirms it.
+                    crate::readiness_trace::record(
+                        &crate::readiness_trace::Sample::new("handshake", worker_id.as_str())
+                            .elapsed_ms(start.elapsed().as_millis())
+                            .status(&SessionStatus::TrustPrompt)
+                            .note("sending Enter to confirm the trust dialog"),
+                    );
                     send_enter(backend, worker_id)?;
-                    trust_handled = true;
+                    trust_answers += 1;
                 }
                 // Continue polling — Claude will transition to Loading then Ready.
             }
             SessionStatus::BypassPermsPrompt => {
-                if !bypass_handled {
+                if bypass_answers < MODAL_ANSWER_ATTEMPTS {
                     // Unlike the trust prompt, the default-highlighted option
                     // here is `1. No, exit` — a bare Enter would quit the
                     // worker. Select `2. Yes, I accept` explicitly by sending
                     // the digit `2` followed by Enter (send_input appends the
-                    // Enter). Idempotent by the `bypass_handled` latch: once
-                    // accepted, ~/.claude.json records it and no re-launch of
-                    // this worker shows the prompt again. (noogram/cosmon#6)
+                    // Enter).
+                    crate::readiness_trace::record(
+                        &crate::readiness_trace::Sample::new("handshake", worker_id.as_str())
+                            .elapsed_ms(start.elapsed().as_millis())
+                            .status(&SessionStatus::BypassPermsPrompt)
+                            .note("sending 2 + Enter to accept bypass permissions"),
+                    );
                     backend.send_input(worker_id, "2")?;
-                    bypass_handled = true;
+                    bypass_answers += 1;
                 }
                 // Continue polling — Claude dismisses the prompt and settles
                 // on Loading then Ready / Working.
@@ -318,11 +674,21 @@ pub fn wait_ready(
             SessionStatus::Blocked => {
                 // Session is blocked on a permission prompt.
                 // Auto-accept by sending Enter (selects the default option).
+                crate::readiness_trace::record(
+                    &crate::readiness_trace::Sample::new("handshake", worker_id.as_str())
+                        .elapsed_ms(start.elapsed().as_millis())
+                        .status(&SessionStatus::Blocked)
+                        .note("sending Enter to accept the default option"),
+                );
                 send_enter(backend, worker_id)?;
                 // Continue polling — Claude will proceed after acceptance.
             }
-            SessionStatus::Loading | SessionStatus::Unknown => {
-                // Still booting or unrecognized — keep waiting.
+            SessionStatus::Loading | SessionStatus::AwaitingHuman | SessionStatus::Unknown => {
+                // Still booting, parked on a screen nobody named, or showing
+                // nothing recognisable — keep waiting. Deliberately NOT
+                // answered: cosmon does not drive onboarding, and pressing a
+                // key into a screen it cannot read is how a briefing ended up
+                // typed into a two-option menu.
             }
         }
 
@@ -330,7 +696,21 @@ pub fn wait_ready(
     }
 
     // Timeout — return whatever state we last observed.
-    detect_status(backend, worker_id)
+    //
+    // This is the path that carries the whole issue-#20 door-4 argument, and it
+    // is why the trace names it: a status reached *by exhausting the window* is
+    // not the same claim as a status reached by evidence, and for a caller
+    // asking "is this worker accepting work?" the difference is the answer.
+    let last = detect_status(backend, worker_id);
+    if let Ok(status) = &last {
+        crate::readiness_trace::record(
+            &crate::readiness_trace::Sample::new("wait_ready.return", worker_id.as_str())
+                .elapsed_ms(start.elapsed().as_millis())
+                .status(status)
+                .note("TIMEOUT — window exhausted, returning the last observed status"),
+        );
+    }
+    last
 }
 
 // ===========================================================================
@@ -460,17 +840,38 @@ pub fn poll_until_live<P: LiveProbe + ?Sized>(
     window: Duration,
     poll_interval: Duration,
 ) -> Result<Liveness, TransportError> {
-    let deadline = Instant::now() + window;
+    let started = Instant::now();
+    let deadline = started + window;
     let mut last = Liveness::Indeterminate;
     loop {
         match probe.observe(backend, worker_id) {
-            Ok(Liveness::Live) => return Ok(Liveness::Live),
+            Ok(Liveness::Live) => {
+                crate::readiness_trace::record(
+                    &crate::readiness_trace::Sample::new(
+                        "spawn_postcondition.return",
+                        worker_id.as_str(),
+                    )
+                    .elapsed_ms(started.elapsed().as_millis())
+                    .liveness(&Liveness::Live)
+                    .note("evidence of life within the window"),
+                );
+                return Ok(Liveness::Live);
+            }
             Ok(other) => last = other,
             // A transient query failure is not evidence of death — keep
             // polling within the window (pre-refactor `.unwrap_or` shape).
             Err(_) => {}
         }
         if Instant::now() >= deadline {
+            crate::readiness_trace::record(
+                &crate::readiness_trace::Sample::new(
+                    "spawn_postcondition.return",
+                    worker_id.as_str(),
+                )
+                .elapsed_ms(started.elapsed().as_millis())
+                .liveness(&last)
+                .note("TIMEOUT — window exhausted"),
+            );
             return Ok(last);
         }
         std::thread::sleep(poll_interval);
@@ -505,11 +906,146 @@ impl LiveProbe for ClaudeTuiProbe {
         timeout: Duration,
         poll_interval: Duration,
     ) -> Result<Liveness, TransportError> {
+        Self::await_live_with_status(backend, worker_id, timeout, poll_interval)
+            .map(|(_status, liveness)| liveness)
+    }
+}
+
+/// The dispatch gate's collapse: which Claude-TUI verdicts mean *"this worker
+/// is accepting work"*.
+///
+/// An **allow-list**, and that is the whole of the issue-#20 door-4 fix.
+///
+/// # Why an allow-list
+///
+/// [`wait_ready`] has exactly two ways to return: it returns [`SessionStatus::Ready`]
+/// or [`SessionStatus::Working`] the moment it *sees* them, and it returns
+/// everything else only by running out of window. So *"did this status arrive
+/// as evidence?"* and *"is this status `Ready` or `Working`?"* have the same
+/// answer — and a gate whose question is *"is it accepting work?"* has no
+/// business saying yes to anything else.
+///
+/// This used to be a deny-list inlined in [`ClaudeTuiProbe::await_live_with_status`]:
+/// four named statuses forced to [`Liveness::Indeterminate`], everything else
+/// collapsed through [`SessionStatus::liveness`]. It read as safe and it was
+/// not, for the same reason naming one more marker was never a fix: **what is
+/// not on the list dispatches**. `Loading` was not on the list.
+///
+/// # What the bench measured
+///
+/// On the instrumented issue-#20 container run of 2026-07-25 (arm C, virgin
+/// `CLAUDE_CONFIG_DIR`), `readiness_trace` recorded the gap in two lines:
+///
+/// ```text
+/// 30155  wait_ready.return  loading  TIMEOUT — window exhausted
+///        dispatch_gate      loading  live
+/// ```
+///
+/// For the entire 30 s window the pane was Claude Code's first-run **theme
+/// wizard** — `Let's get started.` / `Choose the text style` — which
+/// [`classify_output`] deliberately calls `Loading`, because a wizard on screen
+/// genuinely is a cold start still in progress. The window closed with the
+/// wizard unanswered (cosmon does not drive onboarding), `wait_ready` handed
+/// back its last observation, and the deny-list let `Loading` through to
+/// [`Liveness::Live`]. `cs tackle` then typed an 80-line briefing into the
+/// wizard — whose keystrokes answered it and advanced the pane to the
+/// login-method selector, which is why every capture taken *after* tackle
+/// returned showed a selector the process had never once classified. That is
+/// the whole of "unit-green and bench-red at the same seam": the unit tests
+/// were reasoning about a pane the gate never saw.
+///
+/// # What it does not change
+///
+/// Contract C0 is untouched, and this is where to check it.
+/// [`SessionStatus::liveness`] still calls a rendered frame `Live`, so
+/// [`LiveProbe::observe`] and `cs tackle`'s spawn postcondition still answer
+/// *"did the binary run?"* with a yes for a slow cold start. The two questions
+/// stay two questions; only this one got its honest answer.
+///
+/// # Two deliberate shapes
+///
+/// The match is **exhaustive with no wildcard arm**. A wildcard is how the next
+/// variant would silently inherit whichever side it happened to fall on; without
+/// one, adding a [`SessionStatus`] breaks this build until someone decides, in
+/// writing, whether that screen may be dispatched into.
+///
+/// [`SessionStatus::Dead`] cannot normally reach here — `wait_ready` converts a
+/// dead session into `Err` — but its timeout path re-reads the pane, so the arm
+/// is real and must stay [`Liveness::Dead`]: the caller's diagnostic for a
+/// session that died is not the diagnostic for one that never settled.
+fn dispatch_gate_liveness(status: &SessionStatus) -> Liveness {
+    match status {
+        SessionStatus::Ready | SessionStatus::Working => Liveness::Live,
+        SessionStatus::Dead => Liveness::Dead,
+        SessionStatus::TrustPrompt
+        | SessionStatus::BypassPermsPrompt
+        | SessionStatus::Loading
+        | SessionStatus::Blocked
+        | SessionStatus::AwaitingHuman
+        | SessionStatus::Unknown => Liveness::Indeterminate,
+    }
+}
+
+impl ClaudeTuiProbe {
+    /// The same wait as [`LiveProbe::await_live`], returning the Claude-TUI
+    /// verdict *beside* the collapsed one.
+    ///
+    /// # Why this exists
+    ///
+    /// A refusal that cannot name what it saw invites the reader to invent a
+    /// cause. `cs tackle` used to print a hard-coded `(status=unknown)` in the
+    /// same sentence that went on to describe a perfectly legible consent
+    /// screen — the diagnostic contradicted itself because `await_live` had
+    /// already thrown the name away. `SessionStatus` is `Display`, and
+    /// `AwaitingHuman` renders as `awaiting-human`; the only thing missing was
+    /// a way for the caller to receive it.
+    ///
+    /// # Why it does not re-open contract C0
+    ///
+    /// C0 is the separation of two *questions* — [`LiveProbe::observe`] asks
+    /// "did the binary run?" and `await_live` asks "is it accepting work?" —
+    /// not a rule about how much vocabulary crosses the boundary. Both
+    /// questions are still answered here, by the same collapse, in one place:
+    /// the `Liveness` half of the pair is computed exactly as before, and it
+    /// remains the only value any caller branches on. The `SessionStatus` half
+    /// is diagnostic payload, printed and never matched, so no call site can
+    /// grow a second opinion about which panes may be dispatched into.
+    ///
+    /// It is an inherent method rather than a widening of [`LiveProbe`] for
+    /// the same reason: the trait is the substrate-agnostic contract that an
+    /// Aider REPL and a headless API worker also satisfy, and `SessionStatus`
+    /// is Claude pane vocabulary. Pushing it into the trait would make every
+    /// Adapter speak a language only one of them has.
+    ///
+    /// It carries no `self`: the probe is zero-sized, and the trait method
+    /// above is the one that needs a receiver.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportError`] if the session dies or cannot be queried —
+    /// same conditions as [`wait_ready`], which this delegates to.
+    pub fn await_live_with_status(
+        backend: &dyn TransportBackend,
+        worker_id: &WorkerId,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<(SessionStatus, Liveness), TransportError> {
         // `wait_ready` carries the Claude-TUI-specific handshake (it sends
         // Enter to dismiss the trust dialog and auto-accept permission
         // prompts). Mapping its rich verdict onto `Liveness` is the whole
         // job of this override.
-        Ok(wait_ready(backend, worker_id, timeout, poll_interval)?.liveness())
+        let status = wait_ready(backend, worker_id, timeout, poll_interval)?;
+        let liveness = dispatch_gate_liveness(&status);
+        // The verdict the caller will actually branch on, recorded beside the
+        // pane verdict it was collapsed from. Read against the `capture` lines
+        // above it, this line says in one place which screen the gate opened
+        // for — the observation arm C could not make from outside the process.
+        crate::readiness_trace::record(
+            &crate::readiness_trace::Sample::new("dispatch_gate", worker_id.as_str())
+                .status(&status)
+                .liveness(&liveness),
+        );
+        Ok((status, liveness))
     }
 }
 
@@ -912,14 +1448,64 @@ mod tests {
 
     #[test]
     fn test_classify_ready_prompt() {
-        let output = "some previous output\n\n❯ ";
+        // The idle REPL prompt, with the composer footer that identifies the
+        // input line beside it as the composer's.
+        let output = "some previous output\n\n  ? for shortcuts\n❯ ";
         assert_eq!(classify_output(output), SessionStatus::Ready);
     }
 
+    /// A bare chevron is the shape of **any** empty input line, so it cannot
+    /// certify a composer on its own. The paste-the-authorization-code field
+    /// one step behind the login-method selector draws exactly this, and
+    /// admitting it would shut one screen and re-open the corridor on the next.
+    #[test]
+    fn a_bare_chevron_without_composer_co_evidence_is_not_ready() {
+        let paste_code_pane = " Paste the authorization code from your browser:
+ (the code is shown after you approve the request)
+ ❯
+   Enter to submit · Esc to go back
+";
+        assert_eq!(
+            classify_output(paste_code_pane),
+            SessionStatus::AwaitingHuman,
+            "a blocking free-text field is not a composer"
+        );
+    }
+
+    /// The placeholder quoted in **body prose** is a sentence about the
+    /// composer, not a composer. This test used to assert the opposite, and a
+    /// green suite blessing it is why nothing flagged the whole-pane substring
+    /// scan it depended on.
     #[test]
     fn test_classify_ready_type_message() {
-        let output = "Welcome to Claude Code!\n\nType your message to get started.\n";
-        assert_eq!(classify_output(output), SessionStatus::Ready);
+        let banner = "Welcome to Claude Code!\n\nType your message to get started.\n";
+        assert_ne!(
+            classify_output(banner),
+            SessionStatus::Ready,
+            "a welcome banner mentioning the placeholder has no composer on it"
+        );
+
+        // On the input line, the same phrase IS the composer.
+        assert_eq!(
+            classify_output("Welcome to Claude Code!\n\n❯ Type your message\n"),
+            SessionStatus::Ready
+        );
+    }
+
+    /// Scrollback must not certify the present: a capture whose history holds
+    /// a composer says nothing about the menu on screen now.
+    #[test]
+    fn a_composer_in_scrollback_does_not_certify_a_blocking_menu() {
+        let pane = " ❯ Type your message
+  (session reconnecting…)
+
+ Your session needs to be re-authorised. Pick how to continue:
+ ❯ 1. Re-authorise now
+   2. Work offline
+   3. Quit
+   Enter to confirm
+";
+        assert_eq!(classify_output(pane), SessionStatus::AwaitingHuman);
     }
 
     #[test]
@@ -1006,6 +1592,19 @@ mod tests {
 
     /// A real Claude Code v2.x bypass-permissions acceptance prompt, captured
     /// from the reproduction inside a Debian root container (noogram/cosmon#6).
+    /// The folder-trust dialog exactly as Claude Code 2.1.220 renders it — the
+    /// pane the container worker was found parked on.
+    const TRUST_PANE: &str = r"
+ Accessing workspace: /home/cosmon-worker/proj/.worktrees/task-20260725-fa33
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ ❯ 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm · Esc to cancel
+";
+
     const BYPASS_PERMS_PANE: &str = r"
  WARNING: Claude Code running in Bypass Permissions mode
 
@@ -1103,9 +1702,16 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, MockCall::SendInput { input, .. } if input == "2"))
             .count();
-        assert_eq!(
-            accept_count, 1,
-            "expected exactly one `2` accept keystroke (idempotent handshake), got {accept_count}"
+        // The invariant is *bounded*, not *once*. The one-shot latch this
+        // replaced made a single swallowed keystroke unrecoverable (issue #20:
+        // a cold container drops the first send-keys and the pane sits on the
+        // question for the rest of the window). What must never happen is
+        // unbounded hammering for the whole timeout, so the bound is what is
+        // pinned here — with at least one answer actually sent.
+        assert!(
+            (1..=MODAL_ANSWER_ATTEMPTS as usize).contains(&accept_count),
+            "expected between 1 and {MODAL_ANSWER_ATTEMPTS} `2` accept keystrokes, got \
+             {accept_count}"
         );
         // And crucially: no bare-Enter (empty input) was sent, which would
         // have selected `1. No, exit`.
@@ -1115,6 +1721,586 @@ mod tests {
                 .any(|c| matches!(c, MockCall::SendInput { input, .. } if input.is_empty())),
             "wait_ready sent a bare Enter on the bypass prompt — would select `No, exit`"
         );
+    }
+
+    /// Issue #20, the silent half of the container hang — frozen.
+    ///
+    /// A pane parked on a startup modal for the whole readiness window used to
+    /// come back from `await_live` as `Liveness::Live`, because
+    /// `SessionStatus::TrustPrompt.liveness()` is `Live` (correctly, for the
+    /// *spawn postcondition*: a rendered dialog proves the binary ran). The
+    /// tackle caller reads that verdict as "accepting work" and immediately
+    /// types the briefing into a two-option menu. Nothing errors, nothing logs,
+    /// the molecule stays `running`, and the operator sees a healthy worker that
+    /// will never produce a token — the report's "worker waits indefinitely".
+    ///
+    /// Both modals are asserted: they reach the mapping through different
+    /// handshake arms, and the trust dialog is the one the tester actually hit.
+    #[test]
+    fn await_live_refuses_a_worker_still_parked_on_a_startup_modal() {
+        use super::LiveProbe as _;
+        use crate::mock::MockBackend;
+
+        for (label, pane) in [("trust", TRUST_PANE), ("bypass", BYPASS_PERMS_PANE)] {
+            let backend = MockBackend::new();
+            let config = cosmon_core::transport::RuntimeConfig::default();
+            let agent = cosmon_core::transport::AgentDefinition {
+                id: cosmon_core::id::AgentId::new("test-modal").unwrap(),
+                role: cosmon_core::agent::AgentRole::Implementation,
+                command: "echo".to_owned(),
+                args: vec![],
+            };
+            let worker = backend.spawn(&agent, &config).unwrap();
+            backend.set_canned_output(pane);
+
+            let verdict = ClaudeTuiProbe
+                .await_live(
+                    &backend,
+                    &worker.id,
+                    Duration::from_millis(300),
+                    Duration::from_millis(50),
+                )
+                .expect("probe queries the backend fine");
+
+            assert_eq!(
+                verdict,
+                Liveness::Indeterminate,
+                "a worker still parked on the {label} modal must not be reported Live — \
+                 that is what let tackle type the briefing into the dialog"
+            );
+        }
+    }
+
+    /// The companion property: the *postcondition* probe must keep reading a
+    /// rendered modal as `Live`. The two questions are different — "did the
+    /// binary run?" versus "is it accepting work?" — and collapsing them would
+    /// turn a slow-but-fine cold start into a torn-down spawn.
+    #[test]
+    fn observe_still_counts_a_startup_modal_as_proof_of_life() {
+        use super::LiveProbe as _;
+        use crate::mock::MockBackend;
+
+        let backend = MockBackend::new();
+        let config = cosmon_core::transport::RuntimeConfig::default();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("test-modal-observe").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "echo".to_owned(),
+            args: vec![],
+        };
+        let worker = backend.spawn(&agent, &config).unwrap();
+        backend.set_canned_output(TRUST_PANE);
+
+        assert_eq!(
+            ClaudeTuiProbe
+                .observe(&backend, &worker.id)
+                .expect("observe"),
+            Liveness::Live
+        );
+    }
+
+    /// Issue #20, door 4 — VERBATIM capture from the versioned bench, arm C:
+    /// a virgin `CLAUDE_CONFIG_DIR` with both consent keys pre-granted and a
+    /// placeholder credential present. This is evidence, not a reconstruction.
+    const LOGIN_SELECTOR_PANE: &str = r" Select login method:
+ ❯ 1. Claude account with subscription · Pro, Max, Team, or Enterprise
+   2. Anthropic Console account · API usage billing
+   3. 3rd-party platform · Amazon Bedrock, Microsoft Foundry, or Vertex AI
+";
+
+    /// Issue #20, door 4 — the screen the process ACTUALLY saw. VERBATIM from
+    /// the instrumented bench run of 2026-07-25, arm C, captured by
+    /// `readiness_trace` from inside `cs tackle`'s own readiness loop: every
+    /// one of the ~60 samples in the 30 s window classified this pane, and none
+    /// of them ever saw the login-method selector.
+    ///
+    /// The distinction is the whole finding. `LOGIN_SELECTOR_PANE` is what the
+    /// bench captured *after* tackle returned; this is what the gate decided
+    /// on. Both are real, they are different screens, and every explanation
+    /// built on the first one was reasoning about a pane the process never
+    /// classified.
+    const FIRST_RUN_THEME_WIZARD_PANE: &str = r"Welcome to Claude Code v2.1.220
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+
+  Syntax theme: Monokai Extended (ctrl+t to disable)
+";
+
+    /// An **invented** onboarding screen matching no marker in [`markers`].
+    /// Deliberately not a real Claude screen: the property under test is that
+    /// the build refuses a menu it has never seen. If a future marker ever
+    /// claims this pane, replace the pane — never the assertion.
+    const UNNAMED_MENU_PANE: &str = r" Pick a starting workspace layout:
+ ❯ 1. Split panes
+   2. Single pane
+   3. Decide later
+   Enter to confirm · Esc to go back
+";
+
+    /// The composer as the tester's container painted it — the one pane that
+    /// legitimately means "accepting work".
+    const COMPOSER_PANE: &str = r"
+  ⏵⏵ bypass permissions on (shift+tab to cycle)     Not logged in · Run /login
+ ❯ Type your message
+";
+
+    /// **The named door.** A pane parked on Claude Code's login-method
+    /// selector is a pane waiting for a human. Before the fix it classified
+    /// `Ready`, so `cs tackle` typed the briefing into a menu, exited 0, and
+    /// the molecule stayed `running` forever with nothing reporting a fault.
+    #[test]
+    fn login_method_selector_is_not_ready() {
+        assert_eq!(
+            classify_output(LOGIN_SELECTOR_PANE),
+            SessionStatus::AwaitingHuman,
+            "the login-method selector is a menu awaiting a human, not a composer"
+        );
+    }
+
+    /// **The closed default — the load-bearing one.** Shutting door 4 by
+    /// adding `Select login method` to [`markers`] would turn the test above
+    /// green and leave this one red, and the next unnamed screen would re-open
+    /// the identical door. That is precisely how it was opened three times
+    /// already (`TRUST_PROMPT`, `BYPASS_PERMS_WARNING`, `FIRST_RUN_THEME`).
+    #[test]
+    fn an_unrecognised_menu_is_not_ready() {
+        assert_eq!(
+            classify_output(UNNAMED_MENU_PANE),
+            SessionStatus::AwaitingHuman,
+            "a menu matching NO marker must not become Ready merely by drawing a chevron"
+        );
+    }
+
+    /// The other half of contract C0, for the class the fix actually changed.
+    /// The frozen harness guards C0 with the *named* trust dialog, which routes
+    /// to `TrustPrompt` and stays `Live` whatever the default does — so it
+    /// cannot see a closed default leaking into `observe`. This can.
+    #[test]
+    fn observe_still_counts_an_unnamed_rendered_screen_as_proof_of_life() {
+        use super::LiveProbe as _;
+        use crate::mock::MockBackend;
+
+        for (label, pane) in [
+            ("login-selector", LOGIN_SELECTOR_PANE),
+            ("unnamed-menu", UNNAMED_MENU_PANE),
+        ] {
+            let backend = MockBackend::new();
+            let agent = cosmon_core::transport::AgentDefinition {
+                id: cosmon_core::id::AgentId::new("observe-unnamed").unwrap(),
+                role: cosmon_core::agent::AgentRole::Implementation,
+                command: "echo".to_owned(),
+                args: vec![],
+            };
+            let worker = backend
+                .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+                .unwrap();
+            backend.set_canned_output(pane);
+
+            assert_eq!(
+                ClaudeTuiProbe.observe(&backend, &worker.id).unwrap(),
+                Liveness::Live,
+                "observe refused the rendered {label} screen — the spawn \
+                 postcondition and the dispatch gate have collapsed into one \
+                 question, and a slow cold start painting an unnamed first \
+                 frame is now a torn-down spawn"
+            );
+        }
+    }
+
+    /// The dispatch verdict for both panes — the *composed* decision
+    /// `cs tackle` actually makes, not the classifier's enum. A refactor that
+    /// renamed the enum while still dispatching would pass the two tests above
+    /// and fail this one.
+    #[test]
+    fn await_live_refuses_a_worker_parked_on_a_menu() {
+        use super::LiveProbe as _;
+        use crate::mock::MockBackend;
+
+        for (label, pane) in [
+            ("login-selector", LOGIN_SELECTOR_PANE),
+            ("unnamed-menu", UNNAMED_MENU_PANE),
+        ] {
+            let backend = MockBackend::new();
+            let agent = cosmon_core::transport::AgentDefinition {
+                id: cosmon_core::id::AgentId::new("test-menu").unwrap(),
+                role: cosmon_core::agent::AgentRole::Implementation,
+                command: "echo".to_owned(),
+                args: vec![],
+            };
+            let worker = backend
+                .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+                .unwrap();
+            backend.set_canned_output(pane);
+
+            // Guard: a worker reading `Dead` would make the assertion below
+            // pass vacuously — the harness would be broken, not the build.
+            assert_ne!(
+                ClaudeTuiProbe.observe(&backend, &worker.id).unwrap(),
+                Liveness::Dead,
+                "the {label} mock worker is not even alive"
+            );
+
+            assert_eq!(
+                ClaudeTuiProbe
+                    .await_live(
+                        &backend,
+                        &worker.id,
+                        Duration::from_millis(300),
+                        Duration::from_millis(50),
+                    )
+                    .unwrap(),
+                Liveness::Indeterminate,
+                "await_live reported Live for a pane parked on the {label} menu"
+            );
+        }
+    }
+
+    /// **The bench-red test.** Issue #20, door 4 — the one that was green at
+    /// every other layer while the container dispatched anyway.
+    ///
+    /// The pane is the first-run theme wizard, verbatim from the instrumented
+    /// arm C run, and the mock never changes it — which is exactly what the
+    /// container did for the whole 30 s window. `classify_output` calls it
+    /// `Loading` (correct: a wizard on screen IS a cold start in progress),
+    /// `wait_ready` exhausts its window and hands that `Loading` back, and the
+    /// gate used to collapse it to `Live` because `Loading` was simply not on
+    /// the deny-list. That is how an 80-line briefing got typed into an
+    /// onboarding wizard.
+    ///
+    /// If this ever goes green by someone adding a marker for the wizard,
+    /// the fix has been undone: the property under test is that a status
+    /// arriving by TIMEOUT is refused whatever it is called, not that this
+    /// particular screen is recognised.
+    #[test]
+    fn await_live_refuses_a_worker_still_on_the_first_run_wizard_when_the_window_closes() {
+        use super::LiveProbe as _;
+        use crate::mock::MockBackend;
+
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("test-wizard").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "echo".to_owned(),
+            args: vec![],
+        };
+        let worker = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap();
+        backend.set_canned_output(FIRST_RUN_THEME_WIZARD_PANE);
+
+        // The premise, asserted rather than assumed: this pane really is the
+        // `Loading` the deny-list waved through. If a future build reclassifies
+        // it, this test would otherwise keep passing for the wrong reason.
+        assert_eq!(
+            classify_output(FIRST_RUN_THEME_WIZARD_PANE),
+            SessionStatus::Loading,
+            "the wizard is a cold start in progress — that classification is not the bug"
+        );
+
+        // C0's half: the spawn postcondition must still call it alive. A
+        // refusal here would tear down every slow cold start, which is the
+        // over-correction this contract exists to prevent.
+        assert_eq!(
+            ClaudeTuiProbe.observe(&backend, &worker.id).unwrap(),
+            Liveness::Live,
+            "a painted wizard is still proof the binary ran"
+        );
+
+        // C1's half: the dispatch gate must refuse it.
+        assert_eq!(
+            ClaudeTuiProbe
+                .await_live(
+                    &backend,
+                    &worker.id,
+                    Duration::from_millis(300),
+                    Duration::from_millis(50),
+                )
+                .unwrap(),
+            Liveness::Indeterminate,
+            "await_live certified a worker parked on the first-run wizard as accepting work"
+        );
+    }
+
+    /// The gate's rule stated as a rule, not as a list of screens.
+    ///
+    /// `wait_ready` returns `Ready` / `Working` on sight and everything else
+    /// only by running out of window, so "arrived as evidence" and "is `Ready`
+    /// or `Working`" are the same set. This walks every `SessionStatus` and
+    /// pins the collapse, so a future edit that re-opens one arm — the shape
+    /// every previous door-4 regression took — fails here by name.
+    #[test]
+    fn only_ready_and_working_open_the_dispatch_gate() {
+        for (status, expected) in [
+            (SessionStatus::Ready, Liveness::Live),
+            (SessionStatus::Working, Liveness::Live),
+            (SessionStatus::Dead, Liveness::Dead),
+            (SessionStatus::Loading, Liveness::Indeterminate),
+            (SessionStatus::TrustPrompt, Liveness::Indeterminate),
+            (SessionStatus::BypassPermsPrompt, Liveness::Indeterminate),
+            (SessionStatus::Blocked, Liveness::Indeterminate),
+            (SessionStatus::AwaitingHuman, Liveness::Indeterminate),
+            (SessionStatus::Unknown, Liveness::Indeterminate),
+        ] {
+            assert_eq!(
+                dispatch_gate_liveness(&status),
+                expected,
+                "the dispatch gate changed its mind about {status}"
+            );
+        }
+    }
+
+    /// The price-of-the-fix guard: closing the default must not cost the
+    /// composer. If this goes red the build refuses every healthy worker.
+    #[test]
+    fn the_composer_is_still_ready() {
+        assert_eq!(classify_output(COMPOSER_PANE), SessionStatus::Ready);
+        // The idle REPL prompt under the composer's own footer.
+        assert_eq!(
+            classify_output("earlier output\n\n ⏵⏵ bypass permissions on\n ❯ "),
+            SessionStatus::Ready
+        );
+        // The idle REPL prompt inside the composer's box frame — boxed *and*
+        // under the footer. The box is decoration here; the footer is what
+        // certifies it, which is why the same box without a footer is refused
+        // by `a_bare_box_frame_is_not_composer_evidence` below.
+        assert_eq!(
+            classify_output("│ ❯                 │\n│ ? for shortcuts   │\n"),
+            SessionStatus::Ready
+        );
+    }
+
+    /// The mirror of the closed default. A healthy composer holding a
+    /// suggestion, a reworded placeholder or a localised one still means
+    /// "accepting work": the refusal is keyed on menu *shape*, not on "the
+    /// chevron has content". Keying it the other way buys the door with a fleet
+    /// that refuses every worker whose vendor UI string moved.
+    #[test]
+    fn a_composer_showing_a_suggestion_is_still_ready() {
+        for pane in [
+            "  ⏵⏵ bypass permissions on (shift+tab to cycle)\n ❯ Try \"fix the failing test\"\n",
+            "  ? for shortcuts\n ❯ Écris ton message\n",
+            "│ ⏵⏵ bypass permissions on │\n│ ❯ Schreib deine Nachricht │\n",
+        ] {
+            assert_eq!(
+                classify_output(pane),
+                SessionStatus::Ready,
+                "refused a healthy composer:\n{pane}"
+            );
+        }
+    }
+
+    /// The corridor this module exists to shut, re-opened once already by
+    /// offering the box frame as composer co-evidence.
+    ///
+    /// This TUI boxes its modals as readily as its composer, so a frame
+    /// certifies nothing. Each pane below is a *blocking* screen — a menu whose
+    /// options are lettered, a paste-the-authorization-code field, a bare boxed
+    /// input line — drawn exactly the way the composer is drawn, minus the
+    /// composer's own footer and placeholder. All must be refused.
+    #[test]
+    fn a_bare_box_frame_is_not_composer_evidence() {
+        for (label, pane) in [
+            ("bare boxed input line", "│ ❯                 │\n"),
+            (
+                "boxed lettered menu",
+                " How would you like to continue?\n \
+                 ╭───────────────────────────╮\n \
+                 │ ❯ a) Re-authorise now     │\n \
+                 │   b) Work offline         │\n \
+                 ╰───────────────────────────╯\n",
+            ),
+            (
+                "boxed paste-the-code field",
+                " Paste the authorization code from your browser:\n \
+                 ╭───────────────────────────╮\n \
+                 │ ❯                         │\n \
+                 ╰───────────────────────────╯\n   Enter to submit\n",
+            ),
+        ] {
+            assert_eq!(
+                classify_output(pane),
+                SessionStatus::AwaitingHuman,
+                "a box frame certified the {label} as a composer:\n{pane}"
+            );
+        }
+    }
+
+    /// [`is_menu_option_line`] used to key on exactly two characters, so `10.`,
+    /// `a)` and `• ` were all invisible to it — and an option shape it cannot
+    /// see is a menu cursor promoted to composer evidence.
+    #[test]
+    fn menu_option_shapes_wider_than_two_characters_are_still_menus() {
+        for rest in [
+            "1. Split panes",
+            "10. Decide later",
+            "a) Re-authorise",
+            "• Quit",
+        ] {
+            assert!(
+                is_menu_option_shape(rest),
+                "menu option shape not recognised: {rest}"
+            );
+        }
+        // A composer holding a draft is not a menu, whatever it starts with.
+        for rest in [
+            "",
+            "Type your message",
+            "fix the failing test",
+            "- fix the test",
+        ] {
+            assert!(
+                !is_menu_option_shape(rest),
+                "composer content misread as a menu option: {rest}"
+            );
+        }
+    }
+
+    /// Scrollback must not certify the present through the `Blocked` arm
+    /// either — it runs *before* the composer evidence rule, so a whole-capture
+    /// match there wins outright over whatever the pane is painting now.
+    #[test]
+    fn a_stale_permission_question_does_not_block_the_current_screen() {
+        let pane = " ⏺ Bash(cargo test)\n   Do you want to proceed?\n   1. Yes  2. No\n \
+                    ⏺ done\n\n Your session needs to be re-authorised. Pick how to continue:\n \
+                    ❯ 1. Re-authorise now\n   2. Work offline\n   Enter to confirm\n";
+        assert_eq!(classify_output(pane), SessionStatus::AwaitingHuman);
+    }
+
+    /// `Blocked` is `Live` for the spawn postcondition (a rendered dialog is
+    /// proof the binary ran) and `Indeterminate` at the dispatch gate (a
+    /// question that would not clear is not a worker accepting a briefing).
+    /// Without the second half, any unnamed menu wearing the boilerplate
+    /// `Esc to cancel` footer walked through the gate and the whole composer
+    /// evidence rule was never consulted.
+    #[test]
+    fn await_live_refuses_a_pane_still_blocked_when_the_window_closes() {
+        use crate::MockBackend;
+
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("blocked-pane").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "echo".to_owned(),
+            args: vec![],
+        };
+        let worker = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap();
+        backend.set_canned_output(
+            " Pick a starting workspace layout:\n ❯ 1. Split panes\n   2. Single pane\n   \
+             Enter to confirm · Esc to cancel\n",
+        );
+
+        let probe = ClaudeTuiProbe;
+        assert_eq!(
+            probe.observe(&backend, &worker.id).unwrap(),
+            Liveness::Live,
+            "the pane painted a frame — the spawn postcondition must still say Live"
+        );
+        assert_eq!(
+            probe
+                .await_live(
+                    &backend,
+                    &worker.id,
+                    Duration::from_millis(300),
+                    Duration::from_millis(50),
+                )
+                .unwrap(),
+            Liveness::Indeterminate,
+            "await_live dispatched into an unnamed menu whose footer says `Esc to cancel`"
+        );
+    }
+
+    /// The refusal a caller prints must be able to name what the probe saw.
+    /// `await_live` alone collapses `awaiting-human` to `indeterminate`, which
+    /// is why `cs tackle` used to print a hard-coded `(status=unknown)` beside
+    /// a description of a screen it had in fact recognised.
+    #[test]
+    fn await_live_with_status_keeps_the_name_of_the_screen_it_refused() {
+        use crate::MockBackend;
+
+        let backend = MockBackend::new();
+        let agent = cosmon_core::transport::AgentDefinition {
+            id: cosmon_core::id::AgentId::new("named-refusal").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "echo".to_owned(),
+            args: vec![],
+        };
+        let worker = backend
+            .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
+            .unwrap();
+        backend.set_canned_output(UNNAMED_MENU_PANE);
+
+        let (status, liveness) = ClaudeTuiProbe::await_live_with_status(
+            &backend,
+            &worker.id,
+            Duration::from_millis(300),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+        assert_eq!(status, SessionStatus::AwaitingHuman);
+        assert_eq!(liveness, Liveness::Indeterminate);
+        assert_eq!(
+            status.to_string(),
+            "awaiting-human",
+            "the operator reads this string in the refusal"
+        );
+    }
+
+    /// A painted frame with no chevron in it is still a painted frame. The
+    /// spawn postcondition asks "did the binary run?", and answering `Unknown`
+    /// for a rendered login screen whose field uses `>` costs the operator a
+    /// true diagnostic. The dispatch gate refuses it either way.
+    #[test]
+    fn a_rendered_frame_without_a_chevron_is_not_nothing() {
+        let pane = " Open this URL to finish signing in:\n \
+                    ╭───────────────────────────╮\n \
+                    │ https://example.invalid/x │\n \
+                    ╰───────────────────────────╯\n";
+        assert_eq!(classify_output(pane), SessionStatus::AwaitingHuman);
+        assert_eq!(
+            SessionStatus::AwaitingHuman.liveness(),
+            Liveness::Live,
+            "something painted that frame"
+        );
+        // And nothing recognisable is still nothing.
+        assert_eq!(
+            classify_output("some random text\n"),
+            SessionStatus::Unknown
+        );
+    }
+
+    /// Scrollback must not speak over the current screen: a `⏺` left from an
+    /// earlier turn cannot report `Working` while a question is on screen now.
+    /// Without this the corridor re-opens for any menu that happens to follow
+    /// a tool call.
+    #[test]
+    fn stale_tool_use_does_not_promote_a_menu_to_working() {
+        let pane = format!("⏺ Read(config.toml)\n⏺ Bash(ls)\n{UNNAMED_MENU_PANE}");
+        assert_eq!(classify_output(&pane), SessionStatus::AwaitingHuman);
+    }
+
+    /// The same rule, doing its other job. A composer still holding an
+    /// unsubmitted pasted briefing must not read `Working` — that is the
+    /// signal the briefing-submit confirmation loop takes as "delivered", and
+    /// reading it here would stop the re-`Enter` nudges on the exact pane they
+    /// exist to rescue (the 2026-07-20 paste-sans-submit stall).
+    #[test]
+    fn a_pasted_briefing_is_not_a_worker_that_started_working() {
+        let pane = "⏺ Reading files...\n ❯ [Pasted text #1 +86 lines]\n";
+        assert_ne!(classify_output(pane), SessionStatus::Working);
+        assert_ne!(classify_output(pane), SessionStatus::Ready);
     }
 
     #[test]
@@ -1132,7 +2318,7 @@ mod tests {
         let worker = backend.spawn(&agent, &config).unwrap();
 
         // Set output to show ready prompt.
-        backend.set_canned_output("Welcome!\n\n❯ ");
+        backend.set_canned_output("Welcome!\n\n❯ Type your message");
 
         let status = wait_ready(
             &backend,
@@ -1162,7 +2348,7 @@ mod tests {
         assert_eq!(classify_output(trust_output), SessionStatus::TrustPrompt);
 
         // After accepting trust, Claude transitions to ready.
-        let ready_output = "❯ ";
+        let ready_output = "❯ Type your message";
         assert_eq!(classify_output(ready_output), SessionStatus::Ready);
     }
 
@@ -1196,6 +2382,9 @@ mod tests {
         assert_eq!(SessionStatus::Ready.liveness(), Liveness::Live);
         assert_eq!(SessionStatus::Working.liveness(), Liveness::Live);
         assert_eq!(SessionStatus::Blocked.liveness(), Liveness::Live);
+        // A painted frame parked on a question is still a painted frame: the
+        // spawn postcondition (C0) is entitled to read it as proof of life.
+        assert_eq!(SessionStatus::AwaitingHuman.liveness(), Liveness::Live);
         // Terminal / unrecognised.
         assert_eq!(SessionStatus::Dead.liveness(), Liveness::Dead);
         assert_eq!(SessionStatus::Unknown.liveness(), Liveness::Indeterminate);
@@ -1215,13 +2404,13 @@ mod tests {
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
             .unwrap();
-        backend.set_canned_output("Welcome!\n\n❯ ");
+        backend.set_canned_output("Welcome!\n\n❯ Type your message");
 
         let probe = ClaudeTuiProbe;
         assert_eq!(
             probe.observe(&backend, &worker.id).unwrap(),
             Liveness::Live,
-            "a ready ❯ pane is positive evidence of liveness"
+            "a composer pane is positive evidence of liveness"
         );
         assert_eq!(
             probe

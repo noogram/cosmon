@@ -92,6 +92,10 @@ exactly once.
 - [guides/](guides/) — how-to guides (peek-zoom, syzygie, scratch, …); see [`guides/README.md`](guides/README.md).
 - [examples/](examples/) — copy-paste config templates (`daemons.toml.example`, `codex-adapter.toml.example`, `voice-commands.toml.example`).
 
+## Verdict provenance
+
+- [provenance/issue-20/AUTHORITATIVE-INDEX.md](provenance/issue-20/AUTHORITATIVE-INDEX.md) — which of the twenty-one issue-#20 gate verdicts speaks for the current head, which was overtaken, and which subjects nobody has re-judged since the door-4 fix. Append-only: no historical verdict was edited to build it.
+
 ## Sister subsystems
 
 - [`crates/cosmon-crashtest/README.md`](../crates/cosmon-crashtest/README.md) — bisimulation proptest harness.

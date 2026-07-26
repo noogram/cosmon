@@ -147,6 +147,11 @@ pub enum StitchStatus {
     /// (conflict, untracked-overwrite, or check-failure). Merging this
     /// molecule would land work that builds on an unmerged predecessor.
     SkippedUpstreamFailed,
+    /// The molecule carries its own integration base (`cs tackle --base`)
+    /// and it is **not** the trunk this batch is stitching onto. Merging it
+    /// here would land the work on the wrong trunk, so it is refused — and
+    /// treated as a failure so its downstream lineage is skipped too.
+    WrongBase,
     /// Plan-only (set in `--dry-run` for entries that *would* merge).
     PlannedMerge,
     /// Plan-only (would skip).
@@ -169,6 +174,7 @@ impl StitchStatus {
                 | Self::UntrackedOverwrite
                 | Self::CheckFailed
                 | Self::SkippedUpstreamFailed
+                | Self::WrongBase
         )
     }
 }
@@ -184,6 +190,7 @@ impl std::fmt::Display for StitchStatus {
             Self::UntrackedOverwrite => "untracked_overwrite",
             Self::CheckFailed => "check_failed",
             Self::SkippedUpstreamFailed => "skipped_upstream_failed",
+            Self::WrongBase => "wrong_base",
             Self::PlannedMerge => "planned_merge",
             Self::PlannedSkip => "planned_skip",
         })
@@ -221,7 +228,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let repo_root = find_repo_root()?;
 
     if args.dry_run {
-        let rows = plan_rows(&store, &repo_root, &order);
+        let rows = plan_rows(&store, &repo_root, &order, &root_id);
         emit_report(ctx, &rows);
         return Ok(());
     }
@@ -246,7 +253,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // HEAD must be on the configured base branch — git merge
         // advances the *current* branch, never one by name. Refuse
         // before we touch anything; same discipline as `cs done`.
-        let base = resolve_base_branch(&repo_root);
+        // The batch trunk. `cs stitch` merges a whole DAG in one pass, so it
+        // needs ONE base — taken from the root molecule's own
+        // `base_branch` when it has one (`cs tackle --base`), otherwise from
+        // the ambient chain exactly as before. Members whose persisted base
+        // disagrees are refused per-row below rather than silently landed on
+        // the wrong trunk.
+        let base = batch_base(s, &repo_root, &root_id);
         let current =
             current_branch_name(&repo_root).unwrap_or_else(|| "(detached HEAD)".to_owned());
         if current != base {
@@ -367,6 +380,13 @@ fn stitch_one(
             conflict_files: Vec::new(),
             note: format!("status={}", mol.status),
         };
+    }
+
+    // 1b. Base agreement. A molecule tackled with `--base release/2.0` must
+    //     not be stitched onto `main` just because the batch root lives there:
+    //     the merge would land real work on a trunk that never asked for it.
+    if let Some(row) = wrong_base_row(mol_id, mol.base_branch.as_deref(), base) {
+        return row;
     }
 
     let branch_name = format!("feat/{mol_id}");
@@ -647,8 +667,13 @@ fn run_merge(
 /// Dry-run companion: compute what each molecule's row *would* be
 /// without touching git mutating state. We still probe topology
 /// (branch presence, ancestry) since those reads are side-effect-free.
-fn plan_rows(store: &FileStore, repo_root: &Path, order: &[MoleculeId]) -> Vec<StitchRow> {
-    let base = resolve_base_branch(repo_root);
+fn plan_rows(
+    store: &FileStore,
+    repo_root: &Path,
+    order: &[MoleculeId],
+    root_id: &MoleculeId,
+) -> Vec<StitchRow> {
+    let base = batch_base(store, repo_root, root_id);
     order
         .iter()
         .map(|mol_id| {
@@ -667,6 +692,9 @@ fn plan_rows(store: &FileStore, repo_root: &Path, order: &[MoleculeId]) -> Vec<S
                     conflict_files: Vec::new(),
                     note: format!("status={}", mol.status),
                 };
+            }
+            if let Some(row) = wrong_base_row(mol_id, mol.base_branch.as_deref(), &base) {
+                return row;
             }
             let branch = format!("feat/{mol_id}");
             if !branch_exists(repo_root, &branch) {
@@ -787,34 +815,39 @@ fn current_branch_name(repo_root: &Path) -> Option<String> {
     }
 }
 
-fn resolve_base_branch(repo_root: &Path) -> String {
-    if let Ok(explicit) = std::env::var("COSMON_BASE_BRANCH") {
-        if !explicit.trim().is_empty() {
-            return explicit.trim().to_owned();
-        }
+/// The trunk this batch stitches onto.
+///
+/// Precedence mirrors `cs done`: the **root** molecule's persisted
+/// `base_branch` (stamped by `cs tackle --base`), then `COSMON_BASE_BRANCH`,
+/// then `origin/HEAD`, then `"main"`. A batch has exactly one trunk because
+/// `git merge` advances the current HEAD, never a branch by name.
+fn batch_base(store: &FileStore, repo_root: &Path, root_id: &MoleculeId) -> String {
+    let persisted = store
+        .load_molecule(root_id)
+        .ok()
+        .and_then(|m| m.base_branch);
+    cosmon_cli::base_branch::resolve(repo_root, persisted.as_deref())
+}
+
+/// A refusal row when a molecule's own base disagrees with the batch trunk.
+///
+/// Returns `None` — merge as usual — for every molecule with no persisted
+/// base (the pre-`--base` shape) and for those whose base *is* the trunk.
+fn wrong_base_row(
+    mol_id: &MoleculeId,
+    persisted_base: Option<&str>,
+    batch_base: &str,
+) -> Option<StitchRow> {
+    let mol_base = persisted_base?;
+    if mol_base == batch_base {
+        return None;
     }
-    let symref = Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "symbolic-ref",
-            "--short",
-            "refs/remotes/origin/HEAD",
-        ])
-        .output();
-    if let Ok(o) = symref {
-        if o.status.success() {
-            let raw = String::from_utf8_lossy(&o.stdout).trim().to_owned();
-            if let Some(stripped) = raw.strip_prefix("origin/") {
-                if !stripped.is_empty() {
-                    return stripped.to_owned();
-                }
-            } else if !raw.is_empty() {
-                return raw;
-            }
-        }
-    }
-    "main".to_owned()
+    Some(StitchRow {
+        molecule: mol_id.as_str().to_owned(),
+        status_merge: StitchStatus::WrongBase,
+        conflict_files: Vec::new(),
+        note: format!("molecule base `{mol_base}` != batch base `{batch_base}`"),
+    })
 }
 
 fn branch_exists(repo_root: &Path, branch: &str) -> bool {
@@ -978,6 +1011,38 @@ mod tests {
         assert!(s.contains("\"already_merged\""), "got: {s}");
     }
 
+    /// A batch member whose own base disagrees with the batch trunk is
+    /// refused, not silently landed on the wrong trunk.
+    #[test]
+    fn wrong_base_member_is_refused_and_poisons_its_lineage() {
+        let mol = MoleculeId::new("task-20260725-ba5e").unwrap();
+
+        let row = wrong_base_row(&mol, Some("release/2.0"), "main")
+            .expect("a disagreeing base must produce a refusal row");
+
+        assert_eq!(row.status_merge, StitchStatus::WrongBase);
+        assert!(
+            row.status_merge.is_failure(),
+            "landing this molecule's dependents would build on work that never merged"
+        );
+        assert!(
+            row.note.contains("release/2.0") && row.note.contains("main"),
+            "the note must name both trunks: {}",
+            row.note
+        );
+    }
+
+    /// The two agreeing shapes are pass-through: a molecule with no base of
+    /// its own (every pre-`--base` molecule), and one whose base *is* the
+    /// batch trunk.
+    #[test]
+    fn agreeing_or_absent_base_is_not_refused() {
+        let mol = MoleculeId::new("task-20260725-ba5f").unwrap();
+
+        assert!(wrong_base_row(&mol, None, "main").is_none());
+        assert!(wrong_base_row(&mol, Some("main"), "main").is_none());
+    }
+
     #[test]
     fn stitch_status_display_matches_serde() {
         assert_eq!(StitchStatus::Merged.to_string(), "merged");
@@ -1121,6 +1186,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,

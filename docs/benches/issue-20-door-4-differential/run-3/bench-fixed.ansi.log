@@ -1,0 +1,381 @@
+
+[1;35m═══ 0. Environment fidelity ═══[0m
+[0;36m  · uname -a[0m
+[0;90mLinux 2b281366b7c3 6.10.11-linuxkit #1 SMP Thu Oct  3 10:17:28 UTC 2024 aarch64 GNU/Linux[0m
+[0;36m  · sysctl kernel.unprivileged_userns_clone user.max_user_namespaces[0m
+[0;90msysctl: cannot stat /proc/sys/kernel/unprivileged_userns_clone: No such file or directory[0m
+[0;90muser.max_user_namespaces = 31321[0m
+[0;36m  · functional userns probe, as uid 10001: setpriv --reuid 10001 --regid 10001 --clear-groups unshare -Ur true[0m
+[0;90munprivileged user namespace creation SUCCEEDS as uid 10001[0m
+[0;36m  · cs --version[0m
+[0;90mcs 0.3.0[0m
+[0;36m  · claude --version[0m
+[0;90m2.1.220 (Claude Code)[0m
+[0;36m  · provenance: fix-only strings that do not exist in v0.3.0[0m
+[0;90mPRESENT  "no usable Claude Code credential"[0m
+[0;90mPRESENT  "hasTrustDialogAccepted"[0m
+[0;90mPRESENT  "awaiting-human"[0m
+
+[1;35m═══ A. Door 3 — cs as root, COSMON_WORKER_UID=10001, NO credential ═══[0m
+[0;36m  · molecule = task-20260725-7b57[0m
+
+[1;36m▶ cs tackle task-20260725-7b57 --adapter claude   (expect a fail-closed refusal)[0m
+[0;36m  · exit status = 1[0m
+[0;36m  · raw output:[0m
+[0;90mcs: cs tackle: refusing to spawn a claude worker for molecule task-20260725-7b57: no usable Claude Code credential for the interactive worker: /root/.claude/.credentials.json does not exist, no keychain item `Claude Code-credentials` exists, and CLAUDE_CODE_OAUTH_TOKEN is not set. Provision a credential the interactive worker can use, by either: (a) exporting CLAUDE_CODE_OAUTH_TOKEN into the dispatcher's environment; (b) running `claude` once interactively under the same CLAUDE_CONFIG_DIR and completing `/login`, which writes the credential to the OS keychain or to $CLAUDE_CONFIG_DIR/.credentials.json; or (c) mounting an existing .credentials.json into that directory in the container image. Note that ANTHROPIC_API_KEY is NOT a substitute — measured on Claude Code 2.1.220 it opens its own consent dialog whose default answer is `No`, which is a fresh mute hang.[0m
+[0;36m  · worktree owner (stat -c %u) = (absent)[0m
+
+[1;33mVERDICT A: door 3 REFUSED the dispatch (credential named in the refusal), rc=1, worktree owner=(absent)[0m
+
+[1;35m═══ B. Scenario 1 — cs as root, COSMON_WORKER_UID=10001, placeholder credential ═══[0m
+[0;36m  · placeholder credential at /home/cosmon-worker/.claude-arm-b/.credentials.json owned by 10001[0m
+[0;36m  · molecule = task-20260725-4c19[0m
+
+[1;36m▶ cs tackle task-20260725-4c19 --adapter claude   (expect NO provisioning refusal)[0m
+[0;36m  · exit status = 1[0m
+[0;36m  · raw output:[0m
+[0;90mcs: cs tackle: claude session probe-container-startup-doors-4c19 never reached a work-accepting state within 30s (status=loading). The pane is alive but is not a composer — typically an onboarding or consent screen waiting for a human (run `claude` once in this CLAUDE_CONFIG_DIR to answer it), or a binary that started and printed nothing recognisable. Pane showed: Welcome to Claude Code v2.1.220 | Let's get started. | … | 1  function greet() { | 2 -  console.log("Hello, World!"); | 2 +  console.log("Hello, Claude!"); | 3  } | ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ | Syntax theme: Monokai Extended (ctrl+t to disable). Inspect with `tmux -L arm-b-df33 capture-pane -pS - -t probe-container-startup-doors-4c19` then retry with --force (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)[0m
+[0;36m  · worktree owner after the arm (stat -c %u) = (absent)[0m
+[0;36m  · worktree owner WHILE IT EXISTED (watcher) = 10001  (10001 is the proof; 0 is the reported bug)[0m
+[0;36m  · the worktree was rolled back by the refusal; grading on the watcher's reading[0m
+[0;36m  · state dir owners:[0m
+[0;90mcosmon-worker  /work/arm-b/.cosmon
+cosmon-worker  /work/arm-b/.cosmon/surfaces.toml
+cosmon-worker  /work/arm-b/.cosmon/molecules
+cosmon-worker  /work/arm-b/.cosmon/state
+cosmon-worker  /work/arm-b/.cosmon/state/fleet.lock
+cosmon-worker  /work/arm-b/.cosmon/state/fleets
+cosmon-worker  /work/arm-b/.cosmon/state/events.jsonl
+cosmon-worker  /work/arm-b/.cosmon/state/fleet.json
+cosmon-worker  /work/arm-b/.cosmon/state/nucleons
+cosmon-worker  /work/arm-b/.cosmon/formulas
+cosmon-worker  /work/arm-b/.cosmon/formulas/editorial-work.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/verify-surface.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/mission-plan.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/idea-to-plan.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/deep-think-inline.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/mission-controller.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/task-work.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/temp-review.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/formulas/deep-think.formula.toml
+cosmon-worker  /work/arm-b/.cosmon/config.toml[0m
+
+[1;33mVERDICT B: PROVEN — worktree owned by 10001, no provisioning refusal, rc=1[0m
+
+[1;35m═══ C. Scenario 2 — cs demoted via setpriv to 10001, VIRGIN config dir (placeholder credential only) ═══[0m
+[0;36m  · HOME=/home/cosmon-worker (owner 10001), CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-arm-c (owner 10001)[0m
+[0;36m  · config dir contents: .credentials.json [0m
+
+[1;36m▶ setpriv --reuid 10001 --regid 10001 --clear-groups  →  cs init / nucleate / tackle[0m
+[0;36m  · exit status = 0[0m
+[0;36m  · raw output:[0m
+[0;90mARM_C_MOL=task-20260725-1327
+--- cs tackle (no --permission-mode: default bypassPermissions) ---
+cs: cs tackle: claude session probe-container-startup-doors-1327 never reached a work-accepting state within 30s (status=loading). The pane is alive but is not a composer — typically an onboarding or consent screen waiting for a human (run `claude` once in this CLAUDE_CONFIG_DIR to answer it), or a binary that started and printed nothing recognisable. Pane showed: Welcome to Claude Code v2.1.220 | Let's get started. | … | 1  function greet() { | 2 -  console.log("Hello, World!"); | 2 +  console.log("Hello, Claude!"); | 3  } | ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌ | Syntax theme: Monokai Extended (ctrl+t to disable). Inspect with `tmux -L arm-c-6eb6 capture-pane -pS - -t probe-container-startup-doors-1327` then retry with --force (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)
+ARM_C_TACKLE_RC=1
+--- ARM_C_PANE_AT_RETURN (socket=arm-c-6eb6 session=probe-container-startup-doors-1327) ---
+no server running on /tmp/tmux-10001/arm-c-6eb6
+--- ARM_C_PANE_AT_RETURN_END ---[0m
+[0;36m  · cs tackle exit status = 1[0m
+
+[1;35m═══ c. readiness trace — what the process observed during its window ═══[0m
+[0;36m  · samples (elapsed_ms / event / status / liveness / pane_lines / note):[0m
+[0;90m-	capture	unknown	-	0	-
+-	capture	unknown	-	0	-
+-	capture	unknown	-	0	-
+-	capture	unknown	-	0	-
+-	capture	loading	-	22	-
+866	spawn_postcondition.return	-	live	-	evidence of life within the window
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+-	capture	loading	-	22	-
+30153	wait_ready.return	loading	-	-	TIMEOUT — window exhausted, returning the last observed status
+-	dispatch_gate	loading	indeterminate	-	-[0m
+[0;36m  · the exact bytes classified — first sample of each distinct status:[0m
+[0;90m───── classified loading at ?ms, 22 lines ─────
+Welcome to Claude Code v2.1.220
+
+ Let's get started.
+
+ Choose the text style that looks best with your terminal
+ To change this later, run /theme
+
+   1. Auto (match terminal)
+ ❯ 2. Dark mode ✔
+   3. Light mode
+   4. Dark mode (colorblind-friendly)
+   5. Light mode (colorblind-friendly)
+   6. Dark mode (ANSI colors only)
+   7. Light mode (ANSI colors only)
+
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  1  function greet() {
+  2 -  console.log("Hello, World!");
+  2 +  console.log("Hello, Claude!");
+  3  }
+ ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+  Syntax theme: Monokai Extended (ctrl+t to disable)
+───── classified unknown at ?ms, 0 lines ─────[0m
+[0;36m  · post-tackle pre-grant state (.claude.json projects map):[0m
+[0;90m{"hasCompletedOnboarding":null,"projects":{"/home/cosmon-worker/arm-c/.worktrees/task-20260725-1327":{"hasTrustDialogAccepted":true}}}[0m
+[0;36m  · post-tackle pre-grant state (settings.json):[0m
+[0;90m{"skipDangerousModePermissionPrompt":true}[0m
+
+[1;35m═══ c. refusal post-conditions ═══[0m
+[0;36m  · 1. cs tackle exited non-zero: yes (rc=1)[0m
+[0;36m  · 2. stderr cites the blocking onboarding pane (wizard or selector): yes[0m
+[0;36m  · 3. tmux session torn down: yes (socket=arm-c-6eb6 session=probe-container-startup-doors-1327); has-session said: no server running on /tmp/tmux-10001/arm-c-6eb6[0m
+[0;36m  · 4. molecule not left running: yes (status=pending)[0m
+
+[1;33mVERDICT c: PROVEN — cs tackle REFUSED the blocking onboarding pane: rc=1, stderr quotes the screen it refused, tmux session probe-container-startup-doors-1327 gone, molecule=pending[0m
+[0;36m  · molecule state after the arm:[0m
+[0;90mMolecule: task-20260725-1327
+
+  Status:          pending
+  Formula:         task-work
+  Step:            0/2
+  Worker:          -
+  Created:         2026-07-25 23:23:35.579878092 UTC
+  Updated:         2026-07-25 23:23:35.581337842 UTC
+
+  Variables:
+    topic = probe the container startup doors
+
+  Model:
+    default ← floor — no --model flag, no formula-step model pin, no $COSMON_DEFAULT_MODEL / $ANTHROPIC_MODEL, and no [adapters.claude].default_model in either the per-galaxy or global config; pinning no model (the adapter's own default applies — strong is never reachable from silence) (claude)[0m
+
+[1;35m═══ D. Scenario 2 — cs demoted via setpriv to 10001, ONBOARDED config dir — the tester's shape ═══[0m
+[0;36m  · HOME=/home/cosmon-worker (owner 10001), CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-arm-d (owner 10001)[0m
+[0;36m  · config dir contents: .claude.json .credentials.json [0m
+
+[1;36m▶ setpriv --reuid 10001 --regid 10001 --clear-groups  →  cs init / nucleate / tackle[0m
+[0;36m  · exit status = 0[0m
+[0;36m  · raw output:[0m
+[0;90mARM_C_MOL=task-20260725-568e
+--- cs tackle (no --permission-mode: default bypassPermissions) ---
+ Tackling probe-container-startup-doors-568e (task-work)
+  molecule: task-20260725-568e
+  branch:   feat/task-20260725-568e
+  worktree: /home/cosmon-worker/arm-d/.worktrees/task-20260725-568e
+  session:  probe-container-startup-doors-568e
+  attach:   tmux -L arm-d-d9ba attach -t probe-container-startup-doors-568e
+ARM_C_TACKLE_RC=0
+--- ARM_C_PANE_AT_RETURN (socket=arm-d-d9ba session=probe-container-startup-doors-568e) ---
+
+  - Do NOT pause between steps to summarize what you did.
+  - Do NOT ask "shall I continue?" or "would you like me to proceed?".
+  - Do NOT describe what you are about to do — just DO IT.
+  - Do NOT offer alternatives or ask for confirmation.
+  - Do NOT wait for user input at the ❯ prompt between steps.
+  - Do NOT create GitHub PRs — integration is local via molecules.
+  - Do NOT push to remote — commits stay on the local branch.
+
+  ## ▶ Execute step 1 NOW.
+
+  Begin immediately. No preamble. No planning summary. Just start working.
+
+  ⎿  Not logged in · Please run /login
+
+✻ Brewed for 0s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                    Not logged in · Run /login
+
+
+--- ARM_C_PANE_AT_RETURN_END ---[0m
+[0;36m  · cs tackle exit status = 0[0m
+
+[1;35m═══ d. readiness trace — what the process observed during its window ═══[0m
+[0;36m  · samples (elapsed_ms / event / status / liveness / pane_lines / note):[0m
+[0;90m-	capture	unknown	-	0	-
+-	capture	unknown	-	0	-
+-	capture	unknown	-	0	-
+-	capture	idle	-	19	-
+624	spawn_postcondition.return	-	live	-	evidence of life within the window
+-	capture	idle	-	19	-
+3	wait_ready.return	idle	-	-	composer evidence — returned before the window closed
+-	dispatch_gate	idle	live	-	-
+-	capture	idle	-	30	-[0m
+[0;36m  · the exact bytes classified — first sample of each distinct status:[0m
+[0;90m───── classified idle at ?ms, 19 lines ─────
+╭─── Claude Code v2.1.220 ─────────────────────────────────────────────────────╮
+│                                             │ Tips for getting started       │
+│                Welcome back!                │ Run /init to create a CLAUDE.… │
+│                                             │ ────────────────────────────── │
+│                   ▐▛███▜▌                   │ What's new                     │
+│                  ▝▜█████▛▘                  │ Check the Claude Code changel… │
+│                    ▘▘ ▝▝                    │                                │
+│                                             │                                │
+│   Opus 5 (1M context) · API Usage Billing   │                                │
+│    ~/arm-d/.worktrees/task-20260725-568e    │                                │
+╰──────────────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                    Not logged in · Run /login
+                                                              ● high · /effort
+───── classified unknown at ?ms, 0 lines ─────[0m
+[0;36m  · post-tackle pre-grant state (.claude.json projects map):[0m
+[0;90m{"hasCompletedOnboarding":true,"projects":{"/home/cosmon-worker/arm-d/.worktrees/task-20260725-568e":{"hasTrustDialogAccepted":true},"/home/cosmon-worker/arm-d":{"hasTrustDialogAccepted":false}}}[0m
+[0;36m  · post-tackle pre-grant state (settings.json):[0m
+[0;90m{"skipDangerousModePermissionPrompt":true}[0m
+[0;36m  · tmux socket=arm-d-d9ba session=probe-container-startup-doors-568e — settling 25s before capture[0m
+
+[1;35m═══ d. captured pane (socket=arm-d-d9ba session=probe-container-startup-doors-568e rc=0) ═══[0m
+[0;90m
+  - Do NOT pause between steps to summarize what you did.
+  - Do NOT ask "shall I continue?" or "would you like me to proceed?".
+  - Do NOT describe what you are about to do — just DO IT.
+  - Do NOT offer alternatives or ask for confirmation.
+  - Do NOT wait for user input at the ❯ prompt between steps.
+  - Do NOT create GitHub PRs — integration is local via molecules.
+  - Do NOT push to remote — commits stay on the local branch.
+
+  ## ▶ Execute step 1 NOW.
+
+  Begin immediately. No preamble. No planning summary. Just start working.
+
+  ⎿  Not logged in · Please run /login
+
+✻ Brewed for 0s
+
+────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                    Not logged in · Run /login[0m
+
+[1;33mVERDICT d: PROVEN — the pane reached the COMPOSER (no startup dialog); doors 1 and 2 passed[0m
+[0;36m  · molecule state after the arm:[0m
+[0;90mMolecule: task-20260725-568e
+
+  Status:          running
+  Formula:         task-work
+  Step:            0/2
+  Worker:          probe-container-startup-doors-568e
+  Created:         2026-07-25 23:24:06.937338760 UTC
+  Updated:         2026-07-25 23:25:38.634722760 UTC
+
+  Variables:
+    topic = probe the container startup doors
+
+  Model:
+    default ← floor — no --model flag, no formula-step model pin, no $COSMON_DEFAULT_MODEL / $ANTHROPIC_MODEL, and no [adapters.claude].default_model in either the per-galaxy or global config; pinning no model (the adapter's own default applies — strong is never reachable from silence) (claude)[0m
+
+[1;35m═══ E. Direct claude probes — isolating what the placeholder credential causes ═══[0m
+[0;36m  · e1-onboarded-no-cred: config dir contents: .claude.json settings.json [0m
+
+[1;35m═══ E. pane for e1-onboarded-no-cred ═══[0m
+[0;90m╭─── Claude Code v2.1.220 ───────────────────────────────────────────────────────────────────────────╮
+│                                             │ Tips for getting started                             │
+│                Welcome back!                │ Ask Claude to create a new app or clone a repository │
+│                                             │ ──────────────────────────────────────────────────── │
+│                   ▐▛███▜▌                   │ What's new                                           │
+│                  ▝▜█████▛▘                  │ Check the Claude Code changelog for updates          │
+│                    ▘▘ ▝▝                    │                                                      │
+│                                             │                                                      │
+│   Opus 5 (1M context) · API Usage Billing   │                                                      │
+│          ~/ws-e1-onboarded-no-cred          │                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                                                                                                              Not logged in · Run /login[0m
+
+[1;33mVERDICT e1-onboarded-no-cred: COMPOSER with the 'Not logged in' footer (the documented shape)[0m
+[0;36m  · e2-onboarded-placeholder-cred: config dir contents: .claude.json .credentials.json settings.json [0m
+
+[1;35m═══ E. pane for e2-onboarded-placeholder-cred ═══[0m
+[0;90m╭─── Claude Code v2.1.220 ───────────────────────────────────────────────────────────────────────────╮
+│                                             │ Tips for getting started                             │
+│                Welcome back!                │ Ask Claude to create a new app or clone a repository │
+│                                             │ ──────────────────────────────────────────────────── │
+│                   ▐▛███▜▌                   │ What's new                                           │
+│                  ▝▜█████▛▘                  │ Check the Claude Code changelog for updates          │
+│                    ▘▘ ▝▝                    │                                                      │
+│                                             │                                                      │
+│   Opus 5 (1M context) · API Usage Billing   │                                                      │
+│     ~/ws-e2-onboarded-placeholder-cred      │                                                      │
+╰────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents                                                                                                              Not logged in · Run /login[0m
+
+[1;33mVERDICT e2-onboarded-placeholder-cred: COMPOSER with the 'Not logged in' footer (the documented shape)[0m
+
+[1;35m═══ VERDICT SUMMARY ═══[0m
+VERDICT A: door 3 REFUSED the dispatch (credential named in the refusal), rc=1, worktree owner=(absent)
+VERDICT B: PROVEN — worktree owned by 10001, no provisioning refusal, rc=1
+VERDICT c: PROVEN — cs tackle REFUSED the blocking onboarding pane: rc=1, stderr quotes the screen it refused, tmux session probe-container-startup-doors-1327 gone, molecule=pending
+VERDICT d: PROVEN — the pane reached the COMPOSER (no startup dialog); doors 1 and 2 passed
+VERDICT e1-onboarded-no-cred: COMPOSER with the 'Not logged in' footer (the documented shape)
+VERDICT e2-onboarded-placeholder-cred: COMPOSER with the 'Not logged in' footer (the documented shape)
+bench_exit_status   0

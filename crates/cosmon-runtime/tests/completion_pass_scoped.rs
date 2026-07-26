@@ -84,6 +84,7 @@ fn seed(
         expires_at: None,
         expiry_policy: None,
         originating_branch: None,
+        base_branch: None,
         pending_step: None,
         merged_at,
         prompt_seal: None,

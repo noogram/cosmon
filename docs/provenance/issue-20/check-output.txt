@@ -1,0 +1,104 @@
+$ scripts/check-verdict-provenance.py
+mission          noogram/cosmon#20
+frozen head      9e2a8ce2cea202bba55966ffe16acfc7aa9151a4
+final door-4 fix 73c4b2a
+catalogue        21 verdicts
+register         7 transitions
+molecules root   .cosmon/state/fleets/default/molecules (found)
+
+(a) IMMUTABILITY        PASS — 21/21 byte-identical
+(b) ACCESSIBILITY       PASS — every verdict reaches a terminal
+(c) ACYCLIC+TERMINATES  PASS — no cycle, no fork; 21 chains end on 14 terminals
+(d) UNICITY             1 exact, 13 holes, 0 ambiguities  (over 14 subjects)
+    HOLE      g0-intake: no verdict speaks for the frozen head
+    HOLE      g1-behavioural-contract: no verdict speaks for the frozen head
+    HOLE      g2-reproduce: no verdict speaks for the frozen head
+    HOLE      g3-falsify: no verdict speaks for the frozen head
+    HOLE      g4-implementation: no verdict speaks for the frozen head
+    HOLE      g5-green-on-original-red: no verdict speaks for the frozen head
+    HOLE      repository-gates: no verdict speaks for the frozen head
+    HOLE      cross-provider-referee: no verdict speaks for the frozen head
+    HOLE      committee-adjudication: no verdict speaks for the frozen head
+    HOLE      convergence: no verdict speaks for the frozen head
+    HOLE      cmb-verify-mechanism: no verdict speaks for the frozen head
+    HOLE      g10-release-manifest: no verdict speaks for the frozen head
+    HOLE      g11-closure: no verdict speaks for the frozen head
+
+status of every catalogued verdict
+  V-01  task-20260723-5be4/verdict.json               stale-unreplaced  subject sha indeterminate
+  V-02  task-20260723-5371/verdict.json               superseded        named as `previous` by SR-001
+  V-03  repro-20260723-a38d/verdict.json              stale-unreplaced  pronounced on 9639f85d1a2c59176724def0f400661caeb22f3a, before the final door-4 fix 73c4b2a
+  V-04  task-20260723-d1b2/verdict.json               stale-unreplaced  pronounced on 7aeb6f24658724a2b21c57a10ce9fd16fae249d8, before the final door-4 fix 73c4b2a
+  V-05  task-20260723-d94b/verdict.json               stale-unreplaced  commit f002da8952ee5284d76064ae4750554f93efe2b5 is not an ancestor of the frozen head (abandoned line)
+  V-06  task-20260723-f18f/verdict.json               stale-unreplaced  commit 4e57b1981d25376a0b6a82ce4a4649cac40c05ba is not an ancestor of the frozen head (abandoned line)
+  V-07  task-20260723-c710/verdict.json               superseded        named as `previous` by SR-002
+  V-08  task-20260723-b0a5/verdict.json               superseded        named as `previous` by SR-003
+  V-09  task-20260723-631e/verdict.json               superseded        named as `previous` by SR-005
+  V-10  converge-20260723-a767/converge-verdict.json  stale-unreplaced  commit f002da8952ee5284d76064ae4750554f93efe2b5 is not an ancestor of the frozen head (abandoned line)
+  V-11  task-20260725-9a44/contract-verdict.json      stale-unreplaced  subject sha indeterminate
+  V-12  task-20260725-97da/verdict.json               stale-unreplaced  pronounced on a07cabfeea8625e1c9d67b534c2840803ca3a163, before the final door-4 fix 73c4b2a
+  V-13  cmbverify-20260725-ed95/verdict.md            superseded        named as `previous` by SR-007
+  V-14  cmbverify-20260725-ed95/verdict.json          superseded        named as `previous` by SR-004
+  V-15  cmbverify-20260725-186c/verdict.md            stale-unreplaced  pronounced on 97e7eeb, before the final door-4 fix 73c4b2a
+  V-16  cmbverify-20260725-186c/verdict.json          stale-unreplaced  pronounced on 97e7eeb, before the final door-4 fix 73c4b2a
+  V-17  task-20260725-f02f/committee-verdict.md       superseded        named as `previous` by SR-006
+  V-18  task-20260725-1e40/committee-verdict.md       stale-unreplaced  pronounced on 97e7eeb, before the final door-4 fix 73c4b2a
+  V-19  task-20260725-3866/verdict.json               stale-unreplaced  pronounced on 88e4ca8d4697dc5f7c8821c4636d84eb2740070a, before the final door-4 fix 73c4b2a
+  V-20  bug-closure-20260725-8c79/verdict.md          stale-unreplaced  pronounced on 88e4ca8, before the final door-4 fix 73c4b2a
+  V-21  docs/benches/issue-20-door-4-differential.md  authoritative     pronounced on 73c4b2a, at or after 73c4b2a
+
+$ echo $?
+2
+
+--- (b) accessibility: five entry points, five routes, no dead ends ---
+
+$ scripts/check-verdict-provenance.py --resolve task-20260723-5371/verdict.json
+    V-02  g1-behavioural-contract    BLOCKED
+        task-20260723-5371/verdict.json
+ -> V-11  g1-behavioural-contract    PASS
+        task-20260725-9a44/contract-verdict.json
+
+terminal for subject `g1-behavioural-contract` — stale-unreplaced: subject sha indeterminate
+the chain ends here, but this verdict does NOT speak for the frozen
+head 9e2a8ce2cea2; nothing does. See the index.
+index: docs/provenance/issue-20/AUTHORITATIVE-INDEX.md
+
+$ scripts/check-verdict-provenance.py --resolve task-20260723-631e/verdict.json
+    V-09  committee-adjudication     inconclusive
+        task-20260723-631e/verdict.json
+ -> V-17  committee-adjudication     inconclusive-by-missing-witness
+        task-20260725-f02f/committee-verdict.md
+ -> V-18  committee-adjudication     inconclusive
+        task-20260725-1e40/committee-verdict.md
+
+terminal for subject `committee-adjudication` — stale-unreplaced: pronounced on 97e7eeb, before the final door-4 fix 73c4b2a
+the chain ends here, but this verdict does NOT speak for the frozen
+head 9e2a8ce2cea2; nothing does. See the index.
+index: docs/provenance/issue-20/AUTHORITATIVE-INDEX.md
+
+$ scripts/check-verdict-provenance.py --resolve cmbverify-20260725-ed95/verdict.md
+    V-13  cmb-verify-mechanism       confirmed
+        cmbverify-20260725-ed95/verdict.md
+ -> V-15  cmb-verify-mechanism       confirmed
+        cmbverify-20260725-186c/verdict.md
+
+terminal for subject `cmb-verify-mechanism` — stale-unreplaced: pronounced on 97e7eeb, before the final door-4 fix 73c4b2a
+the chain ends here, but this verdict does NOT speak for the frozen
+head 9e2a8ce2cea2; nothing does. See the index.
+index: docs/provenance/issue-20/AUTHORITATIVE-INDEX.md
+
+$ scripts/check-verdict-provenance.py --resolve bug-closure-20260725-8c79/verdict.md
+    V-20  g11-closure                REOPEN_WITH_MISSING_SURFACES
+        bug-closure-20260725-8c79/verdict.md
+
+terminal for subject `g11-closure` — stale-unreplaced: pronounced on 88e4ca8, before the final door-4 fix 73c4b2a
+the chain ends here, but this verdict does NOT speak for the frozen
+head 9e2a8ce2cea2; nothing does. See the index.
+index: docs/provenance/issue-20/AUTHORITATIVE-INDEX.md
+
+$ scripts/check-verdict-provenance.py --resolve docs/benches/issue-20-door-4-differential.md
+    V-21  door-4-differential        arm C NOT PROVEN on 4c41738, PROVEN on 73c4b2a
+        docs/benches/issue-20-door-4-differential.md
+
+terminal for subject `door-4-differential` — authoritative: pronounced on 73c4b2a, at or after 73c4b2a
+index: docs/provenance/issue-20/AUTHORITATIVE-INDEX.md

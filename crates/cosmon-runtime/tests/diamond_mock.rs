@@ -227,6 +227,7 @@ fn seed(store: &dyn StateStore, id: &MoleculeId, links: Vec<MoleculeLink>) {
         expires_at: None,
         expiry_policy: None,
         originating_branch: None,
+        base_branch: None,
         pending_step: None,
         merged_at: None,
         prompt_seal: None,

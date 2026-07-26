@@ -173,21 +173,167 @@ where
         .or_else(|| env_lookup("HOME").map(|h| Path::new(&h).join(".claude")))
 }
 
-/// The **one** entry point every demote call site must use: decide the root
-/// spawn, then downgrade a `Demote` to a typed refusal when the target cannot
-/// reach what the worker needs.
+/// Everything a demoted worker must be able to use, as *paths* rather than as
+/// a closure.
 ///
-/// `checks_for` is a closure so the `stat(2)` happens only on the demote path
-/// and stays out of the ordering logic. Non-demote decisions never touch the
-/// filesystem.
+/// # Why a struct and not a closure (issue #20)
 ///
-/// Any dispatch that reaches a live worker must route through here. Calling
-/// [`decide_root_spawn`] directly is the A3 defect.
+/// The previous entry point took a `checks_for` closure, which could only ever
+/// *observe*. Repairing the ownership catch-22 needs the port to **act** on the
+/// same paths it judges — chown them to the target uid — and a closure hides
+/// them from it. Naming the paths in a struct is what makes the repair and the
+/// verdict share one input, so no caller can apply one without the other. That
+/// is the same "no forgettable intermediate step" discipline that put the
+/// privilege drop at the binary token rather than in an env splice.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DemoteResources {
+    /// The Claude config home the worker authenticates from. **Never chowned**:
+    /// under `docker run -u 0` this is root's own `/root/.claude`, and handing
+    /// root's home to a worker uid is an operator decision, not a cosmon
+    /// default. It is probed, and an unusable one still refuses.
+    pub config_home: Option<PathBuf>,
+    /// The git worktree the worker runs in — created by the very `cs tackle`
+    /// that is demoting, hence root-owned, hence chowned here.
+    pub worktree: PathBuf,
+    /// The out-of-worktree state roots the worker writes on `cs evolve` /
+    /// `cs complete` (the `.cosmon` dir, plus the molecule's own state dir).
+    /// Also created root-owned, also chowned here.
+    pub state_dirs: Vec<PathBuf>,
+}
+
+/// Give `path` and everything beneath it to `uid` (and to `uid` as gid, which
+/// is what `setpriv --regid <uid>` gives the worker).
+///
+/// Symlinks are chowned with `lchown`, never followed: a symlink out of the
+/// worktree must not drag an unrelated tree into the ownership transfer.
+/// Entries already owned by `uid` are skipped, so re-tackling in a warm
+/// container is a walk and not a syscall storm.
+///
+/// # Errors
+///
+/// Returns the first `chown` or directory-read failure. Callers on the demote
+/// path deliberately do **not** treat that as fatal: the provisioning checks
+/// run afterwards and turn a transfer that did not take into the typed refusal
+/// an operator can act on. Failing here directly would report `EPERM` where the
+/// interesting fact is "the uid still cannot write this path".
+pub fn chown_tree_to_uid(path: &Path, uid: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        // Nothing to give away. A missing path is judged by the checks, which
+        // fall back to its nearest existing ancestor.
+        return Ok(());
+    };
+    if meta.uid() != uid || meta.gid() != uid {
+        std::os::unix::fs::lchown(path, Some(uid), Some(uid))?;
+    }
+    if meta.is_dir() {
+        for entry in std::fs::read_dir(path)? {
+            chown_tree_to_uid(&entry?.path(), uid)?;
+        }
+    }
+    Ok(())
+}
+
+/// The first resource a worker spawning **as its dispatcher's own uid** cannot
+/// use, or `None` when every one of them is reachable.
+///
+/// # The parity hole this closes (issue #20, `@jdthaler`'s non-root container)
+///
+/// The `--add-dir` grant itself has no parity hole: both spawn paths emit it for
+/// every root decision, pinned by
+/// `grant_is_structural_across_permission_modes`. What is *not* symmetric is the
+/// question behind it. `--add-dir` grants Claude Code **authorization**, never
+/// OS **ownership**, so the grant is only worth anything if the uid the worker
+/// runs as can actually write those directories. A `Demote` has that verified by
+/// [`provision_and_decide_root_spawn`] and is refused when it fails. A
+/// [`RootSpawnDecision::SpawnAsIs`] — the whole non-root fleet, including
+/// `cs` launched directly under an unprivileged container uid — verified
+/// nothing.
+///
+/// That is the *same wedge* the demote check exists to prevent, reached by the
+/// door nobody guarded: a container image built as root and then dropped to
+/// `USER 10001` leaves the repo's `.cosmon/` root-owned, the worker is granted
+/// the dir, starts, is declared live, and fails `EACCES` the first time it runs
+/// `cs evolve` — a hang the operator cannot tell apart from the trust-dialog
+/// one. Checking it is cheap (`stat(2)` on a handful of paths) and the refusal
+/// happens before a live worker exists.
+///
+/// The `Demote*` names on the shared types are historical: they describe
+/// *resource kinds*, not the root path, and both call sites now ask the same
+/// question about whichever uid the worker will hold.
 #[must_use]
-pub fn decide_root_spawn_provisioned<F>(
+pub fn as_is_reachability_refusal(
+    running_uid: u32,
+    config_home: Option<&Path>,
+    worktree: &Path,
+    state_dirs: &[PathBuf],
+) -> Option<DemoteResourceAccess> {
+    demote_resource_checks(running_uid, config_home, worktree, state_dirs)
+        .into_iter()
+        .find(|c| !c.usable)
+}
+
+/// The **one** entry point every demote call site must use: decide the root
+/// spawn, transfer ownership of what the worker writes, then downgrade a
+/// `Demote` to a typed refusal when the target still cannot reach what it
+/// needs.
+///
+/// # The ordering this fixes (issue #20)
+///
+/// The external tester's repro: a freshly nucleated molecule, tackled by a root
+/// container with `COSMON_WORKER_UID` set, refused with *"worktree … is not
+/// usable by it — chown the worktree to the uid before tackling"*. But
+/// `cs tackle` is what **creates** that worktree; there is no "before" in which
+/// an operator could have chowned it. The guard was right and fail-closed; the
+/// order of operations was wrong. So the transfer happens here, on the demote
+/// path, after the worktree exists and before any live worker does — and the
+/// guard still runs after it, unchanged, so a transfer that silently failed
+/// (read-only mount, ACL, a uid absent from the host) still refuses rather than
+/// spawning a worker that wedges on `EACCES`.
+///
+/// A chown error is intentionally swallowed: the *checks* are the verdict. The
+/// operator wants to know that the uid cannot write the path, not which errno
+/// the repair attempt returned.
+///
+/// Non-demote decisions never touch the filesystem — neither to chown nor to
+/// `stat`. Any dispatch that reaches a live worker must route through here;
+/// calling [`decide_root_spawn`] directly is the A3 defect.
+#[must_use]
+pub fn provision_and_decide_root_spawn(
     running_uid: u32,
     demote_target: Option<u32>,
-    checks_for: F,
+    resources: &DemoteResources,
+) -> RootSpawnDecision {
+    decide_provisioned_with(running_uid, demote_target, |to_uid| {
+        // Repair first…
+        let _ = chown_tree_to_uid(&resources.worktree, to_uid);
+        for dir in &resources.state_dirs {
+            let _ = chown_tree_to_uid(dir, to_uid);
+        }
+
+        // …then judge. Never the reverse, and never one without the other.
+        demote_resource_checks(
+            to_uid,
+            resources.config_home.as_deref(),
+            &resources.worktree,
+            &resources.state_dirs,
+        )
+    })
+}
+
+/// The ordering skeleton of [`provision_and_decide_root_spawn`], with the
+/// filesystem work injected.
+///
+/// Deliberately **private**. It exists so the "a non-demote decision touches no
+/// filesystem at all" property stays observable in a unit test — the closure
+/// records whether it ran — without exposing a public entry point that lets a
+/// caller judge the paths while forgetting to repair them. That forgettable
+/// step is the whole shape of defect A3, and of issue #20 after it.
+fn decide_provisioned_with<F>(
+    running_uid: u32,
+    demote_target: Option<u32>,
+    act_and_check: F,
 ) -> RootSpawnDecision
 where
     F: FnOnce(u32) -> Vec<DemoteResourceAccess>,
@@ -195,7 +341,7 @@ where
     let decision = decide_root_spawn(running_uid, demote_target);
     match decision {
         RootSpawnDecision::Demote { to_uid } => {
-            enforce_demote_provisioning(decision, &checks_for(to_uid))
+            enforce_demote_provisioning(decision, &act_and_check(to_uid))
         }
         other => other,
     }
@@ -212,6 +358,72 @@ mod tests {
 
     /// A uid that owns nothing on any test host, so `other` bits decide.
     const FOREIGN: u32 = 4_294_967_000;
+
+    /// Issue #20 point 2 — the non-root twin of the demote provisioning check.
+    ///
+    /// Env-free companion to the call-site test in `claude.rs`: every input is
+    /// explicit, so this pins *which* resource the refusal names rather than
+    /// merely that one fired.
+    #[test]
+    fn as_is_refusal_names_the_unreachable_state_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        // Rooted in `/tmp`, not the per-user temp dir. `path_usable_by_uid`
+        // walks every ancestor for the search bit, and macOS puts the default
+        // temp dir under a 0700 `/var/folders/<user>/…`: below that, EVERY path
+        // is unreachable by a foreign uid, so the first-unusable-wins verdict
+        // would name the config home and this test would pass without ever
+        // exercising the state-dir case. `/tmp` is world-traversable on both
+        // macOS and Linux, which is what makes the one closed directory below
+        // the only reason for the refusal.
+        let tmp = TempDir::new_in("/tmp").unwrap();
+        let config_home = tmp.path().join("cfg");
+        let worktree = tmp.path().join("worktree");
+        let state_dir = tmp.path().join("main").join(".cosmon");
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        for d in [&config_home, &worktree, &state_dir] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o777)).unwrap();
+        }
+        std::fs::set_permissions(
+            state_dir.parent().expect("main/"),
+            std::fs::Permissions::from_mode(0o777),
+        )
+        .unwrap();
+        // Only the out-of-worktree state dir is closed to the worker's uid —
+        // exactly the container shape: image built as root, `USER 10001` after.
+        std::fs::set_permissions(&state_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        let blocked = as_is_reachability_refusal(
+            FOREIGN,
+            Some(&config_home),
+            &worktree,
+            std::slice::from_ref(&state_dir),
+        )
+        .expect("an unwritable granted state dir must be refused");
+        assert_eq!(blocked.resource, DemoteResource::StateDir);
+        assert_eq!(blocked.path, state_dir.to_string_lossy().into_owned());
+    }
+
+    /// The normal fleet dispatch must not be refused: when every resource is
+    /// reachable by the running uid there is no verdict to report. A check that
+    /// cried wolf here would ground the whole fleet.
+    #[test]
+    fn as_is_refusal_is_silent_when_everything_is_reachable() {
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("worktree");
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        assert!(as_is_reachability_refusal(
+            nix::unistd::Uid::effective().as_raw(),
+            None,
+            &worktree,
+            std::slice::from_ref(&state_dir),
+        )
+        .is_none());
+    }
 
     /// COSMON-DEV #20 defect A3, iteration 2 — the surviving call site, frozen.
     ///
@@ -233,9 +445,15 @@ mod tests {
         std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
         let target = std::fs::metadata(tmp.path()).unwrap().uid();
 
-        let decision = decide_root_spawn_provisioned(0, Some(target), |uid| {
-            demote_resource_checks(uid, None, tmp.path(), &[state.clone()])
-        });
+        let decision = provision_and_decide_root_spawn(
+            0,
+            Some(target),
+            &DemoteResources {
+                worktree: tmp.path().to_path_buf(),
+                state_dirs: vec![state.clone()],
+                ..DemoteResources::default()
+            },
+        );
 
         match decision {
             RootSpawnDecision::Refuse {
@@ -281,9 +499,15 @@ mod tests {
         let home = tmp.path().join("dot-claude");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o300)).unwrap();
-        let decision = decide_root_spawn_provisioned(0, Some(owner), |uid| {
-            demote_resource_checks(uid, Some(&home), tmp.path(), &[])
-        });
+        let decision = provision_and_decide_root_spawn(
+            0,
+            Some(owner),
+            &DemoteResources {
+                config_home: Some(home.clone()),
+                worktree: tmp.path().to_path_buf(),
+                state_dirs: vec![],
+            },
+        );
         assert!(
             matches!(
                 decision,
@@ -331,9 +555,14 @@ mod tests {
         // macOS, so a foreign uid legitimately cannot traverse to this leaf —
         // that IS the ancestor rule, asserted separately below.
         let owner = std::fs::metadata(tmp.path()).unwrap().uid();
-        let decision = decide_root_spawn_provisioned(0, Some(owner), |uid| {
-            demote_resource_checks(uid, None, tmp.path(), &[])
-        });
+        let decision = provision_and_decide_root_spawn(
+            0,
+            Some(owner),
+            &DemoteResources {
+                worktree: tmp.path().to_path_buf(),
+                ..DemoteResources::default()
+            },
+        );
         assert_eq!(decision, RootSpawnDecision::Demote { to_uid: owner });
     }
 
@@ -363,12 +592,13 @@ mod tests {
         }
     }
 
-    /// The non-root fleet path never touches the filesystem — the provisioning
-    /// closure is not even called.
+    /// The non-root fleet path never touches the filesystem — neither to chown
+    /// nor to `stat`. Asserted on the private skeleton, which is where the
+    /// filesystem work is injectable.
     #[test]
     fn non_root_never_probes_the_filesystem() {
         let probed = std::cell::Cell::new(false);
-        let decision = decide_root_spawn_provisioned(1000, Some(FOREIGN), |_| {
+        let decision = decide_provisioned_with(1000, Some(FOREIGN), |_| {
             probed.set(true);
             vec![]
         });
@@ -381,7 +611,7 @@ mod tests {
     #[test]
     fn a_root_refusal_passes_through_without_probing() {
         let probed = std::cell::Cell::new(false);
-        let decision = decide_root_spawn_provisioned(0, None, |_| {
+        let decision = decide_provisioned_with(0, None, |_| {
             probed.set(true);
             vec![]
         });

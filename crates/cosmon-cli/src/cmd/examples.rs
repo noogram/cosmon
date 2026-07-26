@@ -623,6 +623,14 @@ pub const TACKLE: &str = "EXAMPLES:
   cs tackle task-example-0001        # worktree + tmux + Claude (one node)
   cs tackle <mol> --dry-run           # print the bootstrap prompt
   cs tackle <mol> --no-worktree       # reuse current directory
+  cs tackle <mol> --base release/2.0  # cut from — and merge back to — that trunk
+
+`--base` makes the integration branch a property of the MOLECULE: the
+worker's branch is cut from it, the name is persisted in the molecule's
+state, and `cs done` merges back into it with no `COSMON_BASE_BRANCH` in
+the environment. Without `--base`, the branch is cut from the ambient
+HEAD and `cs done` falls back to COSMON_BASE_BRANCH → origin/HEAD → main,
+exactly as before.
 
 `cs tackle` is ALWAYS leaf — it spawns one worker on the named node and
 never walks the DAG. To walk a DAG of N≥1 nodes (1 = leaf, N = full
@@ -690,6 +698,21 @@ worktree persists.
 touching state when the molecule is not `Completed` or already merged;
 behaves identically to plain `cs done` otherwise. Supersedes the
 former `cs harvest` verb (ADR-052 §D3).
+
+BASE BRANCH — the branch this merge lands on is resolved once per run,
+in this order (first that answers wins):
+
+  1. the molecule's own base, stamped by `cs tackle --base <branch>`
+  2. the COSMON_BASE_BRANCH environment variable
+  3. `git symbolic-ref refs/remotes/origin/HEAD`
+  4. the literal main
+
+Rung 1 is why a `cs done` fired from a tmux hook — whose environment
+froze when the tmux server started and never saw a later `export` —
+still merges onto the right trunk. Molecules tackled without `--base`
+resolve through rungs 2-4 exactly as they always did. `cs done` still
+refuses (NotOnBase) when HEAD is not the resolved base: git merges into
+the current HEAD, never into a branch by name.
 
 SEE ALSO: cs complete (state transition only), cs tackle (counterpart).";
 

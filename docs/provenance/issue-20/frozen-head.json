@@ -1,0 +1,11 @@
+{
+  "_comment": "The head this provenance index is projected onto. Changing it is a deliberate act: it redefines which verdicts are authoritative, so it is versioned beside the register rather than passed on a command line.",
+  "mission": "noogram/cosmon#20",
+  "integration_trunk": "feat/container-worker-doors",
+  "frozen_head": "9e2a8ce2cea202bba55966ffe16acfc7aa9151a4",
+  "frozen_head_subject": "Merge branch 'feat/task-20260725-a088'",
+  "final_door_4_fix": "73c4b2a",
+  "final_door_4_fix_subject": "fix(readiness): the dispatch gate is an allow-list, not a deny-list",
+  "authority_rule": "A catalogued verdict is AUTHORITATIVE for the frozen head when (1) no succession-register entry names it as `previous`, (2) its subject_sha is known, (3) that sha is an ancestor of the frozen head, and (4) the final door-4 fix is an ancestor of that sha — i.e. the verdict was pronounced on the fix or later. A terminal verdict that fails (2), (3) or (4) is STALE-UNREPLACED: still true on its own bytes, but it does not speak for the frozen head and nothing has replaced it.",
+  "pushed": false
+}

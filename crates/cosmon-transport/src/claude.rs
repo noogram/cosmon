@@ -139,6 +139,47 @@ pub enum ClaudeError {
     /// root-bypass spawn.
     #[error("root-spawn refused: {0}")]
     RootSpawnRefused(String),
+
+    /// Refused to spawn because Claude Code's startup consent dialogs (folder
+    /// trust, bypass disclaimer) could not be pre-granted for the workdir
+    /// (issue #20). No live worker was created — the loud alternative to a pane
+    /// that renders a question nobody will answer. See [`crate::claude_trust`].
+    #[error("startup-consent pre-grant refused: {0}")]
+    StartupConsentRefused(String),
+
+    /// Refused to spawn because the uid the worker will run as cannot use a
+    /// directory the worker must write (issue #20). `--add-dir` grants Claude
+    /// Code authorization, never OS ownership; without this check the worker
+    /// starts, is declared live, and fails `EACCES` the first time it writes
+    /// molecule state. No live worker was created. See
+    /// [`crate::demote_provisioning::as_is_reachability_refusal`].
+    #[error(
+        "worker uid {uid} cannot use the {resource} it must write: {path} \
+         (--add-dir grants Claude authorization, not filesystem ownership)"
+    )]
+    UnreachableResource {
+        /// The uid the worker would have run as.
+        uid: u32,
+        /// Which resource kind is blocked (config home, worktree, state dir).
+        resource: String,
+        /// The blocked path.
+        path: String,
+    },
+
+    /// Refused to spawn an **interactive** worker that has no usable Claude Code
+    /// credential (issue #20, the third door). Measured on 2.1.220: such a
+    /// worker does not stop on a login dialog — it boots to the composer, reads
+    /// `Not logged in · Run /login`, accepts its briefing and produces nothing,
+    /// while every liveness signal says healthy. No live worker was created. The
+    /// headless `claude -p` path is deliberately exempt (it exits with a status
+    /// instead of hanging). See [`crate::claude_login`].
+    #[error("interactive worker has no usable Claude Code credential: {refusal}. {remedy}")]
+    LoginCredentialsMissing {
+        /// The typed refusal, rendered. Carries locators only, never a secret.
+        refusal: String,
+        /// The operator-facing remedy for that refusal.
+        remedy: String,
+    },
 }
 
 /// Configuration for spawning a Claude session.
@@ -424,7 +465,7 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
 /// # Why this is a separate function (COSMON-DEV #20 defect ND3)
 ///
 /// A3 was "two demote call sites, one of them unchecked". The fix routes both
-/// through [`crate::demote_provisioning::decide_root_spawn_provisioned`], and
+/// through [`crate::demote_provisioning::provision_and_decide_root_spawn`], and
 /// the tackle side is pinned by tests because its guard sits inside a function
 /// whose uid is a parameter. This side read `Uid::effective()` inline, so no
 /// test could reach its root branch: swapping the provisioned port back for the
@@ -439,22 +480,102 @@ fn decide_for_config(running_uid: u32, config: &ClaudeSessionConfig) -> RootSpaw
     // or write the root-owned `.cosmon/state/`, and the worker started, was
     // declared live, and wedged on EACCES. Both demote call sites now route
     // through the one shared port.
-    crate::demote_provisioning::decide_root_spawn_provisioned(
+    // Issue #20: the same entry point also transfers ownership of the worktree
+    // and the state roots to the demote target before judging them. A thaw
+    // recreates neither, but a worker paused by a root dispatcher left both
+    // root-owned, so the repair is as load-bearing here as on the tackle path.
+    crate::demote_provisioning::provision_and_decide_root_spawn(
         running_uid,
         demote_target,
-        |to_uid| {
-            let config_home = crate::demote_provisioning::demote_config_home(
+        &crate::demote_provisioning::DemoteResources {
+            config_home: crate::demote_provisioning::demote_config_home(
                 std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
                 |k| std::env::var(k).ok(),
-            );
-            crate::demote_provisioning::demote_resource_checks(
-                to_uid,
-                config_home.as_deref(),
-                std::path::Path::new(&config.work_dir),
-                &config.writable_roots,
-            )
+            ),
+            worktree: std::path::PathBuf::from(&config.work_dir),
+            state_dirs: config.writable_roots.clone(),
         },
     )
+}
+
+/// Refuse a **TUI** respawn that has no usable Claude Code credential, or pass.
+///
+/// # Why this path gets the check, and which half of it
+///
+/// [`build_headless_command`] spawns two different things: with
+/// [`ClaudeSessionConfig::prompt`] `Some` it is a headless `claude -p`, with
+/// `None` a bare **interactive TUI**. `cs thaw` and the patrol respawn backstop
+/// both take the `None` arm — they re-create the pane and then paste the resume
+/// prompt into it — so both revive workers straight through the third door. A
+/// resumed worker is not a lesser worker, exactly as the consent pre-grant
+/// argues, and a resumed worker with no credential is the same silent composer.
+///
+/// The `Some` arm is deliberately **not** checked. A headless `claude -p` with no
+/// credential *exits*, non-zero and immediately, which cosmon already classifies
+/// through its adapter-exit path. Door 3 is a doctrine about mute hangs; a
+/// process that dies with a status is not one, and extending the refusal there
+/// would trade a loud failure for another loud failure while adding a new way to
+/// wrongly block a working dispatch.
+///
+/// The uid is the dispatcher's own: this path has no demotion decision of its
+/// own to consult at this point (the caller resolves it separately), and reading
+/// the credential as the process that will exec is the honest question for a
+/// `SpawnAsIs`. On a demote the config home is already probed for **read**
+/// access against the target uid by
+/// [`crate::demote_provisioning::demote_resource_checks`], which is the same
+/// question one directory up.
+///
+/// The environment and the keychain arrive as **injected ports** for the same
+/// reason the uid does (defect ND3): a check that reads the ambient process
+/// environment inline cannot be driven from a test, and this machine's own
+/// keychain holds a real credential — so the only way to pin "a credential-less
+/// TUI respawn refuses" without it silently passing is to hand the decision its
+/// world. Production wires
+/// [`crate::claude_login::security_keychain_probe`] and `std::env::var`.
+fn refuse_tui_without_credentials<E, K>(
+    config: &ClaudeSessionConfig,
+    running_uid: u32,
+    env_lookup: E,
+    keychain_present: K,
+) -> Result<(), ClaudeError>
+where
+    E: Fn(&str) -> Option<String>,
+    K: Fn(&str, &str) -> bool,
+{
+    if config.prompt.is_some() {
+        return Ok(());
+    }
+    let config_dir = env_lookup("CLAUDE_CONFIG_DIR");
+    crate::claude_login::check_tui_credentials(
+        config_dir.as_deref(),
+        running_uid,
+        &env_lookup,
+        keychain_present,
+    )
+    .map(|_| ())
+    .map_err(|refusal| ClaudeError::LoginCredentialsMissing {
+        refusal: refusal.to_string(),
+        remedy: refusal.remedy(),
+    })
+}
+
+/// Pre-grant Claude Code's startup consent for `config`'s workdir, or fail.
+///
+/// The config dir is read from `CLAUDE_CONFIG_DIR` here rather than threaded
+/// through [`ClaudeSessionConfig`]: this path's callers (`cs thaw`, the patrol
+/// respawn) do not resolve an account per worker the way `cs tackle` does, so
+/// the process environment *is* the account selection they hand to `claude`.
+/// Reading it in the same function that spawns keeps the pre-grant and the
+/// worker pointed at one config by construction.
+fn pregrant_consent_for_config(config: &ClaudeSessionConfig) -> Result<(), ClaudeError> {
+    let paths = crate::claude_trust::consent_paths(
+        std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+        |k| std::env::var(k).ok(),
+    )
+    .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
+    crate::claude_trust::pregrant_startup_consent(&paths, std::path::Path::new(&config.work_dir))
+        .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
+    Ok(())
 }
 
 /// [`spawn_claude_session`] with the dispatcher's uid injected.
@@ -467,6 +588,33 @@ fn spawn_claude_session_as(
     config: &ClaudeSessionConfig,
     running_uid: u32,
 ) -> Result<(), ClaudeError> {
+    spawn_claude_session_with(
+        config,
+        running_uid,
+        |k| std::env::var(k).ok(),
+        crate::claude_login::security_keychain_probe,
+    )
+}
+
+/// [`spawn_claude_session_as`] with the credential world injected too.
+///
+/// The extra two ports exist for the third door only (issue #20). Its check has
+/// to ask "does *this* environment hold a credential, and does *this* host's
+/// keychain hold one?", and both answers are ambient — on the machine cosmon is
+/// developed on, the real keychain holds a live credential, so a test driving the
+/// production ports would pass whatever the code did. Injecting them is the same
+/// move as injecting the uid (defect ND3): the property becomes assertable at the
+/// call site instead of one level below it at the port.
+fn spawn_claude_session_with<E, K>(
+    config: &ClaudeSessionConfig,
+    running_uid: u32,
+    env_lookup: E,
+    keychain_present: K,
+) -> Result<(), ClaudeError>
+where
+    E: Fn(&str) -> Option<String>,
+    K: Fn(&str, &str) -> bool,
+{
     let briefing_file = match config.prompt {
         Some(ref prompt) => Some(write_briefing_file(prompt)?),
         None => None,
@@ -487,6 +635,67 @@ fn spawn_claude_session_as(
         }
         return Err(ClaudeError::RootSpawnRefused(reason.to_string()));
     }
+    // Grant-reachability parity (issue #20). A `Demote` had its resources
+    // verified inside `decide_for_config`; a `SpawnAsIs` verified nothing, so a
+    // worker running as an unprivileged container uid was handed `--add-dir` on
+    // a root-owned `.cosmon/` and wedged on EACCES mid-run. Same question, same
+    // port, both decisions. Refused here, before a live worker exists — and the
+    // briefing temp file is reaped, exactly as the root refusal above does.
+    if matches!(decision, RootSpawnDecision::SpawnAsIs) {
+        if let Some(blocked) = crate::demote_provisioning::as_is_reachability_refusal(
+            running_uid,
+            crate::demote_provisioning::demote_config_home(
+                std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
+                |k| std::env::var(k).ok(),
+            )
+            .as_deref(),
+            std::path::Path::new(&config.work_dir),
+            &config.writable_roots,
+        ) {
+            if let Some(ref path) = briefing_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(ClaudeError::UnreachableResource {
+                uid: running_uid,
+                resource: format!("{:?}", blocked.resource),
+                path: blocked.path,
+            });
+        }
+    }
+    // The third door (issue #20). A TUI respawn with no credential boots to a
+    // composer reading `Not logged in · Run /login` and reports healthy forever;
+    // refuse it here, where no live worker exists, and reap the briefing exactly
+    // as the two refusals above do. Scope is the TUI arm only — see
+    // [`refuse_tui_without_credentials`] for why the headless arm is exempt.
+    //
+    // Ordered before the consent pre-grant so a refused dispatch leaves no trace
+    // in the operator's Claude Code config.
+    if let Err(e) =
+        refuse_tui_without_credentials(config, running_uid, &env_lookup, keychain_present)
+    {
+        if let Some(ref path) = briefing_file {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(e);
+    }
+
+    // Pre-grant Claude Code's two startup consent dialogs for this workdir
+    // (issue #20). A resumed worker is not a lesser worker: `cs thaw` and the
+    // patrol backstop respawn into the same unseen worktrees and would stop on
+    // the same folder-trust question the interactive tackle path pre-grants
+    // away. Fail-closed — refuse here, where no live worker exists yet, rather
+    // than hand the fleet a pane that looks healthy and answers nothing. See
+    // [`crate::claude_trust`].
+    //
+    // Ordered AFTER both refusals above on purpose: a dispatch cosmon is about
+    // to refuse must not leave a trace in the operator's Claude Code config.
+    if let Err(e) = pregrant_consent_for_config(config) {
+        if let Some(ref path) = briefing_file {
+            let _ = std::fs::remove_file(path);
+        }
+        return Err(e);
+    }
+
     let claude_cmd = build_headless_command(
         config.permission_mode,
         briefing_file.as_deref(),
@@ -758,9 +967,17 @@ impl From<ClaudeError> for SpawnError {
             // A root-spawn refusal is a spawn that never happened; it shares
             // the generic spawn-error envelope, which carries the typed reason
             // string.
-            ClaudeError::SpawnFailed(m) | ClaudeError::RootSpawnRefused(m) => Self::SpawnFailed(m),
+            // A startup-consent refusal is likewise a spawn that never
+            // happened, and carries its own reason string.
+            ClaudeError::SpawnFailed(m)
+            | ClaudeError::RootSpawnRefused(m)
+            | ClaudeError::StartupConsentRefused(m) => Self::SpawnFailed(m),
             ClaudeError::KillFailed(m) => Self::KillFailed(m),
             ClaudeError::Io(m) => Self::Io(m),
+            // Same envelope, same reason: a spawn that never happened. Rendered
+            // through `Display` so the uid and path reach the operator.
+            ref other @ (ClaudeError::UnreachableResource { .. }
+            | ClaudeError::LoginCredentialsMissing { .. }) => Self::SpawnFailed(other.to_string()),
         }
     }
 }
@@ -801,7 +1018,7 @@ mod tests {
     /// Before the uid became a parameter, `spawn_claude_session` read
     /// `Uid::effective()` inline, so no test on a non-root box could reach its
     /// root branch: replacing
-    /// `demote_provisioning::decide_root_spawn_provisioned` with the bare
+    /// `demote_provisioning::provision_and_decide_root_spawn` with the bare
     /// `decide_root_spawn` reintroduced A3 with the entire suite green. This
     /// drives uid 0 through the seam against a worktree the demote target
     /// (uid 10001, never the test user) cannot write, and asserts the refusal —
@@ -831,6 +1048,160 @@ mod tests {
             matches!(err, ClaudeError::RootSpawnRefused(_)),
             "expected a typed root refusal before any live worker, got {err:?}"
         );
+    }
+
+    /// Issue #20, the THIRD door — a TUI respawn with no usable credential must
+    /// be refused **before** anything is spawned.
+    ///
+    /// This is the test that fails for the right reason before the fix: with no
+    /// credential check on the path, `spawn_claude_session_with` reached
+    /// `build_headless_command` and created a live pane that would boot to a
+    /// composer reading `Not logged in · Run /login` and report healthy forever.
+    /// `prompt: None` is what makes this the TUI arm (`cs thaw` and the patrol
+    /// respawn both take it); the env and keychain ports are empty so the verdict
+    /// is deterministic on a developer machine whose real keychain *does* hold a
+    /// credential.
+    #[test]
+    fn tui_respawn_without_any_credential_refuses_before_spawning() {
+        let tmp = tempdir().unwrap();
+        let work_dir = tmp.path().join("worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+        let socket = "cosmon-test-door3-never-spawned";
+
+        let config = session_config(
+            socket,
+            "polecat-dddd",
+            &work_dir,
+            Clearance::Write,
+            // TUI: no briefing on stdin, the prompt is pasted afterwards.
+            None,
+        );
+
+        let err = spawn_claude_session_with(
+            &config,
+            // The dispatcher's real uid: the two earlier refusals (root policy,
+            // grant reachability) read the ambient environment and would fire
+            // first on a synthetic uid, masking the door this test is about.
+            nix::unistd::Uid::effective().as_raw(),
+            // An environment holding neither token nor config dir, but a HOME
+            // pointing into the tempdir so the credentials path resolves to
+            // somewhere that genuinely has no credentials file.
+            |k| (k == "HOME").then(|| tmp.path().to_string_lossy().into_owned()),
+            crate::claude_login::no_keychain,
+        )
+        .expect_err("a credential-less TUI respawn must refuse");
+
+        assert!(
+            matches!(err, ClaudeError::LoginCredentialsMissing { .. }),
+            "expected a typed login refusal before any live worker, got {err:?}"
+        );
+        // The remedy has to reach the operator through the error, and must name
+        // the belief that cost the reporter time.
+        let rendered = err.to_string();
+        assert!(rendered.contains("CLAUDE_CODE_OAUTH_TOKEN"), "{rendered}");
+        assert!(rendered.contains("ANTHROPIC_API_KEY"), "{rendered}");
+        // And no live worker: nothing ever asked tmux for that session.
+        assert_eq!(
+            check_alive(socket, "polecat-dddd", None).ok(),
+            Some(false),
+            "the refusal must precede the spawn, not follow it"
+        );
+    }
+
+    /// The scope half of the third door: a **headless** dispatch is NOT blocked
+    /// by the credential check, even with the same empty credential world.
+    ///
+    /// A `claude -p` with no credential exits with a status, which cosmon already
+    /// classifies — it is not a mute hang, and refusing it here would trade one
+    /// loud failure for another while adding a way to wrongly block a working
+    /// dispatch. Asserted by *cause*: whatever else goes wrong downstream in a
+    /// test environment, it must not be the login refusal.
+    #[test]
+    fn headless_dispatch_is_not_blocked_by_the_credential_check() {
+        let tmp = tempdir().unwrap();
+        let work_dir = tmp.path().join("worktree");
+        fs::create_dir_all(&work_dir).unwrap();
+
+        let config = session_config(
+            "cosmon-test-door3-headless",
+            "polecat-eeee",
+            &work_dir,
+            Clearance::Write,
+            // Headless: the briefing goes to `claude -p` on stdin.
+            Some("a briefing".to_owned()),
+        );
+
+        let outcome = spawn_claude_session_with(
+            &config,
+            nix::unistd::Uid::effective().as_raw(),
+            |k| (k == "HOME").then(|| tmp.path().to_string_lossy().into_owned()),
+            crate::claude_login::no_keychain,
+        );
+
+        assert!(
+            !matches!(outcome, Err(ClaudeError::LoginCredentialsMissing { .. })),
+            "the headless path must not be refused by the TUI credential check, got {outcome:?}"
+        );
+        // Whatever pane this may have created in a host with tmux, take it down.
+        let _ = kill_session("cosmon-test-door3-headless", "polecat-eeee", None);
+    }
+
+    /// Issue #20 point 2 — the grant-reachability parity hole, frozen.
+    ///
+    /// The tester read the asymmetry as "the non-root path does not pass the
+    /// `--add-dir` the demotion path passes". The flag itself has no hole (see
+    /// `grant_is_structural_across_permission_modes`); the *question behind it*
+    /// did. `--add-dir` grants Claude Code authorization, never OS ownership, so
+    /// a worker running as a container's unprivileged uid was handed a
+    /// root-owned `.cosmon/`, started, was declared live, and failed EACCES on
+    /// its first `cs evolve`. A demote had exactly that verified and refused; a
+    /// non-root spawn verified nothing.
+    ///
+    /// Deterministic without root: the uid is a parameter, so a uid that owns
+    /// nothing on any host makes `other` bits decide, and `other` has nothing on
+    /// a 0700 dir. Before the fix this call reached `spawn_worker` and returned
+    /// `Ok`/`SpawnFailed` from tmux — never a reachability refusal.
+    #[test]
+    fn transport_non_root_spawn_refuses_an_unreachable_state_dir() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// A uid that owns nothing on any test host, so `other` bits decide.
+        const FOREIGN: u32 = 4_294_967_000;
+
+        let tmp = tempdir().unwrap();
+        let work_dir = tmp.path().join("worktree");
+        let state_dir = tmp.path().join("main").join(".cosmon");
+        fs::create_dir_all(&work_dir).unwrap();
+        fs::create_dir_all(&state_dir).unwrap();
+        // World-open worktree, owner-only state dir: isolates the assertion to
+        // the out-of-worktree grant the worker needs for `cs evolve`.
+        fs::set_permissions(&work_dir, fs::Permissions::from_mode(0o777)).unwrap();
+        fs::set_permissions(&state_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let mut config = session_config(
+            "cosmon-test-20",
+            "issue20-never-spawned",
+            &work_dir,
+            Clearance::Write,
+            None,
+        );
+        config.writable_roots = vec![state_dir.clone()];
+
+        let err = spawn_claude_session_as(&config, FOREIGN).expect_err(
+            "a worker whose uid cannot write the granted state dir must be refused, not spawned",
+        );
+        // The *uid* is pinned, the *path* is not: this seam reads the config home
+        // from the ambient `CLAUDE_CONFIG_DIR`, which on a developer box is the
+        // operator's own 0700 account dir and is therefore itself unreachable by
+        // `FOREIGN` — a second true refusal that would race the assertion. Which
+        // resource is named is pinned env-free in
+        // `demote_provisioning::as_is_refusal_names_the_unreachable_state_dir`.
+        match err {
+            ClaudeError::UnreachableResource { uid, .. } => assert_eq!(uid, FOREIGN),
+            other => {
+                panic!("expected a reachability refusal before any live worker, got {other:?}")
+            }
+        }
     }
 
     /// The same seam on the ordinary non-root path is byte-identical to

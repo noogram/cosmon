@@ -42,8 +42,8 @@
 //! | `updated_at` | last event timestamp |
 //!
 //! Anything else (`variables`, `tags`, `project_id`, `kind`, `session_name`,
-//! `assigned_worker`, `originating_branch`, `expires_at`, …) materialises to
-//! the serde default. Operators who need the full hot cache contents should
+//! `assigned_worker`, `originating_branch`, `base_branch`, `expires_at`, …)
+//! materialises to the serde default. Operators who need the full hot cache contents should
 //! rely on the synchronous `cs evolve` write path; the rebuild is a safety net.
 //!
 //! [`MoleculeNucleated`]: cosmon_core::event_v2::EventV2::MoleculeNucleated
@@ -306,8 +306,8 @@ fn project_single(id: &MoleculeId, envelopes: &[Envelope]) -> Option<MoleculeDat
 ///
 /// The event log can project `status`, step counters, seals, and typed links,
 /// but **not** `variables`, `tags`, `assigned_worker`, `assigned_role`,
-/// `kind`, `class`, `session_name`, `originating_branch`, `project_id`,
-/// `expires_at`, or `expiry_policy` (see the module table). When a `state.json`
+/// `kind`, `class`, `session_name`, `originating_branch`, `base_branch`,
+/// `project_id`, `expires_at`, or `expiry_policy` (see the module table). When a `state.json`
 /// is classified `Corrupt`, the strict `MoleculeData` deserialize failed — but
 /// the JSON is frequently *mostly* intact (one field drifted, a trailing
 /// truncation, a type that no longer matches). A lenient `serde_json::Value`
@@ -358,6 +358,11 @@ fn salvage_non_projectable(corrupt_bytes: &[u8], projected: &mut MoleculeData) {
     salvage!("class" => projected.class);
     salvage!("session_name" => projected.session_name, non_empty: |o: &Option<_>| o.is_none());
     salvage!("originating_branch" => projected.originating_branch, non_empty: |o: &Option<_>| o.is_none());
+    // The molecule's own integration base (`cs tackle --base`). No event
+    // carries it, and losing it would silently demote `cs done` back to the
+    // ambient `COSMON_BASE_BRANCH`/`origin/HEAD`/`main` chain — i.e. merge the
+    // worker's branch onto the wrong trunk after a reconcile.
+    salvage!("base_branch" => projected.base_branch, non_empty: |o: &Option<_>| o.is_none());
     salvage!("project_id" => projected.project_id, non_empty: |o: &Option<_>| o.is_none());
     salvage!("expires_at" => projected.expires_at, non_empty: |o: &Option<_>| o.is_none());
     salvage!("expiry_policy" => projected.expiry_policy, non_empty: |o: &Option<_>| o.is_none());
@@ -610,6 +615,7 @@ fn empty_molecule_data(
         expires_at: None,
         expiry_policy: None,
         originating_branch: None,
+        base_branch: None,
         pending_step: None,
         merged_at: None,
         prompt_seal: None,
@@ -1130,6 +1136,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,
@@ -1256,6 +1263,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,

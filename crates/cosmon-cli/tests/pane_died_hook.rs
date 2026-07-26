@@ -79,7 +79,7 @@ fn install_fake_claude_alive(tmp: &Path) -> std::path::PathBuf {
     // when the shell finishes spawning.
     fs::write(
         &fake,
-        "#!/bin/sh\nprintf '\\xe2\\x9d\\xaf\\n'\nexec sleep 600\n",
+        "#!/bin/sh\nprintf '\\xe2\\x9d\\xaf Type your message\\n'\nexec sleep 600\n",
     )
     .unwrap();
     let mut perm = fs::metadata(&fake).unwrap().permissions();

@@ -58,6 +58,17 @@ pub struct Args {
     #[arg(long)]
     pub workdir: Option<String>,
 
+    /// Integration base branch for this molecule (default: the ambient HEAD
+    /// of the main checkout).
+    ///
+    /// The worker's `feat/{mol-id}` branch is cut from this ref instead of
+    /// whatever the main checkout has checked out, and the branch name is
+    /// **persisted on the molecule** so `cs done` merges back into it without
+    /// any `COSMON_BASE_BRANCH` in the environment. Makes the base a property
+    /// of the molecule rather than of the session that launched it.
+    #[arg(long, value_name = "BRANCH")]
+    pub base: Option<String>,
+
     /// Skip git worktree creation (use current directory).
     #[arg(long)]
     pub no_worktree: bool,
@@ -333,7 +344,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("invalid --by value: {e}"))?;
 
     // 1. Resolve molecule (exact, prefix, or fuzzy).
-    let mol = resolve_molecule(&store, &args.molecule)?;
+    let mut mol = resolve_molecule(&store, &args.molecule)?;
     let mol_id = mol.id.clone();
 
     // Guard: only tackle alive molecules.
@@ -1090,7 +1101,28 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let repo_root = find_repo_root()?;
     let branch_name = format!("feat/{mol_id}");
-    let start_point = resolve_branch_start_point(&repo_root, &mol);
+
+    // 7a. Base branch — a property of the molecule, not of the session
+    //     (task-20260725-61fa). `--base` names the trunk this molecule's work
+    //     belongs to; we validate it exists locally, persist it on the
+    //     molecule, and cut the worker's branch from it below. `cs done` then
+    //     reads it back from state, so a harvest triggered from a tmux hook —
+    //     whose environment froze when the tmux server started and therefore
+    //     never sees a later `export COSMON_BASE_BRANCH` — still merges onto
+    //     the right trunk. Without `--base` the molecule keeps whatever base
+    //     a previous tackle persisted, and a never-based molecule keeps the
+    //     pre-existing ambient behaviour exactly.
+    let base_branch =
+        resolve_tackle_base(&repo_root, args.base.as_deref(), mol.base_branch.clone())?;
+    if let Some(base) = base_branch.as_deref() {
+        if mol.base_branch.as_deref() != Some(base) {
+            mol.base_branch = Some(base.to_owned());
+            mol.updated_at = Utc::now();
+            store.save_molecule(&mol_id, &mol)?;
+        }
+    }
+
+    let start_point = resolve_branch_start_point(&repo_root, &mol).or_else(|| base_branch.clone());
     let worktree_path = if args.no_worktree {
         args.workdir
             .as_deref()
@@ -3356,6 +3388,67 @@ where
     env_lookup("COSMON_API_REQUEST").as_deref() == Some("1")
 }
 
+/// Resolve the integration base to persist on the molecule at tackle time.
+///
+/// Precedence:
+///
+/// 1. `--base <branch>` — the operator names the trunk explicitly. The ref is
+///    validated as an existing **local branch** (not a tag, not a remote-only
+///    ref): `cs done` merges by checking that HEAD *is* that branch, so a base
+///    that cannot be checked out would only surface as a `NotOnBase` refusal
+///    much later, after the worker has already done its work.
+/// 2. The base already persisted on the molecule — so a re-tackle (`--force`,
+///    a resumed dispatch) keeps the trunk it was cut from without the operator
+///    having to retype `--base`.
+/// 3. `None` — no molecule-level base. The branch is cut from the ambient
+///    `HEAD` and `cs done` falls back to `COSMON_BASE_BRANCH` → `origin/HEAD`
+///    → `"main"`, exactly as before this flag existed.
+///
+/// # Errors
+///
+/// Returns an error when `--base` names a branch that does not exist locally.
+/// Failing here is deliberate: the alternative is cutting the worker's branch
+/// from the ambient HEAD while recording a base it will never merge into.
+fn resolve_tackle_base(
+    repo_root: &std::path::Path,
+    requested: Option<&str>,
+    persisted: Option<String>,
+) -> anyhow::Result<Option<String>> {
+    let Some(requested) = requested else {
+        return Ok(persisted);
+    };
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(anyhow::anyhow!(
+            "--base was given an empty branch name; pass a local branch such as `--base main`"
+        ));
+    }
+    if !local_branch_exists(repo_root, requested) {
+        return Err(anyhow::anyhow!(
+            "--base {requested}: no local branch by that name in {}.\n\
+             The base must be a branch `cs done` can check out and merge into — \
+             create or fetch it first (e.g. `git branch {requested} origin/{requested}`).",
+            repo_root.display()
+        ));
+    }
+    Ok(Some(requested.to_owned()))
+}
+
+/// True iff `refs/heads/<branch>` exists in `repo_root`.
+fn local_branch_exists(repo_root: &std::path::Path, branch: &str) -> bool {
+    std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
 fn resolve_branch_start_point(repo_root: &std::path::Path, mol: &MoleculeData) -> Option<String> {
     let blockers = mol.blocked_by();
     if blockers.is_empty() {
@@ -4222,7 +4315,11 @@ fn spawn_claude_and_prompt(
     // strong model (task-20260705-ba98).
     strong_set: &[String],
 ) -> anyhow::Result<()> {
-    use cosmon_transport::readiness::{ClaudeTuiProbe, LiveProbe, Liveness};
+    // `LiveProbe` is not imported here: this path calls the Claude probe's
+    // inherent `await_live_with_status`, which keeps the pane verdict the
+    // refusal below quotes. The trait's `await_live` is what the
+    // substrate-agnostic spawn paths (aider, headless) use.
+    use cosmon_transport::readiness::{ClaudeTuiProbe, Liveness};
     let claude_bin = which_claude().unwrap_or_else(|| "claude".to_owned());
     let perm_mode = permission_mode_override.unwrap_or(default_permission_mode(mol));
     // Inject COSMON_MOL_DIR so the worker process knows the molecule state
@@ -4254,6 +4351,88 @@ fn spawn_claude_and_prompt(
         &|k| std::env::var(k).ok(),
     );
 
+    // The identity questions, resolved once and used by every check below.
+    // Reading them is pure — no probe, no process, no config write — so they sit
+    // above the first fail-closed gate: the credential check needs to know which
+    // uid will *read* the credential, and that is the demote target on a root
+    // dispatch, not the dispatcher.
+    let running_uid = nix::unistd::Uid::effective().as_raw();
+    let demote_target =
+        cosmon_core::root_spawn_policy::resolve_demote_target(|k| std::env::var(k).ok());
+
+    // The THIRD door (issue #20, the login half contributed by @jdthaler).
+    // `cs tackle --adapter claude` spawns an INTERACTIVE claude, and an
+    // interactive claude with no credential does not stop on a dialog — measured
+    // on 2.1.220, it boots all the way to the composer and sits there reading
+    // `Not logged in · Run /login`. Every liveness signal cosmon has reports a
+    // healthy worker; it will accept this briefing and never emit a token. Of
+    // the three doors it is the quietest, so it gets the same treatment as the
+    // other two: refuse here, before anything is live, with the remedy.
+    //
+    // Placed FIRST of the fail-closed gates, ahead of the consent pre-grant, so
+    // a dispatch cosmon is about to refuse leaves no trace in the operator's
+    // Claude Code config — and ahead of the paid model probe, so it costs
+    // nothing. Scope is deliberate: this is the TUI path. See
+    // [`cosmon_transport::claude_login`] for the measurement behind every
+    // clause, including why an env API key is NOT accepted.
+    let credential_uid = if running_uid == 0 {
+        demote_target.unwrap_or(0)
+    } else {
+        running_uid
+    };
+    cosmon_transport::claude_login::check_tui_credentials(
+        config_dir.as_deref(),
+        credential_uid,
+        |k| std::env::var(k).ok(),
+        cosmon_transport::claude_login::security_keychain_probe,
+    )
+    .map_err(|refusal| {
+        anyhow::anyhow!(
+            "cs tackle: refusing to spawn a claude worker for molecule {}: {refusal}. {}",
+            mol.id.as_str(),
+            refusal.remedy(),
+        )
+    })?;
+
+    // Pre-grant Claude Code's two startup consent dialogs for this worktree
+    // BEFORE anything spawns (COSMON-DEV #20 / issue #20). Claude Code asks
+    // "Is this a project you created or one you trust?" in any directory it has
+    // not seen, and a fresh worktree is by definition unseen; the folder-trust
+    // question is a property of the workspace and is asked regardless of
+    // `--permission-mode` (measured against 2.1.220 under
+    // `bypassPermissions` — the mode does NOT suppress it). Nobody is in front
+    // of a worker's tmux pane to answer, and the readiness handshake's
+    // keystroke answer is a race against a TUI still painting its first frame
+    // — which is how @jdthaler's container worker sat on the dialog forever.
+    // Pre-granting removes the race: the dialog is never rendered.
+    //
+    // Fail-closed, and deliberately placed BEFORE the model preflight so a
+    // refusal costs no paid probe: if the consent cannot be pre-granted we
+    // refuse the dispatch loudly instead of spawning a worker that will stop on
+    // a question nobody can answer. A mute hang is worse than a stated refusal
+    // — it holds the molecule `running` and reads as healthy.
+    let consent_paths = cosmon_transport::claude_trust::consent_paths(config_dir.as_deref(), |k| {
+        std::env::var(k).ok()
+    })
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "cs tackle: refusing to spawn a claude worker for molecule {}: {e}. \
+             Without this, the worker stops on Claude Code's folder-trust dialog \
+             with nobody to answer it.",
+            mol.id.as_str(),
+        )
+    })?;
+    cosmon_transport::claude_trust::pregrant_startup_consent(&consent_paths, worktree_path)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "cs tackle: refusing to spawn a claude worker for molecule {}: \
+                 cannot pre-grant Claude Code's startup consent: {e}. \
+                 Without this, the worker stops on Claude Code's folder-trust dialog \
+                 with nobody to answer it.",
+                mol.id.as_str(),
+            )
+        })?;
+
     // Model fallback chain (task-20260614-3116). The preferred model
     // (`ANTHROPIC_MODEL`, exported by the rpp-adapter from the `rpp.toml`
     // `claude_model` pin, default `claude-fable-5`) is no longer trusted
@@ -4274,18 +4453,18 @@ fn spawn_claude_and_prompt(
     // and chooses the probe's *identity* — never root: refused dispatches
     // never probe at all, and a demote probes as the demoted uid. The ordering
     // cannot be undone by a later edit that moves two statements past each
-    // other.
-    let running_uid = nix::unistd::Uid::effective().as_raw();
-    let demote_target =
-        cosmon_core::root_spawn_policy::resolve_demote_target(|k| std::env::var(k).ok());
+    // other. (`running_uid` / `demote_target` are resolved above, where the
+    // credential check needs them; both reads are pure.)
     // COSMON-DEV #20 facet B (task-20260723-2aa4): a claude worker's cwd is its
     // worktree, but the molecule state / fleet lock / events.jsonl it writes on
     // `cs evolve` / `cs complete` live in the MAIN repo's out-of-worktree
     // `.cosmon/state/` (walk-up redirects a worktree's state host to the main
-    // checkout). The interactive TUI runs under `acceptEdits`, which only
-    // auto-accepts edits INSIDE the cwd, so that out-of-worktree write trips a
-    // permission prompt an unattended worker cannot answer — the root-container
-    // hang Jesse Thaler reported. Declare the main-repo `.cosmon/` dir writable
+    // checkout). Under `acceptEdits` — the mode `cs thaw` and the patrol
+    // backstop derive from a worker's `Clearance::Write`; this interactive path
+    // uses `bypassPermissions`, see `default_permission_mode` — only writes
+    // INSIDE the cwd auto-accept, so that out-of-worktree write trips a
+    // permission prompt an unattended worker cannot answer — the container hang
+    // Jesse Thaler reported. Declare the main-repo `.cosmon/` dir writable
     // via claude's first-class `--add-dir` (empirically confirmed 2026-07-23),
     // resolved with the SAME `walk_up_find_cosmon_dir_from` redirect `cs evolve`
     // uses, so the two agree by construction. `None` (no `.cosmon/` ancestor)
@@ -4295,19 +4474,63 @@ fn spawn_claude_and_prompt(
         .into_iter()
         .collect::<Vec<_>>();
 
+    // Grant-reachability parity (issue #20 point 2). The `--add-dir` grant above
+    // is emitted on every spawn path for every permission mode — that part has
+    // no hole. What was asymmetric is the *question*: a demote has these very
+    // paths verified against the target uid by `preflight_root_then_model`
+    // below, while a non-root dispatch (`running_uid != 0`, the whole normal
+    // fleet AND `cs` launched directly under a container's unprivileged uid)
+    // verified nothing. `--add-dir` grants Claude Code authorization, never OS
+    // ownership: on an image built as root and dropped to `USER 10001`, the
+    // root-owned `.cosmon/` is granted, the worker starts, is declared live, and
+    // fails EACCES on its first `cs evolve` — the same wedge the demote check
+    // exists to prevent, through the door nobody guarded. Checked here, before
+    // the paid model probe, so a doomed dispatch costs nothing.
+    if running_uid != 0 {
+        if let Some(blocked) = cosmon_transport::demote_provisioning::as_is_reachability_refusal(
+            running_uid,
+            demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()).as_deref(),
+            worktree_path,
+            &writable_roots,
+        ) {
+            return Err(anyhow::anyhow!(
+                "cs tackle: refusing to spawn a claude worker for molecule {}: \
+                 uid {running_uid} cannot use the {:?} it must write: {}. \
+                 `--add-dir` grants Claude Code authorization, not filesystem \
+                 ownership — a worker spawned anyway would be declared live and \
+                 then fail EACCES on its first `cs evolve`. Fix the ownership or \
+                 mode of that path (in a container, `chown -R {running_uid} \
+                 <repo>/.cosmon`).",
+                mol.id.as_str(),
+                blocked.resource,
+                blocked.path,
+            ));
+        }
+    }
+
     let (root_decision, effective_model) = match preflight_root_then_model(
         running_uid,
         demote_target,
-        // Consulted only on the demote path (defect A3): `--add-dir` grants
-        // Claude *authorization*, never OS ownership, so the same dirs the
-        // grant names must also be reachable by the demote target.
-        |to_uid| {
-            demote_resource_checks(
-                to_uid,
-                demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()).as_deref(),
-                worktree_path,
-                &writable_roots,
-            )
+        // Used only on the demote path (defect A3, then issue #20): `--add-dir`
+        // grants Claude *authorization*, never OS ownership, so the same dirs
+        // the grant names must be OWNED by the demote target — the port chowns
+        // them here, after `create_worktree` made them and before any worker
+        // exists, then still refuses if the transfer did not take.
+        //
+        // `mol_state_dir` is listed alongside the walked-up `.cosmon` roots
+        // rather than trusted to be under them: it is where the worker writes
+        // its artefacts on `cs evolve` / `cs complete`, and a `COSMON_MOL_DIR`
+        // override can put it outside every walked-up root. Listing it twice
+        // when it is inside one is harmless (the chown skips already-owned
+        // entries, and the check is idempotent); missing it once is the wedge.
+        &DemoteResources {
+            config_home: demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()),
+            worktree: worktree_path.to_path_buf(),
+            state_dirs: writable_roots
+                .iter()
+                .cloned()
+                .chain(std::iter::once(mol_state_dir.to_path_buf()))
+                .collect(),
         },
         // The probe now runs under the identity the WORKER will hold — as the
         // demote target on a root dispatch, as the dispatcher otherwise — so
@@ -4329,10 +4552,21 @@ fn spawn_claude_and_prompt(
         // from a crash, then bail.
         SpawnPreflight::Refused(reason) => {
             record_root_spawn_refusal(mol_state_dir, &mol.id, wid, &reason);
+            // The trailing advice must match the refusal (issue #20). Telling an
+            // operator who ALREADY set `COSMON_WORKER_UID` to set it is noise
+            // that sends them down the wrong path; that reason carries its own
+            // remedy in its Display, so we do not bolt a second one on.
+            let next_step = match reason {
+                cosmon_core::root_spawn_policy::RootRefusalReason::NoNonRootTarget => {
+                    " Set COSMON_WORKER_UID to a non-zero uid to enable \
+                     privilege-drop demotion, or run cs as a non-root user."
+                }
+                cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget {
+                    ..
+                } => "",
+            };
             return Err(anyhow::anyhow!(
-                "cs tackle: {reason} (molecule {}). Set COSMON_WORKER_UID to a \
-                 non-zero uid to enable privilege-drop demotion, or run cs as a \
-                 non-root user.",
+                "cs tackle: {reason} (molecule {}).{next_step}",
                 mol.id.as_str(),
             ));
         }
@@ -4372,9 +4606,17 @@ fn spawn_claude_and_prompt(
     // 1s blind sleep. The fix for task-4046 is to demand EVIDENCE that the
     // worker actually started, not just the absence of a tmux spawn error.
     // The driver requires at least one `Liveness::Live` observation within
-    // the postcondition window — any of {Loading, TrustPrompt, Ready,
-    // Working, Blocked} proves the process printed something a live claude
-    // would print. If the window expires with only Dead / Indeterminate, we
+    // the postcondition window — any of {Loading, TrustPrompt,
+    // BypassPermsPrompt, Ready, Working, Blocked, AwaitingHuman} proves the
+    // process printed something a live claude would print. `AwaitingHuman` is
+    // in that set on purpose and carries the whole C0 argument: a screen
+    // nobody named is still a screen something *painted*, so it answers this
+    // question — "did the binary run?" — with the strongest possible yes,
+    // while the dispatch gate below refuses it. The authority for the set is
+    // `SessionStatus::liveness`; keep this list in step with it, because a
+    // stale list here is how the next reader learns the wrong contract (issue
+    // #20 got its wrong title from exactly that).
+    // If the window expires with only Dead / Indeterminate, we
     // kill the carcass session and bail; the operator gets the truth.
     if let Err(e) = observe_spawn_postcondition(backend, wid) {
         maybe_terminate(backend, wid);
@@ -4384,8 +4626,11 @@ fn spawn_claude_and_prompt(
     // Second stage: block until the worker is alive and accepting work via
     // the substrate-agnostic `LiveProbe` contract (task-20260426-d781). The
     // Claude TUI's trust/permission-prompt handshake lives behind
-    // `ClaudeTuiProbe::await_live` (it delegates to `wait_ready`); this call
-    // site only knows `Live` vs not-`Live`. Before the task-4046 fix the
+    // `ClaudeTuiProbe::await_live_with_status` (it delegates to `wait_ready`);
+    // this call site still *branches* only on `Live` vs not-`Live` — the pane
+    // verdict that rides along is printed, never matched, so the decision of
+    // which screens may be dispatched into stays in one place.
+    // Before the task-4046 fix the
     // result was discarded (`let _status = ...`) — a classic surface-lie
     // pattern: success was inferred from the absence of a returned error,
     // not from the presence of observed liveness. We now match on the
@@ -4393,15 +4638,14 @@ fn spawn_claude_and_prompt(
     // the partial tmux state and surface a diagnostic pointing the operator
     // at `tmux -L <socket> capture-pane` so they can see what the session
     // actually said.
-    let probe = ClaudeTuiProbe;
-    match probe.await_live(
+    match ClaudeTuiProbe::await_live_with_status(
         backend,
         wid,
         std::time::Duration::from_secs(30),
         std::time::Duration::from_millis(500),
     ) {
-        Ok(Liveness::Live) => {}
-        Ok(Liveness::Dead) => {
+        Ok((_, Liveness::Live)) => {}
+        Ok((_, Liveness::Dead)) => {
             maybe_terminate(backend, wid);
             let stderr_hint = worker_stderr_tail(mol_state_dir)
                 .map(|t| format!(" worker.stderr: {t}."))
@@ -4414,15 +4658,28 @@ fn spawn_claude_and_prompt(
                 backend.socket()
             ));
         }
-        Ok(Liveness::Indeterminate) => {
+        Ok((status, Liveness::Indeterminate)) => {
+            // Quote the pane BEFORE tearing it down — after `maybe_terminate`
+            // there is nothing left to capture, and the pane's own words are
+            // what turn this refusal into a diagnosis instead of a re-run.
+            let pane_hint = pane_tail_quote(backend, wid)
+                .map(|t| format!(" Pane showed: {t}."))
+                .unwrap_or_default();
             maybe_terminate(backend, wid);
             let stderr_hint = worker_stderr_tail(mol_state_dir)
                 .map(|t| format!(" worker.stderr: {t}."))
                 .unwrap_or_default();
+            // `status` is the probe's own last verdict, not a guess. The
+            // hard-coded `status=unknown` that stood here contradicted the
+            // very next clause, which describes a consent screen the probe had
+            // in fact recognised as `awaiting-human`.
             return Err(anyhow::anyhow!(
-                "cs tackle: claude session {session_name} did not reach a \
-                 known state within 30s (status=unknown). Likely the binary \
-                 failed to start or printed nothing recognisable.{stderr_hint} \
+                "cs tackle: claude session {session_name} never reached a \
+                 work-accepting state within 30s (status={status}). The pane is \
+                 alive but is not a composer — typically an onboarding or \
+                 consent screen waiting for a human (run `claude` once in this \
+                 CLAUDE_CONFIG_DIR to answer it), or a binary that started and \
+                 printed nothing recognisable.{pane_hint}{stderr_hint} \
                  Inspect with `tmux -L {} capture-pane -pS - -t {session_name}` \
                  then retry with --force \
                  (set COSMON_SPAWN_NO_TEARDOWN=1 to keep the carcass)",
@@ -4781,7 +5038,7 @@ fn run_briefing_submit_loop(
 // lives in `cosmon_transport::demote_provisioning` and BOTH demote call sites
 // import it, so the asymmetry cannot be reintroduced by editing one crate.
 use cosmon_transport::demote_provisioning::{
-    decide_root_spawn_provisioned, demote_config_home, demote_resource_checks,
+    demote_config_home, provision_and_decide_root_spawn, DemoteResources,
 };
 
 /// The outcome of the ordered pre-flight a claude spawn runs before it
@@ -4826,12 +5083,14 @@ enum SpawnPreflight {
 /// non-root path (`SpawnAsIs`) probes as the dispatcher itself, byte-identical
 /// to pre-#20.
 ///
-/// `provision_check` is consulted only on the demote path (COSMON-DEV #20
-/// defect A3): it reports whether the target uid can actually reach its config
-/// home, worktree, and state dir, and an unusable one turns the demote into a
-/// typed refusal rather than a worker that starts and wedges on `EACCES`. It is
-/// a closure so the `stat(2)` stays out of the ordering logic and out of the
-/// tests.
+/// `resources` is used only on the demote path (COSMON-DEV #20 defect A3, and
+/// issue #20 for the ordering). The worktree and the state dirs are chowned to
+/// the target uid — they were created root-owned by this very `cs tackle`, so
+/// no operator could have done it "before tackling" — and then all three
+/// resources are probed; one the uid still cannot use turns the demote into a
+/// typed refusal rather than a worker that starts and wedges on `EACCES`. The
+/// config home is probed but never chowned: it is root's own home, not
+/// cosmon's to give away.
 ///
 /// `resolve_model` is injected so the ordering is observable in a unit test
 /// without being root and without spawning a real `claude`.
@@ -4842,21 +5101,22 @@ enum SpawnPreflight {
 /// unreachable). A *refusal* is not an error here — it is
 /// [`SpawnPreflight::Refused`], so the caller can record the typed event
 /// before turning it into its own error.
-fn preflight_root_then_model<M, P>(
+fn preflight_root_then_model<M>(
     running_uid: u32,
     demote_target: Option<u32>,
-    provision_check: P,
+    resources: &DemoteResources,
     resolve_model: M,
 ) -> anyhow::Result<SpawnPreflight>
 where
     M: FnOnce(cosmon_core::root_spawn_policy::PreflightIdentity) -> anyhow::Result<Option<String>>,
-    P: FnOnce(u32) -> Vec<cosmon_core::root_spawn_policy::DemoteResourceAccess>,
 {
     use cosmon_core::root_spawn_policy::gate_cognitive_preflight;
 
-    // A demote is only real if the target can use what the worker needs — the
-    // same shared port the transport spawn path calls (defect A3).
-    let decision = decide_root_spawn_provisioned(running_uid, demote_target, provision_check);
+    // A demote first HANDS the target what the worker writes, then checks that
+    // it can use it — the same shared port the transport spawn path calls
+    // (defect A3, then issue #20 for the ordering). Both gestures live behind
+    // one call precisely so neither can be applied without the other.
+    let decision = provision_and_decide_root_spawn(running_uid, demote_target, resources);
     match gate_cognitive_preflight(&decision, resolve_model) {
         Err(reason) => Ok(SpawnPreflight::Refused(reason)),
         // Both surviving arms resolve a model; the gate chose WHICH IDENTITY
@@ -6148,7 +6408,14 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // never "how does this branch differ from main?". On `--no-worktree` the
     // worker sits on the operator's own checkout, where those two questions
     // have very different answers (see [`WorktreeBaseline`]).
-    let baseline = WorktreeBaseline::capture(&job.worktree_path);
+    // Diff against the molecule's OWN trunk, not a hardcoded `main`
+    // (task-20260725-61fa): on a molecule tackled with `--base <other>`, a
+    // `merge-base HEAD main` would report the entire `main`↔base delta as this
+    // worker's output.
+    let baseline = WorktreeBaseline::capture(
+        &job.worktree_path,
+        &cosmon_cli::base_branch::resolve(&job.worktree_path, mol.base_branch.as_deref()),
+    );
 
     let result = run_local_agent_loop(
         &job.adapter_name,
@@ -6587,7 +6854,8 @@ fn repo_root_of_worktree(worktree: &Path) -> Option<PathBuf> {
 /// shell access to the worktree.
 ///
 /// "Produced" = tracked files that differ from the worktree's merge-base with
-/// `main`, plus new untracked files. Git paths are read as NUL-delimited bytes.
+/// `base` — the molecule's integration branch, not a hardcoded `main` — plus
+/// new untracked files. Git paths are read as NUL-delimited bytes.
 /// Paths internal to cosmon (`.cosmon/`, `target/`, `.git/`) are skipped.
 ///
 /// The artifact listing is flat, so each source path is encoded as
@@ -6734,6 +7002,15 @@ struct WorktreeBaseline {
     /// to this turn. Without a "before" we cannot prove the worker authored
     /// anything, and a publisher that cannot prove authorship must not commit.
     observed: bool,
+    /// The molecule's integration base — the trunk deliverable discovery
+    /// diffs against.
+    ///
+    /// Resolved once at capture through
+    /// [`cosmon_cli::base_branch::resolve`], so a molecule tackled with
+    /// `--base release/2.0` reports what it changed relative to *its* trunk.
+    /// Before this field the diff was taken against the literal `main`, which
+    /// on any other base attributed the whole `main`↔base delta to the worker.
+    base: String,
 }
 
 impl WorktreeBaseline {
@@ -6746,6 +7023,7 @@ impl WorktreeBaseline {
             entries: std::collections::BTreeMap::new(),
             pre_dirty: std::collections::BTreeSet::new(),
             observed: true,
+            base: cosmon_cli::base_branch::DEFAULT_BASE_BRANCH.to_owned(),
         }
     }
 
@@ -6754,8 +7032,8 @@ impl WorktreeBaseline {
     /// Discovery failure is not fatal here: it yields an *unobserved* baseline,
     /// which the filter treats as "attribute nothing to this turn" rather than
     /// as "attribute everything".
-    fn capture(worktree: &Path) -> Self {
-        match discover_worktree_deliverables(worktree) {
+    fn capture(worktree: &Path, base: &str) -> Self {
+        match discover_worktree_deliverables(worktree, base) {
             Ok(rels) => {
                 // Conservative on failure: if we cannot tell which paths were
                 // already dirty, treat every pre-existing difference as a
@@ -6781,6 +7059,7 @@ impl WorktreeBaseline {
                         .collect(),
                     pre_dirty,
                     observed: true,
+                    base: base.to_owned(),
                 }
             }
             Err(error) => {
@@ -6789,7 +7068,10 @@ impl WorktreeBaseline {
                     error = %error,
                     "could not snapshot pre-run worktree state; this turn will publish nothing"
                 );
-                Self::default()
+                Self {
+                    base: base.to_owned(),
+                    ..Self::default()
+                }
             }
         }
     }
@@ -6870,7 +7152,7 @@ fn turn_scoped_deliverables(
     worktree: &Path,
     baseline: &WorktreeBaseline,
 ) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
-    let discovered = discover_worktree_deliverables(worktree)?;
+    let discovered = discover_worktree_deliverables(worktree, &baseline.base)?;
     if !baseline.observed {
         return Ok(std::collections::BTreeSet::new());
     }
@@ -6895,13 +7177,14 @@ fn turn_scoped_deliverables(
 /// turn's worker.
 fn discover_worktree_deliverables(
     worktree: &Path,
+    base: &str,
 ) -> anyhow::Result<std::collections::BTreeSet<Vec<u8>>> {
     let mut rels = std::collections::BTreeSet::new();
     rels.extend(git_nul_paths(
         worktree,
         &["ls-files", "-z", "--others", "--exclude-standard"],
     )?);
-    match git_stdout(worktree, &["merge-base", "HEAD", "main"]) {
+    match git_stdout(worktree, &["merge-base", "HEAD", base]) {
         Ok(base) => {
             let base = std::str::from_utf8(&base)
                 .map_err(|_| anyhow::anyhow!("git merge-base returned non-UTF-8 object id"))?
@@ -6915,14 +7198,15 @@ fn discover_worktree_deliverables(
             )?);
         }
         Err(error) if !rels.is_empty() => {
-            // Fresh RPP galaxies can have a feature worktree but no `main`
+            // Fresh RPP galaxies can have a feature worktree but no base
             // ref yet. Untracked worker output is still a real deliverable and
             // must cross the artifact boundary; only tracked-diff discovery is
             // unavailable in this repository shape.
             tracing::warn!(
                 worktree = %worktree.display(),
+                base = %base,
                 error = %error,
-                "artifact sync could not resolve main merge-base; publishing untracked deliverables"
+                "artifact sync could not resolve the base merge-base; publishing untracked deliverables"
             );
         }
         Err(error) => return Err(error),
@@ -7743,6 +8027,52 @@ fn worker_stderr_tail(mol_state_dir: &Path) -> Option<String> {
     Some(lines.join(" | "))
 }
 
+/// What the pane was actually showing, as one quotable line.
+///
+/// A refusal that names no evidence costs a re-run: each of the four doors
+/// behind noogram/cosmon#20 was diagnosed from a captured pane, and an
+/// operator who is told only "did not reach a known state" has to go and
+/// capture it again. So the diagnostic carries the pane's own words — the
+/// difference between *five minutes* and *reproduce it yourself*.
+///
+/// Best-effort by construction: a session that has already died cannot be
+/// captured, and that must never turn a truthful refusal into an error.
+///
+/// # Why the head and not only the tail
+///
+/// This used to quote the last six non-empty lines and nothing else, and on the
+/// screen that actually blocks a container dispatch that is close to useless:
+/// Claude Code's first-run theme wizard ends in a syntax-highlighting *code
+/// sample*, so the refusal quoted `console.log("Hello, World!")` and never the
+/// words `Let's get started.` — the operator was handed a puzzle instead of a
+/// door name. These screens put their identity in the headline and their
+/// mechanics at the foot, so the quote carries both ends and elides the middle.
+fn pane_tail_quote(backend: &TmuxBackend, wid: &cosmon_core::id::WorkerId) -> Option<String> {
+    /// Leading lines kept — enough for a banner plus the screen's own headline.
+    const HEAD: usize = 2;
+    /// Trailing lines kept — the selection cursor and whatever footer it wears.
+    const TAIL: usize = 6;
+
+    let raw = backend.capture_output(wid, 30).ok()?;
+    let lines: Vec<&str> = raw
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Short enough to quote whole: eliding would only lose evidence.
+    if lines.len() <= HEAD + TAIL {
+        return Some(lines.join(" | "));
+    }
+
+    let head = lines[..HEAD].join(" | ");
+    let tail = lines[lines.len() - TAIL..].join(" | ");
+    Some(format!("{head} | … | {tail}"))
+}
+
 /// Default permission mode based on molecule kind.
 fn default_permission_mode(_mol: &MoleculeData) -> &'static str {
     // All workers run in bypass mode for full autonomy.
@@ -8308,6 +8638,34 @@ mod tests {
     // paid Claude processes. The seam exists precisely so this is observable
     // from a test that is not root and spawns nothing.
 
+    /// A scratch worktree the demote target can genuinely use, and that
+    /// target's uid.
+    ///
+    /// The ordering tests below need a demote that actually **proceeds**, so
+    /// the provisioning checks must pass for real. Since issue #20 those checks
+    /// run *after* the port chowns the worktree to the target — which is the
+    /// whole fix — but a chown only lands when the process may perform it. So:
+    /// on an ordinary (non-root) test host the target is the scratch dir's own
+    /// owner, and the chown is a no-op the checks then approve; on a root host
+    /// the target is the conventional worker uid and the chown is performed for
+    /// real, which is the production shape. Either way nothing is faked and the
+    /// guard is never bypassed.
+    fn demotable_scratch() -> (TempDir, u32, DemoteResources) {
+        let tmp = TempDir::new().unwrap();
+        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let owner = std::fs::metadata(tmp.path()).unwrap().uid();
+        let target = if owner == 0 {
+            cosmon_core::root_spawn_policy::CONVENTIONAL_WORKER_UID
+        } else {
+            owner
+        };
+        let resources = DemoteResources {
+            worktree: tmp.path().to_path_buf(),
+            ..DemoteResources::default()
+        };
+        (tmp, target, resources)
+    }
+
     /// Under a root dispatcher with demotion disabled (`COSMON_WORKER_UID=off`
     /// and friends), the pre-flight must refuse having spawned NOTHING
     /// cognitive. Before the fix the probe ran first, so a root `claude`
@@ -8315,16 +8673,12 @@ mod tests {
     #[test]
     fn root_refuse_spawns_no_cognitive_probe() {
         let probes = std::cell::Cell::new(0_u32);
-        let outcome = preflight_root_then_model(
-            0,
-            None,
-            |_| vec![],
-            |_identity| {
+        let outcome =
+            preflight_root_then_model(0, None, &DemoteResources::default(), |_identity| {
                 probes.set(probes.get() + 1);
                 Ok(Some("claude-fable-5".to_owned()))
-            },
-        )
-        .expect("a refusal is an outcome, not an error");
+            })
+            .expect("a refusal is an outcome, not an error");
         assert_eq!(
             probes.get(),
             0,
@@ -8350,23 +8704,19 @@ mod tests {
     fn root_demote_probes_as_the_demoted_uid_and_uses_the_resolved_model() {
         use cosmon_core::root_spawn_policy::PreflightIdentity;
 
+        let (_tmp, target, resources) = demotable_scratch();
         let identities = std::cell::RefCell::new(Vec::new());
-        let outcome = preflight_root_then_model(
-            0,
-            Some(10001),
-            |_| vec![],
-            |identity| {
-                identities.borrow_mut().push(identity);
-                // The preferred pin was unreachable; this is the fallback the
-                // probe selected. The demoted worker must get THIS.
-                Ok(Some("probed-fallback".to_owned()))
-            },
-        )
+        let outcome = preflight_root_then_model(0, Some(target), &resources, |identity| {
+            identities.borrow_mut().push(identity);
+            // The preferred pin was unreachable; this is the fallback the
+            // probe selected. The demoted worker must get THIS.
+            Ok(Some("probed-fallback".to_owned()))
+        })
         .expect("demote proceeds");
 
         assert_eq!(
             *identities.borrow(),
-            vec![PreflightIdentity::Demoted { to_uid: 10001 }],
+            vec![PreflightIdentity::Demoted { to_uid: target }],
             "the probe must run exactly once, demoted — as root it is defect \
              A2, not at all it is regression ND1",
         );
@@ -8378,7 +8728,7 @@ mod tests {
             outcome,
             SpawnPreflight::Proceed {
                 decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
-                    to_uid: 10001
+                    to_uid: target
                 },
                 model: Some("probed-fallback".to_owned()),
             },
@@ -8392,12 +8742,10 @@ mod tests {
     /// demotion exactly as it does on the non-root path.
     #[test]
     fn root_demote_model_failure_still_aborts() {
-        let outcome = preflight_root_then_model(
-            0,
-            Some(10001),
-            |_| vec![],
-            |_identity| Err(anyhow::anyhow!("no reachable model")),
-        );
+        let (_tmp, target, resources) = demotable_scratch();
+        let outcome = preflight_root_then_model(0, Some(target), &resources, |_identity| {
+            Err(anyhow::anyhow!("no reachable model"))
+        });
         assert!(
             outcome.is_err(),
             "a demoted dispatch with a dead model chain must abort, not spawn"
@@ -8413,17 +8761,13 @@ mod tests {
 
         let probes = std::cell::Cell::new(0_u32);
         let seen = std::cell::Cell::new(None);
-        let outcome = preflight_root_then_model(
-            1000,
-            Some(10001),
-            |_| vec![],
-            |identity| {
+        let outcome =
+            preflight_root_then_model(1000, Some(10001), &DemoteResources::default(), |identity| {
                 probes.set(probes.get() + 1);
                 seen.set(Some(identity));
                 Ok(Some("probe-selected".to_owned()))
-            },
-        )
-        .expect("non-root proceeds");
+            })
+            .expect("non-root proceeds");
         assert_eq!(probes.get(), 1);
         assert_eq!(seen.get(), Some(PreflightIdentity::AsIs));
         assert_eq!(
@@ -8443,7 +8787,7 @@ mod tests {
         let outcome = preflight_root_then_model(
             1000,
             Some(10001),
-            |_| vec![],
+            &DemoteResources::default(),
             |_identity| Err(anyhow::anyhow!("no reachable model")),
         );
         assert!(outcome.is_err(), "a dead model chain must still abort");
@@ -8525,7 +8869,11 @@ mod tests {
         let outcome = preflight_root_then_model(
             0,
             Some(target),
-            |uid| demote_resource_checks(uid, None, tmp.path(), &[state.clone()]),
+            &DemoteResources {
+                worktree: tmp.path().to_path_buf(),
+                state_dirs: vec![state.clone()],
+                ..DemoteResources::default()
+            },
             |_| {
                 probes.set(probes.get() + 1);
                 Ok(Some("claude-fable-5".to_owned()))
@@ -8567,7 +8915,10 @@ mod tests {
         let outcome = preflight_root_then_model(
             0,
             Some(target),
-            |uid| demote_resource_checks(uid, None, tmp.path(), &[]),
+            &DemoteResources {
+                worktree: tmp.path().to_path_buf(),
+                ..DemoteResources::default()
+            },
             |_| Ok(Some("resolved-under-the-demoted-identity".to_owned())),
         )
         .expect("demote proceeds");
@@ -9130,6 +9481,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,
@@ -9492,7 +9844,7 @@ mod tests {
         let (_tmp, root) = init_repo();
         std::fs::write(root.join("operator-notes.txt"), "mine, not the worker's").unwrap();
 
-        let baseline = WorktreeBaseline::capture(&root);
+        let baseline = WorktreeBaseline::capture(&root, "main");
         std::fs::write(root.join("worker-output.txt"), "the worker's").unwrap();
 
         let scoped = turn_scoped_deliverables(&root, &baseline).unwrap();
@@ -9515,7 +9867,7 @@ mod tests {
         let (_tmp, root) = init_repo();
         std::fs::write(root.join("shared.txt"), "before").unwrap();
 
-        let baseline = WorktreeBaseline::capture(&root);
+        let baseline = WorktreeBaseline::capture(&root, "main");
         std::fs::write(root.join("shared.txt"), "after — the worker changed it").unwrap();
 
         let scoped = turn_scoped_deliverables(&root, &baseline).unwrap();
@@ -9585,7 +9937,7 @@ mod tests {
         // The operator edits it and does NOT commit — a dirty tracked file.
         std::fs::write(root.join("shared.txt"), "committed line\nOPERATOR HUNK\n").unwrap();
 
-        let baseline = WorktreeBaseline::capture(&root);
+        let baseline = WorktreeBaseline::capture(&root, "main");
 
         // The worker (running `--no-worktree`, i.e. in the operator's own
         // checkout) appends to that same file, and writes a file of its own.
@@ -9642,7 +9994,7 @@ mod tests {
         // worker — and a wildmatch of the worker's filename.
         std::fs::write(root.join("ab.txt"), "OPERATOR FILE\n").unwrap();
 
-        let baseline = WorktreeBaseline::capture(&root);
+        let baseline = WorktreeBaseline::capture(&root, "main");
 
         // The worker's file this turn. Its name contains glob metacharacters.
         std::fs::write(root.join("a[bc].txt"), "worker\n").unwrap();
@@ -9674,7 +10026,7 @@ mod tests {
         let (_tmp, root) = init_repo();
         std::fs::write(root.join("previous-turn.txt"), "produced earlier").unwrap();
 
-        let baseline = WorktreeBaseline::capture(&root);
+        let baseline = WorktreeBaseline::capture(&root, "main");
         // The worker does nothing at all.
 
         assert!(
@@ -9751,6 +10103,87 @@ mod tests {
     const B1: &str = "task-20260712-b001";
     const B2: &str = "task-20260712-b002";
     const D: &str = "task-20260712-d001";
+
+    // ── Molecule-owned integration base (`--base`, task-20260725-61fa) ──
+
+    /// `--base <existing-branch>` is accepted and becomes the molecule's base.
+    #[test]
+    fn tackle_base_flag_selects_an_existing_branch() {
+        let (_tmp, root) = init_repo();
+        git_in(&root, &[], &["branch", "release/2.0"]);
+
+        assert_eq!(
+            resolve_tackle_base(&root, Some("release/2.0"), None).unwrap(),
+            Some("release/2.0".to_owned())
+        );
+    }
+
+    /// `--base` naming a branch that does not exist is refused up front —
+    /// the alternative is cutting from the ambient HEAD while recording a
+    /// base the work can never merge into.
+    #[test]
+    fn tackle_base_flag_refuses_a_missing_branch() {
+        let (_tmp, root) = init_repo();
+
+        let err = resolve_tackle_base(&root, Some("release/nope"), None)
+            .expect_err("a missing base must be refused");
+        assert!(
+            err.to_string().contains("release/nope"),
+            "the refusal must name the branch: {err}"
+        );
+    }
+
+    /// Without `--base`, a re-tackle keeps the base a previous tackle
+    /// persisted — the operator does not have to retype it.
+    #[test]
+    fn tackle_without_base_flag_keeps_the_persisted_base() {
+        let (_tmp, root) = init_repo();
+
+        assert_eq!(
+            resolve_tackle_base(&root, None, Some("release/2.0".to_owned())).unwrap(),
+            Some("release/2.0".to_owned())
+        );
+    }
+
+    /// A molecule that never had a base stays base-less: the branch is cut
+    /// from the ambient HEAD and `cs done` uses the historical chain.
+    #[test]
+    fn tackle_without_base_and_without_history_is_none() {
+        let (_tmp, root) = init_repo();
+        assert_eq!(resolve_tackle_base(&root, None, None).unwrap(), None);
+    }
+
+    /// The cut itself: with a base, the worker's branch descends from *that*
+    /// branch, not from whatever the main checkout had checked out.
+    #[test]
+    fn worktree_branch_is_cut_from_the_requested_base() {
+        let (tmp, root) = init_repo();
+        // A base branch that diverges from main by one commit.
+        git_in(&root, &[], &["checkout", "-q", "-b", "release/2.0"]);
+        std::fs::write(root.join("release-only.txt"), "release").unwrap();
+        git_in(&root, &[], &["add", "-A"]);
+        git_in(&root, &[], &["commit", "-q", "-m", "release-only"]);
+        // Main is where the ambient HEAD sits — the wrong parent for this cut.
+        git_in(&root, &[], &["checkout", "-q", "main"]);
+
+        let wt = tmp.path().join("wt");
+        create_worktree(&root, &wt, "feat/based", Some("release/2.0")).unwrap();
+
+        let ancestor = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["merge-base", "--is-ancestor", "release/2.0", "feat/based"])
+            .status()
+            .expect("git merge-base");
+        assert!(
+            ancestor.success(),
+            "the worker's branch must descend from the requested base"
+        );
+        assert!(
+            wt.join("release-only.txt").exists(),
+            "the worktree must contain the base's content, not main's"
+        );
+    }
 
     /// No blockers → branch from HEAD/main (`None`).
     #[test]
@@ -11122,6 +11555,7 @@ mod tests {
             molecule: "idea-20260407-done".to_owned(),
             fleet: None,
             workdir: None,
+            base: None,
             no_worktree: true,
             dry_run: true,
             permission_mode: None,
@@ -11159,6 +11593,7 @@ mod tests {
             molecule: "idea-20260407-test".to_owned(),
             fleet: None,
             workdir: None,
+            base: None,
             no_worktree: true,
             dry_run: true,
             permission_mode: None,
@@ -12129,6 +12564,7 @@ prompt = "Custom fleet prompt."
             molecule: "task-20260426-fdep".to_owned(),
             fleet: None,
             workdir: None,
+            base: None,
             no_worktree: true,
             dry_run: true,
             permission_mode: None,
@@ -12173,6 +12609,7 @@ prompt = "Custom fleet prompt."
             molecule: "task-20260426-leaf".to_owned(),
             fleet: None,
             workdir: None,
+            base: None,
             no_worktree: true,
             dry_run: true,
             permission_mode: None,
@@ -12224,6 +12661,7 @@ prompt = "Custom fleet prompt."
             molecule: "task-20260426-d2pa".to_owned(),
             fleet: None,
             workdir: None,
+            base: None,
             no_worktree: true,
             dry_run: true,
             permission_mode: None,

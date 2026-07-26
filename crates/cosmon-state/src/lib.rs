@@ -391,6 +391,31 @@ pub struct MoleculeData {
     /// legacy molecules that predate this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub originating_branch: Option<String>,
+    /// The git branch this molecule's work is meant to be integrated back
+    /// into — the **base** of its worktree.
+    ///
+    /// Stamped by `cs tackle --base <branch>`, which also cuts the worker's
+    /// `feat/<id>` branch from this ref instead of the ambient `HEAD` of the
+    /// main checkout. `cs done` then honours it as the highest-precedence
+    /// source when resolving where the merge must land:
+    ///
+    /// 1. this field (the molecule's own, durable base),
+    /// 2. the `COSMON_BASE_BRANCH` environment variable,
+    /// 3. `origin/HEAD`,
+    /// 4. the literal `"main"`.
+    ///
+    /// Before this field existed the base was purely ambient: the branch was
+    /// cut from whatever the main checkout happened to have checked out, and
+    /// the harvest re-derived the base from an environment variable that a
+    /// tmux-spawned `cs done` (whose server env froze at startup) could not
+    /// see — so piloting two molecules on two different bases required a
+    /// manual `git checkout` dance around every `cs tackle` and re-exporting
+    /// the variable in front of every `cs done`.
+    ///
+    /// `None` for legacy molecules and for every molecule tackled without
+    /// `--base`; those keep the exact pre-existing ambient behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
     /// Durable intent record for an in-flight `cs evolve` transition.
     ///
     /// Written to state.json BEFORE artifact writes (log.md, briefing.md,
@@ -1214,6 +1239,7 @@ mod tests {
             expires_at: None,
             expiry_policy: None,
             originating_branch: None,
+            base_branch: None,
             pending_step: None,
             merged_at: None,
             prompt_seal: None,
@@ -2053,6 +2079,7 @@ mod tests {
                         expires_at: None,
                         expiry_policy: None,
                         originating_branch: None,
+                        base_branch: None,
                         pending_step: None,
                         merged_at: None,
                         prompt_seal: None,

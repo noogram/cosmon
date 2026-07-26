@@ -127,3 +127,4 @@
 | 155-macos-egress-enforcement-seatbelt | [155-macos-egress-enforcement-seatbelt.md](docs/adr/155-macos-egress-enforcement-seatbelt.md) |
 | 160-spore-export-ex-post-manifest | [160-spore-export-ex-post-manifest.md](docs/adr/160-spore-export-ex-post-manifest.md) |
 | 161-spore-run-scoped-output-home | [161-spore-run-scoped-output-home.md](docs/adr/161-spore-run-scoped-output-home.md) |
+| 162-dispatch-boundary-ready-is-earned | [162-dispatch-boundary-ready-is-earned.md](docs/adr/162-dispatch-boundary-ready-is-earned.md) |

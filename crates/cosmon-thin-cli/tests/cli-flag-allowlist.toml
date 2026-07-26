@@ -739,6 +739,11 @@ reason = "adapter selector — local fleet plumbing; cs-thin never tackles."
 
 [[flag_only_in_cs]]
 verb = "tackle"
+flag = "--base"
+reason = "integration base branch persisted on the molecule (task-20260725-61fa) — local git plumbing: it names the trunk the worker's worktree is cut from and that `cs done` merges back into. A remote tenant has no local checkout, no worktree and no `cs done`; teardown is server-side (the §8p frozen surface), so there is nothing on the thin side for a base branch to mean."
+
+[[flag_only_in_cs]]
+verb = "tackle"
 flag = "--by"
 reason = "anti-preemption lease owner (human | runtime:<pid>, task-20260531-a12f) — local-dispatch plumbing. Over RPP the dispatcher identity IS the JWT sub, so --by is intentionally cs-only."
 

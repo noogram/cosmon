@@ -11,9 +11,11 @@ PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
                                   picked by the operator: cs tackle = single
                                   node; cs run = N≥1 nodes (resident runtime).
   cs wait <id> &                  background wait, get notified on completion
-  cs done <id>                    merge branch to main + teardown (required!)
+  cs done <id>                    merge branch to its base + teardown (required!)
 
 Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. Pilots NEVER skip 'cs done' — without it the branch never merges. Pilots NEVER run 'cs run' in the foreground — wrap it in a detached tmux session: tmux new -d -s runtime cs run <root> --poll-interval 5 (cs run calls cs done automatically on completion). The historical '--leaf' and '--force-runtime' flags on 'cs tackle' are deprecated no-ops since the verb-unification: pick the right verb instead.
+
+BASE BRANCH. The branch a molecule merges back into is a property of the MOLECULE, not of your shell: 'cs tackle --base <branch>' cuts the worker's branch from that trunk and persists the name, and 'cs done' reads it back. Resolution order: the molecule's own base → $COSMON_BASE_BRANCH → origin/HEAD → 'main'. Tackle without --base and nothing changes — the branch is cut from the ambient HEAD and the harvest uses the environment chain, as it always did. This is what lets you pilot several molecules on several trunks from one session without a git checkout dance, and what lets a 'cs done' fired by a tmux hook (whose environment froze when the tmux server started) still land on the right trunk.
 
 ANTI-PREEMPTION LEASE. A human 'cs tackle' and a running 'cs run' are two writers racing on the same Pending → Active flip, so every tackle records WHO dispatched it: 'cs tackle --by human' (the default) or 'cs tackle --by runtime:<pid>' (what 'cs run' passes). The walker re-reads each candidate fresh from disk right before dispatch and SKIPS anything no longer Pending, carrying a sticky 'human' claim, or tagged 'hold:pilot'. Use 'cs claim <id>' before reaching for a pending molecule: it writes the durable pilot hold before 'cs tackle', and 'cs release <id>' removes it. The runtime always defers to that hold. 'manual always wins', the runtime never raffles a molecule you reached for. Binary owner field, no clock to calibrate. Operators do not normally type '--by'; 'human' is the default.
 

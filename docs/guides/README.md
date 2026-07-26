@@ -7,6 +7,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [Guide — the artifact map (ADR-057)](artifact-map.md)
 - [Birthing a galaxy — operator guide](birthing-a-galaxy.md)
 - [Blink Shell — sideload guide (Noogram / dev.noogram)](blink-sideload.md)
+- [Running a claude worker inside a container — operator guide](claude-worker-in-a-container.md)
 - [Cluster views — Motion / Ensemble / Peek](cluster-views.md)
 - [Constellation — the fil-rouge molecule](constellation-pattern.md)
 - [cosmon-letter-monday — godin ship-moment #1](cosmon-letter-monday.md)

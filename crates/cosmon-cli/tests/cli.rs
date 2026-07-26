@@ -1,12 +1,60 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 use std::fs;
+use std::path::Path;
 use std::process::Command;
+use std::sync::OnceLock;
 
+/// An empty directory outside any git repository, used as the default cwd for
+/// every `cs` subprocess these fixtures spawn.
+///
+/// `std::process::Command` inherits the *test runner's* cwd, which under
+/// `cargo test` is the crate directory — i.e. a live git worktree holding the
+/// developer's (or the worker's) uncommitted work. Any `cs` subcommand that
+/// resolves a repository from cwd then operates on that real checkout even
+/// though the fixture carefully isolated its *store* in a tempdir. That is not
+/// hypothetical: on 2026-07-25 the verification-gate fixture below drove a
+/// real `cs evolve` auto-commit (`evolve(vg-20260725-e4c2): step 1/2 — Gated
+/// step`) into the calling worker's worktree, sweeping its WIP in via
+/// `git add -A`.
+///
+/// Isolating the store is therefore only half the fixture; the cwd is the
+/// other half. Neutral means *empty and not a git repo*, so `git rev-parse
+/// --show-toplevel` fails and no repository can be reached by walking up. It
+/// deliberately cannot live under `CARGO_TARGET_TMPDIR`: `target/` sits inside
+/// this repository, so a cwd there still resolves to this worktree.
+fn neutral_cwd() -> &'static Path {
+    static NEUTRAL: OnceLock<tempfile::TempDir> = OnceLock::new();
+    NEUTRAL
+        .get_or_init(|| {
+            tempfile::Builder::new()
+                .prefix("cosmon-cli-tests-neutral-cwd-")
+                .tempdir()
+                .expect("create neutral cwd")
+        })
+        .path()
+}
+
+/// A `cs` command isolated from the ambient session: neutral cwd (see
+/// [`neutral_cwd`]) and no inherited `COSMON_*` variable that could redirect
+/// state, molecule identity, or discovery back onto the caller's real galaxy.
+///
+/// Individual tests that need a specific cwd override it with
+/// `.current_dir(...)` after the fact — the last call wins.
 fn cosmon_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
-    cmd.env_remove("COSMON_PARENT_MOL_ID")
+    cmd.current_dir(neutral_cwd())
+        .env_remove("COSMON_PARENT_MOL_ID")
         .env_remove("COSMON_MOL_DIR")
+        // Ambient redirection: an operator shell (or a parent worker) may
+        // export any of these; inheriting one would silently point the fixture
+        // at the real fleet state instead of its tempdir.
+        .env_remove("COSMON_STATE_DIR")
+        .env_remove("COSMON_CONFIG")
+        .env_remove("COSMON_CONFIG_HOME")
+        .env_remove("COSMON_FORMULAS_DIR")
+        .env_remove("COSMON_ARTIFACT_DIR")
+        .env_remove("COSMON_BASE_BRANCH")
         // These fixtures exercise non-trust behaviour in throwaway repos; the
         // repo-supplied-shell trust gate (B5) is bypassed here so the
         // verification/gate paths run. The gate itself is covered by
@@ -1734,10 +1782,33 @@ fn mark_molecule_running(state_dir: &std::path::Path, id: &str) {
     fs::write(&path, serde_json::to_string_pretty(&state).unwrap()).unwrap();
 }
 
+/// Run `git <args>` in `dir` and return its trimmed stdout, panicking when git
+/// itself fails — a broken fixture must not masquerade as a passing assertion.
+fn git_stdout(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap_or_else(|e| panic!("git {args:?} in {}: {e}", dir.display()));
+    assert!(
+        out.status.success(),
+        "git {args:?} in {} failed: {}",
+        dir.display(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
 /// `cs evolve` wires `VerificationSpec`: when a step has `[steps.verification]`
 /// with a `criteria` command, evolve runs it as a shell gate. If the command
 /// fails and retries remain, the step does NOT advance. If retries are
 /// exhausted (`max_retries=0`), the molecule is marked stuck (frozen).
+///
+/// Every subprocess here runs in the neutral cwd installed by [`cosmon_bin`],
+/// never in the cwd `cargo test` was launched from — see [`neutral_cwd`] for
+/// the auto-commit this fixture once drove into a live worker's worktree. The
+/// companion proof lives in
+/// [`test_evolve_never_commits_into_the_calling_worktree`].
 #[test]
 #[allow(clippy::too_many_lines)]
 fn test_evolve_verification_spec_gate() {
@@ -1876,6 +1947,171 @@ needs = ["gated-step"]
         evolve2_json["new_step"],
         serde_json::json!("final-step"),
         "should advance to final step"
+    );
+}
+
+/// A `cs evolve` run from a *foreign* dirty worktree must leave that worktree
+/// byte-identical: same HEAD, same commit count, same index, same untracked
+/// WIP.
+///
+/// This is the regression for the 2026-07-25 incident. A fixture molecule
+/// (isolated store, no bound worker, therefore no recorded worktree) was
+/// evolved with the calling worker's `.worktrees/<mol>/` inherited as cwd. The
+/// mismatch guard had no recorded path to compare against and the
+/// shared-checkout guard sees a *linked* worktree as legitimate, so `git add
+/// -A` ran and swept the worker's in-flight edits into a commit named after
+/// the fixture molecule.
+///
+/// The fixture reproduces that exact shape — a linked worktree, dirty, with an
+/// untracked sentinel — and deliberately hands it to `cs evolve` as cwd rather
+/// than hiding behind the neutral cwd: isolation must not be the only thing
+/// standing between a test and a stranger's repository. The molecule still
+/// advances; only the blanket commit is refused.
+#[test]
+#[allow(clippy::too_many_lines)]
+fn test_evolve_never_commits_into_the_calling_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // ── The "caller": a repo with a linked worktree, exactly the shape a
+    //    cosmon worker runs in (`.worktrees/<mol>/`).
+    let caller_main = tmp.path().join("caller-main");
+    fs::create_dir_all(&caller_main).unwrap();
+    git_stdout(&caller_main, &["init", "-q", "--initial-branch=main"]);
+    git_stdout(&caller_main, &["config", "user.email", "t@example.com"]);
+    git_stdout(&caller_main, &["config", "user.name", "Tester"]);
+    fs::write(caller_main.join("tracked.txt"), "baseline\n").unwrap();
+    git_stdout(&caller_main, &["add", "-A"]);
+    git_stdout(&caller_main, &["commit", "-qm", "baseline"]);
+
+    let caller_wt = tmp.path().join("caller-worktree");
+    git_stdout(
+        &caller_main,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            caller_wt.to_str().unwrap(),
+        ],
+    );
+
+    // Work in flight: one modified tracked file, one untracked sentinel.
+    fs::write(caller_wt.join("tracked.txt"), "operator edit in flight\n").unwrap();
+    let sentinel = caller_wt.join("WIP-sentinel.txt");
+    fs::write(&sentinel, "uncommitted work that must stay uncommitted\n").unwrap();
+
+    let head_before = git_stdout(&caller_wt, &["rev-parse", "HEAD"]);
+    let count_before = git_stdout(&caller_wt, &["rev-list", "--count", "HEAD"]);
+    let status_before = git_stdout(&caller_wt, &["status", "--porcelain"]);
+    let sentinel_before = fs::read(&sentinel).unwrap();
+
+    // ── The molecule: isolated store, no bound worker (the "legacy/test"
+    //    shape that used to be treated as safe).
+    let state_dir = tmp.path().join("state");
+    let formulas_dir = tmp.path().join("formulas");
+    fs::create_dir_all(&formulas_dir).unwrap();
+    let formula_path = formulas_dir.join("caller-safety.formula.toml");
+    fs::write(
+        &formula_path,
+        r#"
+formula = "caller-safety"
+version = 1
+description = "Two plain steps, no gate — the auto-commit is what is under test"
+id_prefix = "cw"
+
+[[steps]]
+id = "first"
+title = "First step"
+description = "Work."
+acceptance = "Done"
+
+[[steps]]
+id = "second"
+title = "Second step"
+description = "More work."
+acceptance = "Done"
+needs = ["first"]
+"#,
+    )
+    .unwrap();
+
+    let state_str = state_dir.to_str().unwrap();
+    let output = cosmon_bin()
+        .args([
+            "--json",
+            "nucleate",
+            "caller-safety",
+            "--store-dir",
+            state_str,
+            "--formulas-dir",
+            formulas_dir.to_str().unwrap(),
+        ])
+        .output()
+        .expect("nucleate failed");
+    assert!(
+        output.status.success(),
+        "nucleate: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let nucleate_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    let molecule_id = nucleate_json["id"].as_str().unwrap();
+    mark_molecule_running(&state_dir, molecule_id);
+
+    // ── The incident gesture: evolve with the stranger's worktree as cwd.
+    let output = cosmon_bin()
+        .current_dir(&caller_wt)
+        .args([
+            "--json",
+            "evolve",
+            molecule_id,
+            "--evidence",
+            "step one done",
+            "--ops-dir",
+            state_str,
+            "--formula",
+            formula_path.to_str().unwrap(),
+        ])
+        .output()
+        .expect("evolve failed");
+    assert!(
+        output.status.success(),
+        "evolve should still succeed — the guard skips the commit, never the \
+         lifecycle: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let evolve_json: serde_json::Value =
+        serde_json::from_str(String::from_utf8_lossy(&output.stdout).trim()).unwrap();
+    assert_eq!(
+        evolve_json["completed_step"], "first",
+        "the step must advance regardless of the commit refusal"
+    );
+
+    // ── The proof: the caller's repository is untouched.
+    assert_eq!(
+        git_stdout(&caller_wt, &["rev-parse", "HEAD"]),
+        head_before,
+        "HEAD of the calling worktree moved — evolve committed into it"
+    );
+    assert_eq!(
+        git_stdout(&caller_wt, &["rev-list", "--count", "HEAD"]),
+        count_before,
+        "a commit was created in the calling worktree"
+    );
+    assert_eq!(
+        git_stdout(&caller_wt, &["status", "--porcelain"]),
+        status_before,
+        "the calling worktree's index/working tree changed (WIP was staged)"
+    );
+    assert_eq!(
+        fs::read(&sentinel).unwrap(),
+        sentinel_before,
+        "the untracked sentinel was modified"
+    );
+    let all_commits = git_stdout(&caller_main, &["log", "--all", "--oneline"]);
+    assert!(
+        !all_commits.contains(molecule_id),
+        "a commit naming {molecule_id} exists in the caller's repo: {all_commits}"
     );
 }
 

@@ -5,3 +5,11 @@
 # a generated file we must not hand-edit (COSMON-DEV #20 finding C3: both
 # adversarial reviewers confirmed it is clap padding, not source sloppiness).
 crates/cosmon-cli/tests/snapshots/*.snap -whitespace
+
+# Raw bench captures — verbatim evidence, never reformatted (issue #20, 2026-07-26).
+# These files are terminal captures kept byte-for-byte so a reader can audit the
+# differential replay without trusting a summary. Trailing whitespace inside them
+# is part of what the terminal actually emitted; stripping it would falsify the
+# evidence to satisfy a lint. `-whitespace` tells git's whitespace checks to leave
+# them alone rather than tempting anyone to "fix" them.
+docs/benches/issue-20-door-4-differential/** -whitespace

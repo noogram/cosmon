@@ -1,0 +1,20 @@
+=== [fixed] image identity ===
+commit_under_test   73c4b2a7bd87397c55646aba9de399d0cce26b4a
+image_tag           cosmon-cwd-diff:fixed
+image_id            sha256:97ef63b020d32827657240ee8f690c1fa2144fe602b84fa76598263e3bb4e4fd
+image_created       2026-07-25T22:58:27.156675922Z
+base_digest         
+(unpulled)
+builder_digest      
+(unpulled)
+
+--- binary provenance, read from /usr/local/bin/cs in the image ---
+(the first three exist ALREADY at the parent — fixes 1-3 predate it —
+ so only the fourth distinguishes the two builds under test)
+PRESENT  no usable Claude Code credential
+PRESENT  hasTrustDialogAccepted
+PRESENT  awaiting-human
+PRESENT  COSMON_READINESS_TRACE
+cs_sha256  02fa39d89e9bd052d53e162f88411ecff20217b7f132d9f1867acbcf06cad9d1
+cs_version cs 0.3.0
+claude_version 2.1.220 (Claude Code)

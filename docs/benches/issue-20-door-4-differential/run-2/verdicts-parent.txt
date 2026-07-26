@@ -1,0 +1,6 @@
+VERDICT A: door 3 REFUSED the dispatch (credential named in the refusal), rc=1, worktree owner=(absent)
+VERDICT B: PROVEN — worktree owned by 10001, no provisioning refusal, rc=0
+VERDICT c: NOT PROVEN — an ONBOARDING SCREEN is still certified alive: cs tackle exited 0 over it, the session probe-container-startup-doors-2e9c is still up, molecule=running (the pre-fix pathology, unchanged)
+VERDICT d: PROVEN — the pane reached the COMPOSER (no startup dialog); doors 1 and 2 passed
+VERDICT e1-onboarded-no-cred: COMPOSER with the 'Not logged in' footer (the documented shape)
+VERDICT e2-onboarded-placeholder-cred: COMPOSER with the 'Not logged in' footer (the documented shape)

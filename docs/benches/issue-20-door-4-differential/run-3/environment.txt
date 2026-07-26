@@ -1,0 +1,16 @@
+=== differential run environment (identical for both passes) ===
+date_utc            2026-07-25T23:15:37Z
+host_uname          Darwin mbpdeemmanuel2.home 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:34 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6041 arm64
+docker_context      desktop-linux
+docker_client       27.3.1
+docker_server      27.3.1
+engine_os           Docker Desktop
+engine_arch         aarch64
+engine_kernel       6.10.11-linuxkit
+harness_path        docker/container-worker-doors/in-container-bench.sh
+harness_sha256      c9808df181dfaa5a25c27aac8513faa75c9d055d33e2585dc5f5e320b3ac12fc
+harness_bytes       35565
+dockerfile_sha256   6c76e2d1d945276afd63f5081dfff571f13a3b8f00bc7b2087a4398cc40d3913
+parent_sha          4c41738166e369e6cb017b2533d2a9b4bfad8c59
+fixed_sha           73c4b2a7bd87397c55646aba9de399d0cce26b4a
+placeholder_cred    PLACEHOLDER-NOT-A-CREDENTIAL-cosmon-bench-issue-20 (literal; door 3 stats, never reads)

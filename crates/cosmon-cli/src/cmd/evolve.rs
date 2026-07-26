@@ -266,6 +266,33 @@ pub(crate) fn evolve_worktree_mismatch(
     (rec != act).then_some((rec, act))
 }
 
+/// Decide whether `cs evolve`'s per-step auto-commit may run at all when the
+/// molecule has **no recorded worktree**.
+///
+/// Until 2026-07-25 a `None` recorded worktree was read as "legacy / test
+/// shape — behave as before" and the blanket `git add -A` was allowed to run
+/// in whatever git worktree the caller happened to be cwd'd in. That default
+/// is unsafe, and it fired for real: during a `cargo test --workspace` run,
+/// `tests/cli.rs`'s verification-gate fixture nucleated a throwaway molecule,
+/// inherited the *calling worker's* worktree as its cwd, and committed that
+/// worker's uncommitted WIP under the fixture molecule's name
+/// (`evolve(vg-…): step 1/2 — Gated step`). No guard could catch it: the
+/// fixture molecule has no bound worker, so there was no recorded path to
+/// compare against, and a linked worktree is not a shared main checkout.
+///
+/// The invariant the two sibling guards encode is *"only commit into the tree
+/// this molecule was tackled in"*. With no recorded tree there is no such
+/// tree, so the honest answer is to refuse rather than to fall back on the
+/// ambient cwd. Refusing is cheap: a molecule with no bound worker was never
+/// tackled, so nothing downstream (merge-on-done, restore anchors) depends on
+/// the anchor existing, and the operator keeps every alternative — commit by
+/// hand, or `cs tackle` the molecule so a worktree *is* recorded.
+///
+/// Returns `true` when the auto-commit must be skipped.
+pub(crate) fn unrecorded_worktree_refusal(recorded_worktree: Option<&Path>) -> bool {
+    recorded_worktree.is_none()
+}
+
 /// Decide whether `cs done`'s artifact commit may run in `commit_root`.
 ///
 /// Unlike [`evolve_worktree_mismatch`], `cs done` commits the molecule's
@@ -309,6 +336,21 @@ fn guarded_auto_commit(
     step_name: &str,
     label: &str,
 ) {
+    // Unrecorded-worktree guard (task-20260725-2c49). No recorded worktree
+    // means the molecule was never tackled, so there is no tree we are
+    // *entitled* to blanket-commit into — and the ambient cwd is emphatically
+    // not that tree. See `unrecorded_worktree_refusal` for the incident.
+    if unrecorded_worktree_refusal(recorded_worktree) {
+        eprintln!(
+            "⚠️  cs evolve: SKIPPING {label} auto-commit — {mol_id} has no recorded \
+             worktree (no bound worker), so there is no tree this commit may \
+             claim.\n     cwd git toplevel:  {}\n     \
+             (refusing to `git add -A` the ambient working tree; `cs tackle` the \
+             molecule to get a per-step anchor, or commit deliberate paths yourself)",
+            project_root.display(),
+        );
+        return;
+    }
     if let Some((recorded, actual)) = evolve_worktree_mismatch(recorded_worktree, project_root) {
         eprintln!(
             "⚠️  cs evolve: SKIPPING {label} auto-commit — the cwd git toplevel does \
@@ -1934,11 +1976,31 @@ mod tests {
     // cwd git toplevel.
     // -----------------------------------------------------------------
 
-    /// No recorded worktree (legacy / `--no-worktree` with nothing on the
-    /// fleet / tests) → behave as today: commit is allowed.
+    /// No recorded worktree → the *mismatch* predicate has nothing to compare
+    /// and stays silent. The refusal is the separate
+    /// [`unrecorded_worktree_refusal`] guard's job (below); this test pins the
+    /// division of labour between the two.
     #[test]
     fn evolve_guard_allows_when_no_recorded_worktree() {
         assert!(evolve_worktree_mismatch(None, Path::new("/anywhere")).is_none());
+    }
+
+    /// No recorded worktree → the auto-commit is refused outright: there is no
+    /// tree this molecule is entitled to `git add -A`. This is the guard that
+    /// would have stopped the `vg-20260725-e4c2` fixture from committing a
+    /// worker's WIP during `cargo test --workspace`.
+    #[test]
+    fn unrecorded_worktree_refuses_auto_commit() {
+        assert!(unrecorded_worktree_refusal(None));
+    }
+
+    /// A recorded worktree exists → this guard stands aside and lets the
+    /// mismatch / shared-checkout guards decide.
+    #[test]
+    fn recorded_worktree_passes_the_unrecorded_guard() {
+        assert!(!unrecorded_worktree_refusal(Some(Path::new(
+            "/galaxy/.worktrees/m"
+        ))));
     }
 
     /// cwd git toplevel equals the recorded worktree → allowed (the normal

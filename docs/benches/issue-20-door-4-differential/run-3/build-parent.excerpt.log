@@ -1,0 +1,13 @@
+#1 DONE 0.0s
+#3 DONE 0.6s
+#2 DONE 0.6s
+#4 DONE 0.0s
+#5 [builder  1/14] FROM docker.io/library/rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0
+#5 resolve docker.io/library/rust:1.88-bookworm@sha256:af306cfa71d987911a781c37b59d7d67d934f49684058f96cf72079c3626bfe0 done
+#5 DONE 0.0s
+#6 [stage-1 1/8] FROM docker.io/library/rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa
+#6 resolve docker.io/library/rust:1-bookworm@sha256:77fac8b98f9f46062bb680b6d25d5bcaabfc400143952ebc572e924bcbedc3fa done
+#6 DONE 0.0s
+#7 DONE 0.2s
+#28 naming to docker.io/library/cosmon-cwd-diff:parent done
+#28 DONE 0.9s

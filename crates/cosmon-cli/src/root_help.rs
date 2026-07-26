@@ -34,7 +34,7 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
                picked by the operator: cs tackle = single\n                                  \
                node; cs run = N≥1 nodes (resident runtime).\n  \
              cs wait <id> &                  background wait, get notified on completion\n  \
-             cs done <id>                    merge branch to main + teardown (required!)\n\n\
+             cs done <id>                    merge branch to its base + teardown (required!)\n\n\
              Pilots NEVER poll 'cs observe' by hand — always use 'cs wait'. \
              Pilots NEVER skip 'cs done' — without it the branch never merges. \
              Pilots NEVER run 'cs run' in the foreground — wrap it in a detached \
@@ -43,6 +43,17 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              '--leaf' and '--force-runtime' flags on 'cs tackle' are deprecated \
              no-ops since the verb-unification: pick the \
              right verb instead.\n\n\
+             BASE BRANCH. The branch a molecule merges back into is a property \
+             of the MOLECULE, not of your shell: 'cs tackle --base <branch>' cuts \
+             the worker's branch from that trunk and persists the name, and \
+             'cs done' reads it back. Resolution order: the molecule's own base → \
+             $COSMON_BASE_BRANCH → origin/HEAD → 'main'. Tackle without --base and \
+             nothing changes — the branch is cut from the ambient HEAD and the \
+             harvest uses the environment chain, as it always did. This is what \
+             lets you pilot several molecules on several trunks from one session \
+             without a git checkout dance, and what lets a 'cs done' fired by a \
+             tmux hook (whose environment froze when the tmux server started) still \
+             land on the right trunk.\n\n\
              ANTI-PREEMPTION LEASE. A human 'cs tackle' and a \
              running 'cs run' are two writers racing on the same Pending → Active \
              flip, so every tackle records WHO dispatched it: 'cs tackle --by human' \
