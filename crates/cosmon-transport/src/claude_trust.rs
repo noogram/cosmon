@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! Pre-grant Claude Code's two startup consent gates for an unattended worker
 //! (COSMON-DEV issue #20, the `@jdthaler` container hang on v0.3.0).
 //!

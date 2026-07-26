@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
 //! The third door: refuse a TUI worker that has no credential to work with
 //! (COSMON-DEV issue #20, the login-door half reported by `@jdthaler`).
 //!
