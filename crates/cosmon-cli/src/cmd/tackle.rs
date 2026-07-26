@@ -1103,7 +1103,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if launch_exposed {
         std::env::set_var(cosmon_core::egress::REQUIRE_NETNS_ENV, "1");
     }
-    let egress_netns_available = cosmon_agent_harness::egress_probe::netns_available();
+    // The TYPED probe, not a bool: the refusal / degradation messages below
+    // quote the measured blocker instead of naming a plausible sysctl
+    // (task-20260726-eabf).
+    let egress_netns = cosmon_agent_harness::egress_probe::netns_probe();
     // Exposed multi-tenant axis (task-20260713-8acc): a hosted RPP dispatch on
     // a host that cannot kernel-enforce `deny-external` is refused fail-closed,
     // regardless of the operator's require-netns knob. On a macOS host this is
@@ -1125,7 +1128,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         if let cosmon_core::egress::EgressPreflight::Refused { message } =
             cosmon_core::egress::EgressJail::preflight(
                 preflight_policy,
-                egress_netns_available,
+                &egress_netns,
                 egress_require_netns,
                 egress_exposed,
             )
@@ -1265,7 +1268,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if let cosmon_core::egress::EgressPreflight::DegradedAdvisory { reason } =
         cosmon_core::egress::EgressJail::preflight(
             egress_policy,
-            egress_netns_available,
+            &egress_netns,
             egress_require_netns,
             egress_exposed,
         )
@@ -9344,7 +9347,7 @@ mod tests {
         // non-Linux, or a hardened Linux kernel).
         let decision = EgressJail::preflight(
             EgressPolicy::DenyExternal,
-            /* netns_available */ false,
+            /* netns */ &cosmon_core::egress::NetnsProbe::not_linux(),
             require_netns,
             /* exposed_multi_tenant */ true,
         );
@@ -9365,7 +9368,7 @@ mod tests {
             egress_launch_is_exposed(|k| (k == "COSMON_API_REQUEST").then(|| "1".to_owned()));
         let decision = EgressJail::preflight(
             EgressPolicy::AllowAll,
-            /* netns_available */ false,
+            /* netns */ &cosmon_core::egress::NetnsProbe::not_linux(),
             require_netns,
             /* exposed_multi_tenant */ true,
         );
@@ -9386,7 +9389,7 @@ mod tests {
         assert!(!require_netns);
         let decision = EgressJail::preflight(
             EgressPolicy::DenyExternal,
-            /* netns_available */ false,
+            /* netns */ &cosmon_core::egress::NetnsProbe::not_linux(),
             require_netns,
             /* exposed_multi_tenant */ false,
         );

@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Pre-grant Claude Code's two startup consent gates for an unattended worker
+//! Pre-grant Claude Code's three startup consent gates for an unattended worker
 //! (COSMON-DEV issue #20, the `@jdthaler` container hang on v0.3.0).
 //!
-//! # The gate that stops a worker with nobody in front of it
+//! # The gates that stop a worker with nobody in front of it
 //!
-//! Claude Code asks two blocking, full-screen questions *before* it will accept
-//! any work in a directory it has not seen before:
+//! Claude Code asks three blocking, full-screen questions *before* it will
+//! accept any work in a config directory / project it has not seen before:
 //!
+//! 0. the **first-run onboarding wizard** — `Let's get started.` /
+//!    `Choose the text style that looks best with your terminal`, footed by
+//!    `Syntax theme: Monokai Extended (ctrl+t to disable)`. It renders on any
+//!    `CLAUDE_CONFIG_DIR` that has never completed onboarding, *before* the
+//!    other two, and it is the screen the tester hit on Claude Code 2.1.220;
 //! 1. the **folder-trust** dialog — `Quick safety check: Is this a project you
 //!    created or one you trust?` with `❯ 1. Yes, I trust this folder`;
 //! 2. the **bypass-permissions disclaimer** —
@@ -32,13 +37,14 @@
 //! value skips it. So the fix cannot be "make sure the worker really is in
 //! bypass" — the trust has to be granted **before** the process starts.
 //!
-//! # Where Claude Code keeps the two answers
+//! # Where Claude Code keeps the three answers
 //!
 //! In **two different files**, which is the trap this module exists to
 //! remember. [`consent_paths`] resolves both.
 //!
 //! | gate | file | key |
 //! |---|---|---|
+//! | onboarding wizard | `<config dir>/.claude.json` | `hasCompletedOnboarding = true` |
 //! | folder trust | `<config dir>/.claude.json` | `projects["<abs workspace>"].hasTrustDialogAccepted = true` |
 //! | bypass disclaimer | `<config dir>/settings.json` | `skipDangerousModePermissionPrompt = true` |
 //!
@@ -54,10 +60,79 @@
 //! on 2.1.220, a config with `bypassPermissionsModeAccepted = true` still
 //! renders the disclaimer (the flag is legacy, kept only for a one-way
 //! migration into settings that does not run before the gate). Only the
-//! settings key suppresses it. The two writes below are exactly the two
-//! measured to work; the pair was verified end to end — trust pre-granted plus
-//! the settings key, `claude --permission-mode bypassPermissions` in an unseen
-//! directory boots straight to the composer with no dialog at all.
+//! settings key suppresses it. The writes below are exactly the ones measured
+//! to work; the set was verified end to end — onboarding and trust pre-granted
+//! plus the settings key, `claude --permission-mode bypassPermissions` in an
+//! unseen directory and a pristine config dir boots straight to the composer
+//! with no dialog at all.
+//!
+//! # `.claude.json` is not durable storage — re-assert on every spawn
+//!
+//! This is the load-bearing property of the whole module, and it is the one a
+//! reader is most likely to assume the other way round.
+//!
+//! Claude Code does not *edit* `.claude.json`. It reads it at startup, keeps
+//! the result in memory, and **rewrites the whole file from that in-memory
+//! state** — dropping every key the running build does not recognise. Measured
+//! on 2.1.220 (macOS, native install, 2026-07-26), one graceful TUI lifecycle
+//! over a config seeded with four keys:
+//!
+//! | key seeded in `.claude.json` | after the process exits |
+//! |---|---|
+//! | `hasCompletedOnboarding: true` | **survives** |
+//! | `projects[ws].hasTrustDialogAccepted: true` | **survives** |
+//! | `theme: "dark"` | **stripped** |
+//! | `bypassPermissionsModeAccepted: true` | **stripped** |
+//!
+//! `settings.json` was not touched at all, in the same run.
+//!
+//! Two keys survived *today*. That is a fact about 2.1.220's key list, not a
+//! guarantee — the two that did not survive are exactly the two an earlier
+//! version did recognise, so the survivor set is a moving target. The tester on
+//! issue #20 measured `hasCompletedOnboarding` going to `null` across the same
+//! cycle on his bench: same mechanism, different build state, opposite outcome
+//! for that key. **A pre-grant written once may therefore be gone before the
+//! next dispatch, and cosmon has no way to know which keys this build keeps.**
+//!
+//! There is no durable channel to move it to, which was measured too rather
+//! than assumed:
+//!
+//! - `settings.json` — never rewritten by Claude Code, but it does **not**
+//!   honour `hasCompletedOnboarding`: a config with the key in `settings.json`
+//!   and absent from `.claude.json` still renders the wizard. Not an option.
+//! - `claude config set -g hasCompletedOnboarding true` — the supported CLI
+//!   for this is gone: `error: unknown option '-g'` on 2.1.220.
+//! - an environment variable — none is exposed for onboarding state.
+//!
+//! So the answer is the third one, and it is a design property, not a
+//! workaround: **[`pregrant_startup_consent`] is called before *every* spawn
+//! and re-reads both files each time**, so a key a previous worker dropped is
+//! simply re-written before the next worker starts. Idempotence is what makes
+//! this cheap ([`ConsentPregrant::AlreadyGranted`] touches nothing), and
+//! re-assertion is what makes it correct. Nothing in this module may be
+//! "optimised" into a run-once install step; the acceptance test for it is two
+//! *consecutive* dispatches on a pristine config dir, because a single green
+//! dispatch cannot distinguish the two designs. See
+//! `tests/claude_consent_live.rs`.
+//!
+//! # Why cosmon pre-grants the wizard instead of answering it
+//!
+//! §8v (ADR-162) says a screen cosmon cannot certify is refused, and that
+//! cosmon does not drift into piloting onboarding. Pre-granting the onboarding
+//! key does not touch that boundary in either direction:
+//!
+//! - the classifier is unchanged — no marker is added, no new screen becomes
+//!   `Ready`, and a wizard that renders anyway is still refused with the pane
+//!   quoted. The closed default stands exactly as ratified;
+//! - what changes is upstream of the classifier: the wizard is not *answered*,
+//!   it is not *rendered*. Writing consent into a config file is the same act
+//!   as the folder-trust pre-grant §8v was ratified alongside — a file write
+//!   before the process exists, not a keystroke into a live TUI.
+//!
+//! The alternative — teaching the readiness loop to select a theme — is the one
+//! §8v forbids, and it fails on its own terms too: every startup screen this
+//! TUI paints is a menu, so naming the fifth door leaves the sixth open. That
+//! is the corridor issue #20 walked through four times.
 //!
 //! # The footprint, stated plainly
 //!
@@ -216,15 +291,19 @@ where
     }
 }
 
-/// Pre-grant folder trust for `workspace` and the bypass-permissions
-/// disclaimer, in the two files named by `paths`.
+/// Pre-grant the first-run onboarding wizard, folder trust for `workspace`, and
+/// the bypass-permissions disclaimer, in the two files named by `paths`.
 ///
 /// Read-modify-write on each file: every key Claude Code (or the operator)
-/// already wrote is preserved; only
+/// already wrote is preserved; only `hasCompletedOnboarding` and
 /// `projects.<workspace>.hasTrustDialogAccepted` in the config file and
 /// `skipDangerousModePermissionPrompt` in the settings file are asserted. A
-/// missing file is created with just its one key — Claude Code fills the rest at
+/// missing file is created with just those keys — Claude Code fills the rest at
 /// startup.
+///
+/// **Call this before every spawn.** The config file is rewritten wholesale by
+/// each Claude Code process from its own in-memory state, so a pre-grant is not
+/// storage that stays put; see the module docs.
 ///
 /// Each write is atomic (temp file in the same directory, then rename), so a
 /// crash mid-write cannot leave the operator with a truncated `.claude.json` —
@@ -249,13 +328,13 @@ pub fn pregrant_startup_consent(
         .to_string_lossy()
         .into_owned();
 
-    let trust = grant_folder_trust(&paths.config_file, workspace_key)?;
+    let config = grant_onboarding_and_trust(&paths.config_file, workspace_key)?;
     let disclaimer = grant_disclaimer_skip(&paths.settings_file)?;
 
-    // "Already granted" only when BOTH were already in place: a caller logging
-    // `AlreadyGranted` must be able to read it as "nothing to do", and one of
-    // two gates being open is not that.
-    Ok(match (trust, disclaimer) {
+    // "Already granted" only when BOTH files were already in place: a caller
+    // logging `AlreadyGranted` must be able to read it as "nothing to do", and
+    // one of the gates being open is not that.
+    Ok(match (config, disclaimer) {
         (ConsentPregrant::AlreadyGranted, ConsentPregrant::AlreadyGranted) => {
             ConsentPregrant::AlreadyGranted
         }
@@ -263,9 +342,13 @@ pub fn pregrant_startup_consent(
     })
 }
 
-/// Assert `projects.<workspace_key>.hasTrustDialogAccepted = true` in the
-/// `.claude.json` at `config_path`.
-fn grant_folder_trust(
+/// Assert both `.claude.json` keys — `hasCompletedOnboarding` at the root and
+/// `projects.<workspace_key>.hasTrustDialogAccepted` — in one read-modify-write.
+///
+/// One pass, not two, because they live in the same file: writing it twice
+/// would double the window in which a concurrently-exiting Claude Code process
+/// could interleave, for no gain.
+fn grant_onboarding_and_trust(
     config_path: &Path,
     workspace_key: String,
 ) -> Result<ConsentPregrant, TrustError> {
@@ -273,6 +356,14 @@ fn grant_folder_trust(
     let not_an_object = || TrustError::NotAnObject {
         path: config_path.to_string_lossy().into_owned(),
     };
+
+    // The onboarding wizard is gate 0: it renders *before* the trust dialog, so
+    // pre-granting trust without it leaves the worker parked one screen earlier
+    // — which is precisely the 2.1.220 report this key answers.
+    let onboarding_missing = root.get(ONBOARDING_KEY) != Some(&serde_json::Value::Bool(true));
+    if onboarding_missing {
+        root.insert(ONBOARDING_KEY.to_owned(), serde_json::Value::Bool(true));
+    }
 
     // `projects` is an object keyed by absolute directory. A non-object value
     // there is corrupt config, not a shape to merge into.
@@ -287,10 +378,14 @@ fn grant_folder_trust(
         .as_object_mut()
         .ok_or_else(not_an_object)?;
 
-    if entry.get(TRUST_KEY) == Some(&serde_json::Value::Bool(true)) {
+    let trust_missing = entry.get(TRUST_KEY) != Some(&serde_json::Value::Bool(true));
+    if trust_missing {
+        entry.insert(TRUST_KEY.to_owned(), serde_json::Value::Bool(true));
+    }
+
+    if !onboarding_missing && !trust_missing {
         return Ok(ConsentPregrant::AlreadyGranted);
     }
-    entry.insert(TRUST_KEY.to_owned(), serde_json::Value::Bool(true));
     write_json_atomically(config_path, &serde_json::Value::Object(root))?;
     Ok(ConsentPregrant::Granted)
 }
@@ -310,6 +405,14 @@ fn grant_disclaimer_skip(settings_path: &Path) -> Result<ConsentPregrant, TrustE
     Ok(ConsentPregrant::Granted)
 }
 
+/// The `.claude.json` root flag that suppresses the first-run onboarding
+/// wizard. Root-scoped, not per-project: onboarding is a property of the config
+/// directory, so one grant covers every workspace that config dir ever opens.
+///
+/// Measured on 2.1.220: this key alone skips the wizard — no `theme` key is
+/// required anywhere, and the same key placed in `settings.json` instead does
+/// nothing at all (the wizard still renders).
+const ONBOARDING_KEY: &str = "hasCompletedOnboarding";
 /// The `.claude.json` key holding per-project state, keyed by absolute dir.
 const PROJECTS_KEY: &str = "projects";
 /// The per-project folder-trust flag Claude Code checks before the dialog.
@@ -417,14 +520,93 @@ mod tests {
             .expect("canonicalize")
             .to_string_lossy()
             .into_owned();
-        assert_eq!(
-            read_json(&paths.config_file)["projects"][&key]["hasTrustDialogAccepted"],
-            true
-        );
+        let cfg = read_json(&paths.config_file);
+        assert_eq!(cfg["hasCompletedOnboarding"], true);
+        assert_eq!(cfg["projects"][&key]["hasTrustDialogAccepted"], true);
         assert_eq!(
             read_json(&paths.settings_file)["skipDangerousModePermissionPrompt"],
             true
         );
+    }
+
+    /// The gate the 2.1.220 report added: a config dir that has never completed
+    /// onboarding opens on the theme wizard, one screen *before* the trust
+    /// dialog. Trust alone therefore pre-grants nothing observable — the worker
+    /// still stops, just earlier.
+    #[test]
+    fn onboarding_is_granted_even_when_trust_already_is() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("worktree");
+        std::fs::create_dir(&ws).expect("mkdir");
+        let paths = paths_in(dir.path());
+        let key = std::fs::canonicalize(&ws)
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
+        std::fs::write(
+            &paths.config_file,
+            serde_json::json!({"projects": {key.clone(): {"hasTrustDialogAccepted": true}}})
+                .to_string(),
+        )
+        .expect("seed");
+
+        assert_eq!(
+            pregrant_startup_consent(&paths, &ws).expect("pre-grant"),
+            ConsentPregrant::Granted
+        );
+        assert_eq!(
+            read_json(&paths.config_file)["hasCompletedOnboarding"],
+            true
+        );
+    }
+
+    /// **The durability contract.** Claude Code rewrites `.claude.json` from its
+    /// own in-memory state on exit and drops keys the running build does not
+    /// recognise — measured on 2.1.220, where `theme` and
+    /// `bypassPermissionsModeAccepted` vanished across one graceful lifecycle
+    /// while other keys survived. A pre-grant is therefore not storage: it is an
+    /// assertion that must be re-made before every spawn.
+    ///
+    /// This test simulates the worst case — the config comes back with *both*
+    /// granted keys stripped and the rest of the operator's state intact — and
+    /// pins that the next pre-grant restores them without a human in the loop.
+    /// It is the hermetic half of `tests/claude_consent_live.rs`, which proves
+    /// the same property against the installed binary.
+    #[test]
+    fn a_stripped_config_is_re_granted_by_the_next_spawn() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws = dir.path().join("worktree");
+        std::fs::create_dir(&ws).expect("mkdir");
+        let paths = paths_in(dir.path());
+        let key = std::fs::canonicalize(&ws)
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
+
+        pregrant_startup_consent(&paths, &ws).expect("first spawn");
+
+        // What a Claude Code process leaves behind when it drops both keys.
+        std::fs::write(
+            &paths.config_file,
+            serde_json::json!({
+                "numStartups": 1,
+                "projects": {key.clone(): {"lastSessionId": "…"}},
+            })
+            .to_string(),
+        )
+        .expect("simulate the rewrite");
+
+        assert_eq!(
+            pregrant_startup_consent(&paths, &ws).expect("second spawn"),
+            ConsentPregrant::Granted,
+            "a stripped config must be detected as needing the grant again"
+        );
+        let cfg = read_json(&paths.config_file);
+        assert_eq!(cfg["hasCompletedOnboarding"], true);
+        assert_eq!(cfg["projects"][&key]["hasTrustDialogAccepted"], true);
+        // The state the process wrote in between is not collateral damage.
+        assert_eq!(cfg["numStartups"], 1);
+        assert_eq!(cfg["projects"][&key]["lastSessionId"], "…");
     }
 
     /// Read-modify-write, not overwrite: the pre-grant must not cost the

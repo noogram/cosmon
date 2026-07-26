@@ -5,17 +5,35 @@
 //!
 //! [`cosmon_core::egress`] is I/O-free: it owns the *decision* (given whether
 //! the host can create an unprivileged user+network namespace, what
-//! enforcement mode / preflight outcome applies) but must not read `/proc` or
-//! the environment. This module is where that reading happens, so the netns
-//! probe can be tested against the pure
-//! [`cosmon_core::egress::userns_permitted`] decision on any host.
+//! enforcement mode / preflight outcome applies) but must not read `/proc`, run
+//! a subprocess, or read the environment. This module is where all of that
+//! happens, and it hands core a typed [`cosmon_core::egress::NetnsProbe`] whose
+//! classification logic
+//! ([`cosmon_core::egress::sysctl_userns_blocker`],
+//! [`cosmon_core::egress::sandbox_policy_evidence`],
+//! [`cosmon_core::egress::classify_netns_attempt_failure`]) stays pure and
+//! testable on any host.
 //!
 //! Both `cs tackle` (the spawner) and `exec_command` (the per-subprocess jail)
-//! call [`netns_available`] to compute the *truthful* enforcement mode via
+//! consult the probe to compute the *truthful* enforcement mode via
 //! [`cosmon_core::egress::EgressJail::enforcement_mode_for`], rather than the
-//! optimistic `cfg!`-only ceiling that lied on a hardened kernel.
+//! optimistic `cfg!`-only ceiling that lied on a host which refuses the
+//! namespace.
+//!
+//! # Why the probe is typed and not a bool (task-20260726-eabf)
+//!
+//! It used to return `bool`. The decision survived the seam; the *cause* did
+//! not — so the operator-facing message on the far side had to invent one, and
+//! it invented two sysctls it had never read. An external tester copied those
+//! key names out of our message into a public reproduction recipe as if they
+//! were measurements. Carrying [`cosmon_core::egress::NetnsBlocker`] across the
+//! seam is what lets the message state only what was observed, up to and
+//! including *"this probe cannot say why"*.
 
-use cosmon_core::egress::{userns_permitted, EXPOSED_MULTITENANT_ENV, REQUIRE_NETNS_ENV};
+use cosmon_core::egress::{
+    classify_netns_attempt_failure, sandbox_policy_evidence, sysctl_userns_blocker, NetnsBlocker,
+    NetnsProbe, EXPOSED_MULTITENANT_ENV, REQUIRE_NETNS_ENV,
+};
 
 /// The RPP subprocess envelope (ADR-080 §3.5) stamps every hosted-tenant
 /// invocation of `cs` with this marker. It is owned by
@@ -26,55 +44,99 @@ use cosmon_core::egress::{userns_permitted, EXPOSED_MULTITENANT_ENV, REQUIRE_NET
 const RPP_API_REQUEST_ENV: &str = "COSMON_API_REQUEST";
 
 /// Probe whether this host can actually create the unprivileged user+network
-/// namespace that `EnforcementMode::Netns` relies on.
+/// namespace that `EnforcementMode::Netns` relies on — and, when it cannot,
+/// **which observation says so**.
 ///
-/// `false` on any non-Linux host (netns is a Linux facility) and on a Linux
-/// host whose kernel hardening disables unprivileged user namespaces
-/// (`/proc/sys/kernel/unprivileged_userns_clone` = `0` or
-/// `/proc/sys/user/max_user_namespaces` = `0`). This is the robustness probe
-/// C1-F3 added: without it `enforcement_mode()` reported `Netns` from
-/// `cfg!(target_os = "linux")` alone, and a `deny-external` worker on a
-/// hardened kernel became *totally unusable* — every `unshare` failed to create
-/// the namespace, bash never `exec`'d, and every `exec_command` died opaquely
-/// with `"shell died during init"`.
+/// The order is deliberate and is the whole correction of task-20260726-eabf:
 ///
-/// The probe is conservative in the permissive direction: a missing knob (older
-/// kernel) or an unparseable value is treated as *available*, because the
-/// runtime `unshare` remains the real arbiter and a false-negative here would
-/// needlessly degrade a capable host. A false-positive is harmless — the spawn
-/// still fails loud (now with a correctly-named program in the error), it just
-/// does not benefit from the pre-spawn advisory degradation.
+/// 1. **Read the sysctls.** A restrictive one is a cheap, *certain* cause, and
+///    reporting it quotes a measurement (`sysctl_userns_blocker` returns the
+///    key and value it saw).
+/// 2. **Attempt the operation.** Permissive sysctls prove nothing: an external
+///    tester's container read `unprivileged_userns_clone = 1` and
+///    `max_user_namespaces = 79654` and `unshare -Ur true` still returned
+///    `Operation not permitted`, because the engine's default seccomp profile
+///    refuses the syscall. The attempt is the only positive capability claim
+///    this function is willing to make.
+/// 3. **Classify a failure from what is observable**, not from what is
+///    plausible. If a sandbox policy layer is active, that is the attribution
+///    (without naming *which* layer — see
+///    [`NetnsBlocker::SandboxPolicyBlocksSyscall`]). If none is,
+///    [`NetnsBlocker::Undetermined`] is the answer, and it says so out loud.
+///
+/// Reporting the wrong cause here is worse than reporting none: the previous
+/// version named two sysctls whenever anything failed, and those two key names
+/// were copied out of our message into a public reproduction recipe as though
+/// they had been measured.
+///
+/// Without any probe at all — the pre-C1-F3 state — `enforcement_mode()`
+/// reported `Netns` from `cfg!(target_os = "linux")` alone, and a
+/// `deny-external` worker on a host that refuses the namespace became *totally
+/// unusable*: every `unshare` failed, bash never `exec`'d, and every
+/// `exec_command` died opaquely with `"shell died during init"`.
 #[must_use]
-pub fn netns_available() -> bool {
+pub fn netns_probe() -> NetnsProbe {
     #[cfg(target_os = "linux")]
     {
-        // The two /proc knobs miss newer hardenings: Ubuntu ≥23.10 restricts
-        // unprivileged userns through AppArmor
-        // (kernel.apparmor_restrict_unprivileged_userns), where the clone
-        // itself succeeds and the uid_map write then fails EPERM — exactly
-        // what GitHub runners exhibit. Keep the knob check as the cheap
-        // fast-negative, then ask the kernel the only truthful way: attempt
-        // the exact namespace setup the jail wrapper uses.
-        let unpriv = std::fs::read_to_string("/proc/sys/kernel/unprivileged_userns_clone").ok();
-        let max_ns = std::fs::read_to_string("/proc/sys/user/max_user_namespaces").ok();
-        if !userns_permitted(unpriv.as_deref(), max_ns.as_deref()) {
-            return false;
+        let read = |p: &str| std::fs::read_to_string(p).ok();
+        if let Some(blocker) = sysctl_userns_blocker(
+            read("/proc/sys/kernel/unprivileged_userns_clone").as_deref(),
+            read("/proc/sys/user/max_user_namespaces").as_deref(),
+            read("/proc/sys/kernel/apparmor_restrict_unprivileged_userns").as_deref(),
+        ) {
+            return NetnsProbe::Unavailable(blocker);
         }
-        std::process::Command::new("unshare")
+        // Ask the host the only truthful way: attempt the exact namespace setup
+        // the jail wrapper uses, and keep the stderr — swallowing it is how a
+        // real refusal becomes an invented cause.
+        let attempt = std::process::Command::new("unshare")
             .args(["--net", "--user", "--map-root-user", "true"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output();
+        let (failed_stderr, spawn_error) = match attempt {
+            Ok(out) if out.status.success() => return NetnsProbe::Available,
+            Ok(out) => (String::from_utf8_lossy(&out.stderr).into_owned(), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return NetnsProbe::Unavailable(NetnsBlocker::ToolMissing {
+                    tool: "unshare".to_owned(),
+                });
+            }
+            Err(e) => (String::new(), Some(format!("could not run `unshare`: {e}"))),
+        };
+        let policy = sandbox_policy_evidence(
+            read("/proc/self/status").as_deref(),
+            read("/proc/self/attr/current").as_deref(),
+            read("/sys/fs/selinux/enforce").as_deref(),
+        );
+        let observed = spawn_error.unwrap_or(failed_stderr);
+        NetnsProbe::Unavailable(classify_netns_attempt_failure(&observed, policy.as_deref()))
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // Silence the unused-import warning on non-Linux targets — the pure
-        // decision helper is only reached through the `/proc` read above.
-        let _ = userns_permitted;
-        false
+        // Silence unused-import warnings on non-Linux targets — the pure
+        // helpers are only reached through the `/proc` reads above.
+        let _ = (
+            sysctl_userns_blocker,
+            sandbox_policy_evidence,
+            classify_netns_attempt_failure,
+        );
+        let _ = NetnsBlocker::ToolMissing {
+            tool: String::new(),
+        };
+        NetnsProbe::not_linux()
     }
+}
+
+/// `true` when this host can build the real netns jail.
+///
+/// Convenience over [`netns_probe`] for the call sites that only need the
+/// enforcement *decision* and never render a cause. Anything that produces an
+/// operator-facing message must use [`netns_probe`] instead — a bare bool is
+/// exactly what forced the message downstream to guess.
+#[must_use]
+pub fn netns_available() -> bool {
+    netns_probe().is_available()
 }
 
 /// `true` when the operator demanded *hard* netns enforcement via
@@ -124,6 +186,64 @@ mod tests {
         // to advisory rather than attempting an impossible `unshare`.
         if !cfg!(target_os = "linux") {
             assert!(!netns_available());
+        }
+    }
+
+    #[test]
+    fn probe_and_bool_never_disagree() {
+        // The bool is derived from the probe, so a caller that renders a cause
+        // and a caller that only needs the decision cannot drift apart.
+        assert_eq!(netns_probe().is_available(), netns_available());
+    }
+
+    #[test]
+    fn non_linux_probe_reports_the_structural_cause_not_a_sysctl() {
+        // The darwin dev host is unavailable for a *structural* reason. Before
+        // task-20260726-eabf every unavailability rendered the same
+        // sysctl-flavoured sentence; here the blocker must be NotLinux and its
+        // text must not mention a kernel knob nobody read.
+        if cfg!(target_os = "linux") {
+            return;
+        }
+        let probe = netns_probe();
+        let blocker = probe
+            .blocker()
+            .expect("non-Linux host cannot build a netns");
+        assert_eq!(blocker.as_token(), "netns-unavailable:not-linux");
+        let text = blocker.describe();
+        assert!(!text.contains("sysctl"), "{text}");
+        assert!(text.contains(std::env::consts::OS), "{text}");
+    }
+
+    /// On a netns-capable Linux host the probe must report `Available` — and it
+    /// may only do so after actually creating the namespace. Skipped elsewhere:
+    /// a container with a restrictive seccomp profile legitimately reports a
+    /// blocker, which is the whole point of the type.
+    #[test]
+    fn linux_probe_when_available_is_a_functional_result() {
+        if !cfg!(target_os = "linux") {
+            return;
+        }
+        match netns_probe() {
+            cosmon_core::egress::NetnsProbe::Available => {
+                // The attempt succeeded; nothing further to assert.
+            }
+            cosmon_core::egress::NetnsProbe::Unavailable(blocker) => {
+                // Whatever the cause, it must carry an attributable token and a
+                // description that is not the old blanket sysctl sentence.
+                assert!(blocker.as_token().starts_with("netns-unavailable:"));
+                let text = blocker.describe();
+                let named_sysctl = text.contains("kernel.unprivileged_userns_clone")
+                    || text.contains("user.max_user_namespaces")
+                    || text.contains("kernel.apparmor_restrict_unprivileged_userns");
+                if named_sysctl {
+                    assert_eq!(
+                        blocker.as_token(),
+                        "netns-unavailable:sysctl-restricted",
+                        "a sysctl may only be named when it was the key actually read: {text}"
+                    );
+                }
+            }
         }
     }
 

@@ -88,8 +88,12 @@ pub fn emit_local_exec_receipt(
 /// Emit an [`EventV2::EgressUnenforceable`].
 ///
 /// Called by `cs tackle` **before** spawning a strict-local worker on a host
-/// that cannot create the egress-denied network namespace (a macOS dev host,
-/// or a hardened Linux kernel with unprivileged user namespaces disabled). The
+/// that cannot create the egress-denied network namespace — a macOS dev host, a
+/// kernel whose sysctls forbid the namespace, or a sandbox policy (seccomp /
+/// `AppArmor` / `SELinux`) that refuses the syscall with every sysctl permissive.
+/// The `reason` this event carries is produced by
+/// `cosmon_core::egress::NetnsBlocker` and names only what the probe measured;
+/// do not infer a cause from the mere presence of this event. The
 /// `deny-external` policy degrades to advisory mode; this line makes the
 /// degradation loud and durable so the cutover gate refuses to flip the
 /// hosted-tenant default while any spawn carries it. Fix for C1-F3

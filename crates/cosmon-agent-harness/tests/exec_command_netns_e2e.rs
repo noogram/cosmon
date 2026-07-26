@@ -128,7 +128,9 @@ fn netns_denies_external_egress_while_local_commands_run() {
     assert_eq!(
         jailed_net.exit_code, 0,
         "the netns jail must spawn and run the probe (non-zero ⇒ unshare failed to create the \
-         namespace; enable unprivileged user namespaces in the kernel): {jailed_net:?}"
+         namespace — the refusal can come from a sysctl, a seccomp profile, AppArmor or SELinux; \
+         run `cosmon_agent_harness::egress_probe::netns_probe()` on this host to see which was \
+         actually observed): {jailed_net:?}"
     );
     assert!(
         jailed_net.output.contains("NET_BLOCKED"),

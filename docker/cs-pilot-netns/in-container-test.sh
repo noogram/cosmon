@@ -18,14 +18,20 @@ die() { printf '\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 [ "$(uname -s)" = "Linux" ] || die "not Linux — this test requires a netns-capable kernel"
 command -v unshare >/dev/null 2>&1 || die "unshare (util-linux) not found — cannot create a netns"
 
-# Probe that unprivileged user+net namespaces actually work in THIS
-# kernel. Some hardened kernels disable unprivileged userns
-# (kernel.unprivileged_userns_clone=0); fail with a clear message rather
-# than letting the test report a confusing spawn error.
+# Probe that unprivileged user+net namespaces actually work HERE. Several
+# independent layers can refuse it — a restrictive sysctl, a seccomp filter
+# (Docker's default profile blocks `unshare` on some engines), an AppArmor or
+# SELinux policy. So attempt the operation, report the REAL refusal text, and
+# name none of those as the cause: guessing one is what task-20260726-eabf
+# had to undo. Fail here rather than letting the test report a confusing
+# spawn error later.
 say "Probing unprivileged user+net namespace support ..."
-if ! unshare --user --map-root-user --net -- true 2>/dev/null; then
-  die "unprivileged 'unshare --user --map-root-user --net' is refused by this kernel — \
-enable unprivileged user namespaces (the colima default kernel supports them)"
+if ! unshare --user --map-root-user --net -- true 2>/tmp/netns-probe.err; then
+  die "'unshare --user --map-root-user --net' is refused here: $(cat /tmp/netns-probe.err) \
+— the refusal can come from a sysctl, a seccomp profile, AppArmor or SELinux; this probe does \
+not know which. Check the sysctls (kernel.unprivileged_userns_clone, user.max_user_namespaces, \
+kernel.apparmor_restrict_unprivileged_userns), 'grep Seccomp /proc/self/status', and the \
+engine's security options. The colima default kernel with the default profile passes this probe."
 fi
 ok "kernel supports an unprivileged egress-denied network namespace"
 

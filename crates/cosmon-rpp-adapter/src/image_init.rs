@@ -25,11 +25,20 @@
 //!   `serde_json` in-process (sens (i)). node stays in the image only
 //!   because `claude` itself is an npm package — that is a different,
 //!   out-of-scope concern (sens (ii)).
-//! - **Write before spawn.** The Claude Code config gates are written at
-//!   *boot*, before any worker is spawned — the same ordering the script
-//!   relied on. Claude Code rewrites `.claude.json` at startup, but the
-//!   gate is *read before* the rewrite, so a boot-time write wins. A
-//!   Dockerfile-baked write would lose to the rewrite; this does not.
+//! - **Write before spawn — and re-asserted after it.** The Claude Code
+//!   config gates are written at *boot*, before any worker is spawned —
+//!   the same ordering the script relied on. Claude Code reads
+//!   `.claude.json` at startup and rewrites it wholesale when the session
+//!   *ends*, dropping keys the running build does not recognise, so a
+//!   boot-time write wins for the first spawn and a Dockerfile-baked one
+//!   would already have lost. It does **not** make this write durable: a
+//!   worker can strip the gate on its way out and leave the *next* spawn
+//!   facing the first-run wizard. What covers that is
+//!   `cosmon_transport::claude_trust` (not a dependency of this crate, so
+//!   this is a prose reference rather than a link), which re-asserts the keys
+//!   before every spawn; this boot pass is the belt to its braces, not a
+//!   substitute for it. Measured on Claude Code 2.1.220 —
+//!   `docs/benches/claude-2.1.220-consent-durability.md`.
 //! - **Idempotent + best-effort.** Safe to re-run on every container
 //!   restart (B2 eager). `mkdir` is `create_dir_all`, `cs init --upgrade`
 //!   is a no-op once `config.toml` exists, `git init` is guarded on

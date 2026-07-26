@@ -199,8 +199,11 @@ Diagnostic that still holds: a worker showing the *composer* is past doors 1 and
 ### 4. The onboarding doors — the theme wizard and the login-method selector
 
 On a *virgin* `CLAUDE_CONFIG_DIR` (no `hasCompletedOnboarding`), Claude Code
-2.1.220 opens onto onboarding and stays there. There are **two** screens, in
-this order, and the order is the part that cost the most time to learn:
+2.1.220 opens onto onboarding and stays there. **cosmon now pre-grants this
+gate** — `claude_trust` writes `hasCompletedOnboarding: true` before every spawn,
+so a worker does not render either screen below. The section is kept because the
+screens are what you will see if the pre-grant ever stops working, and because
+the order is the part that cost the most time to learn:
 
 ```text
 Welcome to Claude Code v2.1.220          ← first, and the one that blocks a dispatch
@@ -238,7 +241,16 @@ them by running two arms that differ only in `hasCompletedOnboarding`
 credential check is satisfied and these screens still appear, because nothing has
 told Claude Code how you intend to set up the session.
 
-**What cosmon does — and what it deliberately did not do.** No marker for this
+**What cosmon does — and what it deliberately did not do.** It pre-grants the
+gate in the config file, and it does **not** teach the readiness loop to answer
+the screen. The distinction is the whole of §8v ([ADR-162](../adr/162-dispatch-boundary-ready-is-earned.md)):
+writing consent to a file before the process exists is the same act as the
+folder-trust pre-grant; typing a theme selection into a live TUI would be cosmon
+piloting onboarding, which is what the invariant forbids. The classifier below is
+therefore unchanged, and a wizard that renders anyway is still refused with the
+pane quoted.
+
+No marker for this
 screen was added to `readiness::markers`. Naming it would have shut one door and
 left the corridor open, exactly as the three previous names did: every one of
 Claude Code's startup screens is a menu, every menu draws `❯` as its selection
@@ -316,14 +328,61 @@ gone, and the molecule is back to `pending` rather than parked `running` behind 
 blocked pane. The spawn postcondition still passes a slow cold start, which is
 the price this fix was not allowed to charge.
 
-**What the operator still does, and why it is still the better gesture:** seed
-the config directory once and let every container reuse it — run `claude` a
-single time under the same `CLAUDE_CONFIG_DIR`, answer both onboarding screens,
-and the `hasCompletedOnboarding` key it writes is what later spawns inherit.
-Baking an onboarded config into the *image* is the same idea with a coarser
-grain. cosmon now refuses loudly instead of hanging mutely, but a refusal is
-still a dispatch that did not happen; the seeded config is what makes the
-dispatch work.
+**The operator no longer has to seed the config directory.** Earlier revisions of
+this page told you to run `claude` once by hand under the same
+`CLAUDE_CONFIG_DIR` and answer both screens. That is now cosmon's job: the
+pre-grant runs before every spawn, on a pristine directory as readily as a warm
+one. Seeding by hand still works and does no harm; it is no longer required.
+
+### `.claude.json` is not durable — why the pre-grant runs before *every* spawn
+
+This is the finding that closed the 2.1.220 report, and it is worth stating in
+full because the obvious design — write the key once at image build time — fails
+in a way a single green dispatch cannot reveal.
+
+Claude Code does not *edit* `.claude.json`. It reads the file at startup, holds
+the result in memory, and **rewrites the whole thing from that in-memory state**
+when the session ends, dropping every key the running build does not recognise.
+Measured on 2.1.220 (macOS, native install, 2026-07-26) across one graceful TUI
+lifecycle:
+
+| key seeded in `.claude.json` | after the process exits |
+|---|---|
+| `hasCompletedOnboarding: true` | survives |
+| `projects[ws].hasTrustDialogAccepted: true` | survives |
+| `theme: "dark"` | **stripped** |
+| `bypassPermissionsModeAccepted: true` | **stripped** |
+
+`settings.json` was not touched at all in the same run.
+
+Two keys survived *on that build*. The issue-#20 tester measured
+`hasCompletedOnboarding` going to `null` across the same cycle on his bench —
+same mechanism, different build state, opposite outcome for the key that matters.
+So the survivor set is a moving target, and cosmon cannot know which keys this
+build keeps.
+
+There is no durable place to move the grant to, and each alternative was measured
+rather than assumed:
+
+- **`settings.json`** is never rewritten by Claude Code, but it does not honour
+  `hasCompletedOnboarding`: a config with the key there and absent from
+  `.claude.json` still renders the wizard.
+- **`claude config set -g hasCompletedOnboarding true`** — gone:
+  `error: unknown option '-g'` on 2.1.220.
+- **an environment variable** — none is exposed for onboarding state.
+
+The answer is re-assertion, and it is a design property rather than a workaround:
+`pregrant_startup_consent` re-reads both files before every dispatch and rewrites
+whatever is missing, so a key the *previous* worker dropped is restored before the
+next one starts. It is idempotent, so the warm case costs a read.
+
+**Nothing here may be optimised into a run-once install step**, and the test that
+enforces that is
+`cargo test -p cosmon-transport --test claude_consent_live -- --ignored`: two
+consecutive spawns on one pristine config directory with no operator in between.
+A run-once design passes spawn 1 and fails spawn 2 — which is exactly the trap
+the tester documented, and why a single green dispatch is not evidence. Measured
+green on 2.1.220, both spawns reaching the composer.
 
 ## Ownership: `--add-dir` is authorization, not ownership
 
@@ -360,6 +419,42 @@ The fix is on the image side:
 RUN chown -R 10001:10001 /home/cosmon-worker/proj
 ```
 
+### Put the project on container-local storage, not on a `-v` bind mount from macOS
+
+> Contributed by `@jdthaler`, who lost an afternoon to it on issue #20.
+
+If the project lives on a bind mount from a macOS host — `docker run -v
+$PWD:/work` under Docker Desktop — the fix above **cannot work, and will not tell
+you so**. Docker Desktop passes that mount through virtiofs, where `chown` is a
+**silent no-op**: it returns success, changes nothing, and leaves no error
+anywhere. cosmon chowns the worktree, the filesystem ignores it, the preflight
+re-reads the ownership it just set, finds the old uid, and refuses the dispatch.
+
+The refusal is correct — the uid genuinely cannot write the directory, and
+launching anyway would buy an `EACCES` on the first `cs evolve` instead of a
+stated refusal at the door. But the *cause* is two layers away from the message,
+which is what makes it expensive to diagnose: nothing in the chown path failed.
+
+So:
+
+```sh
+# ✗ chown is a silent no-op here; the preflight will refuse, correctly
+docker run -v "$PWD:/work" …
+
+# ✓ project on the container's own filesystem
+docker run … # then `git clone` / COPY the project inside the image
+```
+
+Keep bind mounts for things a worker only *reads*. The cosmon galaxy — the
+worktree and the out-of-worktree `.cosmon/` — belongs on container-local storage.
+
+Quick confirmation when a refusal names a uid you are sure you chowned:
+
+```sh
+chown -R 10001:10001 /work/proj && stat -c %u /work/proj
+# prints 0 → you are on virtiofs and the chown did nothing
+```
+
 ## The rule behind all of it: fail loud, never mute
 
 Every check above refuses **before** a live worker exists, and says why. That
@@ -373,8 +468,21 @@ reachable, cosmon declines the spawn rather than hoping.
 
 The pre-grant is exercised by unit tests
 (`cosmon_transport::claude_trust::tests`), but whether Claude Code still honours
-those two keys is a property of the *installed binary*, which no hermetic test
-can pin. Re-verify after a Claude Code upgrade:
+those keys is a property of the *installed binary*, which no hermetic test can
+pin. **The scripted version of this section is the one to run first** — it drives
+cosmon's own pre-grant, twice, on a pristine config dir:
+
+```sh
+cargo test -p cosmon-transport --test claude_consent_live -- --ignored --nocapture
+```
+
+It prints the Claude Code version, the pre-grant outcome and the granted keys
+after each spawn, and on failure the pane verbatim with the door named. Two
+spawns, not one: see *"`.claude.json` is not durable"* above for why one green
+dispatch is not evidence.
+
+The by-hand recipe below stays because it separates the doors one at a time,
+which the test deliberately does not:
 
 ```sh
 CFG=$(mktemp -d); WS=$(mktemp -d)
@@ -445,17 +553,21 @@ current key names were established (decompiled gate plus this experiment), so th
 same method applies.
 
 Onboarding note: a genuinely fresh `CLAUDE_CONFIG_DIR` renders onboarding, which
-is why the snippet seeds `hasCompletedOnboarding`. cosmon does not pre-grant
-onboarding, and the two onboarding screens are classified differently — but
-neither is dispatched to:
+is why the snippets above seed `hasCompletedOnboarding` by hand — they drive
+`claude` directly, with cosmon out of the picture, so nothing pre-grants it for
+them. A dispatch through `cs tackle` gets that key written for it.
+
+The two onboarding screens should therefore never be seen by a worker. If one is,
+this is what the classifier does with it — and neither is dispatched to:
 
 | screen | marker | classified | dispatch |
 |---|---|---|---|
-| theme wizard (`Choose the text style`) | `FIRST_RUN_THEME` | `Loading` — a cold start still in progress | the handshake waits |
-| login-method selector (`Select login method`) | *none, by design* | `AwaitingHuman` — no composer evidence | refusal coded; **not yet observed live** |
+| theme wizard (`Choose the text style`) | `FIRST_RUN_THEME` | `Loading` — a cold start still in progress | refused by the gate; the handshake waits out its window first |
+| login-method selector (`Select login method`) | *none, by design* | `AwaitingHuman` — no composer evidence | refused by the gate |
 
 Naming the wizard says "still booting, keep waiting"; the unnamed class says "a
-human is needed here". The second column is what the classifier returns, and it
-is measured. The fourth is what the dispatch gate is written to do with it, and
-on the container bench it has not yet been seen to happen — so seed the config
-dir rather than relying on it. See door 4 above.
+human is needed here". The third column is what the classifier returns, and it is
+measured. The fourth is the dispatch gate's allow-list: only `Ready` and
+`Working` mean *accepting work*, so both rows are refusals. That refusal is now
+the second line of defence rather than the first — the pre-grant is what keeps
+these screens off the pane at all. See door 4 above.

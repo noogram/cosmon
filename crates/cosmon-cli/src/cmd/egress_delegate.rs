@@ -38,14 +38,14 @@
 //! command is byte-identical to the pre-fix `sh -c <command>` — so
 //! cosmon-on-cosmon behaviour is unchanged.
 
-use cosmon_core::egress::{EgressJail, EgressPolicy, EgressPreflight, EnforcementMode};
+use cosmon_core::egress::{EgressJail, EgressPolicy, EgressPreflight, EnforcementMode, NetnsProbe};
 
 /// The decision of applying the egress jail to one delegated command.
 ///
-/// A pure function of `(policy, netns_available, require_netns,
-/// exposed_multi_tenant, program, args)` ([`jail_decision`]) so the security
-/// logic is host-independently testable — the `/proc` read and env reads live
-/// only in [`jail_delegated_sh`].
+/// A pure function of `(policy, netns, require_netns, exposed_multi_tenant,
+/// program, args)` ([`jail_decision`]) so the security logic is
+/// host-independently testable — the `/proc` reads, the namespace attempt and
+/// the env reads live only in [`jail_delegated_sh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum JailDecision {
     /// Spawn `program` with `args`. Under [`EnforcementMode::Netns`] +
@@ -79,23 +79,27 @@ pub(crate) enum JailDecision {
 /// wrap the command under the host's truthful enforcement mode. Split from
 /// [`jail_delegated_sh`] so the fail-closed security path (an exposed
 /// multi-tenant, non-enforceable `deny-external` ⇒ [`JailDecision::Refused`]) is
-/// testable on any host, including the darwin dev box where `netns_available` is
-/// always `false`.
+/// testable on any host, including the darwin dev box where the netns probe is
+/// always `Unavailable`.
+///
+/// `netns` is the *typed* probe result, not a bool: the refusal and advisory
+/// messages quote the measured blocker, and a bool would leave them nothing to
+/// quote but a guess (task-20260726-eabf).
 pub(crate) fn jail_decision(
     policy: EgressPolicy,
-    netns_available: bool,
+    netns: &NetnsProbe,
     require_netns: bool,
     exposed_multi_tenant: bool,
     program: &str,
     args: &[String],
 ) -> JailDecision {
     let advisory_reason =
-        match EgressJail::preflight(policy, netns_available, require_netns, exposed_multi_tenant) {
+        match EgressJail::preflight(policy, netns, require_netns, exposed_multi_tenant) {
             EgressPreflight::Refused { message } => return JailDecision::Refused { message },
             EgressPreflight::DegradedAdvisory { reason } => Some(reason),
             EgressPreflight::Ready => None,
         };
-    let mode = EgressJail::enforcement_mode_for(netns_available);
+    let mode = EgressJail::enforcement_mode_for(netns.is_available());
     let jailed = EgressJail::wrap_with_mode(mode, policy, program, args);
     JailDecision::Ready {
         program: jailed.program,
@@ -116,11 +120,11 @@ pub(crate) fn jail_decision(
 /// `sh -c <command>`.
 pub(crate) fn jail_delegated_sh(command: &str) -> JailDecision {
     let policy = EgressPolicy::from_env_value(std::env::var(EgressPolicy::ENV_VAR).ok().as_deref());
-    let netns_available = cosmon_agent_harness::egress_probe::netns_available();
+    let netns = cosmon_agent_harness::egress_probe::netns_probe();
     let require_netns = cosmon_agent_harness::egress_probe::require_netns_from_env();
     let exposed = cosmon_agent_harness::egress_probe::exposed_multitenant_from_env();
     let args = ["-c".to_owned(), command.to_owned()];
-    jail_decision(policy, netns_available, require_netns, exposed, "sh", &args)
+    jail_decision(policy, &netns, require_netns, exposed, "sh", &args)
 }
 
 #[cfg(test)]
@@ -137,7 +141,14 @@ mod tests {
     #[test]
     fn allow_all_is_unjailed_sh_c() {
         let args = ["-c".to_owned(), "echo hi".to_owned()];
-        let decision = jail_decision(EgressPolicy::AllowAll, false, false, false, "sh", &args);
+        let decision = jail_decision(
+            EgressPolicy::AllowAll,
+            &NetnsProbe::not_linux(),
+            false,
+            false,
+            "sh",
+            &args,
+        );
         assert_eq!(
             decision,
             JailDecision::Ready {
@@ -151,7 +162,7 @@ mod tests {
 
     /// THE LOAD-BEARING SECURITY FALSIFIER (Defect 1): an **exposed
     /// multi-tenant** dispatch with `deny-external` on a host that cannot create
-    /// the netns jail (`netns_available == false`, e.g. macOS) must be
+    /// the netns jail (the netns probe is `Unavailable`, e.g. macOS) must be
     /// **Refused** — never degraded to an unconfined passthrough shell. A tenant
     /// could otherwise exfiltrate a neighbour's state from the combined tree.
     ///
@@ -162,7 +173,7 @@ mod tests {
         let args = ["-c".to_owned(), "./ci/integrity.sh".to_owned()];
         let decision = jail_decision(
             EgressPolicy::DenyExternal,
-            /* netns_available */ false,
+            /* netns */ &NetnsProbe::not_linux(),
             /* require_netns */ false,
             /* exposed_multi_tenant */ true,
             "sh",
@@ -182,7 +193,7 @@ mod tests {
         let args = ["-c".to_owned(), "make check".to_owned()];
         let decision = jail_decision(
             EgressPolicy::DenyExternal,
-            /* netns_available */ false,
+            /* netns */ &NetnsProbe::not_linux(),
             /* require_netns */ true,
             /* exposed_multi_tenant */ false,
             "sh",
@@ -202,7 +213,7 @@ mod tests {
         let args = ["-c".to_owned(), "make check".to_owned()];
         let decision = jail_decision(
             EgressPolicy::DenyExternal,
-            /* netns_available */ false,
+            /* netns */ &NetnsProbe::not_linux(),
             /* require_netns */ false,
             /* exposed_multi_tenant */ false,
             "sh",
@@ -230,7 +241,7 @@ mod tests {
         }
     }
 
-    /// When the host *can* enforce (`netns_available == true`) a `deny-external`
+    /// When the host *can* enforce (the probe says `Available`) a `deny-external`
     /// command is wrapped under `unshare` (netns mode), not run bare — proof the
     /// jail is actually applied on a capable host.
     #[test]
@@ -238,7 +249,7 @@ mod tests {
         let args = ["-c".to_owned(), "make check".to_owned()];
         let decision = jail_decision(
             EgressPolicy::DenyExternal,
-            /* netns_available */ true,
+            /* netns */ &NetnsProbe::Available,
             false,
             false,
             "sh",

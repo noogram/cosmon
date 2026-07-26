@@ -78,24 +78,63 @@ real token; that deletes the proof rather than strengthening it.
 
 ## Engine fidelity — the part that must be checked, not assumed
 
-The tester supplies two readings as the likely reason Claude Code refuses to run
-under root on his bench, and reports both as `0`:
+This section previously reported these two keys as the tester's *readings*, both
+`0`:
 
 ```sh
 sysctl kernel.unprivileged_userns_clone user.max_user_namespaces
 ```
 
-Two things follow, and both matter more than the numbers:
+**Both halves of that sentence were wrong, and the second one was ours.** The
+correction (task-20260726-eabf) is worth keeping in full, because the loop it
+closes is the worst case of the class this bench exists to catch:
 
-- **`kernel.unprivileged_userns_clone` is a Debian/Ubuntu kernel patch, not an
-  upstream key.** On Docker Desktop's LinuxKit kernel it does not exist, and
-  `sysctl` says so. An "unknown key" is *not* a zero. A colima profile, by
-  contrast, runs an Ubuntu kernel where the key exists and reads `1` — the
-  opposite posture. So the *engine choice changes the answer*, which is why the
-  driver defaults to `desktop-linux` and says so when you override it.
-- **A functional probe beats a sysctl read.** The bench runs
-  `setpriv --reuid 10001 … unshare -Ur true`, which is what the sysctls are a
-  proxy *for*. Arm 0 reports it alongside the raw readings.
+1. Cosmon's own egress warning named those two keys as the cause of a failed
+   namespace creation. It had measured neither.
+2. The tester never ran that `sysctl`. He read the two key names **out of our
+   message**, concluded "both at `0`", and wrote it into his public repro recipe
+   as a measurement.
+3. We disputed the number by supposing the key is absent from a stock LinuxKit
+   kernel and that a swallowed error was being read as a zero.
+4. He then measured, in the very container that had produced the report. We were
+   both wrong.
+
+What he measured:
+
+```text
+kernel.unprivileged_userns_clone = 1        (the key EXISTS on that LinuxKit kernel)
+user.max_user_namespaces         = 79654
+unshare -Ur true      (root)      -> unshare failed: Operation not permitted
+unshare -Ur true      (uid 10001) -> unshare failed: Operation not permitted
+unshare --mount true  (root)      -> Operation not permitted
+grep Seccomp /proc/self/status    -> Seccomp: 2   Seccomp_filters: 1
+docker inspect … SecurityOpt      -> null, privileged=false   (default profile)
+```
+
+Both sysctls are healthy. The namespace is refused one layer lower: the engine's
+**default seccomp profile** rejects the `unshare` syscall. Not a sysctl, not a
+user-namespace policy.
+
+Three things follow, and all of them matter more than the numbers:
+
+- **A functional probe beats a setting read — and it is the only thing that may
+  produce a positive claim.** The bench runs
+  `setpriv --reuid 10001 … unshare -Ur true`, which is what the sysctls were
+  being treated as a proxy *for*. Arm 0 reports it alongside the raw readings,
+  and now alongside `/proc/self/status`'s seccomp fields, which is what
+  discriminates "sysctl says no" from "sandbox policy says no".
+- **A sysctl reading is engine-dependent and not a capability.** `sysctl` on our
+  Docker Desktop run reports `kernel.unprivileged_userns_clone` as an unknown
+  key while the tester's reports `1`; an unknown key is not a zero, and a `1` is
+  not permission. The engine choice changes the reading *and* the reading does
+  not decide the outcome — which is why the driver defaults to `desktop-linux`
+  and says so when you override it.
+- **Never name a cause you did not measure.** Cosmon's diagnostic now carries a
+  typed blocker (`cosmon_core::egress::NetnsBlocker`) with an explicit
+  `Undetermined` variant, so an unattributable failure says *"this probe cannot
+  say why"* instead of reaching for a plausible key. Our message is what seeded
+  a false measurement into someone else's public bench; that is the cost of
+  guessing out loud.
 
 If your run's arm-0 block diverges from the tester's, the bench is not faithful
 to his and every verdict below it must be qualified in exactly that way. Say so;
@@ -336,9 +375,10 @@ and their mechanics at the foot.
 |---|---|---|
 | A | root, `COSMON_WORKER_UID=10001`, **no credential at all** | door 3's fail-closed refusal — and the gate *ordering* |
 | B | root, `COSMON_WORKER_UID=10001`, placeholder credential | scenario 1: the worktree-ownership catch-22 |
-| C | `setpriv` to 10001, **virgin** config dir | whether cosmon *refuses* the fourth door, and refuses it cleanly |
+| C | `setpriv` to 10001, **virgin** config dir | whether cosmon pre-grants the onboarding gate *itself* |
 | D | `setpriv` to 10001, **onboarded** config dir | scenario 2 as the tester actually ran it |
 | E | `claude` driven **directly**, cosmon absent | what the placeholder credential alone causes |
+| F | **two consecutive dispatches**, one virgin config dir | whether the pre-grant is re-asserted or merely written once |
 
 Arm E exists because arms C and D observe a pane through `cs tackle`, which moves
 two variables at once — cosmon's pre-grant and the placeholder credential. E
@@ -356,15 +396,59 @@ consequence: **the tester's two scenarios are no longer reproducible on a
 credential-less container at all**, because cosmon now declines before it gets
 there. Arm A measures that ordering instead of leaving it as an inference.
 
-C and D differ by one key, `hasCompletedOnboarding`. A genuinely virgin
-`CLAUDE_CONFIG_DIR` renders Claude Code's first-run theme wizard, which cosmon
-recognises (`readiness::markers::FIRST_RUN_THEME`) and deliberately does **not**
-pre-grant. The tester saw the trust dialog, so his config was necessarily past
-onboarding; replaying his scenario on a virgin dir would measure a door he never
-hit and blame the wrong fix. Running both is what lets the report tell them
-apart.
+C and D differ by one seeded key, `hasCompletedOnboarding`. A genuinely virgin
+`CLAUDE_CONFIG_DIR` renders Claude Code's first-run theme wizard. The tester saw
+the trust dialog, so his config was necessarily past onboarding; replaying his
+scenario on a virgin dir would have measured a door he never hit and blamed the
+wrong fix. Running both is what lets the report tell them apart.
 
-### Why arm C grades a refusal and not a pane
+### The 2.1.220 report, and why arm C's expectation flipped
+
+The paragraph above described a bench where cosmon deliberately did **not**
+pre-grant onboarding. That changed with the 2.1.220 report: the installer moved
+under us, the tester's worker landed on the theme wizard, and cosmon refused —
+correctly, loudly, and with the work still not done. `claude_trust` now
+pre-grants `hasCompletedOnboarding` alongside folder trust, before every spawn.
+
+So arm C, the virgin-config arm, no longer expects a refusal. It expects a
+**composer**, reached because cosmon wrote the key itself. C and D now converge
+on the same outcome by two routes — D inherits the key, C has cosmon write it —
+and that convergence is the proof. Expecting a refusal there would report red
+over the fix working.
+
+This does not loosen §8v. The classifier is untouched, no marker was added for
+the wizard, and any screen cosmon cannot certify is still refused. What changed
+is upstream: the wizard is not *answered*, it is not *rendered*. Writing consent
+into a config file before the process exists is the folder-trust pre-grant's
+gesture, not the piloting of onboarding the invariant forbids.
+
+### Arm F — two consecutive dispatches, and why one is not enough
+
+Arm F is the acceptance criterion of the 2.1.220 report, and no other arm can
+stand in for it.
+
+Claude Code does not edit `.claude.json`; it rewrites the whole file from its own
+in-memory state when a session ends, dropping keys the running build does not
+recognise. Measured on 2.1.220 the onboarding and trust keys survived that cycle
+while `theme` and `bypassPermissionsModeAccepted` were stripped — and the tester
+measured `hasCompletedOnboarding` itself going to `null` on his bench. Same
+mechanism, opposite outcome for the key that matters, which is the point: the
+survivor set is a moving target.
+
+A pre-grant is therefore an assertion re-made before every spawn, not an install
+step — and a run-once design passes dispatch 1 and fails dispatch 2. Every other
+arm here dispatches once and cannot see the difference. Arm F dispatches twice
+into one pristine config dir with **nothing in between**, tearing the first
+worker down first so the config rewrite actually happens, and grades both panes.
+Green C/D with a red F would mean precisely "the grant worked once and
+evaporated".
+
+The same property is pinned outside the container, against the installed binary,
+by `cargo test -p cosmon-transport --test claude_consent_live -- --ignored`.
+
+### Why arm C used to grade a refusal and not a pane
+
+*(Kept for readers of earlier bench runs; arm C now grades a composer, above.)*
 
 Arm C used to decide its verdict by grepping the captured tmux pane. Once the
 door-4 fix landed that stopped being an instrument, because the *correct*

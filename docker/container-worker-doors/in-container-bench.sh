@@ -20,11 +20,22 @@
 #   B  scenario 1, worktree ownership   — root + COSMON_WORKER_UID=10001
 #   C  scenario 2, VIRGIN config dir    — cs demoted via setpriv to 10001
 #   D  scenario 2, ONBOARDED config dir — the tester's actual shape
+#   E  direct `claude` probes           — cosmon out of the picture
+#   F  TWO CONSECUTIVE dispatches       — the 2.1.220 acceptance criterion
 #
-# C and D differ by one key (`hasCompletedOnboarding`) and that difference
-# is the point: see mint_placeholder_credential. It also makes them expect
-# OPPOSITE post-conditions — D a composer, C a refusal that leaves no pane
-# behind — which is why `run_scenario_2` is told which one to grade.
+# C and D differ by one seeded key (`hasCompletedOnboarding`): D inherits it
+# from the config, C makes cosmon write it. Since `claude_trust` pre-grants
+# onboarding they expect the SAME post-condition — a composer — by two
+# different routes, and that convergence is what proves the pre-grant. The
+# arms used to expect opposite outcomes, which is why `run_scenario_2` is
+# still told which one to grade; see the comment at the C call site for why
+# the expectation flipped.
+#
+# F is the arm the single-dispatch arms cannot replace. Claude Code rewrites
+# `.claude.json` from its own in-memory state at exit, so a pre-grant that
+# works once may be gone before the next spawn; only two consecutive
+# dispatches on one config dir can tell a re-asserted grant from a run-once
+# one. Green arms C/D with a red arm F would mean exactly that.
 #
 # Every arm prints its RAW observations (exit status, stderr, file owner,
 # captured pane) and then a machine-greppable verdict line. It never
@@ -43,24 +54,45 @@ VERDICTS=()
 verdict() { VERDICTS+=("$1"); printf '\n\033[1;33mVERDICT %s\033[0m\n' "$1"; }
 
 # ── 0. Environment fidelity ────────────────────────────────────────────
-# The tester supplies these two readings as the likely reason Claude Code
-# refuses to run under root on his bench. If ours differ, our bench is NOT
-# faithful to his and every verdict below must be qualified. Reported raw,
-# including the "unknown key" case, which is NOT the same as a 0.
+# These readings are context, NOT a cause. The two sysctls were once treated
+# as the reason a namespace creation fails; measured on the tester's own
+# container they read 1 and 79654 — healthy — while `unshare -Ur` still
+# returned EPERM, because the engine's DEFAULT SECCOMP PROFILE refuses the
+# syscall (task-20260726-eabf). So arm 0 prints the sysctls raw (including
+# the "unknown key" case, which is NOT a 0), prints the sandbox-policy state
+# that actually discriminates, and lets the functional probe decide.
 hdr "0. Environment fidelity"
 sub "uname -a"
 raw "$(uname -a)"
 sub "sysctl kernel.unprivileged_userns_clone user.max_user_namespaces"
 raw "$(sysctl kernel.unprivileged_userns_clone 2>&1)"
 raw "$(sysctl user.max_user_namespaces 2>&1)"
-# A functional probe beats a sysctl read: this is what the sysctls are a
-# proxy FOR. Run as the demote target, since that is the uid that matters.
+# The sandbox-policy layer: a seccomp filter (Seccomp: 2) or an AppArmor
+# profile can refuse `unshare` with every sysctl above permissive. Presence
+# is an observation, not an attribution — printed so the report can tell the
+# two failure classes apart instead of blaming the sysctls by default.
+sub "sandbox policy state: seccomp / AppArmor / SELinux"
+raw "$(grep -E '^Seccomp' /proc/self/status 2>&1 || echo '(no Seccomp fields in /proc/self/status)')"
+raw "apparmor: $(cat /proc/self/attr/current 2>/dev/null || echo '(no AppArmor interface)')"
+raw "selinux:  $(cat /sys/fs/selinux/enforce 2>/dev/null || echo '(no SELinux interface)')"
+# A functional probe beats a setting read, and is the ONLY thing here allowed
+# to produce a positive claim. Run as the demote target, since that is the
+# uid that matters. stderr is captured and reported, never swallowed: the
+# real refusal text is what keeps the report from inventing a cause.
 sub "functional userns probe, as uid 10001: setpriv --reuid 10001 --regid 10001 --clear-groups unshare -Ur true"
 if setpriv --reuid 10001 --regid 10001 --clear-groups \
      unshare -Ur true 2>/tmp/userns.err; then
   raw "unprivileged user namespace creation SUCCEEDS as uid 10001"
 else
   raw "unprivileged user namespace creation FAILS as uid 10001: $(cat /tmp/userns.err)"
+fi
+# Root as well as the demote uid: if BOTH fail, the refusal is not about
+# unprivileged-userns policy at all. Reported, not interpreted.
+sub "same probe as root: unshare -Ur true"
+if unshare -Ur true 2>/tmp/userns-root.err; then
+  raw "user namespace creation SUCCEEDS as root"
+else
+  raw "user namespace creation FAILS as root: $(cat /tmp/userns-root.err)"
 fi
 sub "cs --version"
 raw "$(cs --version 2>&1)"
@@ -100,12 +132,16 @@ done
 #
 # `seed-onboarding` decides whether `hasCompletedOnboarding` is pre-set.
 # It is NOT cosmetic. A genuinely virgin CLAUDE_CONFIG_DIR renders Claude
-# Code's first-run THEME WIZARD, which cosmon knows about
-# (`readiness::markers::FIRST_RUN_THEME`) and deliberately does not
-# pre-grant. The tester's bench was past onboarding — he saw the trust
-# dialog, not the wizard — so a faithful replay of his scenario 2 must be
-# past it too. Arm C runs virgin and arm D runs onboarded precisely so the
-# report can tell the two apart instead of blaming one door for the other.
+# Code's first-run THEME WIZARD. The tester's bench was past onboarding —
+# he saw the trust dialog, not the wizard — so a faithful replay of his
+# scenario 2 must be past it too, which is what arm D seeds.
+#
+# `claude_trust` now pre-grants that key itself, before every spawn, so an
+# UNSEEDED arm is no longer a blocked one: it measures whether cosmon does
+# the seeding. That is arm C's whole job since the 2.1.220 report, and arm
+# F's across two consecutive dispatches. Seeding it here therefore means
+# "hand cosmon a config that is already past onboarding", not "make the
+# dispatch possible".
 # `hasCompletedOnboarding` is a UI preference, not a credential.
 mint_placeholder_credential() {
   local dir="$1" owner="$2" onboard="${3:-0}"
@@ -599,9 +635,26 @@ run_scenario_2() {
   fi
 }
 
-# C — virgin config dir: the login-method selector, and the refusal it must
-# now earn. Grades the REFUSAL, not a pane — there is no pane when it works.
-run_scenario_2 c 0 refusal "cs demoted via setpriv to 10001, VIRGIN config dir (placeholder credential only)"
+# C — virgin config dir. THE arm whose expectation the 2.1.220 report flipped.
+#
+# It used to expect a REFUSAL, and that was right for the code it graded: a
+# virgin config dir opened on the first-run theme wizard, cosmon did not
+# pre-grant onboarding, and the correct behaviour was to decline the dispatch
+# loudly. The tester confirmed that refusal firing on his bench — a good
+# failure, and still a dispatch that did not happen.
+#
+# `claude_trust` now pre-grants `hasCompletedOnboarding` alongside folder trust,
+# so a virgin config dir is no longer a blocked one: the wizard never renders and
+# the worker reaches its composer. Expecting a refusal here would now report red
+# over the fix working. C and D therefore expect the SAME outcome by different
+# routes — D inherits the key from a seeded config, C has cosmon write it — and
+# that convergence is the proof.
+#
+# The refusal path is not left untested by the flip: it is what any UNNAMED
+# screen still gets (§8v), it is pinned by the readiness suite, and arm F below
+# exercises the pre-grant across two consecutive dispatches, which is the only
+# shape that can catch a grant that works once and then evaporates.
+run_scenario_2 c 0 composer "cs demoted via setpriv to 10001, VIRGIN config dir — cosmon must pre-grant onboarding itself"
 
 # D — onboarded config dir. THE faithful replay of the tester's scenario 2:
 # he saw the trust dialog, so his bench was necessarily past onboarding.
@@ -672,6 +725,99 @@ probe_claude_direct() {
 }
 probe_claude_direct e1-onboarded-no-cred 0
 probe_claude_direct e2-onboarded-placeholder-cred 1
+
+# ══ ARM F — TWO CONSECUTIVE dispatches on ONE pristine config dir ══════
+# The acceptance criterion of the 2.1.220 report, and the only arm shaped
+# to catch the failure it describes.
+#
+# Claude Code rewrites `.claude.json` wholesale from its own in-memory
+# state when a session ends, dropping keys the running build does not
+# recognise. Which keys survive is version- and state-dependent: measured
+# on 2.1.220 the onboarding and trust keys survived, while the tester
+# measured the onboarding key going to `null` across the same cycle on his
+# bench. So a pre-grant is NOT storage, and a design that writes it once
+# at image-build time passes dispatch 1 and fails dispatch 2.
+#
+# Every other arm here dispatches once and therefore cannot tell the two
+# designs apart. This one dispatches twice into the same config dir with
+# NOTHING in between — no operator, no re-seed — and lets the first worker
+# be torn down before the second starts, so the config rewrite actually
+# happens. Both panes must be composers. `Not logged in · Run /login` is
+# expected on both: the placeholder credential authenticates nothing, and a
+# composer is exactly the proof sought — no dialog stood in front of it.
+hdr "F. Two CONSECUTIVE dispatches, one pristine config dir, nothing in between"
+F_HOME=/home/cosmon-worker
+F_WORK="$F_HOME/arm-f"
+F_CONFIG="$F_HOME/.claude-arm-f"
+# seed-onboarding=0: the directory must be genuinely virgin, so that what
+# is being graded is cosmon's own re-assertion and not a seeded key.
+mint_placeholder_credential "$F_CONFIG" 10001 0
+install -d -o 10001 -g 10001 "$F_WORK"
+
+# f_dispatch <n> — runs one dispatch and records its verdict.
+# Called directly, never in a subshell: `verdict` appends to VERDICTS, and a
+# subshell would drop the arm from the summary replay while still printing it.
+f_dispatch() {
+  local n="$1" out pane socket session attach
+  sub "F$n: pre-grant state BEFORE the dispatch:"
+  if [ -f "$F_CONFIG/.claude.json" ]; then
+    raw "$(jq -c '{hasCompletedOnboarding, projects: (.projects | with_entries(.value |= {hasTrustDialogAccepted}))}' \
+             "$F_CONFIG/.claude.json" 2>&1)"
+  else
+    raw "(.claude.json absent — the virgin case)"
+  fi
+
+  set +e
+  out="$(setpriv --reuid 10001 --regid 10001 --clear-groups \
+    env HOME="$F_HOME" CLAUDE_CONFIG_DIR="$F_CONFIG" ARM_C_WORK="$F_WORK" \
+        PATH=/usr/local/bin:/usr/bin:/bin \
+        bash /tmp/arm-c-inner.sh 2>&1)"
+  set -e
+  sub "F$n: raw output:"
+  raw "$out"
+
+  attach="$(printf '%s\n' "$out" | tr -d '`' \
+    | grep -o 'tmux -L [^ ]* \(capture-pane -pS - \|attach \)-t [^ ]*' | head -n1 || true)"
+  socket="$(printf '%s' "$attach" | awk '{print $3}')"
+  session="$(printf '%s' "$attach" | awk '{print $NF}')"
+  if [ -z "$session" ]; then
+    verdict "F$n: NOT EXECUTABLE — no session was named (read the raw output above)"
+    return
+  fi
+  sleep 25
+  set +e
+  pane="$(as_worker tmux -L "$socket" capture-pane -p -t "$session" 2>&1)"
+  set -e
+  hdr "F$n. captured pane (socket=$socket session=$session)"
+  raw "$pane"
+
+  # Tear the worker down before the next dispatch. This is load-bearing:
+  # the config rewrite happens when the session ENDS, and a dispatch 2 that
+  # ran while dispatch 1 was still alive would never meet the rewrite it
+  # exists to survive.
+  as_worker tmux -L "$socket" kill-server 2>/dev/null || true
+  sleep 5
+
+  if printf '%s' "$pane" | grep -qi "Choose the text style\|Let's get started"; then
+    verdict "F$n: FAILED — the first-run THEME WIZARD is on the pane (the pre-grant did not hold for this dispatch)"
+  elif printf '%s' "$pane" | grep -qi "Select login method"; then
+    verdict "F$n: FAILED — the LOGIN-METHOD SELECTOR is on the pane"
+  elif printf '%s' "$pane" | grep -qi "Quick safety check\|Yes, I trust this folder"; then
+    verdict "F$n: FAILED — the folder-TRUST DIALOG is on the pane"
+  elif printf '%s' "$pane" | grep -qi "Bypass Permissions mode\|Yes, I accept"; then
+    verdict "F$n: FAILED — the BYPASS DISCLAIMER is on the pane"
+  elif printf '%s' "$pane" | grep -qi "bypass permissions on\|Not logged in\|/login\|shift+tab to cycle"; then
+    verdict "F$n: PASSED — the pane reached the COMPOSER, no startup dialog"
+  else
+    verdict "F$n: INCONCLUSIVE — pane matched neither a dialog nor the composer (read the capture above)"
+  fi
+}
+
+f_dispatch 1
+sub "F: pre-grant state AFTER dispatch 1 exited — what dispatch 2 inherits:"
+raw "$(jq -c '{hasCompletedOnboarding, projects: (.projects | with_entries(.value |= {hasTrustDialogAccepted}))}' \
+         "$F_CONFIG/.claude.json" 2>&1)"
+f_dispatch 2
 
 # ── Replay ─────────────────────────────────────────────────────────────
 hdr "VERDICT SUMMARY"

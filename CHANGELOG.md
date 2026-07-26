@@ -19,6 +19,44 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The `claude` adapter no longer stalls on Claude Code 2.1.220's first-run
+  wizard.** The installer moved from 2.1.218 to 2.1.220 under us; the new build
+  opens a syntax-theme wizard on any config directory that has never completed
+  onboarding, and cosmon refused the dispatch — correctly and loudly, but the
+  work still did not happen. `cosmon-transport`'s consent pre-grant now writes
+  `hasCompletedOnboarding` alongside folder trust, so the wizard is never
+  rendered. Reported by `@jdthaler` on noogram/cosmon#20.
+
+  The pre-grant is **re-asserted before every spawn**, and that is the load-
+  bearing part rather than an implementation detail: Claude Code rewrites
+  `.claude.json` wholesale from its own in-memory state when a session ends and
+  drops keys the running build does not recognise, so a grant written once can
+  be erased by the very worker it allowed to launch. There is no durable place
+  to put it — `settings.json` survives but is not honoured for this key, and
+  `claude config set -g` is gone. Measured rather than inferred:
+  `docs/benches/claude-2.1.220-consent-durability.md`.
+
+  The acceptance criterion is two *consecutive* dispatches on a pristine config
+  directory with no human in between — a single green dispatch cannot tell a
+  re-asserted grant from a run-once one. Pinned by
+  `cargo test -p cosmon-transport --test claude_consent_live -- --ignored`
+  against the installed binary, and by arm F of the container bench.
+
+  The dispatch boundary (§8v, ADR-162) is unchanged: no marker was added, the
+  classifier still refuses any screen it cannot certify, and cosmon does not
+  answer onboarding — it declines to summon it.
+
+### Documentation
+
+- **Do not put a cosmon galaxy on a `-v` bind mount from macOS.** Under Docker
+  Desktop those mounts are virtiofs, where `chown` is a silent no-op: cosmon
+  chowns the worktree, the filesystem ignores it, and the ownership preflight
+  refuses the dispatch with no sign that anything failed. Put the project on
+  container-local storage. Contributed by `@jdthaler`, who lost an afternoon to
+  it — `docs/guides/claude-worker-in-a-container.md`.
+
 ## [0.3.0] — 2026-07-24
 
 **Root-container safety, hardened by an adversarial double-model review.** The

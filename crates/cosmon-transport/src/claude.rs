@@ -140,8 +140,9 @@ pub enum ClaudeError {
     #[error("root-spawn refused: {0}")]
     RootSpawnRefused(String),
 
-    /// Refused to spawn because Claude Code's startup consent dialogs (folder
-    /// trust, bypass disclaimer) could not be pre-granted for the workdir
+    /// Refused to spawn because Claude Code's startup consent dialogs
+    /// (first-run onboarding, folder trust, bypass disclaimer) could not be
+    /// pre-granted for the workdir
     /// (issue #20). No live worker was created — the loud alternative to a pane
     /// that renders a question nobody will answer. See [`crate::claude_trust`].
     #[error("startup-consent pre-grant refused: {0}")]

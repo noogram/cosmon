@@ -194,6 +194,9 @@ For any molecule that **claims to fix a root cause / a performance regression**
       closure**.
 - [ ] **Cross-family reading committee on a root/security stake** (CLAUSE 6, when
       the primitive exists — until then, by hand).
+- [ ] **Every named cause has a line of code that observed it** — no `cfg!` branch
+      or plausibility argument masquerading as a reading; "undetermined" is a
+      shippable answer and carries no invented remedy (the eighth discipline).
 
 ---
 
@@ -217,6 +220,67 @@ operator verdict-door, recorded there.
 - **False-friend warning (turing, confirmed).** The ADR-134 `G_inject` gate is a
   **build-pipeline must-hit assertion** (a sign-flip of the D7 ban-list), **NOT a
   prompt-injection defence.** Do not map "the context is data" onto it.
+
+---
+
+## The eighth discipline — a diagnostic may name only what it measured
+
+Landing here from **`task-20260726-eabf`**, and it is the clause with the shortest
+distance between "we guessed" and "someone else published our guess as a fact".
+
+> **A message that names a cause is making a measurement claim. If the probe did
+> not measure that cause, the message must not name it — and "cause
+> undetermined" must be a representable, shippable answer.** A plausible cause
+> stated as an established one is a *surface lie*, and it is the most contagious
+> kind: readers cannot tell it from a reading, so it propagates into their notes,
+> their bug reports, and their public repro recipes.
+
+The full loop, because it is worth reading once in order:
+
+1. Cosmon's egress preflight, on any failure to create a network namespace,
+   announced `kernel.unprivileged_userns_clone=0 or user.max_user_namespaces=0`
+   as the cause. It had read neither of those keys on the failing host — the
+   sentence was a `cfg!(target_os)` branch, not a measurement.
+2. An external tester never ran that `sysctl`. He read the two key names **out of
+   our message**, inferred "both at `0`", and wrote it into a public reproduction
+   recipe as a *reading*.
+3. We disputed his number — by supposing the key was absent from a stock LinuxKit
+   kernel and that a swallowed error read as a zero. Also not measured.
+4. He measured. `unprivileged_userns_clone = 1`, `max_user_namespaces = 79654` —
+   both healthy — and `unshare -Ur true` still returned `Operation not
+   permitted`, because the engine's **default seccomp profile** refuses the
+   syscall. Both of us had been wrong about the cause of a real phenomenon.
+
+- **Grounded in**: issue #20 (`task-20260726-eabf`); the corrected surface is
+  `cosmon_core::egress::NetnsBlocker` — variants for *sysctl read restrictive*,
+  *sandbox policy active and syscall refused*, *tool missing*, *not Linux*, and
+  the load-bearing `Undetermined`.
+- **Cross-model because** an LLM's pull is toward the *plausible completion*, and
+  a named cause reads as more helpful than "I don't know" — RLHF rewards exactly
+  the sentence that costs the reader most. Nothing about that is provider-specific.
+- **Distinguish only what you can distinguish.** The corrected message separates
+  the classes it can separate (a sysctl it *read*, versus a syscall refused while
+  a sandbox layer is *observed* active) and refuses to pick a member inside a
+  class it cannot resolve: it says *"seccomp / AppArmor / SELinux — which layer
+  denies the call is NOT determined by this probe"* rather than guessing seccomp.
+- **No remedy for an unattributed cause.** `NetnsBlocker::Undetermined::remedy()`
+  returns `None` on purpose. The only fix line we could print there would be
+  invented, and an invented fix is how the wrong `sysctl -w` got prescribed for
+  four releases.
+- **A negative reading is not a positive capability.** "No sysctl I read forbids
+  it" is a legitimate observation; "therefore it will work" is not. Only
+  attempting the operation may produce a positive claim — CLAUSE 1 applied to the
+  diagnostic itself.
+- **Application test**: for any operator-facing message that names a cause, ask
+  *"which line of code observed that?"* If the answer is a `cfg!`, a default
+  branch, or a plausibility argument, the message is a breach. Typed blockers with
+  an explicit *undetermined* variant are the shape that makes the breach
+  unrepresentable rather than merely discouraged.
+- **The good shape already in tree**: `RootRefusalReason::UnprovisionedTarget`
+  (`cosmon-core/src/root_spawn_policy.rs`) names the path it *stat*ed and then
+  **enumerates** candidate causes — "a read-only mount, an ACL, a parent
+  directory the uid cannot search, or a uid that does not exist" — without
+  electing one. Copy that register.
 
 ---
 
