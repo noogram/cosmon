@@ -36,6 +36,31 @@ Where a probe needs an external binary that cannot run headless (a fully authed
 Claude Code session), it degrades to asserting the argv/spawn signature and
 marks that portion **INCONCLUSIVE** with an explicit note — never a silent pass.
 
+### The real-mission arm — how far a machine may actually walk
+
+The sentence above is a real limit, and for a long time it was also a blind
+spot: the container benches proved the four startup doors of issue #20 *open*,
+but every arm of them stops in front of a file literally named
+`PLACEHOLDER-NOT-A-CREDENTIAL`, so nothing had ever been observed walking down
+the corridor behind those doors.
+
+`scripts/container-real-mission-bench.sh` closes that gap up to the one step a
+machine must not take. It builds the tester's environment
+(`docker/container-real-mission/Dockerfile`), installs `cs` from the current
+tree, and drives a **real** molecule through the **real**
+`cs tackle --adapter claude` path — no placeholder minted, nothing doubled. It
+then necessarily halts at door 3 and asserts the refusal's post-conditions,
+capturing the gate's own words verbatim into `mission-record.json`.
+
+**A refusal for the expected reason is the measured outcome, not a failure.**
+An exit-0 would be the alarming result. Same verdict semantics as above: exit
+`0` refused-as-expected, exit `1` a finding, exit `2` INCONCLUSIVE with the
+reason printed — a missing docker engine is never reported as green.
+
+The remaining step, the login, belongs to a human. The harness prints the exact
+command; the two ways to provision that credential and their costs are set out
+in `docs/guides/claude-worker-in-a-container.md`.
+
 ## The six probes
 
 | id | issue | decisive half needs |

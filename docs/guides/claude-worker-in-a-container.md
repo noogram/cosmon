@@ -196,6 +196,12 @@ another loud failure while adding a new way to wrongly block a working dispatch.
 Diagnostic that still holds: a worker showing the *composer* is past doors 1 and
 2; a worker showing a *dialog* never got that far.
 
+Once you have decided to *satisfy* this door rather than read about it, the
+remaining question is how the credential gets into the container at all. There
+are two ways, with materially different security costs: see
+[*Two ways to put a credential into the container*](#two-ways-to-put-a-credential-into-the-container)
+below.
+
 ### 4. The onboarding doors — the theme wizard and the login-method selector
 
 On a *virgin* `CLAUDE_CONFIG_DIR` (no `hasCompletedOnboarding`), Claude Code
@@ -383,6 +389,123 @@ consecutive spawns on one pristine config directory with no operator in between.
 A run-once design passes spawn 1 and fails spawn 2 — which is exactly the trap
 the tester documented, and why a single green dispatch is not evidence. Measured
 green on 2.1.220, both spawns reaching the composer.
+
+## Two ways to put a credential into the container
+
+Door 3 refuses a worker that has no credential. That refusal is correct, and it
+leaves you holding a decision the software cannot make for you: **how** the
+credential gets into the container. There are exactly two ways, they are not
+equivalent, and the difference is not convenience — it is how far a compromise
+inside that container can reach.
+
+Neither is illegitimate. Read both costs before you pick.
+
+### (a) Log in by hand, inside the running container
+
+Start an interactive container, run `claude` in it, complete `/login` yourself.
+The credential is written by Claude Code into `$CLAUDE_CONFIG_DIR` inside the
+container's own filesystem.
+
+```sh
+# 1. build the image and keep it (the mission harness deletes its image by default)
+COSMON_KEEP_IMAGE=1 scripts/container-real-mission-bench.sh
+
+# 2. log in — YOU, at a TTY. Note: no --rm, so the container survives the login.
+docker run -it --init --name cosmon-mission-live \
+  --entrypoint /usr/local/bin/container-real-mission-login \
+  cosmon-container-real-mission:bench
+
+# 3. re-run the mission in that same, now-authenticated container
+docker start -ai cosmon-mission-live
+
+# 4. when you are done, the credential is destroyed with the container
+docker rm -f cosmon-mission-live
+```
+
+What this buys you:
+
+- **The secret is born and dies inside the container.** It is never copied from
+  the host, so a host credential is not duplicated into a second place that can
+  leak.
+- **No automation ever holds it.** No script, no build arg, no environment
+  variable, no CI variable, no agent — including any agent you dispatch into
+  that container — is on the path between you and the token.
+- **The blast radius is one container's lifetime.** `docker rm` is a complete
+  revocation of *this copy*.
+
+What it costs you:
+
+- **One human gesture per container.** This does not automate, by construction.
+  A fleet of ten fresh containers is ten logins.
+- **It needs a TTY**, so it cannot happen in CI or in an unattended patrol.
+- **A `--rm` container throws the credential away with everything else**, so the
+  login has to be paired with a container you intend to keep.
+
+### (b) Mount an existing host credential into the container
+
+Bind-mount the `.credentials.json` the host already has into the config
+directory the worker will read.
+
+```sh
+docker run --init \
+  -v "$HOME/.claude/.credentials.json:/home/cosmon-worker/.claude/.credentials.json:ro" \
+  … your image …
+```
+
+What this buys you:
+
+- **It is repeatable and unattended.** No TTY, no human in the loop; the same
+  command works in a script, in CI, and across a fleet of containers.
+- **One login serves every container**, including short-lived and `--rm` ones.
+
+What it costs you — stated plainly, because this is the part that gets softened:
+
+- **It copies a live secret into a disposable environment.** The token that
+  authenticates *your* account is now present inside a container you built to be
+  thrown away, and that you are probably less careful with precisely because it
+  is disposable.
+- **It widens the blast radius of everything running in that container.** Any
+  process in there — the worker, its subprocesses, anything a task pulls in, any
+  dependency with a postinstall script — can read that file. Container isolation
+  is a boundary against the host; it is not a boundary between the credential and
+  the code you are running next to it.
+- **The credential is reachable by every process inside the container**, not just
+  by `claude`. `:ro` prevents modification. It prevents no reads at all.
+- **`docker rm` does not revoke it.** The mount is a window onto the host's file;
+  if it was exfiltrated, deleting the container changes nothing, and the only
+  real remedy is rotating the credential at the source.
+- **It survives your attention.** A mount written once into a compose file or a
+  script keeps injecting the secret into every future run, including ones written
+  by someone who never read this page.
+
+### What this project recommends
+
+**Prefer (a), the in-container login, and treat (b) as a deliberate exception.**
+
+The reason is not that mounting is disreputable — it is a normal thing to do with
+a normal secret. It is that the specific credential in question authenticates an
+interactive Claude Code account, and the specific environment in question is a
+container that exists to run *unreviewed work*: a mission brief, a task from a
+queue, dependencies pulled at build time. Those two facts together are what tips
+it. A worker container is exactly the place where "some process in here can read
+that file" stops being hypothetical.
+
+So the harness in `scripts/container-real-mission-bench.sh` implements (a) and
+refuses to implement (b): it drives the mission to the credential gate, stops,
+and prints the login command for you. That is a statement about what a *machine*
+may do unattended, not a claim that (b) is wrong.
+
+If you do choose (b), choose it knowingly:
+
+- Mount a credential for an account whose blast radius you accept — ideally not
+  the one your daily work runs under.
+- Treat rotation as the revocation mechanism, since `docker rm` is not one.
+- Do not let the mount outlive the reason for it, and do not commit it into a
+  compose file where it becomes the silent default for everyone after you.
+
+The person launching the container owns this choice. The purpose of this section
+is only to make the trade-off legible before it is made — and to make sure that
+nothing in cosmon quietly makes it for you.
 
 ## Ownership: `--add-dir` is authorization, not ownership
 
