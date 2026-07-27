@@ -310,7 +310,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "composed_prompt_bytes": composed_prompt_bytes,
             // Carries a UTF-8 locale when the spawn env declares none, so a
             // copied attach line renders the worker's TUI instead of a field
-            // of underscores (invariant 8w).
+            // of underscores (invariant §8x).
             "attach": cosmon_transport::locale::attach_command_from_env(&socket, &session_name),
         });
         println!("{out}");

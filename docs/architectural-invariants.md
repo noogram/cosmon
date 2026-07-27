@@ -34,8 +34,8 @@ its status in a trailing `### Status` block. There is no third state.
 
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
-top-level fleet-split / briefing-seal / events-source sections), §8v, §8w, §9,
-§10, §11. (§1bis is *proposed* — see the list below.)
+top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
+§8x, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
