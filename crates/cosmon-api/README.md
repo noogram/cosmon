@@ -33,7 +33,9 @@ cs-api --verbose                       # debug logging
 
 | Flag | Default | Purpose |
 |------|---------|---------|
-| `--bind <ADDR>` | `127.0.0.1:4222` | Socket to listen on. Use `0.0.0.0:4222` only behind Tailscale (see security below). |
+| `--bind <ADDR>` | `127.0.0.1:4222` | Socket to listen on. `0.0.0.0` / `::` is always refused; any other non-loopback address needs the flag below. |
+| `--i-know-this-exposes-an-unauthenticated-api` | off | Consent to a bind other machines can reach. There is no auth: whoever routes there can spawn workers. See [Security](#security). |
+| `--allow-web-origin <ORIGIN>` | none | Allow one browser origin (repeatable, exact match, no wildcard). Native pilots do not need this. |
 | `--cs-path <PATH>` | `which cs` | Absolute path to the `cs` binary. |
 | `--cosmon-state <PATH>` | inherit | Override `$COSMON_STATE_DIR` for child `cs` processes and for `/inbox` / `/whispers` scans. |
 | `--whispers-inbox <PATH>` | `<cosmon-state parent>/whispers/inbox` | Override where `/whispers` reads markdown files from. |
@@ -203,30 +205,81 @@ and the most recent `updated_at` seen across its fleets.
 }
 ```
 
-## Security (v0)
+## Security
 
-**Three invariants apply — read them before changing `--bind`.**
+**`cs-api` has no authentication, and some of its routes execute.**
+`POST /molecules/{id}/tackle` spawns a worker: it runs agent code and
+spends the operator's credit. `POST /whispers/{id}/spark`,
+`POST /whisper/{mol_id}`, `POST /molecules/{id}/tag` and the
+`POST /session/*` routes all write. Every request that reaches the
+socket carries the operator's full authority, because there is nothing
+else for it to carry.
 
-1. **Loopback by default.** The binary binds `127.0.0.1:4222` unless
-   explicitly told otherwise. No other machine can reach `cs-api`
-   in that mode.
-2. **No auth.** v0 does not check a bearer token, API key, or origin
-   header. If you bind anything other than loopback, you MUST put a
-   network boundary in front of it. **The only supported non-loopback
-   deployment for v0 is behind Tailscale** (`cs-api --bind
-   100.x.x.x:4222` on a tailnet). Do **not** expose this daemon on a
-   public IP, and do **not** configure router port-forwarding to it.
-3. **CORS is permissive** (`Access-Control-Allow-Origin: *`). Harmless
-   on loopback; on a tailnet it means any machine the daemon trusts
-   (see #2) can also be hit from a browser. Plan accordingly.
+The bind address is therefore the entire access-control boundary, and
+`src/bind.rs` enforces it as a value the binary must construct before
+it can listen:
 
-### v1 plan
+1. **Loopback by default.** `127.0.0.1:4222`. No other machine can
+   reach it.
+2. **`0.0.0.0` / `::` is refused** — with or without the consent flag.
+   It does not name a network; it names every interface the host has
+   now or acquires later, so the exposure cannot be determined, and we
+   fail closed rather than assume. Same refusal, same reason, as
+   [`apps-transport-http`](../apps-transport-http/src/bind.rs).
+3. **A concrete routable address requires
+   `--i-know-this-exposes-an-unauthenticated-api`.** The only
+   supported such deployment is a Tailscale address
+   (`cs-api --bind "$(tailscale ip -4):4222" --i-know-…`). Never a
+   public IP, never router port-forwarding.
+4. **No CORS by default.** The Mac and iOS pilots are native clients
+   that never send an `Origin` — CORS decides what *web pages* may do,
+   and a wildcard on an unauthenticated executing surface lets any page
+   the operator visits drive the daemon. `--allow-web-origin <ORIGIN>`
+   (repeatable) names origins explicitly; they are matched exactly and
+   echoed back, and `*` is refused by name.
 
-- Bearer token auth (`--token-file` or `$COSMON_API_TOKEN`).
-- Origin pinning (`--allow-origin <URL>`), so CORS stops being `*`
-  when the daemon is not bound to loopback.
-- Tailscale auto-discovery via `neurion` (so iOS apps do not need
-  manual IP entry).
+Note what a warning would *not* have bought here: the operator who
+typed the flag is not reading the log. The refusals are exits, not
+lines in a file.
+
+### The gap that is deliberately still open
+
+Authentication. It is not missing by oversight and it is not
+under-specified: `delib-20260727-f9ee` concluded, five seats of five,
+that the right shape is a **boot-minted seal** extending
+[`admin_seal`](../cosmon-rpp-adapter/src/admin_seal.rs) — a secret
+minted at container/daemon start, printed once, held only as a BLAKE3
+digest, compared in constant time, where `None` is simultaneously "no
+credential" and "closed" so that "enabled but unprotected" cannot be
+written down. It is explicitly **not** an ad-hoc token scheme and
+**not** a "the caller reached loopback, so it must be the operator"
+posture — cosmon's own client code already refuses that: the two
+`is_loopback` call sites in the tree
+([`cosmon-remote/src/oidc/loopback.rs`](../cosmon-remote/src/oidc/loopback.rs))
+gate an OAuth redirect catcher that *also* demands a high-entropy
+`state` nonce, precisely because any open web page can `fetch` a
+loopback socket.
+
+Two further items belong to the next molecule, not to this one:
+
+- **`cosmon-rpp-adapter`'s unauthenticated `auth_claude` surface is
+  credential-*writing*, not read-only.** Verified in this tree:
+  `POST /v1/auth/claude/confirm` (`src/auth_claude/routes.rs`) takes
+  only `State` and `Json` — no bearer is extracted anywhere on the path
+  — and on success calls `write_credentials_file`, which writes
+  `~/.claude/.credentials.json`. An unauthenticated caller who can
+  reach that route can therefore plant an `(access_token,
+  refresh_token)` pair, after which workers in that fleet run against
+  an account they chose. Mitigating fact, also verified: the surface is
+  inert unless the operator wired it — the handlers return
+  `503 service_unavailable` when `AppState::auth_claude` is `None`.
+  This is more severe than any read exposure and must be closed on its
+  own merits.
+- **Tailscale-address auto-discovery** via `neurion`, so the iOS app
+  need not be handed an IP by hand.
+
+See `docs/architectural-invariants.md` §8z for the invariant this
+change ratifies.
 
 ## Running as a LaunchAgent
 
@@ -252,7 +305,10 @@ Each integration test spawns `cs-api` against a scratch
 
 The v0 + v1 surface deliberately omits, per the molecule specs:
 
-- No bearer token auth (lands in a follow-up — see [v1 plan](#v1-plan)).
+- No bearer token auth — see
+  [the gap that is deliberately still open](#the-gap-that-is-deliberately-still-open)
+  for the decided shape (a boot-minted seal) and why the bind address
+  carries the boundary until it lands.
 - No WebSocket — pilots poll `/session/current` / `/whispers` / `/inbox`.
 - No auto-install as a LaunchAgent; operator places the `.plist` by hand.
 - No Tailscale discovery; operator configures the IP manually.

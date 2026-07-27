@@ -123,19 +123,63 @@ environment — so you can either run `cs-api` from the project root
 (walk-up finds `.cosmon/`) or set `COSMON_STATE_DIR` in the
 LaunchAgent's `EnvironmentVariables`.
 
-## Security invariants (v0)
+## Security invariants
 
 Read these before changing `--bind`.
 
+**`cs-api` has no authentication, and some of its routes execute.**
+`POST /molecules/{id}/tackle` spawns a worker — it runs agent code and
+spends your credit. Every request that reaches the socket carries your
+authority, because there is nothing else for it to carry. The bind
+address is therefore not a preference: it is the only access-control
+boundary the process has, and the binary enforces it rather than
+documenting it.
+
 1. **Loopback by default** (`127.0.0.1:4222`). Unreachable from other
    machines.
-2. **No auth.** Bearer token lands in v1.
-3. **Permissive CORS.** Any browser origin can call the API.
+2. **`0.0.0.0` / `::` is refused**, always, with no flag to override
+   it. It names every interface the host has now or acquires later, so
+   the exposure cannot be determined — and where you cannot verify, do
+   not claim. Name one concrete interface instead.
+3. **A routable address requires an explicit gesture.** The daemon
+   refuses to start on a non-loopback address unless you pass
+   `--i-know-this-exposes-an-unauthenticated-api`. The flag is long on
+   purpose; its `--help` text says what it opens.
+4. **No CORS by default.** The Mac and iOS pilots are native clients
+   and never send an `Origin`, so CORS buys them nothing; it only
+   decides which *web pages* may drive this daemon. Name origins
+   explicitly with `--allow-web-origin <ORIGIN>` (repeatable, exact
+   match, no wildcard — `*` is refused by name).
 
-The *only* supported non-loopback deployment for v0 is **behind
-Tailscale**. Run `cs-api --bind 100.x.x.x:4222` on a tailnet address,
-so only authenticated tailnet peers can reach it. Do not expose a
-public IP; do not configure router port-forwarding to `cs-api`.
+The *only* supported non-loopback deployment is **behind Tailscale**:
+
+```sh
+cs-api --bind "$(tailscale ip -4):4222" \
+       --i-know-this-exposes-an-unauthenticated-api
+```
+
+so only your tailnet peers can reach it. Check with `tailscale status`
+that the tailnet holds only your own devices. Do not expose a public
+IP; do not configure router port-forwarding to `cs-api`; and prefer
+starting it when you pilot over leaving it in a LaunchAgent that opens
+the port at every login.
+
+### The gap that is deliberately still open
+
+There is no authentication and this molecule did not add one. The
+shape has been decided — `delib-20260727-f9ee`, five seats of five: a
+**boot-minted seal** extending
+[`admin_seal`](../../crates/cosmon-rpp-adapter/src/admin_seal.rs), a
+secret minted at start, printed once, held only as a BLAKE3 digest,
+where the absence of the credential *is* the closed state — and
+explicitly **not** an ad-hoc token and **not** a
+trust-whoever-reached-loopback posture. Cosmon's own client code
+already refuses the latter: the OAuth redirect catcher in
+[`cosmon-remote`](../../crates/cosmon-remote/src/oidc/loopback.rs)
+binds loopback *and* demands a high-entropy `state` nonce, because any
+open page can `fetch` a loopback socket. Until the seal lands, the bind
+address is the whole boundary. See `docs/architectural-invariants.md`
+§8z.
 
 ## LaunchAgent (macOS)
 
