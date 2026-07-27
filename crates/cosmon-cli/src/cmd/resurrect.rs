@@ -308,7 +308,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "branch": branch,
             "prior_count": prior_count,
             "composed_prompt_bytes": composed_prompt_bytes,
-            "attach": format!("tmux -L {socket} attach -t {session_name}"),
+            // Carries a UTF-8 locale when the spawn env declares none, so a
+            // copied attach line renders the worker's TUI instead of a field
+            // of underscores (invariant 8w).
+            "attach": cosmon_transport::locale::attach_command_from_env(&socket, &session_name),
         });
         println!("{out}");
     } else {
@@ -318,7 +321,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  worktree: {}", worktree_path.display());
         println!("  prior resurrections: {prior_count}");
         println!("  prompt bytes: {composed_prompt_bytes}");
-        println!("  attach: tmux -L {socket} attach -t {session_name}");
+        println!(
+            "  attach: {}",
+            cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
+        );
     }
 
     drop(lock_file);
