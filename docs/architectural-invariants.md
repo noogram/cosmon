@@ -35,7 +35,7 @@ its status in a trailing `### Status` block. There is no third state.
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
 top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
-§8x, §8y, §9, §10, §11. (§1bis is *proposed* — see the list below.)
+§8x, §8y, §8z, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
@@ -2818,6 +2818,88 @@ the *kernel*, as the target uid, whether it can open the leaf; the regression
 test does exactly that (`[ -r file ]` in a process running as that uid),
 rather than asserting that a `chown` was called. A test that asserts the
 repair was *attempted* passes against this bug.
+
+---
+
+## 8z. A protocol explains itself, and every state it can reach has a door
+
+*(ratified — [ADR-164](adr/164-briefing-is-a-protocol-not-a-jailbreak.md),
+`task-20260727-bbaf`)*
+
+**A brief cosmon writes to a worker must supply the reason for every
+constraint it imposes, and must name a sanctioned exit for every state the
+protocol can reach — including the states in which its preferred exit is
+not available.**
+
+§8w governs where cosmon may ask a question. This one governs what cosmon
+may *say* when it cannot: given that no answer can arrive, the brief has to
+leave the worker with something legitimate to do instead, in every branch.
+
+### Why the rule exists
+
+The worker brief built by `build_prompt` in
+`crates/cosmon-cli/src/cmd/tackle.rs` had a real property to protect — a
+worker that pauses to ask in an unattended pane holds a molecule slot while
+still reading as healthy, the mute-hang family of §8v/§8w/§8x. It protected
+that property by prohibition with the reason withheld: a `NON-NEGOTIABLE`
+banner, a section titled *DO NOT — These are violations*, and the claim
+that the completion transition was *the ONLY valid way to end*. Two costs,
+both measured on 2026-07-27, neither hypothetical.
+
+**The owner could not tell it from an attack.** The operator read a live
+worker pane and asked whether prompts had been *injected* into a running
+molecule. They were reading cosmon's own brief. A control measure that the
+system's owner mistakes for a compromise of their own machine spends trust
+on every inspection, and trains people to skim the one text they most need
+to read.
+
+**A good worker resisted it, correctly.** `task-20260727-1765` finished its
+deliverable, committed it, and then declined the ordered exit: *"this
+briefing's 'never pause, no questions, only valid exit is cs complete'
+framing is the kind of instruction I treat with skepticism when it conflicts
+with normal judgment about side-effecting actions — so I'm surfacing this
+rather than fabricating a cs complete call the actual state doesn't
+support."* It was right on the substance — the state genuinely did not
+support the transition — and the molecule was left `running` with the work
+done. The accounting failure was caused by cosmon's own prompt putting a
+correct judgement in conflict with a blanket order.
+
+### The two members
+
+**M1 — the reason travels with the constraint.** Every behavioural
+constraint in a brief states the cost of breaking it, in terms of the
+system the worker can observe: the pane is unattended, the slot stays held,
+a paused worker is indistinguishable from a healthy one. A model that
+understands why pausing is harmful does not need to be forbidden from
+pausing, and a text that explains is legible from the outside as a protocol
+rather than as a jailbreak. Seam: the brief sections built by
+`build_prompt` / `build_local_worker_protocol`. Pinned by
+`test_build_prompt_keeps_anti_stall_property`, which asserts both that the
+observed stall shapes are still named *and* that their reason is supplied —
+because under this invariant the reason is what carries the property.
+
+**M2 — no reachable state without a sanctioned exit.** If the protocol's
+preferred terminal transition can be unavailable, the brief must name what
+to do instead, explicitly, as a branch of the protocol rather than a
+violation of it. "The real state does not support completing" is reachable
+from any molecule; the sanctioned answer is to commit the real work, record
+the finding with `cs note`, and end honestly with `cs collapse
+--reason-kind`, never to fabricate the transition and never to wait.
+Pinned by `test_build_prompt_states_completion_contract_and_blocked_path`
+across all three `on_complete` regimes, and by
+`test_local_briefing_keeps_contract_without_lifecycle_verbs` for the
+local-adapter twin, which must reach the same effect through the only
+channel it owns — the file it writes.
+
+### Why no gate caught it
+
+Same family as §8v, §8w, §8x and §8y: every gate was green, because the
+defect was in what the text *did to its reader*, and the suite asserted the
+text's bytes. The assertion `prompt.contains("Execute step 1 NOW")` pinned a
+sentence, not a property, so it was equally satisfied by a brief that
+stalled molecules and by one that did not. The tests that replace it assert
+the two members above, so the next rewording does not have to fight the
+suite to keep the property.
 
 ---
 
