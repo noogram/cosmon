@@ -122,6 +122,17 @@ pub enum DemoteResource {
     /// `cs complete`. `--add-dir` is a Claude *authorization* grant, not an OS
     /// `chown` — it cannot override `EACCES`.
     StateDir,
+    /// One of the startup-consent files **cosmon itself wrote** into the config
+    /// home before the spawn (`.claude.json`, `settings.json`).
+    ///
+    /// A root dispatcher writes them as root; the worker then opens them as the
+    /// demote target. When it cannot, Claude Code does not fail — it concludes
+    /// it is on a first run and *replaces* `.claude.json` wholesale, losing the
+    /// pre-grant and rendering the onboarding wizard nobody is there to answer.
+    /// The containing directory being usable says nothing about this: measured
+    /// on 2.1.220, a worker-owned config home holding a root-owned
+    /// `.claude.json` reproduces the hang exactly.
+    ConsentFile,
 }
 
 impl DemoteResource {
@@ -132,6 +143,7 @@ impl DemoteResource {
             DemoteResource::ConfigHome => "claude config home",
             DemoteResource::Worktree => "worktree",
             DemoteResource::StateDir => "cosmon state dir",
+            DemoteResource::ConsentFile => "claude startup-consent file",
         }
     }
 
@@ -158,6 +170,17 @@ impl DemoteResource {
                 "cosmon chowns the declared .cosmon state dirs to the uid on the \
                  demote path, so this one resisted it — check for a read-only \
                  mount, an ACL, or a parent directory the uid cannot search"
+            }
+            // Deliberately does NOT advise chowning the config home wholesale:
+            // it can be an operator-supplied directory holding the operator's
+            // own credential, and cosmon only ever takes ownership of the two
+            // files it wrote there itself.
+            DemoteResource::ConsentFile => {
+                "cosmon chowns the consent files it wrote (.claude.json, \
+                 settings.json) to the uid on the demote path, so this one \
+                 resisted it — check for a read-only mount, an ACL, or a mode \
+                 that denies the owner read (a worker that cannot read them \
+                 replaces them and re-opens the onboarding wizard)"
             }
         }
     }

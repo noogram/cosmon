@@ -4577,6 +4577,25 @@ fn spawn_claude_and_prompt(
                 .cloned()
                 .chain(std::iter::once(mol_state_dir.to_path_buf()))
                 .collect(),
+            // The two files the pre-grant above wrote — as ROOT, on a root
+            // dispatch, a few dozen lines before this (issue #20, the
+            // consent-ownership door). The judge used to stat only the config
+            // *directory*, which is worker-owned and therefore answered yes
+            // while the `.claude.json` inside it was unopenable by the worker.
+            // Claude Code does not report that: it reads the unreadable file as
+            // a first run, replaces it, and renders the onboarding wizard
+            // nobody is there to answer. Naming the files here puts them in
+            // both the repair list and the judge list, which is the invariant
+            // the surrounding port exists to keep.
+            //
+            // The ordering is load-bearing and it is satisfied here: the
+            // pre-grant is above (`pregrant_startup_consent`), this preflight —
+            // which chowns and then judges — is here, and no worker process
+            // exists until `spawn_*` below.
+            consent_files: vec![
+                consent_paths.config_file.clone(),
+                consent_paths.settings_file.clone(),
+            ],
         },
         // The probe now runs under the identity the WORKER will hold — as the
         // demote target on a root dispatch, as the dispatcher otherwise — so
