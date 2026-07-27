@@ -471,17 +471,20 @@ EXAMPLES:
   cs opt-in-share --accept    # non-interactive: record acceptance
   cs opt-in-share --json      # NDJSON output for scripting
 
-Deny-by-default. The first time `cs tackle` runs on a TTY, this prompt
+Deny-by-default. The first time `cs init` runs interactively, this prompt
 fires automatically (once) and the answer is persisted to
 ~/.config/cosmon/consent.toml. No trace in your project's git log.
 
 The French prompt names the encryption (age), the sole recipient
 (the Noogram maintainer), and the no-trace-in-commits guarantee, then asks [o/N].
-Anything but an explicit yes is recorded as a decline. When stdin is
-not a TTY (CI, scripts, worker shells), the hook skips the prompt and
-records a decline without asking.
+Anything but an explicit yes is recorded as a decline.
 
-SEE ALSO: cs tackle (the first-run hook site).
+The question is asked only where an answer can arrive: stdin AND stdout
+must both be terminals. A captured stdout (CI, scripts, `OUT="$(cs ...)"`)
+records a decline without asking and says so on stderr. `cs tackle` never
+asks — nothing on the dispatch path may block on a human (ADR-163).
+
+SEE ALSO: cs init (the first-run hook site).
 
 ###### **Options:**
 

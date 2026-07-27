@@ -27,6 +27,10 @@ CLAUDE.md by default — pass `--soft` to generate an agent template.
 Refuses to nest: if an ancestor already carries `.cosmon/`, exits
 non-zero — no `--force`.
 
+On a terminal, the first `cs init` of your life also asks the one-time
+developer-share question (deny-by-default, `cs opt-in-share --status` to
+review). Never asked under `--json`, never asked when stdout is captured.
+
 Symmetric undo: `rm -rf <path>/.cosmon/`.
 
 ###### **Arguments:**

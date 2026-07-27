@@ -21,6 +21,29 @@ this stage.
 
 ### Fixed
 
+- **`cs tackle` no longer asks a question, and cosmon's first-run consent
+  prompt no longer hangs a captured dispatch.** In a container, a dispatch
+  with a valid credential ran its full 240s timeout and spawned nothing: `cs
+  tackle` had printed the French `opt-in-share` prompt into a stdout the
+  orchestrator was capturing, on a stdin that was still the terminal
+  inherited from `docker exec -it`. No keystroke could arrive and no output
+  could warn. The guard tested `stdin().is_terminal()` — "is a terminal
+  attached?" — instead of "can a human see this and answer it?".
+
+  Two repairs, because the predicate and the placement were both wrong. A
+  first-run question is now asked only when **stdin and stdout are both
+  terminals**; a captured stdout auto-declines down the identical path a
+  missing TTY already took, and says so on stderr with the explicit remedy.
+  And the question left the dispatch path entirely — it now fires from `cs
+  init` (suppressed under `--json`) and from `cs opt-in-share` invoked alone.
+  Nothing on the dispatch path may block on a human.
+
+  The regression test allocates a real pty and asserts the process
+  *terminates*, not what it wrote: the broken build records the same
+  decline, just after somebody types into a terminal nobody is watching.
+  [ADR-163](docs/adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md),
+  architectural invariant §8w. Fifth door of noogram/cosmon#20.
+
 - **The `claude` adapter no longer stalls on Claude Code 2.1.220's first-run
   wizard.** The installer moved from 2.1.218 to 2.1.220 under us; the new build
   opens a syntax-theme wizard on any config directory that has never completed
