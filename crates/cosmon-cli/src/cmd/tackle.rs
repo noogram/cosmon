@@ -2977,7 +2977,27 @@ fn build_prompt(
         .map_or("🔧", cosmon_core::kind::MoleculeKind::emoji);
 
     // ── AUTONOMOUS WORK MODE HEADER ─────────────────────────────
-    let _ = writeln!(out, "# 🚨 AUTONOMOUS WORK MODE — NON-NEGOTIABLE 🚨\n");
+    // Register note (task-20260727-bbaf). The header and the closing
+    // protocol used to be written in imperatives with the reason withheld
+    // ("NON-NEGOTIABLE", "This is physics, not politeness", "There is NO
+    // other valid way to end"). Two costs, both observed on 2026-07-27:
+    // the operator read a worker pane and asked whether prompts had been
+    // INJECTED into a running molecule — they were reading our own brief;
+    // and task-20260727-1765 correctly refused the blanket order, because
+    // its molecule's real state did not support the transition the brief
+    // demanded, and was left `running` with the work done. A control a
+    // competent owner mistakes for an attack costs trust on every
+    // inspection, and an order that conflicts with good judgement gets
+    // resisted by exactly the workers you want.
+    //
+    // So the anti-stall property is now carried by EXPLANATION, not by
+    // coercion: the brief states the contract and the cost of breaking it
+    // (unattended pane, held molecule slot, a stalled worker that looks
+    // healthy), and a model that understands that does not need to be
+    // forbidden from pausing. The behavioural target is unchanged and is
+    // asserted as a property in
+    // `test_build_prompt_states_completion_contract_and_blocked_path`.
+    let _ = writeln!(out, "# Autonomous work mode\n");
     let _ = writeln!(
         out,
         "You are a cosmon worker executing {kind_emoji} {kind_str} `{}`.",
@@ -2991,8 +3011,16 @@ fn build_prompt(
         mol.total_steps
     );
     out.push_str(
-        "This is physics, not politeness. A molecule in motion stays in motion. \
-         Every moment you wait is a moment the pipeline stalls.\n\n",
+        "Nobody is reading this pane. cosmon dispatched you into a detached \
+         session and tracks the molecule's recorded state, not anything you \
+         print here. Two consequences shape the protocol at the end of this \
+         brief. First, a question asked here reaches no one, so it is never \
+         answered. Second, a worker waiting at the prompt is indistinguishable \
+         from a worker that is thinking: it holds a molecule slot and reads as \
+         healthy to the fleet until a human happens to look, often hours \
+         later. So keep moving, and put anything you would have said to an \
+         operator into the lifecycle commands instead, where it is recorded \
+         and read.\n\n",
     );
 
     // ── EXTERNAL ATTRIBUTION ────────────────────────────────────
@@ -3225,7 +3253,11 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
                 "6. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
                 mol.id, mol.formula_id
             );
-            out.push_str("7. Immediately start the next step. Do NOT pause.\n\n");
+            out.push_str(
+                "7. Go straight into the next step. There is nobody here to \
+                 check in with, and a pause between steps is invisible to the \
+                 fleet.\n\n",
+            );
         }
         OnComplete::Commit => {
             let _ = writeln!(
@@ -3233,83 +3265,213 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
                 "5. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
                 mol.id, mol.formula_id
             );
-            out.push_str("6. Immediately start the next step. Do NOT pause.\n\n");
-        }
-    }
-
-    // Completion instructions vary based on on_complete config.
-    match on_complete {
-        OnComplete::CommitPushPr => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done:**\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Create a pull request: `gh pr create --title \"<title>\" --body \"<summary>\"`\n\
-                 3. Complete the molecule:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
-            );
-        }
-        OnComplete::CommitPush => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done:**\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Complete the molecule:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
-            );
-        }
-        OnComplete::Commit => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done, your ONLY valid exit is:**\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
+            out.push_str(
+                "6. Go straight into the next step. There is nobody here to \
+                 check in with, and a pause between steps is invisible to the \
+                 fleet.\n\n",
             );
         }
     }
 
-    // ── DO NOT LIST (targets specific Claude failure modes) ─────
-    out.push_str("## DO NOT — These are violations\n\n");
-    out.push_str("- Do NOT pause between steps to summarize what you did.\n");
-    out.push_str("- Do NOT ask \"shall I continue?\" or \"would you like me to proceed?\".\n");
-    out.push_str("- Do NOT describe what you are about to do — just DO IT.\n");
-    out.push_str("- Do NOT offer alternatives or ask for confirmation.\n");
-    out.push_str("- Do NOT wait for user input at the ❯ prompt between steps.\n");
+    // ── COMPLETION CONTRACT ─────────────────────────────────────
+    // Both branches, in one place: the transition that ends the molecule,
+    // and the sanctioned path for a state that does not support it.
+    push_completion_contract(&mut out, mol, on_complete);
 
-    // DO NOT items vary based on on_complete config.
+    // ── WHAT STALLS THE FLEET ───────────────────────────────────
+    // The former "DO NOT — These are violations" list. Same observed
+    // failure modes, each now stated with its cost instead of as a bare
+    // prohibition — a worker that knows *why* a pause is harmful does not
+    // need to be forbidden from pausing, and the section no longer reads
+    // like an instruction someone injected into a running session.
+    out.push_str("## What stalls the fleet\n\n");
+    out.push_str(
+        "Each of these has actually held a molecule slot open on this fleet. \
+         They share one shape: the worker addressed an operator who was not \
+         there.\n\n",
+    );
+    out.push_str(
+        "- Pausing between steps to summarise what you did. The summary is \
+         read by nobody, and the molecule sits at `running` while it waits \
+         to be read.\n",
+    );
+    out.push_str(
+        "- Asking \"shall I continue?\" or \"would you like me to proceed?\". \
+         No answer is coming. Decide, act, and record the decision in the \
+         `--evidence` of your next `cs evolve`, where a human can find it \
+         afterwards.\n",
+    );
+    out.push_str(
+        "- Offering alternatives and waiting for a pick. Same shape: pick the \
+         one you would defend, do it, and say which and why in the evidence.\n",
+    );
+    out.push_str(
+        "- Sitting at the ❯ prompt for input. This is the mute-hang the fleet \
+         cannot distinguish from healthy work; it is the single most \
+         expensive failure mode here.\n",
+    );
+
+    // Scope boundaries — deliberately NOT bullets of the stall list above.
+    // They are not failure modes; they say how far this molecule's
+    // integration reaches, which varies with on_complete. Filing them
+    // under the stall list was what made the old section read as one
+    // undifferentiated wall of prohibitions.
     match on_complete {
         OnComplete::Commit => {
-            out.push_str("- Do NOT create GitHub PRs — integration is local via molecules.\n");
-            out.push_str("- Do NOT push to remote — commits stay on the local branch.\n\n");
+            out.push_str(
+                "\n## How far integration goes\n\n\
+                 - Do NOT create GitHub PRs — integration is local via molecules.\n\
+                 - Do NOT push to remote — commits stay on the local branch; \
+                 cosmon merges them when the molecule is harvested.\n\n",
+            );
         }
         OnComplete::CommitPush => {
-            out.push_str("- Do NOT create GitHub PRs — only push the branch.\n\n");
+            out.push_str(
+                "\n## How far integration goes\n\n\
+                 - Do NOT create GitHub PRs — pushing the branch is where this \
+                 molecule's integration stops.\n\n",
+            );
         }
         OnComplete::CommitPushPr => {
             out.push('\n');
         }
     }
 
-    // ── FINAL IMPERATIVE ────────────────────────────────────────
+    // ── STARTING POINT ──────────────────────────────────────────
+    // Kept LAST on purpose, and the placement is now load-bearing rather
+    // than rhetorical. This block is the only line that names which step
+    // is current, and the brief is re-read from the tail on a mid-molecule
+    // re-prime (`cs prime`) and after a context compaction — the tail is
+    // the one region reliably still in view. What changed is the voice: it
+    // is a pointer into the checklist above, not a fresh order arriving
+    // after the molecule started, which is precisely what an operator
+    // reading a live pane on 2026-07-27 mistook for an injected prompt.
     let _ = writeln!(
         out,
-        "## ▶ Execute step {} NOW.\n\n\
-         Begin immediately. No preamble. No planning summary. Just start working.",
+        "## ▶ Start here: step {}\n\n\
+         Everything you need is above. Start with the work itself rather than \
+         a plan of it — a planning summary in this pane is read by nobody, \
+         whereas the same reasoning in a `cs evolve --evidence` is kept.",
         mol.current_step + 1
     );
 
     out
+}
+
+/// Append the **completion contract** to `out`: how the molecule ends, and
+/// what to do when the real state does not support ending it that way.
+///
+/// Two branches, deliberately given equal standing.
+///
+/// The first is the ordinary exit — `cs complete`, preceded by whatever
+/// integration `on_complete` configures. This is the transition the fleet
+/// waits on; a worker that finishes its work and prints a summary instead
+/// leaves the molecule `running` forever.
+///
+/// The second is the branch the old brief did not have, and its absence
+/// cost us a molecule. The text used to say the completion transition was
+/// the ONLY valid way to end. On 2026-07-27 `task-20260727-1765` finished
+/// and committed its deliverable, found that the molecule's real state did
+/// not support the transition, and refused to fabricate one — correctly,
+/// on the substance. It was left `running` with the work done, because our
+/// own prompt had put a good judgement in conflict with a blanket order
+/// and offered no third door. A worker that discovers the state does not
+/// support completion is doing its job, and it needs a *sanctioned* way to
+/// say so; otherwise the only two moves are a false green or a silent
+/// stall, and both are worse than the truth. `cs note` plus `cs collapse`
+/// make "not completable" a path through the protocol rather than a
+/// violation of it.
+fn push_completion_contract(out: &mut String, mol: &MoleculeData, on_complete: OnComplete) {
+    use std::fmt::Write;
+
+    out.push_str("## Finishing\n\n");
+
+    match on_complete {
+        OnComplete::CommitPushPr => {
+            let _ = writeln!(
+                out,
+                "When every step is done:\n\
+                 1. Push your branch: `git push -u origin HEAD`\n\
+                 2. Create a pull request: `gh pr create --title \"<title>\" --body \"<summary>\"`\n\
+                 3. Record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+        OnComplete::CommitPush => {
+            let _ = writeln!(
+                out,
+                "When every step is done:\n\
+                 1. Push your branch: `git push -u origin HEAD`\n\
+                 2. Record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+        OnComplete::Commit => {
+            let _ = writeln!(
+                out,
+                "When every step is done, record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+    }
+
+    out.push_str(
+        "\nThat command is what ends the molecule. A closing summary written \
+         in this pane instead ends nothing: the work is done and the molecule \
+         still reads as `running`, so whatever is blocked on it stays \
+         blocked. Put the summary in `--reason`, where it is kept.\n\n",
+    );
+
+    // ── THE SANCTIONED NOT-COMPLETABLE PATH ─────────────────────
+    out.push_str("### When the real state does not support completing\n\n");
+    out.push_str(
+        "Sometimes it does not, and finding that out is real work, not a \
+         failure to follow instructions. The mission may rest on a premise \
+         that turned out to be false; a gate may be red for a cause outside \
+         this molecule; the deliverable may exist while the exit criteria \
+         genuinely are not met.\n\n",
+    );
+    out.push_str(
+        "In that case do NOT call `cs complete` to satisfy this protocol. A \
+         completion the state does not support is worse than no completion, \
+         because it launders a stall into a green result that the rest of the \
+         DAG then builds on. Refusing it is the right call.\n\n",
+    );
+    out.push_str(
+        "It is also not a reason to stop and wait, which is the same silent \
+         hang by another route. Say it through the lifecycle, so the finding \
+         is recorded rather than stranded in a pane nobody opens:\n\n",
+    );
+    let _ = writeln!(
+        out,
+        "1. Commit the real work you did. It must not be lost with the \
+         worktree.\n\
+         2. Write down what you found:\n\
+         ```\n\
+         cs note {id} \"<what is actually true, and what it blocks>\"\n\
+         ```\n\
+         3. End the molecule honestly, naming the cause:\n\
+         ```\n\
+         cs collapse {id} --reason \"<why completion is not supported>\" \\\n\
+         \x20   --reason-kind blocker_stuck\n\
+         ```\n\
+         Use `gate_failed` instead when a verification gate is what stands in \
+         the way, or `resource_exhausted` when you ran out of something you \
+         cannot obtain here. Then stop — the molecule is in a terminal state \
+         a human can read and act on, which is the outcome you were after \
+         when you considered asking.",
+        id = mol.id
+    );
+    out.push('\n');
 }
 
 /// Append the **local-worker** execution protocol to `out`.
@@ -3353,23 +3515,51 @@ fn build_local_worker_protocol(out: &mut String, mol: &MoleculeData) {
          format). Empty chatter is not a deliverable — the file must contain \
          the actual work.\n",
     );
-    out.push_str("3. Move straight to the next step. Do NOT pause.\n\n");
-
-    out.push_str("## DO NOT — These are violations\n\n");
-    out.push_str("- Do NOT pause between steps to summarize what you did.\n");
-    out.push_str("- Do NOT ask \"shall I continue?\" or \"would you like me to proceed?\".\n");
     out.push_str(
-        "- Do NOT run any build, test, lint, format or documentation tooling, \
-         version control, or lifecycle command — you cannot, and cosmon does \
-         not expect you to.\n",
+        "3. Go straight into the next step. There is nobody here to check in \
+         with.\n\n",
     );
-    out.push_str("- Do NOT wait for user input.\n\n");
 
+    // Completion contract, in the vocabulary this worker actually has. It
+    // owns no lifecycle verb, so "finishing" means "the file exists and is
+    // real", and the not-completable branch — the same branch the coding
+    // agent gets via `cs note` / `cs collapse` — has to be carried by the
+    // file itself, which is the only channel out of this worker that
+    // anybody reads. Kept free of the coding-agent tokens the regression
+    // contract in
+    // `test_build_prompt_local_adapter_drops_coding_agent_directives`
+    // forbids here.
+    out.push_str("## Finishing\n\n");
+    out.push_str(
+        "You are done when the file exists and contains the actual work. \
+         cosmon records the completion for you by looking at what you wrote — \
+         a reply that describes the deliverable without writing it lands as a \
+         molecule that did nothing.\n\n",
+    );
+    out.push_str("### When you cannot produce what was asked\n\n");
+    out.push_str(
+        "If the mission rests on something false, or asks for material you do \
+         not have, do not invent a deliverable to satisfy this brief — a \
+         fabricated artifact is worse than none, because the work that reads \
+         it downstream cannot tell. Do not stop and wait either: nobody is \
+         reading this session, so waiting is indistinguishable from working \
+         and holds the molecule open.\n\n",
+    );
+    out.push_str(
+        "Write the file anyway, and let it say plainly what you found: what \
+         was asked, what is actually true, and what is missing. That is a \
+         real deliverable — it is the finding — and it reaches a human, which \
+         is what you wanted when you considered asking.\n\n",
+    );
+
+    // Kept last: on a re-prime or after truncation, the tail is the region
+    // reliably still in view, and this is the only line naming which step
+    // is current.
     let _ = writeln!(
         out,
-        "## ▶ Produce the deliverable for step {} NOW.\n\n\
-         Begin immediately. No preamble. No planning summary. Just write the \
-         artifact.",
+        "## ▶ Start here: step {}\n\n\
+         Everything you need is above. Write the artifact rather than a plan \
+         of it — the file is the only output of this session that is kept.",
         mol.current_step + 1
     );
 }
@@ -11240,15 +11430,25 @@ mod tests {
         assert!(prompt.contains("idea-20260407-abcd"));
         assert!(prompt.contains("idea-to-plan"));
         assert!(prompt.contains("Step 1/3"));
-        // Must have autonomous work mode header.
-        assert!(prompt.contains("AUTONOMOUS WORK MODE"));
-        // Must have DO NOT list.
-        assert!(prompt.contains("DO NOT"));
-        assert!(prompt.contains("Do NOT pause between steps"));
+        // Must have the autonomous work mode header.
+        //
+        // These three strings changed deliberately in task-20260727-bbaf —
+        // the header, the anti-stall list and the closing block were
+        // rewritten out of the grammar of a prompt injection and into
+        // explanation. The expectation is updated because the text is
+        // different on purpose, NOT because the assertion was in the way:
+        // the behaviour each one guarded is asserted, by property rather
+        // than by sentence, in
+        // `test_build_prompt_states_completion_contract_and_blocked_path`
+        // and `test_build_prompt_keeps_anti_stall_property`.
+        assert!(prompt.contains("Autonomous work mode"));
+        // Must name the stall failure modes.
+        assert!(prompt.contains("What stalls the fleet"));
+        assert!(prompt.contains("Pausing between steps"));
         // Must have terminal action.
         assert!(prompt.contains("cs complete"));
-        // Must end with execute now.
-        assert!(prompt.contains("Execute step 1 NOW"));
+        // Must end by pointing at the current step.
+        assert!(prompt.contains("Start here: step 1"));
         // Must carry the canonical-text guideline (task-20260623-80f9):
         // workers FETCH standard licence/legal texts, never LLM-generate
         // them (long canonical text trips the OUTPUT content-filter).
@@ -11261,6 +11461,179 @@ mod tests {
         assert!(prompt.contains("docs/guides/diagnosis-discipline.md"));
         // The pointer must NOT inline the clause bodies — cognition rots the DNA.
         assert!(!prompt.contains("Instrument the seam before you trust"));
+    }
+
+    /// The briefing must state BOTH halves of the completion contract:
+    /// the transition that ends the molecule, and the sanctioned path for
+    /// a worker whose real state does not support that transition.
+    ///
+    /// This is the property, not the wording. The old brief said the
+    /// completion transition was the only valid way to end and gave no
+    /// third door; on 2026-07-27 `task-20260727-1765` finished its work,
+    /// found the state genuinely did not support completing, refused to
+    /// fabricate the call — correctly — and was left `running`. A worker
+    /// making that discovery must be able to record it, so the brief has
+    /// to name a terminal, recorded alternative. Asserted structurally so
+    /// that rewording the prose does not have to fight the suite.
+    #[test]
+    fn test_build_prompt_states_completion_contract_and_blocked_path() {
+        let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
+
+        for on_complete in [
+            OnComplete::Commit,
+            OnComplete::CommitPush,
+            OnComplete::CommitPushPr,
+        ] {
+            let mut config = ProjectConfig::default();
+            config.worker.on_complete = on_complete;
+            let prompt = build_prompt(
+                &mol,
+                None,
+                None,
+                &config,
+                Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+                "claude",
+                None,
+            );
+
+            // Half one: the ordinary exit, naming this molecule.
+            assert!(
+                prompt.contains(&format!("cs complete {}", mol.id)),
+                "{on_complete:?}: brief must name the completing transition"
+            );
+
+            // Half two: a sanctioned, RECORDED path for a state that does
+            // not support completing. It must offer a terminal verb (not
+            // merely advice to stop), and a way to write the finding down.
+            assert!(
+                prompt.contains(&format!("cs collapse {}", mol.id)),
+                "{on_complete:?}: brief must offer a terminal exit for a \
+                 state that does not support completion"
+            );
+            assert!(
+                prompt.contains(&format!("cs note {}", mol.id)),
+                "{on_complete:?}: brief must offer a way to record the finding"
+            );
+
+            // And it must be legible as a sanctioned branch rather than as
+            // a violation: the brief has to say, in some words, both that
+            // this situation exists and that faking the completion is the
+            // wrong answer to it.
+            assert!(
+                prompt.contains("does not support completing")
+                    || prompt.contains("does not support completion"),
+                "{on_complete:?}: the not-completable case must be named"
+            );
+            assert!(
+                prompt.contains("do NOT call `cs complete` to satisfy this protocol"),
+                "{on_complete:?}: brief must forbid fabricating the transition"
+            );
+        }
+    }
+
+    /// The rewrite out of coercive grammar must not cost the anti-stall
+    /// property, which is load-bearing: a worker that pauses to ask in an
+    /// unattended pane holds a molecule slot while still looking healthy
+    /// (the mute-hang family). The brief must therefore still name the
+    /// specific observed failure modes AND supply their reason — the
+    /// reason is what replaces the former blanket prohibition, so its
+    /// absence would be the regression.
+    #[test]
+    fn test_build_prompt_keeps_anti_stall_property() {
+        let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &ProjectConfig::default(),
+            Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
+            None,
+        );
+
+        // The three observed stall shapes must each still be addressed.
+        assert!(prompt.contains("shall I continue?"));
+        assert!(prompt.contains("would you like me to proceed?"));
+        assert!(prompt.contains("❯ prompt"));
+
+        // …and the cost must be stated, because explanation is now what
+        // carries the property. A worker has to learn from the brief that
+        // the pane is unattended, that a stalled worker is indistinguishable
+        // from a healthy one, and that the slot stays held.
+        assert!(
+            prompt.contains("Nobody is reading this pane"),
+            "brief must state that the session is unattended"
+        );
+        assert!(
+            prompt.contains("indistinguishable"),
+            "brief must state that a stalled worker looks healthy"
+        );
+        assert!(
+            prompt.contains("holds a molecule slot"),
+            "brief must state the cost of the stall"
+        );
+
+        // The property is kept by explanation, so the coercive framing
+        // that made an operator mistake the brief for an injected prompt
+        // must be gone. Guards against a well-meaning revert.
+        assert!(!prompt.contains("NON-NEGOTIABLE"));
+        assert!(!prompt.contains("These are violations"));
+        assert!(!prompt.contains("NO other valid way to end"));
+    }
+
+    /// The local-worker twin must be consistent in EFFECT with the coding
+    /// agent's briefing, even though its wording differs: it owns no
+    /// lifecycle verb, so both halves of the contract have to be carried
+    /// by the one channel it has — the file it writes.
+    ///
+    /// Consistency here means the same three properties: it must keep the
+    /// anti-stall reason, it must offer a real move for the case where the
+    /// mission cannot be satisfied, and that move must be neither a
+    /// fabricated deliverable nor a silent wait.
+    #[test]
+    fn test_local_briefing_keeps_contract_without_lifecycle_verbs() {
+        let mol = sample_molecule("task-20260721-loc1", MoleculeStatus::Pending);
+        let mol_dir = Path::new("/abs/state/fleets/default/molecules/task-20260721-loc1");
+
+        for adapter in ["local", "ollama", "llama-cpp", "llama"] {
+            let prompt = build_prompt(
+                &mol,
+                None,
+                None,
+                &ProjectConfig::default(),
+                mol_dir,
+                adapter,
+                None,
+            );
+
+            // Anti-stall reason, not a bare prohibition.
+            assert!(
+                prompt.contains("Nobody is reading this pane"),
+                "{adapter}: local brief must state the session is unattended"
+            );
+            assert!(
+                prompt.contains("indistinguishable from working"),
+                "{adapter}: local brief must state that waiting looks like working"
+            );
+
+            // The not-satisfiable branch exists, and names both wrong answers.
+            assert!(
+                prompt.contains("When you cannot produce what was asked"),
+                "{adapter}: local brief must offer a not-satisfiable branch"
+            );
+            assert!(
+                prompt.contains("do not invent a deliverable"),
+                "{adapter}: local brief must rule out a fabricated artifact"
+            );
+            assert!(
+                prompt.contains("Do not stop and wait either"),
+                "{adapter}: local brief must rule out the silent wait"
+            );
+
+            // And the coercive framing is gone here too.
+            assert!(!prompt.contains("These are violations"), "{adapter}");
+            assert!(!prompt.contains("NON-NEGOTIABLE"), "{adapter}");
+        }
     }
 
     /// Jesse #4 clause 2 (task-20260721-676d): the worker briefing must be
