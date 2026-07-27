@@ -1,0 +1,40 @@
+╭─── Claude Code v2.1.220 ────────────────────────────────────────────────────────────────────────────────╮
+│                                                  │ Tips for getting started                             │
+│                   Welcome back!                  │ Ask Claude to create a new app or clone a repository │
+│                                                  │ ──────────────────────────────────────────────────── │
+│                      ▐▛███▜▌                     │ What's new                                           │
+│                     ▝▜█████▛▘                    │ Check the Claude Code changelog for updates          │
+│                       ▘▘ ▝▝                      │                                                      │
+│                                                  │                                                      │
+│     Opus 5 (1M context) · API Usage Billing      │                                                      │
+│   /…/T/claude-pregrant-discriminator.OEGmRO/ws   │                                                      │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+                                                                                            Not logged in · Run /login
+                  tmux focus-events off · add 'set -g focus-events on' to ~/.tmux.conf and reattach for focus tracking
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
