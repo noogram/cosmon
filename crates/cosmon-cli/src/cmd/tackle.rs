@@ -1678,7 +1678,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         });
         if uses_tmux {
             out["tmux_session"] = serde_json::json!(session_name);
-            out["attach"] = serde_json::json!(format!("tmux -L {socket} attach -t {session_name}"));
+            // The attach line carries a UTF-8 locale when the spawn env
+            // declares none — see `cosmon_transport::locale` for the measurement.
+            out["attach"] = serde_json::json!(cosmon_transport::locale::attach_command_from_env(
+                &socket,
+                &session_name
+            ));
         } else {
             // No tmux session exists for this adapter; expose the log path the
             // in-process / detached worker writes so tooling never emits a
@@ -1698,7 +1703,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  worktree: {}", worktree_path.display());
         if uses_tmux {
             println!("  session:  {session_name}");
-            println!("  attach:   tmux -L {socket} attach -t {session_name}");
+            println!(
+                "  attach:   {}",
+                cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
+            );
         } else {
             // In-process/detached local worker: no tmux to attach to.
             println!("  log:      {}", worker_log.display());
@@ -3967,7 +3975,7 @@ fn report_existing_session(
             "worktree": worktree_path.to_string_lossy(),
             "branch": branch_name,
             "already_running": true,
-            "attach": format!("tmux -L {socket} attach -t {session_name}"),
+            "attach": cosmon_transport::locale::attach_command_from_env(socket, session_name),
         });
         println!("{out}");
     } else {
@@ -3977,7 +3985,10 @@ fn report_existing_session(
             mol.id, mol.formula_id
         );
         println!("  session:  {session_name}");
-        println!("  attach:   tmux -L {socket} attach -t {session_name}");
+        println!(
+            "  attach:   {}",
+            cosmon_transport::locale::attach_command_from_env(socket, session_name)
+        );
         println!("  respawn:  cs tackle {} --force", mol.id);
     }
 }

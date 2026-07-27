@@ -346,6 +346,20 @@ impl TmuxBackend {
     /// [`cosmon_cli::tackle_env::build_claude_command`](../cosmon_cli/tackle_env/fn.build_claude_command.html)
     /// for the canonical pattern.
     ///
+    /// # UTF-8 floor
+    ///
+    /// `cmd` is prefixed with `LC_ALL=<utf8 locale> ` when — and only when —
+    /// the process environment declares no UTF-8 locale
+    /// ([`crate::locale::command_prefix`]). A worker TUI is built out of
+    /// box-drawing glyphs, bullets and arrows; a pane whose `LC_CTYPE` is
+    /// `POSIX` — the ordinary default of a slim container base — cannot
+    /// represent them. This is the single choke point for every tmux-backed
+    /// adapter (`claude`, `aider`, `codex`, `opencode`), so the floor is
+    /// applied once here rather than in each command builder. On a host that
+    /// already declares UTF-8 the command is byte-identical to the pre-floor
+    /// shape. See [`crate::locale`] for the measurement and for the half of
+    /// the problem this cannot reach: the locale of a human attaching later.
+    ///
     /// # Errors
     ///
     /// Returns [`TransportError::SpawnFailed`] if the tmux session cannot be created.
@@ -355,8 +369,17 @@ impl TmuxBackend {
         work_dir: &str,
         cmd: &str,
     ) -> Result<(), TransportError> {
-        self.tmux_cmd(&["new-session", "-d", "-s", session_name, "-c", work_dir, cmd])
-            .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
+        let cmd = crate::locale::with_utf8_floor_from_env(cmd);
+        self.tmux_cmd(&[
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-c",
+            work_dir,
+            &cmd,
+        ])
+        .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
         Ok(())
     }
 
@@ -594,6 +617,9 @@ impl TransportBackend for TmuxBackend {
             full_cmd.push_str(&Self::shell_quote(arg));
         }
 
+        // Same UTF-8 floor as `spawn_worker` — a pane spawned through the
+        // generic port renders the same glyphs to the same human eye.
+        let full_cmd = crate::locale::with_utf8_floor_from_env(&full_cmd);
         self.tmux_cmd(&["new-session", "-d", "-s", &session, &full_cmd])
             .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
 

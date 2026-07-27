@@ -34,8 +34,8 @@ its status in a trailing `### Status` block. There is no third state.
 
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
-top-level fleet-split / briefing-seal / events-source sections), §8v, §8w, §9,
-§10, §11. (§1bis is *proposed* — see the list below.)
+top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
+§8x, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
@@ -2677,6 +2677,73 @@ regression test asserts *termination within a deadline*, not the contents of
 types into a terminal nobody is watching, or never. Only "exited on its own"
 separates the two builds. Verified by reverting the guard: the test fails on
 its deadline with the diagnosis quoted.
+
+---
+
+## 8x. The pane is a screen: a TUI cosmon spawns must be legible
+
+*(ratified — `task-20260727-3836`)*
+
+**When cosmon chooses to drive a worker as a TUI under tmux, it owns the
+conditions that make that TUI readable. A user is never asked to know a
+requirement cosmon imposed on them and never told about.**
+
+cosmon spawns an interactive worker whose interface is built out of
+box-drawing characters, bullets and arrows. Those glyphs need a UTF-8
+locale. A container image with `LANG` unset and `LC_CTYPE=POSIX` — the
+ordinary default of a slim Debian base, *not* a misconfiguration — renders
+every one of them as `_`, and corrupts text with them (`Cramér` →
+`Cram_r`). Nothing on the screen points at the locale; an external tester
+meeting this reports it, correctly, as a cosmon rendering bug.
+
+### Where the fault actually is — measured
+
+Measured 2026-07-27 in `debian:bookworm-slim` with tmux 3.3a:
+
+| observation | result |
+| --- | --- |
+| `tmux capture-pane` | `Cramér •` — pane buffer **intact** |
+| attach under `LC_CTYPE=POSIX` | `Cram_r _` |
+| attach under `LC_ALL=C.UTF-8` | `Cramér •` |
+| server started UTF-8, client attaching POSIX | `Cram_r _` |
+
+The application writes correct UTF-8 and tmux stores it correctly. The
+substitution happens when tmux **draws to a client**, and the decision is
+taken per client. The last row is the load-bearing one: nothing cosmon
+does on its own side of the fence can fix what a later attach renders.
+
+### The two halves, and the honest boundary
+
+- **The pane, which cosmon spawns** — `TmuxBackend::spawn_worker` prefixes
+  the command with `LC_ALL=<utf8 locale>` when, and only when, neither
+  `LC_ALL`, `LC_CTYPE` nor `LANG` already declares UTF-8. One choke point
+  covers all four tmux-backed adapters. An operator's chosen locale is
+  never stomped, and the emitted command on a UTF-8 host is byte-identical
+  to the pre-fix shape.
+- **The attach, which cosmon does not spawn** — the attach line printed by
+  `cs tackle` carries the locale in the same case
+  (`LC_ALL=C.UTF-8 tmux -L … attach -t …`). cosmon cannot set the
+  environment of a process a human starts; it can only make the
+  requirement discoverable, so that a user who copies the line cosmon gave
+  them gets a legible screen. A hand-written attach in a POSIX shell is
+  still mangled — documented, not fixed.
+
+The default locale is verified, not assumed: `C.UTF-8` is accepted by
+glibc without the `locales` package (in `debian:bookworm-slim`, `locale -a`
+spells it `C.utf8` yet `LC_ALL=C.UTF-8` resolves), and the resolver prefers
+a name the host actually lists before falling back to that constant.
+
+Seam and tests: [`crates/cosmon-transport/src/locale.rs`](../crates/cosmon-transport/src/locale.rs).
+
+### Why no gate caught it
+
+Same family as the container doors of §8v and the unanswerable question of
+§8w: **the defect exists only on a screen a human is looking at.** `cargo test` never attaches a terminal, and
+`capture-pane` — what every automated probe in this repo reads — returns
+the intact bytes. Build, test, clippy, fmt and doc are all green while the
+interface is unreadable. The only detector is a human eye on an attached
+pane, which is why the invariant is stated as ownership of the *screen*,
+not of the byte stream.
 
 ---
 
