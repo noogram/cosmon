@@ -36,7 +36,7 @@ struct SettingsView: View {
                 } header: {
                     Text("cs-api")
                 } footer: {
-                    Text("cs-api doit être lancé sur le Mac derrière Tailscale. Binder le daemon sur 0.0.0.0:4222 et s'assurer que la machine est dans le même tailnet.")
+                    Text("cs-api doit être lancé sur le Mac, sur son adresse Tailscale — jamais 0.0.0.0, que le daemon refuse. cs-api n'a aucune authentification : qui peut router jusqu'au port peut lancer un worker. Sur le Mac : cs-api --bind \"$(tailscale ip -4):4222\" --i-know-this-exposes-an-unauthenticated-api, et vérifier que le tailnet ne contient que vos appareils.")
                 }
 
                 Section {

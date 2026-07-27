@@ -13,7 +13,8 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use cosmon_api::{default_galaxies_root, router, AppState};
+use cosmon_api::bind::{admit, BindClass};
+use cosmon_api::{default_galaxies_root, router_with_cors, AppState, CorsPolicy};
 
 /// Command-line surface for the `cs-api` binary.
 #[derive(Debug, Parser)]
@@ -24,8 +25,33 @@ use cosmon_api::{default_galaxies_root, router, AppState};
 )]
 struct Cli {
     /// Address to bind. Default `127.0.0.1:4222` (loopback only).
+    ///
+    /// `0.0.0.0` / `::` is always refused. Any other non-loopback
+    /// address requires
+    /// `--i-know-this-exposes-an-unauthenticated-api`.
     #[arg(long, default_value = "127.0.0.1:4222")]
     bind: SocketAddr,
+
+    /// Allow `--bind` on an address other machines can reach.
+    ///
+    /// cs-api has NO authentication: anyone who can route to the bind
+    /// address can start sessions, tag molecules, send whispers, and
+    /// call POST /molecules/{id}/tackle, which spawns a worker and
+    /// spends your credit. Pass this only for an address inside a
+    /// private trust boundary you control — a Tailscale IP from
+    /// `tailscale ip -4`. Never on a public IP, never with router
+    /// port-forwarding, and never for `0.0.0.0` (refused regardless).
+    #[arg(long)]
+    i_know_this_exposes_an_unauthenticated_api: bool,
+
+    /// Allow one browser origin to call this daemon (repeatable).
+    ///
+    /// Off by default: the Mac and iOS pilots are native clients and
+    /// need no CORS. Each value is matched exactly and echoed back;
+    /// `*` is refused, because a wildcard on an unauthenticated
+    /// surface that spawns workers lets any page you visit drive it.
+    #[arg(long, value_name = "ORIGIN")]
+    allow_web_origin: Vec<String>,
 
     /// Path to the `cs` binary. Defaults to `cs` on `$PATH`.
     #[arg(long, value_name = "PATH")]
@@ -74,6 +100,19 @@ async fn main() -> anyhow::Result<()> {
         )
         .try_init();
 
+    // Decide the boundary before doing anything else: an operator who
+    // asked for an exposure we refuse should learn it immediately, not
+    // after the daemon has resolved paths and opened a socket.
+    let admitted = admit(cli.bind, cli.i_know_this_exposes_an_unauthenticated_api)?;
+    if admitted.class() == BindClass::Routable {
+        tracing::warn!(
+            bind = %admitted.addr(),
+            "cs-api is listening on a non-loopback address WITHOUT authentication — \
+             every machine that can route here can spawn workers"
+        );
+    }
+    let cors = CorsPolicy::from_allowed_origins(&cli.allow_web_origin)?;
+
     let cs_path = resolve_cs_path(cli.cs_path.as_ref())?;
     let galaxies_root = cli.galaxies_root.unwrap_or_else(default_galaxies_root);
     tracing::info!(
@@ -94,9 +133,9 @@ async fn main() -> anyhow::Result<()> {
     if let Some(path) = cli.cluster_config {
         state = state.with_cluster_config_path(path);
     }
-    let app = router(state);
+    let app = router_with_cors(state, cors);
 
-    let listener = tokio::net::TcpListener::bind(cli.bind).await?;
+    let listener = tokio::net::TcpListener::bind(admitted.addr()).await?;
     axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }

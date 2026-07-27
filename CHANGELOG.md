@@ -19,6 +19,33 @@ this stage.
 
 ## [Unreleased]
 
+### Security
+
+- **`cs-api` now enforces its own bind rule instead of documenting it, and
+  no longer grants every browser origin.** The daemon has no
+  authentication and one of its routes, `POST /molecules/{id}/tackle`,
+  spawns a worker — so the listening address is the only access-control
+  boundary the process has. It was a plain pass-through: the "run behind
+  Tailscale" caveat lived in a Rust doc comment while `docs/guides/ios-pilot.md`,
+  `apps/ios-pilot/README.md`, the in-app settings footer and the LaunchAgent
+  installer all instructed an all-interfaces bind. A reader of the guide
+  never met the caveat.
+
+  `0.0.0.0` / `::` is now refused outright, with no flag to override it: it
+  does not name a network, it names every interface the host has now or
+  acquires later, so the exposure cannot be determined and we fail closed.
+  Any other non-loopback address requires the explicit
+  `--i-know-this-exposes-an-unauthenticated-api`, whose help text states
+  what it opens; the admitted address is a value only the check can
+  construct, so an unvalidated bind is not a reachable state. CORS defaults
+  to emitting no headers at all — the Mac and iOS pilots are native clients
+  that never send an `Origin` — and `--allow-web-origin <ORIGIN>` names
+  origins explicitly (exact match, repeatable, `*` refused by name). Every
+  document that taught the old gesture now teaches the safe one, beside the
+  refusal messages the reader will actually see. Ratified as
+  `docs/architectural-invariants.md` §8z; the authentication gap that
+  remains is stated, with its decided shape, in `crates/cosmon-api/README.md`.
+
 ### Fixed
 
 - **`cs tackle` no longer asks a question, and cosmon's first-run consent

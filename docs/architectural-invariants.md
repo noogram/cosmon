@@ -35,7 +35,7 @@ its status in a trailing `### Status` block. There is no third state.
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
 top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
-§8x, §8y, §9, §10, §11. (§1bis is *proposed* — see the list below.)
+§8x, §8y, §8z, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
@@ -2818,6 +2818,94 @@ the *kernel*, as the target uid, whether it can open the leaf; the regression
 test does exactly that (`[ -r file ]` in a process running as that uid),
 rather than asserting that a `chown` was called. A test that asserts the
 repair was *attempted* passes against this bug.
+
+---
+
+## 8z. A caveat the operator cannot read is not a control
+
+*(ratified — `task-20260727-cd79`)*
+
+**Where a safety property is carried by a choice the operator makes, the
+mechanism must refuse the unsafe choice — and the document that teaches
+the gesture must teach the safe form. A constraint stated only where the
+operator does not look is not a constraint; it is a hope with a
+comment.**
+
+The two halves are one invariant because either alone fails. A guide that
+warns while the binary accepts anything protects only the reader who read
+it. A binary that refuses while the guide instructs the refused form
+produces a reader who works around their own safety net, and correctly
+files it as a bug.
+
+### The instance that named it
+
+`cs-api` has no authentication and its router mounts
+`POST /molecules/{id}/tackle`, which spawns a worker: it runs agent code
+and spends the operator's credit. Measured on this tree, 2026-07-27:
+
+| where the constraint lived | what it said |
+| --- | --- |
+| `crates/cosmon-api/src/lib.rs:54` (module doc) | "No auth. Run behind Tailscale when binding non-loopback." |
+| `docs/guides/ios-pilot.md:30, 50, 141` | `cs-api serve --bind 0.0.0.0:4222` |
+| the binary | accepted any address, silently |
+
+The caveat was in a Rust doc comment. The instruction was in the guide a
+pilot follows to make their iPhone work. Nobody reading the second ever
+met the first, and the guide's form is the one that gets pasted — it had
+been on the public trunk since the v0.1.0 initial release (`33d4c29`).
+The composition mattered more than either part: permissive CORS (`*`) on
+top meant an attacker did not even need to be on the network, since any
+web page the operator opened could POST to the port.
+
+### The rule, in three clauses
+
+- **Refuse what cannot be determined.** `0.0.0.0` / `::` is rejected
+  unconditionally, and no flag lifts it. It does not name a network; it
+  names every interface the host has now or acquires later, so the
+  exposure is not a fact the process can establish. Where you cannot
+  verify, do not claim. This is the refusal `apps-transport-http`
+  already shipped (`crates/apps-transport-http/src/bind.rs:116`); §8z
+  says the tree may not hold that precedent and its opposite at once.
+- **A wider boundary is a typed gesture, not a log line.** A routable
+  bind requires `--i-know-this-exposes-an-unauthenticated-api`, whose
+  `--help` states what it opens. A warning printed at startup is not a
+  control: the operator who typed the flag is not reading the log. The
+  admitted address is a value (`bind::AdmittedBind`) that only the check
+  can construct, so "we forgot to validate" is not a reachable state.
+- **The default must be the safe one, in the place that is copied.**
+  Prose is read; code blocks are *pasted*. The guide now shows the
+  loopback default and, for the reach the workflow genuinely needs, the
+  Tailscale form with the consent flag and the reason for it — beside the
+  refusal messages the reader will actually see.
+
+Seam and tests: [`crates/cosmon-api/src/bind.rs`](../crates/cosmon-api/src/bind.rs),
+[`crates/cosmon-api/src/cors.rs`](../crates/cosmon-api/src/cors.rs),
+`crates/cosmon-api/tests/cors.rs`.
+
+### What this does not do
+
+It does not add authentication, deliberately. `delib-20260727-f9ee`
+concluded, five seats of five, that the shape is a boot-minted seal
+extending `crates/cosmon-rpp-adapter/src/admin_seal.rs` — minted at
+start, printed once, kept only as a BLAKE3 digest, with the absence of
+the credential *being* the closed state — and not an ad-hoc scheme, and
+not a posture that trusts whoever reached loopback. The same
+deliberation recorded a separate and more severe finding, re-verified
+here: `POST /v1/auth/claude/confirm` in `cosmon-rpp-adapter` extracts no
+bearer anywhere on its path and reaches `write_credentials_file`, so the
+existing unauthenticated surface **writes credentials** rather than
+merely exposing reads. It is inert while `AppState::auth_claude` is
+`None` (503), and it is the next molecule's work.
+
+### Why no gate caught it
+
+Same family as §8v, §8w, §8x and §8y: every gate was green, because
+every gate reads the code and none reads the *guide*. `cargo test` never
+opens `docs/guides/`, and the doc gate resolves intra-doc links, not
+claims. The defect lived in the gap between a true sentence in a source
+comment and a dangerous sentence in a document — a gap no compiler
+spans. The detector that would have caught it is the one now written
+down: grep the docs for the address the binary refuses.
 
 ---
 

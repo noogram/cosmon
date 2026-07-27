@@ -23,7 +23,18 @@
 
   Placeholder tokens (leading + trailing double underscores):
   HOME, BINARY, BIND, CS_PATH, COSMON_STATE, WHISPERS_INBOX,
-  GALAXIES_ROOT, VERBOSE_FLAG, WORKING_DIRECTORY, STDOUT_LOG, STDERR_LOG.
+  GALAXIES_ROOT, VERBOSE_FLAG, EXPOSURE_FLAG, WORKING_DIRECTORY,
+  STDOUT_LOG, STDERR_LOG.
+
+  SECURITY: `cs-api` has no authentication, and POST
+  /molecules/{id}/tackle spawns a worker. The bind address is therefore
+  the only access-control boundary this process has. The binary refuses
+  `0.0.0.0` / `::` outright, and refuses any other non-loopback address
+  unless the installer renders the explicit
+  `--i-know-this-exposes-an-unauthenticated-api` consent into the
+  exposure-flag slot. Note what `RunAtLoad` means for a non-loopback
+  bind: the port is open at every login, wherever the laptop happens to
+  be.
 
   Install / uninstall:
       scripts/install-cs-api-launchagent.sh --help
@@ -52,6 +63,7 @@
         <string>--galaxies-root</string>
         <string>__GALAXIES_ROOT__</string>
         __VERBOSE_FLAG__
+        __EXPOSURE_FLAG__
     </array>
 
     <key>RunAtLoad</key>

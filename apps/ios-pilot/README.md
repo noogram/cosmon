@@ -79,10 +79,26 @@ xcrun simctl launch booted dev.noogram.cosmon.ios-pilot
 
 To point at a real `cs-api`:
 
-1. On the Mac: `cs-api serve --bind 0.0.0.0:4222` (see task-20260422-b031).
-2. On simulator or device: open **Réglages**, paste the Tailscale URL
-   (`tailscale ip -4` on the Mac → `http://<ip>:4222`), tap **Tester la
+**In the simulator**, no exposure is needed at all — the simulator
+shares the Mac's network stack, so it reaches the daemon on its
+loopback default:
+
+1. On the Mac: `cs-api` (binds `127.0.0.1:4222`).
+2. In **Réglages**, paste `http://127.0.0.1:4222`, tap **Tester la
    connexion**.
+
+**On a physical device**, the daemon must listen somewhere the phone
+can reach, which opens an unauthenticated surface that spawns workers.
+Read the "serrure" section of
+[`docs/guides/ios-pilot.md`](../../docs/guides/ios-pilot.md) before
+running this:
+
+1. On the Mac:
+   `cs-api --bind "$(tailscale ip -4):4222" --i-know-this-exposes-an-unauthenticated-api`.
+   `cs-api` refuses `0.0.0.0` outright, and refuses any non-loopback
+   address without that flag.
+2. On the device: open **Réglages**, paste the Tailscale URL
+   (`http://<ip>:4222`), tap **Tester la connexion**.
 
 ## Run on device (sideload)
 
