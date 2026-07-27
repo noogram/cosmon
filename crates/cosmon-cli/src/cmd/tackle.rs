@@ -314,17 +314,15 @@ fn sanitize_session_name(raw: &str) -> anyhow::Result<String> {
 /// Execute the `tackle` command.
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
-    // First-run consent hook (delib fe35 §c). Fires once per user: if
-    // `~/.config/cosmon/consent.toml` is missing and stdin is a TTY, the
-    // operator sees a short French prompt asking whether to share
-    // encrypted bundles with the developers. On non-tty invocations (CI,
-    // scripts, inner worker shells) the hook auto-records a decline so
-    // unattended dispatch is never blocked. Best-effort: any failure to
-    // persist the answer is logged but never aborts the tackle — consent
-    // is a UX layer, not a safety gate.
-    if let Err(e) = super::opt_in_share::ensure_consent() {
-        eprintln!("cs tackle: could not record consent (non-fatal): {e}");
-    }
+    // NOTE — no consent hook here, deliberately (ADR-163, invariant §8w).
+    // `cs tackle` carried the first-run `opt-in-share` prompt until
+    // 2026-07-27. Dispatch is precisely the path an orchestrator wraps in
+    // `OUT="$(cs tackle …)"`, so a question asked here prints into a
+    // captured variable while stdin is still the inherited terminal: no
+    // keystroke can arrive and no output can warn. A tester's container run
+    // hung the full 240s on it and spawned nothing. The question now lives
+    // on `cs init` and on `cs opt-in-share` invoked alone — both explicitly
+    // interactive moments. Nothing on this path may block on a human.
 
     // Guard: require project identity before touching transport.
     super::require_project_identity(ctx)?;

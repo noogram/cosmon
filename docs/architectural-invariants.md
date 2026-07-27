@@ -34,7 +34,7 @@ its status in a trailing `### Status` block. There is no third state.
 
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
-top-level fleet-split / briefing-seal / events-source sections), §8v, §9,
+top-level fleet-split / briefing-seal / events-source sections), §8v, §8w, §9,
 §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
@@ -2611,6 +2611,72 @@ quoting the screen it refused, the tmux session gone, the molecule back to
 See [ADR-162](adr/162-dispatch-boundary-ready-is-earned.md) for the
 decision record, the rejected options, and the resolution of
 [ADR-093](adr/093-cosmon-transport-liveness-detector.md).
+
+---
+
+## 8w. A question may only be asked where an answer can arrive
+
+*(ratified — [ADR-163](adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md),
+fifth door of noogram/cosmon#20)*
+
+**Cosmon may block on a human only where a human can both see the question
+and type at it. Nothing on the dispatch path may block on a human at all.**
+
+§8v governs what cosmon may believe about someone else's screen. This one
+governs cosmon's own: a prompt is not a prompt unless an answer can reach
+it.
+
+### Why the rule exists
+
+`cs tackle`'s first act was the first-run `opt-in-share` consent prompt,
+gated on `stdin().is_terminal()`. That predicate answers *"is a terminal
+attached?"*, not *"can a human see this and answer it?"*, and the two come
+apart in the one situation that matters: an orchestrator captures the
+child's stdout (`OUT="$(cs tackle …)"`) while stdin remains the inherited
+TTY. The question prints into a variable nobody reads, on an input nobody
+watches. No keystroke can arrive; no output can warn.
+
+Measured 2026-07-27 in the external tester's container image on `cs 0.3.0`:
+a dispatch with a valid credential ran the full 240s, exited `rc=124`,
+spawned nothing, and left the molecule `pending`. `docker exec` *without*
+`-t` took the auto-decline path and exited 0; *with* `-t` — the shape the
+container guide itself teaches for the credential login — it hung. The four
+doors of §8v were cosmon mis-certifying somebody else's screen. This one was
+cosmon holding the door shut.
+
+### The three members
+
+**M1 — answerability, not attachment.** A first-run question may be asked
+only when **stdin and stdout are both terminals**. A captured or redirected
+stdout auto-declines down the identical path a missing TTY already took.
+stderr is deliberately outside the conjunction: it carries the auto-decline
+trace and is routinely redirected by supervisors that leave the interactive
+pair intact, so including it would suppress questions the operator can
+answer. Seam: the private `can_ask_interactively` predicate in
+`crates/cosmon-cli/src/cmd/opt_in_share.rs`, consulted on every path to the
+prompt. Pinned by
+`a_captured_stdout_is_never_an_answerable_question` (unit) and
+`consent_with_tty_stdin_and_captured_stdout_does_not_block`
+(`crates/cosmon-cli/tests/consent_non_blocking.rs`, real pty).
+
+**M2 — no interactive question on the dispatch path.** `cs tackle` asks
+nothing. Dispatch is exactly what orchestration wraps in command
+substitution, so a blocking question placed there is a latent hang awaiting
+the next caller who redirects one more stream than the guard happens to
+test. First-run consent lives on `cs init` (the explicit once-per-galaxy
+moment, suppressed under `--json`) and on `cs opt-in-share` invoked alone.
+Pinned by `tackle_never_asks_a_consent_question`, which runs `cs tackle` on
+a *fully* interactive pty — the friendliest possible case for a prompt — and
+asserts none appears and no record is written.
+
+**M3 — an auto-decline is never silent, and the property is what is
+tested.** When a question declines itself and its stdout rendering could not
+have been seen, the trace goes to stderr naming the remedy. And the
+regression test asserts *termination within a deadline*, not the contents of
+`consent.toml`: the broken build writes the same record — after somebody
+types into a terminal nobody is watching, or never. Only "exited on its own"
+separates the two builds. Verified by reverting the guard: the test fails on
+its deadline with the diagnosis quoted.
 
 ---
 

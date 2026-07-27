@@ -132,6 +132,10 @@ CLAUDE.md by default — pass `--soft` to generate an agent template.
 Refuses to nest: if an ancestor already carries `.cosmon/`, exits
 non-zero — no `--force`.
 
+On a terminal, the first `cs init` of your life also asks the one-time
+developer-share question (deny-by-default, `cs opt-in-share --status` to
+review). Never asked under `--json`, never asked when stdout is captured.
+
 Symmetric undo: `rm -rf <path>/.cosmon/`.";
 
 pub const KILL: &str = "EXAMPLES:
@@ -1047,17 +1051,20 @@ pub const OPT_IN_SHARE: &str = "EXAMPLES:
   cs opt-in-share --accept    # non-interactive: record acceptance
   cs opt-in-share --json      # NDJSON output for scripting
 
-Deny-by-default. The first time `cs tackle` runs on a TTY, this prompt
+Deny-by-default. The first time `cs init` runs interactively, this prompt
 fires automatically (once) and the answer is persisted to
 ~/.config/cosmon/consent.toml. No trace in your project's git log.
 
 The French prompt names the encryption (age), the sole recipient
 (the Noogram maintainer), and the no-trace-in-commits guarantee, then asks [o/N].
-Anything but an explicit yes is recorded as a decline. When stdin is
-not a TTY (CI, scripts, worker shells), the hook skips the prompt and
-records a decline without asking.
+Anything but an explicit yes is recorded as a decline.
 
-SEE ALSO: cs tackle (the first-run hook site).";
+The question is asked only where an answer can arrive: stdin AND stdout
+must both be terminals. A captured stdout (CI, scripts, `OUT=\"$(cs ...)\"`)
+records a decline without asking and says so on stderr. `cs tackle` never
+asks — nothing on the dispatch path may block on a human (ADR-163).
+
+SEE ALSO: cs init (the first-run hook site).";
 
 pub const INSPECT: &str = "EXAMPLES:
   cs inspect docs/lore/2026-04-20-x.md      # classify one path

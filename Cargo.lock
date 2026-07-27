@@ -949,6 +949,7 @@ dependencies = [
  "globset",
  "ignore",
  "insta",
+ "libc",
  "neurion-core",
  "nix 0.31.2",
  "notify",
