@@ -35,7 +35,7 @@ its status in a trailing `### Status` block. There is no third state.
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
 top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
-§8x, §9, §10, §11. (§1bis is *proposed* — see the list below.)
+§8x, §8y, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
@@ -2744,6 +2744,80 @@ the intact bytes. Build, test, clippy, fmt and doc are all green while the
 interface is unreadable. The only detector is a human eye on an attached
 pane, which is why the invariant is stated as ownership of the *screen*,
 not of the byte stream.
+
+---
+
+## 8y. What cosmon repairs and what cosmon judges are one list
+
+*(ratified — `task-20260727-724a`)*
+
+**When cosmon provisions a resource for a process it is about to spawn, the
+set of things it repairs and the set of things it checks must be the same
+set, and the check must be asked of the thing the process will actually
+open.**
+
+The shape is not specific to file ownership. Any preflight that both *fixes*
+and *verifies* has two lists, and the asymmetry between them is invisible
+precisely when it matters: the judge answers **yes**, because it was asked an
+easier question than the one the worker will ask.
+
+### The instance that named it
+
+`provision_and_decide_root_spawn` judged three resources — the config home,
+the worktree, the state dirs — and repaired two. The config home was in the
+judge list and in no repair list. Nobody noticed, because the judge
+`stat`s the *directory*, the directory is worker-owned, and so it passes. The
+file inside it — the `.claude.json` cosmon had written as root a few lines
+earlier to pre-grant Claude Code's startup consent — was never looked at and
+never handed over.
+
+Measured 2026-07-27 (Claude Code 2.1.220, **no credential involved**), two
+arms differing only in who owns that file, the directory worker-owned in both:
+
+| `.claude.json` owner, mode 600 | after the spawn | the pane |
+| --- | --- | --- |
+| `10001:10001` | `hasCompletedOnboarding: true`, 1 project | `Welcome back!` |
+| `root:root` | `hasCompletedOnboarding: null`, 0 projects | `Let's get started.` |
+
+The second row is not an error the worker reports. Claude Code reads the
+unreadable file as a *first run* and replaces it wholesale, discarding the
+pre-grant and rendering the onboarding wizard nobody is there to answer.
+`settings.json` survives intact only because Claude Code never rewrites it —
+which is what made the failure look selective in the field report.
+
+### The rule, in three clauses
+
+- **Same list.** Every resource in the judge list is in the repair list, or
+  its exclusion is *argued in the code*, not achieved by omission. Cosmon
+  repairs the consent files it authored; it does **not** chown the config
+  home, because that directory can be operator-supplied and can hold the
+  operator's own `.credentials.json`. That file is chowned by nothing here
+  and opened by nothing here.
+- **Judge the leaf.** The check must probe what the process opens. A
+  directory verdict is not a file verdict, and a passing gate over an
+  unopenable leaf is worse than no gate: it converts a diagnosable `EACCES`
+  into a green light.
+- **Repair after the write, before the spawn.** A repair that runs before
+  the thing it repairs exists is a no-op that still reports success. On the
+  `cs tackle` path the pre-grant is immediately above the preflight; on the
+  `spawn_claude_session` path the ordering had to be inverted, and the part
+  of the decision that must precede the write — the refusals that must leave
+  no trace in the operator's config — is separated out as
+  `pre_write_verdict`, which cannot be spawned on.
+
+Seam and tests:
+[`crates/cosmon-transport/src/demote_provisioning.rs`](../crates/cosmon-transport/src/demote_provisioning.rs),
+`crates/cosmon-transport/tests/demote_consent_ownership.rs`.
+
+### Why no gate caught it
+
+Same family as §8v, §8w and §8x: every gate was green. The unit tests
+asserted the directory was usable — which was true — and the container repro
+asserted the dispatch proceeded — which it did. The only detector is asking
+the *kernel*, as the target uid, whether it can open the leaf; the regression
+test does exactly that (`[ -r file ]` in a process running as that uid),
+rather than asserting that a `chown` was called. A test that asserts the
+repair was *attempted* passes against this bug.
 
 ---
 

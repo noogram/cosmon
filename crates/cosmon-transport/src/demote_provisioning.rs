@@ -50,6 +50,14 @@ pub enum RequiredAccess {
     /// Read entries *and* write them: `r+w+x`. The Claude config home, which is
     /// read for credentials and written for session state.
     ReadWrite,
+    /// Read and rewrite a **regular file**: `r+w`, with no search bit.
+    ///
+    /// Separate from [`Self::ReadWrite`] because the executable bit is a
+    /// directory's search permission and means nothing on a config file. A
+    /// consent file is written mode 0600; asking 0700 of it would refuse every
+    /// correctly-provisioned dispatch, which is the mirror image of the bug
+    /// this variant exists to catch.
+    ReadWriteFile,
 }
 
 impl RequiredAccess {
@@ -59,6 +67,7 @@ impl RequiredAccess {
         match self {
             Self::Write => 0o300,
             Self::ReadWrite => 0o700,
+            Self::ReadWriteFile => 0o600,
         }
     }
 }
@@ -131,12 +140,22 @@ fn has_mode(path: &Path, uid: u32, owner_mask: u32) -> bool {
 /// `--reset-env`) that is root's `/root/.claude`, mode 0700: the reviewers'
 /// predicted `EACCES`, and the reason the config home is probed for **read**
 /// access, not merely write.
+///
+/// `consent_files` are the files cosmon wrote into that config home before the
+/// spawn (`.claude.json`, `settings.json`). They are probed **individually**,
+/// not inferred from the directory: the measured failure (2.1.220, no
+/// credential involved) is a worker-owned config home containing a root-owned
+/// `.claude.json`, where every directory-level question answers yes and the
+/// worker still cannot open the file. A check that passes over an unreadable
+/// file is worse than no check — it is a gate reporting green on the broken
+/// state.
 #[must_use]
 pub fn demote_resource_checks(
     uid: u32,
     config_home: Option<&Path>,
     worktree: &Path,
     state_dirs: &[PathBuf],
+    consent_files: &[PathBuf],
 ) -> Vec<DemoteResourceAccess> {
     let mut checks = Vec::new();
     let mut push = |resource: DemoteResource, path: &Path, need: RequiredAccess| {
@@ -152,6 +171,19 @@ pub fn demote_resource_checks(
     push(DemoteResource::Worktree, worktree, RequiredAccess::Write);
     for dir in state_dirs {
         push(DemoteResource::StateDir, dir, RequiredAccess::Write);
+    }
+    for file in consent_files {
+        // Only files that are actually there: `path_usable_by_uid` falls back
+        // to the nearest existing ancestor for a missing path, which would turn
+        // "cosmon has not written it yet" into a directory verdict wearing a
+        // `ConsentFile` label.
+        if std::fs::symlink_metadata(file).is_ok() {
+            push(
+                DemoteResource::ConsentFile,
+                file,
+                RequiredAccess::ReadWriteFile,
+            );
+        }
     }
     checks
 }
@@ -187,10 +219,17 @@ where
 /// privilege drop at the binary token rather than in an env splice.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DemoteResources {
-    /// The Claude config home the worker authenticates from. **Never chowned**:
-    /// under `docker run -u 0` this is root's own `/root/.claude`, and handing
-    /// root's home to a worker uid is an operator decision, not a cosmon
-    /// default. It is probed, and an unusable one still refuses.
+    /// The Claude config home the worker authenticates from. The **directory
+    /// itself is never chowned**: under `docker run -u 0` this is root's own
+    /// `/root/.claude`, it can be an operator-supplied directory holding the
+    /// operator's own `.credentials.json`, and taking ownership of a human's
+    /// files is not a benign default. It is probed, and an unusable one still
+    /// refuses.
+    ///
+    /// What cosmon *does* take ownership of is [`Self::consent_files`] — the
+    /// files it wrote there itself. That is the deliberate line: a file cosmon
+    /// authored and the worker must read is cosmon's to hand over; everything
+    /// else in that directory belongs to whoever put it there.
     pub config_home: Option<PathBuf>,
     /// The git worktree the worker runs in — created by the very `cs tackle`
     /// that is demoting, hence root-owned, hence chowned here.
@@ -199,6 +238,20 @@ pub struct DemoteResources {
     /// `cs complete` (the `.cosmon` dir, plus the molecule's own state dir).
     /// Also created root-owned, also chowned here.
     pub state_dirs: Vec<PathBuf>,
+    /// The startup-consent files cosmon wrote into [`Self::config_home`] before
+    /// this spawn — `crate::claude_trust::ConsentPaths`' two members.
+    ///
+    /// Chowned **and** probed. A root dispatcher writes them as root; the
+    /// worker opens them as the demote target, and a `.claude.json` it cannot
+    /// read is not an error it reports — Claude Code treats the unreadable file
+    /// as a first run and replaces it, discarding the pre-grant and rendering
+    /// the onboarding wizard nobody is there to answer. `settings.json`
+    /// survives that only because Claude Code never rewrites it, which is what
+    /// made the failure look selective in the field report.
+    ///
+    /// Empty is legitimate: a caller that has not (yet) written any consent
+    /// file declares none, and nothing is chowned or judged.
+    pub consent_files: Vec<PathBuf>,
 }
 
 /// Give `path` and everything beneath it to `uid` (and to `uid` as gid, which
@@ -269,9 +322,59 @@ pub fn as_is_reachability_refusal(
     worktree: &Path,
     state_dirs: &[PathBuf],
 ) -> Option<DemoteResourceAccess> {
-    demote_resource_checks(running_uid, config_home, worktree, state_dirs)
+    // No consent files are declared here on purpose. This is the *non-root*
+    // door: whoever wrote those files wrote them as the very uid that is about
+    // to read them, so there is no ownership gap to find. The gap this closes
+    // is a repo whose `.cosmon/` was built as root and then handed to
+    // `USER 10001`, which is a directory question.
+    demote_resource_checks(running_uid, config_home, worktree, state_dirs, &[])
         .into_iter()
         .find(|c| !c.usable)
+}
+
+/// What can be known about a root dispatch **before** cosmon writes anything
+/// into the operator's Claude Code config.
+///
+/// # Why this exists (issue #20, the consent-ownership door)
+///
+/// Two orderings are both load-bearing and they pull against each other:
+///
+/// - a dispatch cosmon is about to refuse must leave **no trace** in the
+///   operator's config, so the refusals come before the consent pre-grant;
+/// - the ownership repair must come **after** the pre-grant, or it hands over
+///   files that do not exist yet.
+///
+/// The repair and the provisioning verdict are one indivisible step
+/// ([`provision_and_decide_root_spawn`]), so the verdict cannot precede the
+/// write. This function is the part that can: everything decidable from the
+/// uids alone. `UnprovisionedTarget` is the one refusal that necessarily
+/// arrives after the pre-grant, because it is a fact about paths cosmon has to
+/// have written and repaired before it can be asked.
+///
+/// The return type is deliberately **not** a [`RootSpawnDecision`]: a caller
+/// must not be able to spawn on it. The demote arm carries no uid.
+#[must_use]
+pub fn pre_write_verdict(running_uid: u32, demote_target: Option<u32>) -> PreWriteVerdict {
+    match decide_root_spawn(running_uid, demote_target) {
+        RootSpawnDecision::Refuse { reason } => PreWriteVerdict::Refuse(reason),
+        RootSpawnDecision::SpawnAsIs => PreWriteVerdict::AsIs,
+        RootSpawnDecision::Demote { .. } => PreWriteVerdict::DemotePending,
+    }
+}
+
+/// The outcome of [`pre_write_verdict`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreWriteVerdict {
+    /// Refuse now, before the config is touched. Already final.
+    Refuse(cosmon_core::root_spawn_policy::RootRefusalReason),
+    /// The worker will run as the dispatcher's own uid. Nothing will be
+    /// chowned, so [`as_is_reachability_refusal`] is answerable now.
+    AsIs,
+    /// A demote is on the table and its resources are not judged yet. The
+    /// target uid is withheld: the only legitimate next step is to pre-grant
+    /// the consent and then call [`provision_and_decide_root_spawn`], which
+    /// repairs and judges in one gesture.
+    DemotePending,
 }
 
 /// The **one** entry point every demote call site must use: decide the root
@@ -292,6 +395,18 @@ pub fn as_is_reachability_refusal(
 /// (read-only mount, ACL, a uid absent from the host) still refuses rather than
 /// spawning a worker that wedges on `EACCES`.
 ///
+/// # The second half of the same hole (issue #20, consent ownership)
+///
+/// Three resources were judged and only two repaired: `config_home` was in the
+/// judge list and in no repair list. The asymmetry was invisible because the
+/// judge answered *yes* — it stats the directory, which is worker-owned, and
+/// never looked at the `.claude.json` cosmon had just written into it as root.
+/// The worker then could not read that file, Claude Code took it for a first
+/// run, replaced it, and rendered the onboarding wizard: a green gate over a
+/// broken state. The consent files are now in **both** lists, and the config
+/// home stays in the judge list only, by an argued decision rather than by
+/// omission.
+///
 /// A chown error is intentionally swallowed: the *checks* are the verdict. The
 /// operator wants to know that the uid cannot write the path, not which errno
 /// the repair attempt returned.
@@ -311,13 +426,24 @@ pub fn provision_and_decide_root_spawn(
         for dir in &resources.state_dirs {
             let _ = chown_tree_to_uid(dir, to_uid);
         }
+        // …including the files cosmon wrote into the config home. Not the
+        // config home itself: see `DemoteResources::config_home` for why the
+        // line is drawn at authorship, and never `.credentials.json`, which is
+        // never named here and never opened.
+        for file in &resources.consent_files {
+            let _ = chown_tree_to_uid(file, to_uid);
+        }
 
-        // …then judge. Never the reverse, and never one without the other.
+        // …then judge. Never the reverse, and never one without the other —
+        // and the two lists must be THE SAME LIST. A resource that is judged
+        // and not repaired is the shape of this whole issue: the judge answers
+        // yes about the directory while the file under it is unopenable.
         demote_resource_checks(
             to_uid,
             resources.config_home.as_deref(),
             &resources.worktree,
             &resources.state_dirs,
+            &resources.consent_files,
         )
     })
 }
@@ -506,6 +632,7 @@ mod tests {
                 config_home: Some(home.clone()),
                 worktree: tmp.path().to_path_buf(),
                 state_dirs: vec![],
+                consent_files: vec![],
             },
         );
         assert!(

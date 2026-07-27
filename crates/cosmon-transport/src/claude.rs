@@ -472,7 +472,11 @@ pub fn spawn_claude_session(config: &ClaudeSessionConfig) -> Result<(), ClaudeEr
 /// test could reach its root branch: swapping the provisioned port back for the
 /// bare `decide_root_spawn` reintroduced A3 with the whole suite green. Taking
 /// the uid as a value is what makes the recurrence mode testable.
-fn decide_for_config(running_uid: u32, config: &ClaudeSessionConfig) -> RootSpawnDecision {
+fn decide_for_config(
+    running_uid: u32,
+    config: &ClaudeSessionConfig,
+    consent_files: Vec<std::path::PathBuf>,
+) -> RootSpawnDecision {
     let demote_target = resolve_demote_target(|k| std::env::var(k).ok());
     // A demote is only real if the target can actually use what the worker
     // needs (COSMON-DEV #20 defect A3, iteration 2). This path — `cs thaw` and
@@ -495,6 +499,10 @@ fn decide_for_config(running_uid: u32, config: &ClaudeSessionConfig) -> RootSpaw
             ),
             worktree: std::path::PathBuf::from(&config.work_dir),
             state_dirs: config.writable_roots.clone(),
+            // Written by `pregrant_consent_for_config`, which the caller runs
+            // immediately before this — the ordering the repair depends on, and
+            // which the caller's comments spell out.
+            consent_files,
         },
     )
 }
@@ -560,7 +568,14 @@ where
     })
 }
 
-/// Pre-grant Claude Code's startup consent for `config`'s workdir, or fail.
+/// Pre-grant Claude Code's startup consent for `config`'s workdir, or fail,
+/// returning the two files it asserted.
+///
+/// The paths are returned rather than discarded because a root dispatcher wrote
+/// them as root and the demote target has to be able to read them: they are the
+/// repair list [`decide_for_config`] takes (issue #20, consent ownership). A
+/// caller that pre-granted and then judged without them is the exact hole this
+/// change closes.
 ///
 /// The config dir is read from `CLAUDE_CONFIG_DIR` here rather than threaded
 /// through [`ClaudeSessionConfig`]: this path's callers (`cs thaw`, the patrol
@@ -568,7 +583,9 @@ where
 /// the process environment *is* the account selection they hand to `claude`.
 /// Reading it in the same function that spawns keeps the pre-grant and the
 /// worker pointed at one config by construction.
-fn pregrant_consent_for_config(config: &ClaudeSessionConfig) -> Result<(), ClaudeError> {
+fn pregrant_consent_for_config(
+    config: &ClaudeSessionConfig,
+) -> Result<crate::claude_trust::ConsentPaths, ClaudeError> {
     let paths = crate::claude_trust::consent_paths(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
         |k| std::env::var(k).ok(),
@@ -576,7 +593,7 @@ fn pregrant_consent_for_config(config: &ClaudeSessionConfig) -> Result<(), Claud
     .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
     crate::claude_trust::pregrant_startup_consent(&paths, std::path::Path::new(&config.work_dir))
         .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
-    Ok(())
+    Ok(paths)
 }
 
 /// [`spawn_claude_session`] with the dispatcher's uid injected.
@@ -626,8 +643,20 @@ where
     // disabled), never re-arm the old `IS_SANDBOX=1` root bypass. The
     // out-of-worktree writable-dir grant (facet B) rides along on the same
     // command regardless of the root decision.
-    let decision = decide_for_config(running_uid, config);
-    if let RootSpawnDecision::Refuse { reason } = &decision {
+    //
+    // ORDER, issue #20 consent-ownership door. The provisioning verdict cannot
+    // come first any more: its repair half has to chown the consent files, and
+    // those do not exist until the pre-grant below has written them. What CAN
+    // come first is everything decidable from the uids alone — so the two
+    // refusals that must leave no trace in the operator's config keep coming
+    // before the write, and only `UnprovisionedTarget`, which is a fact about
+    // paths cosmon must first write and repair, lands after it. See
+    // `demote_provisioning::pre_write_verdict`.
+    let pre_write = crate::demote_provisioning::pre_write_verdict(
+        running_uid,
+        resolve_demote_target(|k| std::env::var(k).ok()),
+    );
+    if let crate::demote_provisioning::PreWriteVerdict::Refuse(ref reason) = pre_write {
         // Outcome 2: refuse before creating a live worker. Reap the briefing
         // temp file (no spawn will consume+unlink it) so the private briefing
         // never lingers, then surface a typed root-refusal.
@@ -636,13 +665,16 @@ where
         }
         return Err(ClaudeError::RootSpawnRefused(reason.to_string()));
     }
-    // Grant-reachability parity (issue #20). A `Demote` had its resources
+    // Grant-reachability parity (issue #20). A `Demote` has its resources
     // verified inside `decide_for_config`; a `SpawnAsIs` verified nothing, so a
     // worker running as an unprivileged container uid was handed `--add-dir` on
     // a root-owned `.cosmon/` and wedged on EACCES mid-run. Same question, same
     // port, both decisions. Refused here, before a live worker exists — and the
     // briefing temp file is reaped, exactly as the root refusal above does.
-    if matches!(decision, RootSpawnDecision::SpawnAsIs) {
+    //
+    // Answerable this early because an as-is spawn repairs nothing: no chown
+    // will change the answer between here and the exec.
+    if matches!(pre_write, crate::demote_provisioning::PreWriteVerdict::AsIs) {
         if let Some(blocked) = crate::demote_provisioning::as_is_reachability_refusal(
             running_uid,
             crate::demote_provisioning::demote_config_home(
@@ -688,13 +720,35 @@ where
     // than hand the fleet a pane that looks healthy and answers nothing. See
     // [`crate::claude_trust`].
     //
-    // Ordered AFTER both refusals above on purpose: a dispatch cosmon is about
-    // to refuse must not leave a trace in the operator's Claude Code config.
-    if let Err(e) = pregrant_consent_for_config(config) {
+    // Ordered AFTER all three refusals above on purpose: a dispatch cosmon is
+    // about to refuse must not leave a trace in the operator's Claude Code
+    // config. And ordered BEFORE the provisioning verdict, because the files it
+    // writes are part of what that verdict repairs and judges.
+    let consent = match pregrant_consent_for_config(config) {
+        Ok(paths) => paths,
+        Err(e) => {
+            if let Some(ref path) = briefing_file {
+                let _ = std::fs::remove_file(path);
+            }
+            return Err(e);
+        }
+    };
+
+    // The provisioning verdict, now that everything it must hand over exists: a
+    // root dispatcher wrote those two consent files AS ROOT, and a worker that
+    // cannot read `.claude.json` does not fail — it replaces it and re-opens
+    // the onboarding wizard. The repair and the judgement are one call so the
+    // two lists cannot drift apart again.
+    let decision = decide_for_config(
+        running_uid,
+        config,
+        vec![consent.config_file, consent.settings_file],
+    );
+    if let RootSpawnDecision::Refuse { reason } = &decision {
         if let Some(ref path) = briefing_file {
             let _ = std::fs::remove_file(path);
         }
-        return Err(e);
+        return Err(ClaudeError::RootSpawnRefused(reason.to_string()));
     }
 
     let claude_cmd = build_headless_command(
@@ -1219,7 +1273,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            decide_for_config(1000, &config),
+            decide_for_config(1000, &config, Vec::new()),
             RootSpawnDecision::SpawnAsIs
         );
     }

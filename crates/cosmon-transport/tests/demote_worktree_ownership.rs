@@ -98,6 +98,7 @@ fn a_fresh_worktree_is_handed_to_the_demote_target_and_the_dispatch_proceeds() {
             config_home: None,
             worktree: worktree.clone(),
             state_dirs: vec![state.clone(), mol_state.clone()],
+            consent_files: vec![],
         },
     );
 
@@ -159,6 +160,7 @@ fn a_transfer_that_does_not_take_still_refuses() {
             config_home: None,
             worktree: worktree.clone(),
             state_dirs: vec![state.clone()],
+            consent_files: vec![],
         },
     );
 
