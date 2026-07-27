@@ -1,0 +1,14 @@
+=== claude pre-grant discriminator ===
+os          : Darwin arm64
+claude      : 2.1.220 (Claude Code)
+workspace   : /private/var/folders/_f/yp39_pl932l59d2ckz60rnq00000gn/T/claude-pregrant-discriminator.OEGmRO/ws
+settle      : 14s
+
+V0   screen=WIZARD             matured-at-launch=no   credential=absent
+V1   screen=COMPOSER           matured-at-launch=no   credential=absent
+M1   screen=COMPOSER           matured-at-launch=yes  credential=absent
+
+--- verdict ---
+MATURATION NOT REQUIRED on this bed: a virgin config dir plus the
+pre-grant alone reached a composer (V1=COMPOSER, M1=COMPOSER).
+Whatever blocks a spawn here is NOT the un-matured directory.

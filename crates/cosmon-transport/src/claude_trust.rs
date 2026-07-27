@@ -115,6 +115,46 @@
 //! dispatch cannot distinguish the two designs. See
 //! `tests/claude_consent_live.rs`.
 //!
+//! # A pre-grant does **not** need a "matured" config directory
+//!
+//! Recorded because the opposite is a reasonable guess, it was seriously held,
+//! and re-deriving it costs an afternoon.
+//!
+//! Issue #20's tester reached a composer exactly once in ~20 spawns, on a config
+//! directory that some four prior `claude -p` runs had filled in (`machineID`,
+//! `userID`, migration flags), and never from a fresh one. That supports a
+//! specific reading: Claude Code treats a virgin directory as a first run,
+//! rewrites it wholesale from memory before deciding what to render, and
+//! destroys any consent seeded into it — so cosmon would have to *mature* the
+//! directory (one throwaway `claude` invocation) before pre-granting.
+//!
+//! Measured instead, macOS 26.5.2 / arm64 / 2.1.220, three arms over one
+//! workspace, graded by [`crate::readiness::classify_output`] rather than by eye:
+//!
+//! | config dir at launch | screen | classified |
+//! |---|---|---|
+//! | virgin, no pre-grant | first-run theme wizard | `Loading` — refused |
+//! | virgin, **pre-grant only, never matured** | **composer** | **`Ready`** |
+//! | matured by `claude -p`, then pre-grant | composer | `Ready` |
+//!
+//! The middle row is the answer: **maturation is not a precondition**, and the
+//! bottom row buys nothing over it. The pre-grant also survives a maturing run
+//! written over it, and survives a zero-gap teardown-and-relaunch (260/260
+//! samples at 0.1 s). So no maturation step exists in the spawn path, and one
+//! must not be added on the strength of the correlation above: it would cost a
+//! subprocess with a timeout and a new typed failure per dispatch — a new door
+//! of exactly the kind this issue is about — to fix something not measured to
+//! be broken.
+//!
+//! Two things this does *not* license. Maturation is orthogonal to onboarding,
+//! not a weaker form of it: a maturing run writes `machineID` and `userID` and
+//! does **not** write `hasCompletedOnboarding`, so nothing here says a directory
+//! can be pre-granted by using it. And the measurements are macOS-native; the
+//! tester's bed is a Linux container, which is the axis in question.
+//! `scripts/claude-pregrant-discriminator.sh` re-runs the three arms on any bed
+//! with no credential involved, and `docs/benches/issue-20-maturation.md` holds
+//! the raw panes and the half of the proof that needs an operator's credential.
+//!
 //! # Why cosmon pre-grants the wizard instead of answering it
 //!
 //! §8v (ADR-162) says a screen cosmon cannot certify is refused, and that
