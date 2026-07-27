@@ -9,12 +9,33 @@
 # is written by Claude Code itself into $CLAUDE_CONFIG_DIR, owned by uid
 # 10001, and it dies when this container is removed.
 #
-# Invoked as the entrypoint of an interactive, NON-`--rm` container:
+# Invoked with `docker exec -it` into a container that is already running
+# under a NEUTRAL entrypoint:
 #
-#   docker run -it --init --name cosmon-mission-live \
-#     --entrypoint /usr/local/bin/container-real-mission-login <image>
+#   docker run -dit --init --name cosmon-mission-live \
+#     --entrypoint sleep <image> infinity
+#   docker exec -it cosmon-mission-live /usr/local/bin/container-real-mission-login
 #
-# Then the mission is re-run in that same container with `docker start -ai`.
+# Then the mission runs as a SECOND exec into that same, now-authenticated
+# container:
+#
+#   docker exec -it -e CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-mission \
+#     cosmon-mission-live /usr/local/bin/container-real-mission
+#
+# MEASURED, and the reason the recipe is shaped this way: `docker start`
+# does NOT run a different command in an existing container — it replays
+# the entrypoint the container was CREATED with. An earlier version of
+# this header told the operator to `docker start -ai` after the login and
+# promised them the mission; what they got was the login screen a second
+# time. `docker exec` is the only way to run a second, different act in
+# one long-lived container.
+#
+# MEASURED too: `CLAUDE_CONFIG_DIR` does not survive between execs. It is
+# per-exec, not a property of the container — see the note in
+# docs/guides/claude-worker-in-a-container.md. Every exec line that must
+# see the credential this login writes has to carry `-e CLAUDE_CONFIG_DIR`
+# itself, or the gate looks in `$HOME/.claude` and refuses while the
+# credential sits intact thirty centimetres away.
 #
 # Reviewers: do not add a non-interactive branch. A login that can run
 # unattended is a login whose secret came from somewhere else.
@@ -26,8 +47,9 @@ MISSION_CONFIG="$WORKER_HOME/.claude-mission"
 
 if [ ! -t 0 ]; then
   printf '\033[1;31m✗ no TTY on stdin.\033[0m\n' >&2
-  printf 'This entrypoint exists to let a HUMAN complete `/login` by hand.\n' >&2
-  printf 'Re-run the container with `-it`.\n' >&2
+  printf 'This exists to let a HUMAN complete `/login` by hand.\n' >&2
+  printf 'Re-run the exec with `-it`:\n' >&2
+  printf '  docker exec -it <container> /usr/local/bin/container-real-mission-login\n' >&2
   exit 1
 fi
 

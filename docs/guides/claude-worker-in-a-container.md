@@ -402,25 +402,68 @@ Neither is illegitimate. Read both costs before you pick.
 
 ### (a) Log in by hand, inside the running container
 
-Start an interactive container, run `claude` in it, complete `/login` yourself.
-The credential is written by Claude Code into `$CLAUDE_CONFIG_DIR` inside the
-container's own filesystem.
+Keep **one long-lived container** running under a deliberately inert entrypoint,
+then enter it once per act with `docker exec`: first the login, which you do at a
+real TTY with your own hands, then the mission. The credential is written by
+Claude Code into `$CLAUDE_CONFIG_DIR` inside the container's own filesystem.
 
 ```sh
 # 1. build the image and keep it (the mission harness deletes its image by default)
 COSMON_KEEP_IMAGE=1 scripts/container-real-mission-bench.sh
 
-# 2. log in — YOU, at a TTY. Note: no --rm, so the container survives the login.
-docker run -it --init --name cosmon-mission-live \
-  --entrypoint /usr/local/bin/container-real-mission-login \
-  cosmon-container-real-mission:bench
+# 2. a container that just sits there. `sleep infinity` is the whole entrypoint:
+#    the acts below are execs into it, not restarts of it.
+docker run -dit --init --name cosmon-mission-live \
+  --entrypoint sleep cosmon-container-real-mission:bench infinity
 
-# 3. re-run the mission in that same, now-authenticated container
-docker start -ai cosmon-mission-live
+# 3. log in — YOU, at a TTY. Complete /login in the TUI, then quit it.
+docker exec -it cosmon-mission-live /usr/local/bin/container-real-mission-login
 
-# 4. when you are done, the credential is destroyed with the container
+# 4. run the mission in that same, now-authenticated container.
+#    CLAUDE_CONFIG_DIR must be repeated here; see the note below.
+docker exec -it \
+  -e CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-mission \
+  -e MISSION_TOPIC="add a one-line usage example to the README" \
+  cosmon-mission-live /usr/local/bin/container-real-mission
+
+# 5. a second door, to watch the worker while it works
+docker exec -it -u 10001 -w /home/cosmon-worker/mission \
+  -e CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-mission \
+  cosmon-mission-live bash
+#    …and inside it, `cs peek` with NO argument: that is the fleet watchdog
+#    view, and it is far more legible than `cs peek <id>` when what you want
+#    to know is "is anything actually alive in here?".
+
+# 6. when you are done, the credential is destroyed with the container
 docker rm -f cosmon-mission-live
 ```
+
+> **Do not reach for `docker start -ai` at step 4.** It is the obvious-looking
+> move and it does not work. `docker start` re-runs the entrypoint the container
+> was **created** with — measured, on a throwaway container:
+>
+> ```console
+> $ docker run --name probe --entrypoint echo alpine:3 "LOGIN-ENTRYPOINT-RAN"
+> LOGIN-ENTRYPOINT-RAN
+> $ docker start -a probe
+> LOGIN-ENTRYPOINT-RAN
+> ```
+>
+> So a container created *to log in* hands you the login screen again, forever.
+> `docker exec` is the only way to run a second, different act inside one
+> container — which is why the entrypoint above is `sleep` and every act is an
+> exec.
+
+> **`CLAUDE_CONFIG_DIR` is per-exec, not a property of the container.** The login
+> at step 3 writes the credential under `/home/cosmon-worker/.claude-mission`
+> because *that exec* set the variable. It does not stick: a later
+> `docker exec` that omits `-e CLAUDE_CONFIG_DIR` starts with it unset, the
+> credential gate then probes `/home/cosmon-worker/.claude/.credentials.json`
+> instead, and it refuses with *"no usable Claude Code credential"* while the
+> credential sits intact thirty centimetres away. Measured: the same
+> `cs tackle` refused without the variable and dispatched with it. Carry it on
+> every exec, or bake it into the image with `ENV` — but do not assume the login
+> left it behind.
 
 What this buys you:
 
@@ -439,7 +482,8 @@ What it costs you:
   A fleet of ten fresh containers is ten logins.
 - **It needs a TTY**, so it cannot happen in CI or in an unattended patrol.
 - **A `--rm` container throws the credential away with everything else**, so the
-  login has to be paired with a container you intend to keep.
+  login has to be paired with a container you intend to keep — hence the
+  long-lived `sleep infinity` container above rather than a run-per-act.
 
 ### (b) Mount an existing host credential into the container
 

@@ -19,8 +19,14 @@
 # tackles a real molecule through the real `cs tackle --adapter claude`
 # path, and halts at door 3 with the gate's own reason quoted verbatim.
 #
-# A refusal is the EXPECTED, MEASURED outcome here — a real result, not a
-# failure. An exit-0 would be the alarming one.
+# A refusal is the EXPECTED, MEASURED outcome for THIS driver, which never
+# provisions a credential — a real result, not a failure.
+#
+# The in-container harness itself grades against whichever world it finds:
+# empty-handed it expects the refusal; with a credential present (because a
+# human logged in by hand, see below) it expects a spawned, live worker and
+# asserts that positively. This driver reports whichever verdict the
+# harness reached rather than assuming there is only one.
 #
 # Usage:
 #   scripts/container-real-mission-bench.sh
@@ -52,11 +58,11 @@
 # container of yours is ever a candidate for deletion.
 #
 # Exit status:
-#   0  the gate refused for the expected reason (the expected outcome)
-#   1  it did not refuse, or refused for a different reason (a finding)
+#   0  the expected outcome for the world the harness was in was observed
+#   1  a finding: it was not
 #   2  INCONCLUSIVE — the discriminating step could not run here. Never a
-#      silent pass; the reason is printed. (bench/README.md verdict
-#      semantics.)
+#      silent pass in either world; the reason is printed. (bench/README.md
+#      verdict semantics.)
 set -uo pipefail
 
 CONTEXT="${COSMON_DOCKER_CONTEXT:-desktop-linux}"
@@ -125,9 +131,19 @@ fi
 say "records written under: $OUT_DIR"
 ls -1 "$OUT_DIR"
 
+# Report the harness's OWN verdict rather than a verdict this driver
+# assumes. The in-container grader knows which world it was in; this one
+# does not, and printing "REFUSED-AT-CREDENTIAL-GATE" over a run that
+# actually spawned a worker was one of the three defects this harness
+# shipped with. `jq` is not required on the host, so the field is read with
+# sed from jq's own pretty-printed output.
+VERDICT="$(sed -n 's/^ *"verdict": *"\([^"]*\)".*/\1/p' "$RECORD" | head -n1)"
+WORLD="$(sed -n 's/^ *"world": *"\([^"]*\)".*/\1/p' "$RECORD" | head -n1)"
+
 case "$RC" in
-  0) printf '\n\033[1;32mVERDICT REFUSED-AT-CREDENTIAL-GATE — the mission reached the gate and the gate held.\033[0m\n' ;;
-  2) incon "the harness broke before the credential gate was reached; see $OUT_DIR/transcript.log" ;;
-  *) die "the gate did not refuse for the expected reason (rc=$RC); read $RECORD and $OUT_DIR/transcript.log" ;;
+  0) printf '\n\033[1;32mVERDICT %s (world: %s) — the expected outcome for this world was observed.\033[0m\n' \
+       "${VERDICT:-?}" "${WORLD:-?}" ;;
+  2) incon "${VERDICT:-INCONCLUSIVE}: the discriminating step could not run; see $RECORD and $OUT_DIR/transcript.log" ;;
+  *) die "VERDICT ${VERDICT:-?} (world: ${WORLD:-?}) — not the expected outcome for this world (rc=$RC); read $RECORD and $OUT_DIR/transcript.log" ;;
 esac
 exit 0

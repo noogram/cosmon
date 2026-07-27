@@ -53,13 +53,35 @@ then necessarily halts at door 3 and asserts the refusal's post-conditions,
 capturing the gate's own words verbatim into `mission-record.json`.
 
 **A refusal for the expected reason is the measured outcome, not a failure.**
-An exit-0 would be the alarming result. Same verdict semantics as above: exit
-`0` refused-as-expected, exit `1` a finding, exit `2` INCONCLUSIVE with the
-reason printed — a missing docker engine is never reported as green.
+An exit-0 would be the alarming result.
 
 The remaining step, the login, belongs to a human. The harness prints the exact
 command; the two ways to provision that credential and their costs are set out
 in `docs/guides/claude-worker-in-a-container.md`.
+
+#### It grades against the world it is in, not against one world
+
+The first version of this arm only knew the world with no credential in it, so
+it treated a refusal as the pass and a *successful* dispatch as a finding. Once
+the human completed the login, it reported failure over a run that worked.
+
+The in-container grader now decides which world it is in by `stat()`ing the
+credentials path — never by opening it, the secret discipline is unchanged —
+and grades accordingly:
+
+| world | discriminator | expected outcome (exit `0`) |
+|---|---|---|
+| no credential | `$CLAUDE_CONFIG_DIR/.credentials.json` absent | `REFUSED-AT-CREDENTIAL-GATE` — the gate held and named the credential |
+| credential present | that file present | `SPAWNED-LIVE-WORKER` — tackle exited `0`, the named tmux session answers `has-session`, and the molecule is no longer `pending` |
+
+The second row is asserted **positively**. A zero exit code proves only that a
+process exited; it is never taken as evidence that a worker exists.
+
+Same verdict semantics as above in both worlds: exit `0` the expected outcome,
+exit `1` a finding, exit `2` INCONCLUSIVE with the reason printed. **Neither
+world may pass silently when its discriminating step could not run** — a
+missing docker engine, a molecule that never nucleated, or a `0` tackle that
+named no session to probe are all exit `2`, never green.
 
 ## The six probes
 

@@ -12,13 +12,24 @@
 # file literally named PLACEHOLDER-NOT-A-CREDENTIAL. That proves the four
 # doors of issue #20 open. It never proved that a real mission walks down
 # the corridor. This script is the missing arm: a real `cs nucleate` + a
-# real `cs tackle --adapter claude`, on the production path, with NOTHING
-# minted — and therefore it necessarily halts at door 3, the credential
-# gate, which is the last step a machine is allowed to take.
+# real `cs tackle --adapter claude`, on the production path.
 #
-# A refusal here is the MEASURED OUTCOME, not a failure. The thing under
-# measurement is *which* refusal, with *which* reason, leaving *which*
-# post-conditions. An exit-0 "success" would be the alarming result.
+# ── THE TWO WORLDS ─────────────────────────────────────────────────────
+# This script grades against the world it is actually in, and it decides
+# which one by stat()ing the credential path — never by opening it.
+#
+#   no credential present   the mission necessarily halts at door 3, the
+#                           credential gate. The refusal is the MEASURED
+#                           OUTCOME, not a failure; an exit-0 there would
+#                           be the alarming result.
+#   credential present      a human has logged in (see
+#                           login-in-container.sh). The dispatch is then
+#                           entitled to SUCCEED, and the expected outcome
+#                           is a spawned, live worker — asserted
+#                           positively, never inferred from rc=0 alone.
+#
+# The first version of this harness only knew the first world, so once the
+# human completed the login it reported a failure over a run that worked.
 #
 # ── SECRET DISCIPLINE (read this before editing) ───────────────────────
 # This script never creates, requests, copies, reads, prints or logs any
@@ -32,9 +43,12 @@
 #   stdout            the raw transcript (every observation verbatim)
 #   $OUT_DIR/…        mission-record.json, tackle.out, mission-brief.md
 # Exit status:
-#   0  the gate refused for the expected reason (the expected outcome)
-#   1  it did not refuse, or refused for a different reason (a finding)
-#   2  the harness itself broke before the gate could be reached
+#   0  the expected outcome for this world was observed —
+#      REFUSED-AT-CREDENTIAL-GATE with no credential present, or
+#      SPAWNED-LIVE-WORKER with one present
+#   1  a finding: the world's expected outcome did not happen
+#   2  INCONCLUSIVE — the step that discriminates could not run. Never a
+#      silent pass in either world.
 set -uo pipefail
 
 OUT_DIR="${OUT_DIR:-/out}"
@@ -52,6 +66,25 @@ MISSION_WORK="$WORKER_HOME/mission"
 # this path, so a new directory is an absent keychain item — which is what
 # keeps the arm credential-free by construction rather than by promise.
 MISSION_CONFIG="$WORKER_HOME/.claude-mission"
+
+# ── Which world are we in? ─────────────────────────────────────────────
+# STAT ONLY. `[ -e ]` is a stat(2); the file is never opened, read,
+# printed, logged or copied, and the single bit "it exists" is all that
+# leaves this line. The secret discipline above is unchanged — this adds
+# no way to obtain a credential, only a way to notice that the human
+# already created one with their own hands.
+#
+# The path is the one `cs` itself probes: `$CLAUDE_CONFIG_DIR` +
+# `/.credentials.json` (crates/cosmon-transport/src/claude_login.rs). In
+# this image the plaintext backend is the only one available — there is
+# no dbus session and so no secret-service keychain — which is why a file
+# stat is a sufficient discriminator HERE and would not be on a desktop.
+MISSION_CREDENTIAL="$MISSION_CONFIG/.credentials.json"
+if [ -e "$MISSION_CREDENTIAL" ]; then
+  CREDENTIAL_PRESENT=1
+else
+  CREDENTIAL_PRESENT=0
+fi
 
 # The payload. Deliberately target-agnostic and small: this molecule is
 # about the corridor, not about what is carried down it. Any real task
@@ -124,18 +157,30 @@ echo "MISSION_TACKLE_RC=$TACKLE_RC"
 echo "MISSION_STATUS=$(cs observe "$MOL" --json 2>/dev/null \
   | jq -r '.status // .molecule.status // "?"' 2>/dev/null | head -n1)"
 
-# Post-condition: no tmux carcass. `cs` names its own socket and session
-# either way, so nothing here is guessed.
+# Post-condition: the tmux session. In the refusing world its ABSENCE is
+# what is being checked (no carcass); in the authenticated world its
+# PRESENCE is what proves a worker is actually live rather than merely
+# exited-zero. Either way `cs` names its own socket and session, so
+# nothing here is guessed — and `has-session` is a positive probe, not an
+# inference from the tackle's exit code.
 ATTACH="$(printf '%s\n' "$TACKLE_OUT" | tr -d '`' \
   | grep -o 'tmux -L [^ ]* \(capture-pane -pS - \|attach \)-t [^ ]*' | head -n1)"
 if [ -n "$ATTACH" ]; then
   SOCK="$(printf '%s' "$ATTACH" | awk '{print $3}')"
   SESS="$(printf '%s' "$ATTACH" | awk '{print $NF}')"
+  echo "MISSION_SOCKET=$SOCK"
+  echo "MISSION_SESSION=$SESS"
+  if tmux -L "$SOCK" has-session -t "$SESS" 2>/dev/null; then
+    echo "MISSION_SESSION_ALIVE=1"
+  else
+    echo "MISSION_SESSION_ALIVE=0"
+  fi
   echo "--- MISSION_PANE_AT_RETURN (socket=$SOCK session=$SESS) ---"
   tmux -L "$SOCK" capture-pane -p -t "$SESS" 2>&1
   echo "--- MISSION_PANE_AT_RETURN_END ---"
 else
   echo "MISSION_NO_SESSION_NAMED=1"
+  echo "MISSION_SESSION_ALIVE=0"
 fi
 INNER
 chmod a+rx /tmp/mission-inner.sh
@@ -144,7 +189,13 @@ mkdir -p "$MISSION_WORK" "$MISSION_CONFIG"
 chown -R "$WORKER_UID:$WORKER_UID" "$WORKER_HOME"
 
 say "setpriv --reuid $WORKER_UID  →  cs init / cs nucleate / cs tackle --adapter claude"
-sub "CLAUDE_CONFIG_DIR=$MISSION_CONFIG (virgin; no credential minted, none mounted)"
+if [ "$CREDENTIAL_PRESENT" -eq 1 ]; then
+  sub "CLAUDE_CONFIG_DIR=$MISSION_CONFIG (a credential is PRESENT — stat only, never opened)"
+  sub "world: authenticated. Expected outcome: a spawned, LIVE worker."
+else
+  sub "CLAUDE_CONFIG_DIR=$MISSION_CONFIG (virgin; no credential minted, none mounted)"
+  sub "world: empty-handed. Expected outcome: REFUSED-AT-CREDENTIAL-GATE."
+fi
 MISSION_OUT="$(setpriv --reuid "$WORKER_UID" --regid "$WORKER_UID" --clear-groups \
   env HOME="$WORKER_HOME" PATH=/usr/local/bin:/usr/bin:/bin \
       CLAUDE_CONFIG_DIR="$MISSION_CONFIG" \
@@ -157,8 +208,10 @@ raw "$MISSION_OUT"
 MOL="$(printf '%s\n' "$MISSION_OUT" | sed -n 's/^MISSION_MOL=//p' | head -n1)"
 TACKLE_RC="$(printf '%s\n' "$MISSION_OUT" | sed -n 's/^MISSION_TACKLE_RC=//p' | head -n1)"
 STATUS="$(printf '%s\n' "$MISSION_OUT" | sed -n 's/^MISSION_STATUS=//p' | head -n1)"
+SESSION_ALIVE="$(printf '%s\n' "$MISSION_OUT" | sed -n 's/^MISSION_SESSION_ALIVE=//p' | head -n1)"
+SESSION_NAME="$(printf '%s\n' "$MISSION_OUT" | sed -n 's/^MISSION_SESSION=//p' | head -n1)"
 
-# ── 4. Grade the four observable post-conditions of the gate ───────────
+# ── 4. Grade the observable post-conditions, in the world we are in ────
 hdr "3. Verdict"
 
 emit_record() {
@@ -170,21 +223,30 @@ emit_record() {
     --arg tackle_rc "${TACKLE_RC:-}" \
     --arg status "${STATUS:-}" \
     --arg topic "$MISSION_TOPIC" \
+    --arg session "${SESSION_NAME:-}" \
     --arg cs_version "$(cs --version 2>&1 | head -n1)" \
     --arg claude_version "$(claude --version 2>&1 | head -n1)" \
     --argjson provenance_ok "$PROVENANCE_OK" \
+    --argjson credential_present "$CREDENTIAL_PRESENT" \
     --argjson refusal_names_credential "$NAMES_CREDENTIAL" \
     --argjson refusal_names_remedy "$NAMES_REMEDY" \
     --argjson no_session_left "$NO_SESSION" \
+    --argjson session_alive "${SESSION_ALIVE:-0}" \
     --arg refusal_line "$REFUSAL_LINE" \
     '{
        harness: "container-real-mission",
        verdict: $verdict,
        reason: $reason,
+       # Which world this run was graded against. Determined by stat()ing
+       # the credentials path — never by opening it.
+       world: (if $credential_present == 1 then "credential-present"
+               else "no-credential" end),
+       credential_present: ($credential_present == 1),
        molecule: $molecule,
        topic: $topic,
        tackle_rc: $tackle_rc,
        molecule_status_after: $status,
+       tmux_session: $session,
        cs_version: $cs_version,
        claude_version: $claude_version,
        provenance_ok: ($provenance_ok == 1),
@@ -193,7 +255,9 @@ emit_record() {
          refusal_names_credential: ($refusal_names_credential == 1),
          refusal_names_remedy: ($refusal_names_remedy == 1),
          no_tmux_session_left: ($no_session_left == 1),
-         molecule_not_left_running: ($status != "running")
+         tmux_session_alive: ($session_alive == 1),
+         molecule_not_left_running: ($status != "running"),
+         molecule_no_longer_pending: ($status != "pending")
        },
        refusal_line: $refusal_line,
        secrets_touched: "none — no credential created, read, mounted or logged"
@@ -216,12 +280,49 @@ printf '%s' "$MISSION_OUT" | grep -qF "CLAUDE_CODE_OAUTH_TOKEN" && NAMES_REMEDY=
 printf '%s' "$MISSION_OUT" | grep -qF "MISSION_NO_SESSION_NAMED=1" && NO_SESSION=1
 printf '%s' "$MISSION_OUT" | grep -qF "no server running on" && NO_SESSION=1
 
+# Shared by both worlds: without a molecule there is nothing to grade at
+# all, in either of them.
 if [ "$INNER_RC" -eq 90 ] || [ -z "$MOL" ]; then
-  emit_record "INCONCLUSIVE" "the harness could not nucleate a molecule; the credential gate was never reached"
+  emit_record "INCONCLUSIVE" "the harness could not nucleate a molecule; the dispatch path was never entered"
+  exit 2
+fi
+if [ -z "${TACKLE_RC:-}" ]; then
+  emit_record "INCONCLUSIVE" \
+    "the inner shell reported no tackle exit code (inner_rc=$INNER_RC); nothing can be graded — read tackle.out"
   exit 2
 fi
 
-if [ "${TACKLE_RC:-0}" = "0" ]; then
+if [ "$CREDENTIAL_PRESENT" -eq 1 ]; then
+  # ── World B: a human logged in. A successful dispatch is the expected
+  # outcome, and it is asserted POSITIVELY. rc=0 alone proves only that a
+  # process exited; it does not prove a worker exists.
+  if [ "$TACKLE_RC" != "0" ]; then
+    emit_record "REFUSED-WITH-CREDENTIAL" \
+      "a credential is present yet cs tackle refused (rc=$TACKLE_RC) — a finding. If the refusal names the credential, the likely cause is CLAUDE_CONFIG_DIR not being carried into this exec (it is per-exec, never inherited): re-run with -e CLAUDE_CONFIG_DIR=$MISSION_CONFIG"
+    exit 1
+  fi
+  if [ -z "$SESSION_NAME" ]; then
+    emit_record "INCONCLUSIVE" \
+      "cs tackle exited 0 but named no tmux session, so worker liveness could not be probed — and a zero exit code is not evidence of a live worker. Read tackle.out"
+    exit 2
+  fi
+  if [ "${SESSION_ALIVE:-0}" != "1" ]; then
+    emit_record "SPAWNED-BUT-DEAD" \
+      "cs tackle exited 0 and named session '$SESSION_NAME', but tmux has-session says it is not there — the worker did not survive the dispatch"
+    exit 1
+  fi
+  if [ "$STATUS" = "pending" ] || [ -z "$STATUS" ]; then
+    emit_record "SPAWNED-BUT-LEDGER-UNMOVED" \
+      "a live worker is in session '$SESSION_NAME', but the molecule is still '${STATUS:-?}' — the ledger did not follow the dispatch"
+    exit 1
+  fi
+  emit_record "SPAWNED-LIVE-WORKER" \
+    "with a credential present, cs tackle exited 0, tmux session '$SESSION_NAME' answers has-session, and the molecule is no longer pending (status=$STATUS)"
+  exit 0
+fi
+
+# ── World A: empty-handed. The refusal IS the measurement.
+if [ "$TACKLE_RC" = "0" ]; then
   emit_record "NOT-REFUSED" \
     "cs tackle exited 0 with no credential provisioned — the gate did NOT hold (this is a finding, not a pass)"
   exit 1
@@ -247,20 +348,34 @@ The mission is provisioned and the dispatch path works. It stopped at the
 credential gate because this container holds no credential, and this harness
 is not allowed to give it one.
 
-To carry the mission the rest of the way, log in YOURSELF, inside a container
-of this image, with exactly this one line:
+To carry the mission the rest of the way, keep ONE long-lived container alive
+under a neutral entrypoint, and enter it once per act with \`docker exec\`:
 
-  docker --context $CTX run -it --init --name cosmon-mission-live --entrypoint /usr/local/bin/container-real-mission-login $IMAGE_REF
+  # 1. a container that just sits there. The entrypoint is deliberately inert.
+  docker --context $CTX run -dit --init --name cosmon-mission-live --entrypoint sleep $IMAGE_REF infinity
 
-Then re-run the mission in that same (now authenticated) container:
+  # 2. the gesture that is YOURS: complete /login at a real TTY, then quit it.
+  docker --context $CTX exec -it cosmon-mission-live /usr/local/bin/container-real-mission-login
 
-  docker --context $CTX start -ai cosmon-mission-live
+  # 3. now re-run the mission in that same, authenticated container.
+  #    CLAUDE_CONFIG_DIR is PER-EXEC — it is not a property of the container,
+  #    and an exec that omits it makes the gate look in the wrong directory.
+  docker --context $CTX exec -it -e CLAUDE_CONFIG_DIR=$MISSION_CONFIG -e MISSION_TOPIC="$MISSION_TOPIC" cosmon-mission-live /usr/local/bin/container-real-mission
+
+  # 4. a second door, to watch the worker while it runs. \`cs peek\` with NO
+  #    argument gives the fleet watchdog view, which is the one worth having.
+  docker --context $CTX exec -it -u $WORKER_UID -w $MISSION_WORK -e CLAUDE_CONFIG_DIR=$MISSION_CONFIG cosmon-mission-live bash
+
+Do NOT use \`docker start -ai\` for step 3. MEASURED: \`docker start\` replays the
+entrypoint the container was CREATED with, so it would hand you the login a
+second time instead of the mission. \`docker exec\` is what runs a second,
+different act inside one container.
 
 (The harness deletes its image at teardown. Re-run it with COSMON_KEEP_IMAGE=1
 if you intend to do the login afterwards.)
 
 The credential written by that login is born inside the container and dies
-with it (\`docker rm cosmon-mission-live\`). It never touches your host, and no
+with it (\`docker rm -f cosmon-mission-live\`). It never touches your host, and no
 agent — including this one — ever sees it.
 
 The alternative, mounting a host credential in, is documented with its costs
