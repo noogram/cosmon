@@ -345,6 +345,99 @@ else
     ko "sign-before-swap" "commit-tree -S at line ${sign_line:-none}, update-ref at ${swap_line:-none}"
 fi
 
+echo "── the whole crossing, end to end (real signature) ────────────────────"
+
+# A real signature, hermetically: an ephemeral SSH signing key in the temp
+# dir. Nothing else in this suite exercises the half that actually moves the
+# public trunk, and a mechanism whose happy path has never run is a claim.
+sign_key() {
+    ssh-keygen -q -t ed25519 -N '' -f "${tmp}/key-${case_n}" -C crossing-test
+    git -C "$w" config gpg.format ssh
+    git -C "$w" config user.signingkey "${tmp}/key-${case_n}.pub"
+}
+
+new_fixture
+sign_key
+dev_sha="$(git -C "$w" rev-parse HEAD)"
+public_sha="$(git -C "$w" rev-parse main)"
+dev_tree="$(git -C "$w" rev-parse "${dev_sha}^{tree}")"
+bare="$(git -C "$w" remote get-url origin)"
+
+expect "e2e: the candidate is built" "$w" 0 "ready. one command left" || true
+cmd="$(grep -o 'scripts/release/sign-and-push.sh .*' "${tmp}/out.${case_n}" | head -n1)"
+set +e
+e2e="$( cd "$w" && sh -c "./${cmd}" 2>&1 )"
+rc=$?
+set -e
+if [ "$rc" -eq 0 ]; then ok "e2e: the printed command runs and exits 0"
+else ko "e2e: printed command" "exit ${rc}: ${e2e}"; fi
+
+new_public="$(git -C "$w" rev-parse main)"
+[ "$new_public" != "$public_sha" ] \
+    && ok "e2e: the public branch advanced" \
+    || ko "public advanced" "main is still ${public_sha}"
+
+git -C "$w" cat-file commit "$new_public" | grep -q '^gpgsig' \
+    && ok "e2e: the new public tip carries a signature" \
+    || ko "signature" "the new public commit has no gpgsig header"
+
+parents="$(git -C "$w" rev-list --parents -n1 "$new_public" | cut -d' ' -f2-)"
+[ "$parents" = "$public_sha" ] \
+    && ok "e2e: exactly one parent, the previous public tip" \
+    || ko "one parent" "got: ${parents}"
+[ "$(git -C "$w" rev-parse "${new_public}^{tree}")" = "$dev_tree" ] \
+    && ok "e2e: the public tree is the development tree verbatim" \
+    || ko "tree identity" "public tree differs from the development tree"
+
+[ "$(git --git-dir="$bare" rev-parse main)" = "$new_public" ] \
+    && ok "e2e: the remote received exactly that commit" \
+    || ko "push" "the bare remote's main is not ${new_public}"
+
+[ "$(git -C "$w" rev-parse refs/cosmon/crossings/v9.9.9)" = "$dev_sha" ] \
+    && ok "e2e: the archive ref pins the development SHA" \
+    || ko "archive ref" "refs/cosmon/crossings/v9.9.9 does not pin ${dev_sha}"
+git -C "$w" rev-parse --verify --quiet refs/cosmon/crossing/v9.9.9 >/dev/null \
+    && ko "candidate ref cleanup" "the unsigned candidate ref survived the push" \
+    || ok "e2e: the unsigned candidate ref is gone once the signed one exists"
+
+if grep -qF "9.9.9	${new_public}	${dev_sha}" "${w}/docs/release-crossings.tsv" 2>/dev/null; then
+    ok "e2e: the ledger records (version, public-sha, dev-sha)"
+else
+    ko "ledger" "the pairing line is missing from docs/release-crossings.tsv"
+fi
+if [ -z "$(git -C "$w" status --porcelain)" ] \
+   && [ "$(git -C "$w" log -1 --name-only --format= HEAD)" = "docs/release-crossings.tsv" ]; then
+    ok "e2e: the ledger line is committed, path-limited, and nothing else rode along"
+else
+    ko "ledger commit" "the ledger commit is missing or carried other paths"
+fi
+
+# ── the key is unavailable: nothing moves, nothing is pushed ────────────────
+# This is the whole fail-closed claim. `commit-tree -S` is the first thing that
+# can fail and the first thing that runs, so a missing key costs nothing.
+new_fixture
+git -C "$w" config gpg.format ssh
+git -C "$w" config user.signingkey "${tmp}/there-is-no-key-here.pub"
+public_sha="$(git -C "$w" rev-parse main)"
+bare="$(git -C "$w" remote get-url origin)"
+expect "no-key: the candidate is still built (nothing is signed yet)" "$w" 0 "ready. one command left" || true
+cmd="$(grep -o 'scripts/release/sign-and-push.sh .*' "${tmp}/out.${case_n}" | head -n1)"
+set +e
+out="$( cd "$w" && sh -c "./${cmd}" 2>&1 )"
+rc=$?
+set -e
+if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -qF "signing failed"; then
+    ok "no-key: signing fails, and it fails FIRST"
+else
+    ko "no-key refusal" "exit ${rc}: ${out}"
+fi
+[ "$(git -C "$w" rev-parse main)" = "$public_sha" ] \
+    && ok "no-key: local main never moved" \
+    || ko "local main" "main moved despite a failed signature"
+[ "$(git --git-dir="$bare" rev-parse main)" = "$public_sha" ] \
+    && ok "no-key: the remote never moved" \
+    || ko "remote main" "the remote moved despite a failed signature"
+
 echo "──────────────────────────────────────────────────────────────────────"
 printf '%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

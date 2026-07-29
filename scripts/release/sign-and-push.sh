@@ -163,6 +163,7 @@ git update-ref -d "refs/cosmon/crossing/v${VERSION}" 2>/dev/null || true
 
 LEDGER_NOTE=""
 if [ ! -f "$LEDGER" ]; then
+    mkdir -p "$(dirname "$LEDGER")"
     printf '# version\tpublic-sha\tdev-sha\n' > "$LEDGER"
 fi
 printf '%s\t%s\t%s\n' "$VERSION" "$NEW" "$DEV_SHA" >> "$LEDGER"
