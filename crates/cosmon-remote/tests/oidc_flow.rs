@@ -12,7 +12,12 @@
 //! - **concurrent-refresh single-flight** — N parallel refreshers → exactly one
 //!   network refresh, all converge to the same fresh token;
 //! - **negative audience** — a token minted for audience A is never returned for
-//!   audience B (the isolation is proved by *absence*, not by acceptance).
+//!   audience B (the isolation is proved by *absence*, not by acceptance);
+//! - **the `openid` ⇄ `id_token` coupling** (issue #27) — against a provider that
+//!   mints an `id_token` *only* for `openid`, the bearer carries OIDC identity
+//!   claims after login **and** after refresh. This one needs an authorization
+//!   endpoint that observes the requested scope, which is why it lives here and
+//!   not in `cs-oidc-mock` (see [`OpenidGatingProvider`]).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -947,6 +952,369 @@ async fn login_outcome_reports_the_token_subject_not_the_requested_one() {
     // The credential still keys off the requested sub — the slot is a local
     // filing decision; only the *displayed identity* is the token's.
     assert_eq!(outcome.key.sub(), "1");
+}
+
+// --- #27 end-to-end: a provider that GATES the id_token on `openid` ------
+//
+// Everything above stipulates the provider's generosity: the mocks return an
+// `id_token` unconditionally, so they prove the client *selects* the right
+// bearer but say nothing about whether it *asks* for one. Issue #27's two
+// defects are coupled precisely there — a client that never sends `openid` gets
+// no `id_token` to select, and the hardened selection then fails loud instead of
+// producing a login. The mock below is the missing half: it mints an `id_token`
+// only when the authorization request carried `openid`, which is Forgejo's
+// actual behaviour and the only shape that can distinguish the fix from its
+// absence.
+//
+// `cs-oidc-mock` (crate `cosmon-oidc-testkit`) cannot host this reproduction:
+// it exposes exactly one route, `GET /jwks`, and by documented design has no
+// discovery document, no authorization endpoint, and no token endpoint — the
+// caller signs a JWT directly via `issue_jwt`. With no authorization request to
+// carry `openid` and no token response to withhold, there is nothing to gate.
+// The gate therefore lives here, in the `wiremock` harness that already models
+// the token endpoint's wire shapes.
+
+/// A provider whose `id_token` issuance is gated on the `openid` scope.
+///
+/// `GET /authorize` records whether the authorization request's `scope`
+/// parameter contained `openid`, then redirects to the loopback `redirect_uri`
+/// the way a real authorization server does after consent. `POST /token` (both
+/// grants) consults that record: with `openid` it returns
+/// `{access_token, refresh_token, id_token}`; without it, only the claim-less
+/// bookkeeping `access_token` — the exact `401 malformed_jwt` shape from #27.
+///
+/// Sharing one `granted_openid` flag across both grants models the real
+/// coupling: the refresh grant carries no `scope` of its own and inherits the
+/// consent grant's, so a login that failed to request `openid` yields no
+/// `id_token` at refresh time either.
+struct OpenidGatingProvider {
+    granted_openid: Arc<std::sync::atomic::AtomicBool>,
+    seq: AtomicUsize,
+    valid_refresh: Mutex<std::collections::HashSet<String>>,
+}
+
+impl OpenidGatingProvider {
+    fn new(granted_openid: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self {
+            granted_openid,
+            seq: AtomicUsize::new(1),
+            valid_refresh: Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// The authorization-endpoint half: observe the requested scopes, then
+    /// redirect to the loopback with a code (`reqwest` follows the 302, exactly
+    /// as a browser would).
+    fn authorize(&self, request: &Request) -> ResponseTemplate {
+        let mut redirect_uri = String::new();
+        let mut state = String::new();
+        let mut scope = String::new();
+        for (k, v) in request.url.query_pairs() {
+            match k.as_ref() {
+                "redirect_uri" => redirect_uri = v.into_owned(),
+                "state" => state = v.into_owned(),
+                "scope" => scope = v.into_owned(),
+                _ => {}
+            }
+        }
+        // Space-delimited per RFC 6749 §3.3 — match the whole token, so a scope
+        // merely *containing* the substring (`openid-adjacent`) does not pass.
+        let openid = scope.split(' ').any(|s| s == "openid");
+        self.granted_openid.store(openid, Ordering::SeqCst);
+        ResponseTemplate::new(302).insert_header(
+            "location",
+            format!("{redirect_uri}?code=the-code&state={state}").as_str(),
+        )
+    }
+
+    /// The token-endpoint half: the response shape depends on whether the
+    /// authorization request that opened this grant carried `openid`.
+    fn token(&self, request: &Request) -> ResponseTemplate {
+        let params: std::collections::HashMap<String, String> =
+            url::form_urlencoded::parse(&request.body)
+                .into_owned()
+                .collect();
+        // A refresh grant must present a live refresh token; the code grant
+        // opens the chain.
+        if params.get("grant_type").map_or("", String::as_str) == "refresh_token" {
+            let presented = params.get("refresh_token").cloned().unwrap_or_default();
+            if !self.valid_refresh.lock().unwrap().remove(&presented) {
+                return ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                    "error": "invalid_grant",
+                    "error_description": "refresh token is spent or unknown",
+                }));
+            }
+        }
+        let n = self.seq.fetch_add(1, Ordering::SeqCst);
+        let rt = format!("rt-{n}");
+        self.valid_refresh.lock().unwrap().insert(rt.clone());
+        let mut body = serde_json::json!({
+            "access_token": bookkeeping_jwt(n),
+            "refresh_token": rt,
+            "expires_in": 900,
+            "token_type": "bearer",
+        });
+        if self.granted_openid.load(Ordering::SeqCst) {
+            body["id_token"] = serde_json::json!(identity_jwt(&format!("id-{n}")));
+        }
+        ResponseTemplate::new(200).set_body_json(body)
+    }
+}
+
+/// `wiremock` dispatches by matched route, so one `Respond` serves both halves.
+impl Respond for OpenidGatingProvider {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        if request.url.path() == "/authorize" {
+            self.authorize(request)
+        } else {
+            self.token(request)
+        }
+    }
+}
+
+/// Mount the gating provider's discovery document, client registry, authorize
+/// and token endpoints. `published_scopes` is what the cosmon reverse-discovery
+/// document advertises for the audience — `Some(vec![])` is #27's trigger.
+async fn mount_gating_provider(
+    server: &MockServer,
+    published_scopes: Option<Vec<&str>>,
+    granted_openid: Arc<std::sync::atomic::AtomicBool>,
+) {
+    let mut client = serde_json::json!({
+        "audience": "cs-rpp-adapter",
+        "client_id": "client-A",
+    });
+    if let Some(scopes) = published_scopes {
+        client["scopes"] = serde_json::json!(scopes);
+    }
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issuer": "https://forge.example",
+            "authorization_endpoint": format!("{}/authorize", server.uri()),
+            "token_endpoint": format!("{}/token", server.uri()),
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/cosmon-oauth-clients"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "schema_version": 1,
+            "clients": [client],
+        })))
+        .mount(server)
+        .await;
+    let provider = Arc::new(OpenidGatingProvider::new(granted_openid));
+    Mock::given(method("GET"))
+        .and(path("/authorize"))
+        .respond_with(SharedProvider(provider.clone()))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(SharedProvider(provider))
+        .mount(server)
+        .await;
+}
+
+/// Two mounts, one provider: the authorize and token halves must share the
+/// `openid` record, so the `Respond` is registered behind an `Arc`.
+struct SharedProvider(Arc<OpenidGatingProvider>);
+impl Respond for SharedProvider {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        self.0.respond(request)
+    }
+}
+
+/// A browser that simply *follows* the authorize URL, so the authorization
+/// server observes the request (and its `scope`) before redirecting to the
+/// loopback. `fake_browser` above short-circuits the provider by firing the
+/// callback itself — which is why it cannot exercise a scope gate.
+fn following_browser(authorize_url: &str) {
+    let url = authorize_url.to_owned();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Redirect-following is `reqwest`'s default — the 302 lands on the
+        // loopback listener exactly as a browser's would.
+        let _ = reqwest::get(&url).await;
+    });
+}
+
+#[tokio::test]
+async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openid() {
+    // The #27 acceptance criterion, end to end and in one run: against a
+    // provider that mints an `id_token` only for `openid`, and a
+    // reverse-discovery document that publishes an EMPTY scope set (the exact
+    // trigger — `scopes: []` is present, so it overrides the fallback), the
+    // authorization request must still carry `openid`, and the bearer must carry
+    // OIDC identity claims BOTH after login and after a refresh.
+    //
+    // This test FAILS without the fix: drop `ensure_openid` from `discover` and
+    // the empty published set reaches the authorize URL verbatim, the provider
+    // mints no `id_token`, and `login` fails `NoIdentityBearer`. Verified by
+    // reverting the call.
+    let server = MockServer::start().await;
+    let granted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    mount_gating_provider(&server, Some(vec![]), granted.clone()).await;
+
+    // The loopback redirect the provider will 302 to.
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let http = reqwest::Client::new();
+    let mut endpoints = oidc::discover(
+        &http,
+        &server.uri(),
+        &server.uri(),
+        "cs-rpp-adapter",
+        // A profile fallback that also lacks `openid`: neither source supplies
+        // it, so only `discover`'s own guarantee can.
+        vec!["cosmon:molecule:read".into()],
+    )
+    .await
+    .unwrap();
+    endpoints.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+    // The scope the client will actually send leads with `openid`.
+    assert_eq!(
+        endpoints.scopes.first().map(String::as_str),
+        Some("openid"),
+        "discover must request openid even when the registry publishes scopes: []"
+    );
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+    let outcome = oidc::login(
+        &http,
+        &store,
+        &endpoints,
+        "operator",
+        std::time::Duration::from_secs(10),
+        following_browser,
+    )
+    .await
+    .expect("login must succeed against an openid-gating provider");
+
+    // The provider saw `openid` in the authorization request — the client asked.
+    assert!(
+        granted.load(Ordering::SeqCst),
+        "the authorization request must carry the openid scope"
+    );
+    // And the bearer it retained carries the identity claims the resource server
+    // resolves (iss ∧ sub ∧ aud), not the bookkeeping access token.
+    let after_login = store
+        .load(&outcome.key)
+        .unwrap()
+        .expect("credential persisted");
+    assert!(
+        marker_of(after_login.access_token().expose()).starts_with("id-"),
+        "the post-login bearer must be the id_token"
+    );
+    let identity = outcome
+        .identity
+        .expect("the post-login bearer carries identity claims");
+    assert_eq!(identity.iss, "https://forge.example");
+    assert_eq!(identity.sub, "operator");
+
+    // --- and after a refresh -------------------------------------------------
+    // #27 says "after login AND after refresh". Age the credential so the next
+    // ensure_token must rotate, keeping the same refresh token.
+    let refresh = after_login.refresh_token().expose().to_owned();
+    store
+        .store(
+            &outcome.key,
+            &expiring_cred(after_login.access_token().expose(), &refresh),
+        )
+        .unwrap();
+    let state = oidc::ensure_token(
+        &http,
+        &store,
+        &outcome.key,
+        &endpoints.refresh_config(),
+        Utc::now(),
+        ChronoDuration::seconds(60),
+    )
+    .await
+    .expect("the refresh grant must succeed");
+    let rotated = match state {
+        TokenState::Valid(t) => t.expose().to_owned(),
+        TokenState::NeedsLogin => panic!("expected Valid after a refresh, got NeedsLogin"),
+    };
+    assert!(
+        marker_of(&rotated).starts_with("id-"),
+        "the post-refresh bearer must be the freshly issued id_token, got {rotated:?}"
+    );
+    assert_eq!(
+        oidc::bearer_identity(&rotated)
+            .expect("the post-refresh bearer carries identity claims")
+            .iss,
+        "https://forge.example"
+    );
+}
+
+// --- the openid guarantee, at the discover seam --------------------------
+
+#[tokio::test]
+async fn discover_requests_openid_whatever_the_registry_publishes() {
+    // The wiring guard for `ensure_openid`. Its unit tests prove the function is
+    // correct; nothing proved `discover` still *calls* it — deleting the call
+    // left all 234 crate tests green. Each case below pins one shape of the
+    // published scope set through the real discovery round-trip.
+    for (published, fallback, expected) in [
+        // #27's trigger: present-but-empty, so it overrides the fallback.
+        (Some(vec![]), vec!["cosmon:molecule:read"], vec!["openid"]),
+        // Absent: the profile fallback applies — and is normalized too.
+        (
+            None,
+            vec!["cosmon:molecule:read"],
+            vec!["openid", "cosmon:molecule:read"],
+        ),
+        // Published without `openid`: prepended, order otherwise preserved.
+        (
+            Some(vec!["cosmon:molecule:read", "cosmon:molecule:write"]),
+            vec![],
+            vec!["openid", "cosmon:molecule:read", "cosmon:molecule:write"],
+        ),
+        // Published with `openid` trailing: moved to the front, never doubled.
+        (
+            Some(vec!["profile", "openid"]),
+            vec![],
+            vec!["openid", "profile"],
+        ),
+    ] {
+        let server = MockServer::start().await;
+        mount_gating_provider(
+            &server,
+            published.clone(),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+        .await;
+        let http = reqwest::Client::new();
+        let ep = oidc::discover(
+            &http,
+            &server.uri(),
+            &server.uri(),
+            "cs-rpp-adapter",
+            fallback.iter().map(|s| (*s).to_string()).collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ep.scopes, expected,
+            "published scopes {published:?} must resolve to {expected:?}"
+        );
+        // The scope the provider actually reads is the joined query parameter —
+        // assert on that, not only on the vector behind it.
+        let url = oidc::build_authorize_url(&ep, "the-state", "the-challenge").unwrap();
+        let scope = url::Url::parse(&url)
+            .unwrap()
+            .query_pairs()
+            .find(|(k, _)| k == "scope")
+            .map(|(_, v)| v.into_owned())
+            .expect("the authorize URL carries a scope parameter");
+        assert_eq!(scope, expected.join(" "));
+    }
 }
 
 /// A tiny extension so the single-flight mock can add a response delay without a
