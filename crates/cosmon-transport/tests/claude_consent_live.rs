@@ -73,10 +73,8 @@ fn output_of(program: &str, args: &[&str]) -> Option<String> {
 /// `true` when `program` answers its version flag.
 ///
 /// The flag is a parameter because `tmux` answers `-V` and *fails* on
-/// `--version` — probing it with the wrong flag makes this test skip itself on
-/// a machine that could have run it, which is the silent-green failure mode
-/// this whole file exists to avoid. Both tools are preconditions the test skips
-/// on rather than fails on: their absence says nothing about the commit.
+/// `--version` — probing it with the wrong flag makes this test refuse to run
+/// on a machine that could have run it.
 fn available(program: &str, version_flag: &str) -> bool {
     Command::new(program)
         .arg(version_flag)
@@ -208,10 +206,20 @@ fn two_consecutive_spawns_on_a_pristine_config_dir_never_meet_a_dialog() {
         .filter(|(p, f)| !available(p, f))
         .map(|(p, _)| p)
         .collect();
-    if !missing.is_empty() {
-        println!("SKIP: not runnable on this machine — missing: {missing:?}");
-        return;
-    }
+    // Fail loudly off its precondition, the way the demote suites do — this
+    // used to `println!("SKIP: …")` and return, which reports
+    // `0 passed; 0 failed; 1 ignored` and a green line. A bed that cannot run
+    // the only automated check of the pre-grant must SAY so, because the
+    // alternative is a reader concluding the property was verified. Reaching
+    // here at all means somebody passed `--ignored` and asked for the
+    // measurement; answering with a pass they did not get is the defect class
+    // this branch is about.
+    assert!(
+        missing.is_empty(),
+        "this test grades the installed Claude Code and proves nothing without \
+         it — missing: {missing:?}. Install them, or do not claim the pre-grant \
+         is covered on this bed. Do not weaken this into a skip.",
+    );
     println!(
         "claude version: {}",
         output_of("claude", &["--version"])

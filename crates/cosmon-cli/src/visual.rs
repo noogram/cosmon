@@ -129,6 +129,24 @@ pub enum RowKind {
 }
 
 impl RowKind {
+    /// Every variant [`classify`] can actually return, in legend order.
+    ///
+    /// The deprecated `Parked` / `Hot` variants are **absent on purpose**:
+    /// they are never produced by [`classify`], so putting them in a
+    /// legend would teach the operator a vocabulary the screen cannot
+    /// speak. The exhaustive-match test `all_active_covers_every_live_variant`
+    /// makes a new variant a compile error here rather than a glyph that
+    /// silently escapes the legend.
+    pub const ALL_ACTIVE: &'static [RowKind] = &[
+        Self::Healthy,
+        Self::Idle,
+        Self::Blocked,
+        Self::Frozen,
+        Self::Ghost,
+        Self::Drift,
+        Self::Terminal,
+    ];
+
     /// Single visible glyph used in fleet tables.
     ///
     /// The glyphs are chosen so the operator can read the column at a
@@ -256,22 +274,44 @@ pub fn whisper_token(fresh: bool) -> (&'static str, ratatui::style::Style) {
     }
 }
 
+/// The T-column vocabulary, in the order the legend and [`temp_token`]
+/// both read it: `(tag, glyph)`.
+///
+/// One table, two readers — the renderer and the `?` overlay's glyph
+/// legend. A temperature added here appears in both or in neither; there
+/// is no third place to forget.
+pub const TEMP_TOKENS: &[(&str, &str)] = &[
+    ("temp:hot", "🔥"),
+    ("temp:warm", "🌡"),
+    ("temp:cold", "❄"),
+    ("temp:frozen", "🧊"),
+];
+
+/// Style for a temperature glyph, keyed by its `temp:*` tag. Returns the
+/// default style for any tag outside [`TEMP_TOKENS`].
+#[must_use]
+pub fn temp_style(tag: &str) -> ratatui::style::Style {
+    use ratatui::style::{Color, Style};
+    match tag {
+        "temp:hot" => Style::default().fg(Color::Red),
+        "temp:warm" => Style::default().fg(Color::Yellow),
+        "temp:cold" => Style::default().fg(Color::Cyan),
+        "temp:frozen" => Style::default().fg(Color::Blue),
+        _ => Style::default(),
+    }
+}
+
 /// Temperature tag → semantic glyph. Returns a blank placeholder when the
 /// molecule has no `temp:*` tag so rows stay column-aligned. This is the
 /// T-column renderer (priority), orthogonal to [`RowKind`] (lifecycle).
 #[must_use]
 pub fn temp_token(tags: &[String]) -> (&'static str, ratatui::style::Style) {
-    use ratatui::style::{Color, Style};
     for t in tags {
-        match t.as_str() {
-            "temp:hot" => return ("🔥", Style::default().fg(Color::Red)),
-            "temp:warm" => return ("🌡", Style::default().fg(Color::Yellow)),
-            "temp:cold" => return ("❄", Style::default().fg(Color::Cyan)),
-            "temp:frozen" => return ("🧊", Style::default().fg(Color::Blue)),
-            _ => {}
+        if let Some((tag, glyph)) = TEMP_TOKENS.iter().find(|(tag, _)| *tag == t.as_str()) {
+            return (glyph, temp_style(tag));
         }
     }
-    (" ", Style::default())
+    (" ", ratatui::style::Style::default())
 }
 
 /// Inputs to the visual classifier. Grouped so callers can build it from
@@ -623,6 +663,60 @@ mod tests {
         glyphs.sort_unstable();
         glyphs.dedup();
         assert_eq!(glyphs.len(), active.len());
+    }
+
+    /// [`RowKind::ALL_ACTIVE`] is what the `?` overlay's glyph legend
+    /// iterates, so a variant missing from it is a glyph the screen can
+    /// render and the legend cannot explain.
+    ///
+    /// The exhaustive `match` is the mechanism: adding a variant to the
+    /// enum fails to compile here until someone states, in one line,
+    /// whether it is live (→ must be in `ALL_ACTIVE`) or deprecated
+    /// (→ must not be).
+    #[test]
+    fn all_active_covers_every_live_variant() {
+        let all = [
+            RowKind::Healthy,
+            RowKind::Parked,
+            RowKind::Hot,
+            RowKind::Blocked,
+            RowKind::Frozen,
+            RowKind::Ghost,
+            RowKind::Drift,
+            RowKind::Terminal,
+            RowKind::Idle,
+        ];
+        for kind in all {
+            // Exhaustive: a new variant breaks the build right here.
+            let is_live = match kind {
+                RowKind::Healthy
+                | RowKind::Blocked
+                | RowKind::Frozen
+                | RowKind::Ghost
+                | RowKind::Drift
+                | RowKind::Terminal
+                | RowKind::Idle => true,
+                RowKind::Parked | RowKind::Hot => false,
+            };
+            assert_eq!(
+                RowKind::ALL_ACTIVE.contains(&kind),
+                is_live,
+                "{kind:?} must appear in ALL_ACTIVE iff classify() can \
+                 produce it — the `?` glyph legend iterates that list",
+            );
+        }
+    }
+
+    /// The T column's glyphs must come from [`TEMP_TOKENS`] and nowhere
+    /// else, so the legend and the renderer cannot disagree.
+    #[test]
+    fn temp_token_reads_the_shared_table() {
+        for (tag, glyph) in TEMP_TOKENS {
+            let tags = [(*tag).to_owned()];
+            assert_eq!(temp_token(&tags).0, *glyph, "tag {tag} renders {glyph}");
+        }
+        assert_eq!(temp_token(&["temp:tepid".to_owned()]).0, " ");
+        assert_eq!(temp_token(&[]).0, " ");
     }
 
     /// Anti-regression for *"Le Zzz de lifecycle"*.

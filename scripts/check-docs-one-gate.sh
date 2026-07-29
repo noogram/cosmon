@@ -20,7 +20,7 @@
 #     an internal crate in the API reference — never as a product surface.
 #
 # This is complementary to `confidentiality-banlist.sh`: that gate bans
-# operator/FUND identity terms (a real person, a fund, a homeserver) anywhere on
+# operator-IDENTITY terms (a real person, an organization, a homeserver) anywhere on
 # the publishable surface. THIS gate bans a confidential TOOL's *product surface*
 # and a premature tool's *install endpoint*. Different banlist, same discipline:
 # the rule lives in the script, falsifiable via --self-test, hard in CI.

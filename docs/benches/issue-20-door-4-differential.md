@@ -193,6 +193,29 @@ The full instrument history, with the same question asked of every edit, is in
 
 ## 6. Pinned environment — identical across both passes
 
+> **Correction, 2026-07-27 — the engine label below is wrong; the measurements
+> are not.** The line `docker_context desktop-linux (the reporter's engine …)`
+> misnames the engine. On 2026-07-27 the reporter corrected his own earlier
+> description on issue #20: his bed is **Colima (Lima-based), Ubuntu 24.04.4
+> LTS, aarch64**, not Docker Desktop / LinuxKit. He had said Docker Desktop in
+> the original repro recipe, and the benches were pinned to `desktop-linux` on
+> the strength of that.
+>
+> The capture below is left exactly as it was produced. It is a real
+> measurement of a real engine — Docker Desktop 27.3.1, kernel
+> `6.10.11-linuxkit` — and the differential it supports (one harness, two
+> builds, red then green) is unaffected: both passes ran on the *same* engine,
+> which is the only property §1–§5 rely on. What is retracted is the parenthesis
+> claiming that engine was the reporter's.
+>
+> This matters beyond a label. On that engine, `unshare` is **not** blocked and
+> a bind mount **honours** `chown` — so neither of the reporter's two standing
+> findings can reproduce there. The measured comparison of both engines is in
+> [`engine-fidelity-2026-07-27.md`](engine-fidelity-2026-07-27.md); the benches
+> now run on the dedicated `colima-cosmon-bench` profile. A re-run of this
+> differential on that engine has not been done, and this note does not claim
+> its result.
+
 Recorded once and shared by both passes of a run.
 
 ```
@@ -258,9 +281,17 @@ anywhere in this pipeline, and no host credential is mounted.
 ## 8. Reproducing it
 
 ```sh
-open -ga Docker                                  # the reporter's engine
+# Corrected 2026-07-27. This block used to read `open -ga Docker  # the
+# reporter's engine`. It was not his engine — see the note in §6 — and the
+# driver now pins the benches' own colima profile.
+colima start --profile cosmon-bench --cpu 4 --memory 8 --disk 60 \
+  --vm-type vz --mount-type virtiofs --runtime docker
 scripts/container-worker-doors-differential.sh
 ```
+
+Re-running it on that engine will re-derive §1–§5 on a different kernel from the
+one the runs below were taken on. That has not been done here, and this document
+does not predict the result.
 
 Roughly 10 minutes on a cold cargo cache per pass, a few minutes warm. The
 driver prints the harness hash before each pass and aborts on a mismatch. It

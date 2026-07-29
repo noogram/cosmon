@@ -115,6 +115,37 @@ jobs:
       - run: ./scripts/check-book-links.sh
       - run: ./scripts/check-book-links.test.sh
 
+  publish-membrane:
+    name: Publish membrane (runtime state · credentials · machine paths · binaries)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          # The gate audits the TRACKED tree, and check C reads symlink blobs —
+          # both need real git history, not a synthesised single-commit tree.
+          fetch-depth: 0
+      # `CLAUDE.md` has ordered `scripts/publish.sh --check` for release-bound
+      # changes since the contributor guide existed; the file never did, so the
+      # sentence guarding the public projection named a property nobody
+      # measured. It now exists and runs on every PR — because the two clauses
+      # it owns (credentials, machine paths) are exactly the ones the other
+      # referees cannot gate here: release-checklist.sh GATE 1 needs gitleaks
+      # installed and GATE 4 needs the operator's private denylist, and a bare
+      # CI checkout has neither, so both honestly PEND. This one needs nothing
+      # but git and python3 and is therefore hard.
+      - run: ./scripts/publish.sh --check
+      # A green gate proves the scanner ran, not that it can red. The test
+      # constructs a real violating repository per rule and fails unless the
+      # gate exits non-zero AND names the offending path.
+      - run: ./scripts/publish.test.sh
+      # The provenance guard the nonroot-pilot bench stamps its images with
+      # shipped unfalsified: removing the post-build re-check reddened nothing.
+      # This constructs both ways a tree can move mid-build and asserts the
+      # bench still calls the guard AFTER the build, not only before it.
+      - run: ./scripts/source-provenance.test.sh
+
   fixture-independence:
     name: Fixture independence (tautological-fixture tripwire)
     runs-on: ubuntu-latest

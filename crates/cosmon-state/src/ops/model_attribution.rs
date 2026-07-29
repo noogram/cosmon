@@ -20,6 +20,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use chrono::{DateTime, Utc};
+use cosmon_core::adapter_attribution::AdapterAttribution;
 use cosmon_core::event_v2::{Envelope, EventV2, ModelSelectionSource};
 use cosmon_core::id::MoleculeId;
 
@@ -310,6 +311,55 @@ pub fn folded_adapter(state_dir: &Path, mol_id: &MoleculeId) -> AdapterFold {
     fold_adapter(&distinct_adapter_names(state_dir, mol_id))
 }
 
+/// Project the full **specified + realized** attribution for one molecule —
+/// what was pinned *and* what actually answered.
+///
+/// # Why this exists beside [`latest_model_selection`]
+///
+/// [`ModelAttribution`] folds `ModelSelected` alone, so it can only ever report
+/// the **pin**. That was the whole of what `cs observe` showed. When a seat is
+/// re-pointed at a sibling model mid-run — a stalled provider switched by hand
+/// from inside the pane — the pin keeps naming the model that was *asked for*
+/// while a different one answers, and nothing on the operator's primary read
+/// verb says so (measured on `converge-20260727-a302`: the roster reported
+/// `gpt-5.6-sol` for a seat running `gpt-5.6-terra`).
+///
+/// [`AdapterAttribution`] already folds both axes honestly, including the
+/// attempt-scoping that stops a dead predecessor's observation from
+/// contaminating a re-tackle. This is the read-side seam that hands it to a
+/// surface, so `cs observe` renders the same `pin~>realized` drift the
+/// `cs peek` TUI does instead of a pin the operator has no reason to doubt.
+///
+/// Unlike the `ModelSelected`-only scan above, the realized axis needs the
+/// molecule's events **in order and in full** (attempt boundaries reset the
+/// accumulator), so this parses every line belonging to `mol_id` rather than
+/// pre-filtering on one tag. Returns `None` when the log is missing,
+/// unreadable, or carries nothing for this molecule — advisory read,
+/// trace-not-lock, same as its siblings.
+#[must_use]
+pub fn realized_attribution(state_dir: &Path, mol_id: &MoleculeId) -> Option<AdapterAttribution> {
+    let path = resolve_events_log_path(state_dir);
+    let bytes = std::fs::read(&path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    // The molecule id appears verbatim in every envelope that concerns it, so a
+    // substring pre-filter still skips the overwhelming majority of a large
+    // log's lines before any serde work — without narrowing to a single event
+    // kind, which the ordered fold cannot tolerate.
+    let needle = mol_id.as_str();
+    let events: Vec<EventV2> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && line.contains(needle))
+        .filter_map(|line| Envelope::from_line(line).ok())
+        .map(|envelope| envelope.event)
+        .filter(|event| event.molecule_id().is_some_and(|id| id == mol_id))
+        .collect();
+    if events.is_empty() {
+        return None;
+    }
+    Some(AdapterAttribution::fold(&events))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,5 +609,166 @@ mod tests {
             folded_adapter(dir.path(), &mol("task-20260717-zzzz")),
             AdapterFold::Absent
         );
+    }
+
+    // ── realized attribution: the pin is not what answered ───────────────
+
+    /// The measured incident, replayed: a committee seat is pinned to
+    /// `gpt-5.6-sol`, its provider refuses mid-review, the operator switches it
+    /// to `gpt-5.6-terra` from inside the pane — and the roster keeps reporting
+    /// the pin. [`latest_model_selection`] is *structurally incapable* of
+    /// noticing (it folds `ModelSelected` only); [`realized_attribution`] is
+    /// the seam that does.
+    #[test]
+    fn realized_attribution_surfaces_a_seat_that_answered_as_another_model() {
+        use cosmon_core::event_v2::{AdapterSelectionSource, LoopOwnershipTag};
+        use cosmon_core::id::WorkerId;
+        use cosmon_core::model_realization::{ModelId, ModelObservationSource};
+
+        use crate::event_log::{emit_one, resolve_events_log_path};
+        use crate::events::worker_spawn::emit_new_model_observations;
+
+        let dir = tempdir().unwrap();
+        let m = mol("cmbverify-20260728-8e2a");
+        let log = resolve_events_log_path(dir.path());
+        let worker = WorkerId::new("worker-seat-codex").unwrap();
+
+        emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: m.clone(),
+                adapter_name: "codex".to_owned(),
+                selected_at: Utc::now(),
+                selection_source: AdapterSelectionSource::Cli {
+                    flag: "codex".to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+        emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: worker.clone(),
+                molecule: Some(m.clone()),
+                session_name: "seat".to_owned(),
+                role: "refuter".to_owned(),
+                adapter_name: "codex".to_owned(),
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+        emit_model_selected(
+            dir.path(),
+            &m,
+            "codex",
+            Some("gpt-5.6-sol"),
+            ModelSelectionSource::Flag {
+                flag: "gpt-5.6-sol".to_owned(),
+            },
+        );
+        // What actually answered after the in-pane switch.
+        emit_new_model_observations(
+            dir.path(),
+            &m,
+            &worker,
+            "codex",
+            &[ModelId::new("gpt-5.6-terra").unwrap()],
+            ModelObservationSource::CodexSessionMeta,
+        );
+
+        // The pin-only projection — every word of it true, and none of it the
+        // model that answered. This is exactly what the roster was showing.
+        let pinned = latest_model_selection(dir.path(), &m).expect("selection present");
+        assert_eq!(pinned.model_label(), "gpt-5.6-sol");
+
+        // The realized projection names the divergence instead of hiding it.
+        let realized = realized_attribution(dir.path(), &m).expect("attribution present");
+        assert_eq!(
+            realized.realized_drift_display().as_deref(),
+            Some("gpt-5.6-terra")
+        );
+        assert_eq!(
+            realized.compact_cell(),
+            "codex/gpt-5.6-sol~>gpt-5.6-terra [cli]"
+        );
+    }
+
+    /// No divergence, no noise: a seat that ran the model it was pinned to
+    /// reports no drift. The `~>` glyph means something precisely because it is
+    /// absent when specified and realized agree.
+    #[test]
+    fn realized_attribution_is_silent_when_the_pin_is_what_answered() {
+        use cosmon_core::event_v2::{AdapterSelectionSource, LoopOwnershipTag};
+        use cosmon_core::id::WorkerId;
+        use cosmon_core::model_realization::{ModelId, ModelObservationSource};
+
+        use crate::event_log::{emit_one, resolve_events_log_path};
+        use crate::events::worker_spawn::emit_new_model_observations;
+
+        let dir = tempdir().unwrap();
+        let m = mol("cmbverify-20260728-8e2b");
+        let log = resolve_events_log_path(dir.path());
+        let worker = WorkerId::new("worker-seat-ok").unwrap();
+
+        emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: m.clone(),
+                adapter_name: "codex".to_owned(),
+                selected_at: Utc::now(),
+                selection_source: AdapterSelectionSource::Cli {
+                    flag: "codex".to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+        emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: worker.clone(),
+                molecule: Some(m.clone()),
+                session_name: "seat".to_owned(),
+                role: "refuter".to_owned(),
+                adapter_name: "codex".to_owned(),
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+        emit_model_selected(
+            dir.path(),
+            &m,
+            "codex",
+            Some("gpt-5.6-sol"),
+            ModelSelectionSource::Flag {
+                flag: "gpt-5.6-sol".to_owned(),
+            },
+        );
+        emit_new_model_observations(
+            dir.path(),
+            &m,
+            &worker,
+            "codex",
+            &[ModelId::new("gpt-5.6-sol").unwrap()],
+            ModelObservationSource::CodexSessionMeta,
+        );
+
+        let realized = realized_attribution(dir.path(), &m).expect("attribution present");
+        assert!(realized.realized_drift_display().is_none());
+    }
+
+    /// A molecule with nothing in the log projects to `None` — an advisory
+    /// read, never a fabricated attribution.
+    #[test]
+    fn realized_attribution_absent_for_an_unknown_molecule() {
+        let dir = tempdir().unwrap();
+        assert!(realized_attribution(dir.path(), &mol("task-20260728-none")).is_none());
     }
 }

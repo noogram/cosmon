@@ -343,6 +343,25 @@ fn resolve_tmux_pane_cwd(
 /// [`capture_realized_runtime`], split out so tests can drive it with a
 /// fixture directory instead of a process cwd / live pane.
 pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Path) {
+    capture_realized_from_cwd_under(state_dir, mol_id, cwd, None);
+}
+
+/// [`capture_realized_from_cwd`] with an explicitly named Claude `projects/`
+/// root (`None` = resolve from this process's environment, the historical
+/// behaviour).
+///
+/// The detached `cs realized-watch` child passes `Some(root)` because the
+/// dispatcher knows which Claude configuration directory the worker was
+/// actually launched under, and the watcher's own environment may not name it
+/// (a `cb next`-derived `~/.claude-accounts/<email>/` appears in no inherited
+/// variable). Codex resolution is unaffected — it joins on
+/// `session_meta.payload.cwd` under `~/.codex`, a root cosmon never rewrites.
+pub fn capture_realized_from_cwd_under(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    cwd: &Path,
+    claude_projects_root: Option<&Path>,
+) {
     let adapter = last_adapter_for(state_dir, mol_id);
     // Fail-closed worker scoping (round-3 / F-02): every new observation must
     // be attached to the worker that produced it. No resolvable worker → no
@@ -353,10 +372,13 @@ pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Pa
     let (observed, source) = match adapter.as_deref() {
         // Subprocess adapters whose model lives in a session log on disk.
         Some("claude") | None => (
-            resolve_claude_session_by_cwd(cwd)
-                .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|c| realized_models_from_claude_jsonl(&c))
-                .unwrap_or_default(),
+            match claude_projects_root {
+                Some(root) => resolve_claude_session_by_cwd_under(root, cwd),
+                None => resolve_claude_session_by_cwd(cwd),
+            }
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|c| realized_models_from_claude_jsonl(&c))
+            .unwrap_or_default(),
             ModelObservationSource::ClaudeStreamJson,
         ),
         Some("codex") => (
@@ -383,10 +405,44 @@ pub fn capture_realized_from_cwd(state_dir: &Path, mol_id: &MoleculeId, cwd: &Pa
     );
 }
 
+/// The session-log **root directory** the realized-model observer will read
+/// for `mol_id`, given the Claude `projects/` root this process was told to
+/// use (`None` = resolve from the environment).
+///
+/// This is the directory whose *absence* means no observation can ever
+/// arrive — the thing the watcher checks so it can say so instead of ticking
+/// in silence (task-20260727-3f46). `None` is returned for adapters that keep
+/// no session log on disk (the in-process providers): there is no root to
+/// miss, so there is nothing to report.
+///
+/// Note this is the shared root (`…/projects`, `~/.codex/sessions`), not the
+/// per-`cwd` subdirectory. The subdirectory is legitimately absent for the
+/// first seconds of every run — the worker creates it when it writes its
+/// first turn — so treating *its* absence as a broken seam would cry wolf on
+/// every healthy dispatch.
+#[must_use]
+pub fn session_log_root_for(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    claude_projects_root: Option<&Path>,
+) -> Option<PathBuf> {
+    match last_adapter_for(state_dir, mol_id).as_deref() {
+        Some("claude") | None => {
+            Some(claude_projects_root.map_or_else(claude_projects_dir, Path::to_path_buf))
+        }
+        Some("codex") => Some(codex_sessions_dir()),
+        _ => None,
+    }
+}
+
 /// The adapter that most recently ran for `mol_id`, folded from the last
 /// [`EventV2::AdapterSelected`] on `events.jsonl`. `None` on read error or when
 /// no selection was recorded (legacy → treated as claude by the caller).
-fn last_adapter_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<String> {
+///
+/// Public so the detached watcher can scope its own diagnostics to the
+/// adapter that actually ran, without re-implementing the fold.
+#[must_use]
+pub fn last_adapter_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<String> {
     let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
     let envelopes = cosmon_state::event_log::read_all(&log_path).ok()?;
     envelopes.into_iter().rev().find_map(|env| match env.event {
@@ -401,7 +457,12 @@ fn last_adapter_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<String> {
 
 /// The worker most recently spawned for `mol_id` (the current attempt), from the
 /// last [`EventV2::WorkerSpawned`]. Scopes the emitted observations (F-02).
-fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId> {
+///
+/// Public for the same reason as [`last_adapter_for`]: the watcher's
+/// broken-seam diagnostic is scoped to the same attempt as the observations
+/// it replaces, and must resolve that scope the same way.
+#[must_use]
+pub fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId> {
     let log_path = cosmon_state::event_log::resolve_events_log_path(state_dir);
     let envelopes = cosmon_state::event_log::read_all(&log_path).ok()?;
     envelopes.into_iter().rev().find_map(|env| match env.event {
@@ -418,8 +479,14 @@ fn last_worker_for(state_dir: &Path, mol_id: &MoleculeId) -> Option<WorkerId> {
 /// most-recently-modified log under `~/.claude/projects/{sanitize(cwd)}/`. The
 /// completing process shares the worker's cwd, so this needs no live pane.
 fn resolve_claude_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
-    let dir = claude_projects_dir().join(sanitize_path(&cwd.to_string_lossy()));
-    most_recent_jsonl(&dir)
+    resolve_claude_session_by_cwd_under(&claude_projects_dir(), cwd)
+}
+
+/// [`resolve_claude_session_by_cwd`] against an explicitly named `projects/`
+/// root — the watcher's path, where the root comes from the dispatcher rather
+/// than from this process's environment.
+fn resolve_claude_session_by_cwd_under(projects_root: &Path, cwd: &Path) -> Option<PathBuf> {
+    most_recent_jsonl(&projects_root.join(sanitize_path(&cwd.to_string_lossy())))
 }
 
 /// Resolve the codex session `rollout-*.jsonl` for a worker whose `cwd` is
@@ -568,18 +635,60 @@ pub fn sanitize_path(path: &str) -> String {
         .collect()
 }
 
-/// `~/.claude/sessions/` directory.
+/// The Claude Code **configuration root** — the directory that holds
+/// `projects/` and `sessions/`.
+///
+/// Precedence mirrors Claude Code's own, and that is the whole point:
+/// `CLAUDE_CONFIG_DIR` when it is set to a non-empty value, `$HOME/.claude`
+/// otherwise. cosmon *itself* exports `CLAUDE_CONFIG_DIR` onto every worker it
+/// spawns (multi-account routing via `cb`, and every container deployment),
+/// so a resolver that hardcoded `$HOME/.claude` looked for the session log in
+/// a directory that does not exist while the real one sat one level over —
+/// silently losing the realized-model observation for the whole life of the
+/// run (task-20260727-3f46; measured in a Colima container where
+/// `$HOME/.claude` was absent entirely).
+///
+/// Note the asymmetry with `$HOME`: an unset `HOME` falls back to `"."`
+/// (historical behaviour, kept), while an *empty* `CLAUDE_CONFIG_DIR` is
+/// treated as unset — an empty path would resolve to `/projects` at the
+/// filesystem root, which is never what an operator means.
 #[must_use]
-pub fn claude_sessions_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".claude").join("sessions")
+pub fn claude_config_dir() -> PathBuf {
+    match std::env::var("CLAUDE_CONFIG_DIR") {
+        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
+        _ => {
+            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".claude")
+        }
+    }
 }
 
-/// `~/.claude/projects/` directory.
+/// The Claude Code `sessions/` directory (pid sidecars), under
+/// [`claude_config_dir`].
+#[must_use]
+pub fn claude_sessions_dir() -> PathBuf {
+    claude_config_dir().join("sessions")
+}
+
+/// The Claude Code `projects/` directory (session logs), under
+/// [`claude_config_dir`].
 #[must_use]
 pub fn claude_projects_dir() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".claude").join("projects")
+    claude_config_dir().join("projects")
+}
+
+/// The `projects/` directory of an **explicitly named** Claude configuration
+/// root — the value `cs tackle` resolved for this dispatch and handed to the
+/// watcher on its command line.
+///
+/// The detached watcher cannot re-derive the worker's config dir from its own
+/// environment: when the account came from `cb next`, the directory is
+/// `~/.claude-accounts/<email>/` and appears in no environment variable the
+/// watcher inherits. So the dispatcher tells it, and this is where that
+/// answer is turned into a path.
+#[must_use]
+pub fn claude_projects_dir_under(config_dir: &Path) -> PathBuf {
+    config_dir.join("projects")
 }
 
 #[cfg(test)]
@@ -595,6 +704,49 @@ pub(crate) mod test_support {
 
     /// Serializes every test that swaps `HOME` to a fixture root.
     pub(crate) static HOME_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Take the `HOME` serialization lock **and neutralize
+    /// `CLAUDE_CONFIG_DIR`** for the duration of the test.
+    ///
+    /// Since task-20260727-3f46 the session-log root honours
+    /// `CLAUDE_CONFIG_DIR` in preference to `$HOME/.claude` — correctly, since
+    /// that is what Claude Code itself does. But it means a test that
+    /// redirects `HOME` to a fixture no longer controls the resolution: on any
+    /// developer machine that exports `CLAUDE_CONFIG_DIR` (this fleet's own
+    /// multi-account setup does), the fixture would be ignored and the test
+    /// would read the operator's real logs. The guard removes the variable on
+    /// acquire and restores it on drop, so a fixture `HOME` means what it says.
+    pub(crate) fn home_guard() -> HomeGuard {
+        // Poisoning is expected here: a test that panics mid-swap leaves the
+        // mutex poisoned, and every later test would fail for a reason that
+        // has nothing to do with it. The lock serializes; it guards no
+        // invariant a panic could have broken.
+        let lock = HOME_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os("CLAUDE_CONFIG_DIR");
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        HomeGuard {
+            _lock: lock,
+            previous,
+        }
+    }
+
+    /// RAII guard returned by [`home_guard`]: holds the serialization lock and
+    /// restores the ambient `CLAUDE_CONFIG_DIR` when the test ends.
+    pub(crate) struct HomeGuard {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.previous.take() {
+                Some(v) => std::env::set_var("CLAUDE_CONFIG_DIR", v),
+                None => std::env::remove_var("CLAUDE_CONFIG_DIR"),
+            }
+        }
+    }
 
     /// Seed the dispatch journal: `AdapterSelected` + `WorkerSpawned`.
     pub(crate) fn seed_dispatch(state_dir: &Path, mol: &MoleculeId, adapter: &str, worker: &str) {
@@ -902,6 +1054,138 @@ mod tests {
         assert!((c - 0.25).abs() < f64::EPSILON);
     }
 
+    // ---- task-20260727-3f46: the session-log root actually used ----------
+
+    /// The defect, stated as a test: cosmon exports `CLAUDE_CONFIG_DIR` onto
+    /// the worker it spawns, so the resolver that reads the worker's session
+    /// log must honour the same variable. Before the fix it resolved
+    /// `$HOME/.claude/projects` unconditionally — a directory that does not
+    /// exist at all in a container deployment.
+    #[test]
+    fn projects_dir_honours_claude_config_dir_over_home() {
+        let _guard = test_support::home_guard();
+        let home = tempfile::TempDir::new().unwrap();
+        let routed = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+
+        assert_eq!(claude_projects_dir(), home.path().join(".claude/projects"));
+        assert_eq!(claude_sessions_dir(), home.path().join(".claude/sessions"));
+
+        std::env::set_var("CLAUDE_CONFIG_DIR", routed.path());
+        assert_eq!(claude_projects_dir(), routed.path().join("projects"));
+        assert_eq!(claude_sessions_dir(), routed.path().join("sessions"));
+
+        // An empty value is not a path to the filesystem root — it means
+        // "unset", exactly as an absent variable does.
+        std::env::set_var("CLAUDE_CONFIG_DIR", "");
+        assert_eq!(claude_projects_dir(), home.path().join(".claude/projects"));
+
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// The same defect end to end, through the real capture core: the worker
+    /// wrote its log under the routed config dir and `$HOME/.claude` does not
+    /// exist — the exact shape measured in the container. The observation must
+    /// still land.
+    #[test]
+    fn capture_finds_the_session_log_under_a_routed_claude_config_dir() {
+        let _guard = test_support::home_guard();
+        let home = tempfile::TempDir::new().unwrap();
+        let routed = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", routed.path());
+
+        // `$HOME/.claude` is deliberately never created: in the container it
+        // did not exist, and the old resolver looked there anyway.
+        assert!(!home.path().join(".claude").exists());
+
+        let proj = routed
+            .path()
+            .join("projects")
+            .join(sanitize_path(&cwd.path().to_string_lossy()));
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260727-1f01").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+        capture_realized_from_cwd(state.path(), &mol, cwd.path());
+
+        assert_eq!(
+            fold_from_log(state.path(), &mol).realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-opus-4-8".to_string()
+            ]),
+        );
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    /// The watcher's path: the root comes from the dispatcher on the command
+    /// line, not from this process's environment. This is the `cb next` case,
+    /// where the worker's `~/.claude-accounts/<email>/` is named by no
+    /// variable the detached child inherits — so an explicit root must
+    /// override whatever the environment happens to say.
+    #[test]
+    fn capture_under_an_explicit_root_ignores_the_ambient_environment() {
+        let _guard = test_support::home_guard();
+        let home = tempfile::TempDir::new().unwrap();
+        let decoy = tempfile::TempDir::new().unwrap();
+        let account = tempfile::TempDir::new().unwrap();
+        let state = tempfile::TempDir::new().unwrap();
+        let cwd = tempfile::TempDir::new().unwrap();
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", home.path());
+        // The environment points somewhere else entirely — and stays wrong.
+        std::env::set_var("CLAUDE_CONFIG_DIR", decoy.path());
+
+        let encoded = sanitize_path(&cwd.path().to_string_lossy());
+        let real = claude_projects_dir_under(account.path()).join(&encoded);
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(
+            real.join("sess.jsonl"),
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-sonnet-5\"}}\n",
+        )
+        .unwrap();
+
+        let mol = MoleculeId::new("task-20260727-1f02").unwrap();
+        seed_dispatch(state.path(), &mol, "claude", "worker-1");
+        capture_realized_from_cwd_under(
+            state.path(),
+            &mol,
+            cwd.path(),
+            Some(&claude_projects_dir_under(account.path())),
+        );
+
+        assert_eq!(
+            fold_from_log(state.path(), &mol).realized,
+            cosmon_core::adapter_attribution::Realized::Observed(vec![
+                "claude-sonnet-5".to_string()
+            ]),
+            "the explicitly-named root must win over the ambient variable"
+        );
+
+        std::env::remove_var("CLAUDE_CONFIG_DIR");
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     // ---- F-01/F-06 end-to-end: completion-seam capture -------------------
     //
     // fixture session file on disk → `capture_realized_from_cwd` (the real
@@ -912,7 +1196,7 @@ mod tests {
 
     #[test]
     fn capture_at_completion_claude_end_to_end() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -972,7 +1256,7 @@ mod tests {
 
     #[test]
     fn capture_at_completion_codex_end_to_end() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1051,7 +1335,7 @@ mod tests {
     /// realized-model-priced cost — same fidelity class as a claude row.
     #[test]
     fn codex_worker_energy_probes_tokens_and_priced_cost() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1090,7 +1374,7 @@ mod tests {
     /// reports `cost = 0.0`, which the COST column renders as `—`.
     #[test]
     fn codex_worker_energy_unpriced_model_keeps_tokens_zero_cost() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1129,7 +1413,7 @@ mod tests {
     /// rollout log happens to name the same cwd.
     #[test]
     fn claude_worker_never_reads_codex_rollout() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1178,7 +1462,7 @@ mod tests {
     /// `cs complete` → the observation is durable and the fold renders it.
     #[test]
     fn runtime_first_turn_observation_survives_claude_crash_before_complete() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1255,7 +1539,7 @@ mod tests {
     /// resolution (`session_meta.payload.cwd` join).
     #[test]
     fn runtime_first_turn_observation_survives_codex_crash_before_complete() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1313,7 +1597,7 @@ mod tests {
     /// no worker, no line.
     #[test]
     fn capture_without_worker_boundary_emits_nothing() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1364,7 +1648,7 @@ mod tests {
 
     #[test]
     fn capture_is_idempotent_across_repeated_completion_reads() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1402,7 +1686,7 @@ mod tests {
 
     #[test]
     fn capture_skips_in_process_provider_adapters() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let state = tempfile::TempDir::new().unwrap();
         let cwd = tempfile::TempDir::new().unwrap();
@@ -1443,7 +1727,7 @@ mod tests {
     /// backends list resolves no pane, exactly like a dead pane in prod).
     #[test]
     fn post_mortem_capture_claude_turn_then_kill_then_capture() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");
@@ -1501,7 +1785,7 @@ mod tests {
     /// `session_meta.payload.cwd` join — pane-independent by construction.
     #[test]
     fn post_mortem_capture_codex_turn_then_kill_then_capture() {
-        let _guard = HOME_LOCK.lock().unwrap();
+        let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
         let prev_home = std::env::var_os("HOME");

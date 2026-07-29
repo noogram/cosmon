@@ -17,9 +17,339 @@ this stage.
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
-## [Unreleased]
+## [0.4.0] — 2026-07-29
+
+**A release about controls that measure the property next to the one that
+matters.** Three independent review rounds on noogram/cosmon#20 kept finding the
+same shape at every layer — a check that measures *speaking* rather than
+*being*, *presence* rather than *content*, the *label* rather than the
+*property*. The committee integrity witnesses had zero production callers, so a
+roster could claim two providers and be contradicted by nothing; the release
+gate `CLAUDE.md` had ordered for months did not exist as a file; the credential
+canary proved a hardcoded pattern matched a hardcoded string and never that the
+tracked tree had been scanned. All three are now enforced by a tool at a
+boundary, each pinned by a falsifier proven red on revert *and* a counterweight
+proving the gate can still pass — because a gate proven only to fail is
+indistinguishable from an outage.
+
+Minor rather than patch: a supported invocation was **removed**. `cs` running as
+root refuses to spawn a worker at all, with or without a demote target. Under
+SemVer 0.x a patch is for backwards-compatible fixes, and a user upgrading
+0.3.0 → 0.3.1 does not expect their dispatch to start being refused.
+
+### Removed
+
+- **The root → uid demote path.** `cs` running as root with `COSMON_WORKER_UID`
+  set no longer demotes a worker; it declines before it writes anything. There
+  is no flag to restore the old behaviour, because what made it work was handing
+  the worker the repository's shared object store — see the Security entry
+  below, and [ADR-166](docs/adr/166-the-root-to-uid-demote-path-is-refused.md).
+  The nominal pilot (`cs` running as the same non-root uid its workers run as)
+  is unaffected and needs no hand-over at all.
+
+### Security
+
+- **A root dispatcher no longer demotes a worker to another uid — it
+  refuses.** Making a demotion work means handing the worker the repository's
+  *shared* git object store and *shared* `refs/heads`, because a linked
+  worktree commits through both and git offers no way to delegate one branch
+  or one object. Any grant large enough to let a worker commit is therefore
+  large enough to let it rewrite a sibling molecule's branch and delete an
+  object that molecule's history depends on — reproduced at uid 10001 in a
+  Linux container and again at uid 501 on macOS. After three narrowings of the
+  hand-over in two days, the fourth move is to close the path: `cs` running as
+  root with `COSMON_WORKER_UID` set now declines before it writes anything —
+  no consent pre-grant, no `chown`, no process — with a typed refusal
+  (`root-spawn-refused:demote-shares-repository-storage`) naming the uid to run
+  as and pointing at the container guide. The nominal pilot, `cs` running as
+  the same non-root uid its workers run as, is unaffected and is what the
+  refusal points at; it needs no hand-over at all. The bounded design that
+  would make demotion safe — per-worker refs and objects over a read-only
+  shared store, with `cs done` fetching rather than merging in place — is a
+  different worktree lifecycle and is named, not half-built. See
+  [ADR-166](docs/adr/166-the-root-to-uid-demote-path-is-refused.md), which
+  supersedes ADR-165 §2.
+- **`cs resurrect` rolls back its dispatch ledger when the promotion to
+  `Running` fails.** Between `commit_dispatch` (which registers an Active
+  worker and emits `WorkerSpawned`) and the spawn itself, two fallible steps
+  returned early without undoing those writes — a worker the fleet believed
+  live and no process anywhere. `cs tackle` rolled this back at both of its
+  exits; this door was missed.
+
+- **`cs-api` now enforces its own bind rule instead of documenting it, and
+  no longer grants every browser origin.** The daemon has no
+  authentication and one of its routes, `POST /molecules/{id}/tackle`,
+  spawns a worker — so the listening address is the only access-control
+  boundary the process has. It was a plain pass-through: the "run behind
+  Tailscale" caveat lived in a Rust doc comment while `docs/guides/ios-pilot.md`,
+  `apps/ios-pilot/README.md`, the in-app settings footer and the LaunchAgent
+  installer all instructed an all-interfaces bind. A reader of the guide
+  never met the caveat.
+
+  `0.0.0.0` / `::` is now refused outright, with no flag to override it: it
+  does not name a network, it names every interface the host has now or
+  acquires later, so the exposure cannot be determined and we fail closed.
+  Any other non-loopback address requires the explicit
+  `--i-know-this-exposes-an-unauthenticated-api`, whose help text states
+  what it opens; the admitted address is a value only the check can
+  construct, so an unvalidated bind is not a reachable state. CORS defaults
+  to emitting no headers at all — the Mac and iOS pilots are native clients
+  that never send an `Origin` — and `--allow-web-origin <ORIGIN>` names
+  origins explicitly (exact match, repeatable, `*` refused by name). Every
+  document that taught the old gesture now teaches the safe one, beside the
+  refusal messages the reader will actually see. Ratified as
+  `docs/architectural-invariants.md` §8z; the authentication gap that
+  remains is stated, with its decided shape, in `crates/cosmon-api/README.md`.
+
+- **The credential canary now proves every rule, through the engine that
+  actually scans.** It asserted a *second hardcoded copy* of the github-token
+  regex against a loose file with plain `grep` — so breaking the real rule,
+  deleting it, or breaking `git grep` still printed PASS. Every rule is now
+  driven through the same `git grep -nIE` path as the scan, against a
+  shape-only synthetic must-hit keyed by rule name, with coverage checked in
+  both directions. It found a live defect on its first run: a pattern beginning
+  with `-` is parsed by git as an *option*, so **both PEM rules had never run**
+  — git errored, stderr went to `/dev/null`, and the rules reported clean on a
+  tree they never searched. Fixed with `-e` at all three call sites.
+
+- **A `.publish-allow` sidecar is a waiver again, not a whole-file exclusion in
+  costume.** Its only conditions were "non-empty" and "tracked", and it was
+  consulted before the rule was known — so one byte in `x.pem.publish-allow`
+  waived *every* credential rule on `x.pem` forever. Four conditions now:
+  comment-less formats only (everything else takes the inline marker), a reason
+  matching the opt-out shape, the two key-shaped rules only, and a required
+  `publish-allow-blob: <sha>` pinning the waived content, so a waiver written
+  for a synthetic test key does not inherit whatever bytes land at that path
+  next. The canary's `CRED_EXCLUDE` list is pinned to a reviewed literal, so a
+  new blind spot costs two edits in one diff.
+
+- **The worker-prompt attribution directive no longer discloses the shape of
+  what it protects.** It ended by declaring that a particular operator
+  affiliation was private and would never appear in an artifact — a public
+  statement that a specific fact is withheld discloses that the fact exists, and
+  it leaked twice over, since the string is published source *and* resident in
+  every worker's context. Replaced by the positive rule that was doing the real
+  work: use the configured public name and no other. The test now asserts the
+  property (no withheld-category vocabulary, closure intact) rather than the
+  removed sentence verbatim, so a rewording that reintroduces the leak fails in
+  CI rather than in review.
+
+### Added
+
+- **`scripts/publish.sh --check` — the release gate `CLAUDE.md` had always
+  ordered, and which had never existed.** `git log --all -- scripts/publish.sh`
+  was empty: the file was not deleted, it was never written, so the line
+  guarding the public projection named a property nobody measured.
+  `docs/RELEASE-CHECKLIST.md` step 2 ordered the same absent command. On a tree
+  where every existing gate reported PASS it found four violations of "machine
+  paths must never be tracked" on main — including a tracked **symlink** to an
+  absolute machine path, invisible to every content scan in the tree because
+  `git grep` does not open symlink blobs. It is the structural subset decidable
+  from a bare clone with git and `python3` and nothing else, which is what lets
+  it fail the build where `release-checklist.sh` and `confidentiality-lint.sh`
+  honestly report PEND. Per-line waivers only, via the inline marker
+  `publish: allow — <reason>`.
+
+- **`cs peek` has a door to its own glyph vocabulary.** The TUI renders a
+  lifecycle pastille, a whisper bubble, a temperature, a three-signal step cell,
+  a trust bar and an energy bar, and nowhere could an operator look up what any
+  of them meant — the `?` overlay documented keybindings only, and `man cs` and
+  the handbook said nothing. Page 2 of the `?` overlay is now a glyph legend,
+  reached with Tab, scrollable with `j`/`k` and PgUp/PgDn; both pages scroll
+  rather than truncate, because hiding half an answer is not a fix for
+  illegibility. Every entry is **derived** — it calls the same renderer the
+  table calls and iterates the same exhaustive `ALL` lists — and a test fails
+  when a glyph exists in a renderer and not in the legend. A stale legend is
+  worse than none, because it is believed.
+
+- **`cs reconcile --check` enforces the committee integrity witnesses, which
+  until now had zero production callers.** Witness (1) — provider diversity —
+  and witness (2) — the seat's durable adversarial contract — were enforced only
+  by a worker reading a recipe, so a roster that skipped the check was
+  contradicted by nothing. The gate is now a tool at the CLI boundary, and every
+  axis it measures is *derived* rather than declared: a seat's provider family
+  is re-resolved from the `[adapters.<name>]` section it sits on (a declaration
+  that does not survive resolution is refused by name, and a seat naming no
+  adapter is refused as unresolvable rather than skipped); the `injected` flag
+  is read off the seat's own directory rather than hand-set; the seat's posture
+  file is **read**, not merely counted, and checked against the contract version
+  and hash its roster entry declares. Committee-hood itself is resolved from the
+  molecule's recorded `formula_id`, so a convener who writes no artefact at all
+  is still inspected. Terminal molecules are printed in full as HISTORICAL and
+  do not fail the gate — a permanently red gate over a committee that can no
+  longer write a roster is an outage wearing a control's clothes.
+
+- **`cs tackle` refuses an incoherent `(adapter, model)` pair before it spends
+  anything.** Measured 2026-07-28: `cs tackle <seat> --adapter codex` with
+  `ANTHROPIC_MODEL=claude-opus-5` in the dispatching shell resolved, dispatched,
+  was rejected by codex at launch with an HTTP 400, and left a floor-bearing
+  seat sitting mute at a prompt — indistinguishable from a provider outage.
+  Earlier seats' `model-selection.json` recorded `"outcome":"available"` for
+  that pair: the probe had measured that an id *resolves*, not that the pair is
+  *legal*, and reported a positive for what it never checked. The verdict is now
+  derived from the same resolution the provider-diversity floor already uses
+  (base_url → adapter lineage vs. model-id prefix), so a new `gpt-*` or
+  `claude-*` needs no edit and there is no allowlist to rot. Anything not
+  resolvable to a named vendor — a local endpoint, an undeclared adapter, an
+  unrecognised id — returns `NotChecked` and is **not** refused, because
+  refusing on the unknown would break every self-hosted endpoint. The claude
+  probe's trail now stamps a `probe_scope` naming what it did not check.
+
+- **A verdict's `confirmed → CLEAN` mapping is read through a required
+  `mechanism_polarity`.** Three formula files stated the mapping
+  unconditionally, twenty-five lines under a definition whose own example is the
+  opposite row — so a seat that *reproduced* a defect would have been filed
+  CLEAN. `confirmed` means the stated mechanism holds; whether that is good news
+  depends on what the mechanism claimed, which the reader cannot infer. The
+  polarity is now load-bearing rather than declarative: `cs reconcile --check`
+  refuses a missing polarity and an off-table triple, and the falsifier is
+  site-granular — it requires the condition in the same paragraph a reader
+  consumes, not merely somewhere in the flattened file.
+
+- **A live-worker container bench (`arm A`) that drives a real mission past the
+  credential gate,** with the verdict made honest: it refuses to build from a
+  dirty tree, and re-samples HEAD and the porcelain status *after* `docker
+  build` so that an edit or a commit landing mid-build is caught. The engine is
+  resolved in one place (`scripts/lib/bench-engine.sh`) on a dedicated
+  `cosmon-bench` colima profile; an unreachable engine is INCONCLUSIVE (exit 2)
+  with the exact `colima start` line, never a silent fallback to another
+  context. New: `scripts/container-engine-posture.sh`,
+  `scripts/lib/source-provenance.sh` and its test.
+
+### Changed
+
+- **The worker briefing is a protocol, not a jailbreak.** The closing blocks of
+  the dispatch prompt were written in the grammar of a prompt injection — a
+  `NON-NEGOTIABLE` banner, "This is physics, not politeness", a `DO NOT — These
+  are violations` list, and the claim that `cs complete` was the *only* valid
+  way to end. Two observed costs, neither hypothetical: the operator read a live
+  worker pane and asked whether prompts had been injected into a running
+  molecule — they were reading our own briefing, and a control the system's
+  owner mistakes for an attack on their own machine spends trust on every
+  inspection. And a task refused the ordered exit, correctly: it finished its
+  deliverable, found the real state did not support the transition, and declined
+  to fabricate one — right on the substance, and left `running` with the work
+  done, because the prompt put a good judgement in conflict with a blanket order
+  and offered no third door. The anti-stall property is load-bearing and is
+  kept, carried now by explanation and by a named third door (`cs note` +
+  `cs collapse` with a reason kind) instead of by coercion.
+
+- **`cs tackle` reads the built-in dispatch registry instead of re-typing it.**
+  It composed its registry from a literal `vec![…]` of the same ten names
+  `spawn_seam::built_in_adapter_names` already held. A second inventory is a
+  first inventory that will one day disagree — and the committee roster gate
+  measures a seat's adapter against the canonical list, so a name in the literal
+  only would dispatch and be unrosterable. Behaviour is unchanged; there is now
+  one list to add to.
+
+- **A seat is rostered when its adapter *resolves*, not when it has a TOML
+  section.** The gate refused any seat with no `[adapters.<name>]` section —
+  the property next to the one that matters, since `codex`, `claude`, `aider`
+  and `opencode` all dispatch with no section at all. In a galaxy whose only
+  non-generator family is reached through codex, the diversity gate refused the
+  sole provider that would have supplied the diversity, and no jury could be
+  seated. Worse, the remedy the old message prescribed was a fiction: codex has
+  no `base_url` and no `api_key_env`, so any section written to satisfy the gate
+  is unverifiable against the real dispatch path. Adapters are now measured on
+  two separate questions with two different sentences — *dispatchable* (in the
+  canonical registry or the TOML inventory; a name in neither is a ghost) and
+  *resolvable* (the section declares an endpoint, or the name carries a vendor
+  lineage cosmon knows). A registry-only adapter's family comes from what cosmon
+  knows about the binary it spawns, never from the seat's label.
 
 ### Fixed
+
+- **A demoted worker can now commit, because cosmon hands over the git
+  plumbing its worktree writes through — and the resource set is derived
+  in one place instead of remembered at two.** A linked worktree keeps
+  almost nothing inside itself: its HEAD, index and reflog live in
+  `<repo>/.git/worktrees/<name>`, and the objects and refs a commit
+  creates live in the repository's common dir. cosmon chowned the
+  worktree and stopped there, so a worker demoted to a non-root uid could
+  edit every file and record none of them — measured by an external
+  tester, two dispatches, both artefacts written, neither committed, both
+  molecules left short of a terminal state. Git additionally refused the
+  repository as *dubious ownership*, because it resolves the gitdir to a
+  directory owned by somebody else.
+
+  Both git roots are now read out of git's own on-disk pointers (the
+  worktree's `.git` file names the gitdir; the gitdir's `commondir` names
+  the common dir) rather than assembled from a path template, then
+  transferred and judged like every other resource. Ownership is the fix,
+  so `safe.directory` is deliberately **not** configured for the worker:
+  the *dubious ownership* message was a true report of a real defect, and
+  granting the exemption there would have silenced the diagnosis and left
+  the `EACCES` underneath it. It is configured for the **dispatcher**
+  instead, scoped to the paths just transferred, because handing the
+  plumbing to the worker is what makes root the foreign uid.
+
+  The third leaf of the same class, so the class is what was closed. The
+  repair list and the judge list were already required to be one list;
+  what kept failing was the *list*. Every path is now derived from
+  primitives a caller genuinely knows, by a single constructor both demote
+  call sites must use — the struct is `#[non_exhaustive]`, so no other
+  crate can build one by hand and under-declare — and the transfer is
+  recursive over roots rather than exhaustive over leaves, which is what
+  makes the enumeration's incompleteness survivable. Walking it also
+  surfaced a resource nobody had named: the adapter binary itself, which a
+  demoted worker cannot exec when the installer put it under a `0700`
+  home. It is now judged (and, alone among them, never repaired — the
+  binary belongs to whoever installed it) so the operator is told what to
+  `chmod` instead of watching a silent pane. What remains unknowable is
+  stated where the next reader meets it, in the port's module docs.
+
+- **`cs tackle` now records a dispatch before it spawns one, so a worker
+  cosmon started can no longer be invisible to cosmon.** A tmux worker is
+  committed to the operating system the instant it is spawned and outlives
+  the process that started it — but the molecule's `Running` flip, its
+  worker binding and its `WorkerSpawned` event were written only *after*
+  the whole readiness pipeline: the model preflight probe, the 30s liveness
+  wait, the briefing paste, the submit-confirmation window. On a healthy
+  dispatch that is ~98 seconds during which a live, paid worker exists and
+  nothing on disk says so.
+
+  Anything that ended the dispatcher inside that window — a `^C` on a
+  dispatch that looked hung, a closed terminal, a host suspend — left a
+  worker with no ledger entry at all: `cs observe` read `pending`,
+  `cs patrol` could not see it (its orphan scan looks for the opposite
+  shape), and the worker's own `cs evolve` was refused, so a molecule could
+  finish real committed work with an empty step list. Six of this fleet's
+  240 completed molecules carried that signature.
+
+  A filesystem ledger and a `fork`/`exec` cannot commit atomically, so the
+  record moves to the near side of the spawn and is rolled back if the spawn
+  fails: a molecule marked `Running` with no worker is the shape the orphan
+  scan already heals, while a worker with no molecule is visible to nothing.
+  The ordering is enforced by the compiler — the commit returns a token that
+  the spawn requires and checks against its own `(molecule, worker)` pair,
+  so spawn-then-record no longer compiles. `cs resurrect` had the identical
+  shape and is fixed with it. Both `cs patrol` and `cs tackle` now name a
+  live session whose molecule does not admit being dispatched, telling the
+  operator where the worker's commits are. Ratified as
+  `docs/architectural-invariants.md` §8ab.
+
+- **`cs tackle` no longer asks a question, and cosmon's first-run consent
+  prompt no longer hangs a captured dispatch.** In a container, a dispatch
+  with a valid credential ran its full 240s timeout and spawned nothing: `cs
+  tackle` had printed the French `opt-in-share` prompt into a stdout the
+  orchestrator was capturing, on a stdin that was still the terminal
+  inherited from `docker exec -it`. No keystroke could arrive and no output
+  could warn. The guard tested `stdin().is_terminal()` — "is a terminal
+  attached?" — instead of "can a human see this and answer it?".
+
+  Two repairs, because the predicate and the placement were both wrong. A
+  first-run question is now asked only when **stdin and stdout are both
+  terminals**; a captured stdout auto-declines down the identical path a
+  missing TTY already took, and says so on stderr with the explicit remedy.
+  And the question left the dispatch path entirely — it now fires from `cs
+  init` (suppressed under `--json`) and from `cs opt-in-share` invoked alone.
+  Nothing on the dispatch path may block on a human.
+
+  The regression test allocates a real pty and asserts the process
+  *terminates*, not what it wrote: the broken build records the same
+  decline, just after somebody types into a terminal nobody is watching.
+  [ADR-163](docs/adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md),
+  architectural invariant §8w. Fifth door of noogram/cosmon#20.
 
 - **The `claude` adapter no longer stalls on Claude Code 2.1.220's first-run
   wizard.** The installer moved from 2.1.218 to 2.1.220 under us; the new build
@@ -48,14 +378,138 @@ this stage.
   classifier still refuses any screen it cannot certify, and cosmon does not
   answer onboarding — it declines to summon it.
 
+- **Every tmux worker pane gets a UTF-8 locale floor, so its TUI is legible.**
+  cosmon drives its worker as a TUI under tmux and never ensured the locale that
+  makes that TUI readable. In a container with no locale configured — `LANG`
+  unset, `LC_CTYPE=POSIX`, the ordinary default of a slim Debian base — tmux
+  draws every non-ASCII glyph as `_` and corrupts text with it. Nothing on the
+  screen points at the locale, so an external tester reports it as a cosmon
+  rendering bug. Measured in `debian:bookworm-slim` + tmux 3.3a: `capture-pane`
+  returns the bytes **intact**, so the application writes correct UTF-8 and tmux
+  stores it correctly — the substitution happens when tmux draws to a *client*
+  whose locale does not declare UTF-8, and a server started under `C.UTF-8`
+  still renders `_` to a POSIX client. Both halves are addressed for what they
+  are: the pane cosmon spawns is prefixed with `LC_ALL=<utf8 locale>` at the one
+  choke point covering all four tmux-backed adapters (and only when neither
+  `LC_ALL`, `LC_CTYPE` nor `LANG` already declares UTF-8, so a UTF-8 host keeps
+  a byte-identical command), and the attach line `cs tackle` and `cs resurrect`
+  print carries it too, because that attach is one cosmon does not spawn.
+
+- **The realized-model observer honours `CLAUDE_CONFIG_DIR`, and says so when
+  the seam is broken.** It resolved the Claude session-log root as
+  `$HOME/.claude/projects` unconditionally — while cosmon itself exports
+  `CLAUDE_CONFIG_DIR` onto every worker it spawns, for multi-account routing and
+  for every container deployment its own guide instructs. Measured 2026-07-27 in
+  Colima: `$HOME/.claude` absent, the worker's log under
+  `/home/cosmon-worker/.claude-fz/projects/…`, and a detached watcher ticking
+  every second for 7m34s emitting nothing. `cs peek` rendered
+  `realized: … (pending)` for the whole life of every worker, so the
+  pin-versus-realized comparison that exists to close the `/model`-hack leak
+  could never fire. It worked on the operator's Mac only because an interactive
+  install had created `~/.claude` by accident. Fixed at the resolver rather than
+  patched at the watcher, and `cs tackle` now carries the config dir forward,
+  because a detached watcher cannot re-derive a routed account directory from
+  its own environment.
+
+- **A test that skips is no longer a test that passes.** `claude_consent_live`
+  printed `SKIP: not runnable` and returned when tmux or `claude` was absent,
+  reporting `0 passed; 0 failed; 1 ignored` and a green line — for the only
+  automated check of the startup-consent pre-grant. Reaching that code means
+  somebody passed `--ignored` and asked for the measurement, so it now fails
+  loudly with what is missing. In the same pass: the confidentiality banlist
+  states the rule it actually enforces rather than a wider one it does not, and
+  a recorded measurement that a later reader had inherited as a falsifier now
+  says in its own text that it contains zero assertions.
+
+- **The doc gate is unbroken, and an empty journal now says it is empty.** A
+  public doc comment linked to a private const — it compiled, linted and tested
+  green and failed only `RUSTDOCFLAGS='-D warnings' cargo doc`, which is why
+  that gate is not redundant with the others. Journals now carry a header
+  stating how many events they hold and what an event would look like:
+  previously an empty journal was pruned by the zero-byte rule and its
+  emptiness — the whole measurement — vanished.
+
+- **A jury that records its own compromise may not certify, and a diversity
+  floor with no slack is a single point of failure at any floor height.** The
+  floor was measured on the roster as planned rather than on the jury that
+  actually sat, and an endpoint nobody observed was counted as an endpoint that
+  matched. Both are re-checked against what was delivered.
+
 ### Documentation
 
-- **Do not put a cosmon galaxy on a `-v` bind mount from macOS.** Under Docker
-  Desktop those mounts are virtiofs, where `chown` is a silent no-op: cosmon
-  chowns the worktree, the filesystem ignores it, and the ownership preflight
-  refuses the dispatch with no sign that anything failed. Put the project on
-  container-local storage. Contributed by `@jdthaler`, who lost an afternoon to
-  it — `docs/guides/claude-worker-in-a-container.md`.
+- **Do not put a cosmon galaxy on a `-v` bind mount from macOS.** Those mounts
+  are virtiofs, where `chown` is a silent no-op: cosmon chowns the worktree, the
+  filesystem ignores it, and the ownership preflight refuses the dispatch with
+  no sign that anything failed. Put the project on container-local storage.
+  Contributed by `@jdthaler`, who lost an afternoon to it —
+  `docs/guides/claude-worker-in-a-container.md`. (Corrected 2026-07-27: this
+  entry said "Under Docker Desktop". Measured on both engines, Docker Desktop
+  is the one where the mount *honours* `chown` and the whole failure mode is
+  invisible; the silent no-op reproduces on colima/virtiofs.)
+
+- **The container benches moved to a dedicated colima profile, and the fidelity
+  claim they carried was measured instead of asserted.** The three benches
+  pinned `--context desktop-linux` under a header stating that this was the
+  external tester's engine and that "a colima context runs an Ubuntu kernel with
+  a DIFFERENT user-namespace posture and is NOT faithful". On 2026-07-27 the
+  tester corrected his own earlier description, unprompted: his bed is Colima
+  (Lima-based), Ubuntu 24.04.4 LTS, aarch64. The benches had been pinned away
+  from his real engine by a comment written to keep them faithful to it.
+
+  Both engines were then probed rather than re-guessed. Under the default
+  seccomp profile, `unshare` as a non-root uid is **blocked** on colima and
+  **succeeds** on Docker Desktop; a bind-mounted `chown` is **silently ignored**
+  on colima and **honoured** on Docker Desktop. So the old default reproduced
+  neither of the tester's two standing findings — it was not merely mislabelled,
+  it was the engine that cannot see them. The block is attributed to the default
+  seccomp profile by flipping `--security-opt seccomp=unconfined` and nothing
+  else, not by reading a sysctl: on colima both userns sysctls are permissive
+  and `unshare` is refused anyway.
+
+  The engine is now resolved in one place (`scripts/lib/bench-engine.sh`) on the
+  profile `cosmon-bench`, which belongs to the benches and to nothing else. An
+  unreachable engine is **INCONCLUSIVE (exit 2)** with the exact `colima start`
+  line — never a silent fallback to another context. New:
+  `scripts/container-engine-posture.sh` and
+  `docs/benches/engine-fidelity-2026-07-27.md`. Captures taken on the old engine
+  are kept as produced and carry a dated note naming the engine they were
+  actually taken on.
+
+- **ADR-153 records that "pure and unit-tested" was never enforcement.** Its
+  Consequences claimed the dual witness was closed because the logic was pure
+  and unit-tested. It was — and it enforced nothing, because the kernel had no
+  production callers, so every predicate passed while a witness-failing roster
+  was contradicted by no tool. The amendment names the gap, points at the
+  boundary that now refuses, and keeps the original rejection of a `cs
+  committee` verb intact: no surface was added. A second amendment records the
+  identical shape found one layer down, on what seats *emit* rather than on who
+  sits, so the next occurrence is recognised rather than rediscovered.
+
+- **The convener owes each seat a distinct entry point, named in the brief.**
+  Distinct provider families stop two judges making the same mistake about what
+  they read; they do not stop them reading the same place, and the artefact
+  hands every seat the same itinerary. Deliberately a briefing rule and not a
+  scoring one — folding entry-point distinctness into the diversity floor would
+  add a second self-attested axis, which is the defect class the round existed
+  to close.
+
+- **Release-bound guidance no longer teaches a mechanism that does not exist and
+  is also the named anti-pattern.** `docs/architecture-baseline.md` told
+  vendoring galaxies to extend "the path allowlist via `.publish-allowlist.txt`"
+  — a file with zero hits in `git ls-files` and zero readers in `scripts/`,
+  describing a pathspec exclusion that `publish.sh` forbids by name two hundred
+  lines away. This was the worst of the three to leave standing, because
+  vendoring guidance is copied into other repositories as a recommendation. A
+  guard now asserts on *this* repository, so the prohibition cannot quietly
+  become a recommendation again.
+
+- **The two demote integration suites carry a banner saying they exercise a
+  dormant path,** now that the root → uid demote path is refused, and the CLI
+  pre-flight tests point at the refusal the funnel actually reaches.
+
+- **`cs peek`'s how-to points at the new glyph legend,** and the
+  `converge-clean-room` formula is available at galaxy level rather than only
+  inside the galaxy that first wrote it.
 
 ## [0.3.0] — 2026-07-24
 

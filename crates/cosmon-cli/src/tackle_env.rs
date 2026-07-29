@@ -656,7 +656,12 @@ mod tests {
     fn root_dispatch_demotes_the_worker_and_drops_the_root_bypass() {
         let bin = "/usr/local/bin/claude";
         // A root dispatcher with the default worker uid available → Demote.
-        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        // Stated, not decided: `decide_root_spawn` refuses every root dispatch
+        // now — a demotion can only be made to work by handing the worker the
+        // repository's shared objects and refs. These tests are about the
+        // command SHAPE the dormant demote arm produces, so they supply the
+        // decision rather than asking a policy that no longer selects it.
+        let decision = cosmon_core::root_spawn_policy::RootSpawnDecision::Demote { to_uid: 10001 };
         let demoted = build_claude_command(
             "/tmp/state/mol-X",
             "task-20260723-d1f4",
@@ -1209,7 +1214,12 @@ mod tests {
     fn demotion_wraps_the_real_binary_despite_hostile_env_values() {
         let bin = "/usr/local/bin/claude";
         let hostile = format!("{bin} --permission-mode");
-        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        // Stated, not decided: `decide_root_spawn` refuses every root dispatch
+        // now — a demotion can only be made to work by handing the worker the
+        // repository's shared objects and refs. These tests are about the
+        // command SHAPE the dormant demote arm produces, so they supply the
+        // decision rather than asking a policy that no longer selects it.
+        let decision = cosmon_core::root_spawn_policy::RootSpawnDecision::Demote { to_uid: 10001 };
 
         for var in ["CLAUDE_CONFIG_DIR", "ANTHROPIC_MODEL", "IS_SANDBOX"] {
             let cmd = build_claude_command(
@@ -1247,7 +1257,12 @@ mod tests {
     #[test]
     fn demotion_wraps_the_real_binary_despite_a_hostile_state_path() {
         let bin = "/usr/local/bin/claude";
-        let decision = cosmon_core::root_spawn_policy::decide_root_spawn(0, Some(10001));
+        // Stated, not decided: `decide_root_spawn` refuses every root dispatch
+        // now — a demotion can only be made to work by handing the worker the
+        // repository's shared objects and refs. These tests are about the
+        // command SHAPE the dormant demote arm produces, so they supply the
+        // decision rather than asking a policy that no longer selects it.
+        let decision = cosmon_core::root_spawn_policy::RootSpawnDecision::Demote { to_uid: 10001 };
         let cmd = build_claude_command(
             &format!("/tmp/state/{bin} --permission-mode"),
             "task-20260723-778a",

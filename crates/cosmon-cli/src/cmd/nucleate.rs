@@ -1435,6 +1435,26 @@ fn nucleate_and_persist(
             .join(result.id.as_str());
 
         write_briefing(&dir, formula, &result)?;
+        // NO committee-posture delivery here, and the absence is the point.
+        //
+        // A `reinstate_committee_posture_reference(&dir, …)` call sat on this
+        // line, added to let a convener satisfy witness (2) before handoff: the
+        // durable `committee-posture.md` must exist in the seat's directory AND
+        // `briefing.md` must carry the pointer at it, and only `cs tackle` /
+        // `cs evolve` wrote the second fact.
+        //
+        // It could never fire. That function returns immediately unless
+        // `committee-posture.md` already exists in the molecule directory — and
+        // nucleation MINTS the id and CREATES the directory three lines above,
+        // so nothing can pre-exist it. The call was a permanent no-op in the
+        // recipe's own sequence: a control that reads as delivered work and
+        // does none, which is worse than an absence a reader can see.
+        //
+        // Nothing regressed by removing it: `cs tackle` and `cs evolve` both
+        // re-establish the pointer, which is where the seat actually gets one.
+        // The convener's real path is to nucleate the seat, write the posture
+        // file into its directory, and let the first dispatch deliver the
+        // pointer — the ordering the two-fact test was designed around.
         write_prompt(&dir, formula, &result)?;
         write_log(&dir, &result)?;
         emit_event(store_dir, &result, blocks)?;

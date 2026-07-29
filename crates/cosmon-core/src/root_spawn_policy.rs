@@ -15,6 +15,13 @@
 //! 3. *(forbidden)* **spawn a live cognitive worker as uid 0** — an autonomous
 //!    LLM with root's entire blast radius.
 //!
+//! **Outcome 1 is now refused too**, and [`decide_root_spawn`] carries the
+//! argument: demoting across uids requires handing the worker the
+//! repository's shared object store and shared refs, which is repository-wide
+//! destructive authority over every sibling molecule. A root dispatcher
+//! therefore always reaches outcome 2, and the way forward it names is the
+//! nominal one — run `cs` as the non-root uid the workers run as.
+//!
 //! The pre-#20 spawn path reached the forbidden outcome: under a bypass
 //! permission mode it forced `IS_SANDBOX=1` purely to survive Claude Code's
 //! own root guard, *keeping the worker as root*. That optimises to preserve
@@ -31,11 +38,17 @@
 //! and that a test can exercise for `running_uid == 0` without any privilege.
 //! The load-bearing invariant — **root never resolves to a live root
 //! worker** — is then a property of this function, checkable in-process:
-//! for `running_uid == 0` the decision is always [`RootSpawnDecision::Demote`]
-//! or [`RootSpawnDecision::Refuse`], and [`RootSpawnDecision::SpawnAsIs`] is
-//! structurally reachable only for a non-root dispatcher.
+//! for `running_uid == 0` the decision is always [`RootSpawnDecision::Refuse`],
+//! and [`RootSpawnDecision::SpawnAsIs`] is structurally reachable only for a
+//! non-root dispatcher.
 //!
-//! # What this module does NOT yet do (named follow-up)
+//! # What the demote machinery below is now for
+//!
+//! Everything under this line describes a path [`decide_root_spawn`] no longer
+//! takes. It is kept, unmodified in substance, for two reasons: it is the
+//! substrate the per-worker ref/object lifecycle will re-enable, and its
+//! checks are what an operator sees if that lifecycle ever lands. Read it as
+//! documentation of a dormant capability, not of live behaviour.
 //!
 //! [`enforce_demote_provisioning`] *detects* that a demote target cannot reach
 //! its config home, worktree, or state dir and turns that into a typed refusal.
@@ -102,6 +115,18 @@ pub enum RootRefusalReason {
         /// The path the target uid cannot use.
         path: String,
     },
+    /// Demotion is possible and would even work — and cosmon refuses anyway,
+    /// because the hand-over it requires grants the demoted worker write
+    /// authority over storage the **whole repository** shares.
+    ///
+    /// See [`decide_root_spawn`] for why this is a refusal of the path rather
+    /// than a fourth narrowing of the grant.
+    DemoteSharesRepositoryStorage {
+        /// The uid the worker would have been demoted to. Carried so the
+        /// refusal can name the nominal invocation — *be* this uid — rather
+        /// than describing it in the abstract.
+        uid: u32,
+    },
 }
 
 /// What a path the demoted worker needs is *for*.
@@ -122,6 +147,44 @@ pub enum DemoteResource {
     /// `cs complete`. `--add-dir` is a Claude *authorization* grant, not an OS
     /// `chown` — it cannot override `EACCES`.
     StateDir,
+    /// One of the startup-consent files **cosmon itself wrote** into the config
+    /// home before the spawn (`.claude.json`, `settings.json`).
+    ///
+    /// A root dispatcher writes them as root; the worker then opens them as the
+    /// demote target. When it cannot, Claude Code does not fail — it concludes
+    /// it is on a first run and *replaces* `.claude.json` wholesale, losing the
+    /// pre-grant and rendering the onboarding wizard nobody is there to answer.
+    /// The containing directory being usable says nothing about this: measured
+    /// on 2.1.220, a worker-owned config home holding a root-owned
+    /// `.claude.json` reproduces the hang exactly.
+    ConsentFile,
+    /// The git plumbing the worktree records commits *through* — the linked
+    /// worktree's own gitdir (`<repo>/.git/worktrees/<name>`: HEAD, index,
+    /// logs, `ORIG_HEAD`) and the repository's common dir (`<repo>/.git`:
+    /// `objects/`, `refs/`, `logs/`, `packed-refs`, and the lock files git
+    /// creates beside them).
+    ///
+    /// A linked worktree keeps almost nothing under the worktree directory —
+    /// only a `.git` *file* pointing elsewhere. So a demote that chowns the
+    /// worktree and stops there produces a worker that can edit every file and
+    /// record none of them: `git add` fails on the index it cannot write, and
+    /// git refuses the repository outright as *dubious ownership* because it
+    /// resolves the gitdir to a directory owned by another uid. Measured by the
+    /// external tester on issue #20 — two dispatches wrote their artefact and
+    /// neither could commit.
+    GitPlumbing,
+    /// The adapter binary the worker execs — `claude`, resolved from the
+    /// dispatcher's `PATH` or named explicitly.
+    ///
+    /// Judged and never repaired, which is the point of naming it: it belongs
+    /// to whoever installed it, and cosmon taking ownership of an interpreter
+    /// on the host would be a far worse default than refusing. The external
+    /// tester's own recipe carries `chmod o+x /root && chmod -R o+rX
+    /// /root/.local`, because the installer puts `claude` under a `0700` home
+    /// that a demoted worker cannot traverse. Without that line the worker
+    /// spawns into a pane whose command is not runnable — a dispatch that
+    /// costs a molecule slot and produces nothing.
+    WorkerBinary,
 }
 
 impl DemoteResource {
@@ -132,6 +195,9 @@ impl DemoteResource {
             DemoteResource::ConfigHome => "claude config home",
             DemoteResource::Worktree => "worktree",
             DemoteResource::StateDir => "cosmon state dir",
+            DemoteResource::ConsentFile => "claude startup-consent file",
+            DemoteResource::GitPlumbing => "git plumbing the worktree commits through",
+            DemoteResource::WorkerBinary => "adapter binary the worker execs",
         }
     }
 
@@ -158,6 +224,42 @@ impl DemoteResource {
                 "cosmon chowns the declared .cosmon state dirs to the uid on the \
                  demote path, so this one resisted it — check for a read-only \
                  mount, an ACL, or a parent directory the uid cannot search"
+            }
+            // Deliberately does NOT advise chowning the config home wholesale:
+            // it can be an operator-supplied directory holding the operator's
+            // own credential, and cosmon only ever takes ownership of the two
+            // files it wrote there itself.
+            DemoteResource::ConsentFile => {
+                "cosmon chowns the consent files it wrote (.claude.json, \
+                 settings.json) to the uid on the demote path, so this one \
+                 resisted it — check for a read-only mount, an ACL, or a mode \
+                 that denies the owner read (a worker that cannot read them \
+                 replaces them and re-opens the onboarding wizard)"
+            }
+            // Same shape as the worktree remedy: cosmon transfers this itself
+            // on the demote path, so a refusal here means the transfer did not
+            // take. Advising "chown it yourself" would be the catch-22 all over
+            // again — the linked worktree's gitdir is created by the very
+            // `cs tackle` that is demoting.
+            DemoteResource::GitPlumbing => {
+                "cosmon chowns the worktree's gitdir and the repository's git \
+                 common dir to the uid on the demote path, so this one resisted \
+                 it — check for a read-only mount, an ACL, a bare-repo layout \
+                 outside the checkout, or a parent directory the uid cannot \
+                 search (a worker that cannot write these can edit files and \
+                 never commit them)"
+            }
+            // The one resource cosmon judges and deliberately does NOT repair:
+            // the binary belongs to whoever installed it, and chowning an
+            // interpreter on the host is not a benign default. So this remedy,
+            // alone among them, is genuinely the operator's to apply — and it
+            // is followable, unlike the catch-22 the worktree advice used to be.
+            DemoteResource::WorkerBinary => {
+                "make the adapter binary reachable by the uid — `chmod o+x` \
+                 every directory on the way to it and `chmod o+x` the binary \
+                 itself (an installer that put it under a 0700 home is the \
+                 usual cause), or install it somewhere the uid can already \
+                 traverse"
             }
         }
     }
@@ -192,9 +294,20 @@ impl RootRefusalReason {
             RootRefusalReason::UnprovisionedTarget { .. } => {
                 "root-spawn-refused:unprovisioned-demote-target"
             }
+            RootRefusalReason::DemoteSharesRepositoryStorage { .. } => {
+                "root-spawn-refused:demote-shares-repository-storage"
+            }
         }
     }
 }
+
+/// The guide a root dispatcher is pointed at: the nominal, non-root pilot.
+///
+/// A refusal that names no way forward is an outage. This constant is the way
+/// forward, and it is quoted in the refusal text rather than left for the
+/// operator to find — §8z: a caveat the operator cannot read is not a control,
+/// and neither is a remedy.
+pub const NON_ROOT_PILOT_GUIDE: &str = "docs/guides/cosmon-mission-in-a-container.md";
 
 impl std::fmt::Display for RootRefusalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -216,6 +329,19 @@ impl std::fmt::Display for RootRefusalReason {
                 resource.label(),
                 resource.remedy(),
             ),
+            RootRefusalReason::DemoteSharesRepositoryStorage { uid } => write!(
+                f,
+                "refusing to demote a worker from root to uid {uid}: committing \
+                 from a linked worktree needs write access to the repository's \
+                 shared object store and shared refs/heads, which would let \
+                 this worker rewrite another molecule's branch or delete an \
+                 object another molecule's history depends on \
+                 (reproduced at uid 10001 in a container and at uid 501 on \
+                 macOS) — run cs as uid {uid} itself instead of as root \
+                 (`docker exec -u {uid}:{uid} -e HOME=<that uid's home> … cs \
+                 tackle …`), which needs no hand-over at all; see \
+                 {NON_ROOT_PILOT_GUIDE}",
+            ),
         }
     }
 }
@@ -234,6 +360,14 @@ pub enum RootSpawnDecision {
     SpawnAsIs,
     /// The dispatcher **is** root; drop privileges to `to_uid` (a non-root
     /// uid) before exec so the live worker never holds root.
+    ///
+    /// **Dormant.** [`decide_root_spawn`] never returns this variant: the
+    /// hand-over demotion requires grants repository-wide destructive git
+    /// authority, so the path is refused rather than narrowed (see that
+    /// function). The variant survives because it is the shape the bounded
+    /// per-worker ref/object lifecycle will restore, and the machinery behind
+    /// it — [`demotion_command_prefix`], the transport provisioning port —
+    /// stays tested against it. Nothing on a live dispatch constructs it.
     Demote {
         /// The non-root uid the worker is demoted to. Guaranteed `!= 0`.
         to_uid: u32,
@@ -257,10 +391,61 @@ pub enum RootSpawnDecision {
 ///
 /// # The invariant
 ///
-/// For `running_uid == 0` the result is **never** [`RootSpawnDecision::SpawnAsIs`]:
-/// it is [`RootSpawnDecision::Demote`] with a non-zero uid, or
-/// [`RootSpawnDecision::Refuse`]. This is the contract-20A guarantee that a
-/// live cognitive worker never runs as root.
+/// For `running_uid == 0` the result is **always**
+/// [`RootSpawnDecision::Refuse`]. That is stronger than the original
+/// contract-20A guarantee (never [`RootSpawnDecision::SpawnAsIs`], i.e. never
+/// a live root worker), and it subsumes it.
+///
+/// # Why root → uid is refused rather than narrowed a fourth time
+///
+/// The demote path was never only a privilege drop. A worker demoted to
+/// another uid cannot write anything the root dispatcher created, so the path
+/// carries a hand-over: cosmon `chown`s the worktree, the state dirs, the
+/// consent files and the git plumbing to the target uid. That hand-over was
+/// found incomplete three times and too generous once, in two days — and the
+/// last residue does not yield to a fifth cut.
+///
+/// A linked worktree commits through the repository's **shared** object store
+/// and its **shared** `refs/heads` directory. Git's files backend offers no
+/// per-ref and no per-object delegation: writing a loose object means creating
+/// the `objects/XX/` fan-out, which needs write on `objects` itself, and a
+/// branch named `feat/task-…` lives in a directory that also holds every
+/// sibling molecule's branch. So the grant that is small enough to be safe is
+/// not large enough to commit, and the grant that is large enough to commit
+/// lets a worker rewrite a sibling branch or delete an object another
+/// molecule's history depends on. Both were **reproduced**, twice: at uid
+/// 10001 in a Linux container, and again at uid 501 on macOS through a
+/// mode-bit freeze (`demote_git_plumbing_scope.rs`, the test named
+/// `the_grant_still_permits_a_sibling_ref_rewrite_and_a_shared_object_delete`,
+/// which characterises the authority the hand-over would confer and is what
+/// this refusal exists to avoid conferring).
+///
+/// The bounded design that would make demotion safe — per-worker ref and
+/// object storage reaching the shared store read-only through
+/// `objects/info/alternates`, with `cs done` *fetching* rather than merging in
+/// place — is a different worktree lifecycle, not a tighter `chown`. It is
+/// named and deferred, not half-built.
+///
+/// Meanwhile the nominal path costs nothing to prefer: run `cs` as the same
+/// non-root uid the workers run as. Nothing is created by one identity and
+/// handed to another, so there is nothing to hand over and nothing to get
+/// wrong. An external tester has replicated that pilot end to end — two
+/// consecutive dispatches to terminal state and a `cs done` that merged and
+/// cleaned up — with no `safe.directory` exemption. Refusing the dangerous
+/// path therefore blocks no one, which is what makes fail-closed the cheap
+/// choice here rather than the expensive one.
+///
+/// # What survives, and why the `Demote` variant is still in the type
+///
+/// [`RootSpawnDecision::Demote`] is no longer reachable from this function.
+/// It is retained — together with [`demotion_command_prefix`] and the
+/// transport-side provisioning port — because it is the shape the per-worker
+/// storage lifecycle above will re-enable, and because the tests that
+/// characterise the grant are the evidence for this refusal. Nothing
+/// constructs it on a live dispatch: see the transport funnel
+/// `provision_and_decide_root_spawn`, whose repair step is now unreachable by
+/// construction, and the test that asserts a refused root dispatch touches no
+/// file at all.
 #[must_use]
 pub fn decide_root_spawn(running_uid: u32, demote_target: Option<u32>) -> RootSpawnDecision {
     if running_uid != 0 {
@@ -268,8 +453,12 @@ pub fn decide_root_spawn(running_uid: u32, demote_target: Option<u32>) -> RootSp
         return RootSpawnDecision::SpawnAsIs;
     }
     match demote_target {
-        // A valid non-root target: drop privileges to it before exec.
-        Some(uid) if uid != 0 => RootSpawnDecision::Demote { to_uid: uid },
+        // A valid non-root target. Demotion would *work* — and it is refused,
+        // because making it work means handing this uid the repository's
+        // shared object store and shared refs. See the section above.
+        Some(uid) if uid != 0 => RootSpawnDecision::Refuse {
+            reason: RootRefusalReason::DemoteSharesRepositoryStorage { uid },
+        },
         // No target, or a target that is itself root: demotion is impossible,
         // so refuse before a live worker exists rather than spawn as root.
         _ => RootSpawnDecision::Refuse {
@@ -468,11 +657,14 @@ mod tests {
     /// `IS_SANDBOX=1` to keep the worker running at uid 0.
     #[test]
     fn root_never_spawns_as_is() {
-        // With the default worker uid available → demote to it.
+        // With the default worker uid available → refused anyway, because
+        // demoting to it means handing it the repository's shared storage.
         assert_eq!(
             decide_root_spawn(0, Some(CONVENTIONAL_WORKER_UID)),
-            RootSpawnDecision::Demote {
-                to_uid: CONVENTIONAL_WORKER_UID
+            RootSpawnDecision::Refuse {
+                reason: RootRefusalReason::DemoteSharesRepositoryStorage {
+                    uid: CONVENTIONAL_WORKER_UID,
+                },
             },
         );
         // With demotion disabled → refuse before a live worker exists.
@@ -502,6 +694,69 @@ mod tests {
                 reason: RootRefusalReason::NoNonRootTarget,
             },
         );
+    }
+
+    /// The property this refusal exists for: **no** root dispatch, for **any**
+    /// demote target, resolves to a demotion.
+    ///
+    /// Stated over the whole target space rather than over the conventional
+    /// uid, because the hazard is a property of the hand-over and not of a
+    /// particular number. Red before the refusal landed: every non-zero target
+    /// returned `Demote`.
+    #[test]
+    fn no_root_dispatch_resolves_to_a_demotion() {
+        for target in [
+            None,
+            Some(0),
+            Some(1),
+            Some(501),
+            Some(CONVENTIONAL_WORKER_UID),
+            Some(u32::MAX),
+        ] {
+            let decision = decide_root_spawn(0, target);
+            assert!(
+                matches!(decision, RootSpawnDecision::Refuse { .. }),
+                "root with demote target {target:?} must refuse, got {decision:?}",
+            );
+        }
+    }
+
+    /// The refusal is *typed* — an audit can key on the token — and it is
+    /// *reachable*: the operator-facing text names the uid to run as and the
+    /// guide that shows how. A refusal an operator cannot act on is an outage
+    /// wearing a security hat.
+    #[test]
+    fn the_shared_storage_refusal_names_the_nominal_invocation_and_the_guide() {
+        let RootSpawnDecision::Refuse { reason } = decide_root_spawn(0, Some(10001)) else {
+            panic!("root with a non-zero demote target must refuse");
+        };
+        assert_eq!(
+            reason,
+            RootRefusalReason::DemoteSharesRepositoryStorage { uid: 10001 },
+        );
+        assert_eq!(
+            reason.as_token(),
+            "root-spawn-refused:demote-shares-repository-storage",
+        );
+        // The container repro harness keys on this substring for every reason.
+        assert!(reason.as_token().contains("root"));
+
+        let text = reason.to_string();
+        for expected in [
+            // why
+            "shared object store",
+            "rewrite another molecule's branch",
+            // what to do instead, concretely enough to type
+            "run cs as uid 10001 itself",
+            "docker exec -u 10001:10001",
+            // where to read the rest
+            NON_ROOT_PILOT_GUIDE,
+        ] {
+            assert!(
+                text.contains(expected),
+                "the refusal text must contain {expected:?}, got: {text}",
+            );
+        }
     }
 
     /// A non-root dispatcher is untouched — the whole normal fleet path.
@@ -605,7 +860,7 @@ mod tests {
     #[test]
     fn demote_runs_the_preflight_as_the_demoted_identity_never_as_root() {
         let seen = std::cell::RefCell::new(Vec::new());
-        let decision = decide_root_spawn(0, Some(CONVENTIONAL_WORKER_UID));
+        let decision = dormant_demote(CONVENTIONAL_WORKER_UID);
         let outcome = gate_cognitive_preflight(&decision, |identity| {
             seen.borrow_mut().push(identity);
             "probe-selected-fallback".to_owned()
@@ -651,6 +906,20 @@ mod tests {
 
     // ── COSMON-DEV #20 defect A3: provisioning of the demoted identity ──
 
+    /// A `Demote` decision, stated explicitly because [`decide_root_spawn`] no
+    /// longer produces one.
+    ///
+    /// The tests below are about [`enforce_demote_provisioning`] and
+    /// [`gate_cognitive_preflight`], whose contracts are *given a decision* and
+    /// are unchanged. Building their input from `decide_root_spawn` would now
+    /// feed them a refusal, and each assertion would pass for the wrong reason
+    /// — a refusal refuses, a refusal runs no pre-flight. That is a false green
+    /// of exactly the kind this lineage keeps producing, so the input is
+    /// constructed here instead of derived.
+    fn dormant_demote(to_uid: u32) -> RootSpawnDecision {
+        RootSpawnDecision::Demote { to_uid }
+    }
+
     fn access(resource: DemoteResource, path: &str, usable: bool) -> DemoteResourceAccess {
         DemoteResourceAccess {
             resource,
@@ -666,7 +935,7 @@ mod tests {
     /// the readiness probe already calling it live.
     #[test]
     fn unreachable_config_home_refuses_instead_of_demoting() {
-        let decision = decide_root_spawn(0, Some(CONVENTIONAL_WORKER_UID));
+        let decision = dormant_demote(CONVENTIONAL_WORKER_UID);
         let out = enforce_demote_provisioning(
             decision,
             &[access(DemoteResource::ConfigHome, "/root/.claude", false)],
@@ -693,7 +962,7 @@ mod tests {
     /// demoted worker's own `cs evolve` write.
     #[test]
     fn unwritable_state_dir_refuses_because_add_dir_is_not_chown() {
-        let decision = decide_root_spawn(0, Some(10001));
+        let decision = dormant_demote(10001);
         let out = enforce_demote_provisioning(
             decision,
             &[
@@ -731,7 +1000,7 @@ mod tests {
     /// blanket refusal of the demote path.
     #[test]
     fn fully_provisioned_target_still_demotes() {
-        let decision = decide_root_spawn(0, Some(10001));
+        let decision = dormant_demote(10001);
         let out = enforce_demote_provisioning(
             decision,
             &[

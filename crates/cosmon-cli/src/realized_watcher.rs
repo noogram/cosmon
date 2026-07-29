@@ -26,16 +26,34 @@ use std::path::Path;
 ///   `--config` flag so the child writes to the same journal as the
 ///   dispatcher (a child that inherited discovery would resolve the *cwd's*
 ///   galaxy, not the dispatched one).
+/// * `claude_config_dir` — the `CLAUDE_CONFIG_DIR` the worker was actually
+///   launched under, when the spawn resolved one. Passed **explicitly, on the
+///   command line**, because it is precisely the thing the child cannot
+///   inherit: a `cb next`-routed account lives at
+///   `~/.claude-accounts/<email>/` and is named by no environment variable
+///   the child receives. Omitting it means "the child's own environment
+///   decides" — right for codex, and for a claude dispatch with no explicit
+///   routing (task-20260727-3f46).
 #[must_use]
-pub fn watcher_argv(mol_id: &str, worktree: &Path, state_dir: &Path) -> Vec<OsString> {
-    vec![
+pub fn watcher_argv(
+    mol_id: &str,
+    worktree: &Path,
+    state_dir: &Path,
+    claude_config_dir: Option<&Path>,
+) -> Vec<OsString> {
+    let mut argv = vec![
         OsString::from("realized-watch"),
         OsString::from(mol_id),
         OsString::from("--cwd"),
         worktree.as_os_str().to_os_string(),
         OsString::from("--config"),
         state_dir.as_os_str().to_os_string(),
-    ]
+    ];
+    if let Some(dir) = claude_config_dir {
+        argv.push(OsString::from("--claude-config-dir"));
+        argv.push(dir.as_os_str().to_os_string());
+    }
+    argv
 }
 
 #[cfg(test)]
@@ -51,6 +69,7 @@ mod tests {
             "task-20260719-ada3",
             Path::new("/w/tree"),
             Path::new("/s/state"),
+            None,
         );
         assert_eq!(
             argv,
@@ -61,6 +80,26 @@ mod tests {
                 OsString::from("/w/tree"),
                 OsString::from("--config"),
                 OsString::from("/s/state"),
+            ]
+        );
+    }
+
+    /// The routed case (task-20260727-3f46): a dispatch whose worker runs
+    /// under a non-default `CLAUDE_CONFIG_DIR` must hand that directory to
+    /// the watcher, or the watcher reads a root the worker never wrote to.
+    #[test]
+    fn argv_carries_the_resolved_claude_config_dir_when_one_applies() {
+        let argv = watcher_argv(
+            "task-20260719-ada3",
+            Path::new("/w/tree"),
+            Path::new("/s/state"),
+            Some(Path::new("/home/worker/.claude-fz")),
+        );
+        assert_eq!(
+            &argv[argv.len() - 2..],
+            &[
+                OsString::from("--claude-config-dir"),
+                OsString::from("/home/worker/.claude-fz"),
             ]
         );
     }

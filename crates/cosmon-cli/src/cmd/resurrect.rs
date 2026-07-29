@@ -186,7 +186,77 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // inline from `$ANTHROPIC_MODEL` inside `resolve_worker_model`, which
     // now takes the pin as a parameter.
     let resurrect_model = crate::cmd::tackle::env_default_model().map(|(v, _)| v);
-    crate::cmd::tackle::spawn_and_prompt(
+
+    // Record the resurrection BEFORE spawning it, for the same reason
+    // `cs tackle` does (task-20260727-198f): a tmux worker outlives the
+    // process that started it, so any ledger write ordered after the spawn
+    // is a window in which a live worker exists that nothing on disk knows
+    // about. `cs resurrect` had the identical shape — spawn, install the
+    // hook, then flip Frozen → Running — and the same exposure.
+    //
+    // The bare `?` **on this call** is safe on the ledger axis: `commit_dispatch`
+    // undoes the writes it landed before returning an error, so a refused
+    // resurrection leaves the molecule exactly as `prior` holds it. That
+    // guarantee belongs to `commit_dispatch` alone and does not extend one line
+    // further: every fallible step *after* it must roll back explicitly, which
+    // is what the promotion block and the spawn arm below do. `prior` exists for
+    // both of them.
+    let prior = mol.clone();
+    let (mol, recorded) = crate::cmd::dispatch_ledger::commit_dispatch(
+        &store,
+        &mol,
+        &crate::cmd::dispatch_ledger::DispatchRecord {
+            worker: &wid,
+            session_name: &session_name,
+            adapter: &adapter,
+            loop_ownership,
+            model: resurrect_model.as_deref(),
+            // A resurrection is a human gesture (`cs resurrect` has no
+            // runtime caller), so the claim is sticky — the resident runtime
+            // must not preempt a molecule an operator just revived.
+            tackled_by: cosmon_core::tackle::TackledBy::Human,
+            worktree_path: &worktree_path,
+            repo_root: &repo_root,
+        },
+    )?;
+    // `commit_dispatch` only promotes Pending/Queued; a resurrection starts
+    // from Frozen, so state the transition the command exists to perform.
+    // `stuck_at` is the marker for stuck-flavored Frozen
+    // (`task-20260509-177e`); clear it on the way back to Running so a
+    // future `cs collapse` reports `previous_status: "running"` rather than
+    // carrying a stale stuck context across resurrection.
+    //
+    // Neither `?` in here may be bare. Once `commit_dispatch` has returned Ok
+    // the ledger says a worker is Active — a live entry in `fleet.json`, a bound
+    // `MoleculeProcess`, a `WorkerSpawned` on the wire — and no process has been
+    // started yet. An early return from this block would leave exactly that: a
+    // worker nothing can find, because it never existed. That is the same
+    // phantom window the commit-before-spawn reordering opened on the tackle
+    // path, which rolls it back at both of its exits; this door was missed.
+    //
+    // The rollback is deliberately outside the guard's scope. `lock_fleet` is a
+    // non-reentrant advisory `flock`, so calling `rollback_dispatch` (which
+    // takes it) while still holding it would block on itself forever — the mute
+    // hang this codebase treats as worse than the error being handled.
+    let promoted = match store.lock_fleet() {
+        Ok(_g) => {
+            let mut updated = mol;
+            updated.status = MoleculeStatus::Running;
+            updated.stuck_at = None;
+            updated.updated_at = Utc::now();
+            store.save_molecule(&mol_id, &updated).map(|()| updated)
+        }
+        Err(e) => Err(e),
+    };
+    let mol = match promoted {
+        Ok(updated) => updated,
+        Err(e) => {
+            crate::cmd::dispatch_ledger::rollback_dispatch(&store, &prior, &wid);
+            return Err(e.into());
+        }
+    };
+
+    if let Err(e) = crate::cmd::tackle::spawn_and_prompt(
         &backend,
         &wid,
         &session_name,
@@ -203,7 +273,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // cosmon's intrinsic `DEFAULT_STRONG_MODELS` still keeps a cheap
         // pin's fallback tail off the strong model (task-20260705-ba98).
         &[],
-    )?;
+        &recorded,
+    ) {
+        // The spawn we recorded did not happen: undo the ledger entry so the
+        // molecule returns to the state the operator can retry from, rather
+        // than reading Running against a session that never came up.
+        crate::cmd::dispatch_ledger::rollback_dispatch(&store, &prior, &wid);
+        return Err(e);
+    }
 
     // Re-arm the worker-exit → `cs done` bridge. A resurrected worker
     // has the same terminal-closure need as a freshly tackled one.
@@ -223,41 +300,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
-    // Flip molecule status Frozen → Running under the fleet lock so concurrent
-    // patrol/done invocations don't clobber the transition.
-    let prior_session = mol.session_name.clone();
-    {
-        // ADR-131 Decision 2: RAII guard replaces the lock-bounding closure.
-        let _g = store.lock_fleet()?;
-        let s = &store;
-        let mut updated = s.load_molecule(&mol_id)?;
-        updated.status = MoleculeStatus::Running;
-        updated.assigned_worker = Some(wid.clone());
-        updated.session_name = Some(session_name.clone());
-        updated.updated_at = Utc::now();
-        // `stuck_at` is the marker for stuck-flavored Frozen
-        // (`task-20260509-177e`); clear it on the way back to Running so a
-        // future `cs collapse` reports `previous_status: "running"` rather
-        // than carrying a stale stuck context across resurrection.
-        updated.stuck_at = None;
-        s.save_molecule(&mol_id, &updated)?;
-        // `cs resurrect` rebuilds a Claude session by construction
-        // (the resurrection codepath only emits `claude --resume …`);
-        // pin the adapter_name so the WorkerSpawned event matches
-        // the binary actually invoked (ADR-097 / C8). ADR-099 / TS-0
-        // — `&adapter` is the same `ValidatedAdapterName` constructed
-        // above, so the registered worker carries the byte-identical
-        // value that the spawn seam consumed.
-        crate::cmd::tackle::register_tackle_worker(
-            s,
-            &wid,
-            &worktree_path,
-            &repo_root,
-            &updated,
-            &adapter,
-            loop_ownership,
-        )?;
-    }
+    // The Frozen → Running flip, the worker binding and the fleet
+    // registration all happened in the pre-spawn commit above; nothing is
+    // left to do here but carry the session the molecule held *before* this
+    // resurrection into the `Resurrected` event.
+    let prior_session = prior.session_name.clone();
 
     // Breadcrumb — small metadata file, NOT an artifact duplicate.
     let prompt_hash = {
@@ -308,7 +355,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "branch": branch,
             "prior_count": prior_count,
             "composed_prompt_bytes": composed_prompt_bytes,
-            "attach": format!("tmux -L {socket} attach -t {session_name}"),
+            // Carries a UTF-8 locale when the spawn env declares none, so a
+            // copied attach line renders the worker's TUI instead of a field
+            // of underscores (invariant §8x).
+            "attach": cosmon_transport::locale::attach_command_from_env(&socket, &session_name),
         });
         println!("{out}");
     } else {
@@ -318,7 +368,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  worktree: {}", worktree_path.display());
         println!("  prior resurrections: {prior_count}");
         println!("  prompt bytes: {composed_prompt_bytes}");
-        println!("  attach: tmux -L {socket} attach -t {session_name}");
+        println!(
+            "  attach: {}",
+            cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
+        );
     }
 
     drop(lock_file);

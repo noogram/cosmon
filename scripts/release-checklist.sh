@@ -34,7 +34,20 @@ set -uo pipefail
 
 REPO_SLUG="noogram/cosmon"
 POST_FLIP=0
-[ "${1:-}" = "--post-flip" ] && POST_FLIP=1
+# Argument parsing used to be `[ "$1" = "--post-flip" ] && POST_FLIP=1`, which
+# silently ignored everything else. `confidentiality-lint.sh` has been calling
+# `release-checklist.sh --check` — a flag that never existed. It happened to do
+# the right thing (pre-flip mode) for the wrong reason, and a typo'd
+# `--post-flipp` would have quietly downgraded the post-flip gates to PEND.
+# `--check` is now a real alias for the pre-flip run; anything else is refused.
+case "${1:-}" in
+  ""|--check) POST_FLIP=0 ;;
+  --post-flip) POST_FLIP=1 ;;
+  *)
+    echo "usage: scripts/release-checklist.sh [--check | --post-flip]" >&2
+    exit 2
+    ;;
+esac
 
 # Resolve repo root (this script lives in scripts/).
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -275,6 +288,25 @@ if [ $POST_FLIP -eq 1 ]; then
   fi
 else
   gate_pend "12. GitHub secret-scanning/push-protection settable post-flip — post-flip gate"
+fi
+
+# ── 14. structural publish membrane (scripts/publish.sh --check) ────────────
+# The clauses CLAUDE.md states loudest — runtime state, credentials, machine
+# paths, unreviewed binary assets — that are decidable from a bare clone with
+# no operator-local file and no installed scanner. That distinction matters
+# here: GATE 1 PENDs without gitleaks and GATE 4 PENDs without the operator's
+# private denylist, so on a fresh CI checkout the two clauses this covers had
+# no failing referee at all. Measured 2026-07-28: with every gate above PASS,
+# four machine-path leaks were tracked on main, one of them a symlink no
+# content scan in this tree can read.
+if [ -x scripts/publish.sh ]; then
+  if bash scripts/publish.sh --check >/tmp/rc-publish.log 2>&1; then
+    gate_pass "14. publish.sh --check → tracked tree yields a clean public projection"
+  else
+    gate_fail "14. publish.sh --check found publication blockers — see /tmp/rc-publish.log"
+  fi
+else
+  gate_fail "14. scripts/publish.sh missing or not executable — the structural membrane has no referee"
 fi
 
 # ── 13. second independent referee (ADVISORY — honest ABSENT record) ────────

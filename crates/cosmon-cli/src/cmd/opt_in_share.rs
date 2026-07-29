@@ -13,12 +13,24 @@
 //! * **Explicit trace either way.** Accept writes `accepted_at`; decline
 //!   writes `declined_at`. The file's presence + one of those two keys is the
 //!   durable proof of the operator's choice.
-//! * **Non-interactive = decline.** When stdin is not a TTY (CI, scripts,
-//!   worker shells), we skip the prompt and store `declined_at` without
-//!   asking. This keeps the hook in `cs tackle` safe for unattended runs.
+//! * **Non-interactive = decline.** When the question cannot be *answered*
+//!   (see [`can_ask_interactively`]), we skip the prompt and store
+//!   `declined_at` without asking. This keeps every unattended run safe.
 //! * **No trace in the user's project.** Consent lives under
 //!   `~/.config/cosmon/`, never inside the project's `.cosmon/` directory,
 //!   so sharing toggles don't leak into `git log`.
+//!
+//! # Where this question may be asked
+//!
+//! Not on the dispatch path. `cs tackle` used to call [`ensure_consent`] as
+//! its first act; that placement is the one place a blocking question is
+//! guaranteed to be unanswerable, because dispatch is exactly what an
+//! orchestrator wraps in `OUT="$(cs tackle …)"`. The question then prints
+//! into a variable nobody reads while stdin is still the inherited terminal
+//! — a mute hang, structurally the same failure as the four container doors
+//! of noogram/cosmon#20, except this one was ours. The hook now lives on
+//! `cs init` (the explicit, once-per-galaxy interactive moment) and on this
+//! command invoked alone. See ADR-163 and architectural invariant §8w.
 //!
 //! The age recipient is read from `~/.config/cosmon/default-recipient.age`
 //! (shipped by the cosmon installer). Its value is embedded in the consent
@@ -197,6 +209,49 @@ fn parse_yes_no(raw: &str) -> bool {
     )
 }
 
+/// Can a first-run question actually be **answered** right now?
+///
+/// The predicate this guard used to test was `stdin().is_terminal()` — "is a
+/// terminal attached?". That is not the same question. A prompt is answerable
+/// only when a human can *see* it and *type at* it, and those two halves come
+/// apart in exactly the case that hangs: an orchestrator captures the child's
+/// stdout (`OUT="$(cs …)"`) while stdin stays the inherited TTY. The question
+/// is then printed into a variable nobody reads, on an input nobody watches.
+/// No keystroke can arrive and no output can warn — a mute hang. Requiring
+/// **both** stdin and stdout to be terminals closes it: a captured stdout
+/// auto-declines down the same path a missing TTY already took.
+///
+/// stderr is deliberately **not** part of the conjunction. It is the channel
+/// we write the auto-decline trace on, and it is routinely redirected to a
+/// log file by supervisors that leave the interactive pair intact; folding it
+/// in would suppress a question the operator can see and answer perfectly
+/// well. The prompt is written to stdout, so stdout is the surface that must
+/// be visible — stderr's state says nothing about that.
+///
+/// # Why the conjunction is a separate function
+///
+/// It is the part with a truth table, and a truth table can be asserted
+/// exhaustively. Reading the process's real fds cannot be: a unit test runs
+/// inside whatever fds cargo handed the test binary, and cargo hands it a
+/// non-terminal stdin *and* a non-terminal stdout. A test that asserts
+/// `!can_ask_interactively()` in that harness therefore stays green with the
+/// stdout half deleted — it never reaches the second term. That test existed
+/// here, claiming to prove the fix; it proved that cargo captures stdout.
+///
+/// So the two halves are tested by the two things that can each see one of
+/// them: [`answerable`] below, exhaustively and in-process, and
+/// `tests/consent_non_blocking.rs`, which allocates a real pty for stdin and a
+/// real pipe for stdout and requires the binary to *terminate*.
+fn can_ask_interactively() -> bool {
+    answerable(io::stdin().is_terminal(), io::stdout().is_terminal())
+}
+
+/// The rule itself: a question is answerable only where it can be both seen
+/// and typed at.
+const fn answerable(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
+    stdin_is_terminal && stdout_is_terminal
+}
+
 /// Print the prompt, read one line from stdin, and return the accept bit.
 fn prompt_on_tty() -> anyhow::Result<bool> {
     let stdout = io::stdout();
@@ -219,18 +274,23 @@ pub enum Decision {
     Accepted,
     /// Operator explicitly declined on a TTY (or via `--decline`).
     Declined,
-    /// No TTY available — treated as decline (deny-by-default).
+    /// The question could not be answered where it was asked — no TTY, or a
+    /// TTY on stdin with a captured stdout — so it was not asked at all, and
+    /// deny-by-default was recorded. See [`can_ask_interactively`].
     SkippedNoTty,
 }
 
 /// Ensure a consent record exists for this user.
 ///
 /// * If one already exists, this is a no-op: returns `Ok(None)`.
-/// * Otherwise, prompts (when stdin is a TTY) or auto-declines (when not)
-///   and persists the answer.
+/// * Otherwise, prompts (only when [`can_ask_interactively`] holds) or
+///   auto-declines, and persists the answer.
 ///
 /// Callers that only need to *check* consent without prompting should use
-/// [`load_consent`] instead.
+/// [`load_consent`] instead. Callers must be an explicitly interactive
+/// moment — never the dispatch path (see the module docs and ADR-163) — and
+/// should surface [`Decision::SkippedNoTty`] on stderr so the auto-decline
+/// leaves a trace the operator can find later.
 ///
 /// # Errors
 /// Fails on filesystem I/O errors when persisting the record.
@@ -239,7 +299,7 @@ pub fn ensure_consent() -> anyhow::Result<Option<Decision>> {
         return Ok(None);
     }
     let recipient = read_recipient();
-    let decision = if io::stdin().is_terminal() {
+    let decision = if can_ask_interactively() {
         if prompt_on_tty()? {
             Decision::Accepted
         } else {
@@ -276,7 +336,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         (Decision::Accepted, ConsentRecord::accepted(recipient))
     } else if args.decline {
         (Decision::Declined, ConsentRecord::declined(recipient))
-    } else if io::stdin().is_terminal() {
+    } else if can_ask_interactively() {
         if prompt_on_tty()? {
             (Decision::Accepted, ConsentRecord::accepted(recipient))
         } else {
@@ -382,11 +442,49 @@ fn render_decision(
                 path.display()
             ),
             Decision::SkippedNoTty => println!(
-                "opt-in-share: stdin non-tty — refus par défaut enregistré ({})",
+                "opt-in-share: {} — refus par défaut enregistré ({})",
+                skip_reason(),
                 path.display()
             ),
         }
     }
+    if decision == Decision::SkippedNoTty {
+        warn_skipped_on_stderr(path);
+    }
+}
+
+/// Which half of the interactive pair was missing, in the operator's words.
+///
+/// Only meaningful for [`Decision::SkippedNoTty`]. The `stdin non-tty` wording
+/// is the historical one and is preserved byte-for-byte, so the pre-existing
+/// unattended path reads exactly as it always did; the captured-stdout case is
+/// new and names itself, because "stdin non-tty" would be a lie there.
+fn skip_reason() -> &'static str {
+    if io::stdin().is_terminal() {
+        "sortie capturée"
+    } else {
+        "stdin non-tty"
+    }
+}
+
+/// Leave a trace of an auto-decline on stderr, but only when the normal
+/// stdout rendering could not have been seen.
+///
+/// A question that declines itself must not do so silently. When stdout is a
+/// terminal the operator has already read the decision there and a second
+/// copy is noise; when stdout is captured or redirected — the very situation
+/// that forced the auto-decline — stderr is the one channel still likely to
+/// reach a human or a log, so the trace goes there, naming the remedy.
+pub fn warn_skipped_on_stderr(path: &std::path::Path) {
+    if io::stdout().is_terminal() {
+        return;
+    }
+    eprintln!(
+        "opt-in-share: {} — question non posable ici, refus par défaut enregistré ({}). \
+         Pour décider explicitement : `cs opt-in-share --accept` ou `--decline`.",
+        skip_reason(),
+        path.display()
+    );
 }
 
 #[cfg(test)]
@@ -507,6 +605,28 @@ mod tests {
 
         let after = load_consent().expect("load").expect("still present");
         assert_eq!(after, pre, "ensure_consent must not mutate existing record");
+    }
+
+    /// The whole truth table, including the one row that is the bug.
+    ///
+    /// This replaces an assertion that read the *harness's* fds and concluded
+    /// something about the conjunction. It could not: cargo gives the test
+    /// binary a non-terminal stdin too, so the pre-fix `stdin().is_terminal()`
+    /// guard already returned `false` there and the test passed against the
+    /// broken build. Stating the rows explicitly is what makes the second term
+    /// load-bearing — delete it from [`answerable`] and the second row goes
+    /// red, which is the only reason this test is worth having.
+    #[test]
+    fn a_captured_stdout_is_never_an_answerable_question() {
+        assert!(answerable(true, true), "a real terminal on both ends: ask");
+        assert!(
+            !answerable(true, false),
+            "the container hang: a TTY on stdin, stdout captured by \
+             `OUT=$(cs …)`. The question is printed into a variable nobody \
+             reads, on an input nobody watches — it must not be asked",
+        );
+        assert!(!answerable(false, true), "no stdin to answer on");
+        assert!(!answerable(false, false), "no terminal at all");
     }
 
     #[test]

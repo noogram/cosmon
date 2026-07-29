@@ -27,7 +27,8 @@ capturer une idée pendant que les workers tournent sur le Mac.
 iPhone / iPad (SwiftUI)
         │   HTTP (JSON) sur Tailscale WireGuard
         ▼
-Mac (dev): cs-api serve --bind 0.0.0.0:4222
+Mac (dev): cs-api --bind <ip-tailscale-du-mac>:4222 \
+                  --i-know-this-exposes-an-unauthenticated-api
         │
         ▼
 .cosmon/state/sessions/session-<ts>.md   (le fichier source-de-vérité)
@@ -41,21 +42,60 @@ Trois propriétés invariantes :
 3. **Le Mac reste l'oracle** — les fichiers session vivent sur le Mac,
    l'iPhone est un client.
 
+## La serrure de cs-api (à lire avant de l'ouvrir)
+
+`cs-api` **ne demande aucun mot de passe**. Il n'y a pas de token, pas
+de compte, rien. Tout ce qui arrive sur son port est exécuté avec tes
+droits à toi — y compris `POST /molecules/{id}/tackle`, qui lance un
+worker et dépense ton crédit.
+
+Donc l'adresse d'écoute *est* la serrure. C'est la seule qu'il y a.
+
+- **Par défaut** `cs-api` écoute sur `127.0.0.1:4222` : personne d'autre
+  que le Mac lui-même ne peut lui parler. Rien à faire.
+- **Pour que l'iPhone le joigne**, il faut lui donner une adresse que
+  l'iPhone peut atteindre : l'IP Tailscale du Mac. Là, cs-api demande
+  un geste explicite —
+  `--i-know-this-exposes-an-unauthenticated-api` — parce que la
+  serrure vient de s'ouvrir à tout ce qui sait router jusqu'à cette
+  adresse. Sur un tailnet, « tout ce qui sait router » = les appareils
+  de ton tailnet, et c'est précisément la barrière sur laquelle on
+  s'appuie. **Vérifie que ton tailnet ne contient que tes appareils**
+  (`tailscale status`), et n'active pas le partage de nœud.
+- **`--bind 0.0.0.0:4222` est refusé** — et le refus n'est pas
+  contournable par le drapeau ci-dessus. `0.0.0.0`, ce n'est pas « le
+  réseau » : c'est *toutes* les interfaces, y compris le Wi-Fi du café
+  et celles que la machine n'a pas encore. Une porte qu'on ne peut pas
+  situer ne peut pas être jugée sûre, donc cs-api refuse au lieu de
+  supposer. Nomme l'interface que tu veux — une seule, celle de
+  Tailscale.
+- **Jamais d'IP publique, jamais de redirection de port sur la box.**
+
+Corollaire : ne mets pas la ligne Tailscale dans un LaunchAgent qui
+démarre à l'ouverture de session. Le daemon tournerait ouvert pendant
+que tu es au café sans y penser. Lance-le quand tu pilotes.
+
 ## Pré-requis sur le Mac
 
 - `cs-api` installé (voir `task-20260422-b031`). Pendant que cs-api est
   en chantier, ios-pilot tourne sur le client mock (DEBUG only, flag
   `COSMON_USE_MOCK=1`).
 - Tailscale actif, la machine dans le même tailnet que l'iPhone/iPad.
-- Le daemon est lancé : `cs-api serve --bind 0.0.0.0:4222`.
 - Le pare-feu macOS autorise les connexions entrantes sur 4222.
-
-Pour connaître l'IP Tailscale du Mac :
+- Le daemon est lancé sur l'IP Tailscale du Mac (lire d'abord
+  [la section serrure](#la-serrure-de-cs-api-à-lire-avant-de-louvrir)) :
 
 ```sh
 tailscale ip -4
 # ex : 100.64.0.12
+
+cs-api --bind 100.64.0.12:4222 \
+       --i-know-this-exposes-an-unauthenticated-api
 ```
+
+Sans le drapeau, `cs-api` refuse de démarrer sur une adresse non-loopback
+et explique pourquoi. C'est voulu : le drapeau est long parce qu'il doit
+être tapé exprès.
 
 ## Build et installation
 
@@ -138,7 +178,9 @@ de notes, la session disparaît du status.
 
 | Symptôme | Cause probable | Correction |
 |----------|---------------|-----------|
-| "cs-api injoignable" au démarrage | Mac endormi, Tailscale off, daemon pas lancé | `tailscale status` ; `cs-api serve --bind 0.0.0.0:4222` |
+| "cs-api injoignable" au démarrage | Mac endormi, Tailscale off, daemon pas lancé | `tailscale status` ; relancer `cs-api --bind $(tailscale ip -4):4222 --i-know-this-exposes-an-unauthenticated-api` |
+| `refusing to bind 0.0.0.0:4222` au lancement | On a demandé « toutes les interfaces » | Nommer l'IP Tailscale du Mac — voir [la section serrure](#la-serrure-de-cs-api-à-lire-avant-de-louvrir) |
+| `refusing to bind …: no authentication` | Adresse non-loopback sans le geste explicite | Ajouter `--i-know-this-exposes-an-unauthenticated-api` après avoir lu ce qu'il ouvre |
 | "session already open" | Une session était déjà ouverte (autre client) | **Fermer session** sur l'appareil courant, ou `cs session end` côté Mac |
 | Notes tapées non visibles dans le fichier Mac | cs-api écrit dans un autre galaxie | Vérifier `--galaxy` côté Mac ; les sessions sont par-galaxie |
 | Polling cogne la batterie | Intervalle trop court | Dans Réglages, passer à 10–30 s, ou couper le polling |
@@ -201,6 +243,13 @@ Quatre sections :
 - **Switch galaxy active depuis iOS** — cs-api lit toujours
   `$HOME/galaxies/cosmon/` côté Mac (v2).
 - **Chiffrement applicatif** — Tailscale fait le boulot.
+- **Authentification** — il n'y en a pas, et ce n'est pas un oubli en
+  attente : la forme retenue (délibération `delib-20260727-f9ee`, cinq
+  sièges sur cinq) est un **sceau frappé au démarrage** — un secret
+  tiré au lancement, affiché une fois, gardé seulement sous forme
+  d'empreinte BLAKE3 — dans la lignée de `admin_seal` du
+  `cosmon-rpp-adapter`. Tant qu'il n'est pas là, l'adresse d'écoute est
+  toute la serrure, d'où la section plus haut.
 
 ## Futures itérations (v2+)
 

@@ -128,3 +128,5 @@
 | 160-spore-export-ex-post-manifest | [160-spore-export-ex-post-manifest.md](docs/adr/160-spore-export-ex-post-manifest.md) |
 | 161-spore-run-scoped-output-home | [161-spore-run-scoped-output-home.md](docs/adr/161-spore-run-scoped-output-home.md) |
 | 162-dispatch-boundary-ready-is-earned | [162-dispatch-boundary-ready-is-earned.md](docs/adr/162-dispatch-boundary-ready-is-earned.md) |
+| 163-a-question-may-only-be-asked-where-an-answer-can-arrive | [163-a-question-may-only-be-asked-where-an-answer-can-arrive.md](docs/adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md) |
+| 164-briefing-is-a-protocol-not-a-jailbreak | [164-briefing-is-a-protocol-not-a-jailbreak.md](docs/adr/164-briefing-is-a-protocol-not-a-jailbreak.md) |

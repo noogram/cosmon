@@ -124,7 +124,7 @@ N4 seal-verify-contract  N5 cs-spore-run-CLI   N7 e2e-fixture  (task)
 ### N8: the verify gate  [task]
 - **Does:** the closing gate. `cargo check` + `test` + `clippy -D warnings` +
   `fmt --check` green across the workspace; public-surface banlist (zero
-  client, fund, or private-domain names in shipped surfaces, per the release
+  client or private-domain names in shipped surfaces, per the release
   membrane allowlist); zero em dashes in outgoing surfaces (the spore bundle,
   public docs). Fail-closed.
 - **Blocked-by:** N4, N6, N7 (gates the whole convergence).

@@ -73,6 +73,19 @@ impl FileStore {
         Self { root: root.into() }
     }
 
+    /// The state directory this store is rooted at (`.cosmon/state/`).
+    ///
+    /// Exists so a caller that already holds a store never has to ask the
+    /// *ambient* environment where the state dir is. The two agree in
+    /// production and diverge in every test that points a store at a tempdir,
+    /// and a write that resolves the ambient path while the rest of the
+    /// operation uses this one lands in a different tree than the record it
+    /// belongs to.
+    #[must_use]
+    pub fn state_root(&self) -> &Path {
+        &self.root
+    }
+
     /// Derive the project root from the state directory.
     ///
     /// The state directory is `.cosmon/state/`, so the project root is two

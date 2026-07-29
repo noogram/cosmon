@@ -26,7 +26,7 @@ enabled = true
 # directive built from `public_name` + `public_url` into the worker bootstrap
 # prompt — positive supply that fills the attribution vacuum at the source, so
 # the model has the right name in hand before it reaches a "built by" slot and
-# would otherwise enrich it from the operator's PRIVATE fund context.
+# would otherwise enrich it from whatever name is nearest in its context.
 # Empty `public_name` is a no-op (prompt byte-identical to a pre-attribution
 # cosmon). Downstream leak-detection consumes this block as its closed codebook.
 [attribution]
@@ -45,7 +45,7 @@ repo_description = "Maintained by Noogram (noogram.org). Open tooling for AI age
 coauthor_name    = "Noogram"
 coauthor_email   = "noreply@noogram.org"
 # OPERATOR ATOMIC QUESTION (do NOT ship a placeholder — godin): confirm a real
-# non-fund contact address exists before populating these. The injected worker
+# public contact address exists before populating these. The injected worker
 # directive only needs name + url, so the primitive is already live without them.
 # contact      = "hello@noogram.org"
 # authors_line = "Noogram <hello@noogram.org>"
@@ -138,7 +138,7 @@ forbidden_substrings = [
 #
 #   [publish_identity]
 #   allowed_emails = ["bot@noogram.dev"]          # closed-codebook whitelist
-#   forbidden_substrings = ["<operator-email>", "<operator-domain>", "<fund-name>"]
+#   forbidden_substrings = ["<operator-email>", "<operator-domain>", "<blocked-term>"]
 #
 # `allowed_emails` is the inversion that matters (shannon): when set, ANY
 # author/committer email not in the codebook is a violation by construction
@@ -156,7 +156,7 @@ forbidden_substrings = []
 # and ABORTS the merge (before the post-merge push/deploy hook) if any
 # forbidden substring appears.
 #
-# WHY: the fleet keeps stamping the operator's confidential fund name into
+# WHY: the fleet keeps stamping an operator's confidential term into
 # external boilerplate (a README, a footer, an index page, a paper colophon) —
 # the leak is a VACUUM, not a collision: the attribution slot is obligatory
 # and, with no authorized public name supplied, Type-1 retrieval emits the
@@ -166,8 +166,8 @@ forbidden_substrings = []
 #
 # FEDERATION SOURCE (task-20260622-7207): confidential operator context is
 # shared across projects, so it is NOT typed here (this file is
-# git-tracked and ships with the open-core repo — naming the fund here would
-# itself be the leak). It lives ONCE in the operator's machine-wide
+# git-tracked and ships with the open-core repo — naming the term here would
+# itself be the leak, and so would naming the category it belongs to). It lives ONCE in the operator's machine-wide
 # `~/.config/cosmon/config.toml::[confidential_blocklist]`, and `cs done`
 # union-merges that into this per-galaxy block for EVERY galaxy. The block
 # below stays empty: cosmon inherits the federation secret like every other

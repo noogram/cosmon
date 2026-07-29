@@ -1340,14 +1340,14 @@ review. The gate reduces the realized failure class to zero; it does not reduce 
 semantic failure class.\n";
 
 /// Refuse `cs done` when a publish-bound artifact's *content* carries a
-/// confidential substring (the operator's fund name, its aliases, the
+/// confidential substring (the operator's blocked term, its aliases, the
 /// operator domain, or email).
 ///
 /// Sibling of [`check_git_remote_blocklist`]: that guard inspects the
 /// worktree's *remotes*, this one inspects the *content* of the narrow set
 /// of files matched by `cfg.publish_globs`. Closes the attribution
 /// vacuum (ADR-128) — the fleet stamping the operator's confidential
-/// fund name into external boilerplate (README,
+/// term into external boilerplate (README,
 /// footer, index). A negative per-molecule guard ("don't say X") fails by
 /// construction; the deterministic merge gate is the structural floor.
 /// V0 file-content floor that [`check_publish_identity_blocklist`] (V1)
@@ -1381,7 +1381,7 @@ semantic failure class.\n";
 /// `~/.config/cosmon/config.toml` — the SINGLE private home for the
 /// operator's confidential blocklist.
 ///
-/// This is the federation source: the operator's fund name is the *same*
+/// This is the federation source: the operator's blocked term is the *same*
 /// secret across every galaxy, so it lives here once (never committed to any
 /// galaxy repo) and `cs done` folds it into each galaxy's per-galaxy gate.
 /// Honours `$COSMON_CONFIG_HOME` for test isolation, falling back to
@@ -1425,7 +1425,7 @@ fn load_global_confidential_blocklist(path: &Path) -> ConfidentialBlocklistConfi
 /// This is the load-bearing federation step. Without it, the gate fires only
 /// in the one galaxy that hand-typed `[confidential_blocklist]` (cosmon),
 /// leaving every other galaxy — the qfa leak among them — with an empty,
-/// inert gate. With it, the operator supplies the fund name once in
+/// inert gate. With it, the operator supplies the term once in
 /// `~/.config/cosmon/config.toml` and every galaxy inherits it.
 fn effective_confidential_blocklist(
     per_galaxy: &ConfidentialBlocklistConfig,
@@ -2512,7 +2512,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         //
         //      The per-galaxy blocklist is union-merged with the operator's
         //      machine-wide `~/.config/cosmon/config.toml` blocklist
-        //      (task-20260622-7207) so the confidential fund name — a
+        //      (task-20260622-7207) so the confidential term — a
         //      federation-wide secret — is supplied ONCE privately yet guards
         //      every galaxy, not just the one that hand-typed the section.
         //      Scope the scan to the files THIS molecule's branch introduces —
@@ -11525,13 +11525,13 @@ mod tests {
     }
 
     #[test]
-    fn confidential_gate_rejects_fund_name_in_paper_via_default_globs() {
+    fn confidential_gate_rejects_blocked_term_in_paper_via_default_globs() {
         // task-20260622-7207 — the qfa leak: a PAPER author block + colophon
-        // carrying the operator's private fund name. With NO explicit
+        // carrying a term on the operator's private blocklist. With NO explicit
         // publish_globs (a galaxy that inherits only the federation
         // forbidden_substrings), the gate must fall back to DEFAULT_PUBLISH_GLOBS
         // and catch the `.tex` deliverable the old README/site-only globs missed.
-        // ("Tenant-Demo Research" stands in for the real fund name — same convention as
+        // ("Tenant-Demo Research" stands in for the withheld term — same convention as
         // the sibling confidential tests, so this tracked test never names it.)
         let tmp = TempDir::new().unwrap();
         std::fs::write(
@@ -11557,7 +11557,7 @@ mod tests {
     #[test]
     fn global_confidential_blocklist_loads_only_its_section() {
         // The federation source: the operator's machine-wide config supplies
-        // the fund name once; load_global_confidential_blocklist reads only
+        // the blocked term once; load_global_confidential_blocklist reads only
         // [confidential_blocklist] and ignores unrelated sections.
         let tmp = TempDir::new().unwrap();
         let cfg_path = tmp.path().join("config.toml");
@@ -11589,13 +11589,13 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
     }
 
     #[test]
-    fn federation_merge_makes_empty_galaxy_gate_reject_fund_name_in_paper() {
+    fn federation_merge_makes_empty_galaxy_gate_reject_blocked_term_in_paper() {
         // END-TO-END: a galaxy with an EMPTY per-galaxy blocklist (the qfa
-        // case — ~50 galaxies) inherits the operator's fund name from the
+        // case — ~50 galaxies) inherits the operator's blocked term from the
         // machine-wide config and the gate then rejects an 'Tenant-Demo Research'
         // author block in a paper deliverable it never explicitly configured
         // globs for. This is the whole fix in one test. ("Tenant-Demo Research"
-        // stands in for the real fund name so this tracked test never names it.)
+        // stands in for the withheld term so this tracked test never names it.)
         let tmp = TempDir::new().unwrap();
 
         // (1) the operator's private machine-wide config — the single source.
@@ -11629,7 +11629,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         assert!(msg.contains("paper.tex"), "must flag the paper: {msg}");
         assert!(
             msg.contains("Tenant-Demo Research"),
-            "must catch inherited fund name: {msg}"
+            "must catch inherited term: {msg}"
         );
     }
 
@@ -11770,13 +11770,13 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
     #[test]
     fn confidential_gate_diff_scope_ignores_other_mission_leak() {
         // The exact incident (task-20260720-b474): mission B harvests a clean
-        // diff, but mission A had already landed a README naming the fund on
+        // diff, but mission A had already landed a README naming a blocked term on
         // `main`. The WHOLE-tree scan (scope = None) blocks B's harvest; the
         // DIFF-scoped scan (scope = B's changed files) lets it through — B's
         // own files carry nothing forbidden.
         let tmp = TempDir::new().unwrap();
         let root = tmp.path();
-        // Mission A's file, already on main, carries the fund name.
+        // Mission A's file, already on main, carries the blocked term.
         std::fs::create_dir_all(root.join("missions/aurelie-bopp-133c")).unwrap();
         std::fs::write(
             root.join("missions/aurelie-bopp-133c/README.md"),

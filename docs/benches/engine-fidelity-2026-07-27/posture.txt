@@ -1,0 +1,61 @@
+=== container engine posture ===
+date_utc            2026-07-27T17:14:26Z
+host_uname          Darwin <redacted-host> 25.5.0 Darwin Kernel Version 25.5.0: Tue Jun  9 22:28:34 PDT 2026; root:xnu-12377.121.10~1/RELEASE_ARM64_T6041 arm64
+probe_image         ubuntu:24.04
+mount_probe_dir     /Users/<redacted>/.cosmon-engine-posture-66567 (host side; created and removed by this script)
+
+--- context: colima-cosmon-bench ---
+reachable           YES
+engine_server       29.2.1
+engine_os           Ubuntu 24.04.4 LTS
+engine_arch         aarch64
+engine_kernel       6.8.0-100-generic
+[default seccomp profile]
+uname               Linux 6.8.0-100-generic aarch64
+os_release          Ubuntu 24.04.4 LTS
+max_user_namespaces 31515
+unprivileged_userns_clone 1
+seccomp_status      Seccomp:	2 Seccomp_filters:	1 
+unshare_as_uid10001 BLOCKED rc=1 err=unshare: unshare failed: Operation not permitted
+mount_chown_rc      0 
+mount_owner_before  0:0
+mount_owner_after   0:0
+mount_chown_verdict SILENTLY-IGNORED (chown returned 0 and ownership did not change)
+[seccomp=unconfined — attribution pass]
+uname               Linux 6.8.0-100-generic aarch64
+os_release          Ubuntu 24.04.4 LTS
+max_user_namespaces 31515
+unprivileged_userns_clone 1
+seccomp_status      Seccomp:	0 Seccomp_filters:	0 
+unshare_as_uid10001 OK
+mount_chown_verdict NOT-PROBED (no bind mount supplied)
+
+--- context: desktop-linux ---
+reachable           YES
+engine_server       27.3.1
+engine_os           Docker Desktop
+engine_arch         aarch64
+engine_kernel       6.10.11-linuxkit
+[default seccomp profile]
+uname               Linux 6.10.11-linuxkit aarch64
+os_release          Ubuntu 24.04.4 LTS
+max_user_namespaces 31321
+unprivileged_userns_clone <key absent on this kernel — absent is not 0>
+seccomp_status      Seccomp:	0 Seccomp_filters:	0 
+unshare_as_uid10001 OK
+mount_chown_rc      0 
+mount_owner_before  0:0
+mount_owner_after   10001:10001
+mount_chown_verdict HONOURED
+[seccomp=unconfined — attribution pass]
+uname               Linux 6.10.11-linuxkit aarch64
+os_release          Ubuntu 24.04.4 LTS
+max_user_namespaces 31321
+unprivileged_userns_clone <key absent on this kernel — absent is not 0>
+seccomp_status      Seccomp:	0 Seccomp_filters:	0 
+unshare_as_uid10001 OK
+mount_chown_verdict NOT-PROBED (no bind mount supplied)
+
+NOTE: every line above was run or read on the engine it is filed under.
+Where a probe could not attribute a cause it says so; no cause is named
+from a setting that was merely read. (cosmon: NetnsBlocker::Undetermined.)

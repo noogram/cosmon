@@ -74,6 +74,13 @@ pub enum WorkerRole {
     Runtime,
 }
 
+impl WorkerRole {
+    /// Both roles, cognition first — the order the `cs peek` glyph
+    /// legend lists them in. Exists so that legend can be derived from
+    /// the enum instead of transcribed beside it.
+    pub const ALL: &'static [WorkerRole] = &[Self::Cognition, Self::Runtime];
+}
+
 /// A worker executing a molecule.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Worker {

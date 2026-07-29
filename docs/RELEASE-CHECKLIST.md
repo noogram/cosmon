@@ -46,12 +46,28 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
 4. **protect** — `scripts/apply-branch-protection.sh` (wires required checks +
    push-protection; only settable once public).
 
-## The two membranes (ADR-133) — whole-file vs inside-the-file
+## The three membranes (ADR-133) — whole-file, inside-the-file, structural
 
 | Membrane | Question it answers | Referee |
 |----------|--------------------|---------|
 | **Residence** | Is this whole *file* allowed on the public surface? | `scripts/artifact-map-audit.py` over `.cosmon/artifact-map.toml` (RED on any tracked `solo` path) |
 | **Content** | Does a confidential *string* hide inside a public file? | gitleaks (secrets) + `release-checklist.sh` gate 4 (client/domain/infra denylist) + the D7 publish gate in `cs done` ([ADR-128](adr/128-d7-attribution-vacuum-and-publish-gate.md)) |
+| **Structural** | Would a fresh clone carry runtime state, a credential shape, a machine path, or an unreviewed binary? | `scripts/publish.sh --check` (gate 14), hard on every PR |
+
+The structural membrane is the youngest and the narrowest on purpose. This
+document and `CLAUDE.md` both ordered `scripts/publish.sh --check` for years
+while the file did not exist — `git log --all` on that path was empty — so the
+sentence guarding the public projection named a property nobody measured. It was
+written on 2026-07-28, and its first run on a tree where every gate above
+reported PASS found four tracked machine paths, one of them a symlink whose
+absolute target no content scan in this repository can read (`git grep` does not
+open symlink blobs).
+
+It is narrow because narrowness is what makes it *hard*. Gates 1 and 4 cover
+more ground but PEND without gitleaks installed and without the operator's
+private denylist, so on a bare CI checkout they cannot fail. Gate 14 needs only
+git and python3, so it can — and `scripts/publish.test.sh` constructs a real
+violating repository per rule to prove it does.
 
 The confidential-string denylist is sourced **externally** (`$COSMON_FORBID_PATTERN`,
 a gitignored `scripts/.release-denylist.local`, or the now-untracked

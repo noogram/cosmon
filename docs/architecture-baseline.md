@@ -147,8 +147,28 @@ anti-leak invariant") remains the structural sibling at the `cs done` merge gate
 **Vendoring.** `scripts/publish.sh` carries the same Contract-version-1 vendoring
 header as `scripts/architecture-audit.sh`: a downstream galaxy preparing a public
 release copies it verbatim, and the gate forces a real scrub before the first
-publish (PASS once clean, FAIL while any pattern leaks). A galaxy with
-intentional occurrences extends the path allowlist via `.publish-allowlist.txt`.
+publish (PASS once clean, FAIL while any pattern leaks).
+
+A galaxy with intentional occurrences waives them **per line**, with the inline
+marker `publish: allow — <reason>` on the offending line. There is no path
+allowlist and there must not be one: this paragraph used to name a
+`.publish-allowlist.txt`, which does not exist, is read by nothing, and
+described the very thing `publish.sh` refuses by name — *"a pathspec exclusion
+is a permanent blind spot no reviewer sees again"*. Copying that sentence into
+other repos was the worst part, because vendoring guidance is read as a
+recommendation.
+
+The one exception is a format that cannot carry a comment (PEM and its
+neighbours), where the marker is unwritable. Those use a tracked sidecar
+`<path>.publish-allow` whose body is the reason and which the gate accepts only
+for a comment-less extension, only for the two key-shaped rules, and only while
+the file's blob still hashes to the `publish-allow-blob: <sha>` the sidecar
+states. That pin is **required**, not offered: it read "when the sidecar states
+one" until 2026-07-28, which let the sidecar opt out of the one condition that
+binds it to a specific set of bytes — omit the line and the waiver outlives its
+file. A waiver that survives its file being replaced is an exclusion with extra
+steps. An author who cannot state the hash of what they are waiving has not read
+it; `git hash-object -- <path>` prints it.
 
 ### W4 — `INV-PRIVATE-FILE-RM-CACHED-NOT-RM` historical commit `21cf165`
 

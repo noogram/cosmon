@@ -11,12 +11,38 @@
 #   scripts/container-worker-doors-bench.sh                 # build + run
 #   scripts/container-worker-doors-bench.sh | tee bench.log
 #
+# ENGINE (corrected 2026-07-27 — read this before overriding it)
+# ──────────────────────────────────────────────────────────────
+# This bench runs on a dedicated **colima** profile, `cosmon-bench`. Until
+# 2026-07-27 it pinned `desktop-linux` and this header asserted that Docker
+# Desktop was the tester's engine and that colima was "NOT faithful". The
+# tester corrected his own earlier description that day, unprompted, on issue
+# #20: his bed is Colima (Lima-based), Ubuntu 24.04.4 LTS, aarch64.
+#
+# The old claim's factual half — a colima VM runs a different kernel with a
+# different user-namespace posture — is TRUE and now measured. Its conclusion
+# was inverted. On this machine, under the default seccomp profile:
+#
+#   colima-cosmon-bench  kernel 6.8.0-100-generic (Ubuntu 24.04.4 LTS)
+#                        unshare as uid 10001 -> BLOCKED; virtiofs chown -> SILENTLY IGNORED
+#   desktop-linux        kernel 6.10.11-linuxkit (Docker Desktop 27.3.1)
+#                        unshare as uid 10001 -> OK;      bind-mount chown -> HONOURED
+#
+# So Docker Desktop reproduces NEITHER of the tester's two standing findings.
+# It was not merely mislabelled; it was the engine that cannot see them. The
+# full capture, including the seccomp attribution pass, is in
+# `docs/benches/engine-fidelity-2026-07-27.md`, produced by
+# `scripts/container-engine-posture.sh`. Re-measure before changing the
+# default again — do not swap one unverified fidelity claim for another.
+#
+# If the bench engine is not running, this script REFUSES with the command to
+# start it and exits 2 = INCONCLUSIVE. It never falls back to another context.
+#
 # Environment overrides:
-#   COSMON_DOCKER_CONTEXT   docker context (default: desktop-linux, which
-#                           is the tester's engine — Docker Desktop on
-#                           macOS arm64, LinuxKit VM. A colima context
-#                           runs an Ubuntu kernel with a DIFFERENT
-#                           user-namespace posture and is NOT faithful.)
+#   COSMON_BENCH_COLIMA_PROFILE  colima profile (default: cosmon-bench, which
+#                                belongs to the benches and to nothing else)
+#   COSMON_DOCKER_CONTEXT        explicit context override; still must be
+#                                reachable, still no fallback
 #   COSMON_KEEP_IMAGE=1     skip the image rmi at teardown
 #
 # SECRETS: none, ever. No credential is read from the host, mounted, or
@@ -31,19 +57,22 @@
 # container of yours is ever a candidate for deletion.
 set -euo pipefail
 
-CONTEXT="${COSMON_DOCKER_CONTEXT:-desktop-linux}"
 IMAGE="cosmon-container-worker-doors:bench"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# shellcheck source=lib/bench-engine.sh
+. "$REPO_ROOT/scripts/lib/bench-engine.sh"
+CONTEXT="$(bench_engine_context)"
 
 say() { printf '\n\033[1;34m▶ %s\033[0m\n' "$*"; }
 die() { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
-docker --context "$CONTEXT" info >/dev/null 2>&1 \
-  || die "docker context '$CONTEXT' is not reachable. Start Docker Desktop (open -ga Docker), or set COSMON_DOCKER_CONTEXT."
+# Refuses with the start command and exits 2 (INCONCLUSIVE) if the bench
+# engine is down. "The discriminating engine was unavailable" is never a pass.
+bench_engine_require "$CONTEXT"
 
 say "engine fidelity check (context=$CONTEXT)"
-docker --context "$CONTEXT" info \
-  --format 'server={{.ServerVersion}} os={{.OperatingSystem}} arch={{.Architecture}} kernel={{.KernelVersion}}'
+bench_engine_fingerprint "$CONTEXT"
 
 cleanup() {
   if [ "${COSMON_KEEP_IMAGE:-0}" != "1" ]; then

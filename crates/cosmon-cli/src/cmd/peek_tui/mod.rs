@@ -78,6 +78,7 @@ use ratatui::{
 use super::Context;
 use crate::visual::{classify as visual_classify, temp_token, whisper_token, RowInputs, RowKind};
 
+pub(crate) mod legend;
 pub(crate) mod presence_reader;
 pub(crate) mod renderers;
 pub(crate) mod trust;
@@ -527,6 +528,48 @@ fn centered_rect(pct_x: u16, pct_y: u16, r: Rect) -> Rect {
         .split(vertical[1])[0]
 }
 
+/// Which page of the `?` overlay is showing.
+///
+/// The overlay documents two different alphabets — what you can *press*
+/// and what the screen is *saying* — and both are longer than one
+/// terminal. Paging keeps each answer whole instead of solving a
+/// legibility problem by hiding half of it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum HelpPage {
+    /// Keybindings and terminal-selection notes.
+    #[default]
+    Keys,
+    /// The glyph legend — every symbol the table can render.
+    Legend,
+}
+
+impl HelpPage {
+    /// The other page. `Tab` walks this cycle.
+    const fn next(self) -> Self {
+        match self {
+            Self::Keys => Self::Legend,
+            Self::Legend => Self::Keys,
+        }
+    }
+
+    /// One-based page number, for the overlay title.
+    const fn number(self) -> u8 {
+        match self {
+            Self::Keys => 1,
+            Self::Legend => 2,
+        }
+    }
+
+    /// What `Tab` leads to, named in the title so the second page is
+    /// discoverable without pressing an undocumented key.
+    const fn next_label(self) -> &'static str {
+        match self {
+            Self::Keys => "glyph legend",
+            Self::Legend => "keys",
+        }
+    }
+}
+
 /// Build the static help overlay as a vector of styled lines.
 ///
 /// Section order is tuned for the most common lookup: new operators land
@@ -610,6 +653,8 @@ fn help_overlay_lines(mouse_captured: bool) -> Vec<Line<'static>> {
         Line::from(Span::styled("Quit & help", heading)),
         key_line("q / Esc", "exit cs peek"),
         key_line("?", "toggle this help overlay"),
+        key_line("Tab", "→ page 2: what every glyph on screen means"),
+        key_line("j / k", "scroll this overlay (also PgDn / PgUp)"),
         Line::from(""),
         Line::from(Span::styled(
             "Terminal text selection (copy-paste)",
@@ -1171,6 +1216,17 @@ struct App {
     /// Whether the `?` help overlay is currently visible. Toggled by `?`.
     show_help: bool,
 
+    /// Which page of the `?` overlay is showing. Cycled by `Tab`, reset
+    /// to [`HelpPage::Keys`] every time the overlay closes so `?` always
+    /// lands on the same page.
+    help_page: HelpPage,
+
+    /// First visible line of the `?` overlay's current page. Both pages
+    /// are longer than a terminal, and the fix for that is scrolling —
+    /// never dropping content, which would answer a legibility complaint
+    /// by hiding half the answer.
+    help_scroll: u16,
+
     /// Whether crossterm mouse capture is currently enabled.
     ///
     /// `cs peek` enables mouse capture at startup so future pointer
@@ -1264,6 +1320,8 @@ impl App {
             bg_tx,
             bg_pending: false,
             show_help: false,
+            help_page: HelpPage::Keys,
+            help_scroll: 0,
             mouse_captured: true,
             zoom_level: 0.0,
             action_modal: ActionModal::None,
@@ -2310,7 +2368,30 @@ impl App {
                         match k.code {
                             KeyCode::Char('?' | 'q') | KeyCode::Esc | KeyCode::Enter => {
                                 self.show_help = false;
+                                // Reset so `?` always opens on page 1 at
+                                // the top: an overlay that reopens where
+                                // you left it looks like a different
+                                // overlay.
+                                self.help_page = HelpPage::Keys;
+                                self.help_scroll = 0;
                             }
+                            KeyCode::Tab | KeyCode::BackTab => {
+                                self.help_page = self.help_page.next();
+                                self.help_scroll = 0;
+                            }
+                            KeyCode::Char('j') | KeyCode::Down => {
+                                self.help_scroll = self.help_scroll.saturating_add(1);
+                            }
+                            KeyCode::Char('k') | KeyCode::Up => {
+                                self.help_scroll = self.help_scroll.saturating_sub(1);
+                            }
+                            KeyCode::PageDown => {
+                                self.help_scroll = self.help_scroll.saturating_add(10);
+                            }
+                            KeyCode::PageUp => {
+                                self.help_scroll = self.help_scroll.saturating_sub(10);
+                            }
+                            KeyCode::Home => self.help_scroll = 0,
                             _ => {}
                         }
                         continue;
@@ -2952,21 +3033,37 @@ impl App {
         Ok(())
     }
 
-    /// Draw the `?` help overlay — a centered floating panel that
-    /// documents every keybinding and explains how to copy text out of
-    /// the TUI (Shift+drag on common terminals, or `m` to toggle mouse
-    /// capture off wholesale).
+    /// Draw the `?` help overlay — a centered floating panel over two
+    /// pages: the keybindings (plus how to copy text out of the TUI), and
+    /// the glyph legend that says what every symbol on the table means.
+    ///
+    /// Both pages scroll. A screen's legend must be reachable *beside the
+    /// screen it explains* — a Markdown file is not read while looking at
+    /// a table — and it must not be truncated to fit, which would answer
+    /// an illegibility complaint by hiding half the answer.
     fn draw_help_overlay(&self, f: &mut Frame, area: Rect) {
         let popup = centered_rect(78, 88, area);
         f.render_widget(Clear, popup);
-        let lines = help_overlay_lines(self.mouse_captured);
+        let lines = match self.help_page {
+            HelpPage::Keys => help_overlay_lines(self.mouse_captured),
+            HelpPage::Legend => legend::help_legend_lines(),
+        };
+        // Clamp the offset so `j` cannot scroll the content off the top
+        // of the panel and leave the operator staring at an empty box.
+        let body_height = popup.height.saturating_sub(2);
+        let max_scroll = u16::try_from(lines.len())
+            .unwrap_or(u16::MAX)
+            .saturating_sub(body_height);
+        let scroll = self.help_scroll.min(max_scroll);
+        let title = format!(
+            " cs peek — help {}/2 · Tab: {} · ?/Esc: close ",
+            self.help_page.number(),
+            self.help_page.next_label(),
+        );
         let p = Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" cs peek — help · press ? or Esc to close "),
-            )
-            .wrap(Wrap { trim: false });
+            .block(Block::default().borders(Borders::ALL).title(title))
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0));
         f.render_widget(p, popup);
     }
 
@@ -3755,9 +3852,13 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
     // realized — the honest disposition of what actually ran, on its own axis
     // (delib-20260718-c70e). Distinct from the intention pin shown in `adapter`:
     // `? (unknown)` (crashed / never observed), `- (silent)` (ran, reported
-    // nothing), or the observed `a->b` trajectory. Never back-filled from the
-    // pin. The value is painted yellow when a concrete model was observed so it
-    // stands apart from the dim intention above.
+    // nothing), `x (unobservable)` (the observation seam is broken — no
+    // observation can ever arrive), or the observed `a->b` trajectory. Never
+    // back-filled from the pin. The value is painted yellow when a concrete
+    // model was observed so it stands apart from the dim intention above, and
+    // red when the seam is broken — that one is an operator action item (a
+    // misrouted `CLAUDE_CONFIG_DIR`), not a state to wait out
+    // (task-20260727-3f46).
     {
         let realized = format!(
             "{} ({})",
@@ -3766,6 +3867,8 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
         );
         let realized_style = if r.adapter.realized.observed().is_some() {
             Style::default().fg(Color::Yellow)
+        } else if r.adapter.realized == cosmon_core::adapter_attribution::Realized::Unobservable {
+            Style::default().fg(Color::Red)
         } else {
             dim_style
         };
@@ -4872,6 +4975,8 @@ impl App {
             bg_tx,
             bg_pending: false,
             show_help: false,
+            help_page: HelpPage::Keys,
+            help_scroll: 0,
             mouse_captured: true,
             zoom_level: 0.0,
             action_modal: ActionModal::None,
@@ -4885,6 +4990,36 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The glyph legend lives on page 2, so page 1 must name the key
+    /// that reaches it. An undiscoverable second page is the same defect
+    /// as no second page.
+    #[test]
+    fn help_overlay_advertises_the_glyph_legend_page() {
+        let flat: String = super::help_overlay_lines(true)
+            .iter()
+            .flat_map(|l| l.spans.iter())
+            .map(|s| s.content.as_ref())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("Tab"), "page 1 must name the Tab key");
+        assert!(
+            flat.contains("glyph"),
+            "page 1 must say what Tab leads to; got:\n{flat}"
+        );
+    }
+
+    /// `Tab` walks a two-page cycle and always returns. A one-way door
+    /// into the legend would strand the operator away from the keys.
+    #[test]
+    fn help_page_cycle_returns_to_keys() {
+        assert_eq!(HelpPage::Keys.next(), HelpPage::Legend);
+        assert_eq!(HelpPage::Legend.next(), HelpPage::Keys);
+        assert_eq!(HelpPage::default(), HelpPage::Keys);
+        assert_eq!(HelpPage::Keys.number(), 1);
+        assert_eq!(HelpPage::Legend.number(), 2);
+        assert_eq!(HelpPage::Keys.next_label(), "glyph legend");
+    }
 
     /// The help overlay is the only place operators learn how to copy
     /// text out of cs peek — if the mention of `Shift+drag` ever
@@ -6669,6 +6804,29 @@ mod tests {
         let cell = adapter_cell(&att);
         assert_eq!(line_text(&cell), "claude/claude-opus-4-8 [cli]");
         assert!(!line_text(&cell).contains("~>"));
+    }
+
+    #[test]
+    fn expanded_detail_names_a_broken_observation_seam() {
+        // task-20260727-3f46: a molecule whose observation seam is broken must
+        // read `x (unobservable)` — never the eternal `... (pending)` that
+        // says "wait and you will know" about something waiting cannot fix.
+        let mut row = row_with("running", HeartbeatTier::Active);
+        row.adapter = claude_attribution();
+        row.adapter.realized = Realized::Unobservable;
+        let joined: String = expanded_detail_lines(&row)
+            .iter()
+            .map(|l| line_text(l))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("x (unobservable)"),
+            "expanded detail must name the broken seam:\n{joined}"
+        );
+        assert!(
+            !joined.contains("(pending)"),
+            "an unobservable realization must never read as pending:\n{joined}"
+        );
     }
 
     #[test]

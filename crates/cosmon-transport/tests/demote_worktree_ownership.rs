@@ -2,6 +2,14 @@
 
 //! Issue #20 — the worktree-ownership catch-22 on the demotion path.
 //!
+//! **The path this file exercises is dormant.** As of 2026-07-28 a root
+//! dispatcher is refused outright (ADR-166): the grant a demotion needs — the
+//! repository's shared object store and shared `refs/heads` — is authority over
+//! every sibling molecule. These tests still measure the repair and the judge,
+//! entered explicitly through `dormant_provision`, because that machinery is
+//! the substrate of the bounded per-worker lifecycle and the evidence the
+//! refusal rests on. They no longer claim a live dispatch reaches it.
+//!
 //! # The bug this freezes
 //!
 //! An external tester ran a signed v0.3.0 inside a root Docker container with
@@ -43,11 +51,34 @@
 
 use std::os::unix::fs::MetadataExt as _;
 
-use cosmon_core::root_spawn_policy::{DemoteResource, RootSpawnDecision};
+use cosmon_core::root_spawn_policy::{
+    enforce_demote_provisioning, DemoteResource, RootSpawnDecision,
+};
 use cosmon_transport::demote_provisioning::{
-    chown_tree_to_uid, provision_and_decide_root_spawn, DemoteResources,
+    chown_tree_to_uid, provision_demote_resources, DemoteResources,
 };
 use tempfile::TempDir;
+
+/// Drive the demote arm — repair, then judge — with the decision supplied
+/// rather than decided.
+///
+/// `decide_root_spawn` refuses every root dispatch now: making a demotion work
+/// means handing the worker the repository's shared object store and shared
+/// `refs/heads`, which is authority over every sibling molecule. So
+/// `provision_and_decide_root_spawn(0, Some(uid), …)` returns a refusal without
+/// touching a file, and a test that kept calling it would assert "a refusal
+/// refuses" while believing it measured the provisioning.
+///
+/// This composes the same two halves that funnel's demote arm composes, so what
+/// the tests here measure is unchanged. What they no longer claim is that a live
+/// root dispatch gets here — `a_root_dispatch_refuses_without_touching_the_filesystem`
+/// in `demote_provisioning.rs` pins the opposite.
+fn dormant_provision(to_uid: u32, resources: &DemoteResources) -> RootSpawnDecision {
+    enforce_demote_provisioning(
+        RootSpawnDecision::Demote { to_uid },
+        &provision_demote_resources(to_uid, resources),
+    )
+}
 
 /// The demote target the tester's container used, and cosmon's default.
 const TARGET: u32 = cosmon_core::root_spawn_policy::CONVENTIONAL_WORKER_UID;
@@ -89,16 +120,20 @@ fn a_fresh_worktree_is_handed_to_the_demote_target_and_the_dispatch_proceeds() {
         );
     }
 
-    let decision = provision_and_decide_root_spawn(
-        0,
-        Some(TARGET),
-        &DemoteResources {
+    let decision = dormant_provision(
+        TARGET,
+        // Built through the one constructor, which is now the only way another
+        // crate can build one at all (issue #20, the class): a resource added to
+        // the set lands here without this test being edited.
+        &DemoteResources::for_dispatch(
+            &worktree,
+            vec![state.clone(), mol_state.clone()],
             // Not declared: root's own `/root/.claude` is not cosmon's to give
             // away, and its provisioning is a separate operator gesture.
-            config_home: None,
-            worktree: worktree.clone(),
-            state_dirs: vec![state.clone(), mol_state.clone()],
-        },
+            None,
+            vec![],
+            None,
+        ),
     );
 
     assert_eq!(
@@ -152,14 +187,9 @@ fn a_transfer_that_does_not_take_still_refuses() {
     // succeed and the uid still cannot perform its `cs evolve` write.
     std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
 
-    let decision = provision_and_decide_root_spawn(
-        0,
-        Some(TARGET),
-        &DemoteResources {
-            config_home: None,
-            worktree: worktree.clone(),
-            state_dirs: vec![state.clone()],
-        },
+    let decision = dormant_provision(
+        TARGET,
+        &DemoteResources::for_dispatch(&worktree, vec![state.clone()], None, vec![], None),
     );
 
     match decision {

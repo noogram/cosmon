@@ -144,6 +144,27 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              to the selected worker, '.' append a session note. Esc cancels any \
              modal. Detail-pane letters 'n' and 't' moved to 'N' (notes) and 'T' \
              (tree); the mouse-capture toggle moved from 'm' to 'M'.\n\n\
+             cs peek — the '?' overlay, two pages. Page 1 is the keybindings. \
+             'Tab' turns to page 2, the GLYPH LEGEND: what every symbol on the \
+             table means, stated as what to do about it rather than which enum \
+             it maps to. Both pages scroll with j/k and PgUp/PgDn. The legend is \
+             derived from the renderers themselves and a test fails when a glyph \
+             exists on screen and not in it, so it cannot go stale.\n  \
+             The vocabulary it documents: the '♥' column is LIFECYCLE (♥ healthy, \
+             💤 idle-awaiting-triage, '·' blocked on something it does not \
+             control, 🧊 frozen by design, 👻 running with no tmux behind it, ⚠ \
+             self-contradictory, ◌ terminal). 'W' is WHISPER — 🫧 means a human \
+             whispered within the last 60 minutes; blank means not in that \
+             window, never 'never'. 'T' is TEMPERATURE (🔥 hot, 🌡 warm, ❄ cold, \
+             🧊 frozen) and is ORTHOGONAL to ♥ by charter — a hot molecule that \
+             is idle shows 🔥 in T and 💤 in ♥, never the same signal twice. \
+             '● STEP' packs three signals: the ledger's status glyph, the \
+             molecule-health probe, and the step counter — when the first two \
+             disagree, believe the probe. Beside the molecule label, 🧠 is the \
+             cognition worker and 🎛️ the runtime supervisor. TRUST is lineage \
+             coverage, where a '—' is 'not verified yet' and not a low score. \
+             ENERGY is '<context bar> <tokens> <cost>', where a lone '·' means \
+             no context window was REPORTED — unknown, not zero.\n\n\
              cs peek — presence header strip. When '.cosmon/state/presence/*.json' \
              files exist, a one-line strip under the title lists every live Claude \
              session (galaxy \"headline\"). Stale entries (heartbeat > 3 min) render \

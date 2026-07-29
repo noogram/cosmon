@@ -1,0 +1,6 @@
+ Tackling create-file-named-artifact-1-e738 (task-work)
+  molecule: task-20260727-e738
+  branch:   feat/task-20260727-e738
+  worktree: /home/cosmon-worker/nonroot-mission/.worktrees/task-20260727-e738
+  session:  create-file-named-artifact-1-e738
+  attach:   tmux -L nonroot-mission-dc99 attach -t create-file-named-artifact-1-e738

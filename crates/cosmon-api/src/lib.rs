@@ -48,11 +48,47 @@
 //! - `GET  /cluster` — machine-level `cluster.toml`, as JSON; returns
 //!   `{"error":"not_configured"}` (HTTP 200) when the file is absent.
 //!
-//! # Security v0
+//! # Security
+//!
+//! **This daemon has no authentication, and some of its routes
+//! execute.** `POST /molecules/{id}/tackle` spawns a worker — it runs
+//! agent code and spends the operator's credit. `POST /whispers/{id}/spark`,
+//! `POST /whisper/{mol_id}`, `POST /molecules/{id}/tag` and the
+//! `POST /session/*` routes all write. Every request that reaches the
+//! socket carries the operator's full authority, because there is
+//! nothing else for it to carry.
+//!
+//! The listening address is therefore not a preference — it is the only
+//! access-control boundary the process has, and [`bind`] treats it that
+//! way:
 //!
 //! - Default bind `127.0.0.1:4222` (loopback only).
-//! - No auth. Run behind Tailscale when binding non-loopback.
-//! - Permissive CORS (`Access-Control-Allow-Origin: *`).
+//! - `0.0.0.0` / `::` is **refused**, with or without consent: it names
+//!   every interface the host has now or acquires later, so the
+//!   exposure cannot be determined and we fail closed.
+//! - A concrete routable address (e.g. a Tailscale IP) requires
+//!   `--i-know-this-exposes-an-unauthenticated-api`, whose help text
+//!   states what it exposes.
+//!
+//! CORS is [`CorsPolicy::Deny`] by default: a request carrying any
+//! `Origin` is refused `403` before the handler runs, so a browser's
+//! simple `POST` cannot spawn a worker and then be told off about it
+//! afterwards. The native pilots send no `Origin` and are unaffected.
+//! A wildcard on an unauthenticated executing surface would let any
+//! page the operator visits drive this daemon; named origins are
+//! opt-in via `--allow-web-origin`.
+//!
+//! ## What is deliberately still missing
+//!
+//! Authentication. `delib-20260727-f9ee` concluded, five seats of five,
+//! that the right shape is a **boot-minted seal** extending
+//! [`cosmon_rpp_adapter`'s `admin_seal`](../../cosmon-rpp-adapter/src/admin_seal.rs)
+//! — a secret minted at start, printed once, held only as a BLAKE3
+//! digest, where `None` is simultaneously "no credential" and "closed" —
+//! and *not* an ad-hoc scheme, and *not* a trust-the-loopback-caller
+//! posture. Until that lands, the bind address is the whole boundary,
+//! which is why it is enforced rather than documented. See
+//! `docs/architectural-invariants.md` §8z.
 //!
 //! See [ADR-016](../../../docs/adr/016-autonomy-regimes-and-resident-runtime.md)
 //! for the broader Transactional-Core / Resident-Runtime split — `cs-api`
@@ -61,7 +97,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod bind;
 mod cluster;
+pub mod cors;
 mod ensemble;
 mod galaxies;
 mod inbox;
@@ -77,7 +115,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::State;
-use axum::http::{HeaderValue, Method, StatusCode};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -85,6 +123,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
+
+pub use crate::cors::CorsPolicy;
 
 use crate::instrumentation::{
     emit as emit_instrumentation_event, EngineCallEntered, InvocationMode,
@@ -271,14 +311,28 @@ fn whispers_inbox_from_state(state_dir: &Path) -> PathBuf {
     whispers_root_from_state(state_dir).join("inbox")
 }
 
-/// Build the `cs-api` router over a shared `AppState`.
+/// Build the `cs-api` router over a shared `AppState`, with no browser
+/// origin allowed ([`CorsPolicy::Deny`]).
 ///
 /// Separating the router from the listener lets integration tests call
 /// the handlers through `tower::ServiceExt::oneshot` without binding a
 /// TCP socket.
 pub fn router(state: AppState) -> Router {
+    router_with_cors(state, CorsPolicy::Deny)
+}
+
+/// Build the `cs-api` router with an explicit [`CorsPolicy`].
+///
+/// The CORS middleware is installed for **both** policies. It used to
+/// be installed only for [`CorsPolicy::Allow`], on the reasoning that
+/// absent code cannot emit a header by accident — true, and beside the
+/// point: the risk on this daemon is the write, not the header, and a
+/// browser's simple `POST` reaches the handler whatever the response
+/// says afterwards. Under [`CorsPolicy::Deny`] the middleware is what
+/// turns a cross-origin write away before it happens.
+pub fn router_with_cors(state: AppState, cors: CorsPolicy) -> Router {
     let shared = Arc::new(state);
-    Router::new()
+    let routes = Router::new()
         .route("/healthz", get(healthz))
         .route("/session/start", post(session_start))
         .route("/session/note", post(session_note))
@@ -296,42 +350,14 @@ pub fn router(state: AppState) -> Router {
         .route("/motion", get(motion::get_motion))
         .route("/cluster", get(cluster::get_cluster))
         .route("/ensemble", get(ensemble::get_ensemble))
-        .route("/peek", get(peek::get_peek))
-        .layer(axum::middleware::from_fn(cors_permissive))
+        .route("/peek", get(peek::get_peek));
+
+    let policy = Arc::new(cors);
+    routes
+        .layer(axum::middleware::from_fn(move |req, next| {
+            cors::layer(Arc::clone(&policy), req, next)
+        }))
         .with_state(shared)
-}
-
-/// Open permissive CORS (`Access-Control-Allow-Origin: *`) on every
-/// response. v0 ships on loopback so origin enforcement is not critical;
-/// see README for the v1 bearer-token + origin-pinning plan.
-async fn cors_permissive(
-    req: axum::http::Request<axum::body::Body>,
-    next: axum::middleware::Next,
-) -> Response {
-    if req.method() == Method::OPTIONS {
-        let mut response = Response::new(axum::body::Body::empty());
-        *response.status_mut() = StatusCode::NO_CONTENT;
-        inject_cors(response.headers_mut());
-        return response;
-    }
-    let mut response = next.run(req).await;
-    inject_cors(response.headers_mut());
-    response
-}
-
-fn inject_cors(headers: &mut axum::http::HeaderMap) {
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-        HeaderValue::from_static("*"),
-    );
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET, POST, OPTIONS"),
-    );
-    headers.insert(
-        axum::http::header::ACCESS_CONTROL_ALLOW_HEADERS,
-        HeaderValue::from_static("Content-Type"),
-    );
 }
 
 /// Typed handler error — converts into a JSON body + HTTP status.

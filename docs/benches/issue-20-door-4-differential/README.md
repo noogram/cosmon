@@ -4,6 +4,17 @@ The report that reads these files is
 [`../issue-20-door-4-differential.md`](../issue-20-door-4-differential.md).
 Produced by `scripts/container-worker-doors-differential.sh`.
 
+> **Engine, corrected 2026-07-27.** Every `environment.txt` here records
+> `docker_context desktop-linux` — Docker Desktop 27.3.1, kernel
+> `6.10.11-linuxkit`. That is what these runs were taken on and the files are
+> published unchanged. What was wrong is the belief that this was the external
+> reporter's engine: he corrected his own description on 2026-07-27 and named
+> Colima / Ubuntu 24.04.4 LTS / aarch64. See
+> [`../engine-fidelity-2026-07-27.md`](../engine-fidelity-2026-07-27.md) for
+> the measured posture of both engines and what does and does not follow. Runs
+> made after that date are taken on `colima-cosmon-bench`; read the engine off
+> the file rather than assuming which one produced it.
+
 Each run is one complete differential: the **same** harness
 (`docker/container-worker-doors/in-container-bench.sh`, SHA-256
 `c9808df181dfaa5a25c27aac8513faa75c9d055d33e2585dc5f5e320b3ac12fc`) executed

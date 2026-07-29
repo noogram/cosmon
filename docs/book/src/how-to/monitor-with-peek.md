@@ -29,6 +29,15 @@ descends one level:
 | `s` | Synthesis (for molecules that produce one) |
 | `r` | Responses |
 | `q` | Quit |
+| `?` | Help overlay — keybindings. Press `Tab` there for the **glyph legend** |
+
+The table is dense with symbols: a lifecycle pastille (`♥` `💤` `·` `🧊` `👻`),
+a whisper bubble, a temperature, a trust bar, an energy bar. You are not
+expected to memorise them — press `?` then `Tab` and the legend sits beside the
+table it explains, saying what each glyph means *and what to do about it*. The
+same legend is mirrored in `man cs` and in the
+[handbook](https://github.com/noogram/cosmon/blob/main/docs/handbook.md#peek-glyph-legend)
+for reading away from the terminal.
 
 Press `p` to drop into any worker's output, `q` to come back up. That descend-
 and-return is the whole model: you keep the fleet view while you inspect one

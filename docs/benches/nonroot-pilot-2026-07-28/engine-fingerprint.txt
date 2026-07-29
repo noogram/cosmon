@@ -1,0 +1,1 @@
+server=29.2.1 os=Ubuntu 24.04.4 LTS arch=aarch64 kernel=6.8.0-100-generic

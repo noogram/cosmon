@@ -11,10 +11,17 @@ it explains the doors. This document is only about *proving* they are shut.
 ## Run it
 
 ```sh
-open -ga Docker                              # the tester's engine, see fidelity
+# the bench's own colima profile — see "which engine" below before changing it
+colima start --profile cosmon-bench --cpu 4 --memory 8 --disk 60 \
+  --vm-type vz --mount-type virtiofs --runtime docker
 scripts/container-worker-doors-bench.sh | tee /tmp/bench.log
 grep '^VERDICT' /tmp/bench.log
 ```
+
+If that engine is down the driver refuses, prints the line above, and exits
+**2 = INCONCLUSIVE**. It does not fall back to another docker context: a bench
+that quietly ran somewhere else is invisible in its own log, and that is how the
+engine drift corrected on 2026-07-27 got in.
 
 Roughly four minutes of `cargo build --release` on a cold cache, then under two
 minutes of arms. `COSMON_KEEP_IMAGE=1` skips the teardown `rmi` for fast reruns.
@@ -127,8 +134,23 @@ Three things follow, and all of them matter more than the numbers:
   Docker Desktop run reports `kernel.unprivileged_userns_clone` as an unknown
   key while the tester's reports `1`; an unknown key is not a zero, and a `1` is
   not permission. The engine choice changes the reading *and* the reading does
-  not decide the outcome — which is why the driver defaults to `desktop-linux`
-  and says so when you override it.
+  not decide the outcome — which is why the driver pins one engine and says so
+  when you override it.
+
+  > **Which engine, corrected 2026-07-27.** This paragraph used to end "*which
+  > is why the driver defaults to `desktop-linux`*", on the belief that Docker
+  > Desktop was the tester's engine. It was not: he corrected his own earlier
+  > description that day on issue #20 and named Colima (Lima-based), Ubuntu
+  > 24.04.4 LTS, aarch64. The driver now pins the dedicated
+  > `colima-cosmon-bench` profile, and the difference is not cosmetic — on
+  > `desktop-linux`, `unshare` as a non-root uid **succeeds** and a bind mount
+  > **honours** `chown`, so neither of the tester's two standing findings can
+  > reproduce there at all. Both engines were measured rather than assumed:
+  > [`../benches/engine-fidelity-2026-07-27.md`](../benches/engine-fidelity-2026-07-27.md).
+  > Note also that the reading quoted just above (`1` on his bed) is now
+  > explained: on colima both userns sysctls are permissive and `unshare` is
+  > refused anyway, by the default seccomp profile — attributed by flipping
+  > `--security-opt seccomp=unconfined` and nothing else.
 - **Never name a cause you did not measure.** Cosmon's diagnostic now carries a
   typed blocker (`cosmon_core::egress::NetnsBlocker`) with an explicit
   `Undetermined` variant, so an unattributable failure says *"this probe cannot
@@ -370,6 +392,15 @@ with the middle elided, because these screens put their identity in the headline
 and their mechanics at the foot.
 
 ## The arms, and what each one isolates
+
+> **Arms A and B no longer reach what they were built to isolate.** As of
+> 2026-07-28 a root dispatcher with `COSMON_WORKER_UID` set is refused before
+> anything is created — see
+> [ADR-166](../adr/166-the-root-to-uid-demote-path-is-refused.md). Both arms
+> now stop at that refusal, which is earlier than the gates they were measuring.
+> This is the same "each new fail-closed gate moves the point at which an older
+> scenario stops being reachable" note as above, one gate further along: say
+> which gate answered, do not re-point the arm at something easier to prove.
 
 | arm | shape | what it isolates |
 |---|---|---|

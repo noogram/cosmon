@@ -109,6 +109,11 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 [dev-dependencies]
 cosmon-transport = { workspace = true, features = ["test-support"] }
 insta.workspace = true
+# `tests/consent_non_blocking.rs` allocates a real pty (`openpty`) so the
+# non-blocking property of the first-run consent question can be asserted
+# against an actual terminal on stdin — the exact geometry that hung a
+# container dispatch. No production code depends on this.
+libc.workspace = true
 tempfile.workspace = true
 
 [lints]

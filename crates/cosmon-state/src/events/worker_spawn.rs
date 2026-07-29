@@ -437,6 +437,76 @@ pub fn emit_new_model_observations(
     }
 }
 
+/// Emit an [`EventV2::ModelObservationUnavailable`] **at most once** for one
+/// dispatch scope (task-20260727-3f46).
+///
+/// The negative sibling of [`emit_new_model_observations`]: the observer has
+/// positive evidence that it cannot observe — the session-log root it was
+/// handed does not exist — and says so, once, instead of ticking in silence
+/// against a directory that is not there.
+///
+/// A no-op when the scope already carries one — including when the log could
+/// not be read back, which is treated as "already said": a diagnostic that
+/// cannot be deduped must not become a per-tick flood.
+///
+/// Dedup is scoped to `(mol_id, worker_id, adapter_name)` exactly like the
+/// observation dedup, and runs under the same cross-process observation-emit
+/// lock, so two watchers racing on the same dispatch write one line between
+/// them — and a re-tackle (new `worker_id`) is free to report the condition
+/// again for its own attempt.
+///
+/// Best-effort throughout (trace-not-lock): a write failure is swallowed.
+pub fn emit_model_observation_unavailable_once(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+    expected_root: &Path,
+) {
+    let _guard = ObservationEmitLock::acquire(state_dir);
+    if already_reported_unavailable(state_dir, mol_id, worker_id, adapter_name) {
+        return;
+    }
+    let event = EventV2::ModelObservationUnavailable {
+        mol_id: mol_id.clone(),
+        worker_id: Some(worker_id.clone()),
+        adapter_name: adapter_name.to_owned(),
+        expected_root: expected_root.to_string_lossy().into_owned(),
+        detected_at: Utc::now(),
+    };
+    write_event(state_dir, event);
+}
+
+/// Whether `(mol_id, worker_id, adapter_name)` already carries an
+/// [`EventV2::ModelObservationUnavailable`] line.
+///
+/// An unreadable log answers `true` — see
+/// [`emit_model_observation_unavailable_once`] for why the failure mode of a
+/// diagnostic is silence, not repetition. Legacy unscoped lines
+/// (`worker_id: None`) are matched fail-closed, as elsewhere: they belong to
+/// no identifiable attempt and therefore suppress nothing.
+#[must_use]
+fn already_reported_unavailable(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+) -> bool {
+    let log_path = resolve_events_log_path(state_dir);
+    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
+        return true;
+    };
+    envelopes.into_iter().any(|env| match env.event {
+        EventV2::ModelObservationUnavailable {
+            mol_id: ref m,
+            worker_id: Some(ref w),
+            adapter_name: ref a,
+            ..
+        } => m == mol_id && w == worker_id && a == adapter_name,
+        _ => false,
+    })
+}
+
 /// RAII guard making the dedup read-back + emission in
 /// [`emit_new_model_observations`] atomic across processes (round-4 / COND-1).
 ///

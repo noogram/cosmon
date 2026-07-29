@@ -239,6 +239,24 @@ pub(crate) fn complete_one(
     )
     .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
 
+    // Committee-posture survival across the LAST rewrite of the briefing.
+    //
+    // The terse COMPLETED text above replaces whatever the briefing carried,
+    // including a committee seat's pointer at its durable `committee-posture.md`
+    // — and `cs complete` is the verb every seat ends with. Without this call
+    // the persona witness (2) `BriefingNotInjected` would be satisfiable only
+    // *while a seat runs* and false at the moment any auditor, release gate or
+    // `cs reconcile --check` reads the record, which is the only moment such a
+    // record is ever read. Measured on committee-20260728-2d37's two seats:
+    // green after `cs tackle`, `grep -c committee-posture.md briefing.md == 0`
+    // after `cs complete`, both seats.
+    //
+    // `cs tackle` and `cs evolve` call the same function at their own briefing
+    // writes; this is its third and terminal call site. It is a no-op for every
+    // molecule that is not a seat (no durable file → nothing to point at), which
+    // is what makes a third call site safe.
+    super::evolve::reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
+
     // Seal proof-of-work manifest: capture artifact hashes so `cs verify`
     // can later detect tampering. Best-effort — a manifest write failure
     // does not abort the completion (the molecule is already transitioned).

@@ -222,3 +222,9 @@ docker/spore-e2e/_spore_stage/
 # Python bytecode — generated, never tracked (issue-20 provenance checker, 2026-07-26)
 __pycache__/
 *.pyc
+
+# A locally brew-linked JDK used by docs/specs TLA+ runs. It was once tracked
+# as a symlink to an absolute machine path — invisible to every text scan and
+# dangling in any other clone. Resolve java via PATH or $JAVA (see
+# docs/specs/README.md) instead of committing a pointer into one Mac.
+docs/specs/openjdk.jdk

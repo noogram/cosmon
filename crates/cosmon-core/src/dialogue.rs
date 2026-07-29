@@ -18,8 +18,8 @@
 //! - **auto-confirm the cheap prompts** so a worker never rots 30h waiting for
 //!   a keystroke that carries no stake; but
 //! - **never, ever auto-confirm a money choice** — a spend-limit or a plan
-//!   upgrade must page a human, because pressing Enter there spends the fund's
-//!   money without consent.
+//!   upgrade must page a human, because pressing Enter there spends the
+//!   operator's money without consent.
 //!
 //! This module is the *decision core* that separates those two worlds. It is
 //! pure text-in / verdict-out — no tmux, no I/O, no side effects — so the

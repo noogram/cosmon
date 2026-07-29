@@ -38,7 +38,7 @@ use crate::model_spec::ReasoningEffort;
 /// clobber, the intention field (structural no-clobber: the fold arm that fills
 /// this names only [`AdapterAttribution::realized`]).
 ///
-/// It is a **tri-state**, not an `Option<String>` last-wins, because the feature
+/// It is a **multi-state**, not an `Option<String>` last-wins, because the feature
 /// exists to reveal exactly the cases a flat slot fabricates
 /// (`docs/design/realized-model/DECISIONS.md`, D1):
 ///
@@ -81,6 +81,21 @@ pub enum Realized {
     /// `...` (motion) per D3 — distinct from `?`/`-` so a running-but-unobserved
     /// molecule never reads as a confirmed or silent one.
     Pending,
+    /// The observation seam is **broken**: the observer reported (via
+    /// [`EventV2::ModelObservationUnavailable`]) that the session-log root it
+    /// was given does not exist, so no observation can arrive for this
+    /// dispatch — not now, not at teardown, not ever.
+    ///
+    /// This is the honest counterpart of [`Self::Pending`], and the reason it
+    /// exists (task-20260727-3f46): rendering `...` for a state that will
+    /// never resolve is a lie of omission. `...` promises "wait and you will
+    /// know"; here, waiting yields nothing, and the operator's next move is to
+    /// fix a path, not to be patient. Rendered `x`.
+    ///
+    /// Never fabricated from absence: only a positive
+    /// [`EventV2::ModelObservationUnavailable`] on the current attempt
+    /// produces it, and any real observation on that attempt outranks it.
+    Unobservable,
 }
 
 impl Realized {
@@ -95,27 +110,30 @@ impl Realized {
     }
 
     /// The honest one-glyph/one-fragment label for the detail line:
-    /// `?` (unknown), `-` (silent), `...` (pending), or the `a->b` trajectory
-    /// (observed).
+    /// `?` (unknown), `-` (silent), `...` (pending), `x` (unobservable), or
+    /// the `a->b` trajectory (observed).
     #[must_use]
     pub fn detail_fragment(&self) -> String {
         match self {
             Self::Unknown => "?".to_string(),
             Self::Silent => EMPTY_CELL.to_string(),
             Self::Pending => PENDING_GLYPH.to_string(),
+            Self::Unobservable => UNOBSERVABLE_GLYPH.to_string(),
             Self::Observed(ids) if ids.is_empty() => EMPTY_CELL.to_string(),
             Self::Observed(ids) => ids.join("->"),
         }
     }
 
     /// The parenthetical disposition tag for the detail line — how the value
-    /// should be read: `unknown`, `silent`, `pending`, or `observed`.
+    /// should be read: `unknown`, `silent`, `pending`, `unobservable`, or
+    /// `observed`.
     #[must_use]
     pub fn disposition(&self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Silent => "silent",
             Self::Pending => "pending",
+            Self::Unobservable => "unobservable",
             Self::Observed(ids) if ids.is_empty() => "silent",
             Self::Observed(_) => "observed",
         }
@@ -140,6 +158,7 @@ impl Realized {
             Self::Unknown => Some("?"),
             Self::Silent => Some(EMPTY_CELL),
             Self::Pending => Some(PENDING_GLYPH),
+            Self::Unobservable => Some(UNOBSERVABLE_GLYPH),
             Self::Observed(_) => None,
         }
     }
@@ -291,6 +310,12 @@ pub const EMPTY_CELL: &str = "-";
 /// compact cell stays byte-safe.
 pub const PENDING_GLYPH: &str = "...";
 
+/// The `x` glyph for a realization that can never arrive because the
+/// observation seam is broken ([`Realized::Unobservable`], task-20260727-3f46)
+/// — ASCII, and deliberately not a variant of `...`: the two say opposite
+/// things about whether waiting will help.
+pub const UNOBSERVABLE_GLYPH: &str = "x";
+
 /// Whether an adapter can *structurally* report the concrete model it ran, and
 /// therefore whether the absence of a [`Realized::Observed`] is honest silence
 /// or merely an un-observed run (F-05).
@@ -384,6 +409,11 @@ impl AdapterAttribution {
         let mut ran_to_completion = false;
         let mut worker_exited = false;
         let mut dispatched = false;
+        // Positive evidence that the observation seam is broken for *this*
+        // attempt (task-20260727-3f46). Cleared at every attempt boundary
+        // alongside `observed`, so a re-tackle under a fixed configuration is
+        // never tainted by the previous attempt's finding.
+        let mut unobservable = false;
         // The current attempt's scope keys — an observation is folded only when
         // it matches these (F-02). `current_adapter` also decides `Silent` vs
         // `Unknown` at resolution (F-05, via `model_report_capability`).
@@ -401,6 +431,7 @@ impl AdapterAttribution {
                     // New attempt: discard any realized state from the prior run.
                     current_adapter = Some(adapter_name.clone());
                     observed.clear();
+                    unobservable = false;
                     ran_to_completion = false;
                     worker_exited = false;
                     dispatched = true;
@@ -418,6 +449,7 @@ impl AdapterAttribution {
                         current_adapter = Some(adapter_name.clone());
                     }
                     observed.clear();
+                    unobservable = false;
                     ran_to_completion = false;
                     worker_exited = false;
                     dispatched = true;
@@ -460,6 +492,24 @@ impl AdapterAttribution {
                         observed.push(model.clone());
                     }
                 }
+                EventV2::ModelObservationUnavailable {
+                    worker_id,
+                    adapter_name,
+                    ..
+                } => {
+                    // Same fail-closed attempt scoping as `ModelObserved`: a
+                    // finding from another adapter or another worker says
+                    // nothing about this attempt's seam.
+                    if current_adapter.as_deref() != Some(adapter_name.as_str()) {
+                        continue;
+                    }
+                    match (worker_id.as_ref(), current_worker.as_ref()) {
+                        (Some(obs_w), Some(cur_w)) if obs_w != cur_w => continue,
+                        (None, Some(_)) => continue,
+                        _ => {}
+                    }
+                    unobservable = true;
+                }
                 EventV2::MoleculeCompleted { .. } => {
                     ran_to_completion = true;
                 }
@@ -469,34 +519,22 @@ impl AdapterAttribution {
                 _ => {}
             }
         }
-        // Resolve the tri-state from the disjoint accumulators. The pin is NEVER
-        // consulted here.
-        out.realized = if !observed.is_empty() {
-            // An observation always wins — a concrete realized trajectory.
-            Realized::Observed(observed)
-        } else if ran_to_completion {
-            // Completed without any observation. Only a *proven structurally
-            // mute* adapter's completion is honest silence; a capable adapter
-            // that completed unobserved means capture failed / never ran, and
-            // an adapter this build has never heard of proves nothing at all —
-            // both stay `Unknown`, not `Silent` (F-05, fail-closed). A generic
-            // completion never proves a model-less run.
-            match out.adapter.as_deref() {
-                Some(a) if model_report_capability(a) == ModelReportCapability::Mute => {
-                    Realized::Silent
-                }
-                _ => Realized::Unknown,
-            }
-        } else {
-            // Crashed before any event, dispatched-but-in-flight, legacy, or
-            // never tackled — all honestly `Unknown`. The fold does NOT emit
-            // `Pending`: it cannot know a worker is still alive, and claiming a
-            // run is in flight from the mere absence of a terminal event would
-            // be a liveness lie. A live surface promotes this to `Pending` via
-            // `mark_pending_if_live` when it has positive evidence.
-            let _ = (worker_exited, dispatched);
-            Realized::Unknown
-        };
+        // Resolve the realized axis from the disjoint accumulators. The pin is
+        // NEVER consulted there.
+        // `worker_exited` / `dispatched` are tracked but deliberately not
+        // consulted: neither an exit nor a dispatch proves anything about
+        // which model ran, and the fold must never invent a realization from
+        // liveness. They are kept because reading the walk without them
+        // invites exactly that inference.
+        let _ = (worker_exited, dispatched);
+        out.realized = resolve_realized(
+            RealizedAccumulators {
+                observed,
+                unobservable,
+                ran_to_completion,
+            },
+            out.adapter.as_deref(),
+        );
         out
     }
 
@@ -508,8 +546,10 @@ impl AdapterAttribution {
     /// (it cannot know liveness from the log alone). `cs peek`, which *does*
     /// know a worker is alive, calls this so an in-flight, not-yet-observed
     /// molecule renders `...` (motion) rather than `?` (unknown). It only ever
-    /// upgrades `Unknown` — an already-`Observed`/`Silent` realization is a
-    /// settled fact and is left untouched.
+    /// upgrades `Unknown` — an already-`Observed`/`Silent`/`Unobservable`
+    /// realization is a settled fact and is left untouched. `Unobservable` in
+    /// particular must survive liveness: a live worker whose observation seam
+    /// is broken is exactly the case `...` would misdescribe.
     pub fn mark_pending_if_live(&mut self, worker_is_live: bool) {
         if worker_is_live && self.realized == Realized::Unknown {
             self.realized = Realized::Pending;
@@ -658,6 +698,65 @@ impl AdapterAttribution {
     }
 }
 
+/// The disjoint accumulators [`AdapterAttribution::fold`] fills while walking
+/// the event slice, handed to [`resolve_realized`] as one value. They are
+/// deliberately separate from the intention fields: nothing here can reach the
+/// pin, which is what makes "the realized axis never echoes the pin"
+/// structural rather than a convention.
+#[derive(Debug, Default)]
+struct RealizedAccumulators {
+    /// Concrete model ids observed on the current attempt, in order.
+    observed: Vec<String>,
+    /// The observer positively reported it cannot observe (broken seam).
+    unobservable: bool,
+    /// A `MoleculeCompleted` was seen.
+    ran_to_completion: bool,
+}
+
+/// Resolve the realized axis from [`AdapterAttribution::fold`]'s
+/// accumulators. Extracted from the fold so the walk and the resolution can
+/// each be read in one screen; the pin is NEVER consulted here.
+fn resolve_realized(acc: RealizedAccumulators, adapter: Option<&str>) -> Realized {
+    let RealizedAccumulators {
+        observed,
+        unobservable,
+        ran_to_completion,
+    } = acc;
+    if !observed.is_empty() {
+        // An observation always wins — a concrete realized trajectory.
+        // It also outranks a broken-seam finding: a seam that produced an
+        // id worked, whatever an earlier tick reported (a root created
+        // mid-run self-heals).
+        Realized::Observed(observed)
+    } else if unobservable {
+        // The observer said, positively, that it cannot observe. This is
+        // the one state that must not read as `pending`: waiting will
+        // never resolve it (task-20260727-3f46).
+        Realized::Unobservable
+    } else if ran_to_completion {
+        // Completed without any observation. Only a *proven structurally
+        // mute* adapter's completion is honest silence; a capable adapter
+        // that completed unobserved means capture failed / never ran, and
+        // an adapter this build has never heard of proves nothing at all —
+        // both stay `Unknown`, not `Silent` (F-05, fail-closed). A generic
+        // completion never proves a model-less run.
+        match adapter {
+            Some(a) if model_report_capability(a) == ModelReportCapability::Mute => {
+                Realized::Silent
+            }
+            _ => Realized::Unknown,
+        }
+    } else {
+        // Crashed before any event, dispatched-but-in-flight, legacy, or
+        // never tackled — all honestly `Unknown`. The fold does NOT emit
+        // `Pending`: it cannot know a worker is still alive, and claiming a
+        // run is in flight from the mere absence of a terminal event would
+        // be a liveness lie. A live surface promotes this to `Pending` via
+        // `mark_pending_if_live` when it has positive evidence.
+        Realized::Unknown
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -712,6 +811,16 @@ mod tests {
             role: "polecat".to_string(),
             adapter_name: adapter.to_string(),
             loop_ownership: Default::default(),
+        }
+    }
+
+    fn observation_unavailable(adapter: &str, worker: Option<&str>) -> EventV2 {
+        EventV2::ModelObservationUnavailable {
+            mol_id: mid(),
+            worker_id: worker.map(|w| crate::id::WorkerId::new(w).unwrap()),
+            adapter_name: adapter.to_string(),
+            expected_root: "/home/worker/.claude/projects".to_string(),
+            detected_at: Utc::now(),
         }
     }
 
@@ -801,6 +910,95 @@ mod tests {
         assert_eq!(a.model, None);
         // Unobserved capable adapter → trailing `?` (F-03).
         assert_eq!(a.compact_cell(), "claude [config] ?");
+    }
+
+    // ---- Unobservable seam (task-20260727-3f46) ---------------------------
+
+    /// A watcher that reported it cannot observe produces `Unobservable`, not
+    /// `Unknown` and emphatically not `Pending`: the operator's next move is
+    /// to fix a path, not to wait.
+    #[test]
+    fn realized_unobservable_when_the_observer_says_the_seam_is_broken() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            observation_unavailable("claude", Some("worker-1")),
+        ];
+        let mut a = AdapterAttribution::fold(&events);
+        assert_eq!(a.realized, Realized::Unobservable);
+        assert_eq!(a.compact_cell(), "claude [cli] x");
+        assert!(a.detail_line().contains("realized: x (unobservable)"));
+        // Liveness must not overwrite it — that is the whole point.
+        a.mark_pending_if_live(true);
+        assert_eq!(a.realized, Realized::Unobservable);
+    }
+
+    /// A seam that later works outranks its own earlier complaint: a config
+    /// dir created mid-run must self-heal the display rather than leave a
+    /// permanent `x` next to a perfectly good observation.
+    #[test]
+    fn an_observation_outranks_an_earlier_unavailable_report() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            observation_unavailable("claude", Some("worker-1")),
+            model_observed_for("claude", "claude-opus-4-8", Some("worker-1")),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(
+            a.realized,
+            Realized::Observed(vec!["claude-opus-4-8".to_string()])
+        );
+    }
+
+    /// Attempt scoping (F-02), applied to the negative finding: a re-tackle
+    /// under a fixed configuration must not inherit the previous attempt's
+    /// broken seam.
+    #[test]
+    fn a_retackle_does_not_inherit_the_previous_attempts_broken_seam() {
+        let events = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            observation_unavailable("claude", Some("worker-1")),
+            // Second attempt, correctly configured this time.
+            worker_spawned("claude", "worker-2"),
+            model_observed_for("claude", "claude-sonnet-5", Some("worker-2")),
+        ];
+        let a = AdapterAttribution::fold(&events);
+        assert_eq!(
+            a.realized,
+            Realized::Observed(vec!["claude-sonnet-5".to_string()])
+        );
+
+        // ...and the mirror: the finding belongs to a worker that is no
+        // longer the current attempt, so it is rejected outright.
+        let stale = vec![
+            adapter_selected(
+                "claude",
+                AdapterSelectionSource::Cli {
+                    flag: "claude".into(),
+                },
+            ),
+            worker_spawned("claude", "worker-1"),
+            observation_unavailable("claude", Some("worker-1")),
+            worker_spawned("claude", "worker-2"),
+        ];
+        assert_eq!(AdapterAttribution::fold(&stale).realized, Realized::Unknown);
     }
 
     #[test]

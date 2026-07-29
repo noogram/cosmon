@@ -18,9 +18,15 @@ set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
 # Structural checks are autonomous and fail closed even when the optional
-# operator-local name denylist is absent. (Was `scripts/publish.sh --check`,
-# a pre-publication reference that never shipped in this tree — the
-# command-backed successor is the release checklist's GATE items.)
+# operator-local name denylist is absent.
+#
+# This comment used to record that `scripts/publish.sh --check` "never shipped
+# in this tree" and that the release checklist was its successor. Half right:
+# the file genuinely never existed, but the checklist was not a successor —
+# GATE 1 (gitleaks) and GATE 4 (denylist) both PEND without operator-local
+# prerequisites, so on a bare clone the credential and machine-path clauses had
+# no failing referee. `scripts/publish.sh --check` now exists and covers exactly
+# the structural subset, and the checklist calls it as GATE 14.
 bash scripts/release-checklist.sh --check
 
 DIR="${COSMON_DENYLIST_DIR:-$HOME/.cosmon}"
@@ -48,6 +54,7 @@ PATHSPEC=(
   ':(exclude)scripts/confidentiality-banlist.sh'
   ':(exclude)scripts/confidentiality-banlist.test.sh'
   ':(exclude)scripts/publish.sh'
+  ':(exclude)scripts/publish.test.sh'
   ':(exclude)scripts/sovereignty-gate.sh'
   ':(exclude)scripts/sovereignty-spec.md'
   # The WHOLE release membrane, not one file of it (task-20260716-c4eb). This

@@ -106,6 +106,35 @@ among a hundred confirmations still refutes.
   collapse. All logic is pure and unit-tested (missing seat, budget-blocked seat,
   same-family alias, same-persona refuter, one refutation amid confirmations).
 
+  **Amendment, 2026-07-28 — "pure and unit-tested" was not enforcement.** The
+  sentence above was true and it was not enough, and the gap between the two is
+  worth keeping on the record. A referee reading the frozen head verified by
+  grep that `plan_committee`, `committee_requirement`, `fold_committee`,
+  `jury_integrity`, `sor_may_not_resurrect` and `RosterPlan::floor_bearing_seats`
+  had **no production callers anywhere in the workspace** — the only
+  `committee::` references outside the module were the posture-injection
+  plumbing in `cs evolve`, which is not the decision kernel. Every predicate
+  passed its own tests while changing nothing: the two witnesses and the
+  diversity floor were held up by a worker reading the formula, so a convener
+  who skipped the check, or resolved an endpoint tuple wrongly, produced a
+  roster no tool contradicted. A pure kernel nobody calls is documentation.
+
+  The fix keeps the rejection below intact — still no `cs committee` command.
+  A committee now writes a machine-readable
+  [`RosterSpec`](../../crates/cosmon-core/src/committee.rs) to `roster.json`
+  beside its prose `roster.md`, and `cs reconcile --check` refuses a roster in
+  which any seat fails either witness or the roster falls below its family
+  floor, on the same fail-closed contract as the two `[provider_bias]` lints
+  that already lived there. Prose cannot be refused by a tool; a declared
+  roster can. An unparseable `roster.json` is refused rather than skipped —
+  a roster the gate could not read is a roster the gate did not check, and
+  passing it would rebuild this very defect one level up.
+
+  What this does **not** change is the §8b ceiling named below: `injected` and
+  `role_id` remain declared facts, so the gate refuses a convener who is honest
+  and wrong, not one who is dishonest. That was always the claim; what was
+  missing was that it refused nobody at all.
+
 - **Negative / residual (named, not closed).** Tier (a) family is still
   config-derived — a proxy-costume survives (tier (b) `SameFamilyRefusal` is the
   follow-on). The `role_id` and the `injected` flag are *declared* facts the
@@ -115,11 +144,47 @@ among a hundred confirmations still refutes.
   unclosed here too; only C5's empirical calibration probe polices it. This ADR
   makes the jury *loud and structured*, not incorruptible.
 
+### 2026-07-28 postscript — the same shape, one layer downstream
+
+The gap this ADR closed was *a witness with zero production callers*: a
+predicate that passed its own unit tests while nothing consulted it, so the rule
+was held up by a worker reading prose. The identical shape was then found one
+layer down, on what the seats **emit** rather than on who sits.
+
+`cmb-verify`'s verdict door is **relative** — `confirmed` means *the stated
+mechanism holds*, which is CLEAN when the mechanism claimed a fix and FINDINGS
+when it claimed a defect — so `verdict.json` carries a required
+`mechanism_polarity`. `converge-clean-room.formula.toml` stated that a missing
+polarity, or a `(polarity, verdict, VERDICT:)` triple off the table, is
+NOT-CLEAN, and mitigated the residual with *"a seat convened by this loop is
+ALWAYS `polarity: fix`"*. That sentence was a **declaration about seats that
+nothing resolved**: no code read the field, so the gate still passed when the
+constrained party lied, or was simply absent — the same test this ADR applies to
+the roster, failed at the next joint.
+
+Closed the same way, in the same gate: `check_seat_verdict_polarity` in
+`cs reconcile --check` reads each seat's `verdict.json` and `referee-report.md`
+and refuses both shapes, over
+`cosmon_core::committee::read_seat_emission` — the four-row table in code, once,
+taking its polarity by value with no default so *"state it, do not assume it"*
+is enforced by the signature. Scope is decided by the **verdict's own
+vocabulary**, never the molecule's kind: only the relative door is subject to
+the rule, so absolute `PASS` / `FINDINGS` / `CLEAN` gate verdicts are untouched.
+Same live/historical split, for the same reason — a refusal nobody can act on is
+an outage.
+
+The §8b ceiling above is unchanged: a seat can still *state a false polarity*,
+exactly as a convener can lie about injection. What is no longer possible is
+omitting it, or contradicting it in the same breath.
+
 ## Alternatives considered
 
 - **A new `cs committee` command.** Rejected — a committee is a recipe over
   molecules, so it stays a formula (composability principle). C4 adds a pure core
-  kernel the formula cites, not a command or daemon.
+  kernel the formula cites, not a command or daemon. *(Still rejected after the
+  2026-07-28 amendment: the enforcement gap was closed inside `cs reconcile
+  --check`, an existing gate that already hosts two sibling committee lints, so
+  no verb was added to the surface.)*
 - **Fold the persona witness into the SOR `diversity_ok` flag.** Rejected — that
   would let the router's score interact with the witness. The witness must be a
   hard pre-filter upstream of the ballot, which is exactly `plan_committee` →
@@ -130,7 +195,23 @@ among a hundred confirmations still refutes.
 
 ## References
 
-- `crates/cosmon-core/src/committee.rs` — the pure kernel + tests.
+- `crates/cosmon-core/src/committee.rs` — the pure kernel + tests, and
+  `RosterSpec` / `COMMITTEE_ROSTER_FILE`, the declarable roster the gate reads.
+- `crates/cosmon-cli/src/cmd/reconcile.rs` — `check_committee_roster_witnesses`,
+  the production boundary that refuses a witness-failing roster (2026-07-28).
+- `crates/cosmon-cli/tests/committee_roster_reconcile_lint.rs` — the end-to-end
+  refusals, asserted on `cs reconcile --check`'s exit status rather than on the
+  predicates, which already passed while enforcing nothing.
+- `cosmon_core::committee::{map_through_polarity, read_seat_emission,
+  read_converge_round}` + `check_seat_verdict_polarity` in `reconcile.rs`, with
+  `crates/cosmon-cli/tests/seat_verdict_polarity_reconcile_lint.rs` — the
+  2026-07-28 postscript above: the verdict door made readable by code instead of
+  by a sentence.
+- `crates/cosmon-cli/tests/verdict_polarity_coherence.rs` — the site-granular
+  falsifier over the three formulas that speak both vocabularies. It asserts per
+  *site* (paragraph, and list item within it) rather than over the flattened
+  file, because a whole-file `contains()` cannot bind a statement to its
+  condition — measured: the previous version passed on a fully reverted defect.
 - `crates/cosmon-core/src/provider_diversity.rs` — witness (1) resolution (ADR-147).
 - `crates/cosmon-core/src/criticality.rs` — the C2 fold (ADR-151) that triggers the wiring.
 - `crates/cosmon-core/src/sor.rs` — the C3 router (ADR-152) the witness gates.

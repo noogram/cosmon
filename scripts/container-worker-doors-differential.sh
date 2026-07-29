@@ -61,8 +61,18 @@
 #   scripts/container-worker-doors-differential.sh
 #
 # Environment overrides:
-#   COSMON_DOCKER_CONTEXT   docker context (default: desktop-linux, the
-#                           reporter's engine)
+#   COSMON_BENCH_COLIMA_PROFILE  colima profile carrying the bench engine
+#                           (default: cosmon-bench, dedicated to the benches)
+#   COSMON_DOCKER_CONTEXT   explicit docker context override. Corrected on
+#                           2026-07-27: the default was `desktop-linux`,
+#                           labelled "the reporter's engine". It was not.
+#                           The reporter's bed is Colima (Lima-based),
+#                           Ubuntu 24.04.4 LTS, aarch64 — his own correction
+#                           on issue #20 — and the measured posture of both
+#                           engines is in
+#                           docs/benches/engine-fidelity-2026-07-27.md.
+#                           An unreachable engine is INCONCLUSIVE (exit 2),
+#                           never a silent fallback to another context.
 #   COSMON_DIFF_OUT         directory for the raw logs (default: a temp dir,
 #                           printed at the end)
 #   COSMON_KEEP_IMAGE=1     skip the image rmi at teardown
@@ -72,8 +82,10 @@
 # `PLACEHOLDER-NOT-A-CREDENTIAL-…` minted inside the container.
 set -euo pipefail
 
-CONTEXT="${COSMON_DOCKER_CONTEXT:-desktop-linux}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/bench-engine.sh
+. "$REPO_ROOT/scripts/lib/bench-engine.sh"
+CONTEXT="$(bench_engine_context)"
 OUT="${COSMON_DIFF_OUT:-$(mktemp -d "${TMPDIR:-/tmp}/cwd-differential.XXXXXX")}"
 mkdir -p "$OUT"
 # Build contexts live OUTSIDE the artefact directory: a git worktree is not
@@ -94,8 +106,7 @@ die() { printf '\n\033[1;31m✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 sha() { shasum -a 256 "$1" | awk '{print $1}'; }
 
-docker --context "$CONTEXT" info >/dev/null 2>&1 \
-  || die "docker context '$CONTEXT' is not reachable. Start Docker Desktop (open -ga Docker), or set COSMON_DOCKER_CONTEXT."
+bench_engine_require "$CONTEXT"
 
 # ── The pinned environment, recorded ONCE and shared by both passes ──────
 ENV_FILE="$OUT/environment.txt"

@@ -1,0 +1,6 @@
+ Tackling create-file-named-artifact-2-23bd (task-work)
+  molecule: task-20260727-23bd
+  branch:   feat/task-20260727-23bd
+  worktree: /home/cosmon-worker/nonroot-mission/.worktrees/task-20260727-23bd
+  session:  create-file-named-artifact-2-23bd
+  attach:   tmux -L nonroot-mission-dc99 attach -t create-file-named-artifact-2-23bd

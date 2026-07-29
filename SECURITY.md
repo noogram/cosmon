@@ -86,8 +86,8 @@ tracked, operator-owned decision, not a shipped guarantee.
   or crafted `state.json` execute code or destroy unrelated data.
 - Supply-chain gaps in the release/install pipeline (unpinned actions, missing
   signature verification a user is told exists, dependency confusion).
-- Confidentiality-gate bypasses that leak operator/fund identity onto the
-  publishable surface.
+- Confidentiality-gate bypasses that let an operator-supplied blocked term
+  reach the publishable surface.
 - A bypass of the repo-supplied-shell **trust gate**: running a cloned
   repository's formula `command` / `verification` step or its `post_merge` /
   `pre_done` hook via `sh -c` **without** a `cs trust` grant (or the documented

@@ -1,0 +1,5 @@
+# ownership-repair journal — dispatch 1: cs tackle and the worker it spawned
+# every event line begins `pid=`; 0 event(s) recorded.
+# an entry would read: pid=<pid> enter-repair-path to_uid=<uid>
+# followed by:         pid=<pid> chown tree|node uid=<uid> <path>
+# NO EVENTS. The repair path was not entered by any process here.

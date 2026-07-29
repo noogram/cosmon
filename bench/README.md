@@ -32,9 +32,85 @@ Prerequisites:
 - `ollama` + a tiny model (e.g. `qwen2.5:0.5b`) — for probe #4's decisive half.
 - `cosmon-remote` authed, or `COSMON_JUDGE_CMD` — for a real LLM-as-judge run.
 
+### Which docker engine (corrected 2026-07-27)
+
+Two different rules, on purpose:
+
+- The **container benches** under `scripts/` —
+  `container-worker-doors-bench.sh`, `container-real-mission-bench.sh`,
+  `container-worker-doors-differential.sh` — pin the dedicated colima profile
+  `cosmon-bench`, resolved in one place by `scripts/lib/bench-engine.sh`. They
+  used to pin `desktop-linux` under a header claiming Docker Desktop was the
+  external tester's engine and colima "NOT faithful". He corrected his own
+  description on 2026-07-27 (Colima / Ubuntu 24.04.4 LTS / aarch64), and both
+  engines were then measured rather than re-guessed: on `desktop-linux`,
+  `unshare` as a non-root uid succeeds and a bind mount honours `chown`, so
+  **neither** of his two standing findings can reproduce there.
+  → [`docs/benches/engine-fidelity-2026-07-27.md`](../docs/benches/engine-fidelity-2026-07-27.md)
+
+  If that engine is down they exit **2 = INCONCLUSIVE** with the exact
+  `colima start` line, and never fall back to another context — same verdict
+  semantics as everything else here, applied to the engine itself.
+
+- The **six probes** in `bench/probes/` keep using whatever docker context is
+  current, and degrade to INCONCLUSIVE when there is none. This is deliberate,
+  not an oversight: the only docker-dependent probe, `issue-2-build-deps`, asks
+  whether a from-source Linux build needs `pkg-config` + `libdbus-1-dev`. That
+  answer is a property of the *image's* apt state, not of the host kernel's
+  user-namespace or mount posture, so pinning a VM there would cost a boot and
+  buy no fidelity. If a probe ever grows a kernel- or mount-sensitive half, it
+  moves onto `scripts/lib/bench-engine.sh` with the others.
+
 Where a probe needs an external binary that cannot run headless (a fully authed
 Claude Code session), it degrades to asserting the argv/spawn signature and
 marks that portion **INCONCLUSIVE** with an explicit note — never a silent pass.
+
+### The real-mission arm — how far a machine may actually walk
+
+The sentence above is a real limit, and for a long time it was also a blind
+spot: the container benches proved the four startup doors of issue #20 *open*,
+but every arm of them stops in front of a file literally named
+`PLACEHOLDER-NOT-A-CREDENTIAL`, so nothing had ever been observed walking down
+the corridor behind those doors.
+
+`scripts/container-real-mission-bench.sh` closes that gap up to the one step a
+machine must not take. It builds the tester's environment
+(`docker/container-real-mission/Dockerfile`), installs `cs` from the current
+tree, and drives a **real** molecule through the **real**
+`cs tackle --adapter claude` path — no placeholder minted, nothing doubled. It
+then necessarily halts at door 3 and asserts the refusal's post-conditions,
+capturing the gate's own words verbatim into `mission-record.json`.
+
+**A refusal for the expected reason is the measured outcome, not a failure.**
+An exit-0 would be the alarming result.
+
+The remaining step, the login, belongs to a human. The harness prints the exact
+command; the two ways to provision that credential and their costs are set out
+in `docs/guides/claude-worker-in-a-container.md`.
+
+#### It grades against the world it is in, not against one world
+
+The first version of this arm only knew the world with no credential in it, so
+it treated a refusal as the pass and a *successful* dispatch as a finding. Once
+the human completed the login, it reported failure over a run that worked.
+
+The in-container grader now decides which world it is in by `stat()`ing the
+credentials path — never by opening it, the secret discipline is unchanged —
+and grades accordingly:
+
+| world | discriminator | expected outcome (exit `0`) |
+|---|---|---|
+| no credential | `$CLAUDE_CONFIG_DIR/.credentials.json` absent | `REFUSED-AT-CREDENTIAL-GATE` — the gate held and named the credential |
+| credential present | that file present | `SPAWNED-LIVE-WORKER` — tackle exited `0`, the named tmux session answers `has-session`, and the molecule is no longer `pending` |
+
+The second row is asserted **positively**. A zero exit code proves only that a
+process exited; it is never taken as evidence that a worker exists.
+
+Same verdict semantics as above in both worlds: exit `0` the expected outcome,
+exit `1` a finding, exit `2` INCONCLUSIVE with the reason printed. **Neither
+world may pass silently when its discriminating step could not run** — a
+missing docker engine, a molecule that never nucleated, or a `0` tackle that
+named no session to probe are all exit `2`, never green.
 
 ## The six probes
 

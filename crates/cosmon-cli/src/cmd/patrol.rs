@@ -389,6 +389,59 @@ fn scan(
     }
 }
 
+/// Find live worker sessions whose molecule does not admit being dispatched.
+///
+/// Resolves the session name the same way `cs tackle` derives it — from the
+/// molecule's topic and id — because an unrecorded dispatch, by definition,
+/// stored no pointer to its session. That determinism is what makes the
+/// state recoverable at all.
+///
+/// Returns empty when tmux is unavailable (`--no-tmux`, no server running):
+/// with no liveness oracle there is no evidence, and patrol reports
+/// evidence, not suspicion.
+fn scan_unrecorded_dispatches(
+    molecules: &[MoleculeData],
+    backend: Option<&TmuxBackend>,
+) -> Vec<super::dispatch_ledger::UnrecordedDispatch> {
+    let Some(backend) = backend else {
+        return Vec::new();
+    };
+    let Ok(sessions) = backend.list_sessions() else {
+        return Vec::new();
+    };
+    let live: std::collections::HashSet<&str> = sessions
+        .iter()
+        .map(|s| s.session_name.as_str())
+        .chain(sessions.iter().map(|s| s.worker_id.as_str()))
+        .collect();
+    super::dispatch_ledger::scan_unrecorded_dispatches(
+        molecules,
+        |m| cosmon_core::slugify::session_name_for(m.display_topic(), m.id.as_str()),
+        |name| live.contains(name),
+    )
+}
+
+/// Print the unrecorded-dispatch section.
+///
+/// Silent when there is nothing to say: this sweep runs on every patrol, so
+/// a "none found" line on every invocation would train the operator to skip
+/// the section that exists to be read exactly once.
+fn print_unrecorded_report(findings: &[super::dispatch_ledger::UnrecordedDispatch]) {
+    if findings.is_empty() {
+        return;
+    }
+    println!();
+    println!(
+        "  {} {} worker session(s) running against a molecule that does not \
+         know it was dispatched:",
+        "UNRECORDED".red().bold(),
+        findings.len(),
+    );
+    for finding in findings {
+        println!("    - {}", finding.operator_line());
+    }
+}
+
 /// Detect `(molecule, worker_role)` tuples that appear more than once
 /// across the fleet.
 ///
@@ -528,6 +581,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         backend.as_ref().map(|b| b as &dyn TransportBackend),
     );
     let report = &scan_result.report;
+
+    // Unrecorded-dispatch sweep (task-20260727-198f). The mirror of the
+    // orphan scan: not "a Running molecule whose session died" but "a live
+    // session whose molecule never said it was dispatched". Six molecules
+    // reached that state before `cs tackle` started recording the dispatch
+    // ahead of the spawn, and nothing in cosmon could name it — the worker
+    // was working, `cs observe` said `pending`, and the worker's own
+    // `cs evolve` was refused.
+    //
+    // Unconditional and cheap: one `list_sessions` call, already needed by
+    // the scan above, then a pure in-memory match. No flag to remember —
+    // the whole failure mode is that nobody knew to go looking.
+    let unrecorded = scan_unrecorded_dispatches(&molecules, backend.as_ref());
 
     // Apply RecordFailure: increment restart_count for suspect workers.
     let mut state_changed = false;
@@ -877,6 +943,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     .collect::<Vec<_>>(),
             });
         }
+        if !unrecorded.is_empty() {
+            output["unrecorded_dispatches"] = serde_json::json!(unrecorded
+                .iter()
+                .map(|u| serde_json::json!({
+                    "molecule": u.molecule.as_str(),
+                    "session": u.session_name,
+                    "molecule_status": u.status.to_string(),
+                    "advice": u.operator_line(),
+                }))
+                .collect::<Vec<_>>());
+        }
         if args.livelock {
             output["livelock"] = serde_json::to_value(&livelock_report)?;
         }
@@ -943,6 +1020,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("{json}");
     } else {
         print_human_report(report, &respawned);
+        print_unrecorded_report(&unrecorded);
         if !reaped.is_empty() {
             println!();
             println!(
@@ -1600,8 +1678,8 @@ pub(crate) const PROPEL_EXHAUSTED_TAG: &str = "propel-exhausted";
 /// nudged at all").
 pub(crate) const PROPEL_ORPHANED_TAG: &str = "propel-orphaned";
 
-/// Basename of the briefing artefact `cs tackle` / `cs evolve` write into a
-/// molecule's directory. Its **absence** is the structural signature of an
+/// Basename of the briefing artefact `cs tackle` / `cs evolve` / `cs complete`
+/// write into a molecule's directory. Its **absence** is the structural signature of an
 /// orphaned worker (task-20260721-e1d9).
 const BRIEFING_FILENAME: &str = "briefing.md";
 

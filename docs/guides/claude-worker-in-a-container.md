@@ -7,8 +7,17 @@ the fleet reports a healthy worker that will never produce a token.
 
 This guide is the list of those questions and what cosmon does about each. It
 came out of issue #20, reported by an external tester on v0.3.0 running
-`cs` directly under an unprivileged uid in a Docker-Desktop-on-macOS arm64
-container.
+`cs` directly under an unprivileged uid in a macOS arm64 container. (His bed
+was described as Docker Desktop until 2026-07-27, when he corrected it himself
+on the issue: it is **Colima**, Lima-based, Ubuntu 24.04.4 LTS, aarch64. The two
+engines differ in ways that matter — measured in
+[engine-fidelity-2026-07-27.md](../benches/engine-fidelity-2026-07-27.md).)
+
+This is the **reference**: every gate, what it refuses, and why. If what you
+want is to get a mission running end-to-end — build, credential, pilot, watch,
+harvest — start with
+[Run and pilot a real cosmon mission in a container](cosmon-mission-in-a-container.md)
+and come back here when something refuses.
 
 ## The four doors that stop an unattended worker
 
@@ -196,6 +205,12 @@ another loud failure while adding a new way to wrongly block a working dispatch.
 Diagnostic that still holds: a worker showing the *composer* is past doors 1 and
 2; a worker showing a *dialog* never got that far.
 
+Once you have decided to *satisfy* this door rather than read about it, the
+remaining question is how the credential gets into the container at all. There
+are two ways, with materially different security costs: see
+[*Two ways to put a credential into the container*](#two-ways-to-put-a-credential-into-the-container)
+below.
+
 ### 4. The onboarding doors — the theme wizard and the login-method selector
 
 On a *virgin* `CLAUDE_CONFIG_DIR` (no `hasCompletedOnboarding`), Claude Code
@@ -321,7 +336,11 @@ recognisable. Pane showed: Welcome to Claude Code v2.1.220 | Let's get started.
 ```
 
 **Proven in a container, not only in a test.** On the run of 2026-07-25 the
-bench's arm C — virgin config dir, `desktop-linux`, Claude Code 2.1.220, no real
+bench's arm C — virgin config dir, `desktop-linux` (the engine that run was
+actually taken on; the benches moved to the `colima-cosmon-bench` profile on
+2026-07-27, see
+[`../benches/engine-fidelity-2026-07-27.md`](../benches/engine-fidelity-2026-07-27.md)),
+Claude Code 2.1.220, no real
 credential anywhere — showed all four post-conditions of a correct refusal:
 `cs tackle` exits 1, its stderr quotes the screen it refused, the tmux session is
 gone, and the molecule is back to `pending` rather than parked `running` behind a
@@ -384,6 +403,167 @@ A run-once design passes spawn 1 and fails spawn 2 — which is exactly the trap
 the tester documented, and why a single green dispatch is not evidence. Measured
 green on 2.1.220, both spawns reaching the composer.
 
+## Two ways to put a credential into the container
+
+Door 3 refuses a worker that has no credential. That refusal is correct, and it
+leaves you holding a decision the software cannot make for you: **how** the
+credential gets into the container. There are exactly two ways, they are not
+equivalent, and the difference is not convenience — it is how far a compromise
+inside that container can reach.
+
+Neither is illegitimate. Read both costs before you pick.
+
+### (a) Log in by hand, inside the running container
+
+Keep **one long-lived container** running under a deliberately inert entrypoint,
+then enter it once per act with `docker exec`: first the login, which you do at a
+real TTY with your own hands, then the mission. The credential is written by
+Claude Code into `$CLAUDE_CONFIG_DIR` inside the container's own filesystem.
+
+```sh
+# 1. build the image and keep it (the mission harness deletes its image by default)
+COSMON_KEEP_IMAGE=1 scripts/container-real-mission-bench.sh
+
+# 2. a container that just sits there. `sleep infinity` is the whole entrypoint:
+#    the acts below are execs into it, not restarts of it.
+docker run -dit --init --name cosmon-mission-live \
+  --entrypoint sleep cosmon-container-real-mission:bench infinity
+
+# 3. log in — YOU, at a TTY. Complete /login in the TUI, then quit it.
+docker exec -it cosmon-mission-live /usr/local/bin/container-real-mission-login
+
+# 4. run the mission in that same, now-authenticated container.
+#    CLAUDE_CONFIG_DIR must be repeated here; see the note below.
+docker exec -it \
+  -e CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-mission \
+  -e MISSION_TOPIC="add a one-line usage example to the README" \
+  cosmon-mission-live /usr/local/bin/container-real-mission
+
+# 5. a second door, to watch the worker while it works
+docker exec -it -u 10001 -w /home/cosmon-worker/mission \
+  -e CLAUDE_CONFIG_DIR=/home/cosmon-worker/.claude-mission \
+  cosmon-mission-live bash
+#    …and inside it, `cs peek` with NO argument: that is the fleet watchdog
+#    view, and it is far more legible than `cs peek <id>` when what you want
+#    to know is "is anything actually alive in here?".
+
+# 6. when you are done, the credential is destroyed with the container
+docker rm -f cosmon-mission-live
+```
+
+> **Do not reach for `docker start -ai` at step 4.** It is the obvious-looking
+> move and it does not work. `docker start` re-runs the entrypoint the container
+> was **created** with — measured, on a throwaway container:
+>
+> ```console
+> $ docker run --name probe --entrypoint echo alpine:3 "LOGIN-ENTRYPOINT-RAN"
+> LOGIN-ENTRYPOINT-RAN
+> $ docker start -a probe
+> LOGIN-ENTRYPOINT-RAN
+> ```
+>
+> So a container created *to log in* hands you the login screen again, forever.
+> `docker exec` is the only way to run a second, different act inside one
+> container — which is why the entrypoint above is `sleep` and every act is an
+> exec.
+
+> **`CLAUDE_CONFIG_DIR` is per-exec, not a property of the container.** The login
+> at step 3 writes the credential under `/home/cosmon-worker/.claude-mission`
+> because *that exec* set the variable. It does not stick: a later
+> `docker exec` that omits `-e CLAUDE_CONFIG_DIR` starts with it unset, the
+> credential gate then probes `/home/cosmon-worker/.claude/.credentials.json`
+> instead, and it refuses with *"no usable Claude Code credential"* while the
+> credential sits intact thirty centimetres away. Measured: the same
+> `cs tackle` refused without the variable and dispatched with it. Carry it on
+> every exec, or bake it into the image with `ENV` — but do not assume the login
+> left it behind.
+
+What this buys you:
+
+- **The secret is born and dies inside the container.** It is never copied from
+  the host, so a host credential is not duplicated into a second place that can
+  leak.
+- **No automation ever holds it.** No script, no build arg, no environment
+  variable, no CI variable, no agent — including any agent you dispatch into
+  that container — is on the path between you and the token.
+- **The blast radius is one container's lifetime.** `docker rm` is a complete
+  revocation of *this copy*.
+
+What it costs you:
+
+- **One human gesture per container.** This does not automate, by construction.
+  A fleet of ten fresh containers is ten logins.
+- **It needs a TTY**, so it cannot happen in CI or in an unattended patrol.
+- **A `--rm` container throws the credential away with everything else**, so the
+  login has to be paired with a container you intend to keep — hence the
+  long-lived `sleep infinity` container above rather than a run-per-act.
+
+### (b) Mount an existing host credential into the container
+
+Bind-mount the `.credentials.json` the host already has into the config
+directory the worker will read.
+
+```sh
+docker run --init \
+  -v "$HOME/.claude/.credentials.json:/home/cosmon-worker/.claude/.credentials.json:ro" \
+  … your image …
+```
+
+What this buys you:
+
+- **It is repeatable and unattended.** No TTY, no human in the loop; the same
+  command works in a script, in CI, and across a fleet of containers.
+- **One login serves every container**, including short-lived and `--rm` ones.
+
+What it costs you — stated plainly, because this is the part that gets softened:
+
+- **It copies a live secret into a disposable environment.** The token that
+  authenticates *your* account is now present inside a container you built to be
+  thrown away, and that you are probably less careful with precisely because it
+  is disposable.
+- **It widens the blast radius of everything running in that container.** Any
+  process in there — the worker, its subprocesses, anything a task pulls in, any
+  dependency with a postinstall script — can read that file. Container isolation
+  is a boundary against the host; it is not a boundary between the credential and
+  the code you are running next to it.
+- **The credential is reachable by every process inside the container**, not just
+  by `claude`. `:ro` prevents modification. It prevents no reads at all.
+- **`docker rm` does not revoke it.** The mount is a window onto the host's file;
+  if it was exfiltrated, deleting the container changes nothing, and the only
+  real remedy is rotating the credential at the source.
+- **It survives your attention.** A mount written once into a compose file or a
+  script keeps injecting the secret into every future run, including ones written
+  by someone who never read this page.
+
+### What this project recommends
+
+**Prefer (a), the in-container login, and treat (b) as a deliberate exception.**
+
+The reason is not that mounting is disreputable — it is a normal thing to do with
+a normal secret. It is that the specific credential in question authenticates an
+interactive Claude Code account, and the specific environment in question is a
+container that exists to run *unreviewed work*: a mission brief, a task from a
+queue, dependencies pulled at build time. Those two facts together are what tips
+it. A worker container is exactly the place where "some process in here can read
+that file" stops being hypothetical.
+
+So the harness in `scripts/container-real-mission-bench.sh` implements (a) and
+refuses to implement (b): it drives the mission to the credential gate, stops,
+and prints the login command for you. That is a statement about what a *machine*
+may do unattended, not a claim that (b) is wrong.
+
+If you do choose (b), choose it knowingly:
+
+- Mount a credential for an account whose blast radius you accept — ideally not
+  the one your daily work runs under.
+- Treat rotation as the revocation mechanism, since `docker rm` is not one.
+- Do not let the mount outlive the reason for it, and do not commit it into a
+  compose file where it becomes the silent default for everyone after you.
+
+The person launching the container owns this choice. The purpose of this section
+is only to make the trade-off legible before it is made — and to make sure that
+nothing in cosmon quietly makes it for you.
+
 ## Ownership: `--add-dir` is authorization, not ownership
 
 A worker's cwd is its worktree, but the molecule state, fleet lock, and
@@ -424,11 +604,31 @@ RUN chown -R 10001:10001 /home/cosmon-worker/proj
 > Contributed by `@jdthaler`, who lost an afternoon to it on issue #20.
 
 If the project lives on a bind mount from a macOS host — `docker run -v
-$PWD:/work` under Docker Desktop — the fix above **cannot work, and will not tell
-you so**. Docker Desktop passes that mount through virtiofs, where `chown` is a
-**silent no-op**: it returns success, changes nothing, and leaves no error
-anywhere. cosmon chowns the worktree, the filesystem ignores it, the preflight
-re-reads the ownership it just set, finds the old uid, and refuses the dispatch.
+$PWD:/work` — the fix above **cannot work, and will not tell you so**. A
+virtiofs mount makes `chown` a **silent no-op**: it returns success, changes
+nothing, and leaves no error anywhere. cosmon chowns the worktree, the
+filesystem ignores it, the preflight re-reads the ownership it just set, finds
+the old uid, and refuses the dispatch.
+
+> **Which engine does this on, measured 2026-07-27.** This paragraph used to
+> attribute the silent no-op to *Docker Desktop*, because that is the engine the
+> tester was believed to be on. He corrected his own description on issue #20
+> that day: his bed is Colima (Lima-based), Ubuntu 24.04.4 LTS, aarch64. We then
+> probed both engines instead of re-guessing — bind-mount a host directory,
+> `chown 10001:10001` a file inside it, `stat` it back:
+>
+> | engine | `chown` rc | owner before → after | verdict |
+> |---|---|---|---|
+> | `colima-cosmon-bench` (kernel `6.8.0-100-generic`, virtiofs) | `0` | `0:0` → `0:0` | **silently ignored** |
+> | `desktop-linux` (Docker Desktop 27.3.1, kernel `6.10.11-linuxkit`) | `0` | `0:0` → `10001:10001` | honoured |
+>
+> So the hazard is real and the tester's finding stands — on his engine, and on
+> the bench profile that now reproduces it. On our Docker Desktop install the
+> mount honoured the chown, which is worse news than it sounds: it means this
+> whole failure mode is *invisible* there. Do not read that row as "Docker
+> Desktop is safe"; read it as "Docker Desktop cannot show you this". Raw
+> capture and method:
+> [`../benches/engine-fidelity-2026-07-27.md`](../benches/engine-fidelity-2026-07-27.md).
 
 The refusal is correct — the uid genuinely cannot write the directory, and
 launching anyway would buy an `EACCES` on the first `cs evolve` instead of a

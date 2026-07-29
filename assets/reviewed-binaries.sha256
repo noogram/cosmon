@@ -1,0 +1,33 @@
+# reviewed-binaries.sha256 — the pin manifest for every tracked binary asset.
+#
+# WHY THIS FILE EXISTS
+# --------------------
+# `CLAUDE.md`: "unreviewed binary assets must never be tracked". A binary cannot
+# be reviewed in a diff — a reviewer sees `Binary files differ` and moves on, so
+# a blob is the cheapest place in a repository to hide something. The reviewable
+# substitute is a PIN: a binary may be tracked only if its digest appears here,
+# which means adding or changing one requires editing this file in the same
+# commit. That edit is visible, attributable, and shows up in review as a line
+# someone had to type — which is exactly what the blob diff failed to be.
+#
+# Enforced by `scripts/publish.sh --check` (check D): a tracked binary missing
+# from this manifest fails; a digest that no longer matches fails; a pin whose
+# path is no longer tracked fails as stale bookkeeping.
+#
+# FORMAT — `shasum -a 256 -c` compatible: `<sha256>  <path>`
+# To re-pin after a legitimate change:  shasum -a 256 <path>
+#
+# ── Documentation figures (mdBook, docs.noogram.org) ─────────────────────────
+# Rendered from the TikZ sources beside them; light/dark pairs for the book
+# theme. Reviewed as regenerated output of tracked source, not opaque input.
+4ac1e7a049fd1611e34757d6336259dfafe63828895c55640f7a3eba661c7242  docs/book/src/tikz/how-cosmon-runs-light.png
+b0f344be960fb6e280f4f766a79bf9b03104da934329b3f8b36fffc90670bdb7  docs/book/src/tikz/how-cosmon-runs.png
+a6b57edfb745afcba9b85c1404affe910bfd8f834d95fff3d9d90e67ff853998  docs/book/src/tikz/intro-synthetic-light.png
+8459ea3e1936b68035d32871867b253321fde171307c8d16fda16ae95789d347  docs/book/src/tikz/intro-synthetic.png
+9b131d54f9905981c2022e8e087c5205ff4b630fb786d69084b29e7ecde1f090  docs/book/theme/favicon.png
+#
+# ── Vendored tooling ─────────────────────────────────────────────────────────
+# TLA+ model checker, used by docs/specs/ to re-verify the tracked specs. Third-
+# party upstream (tlaplus/tlaplus); pinned so a swap of the jar is a diff here
+# rather than a silent binary replacement.
+af03b2baae73b523fe162c0ff195c5adeed42cd1d092200b0bde2cd15914f624  docs/specs/tla2tools.jar

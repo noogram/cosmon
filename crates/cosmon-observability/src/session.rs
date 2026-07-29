@@ -59,6 +59,20 @@ pub enum HeartbeatTier {
 }
 
 impl HeartbeatTier {
+    /// Every tier, liveliest first — the order an operator-facing legend
+    /// reads them in.
+    ///
+    /// Exists so the `cs peek` glyph legend can be derived from the enum
+    /// rather than transcribed beside it; a transcribed legend rots the
+    /// first time a tier is added.
+    pub const ALL: &'static [HeartbeatTier] = &[
+        Self::Active,
+        Self::Idle,
+        Self::Quiet,
+        Self::Stalled,
+        Self::Orphaned,
+    ];
+
     /// Classify a session by its last-activity timestamp, given `now` as the
     /// current time. Returns [`HeartbeatTier::Stalled`] if no activity has
     /// ever been observed on a live session.

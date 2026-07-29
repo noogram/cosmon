@@ -87,6 +87,24 @@ pub enum MoleculeHealth {
 }
 
 impl MoleculeHealth {
+    /// Every variant, in the order operator-facing legends list them:
+    /// the happy path first, then the states that want a gesture, then
+    /// the two resting states.
+    ///
+    /// Exists so a legend can be *derived* from the enum instead of
+    /// transcribed beside it — a transcribed legend rots the first time
+    /// a variant is added, and a stale legend is worse than none because
+    /// it is believed.
+    pub const ALL: &'static [MoleculeHealth] = &[
+        Self::Healthy,
+        Self::Orphaned,
+        Self::Stalled,
+        Self::Blocked,
+        Self::Degraded,
+        Self::Inert,
+        Self::Terminal,
+    ];
+
     /// Single-character glyph for compact operator-facing tables.
     ///
     /// Chosen so the health cell stays one visible column wide even in

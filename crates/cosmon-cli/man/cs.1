@@ -1,6 +1,6 @@
 .ie \n(.g .ds Aq \(aq
 .el .ds Aq '
-.TH cs 1  "cs 0.3.0" 
+.TH cs 1  "cs 0.4.0" 
 .SH NAME
 cs \- Cosmon — compose, pilot and audit long\-haul AI missions where the trace matters.
 .SH SYNOPSIS
@@ -63,6 +63,9 @@ cs peek navigates three continuous scales via zoom keys: \*(Aq+\*(Aq steps in (v
 cs peek \-\-json — the machine projection. One JSON document, printed once: {"filter", "molecules": [{"id", "project", "status", "heartbeat", "last_activity", "updated_at"}]}, sorted by id so two captures of an unchanged fleet diff to nothing. \*(Aqstatus\*(Aq is the raw core status — the same word \*(Aqcs observe \-\-json\*(Aq reports for the same molecule, never re\-lettered, and an unrecognised future status serialises as its own snake_case name rather than being laundered into \*(Aqpending\*(Aq. \*(Aqheartbeat\*(Aq is the liveness tier (active|idle|quiet|stalled|orphaned); \*(Aqlast_activity\*(Aq is the timestamp it was classified from, but it folds in tmux\*(Aqs attach\-bumped session clock, so merely attaching moves it — \*(Aqupdated_at\*(Aq moves only on a state write and is what a stall or orphan patrol should read. \*(Aqfilter\*(Aq names the published slice, so absence is distinguishable from filtered\-by\-design. \*(Aqproject\*(Aq is a display label, not a join key. \*(Aq\-\-phase\*(Aq/\*(Aq\-\-all\*(Aq select the same molecules as on screen; \*(Aq\-\-json\*(Aq wins over \*(Aq\-\-snapshot\*(Aq. No bucket field: that taxonomy is under active redesign, and publishing it would freeze a machine contract to the one object with a demonstrated re\-cut cadence. Token counts live in \*(Aqcs ensemble \-\-json\*(Aq.
 .PP
 cs peek also drives the fleet from inside the TUI. Cockpit action keystrokes open a thin modal that fires one \*(Aqcs <verb>\*(Aq and waits: \*(Aqn\*(Aq nucleate (formula + topic), \*(Aqt\*(Aq tackle the selected row, \*(Aqm\*(Aq merge\-and\-done (cs done) with y/N confirmation, \*(Aqw\*(Aq whisper a body to the selected worker, \*(Aq.\*(Aq append a session note. Esc cancels any modal. Detail\-pane letters \*(Aqn\*(Aq and \*(Aqt\*(Aq moved to \*(AqN\*(Aq (notes) and \*(AqT\*(Aq (tree); the mouse\-capture toggle moved from \*(Aqm\*(Aq to \*(AqM\*(Aq.
+.PP
+cs peek — the \*(Aq?\*(Aq overlay, two pages. Page 1 is the keybindings. \*(AqTab\*(Aq turns to page 2, the GLYPH LEGEND: what every symbol on the table means, stated as what to do about it rather than which enum it maps to. Both pages scroll with j/k and PgUp/PgDn. The legend is derived from the renderers themselves and a test fails when a glyph exists on screen and not in it, so it cannot go stale.
+  The vocabulary it documents: the \*(Aq♥\*(Aq column is LIFECYCLE (♥ healthy, 💤 idle\-awaiting\-triage, \*(Aq·\*(Aq blocked on something it does not control, 🧊 frozen by design, 👻 running with no tmux behind it, ⚠ self\-contradictory, ◌ terminal). \*(AqW\*(Aq is WHISPER — 🫧 means a human whispered within the last 60 minutes; blank means not in that window, never \*(Aqnever\*(Aq. \*(AqT\*(Aq is TEMPERATURE (🔥 hot, 🌡 warm, ❄ cold, 🧊 frozen) and is ORTHOGONAL to ♥ by charter — a hot molecule that is idle shows 🔥 in T and 💤 in ♥, never the same signal twice. \*(Aq● STEP\*(Aq packs three signals: the ledger\*(Aqs status glyph, the molecule\-health probe, and the step counter — when the first two disagree, believe the probe. Beside the molecule label, 🧠 is the cognition worker and 🎛️ the runtime supervisor. TRUST is lineage coverage, where a \*(Aq—\*(Aq is \*(Aqnot verified yet\*(Aq and not a low score. ENERGY is \*(Aq<context bar> <tokens> <cost>\*(Aq, where a lone \*(Aq·\*(Aq means no context window was REPORTED — unknown, not zero.
 .PP
 cs peek — presence header strip. When \*(Aq.cosmon/state/presence/*.json\*(Aq files exist, a one\-line strip under the title lists every live Claude session (galaxy "headline"). Stale entries (heartbeat > 3 min) render greyed; files without a heartbeat are dropped. The strip is a read\-only wheat\-paste over the presence registry owned by C\-PRESENCE\-CORE (\*(Aqcs presence ping|ls|gc\*(Aq).
 .PP
@@ -430,4 +433,4 @@ REFERENCES:
   Operator handbook — run \*(Aqcs help guide\*(Aq or read docs/handbook.md for conceptual clarification on cosmon\*(Aqs lifecycle, DAG, tags, and monitoring model.
   Help\-text audit — an internal note records the per\-command rationale for the examples rendered here.
 .SH VERSION
-v0.3.0
+v0.4.0

@@ -666,6 +666,52 @@ cs nucleate while \
 
 Note: `cs peek` uses a two-axis system (hue = role, stroke = status). The table above is the status axis only.
 
+### What do the glyphs in `cs peek` mean? <a id="peek-glyph-legend"></a>
+
+**Press `?`, then `Tab`.** The glyph legend is page 2 of the help overlay, beside the screen it explains — a doc file is not read while looking at a table. The copy below is a mirror for readers who are not at the terminal; the overlay is the source of truth, is derived from the renderers themselves, and a test fails when a symbol exists on screen and not in it.
+
+**`♥` — lifecycle.** Where the molecule sits in its own cycle.
+
+| Glyph | Meaning — and what to do |
+|-------|--------------------------|
+| `♥` | A worker is alive and producing. Nothing to do. |
+| `💤` | At rest in its own cycle: pending, nothing blocking it. Press `t` to tackle. |
+| `·` | Waiting on something it does not control — an upstream molecule, or an external authority refusing service. You cannot re-prompt your way out: clear the blocker, rotate the credential, or wait. |
+| `🧊` | Dormant on purpose. `cs thaw` when you want it back. |
+| `👻` | The ledger says running; the tmux session is gone. Nothing is happening. `cs done` or `cs purge`. |
+| `⚠` | The row contradicts itself (e.g. frozen with a live worker). Only a human can decide which half is true. |
+| `◌` | Completed or collapsed — sorted below the fold. |
+
+**`W` — whisper.** `🫧` means a human whispered to this molecule within the last **60 minutes**. An empty cell means *not inside that window* — never *never whispered*.
+
+**`T` — temperature.** What *you* decided: `🔥` `temp:hot`, `🌡` `temp:warm`, `❄` `temp:cold`, `🧊` `temp:frozen`. Empty means nobody has triaged it.
+
+`T` and `♥` are **orthogonal by charter**. A hot molecule that is idle shows `🔥` in `T` and `💤` in `♥`. If one signal ever appears in both columns, that is the bug — the chronicle calls it *"La flamme qui doublait"*. Note that `🧊` appears in both columns without being the same fact: in `♥` it is the molecule's status, in `T` it is your tag.
+
+**`● STEP` — three signals in one column**, read left to right: *what the ledger says*, *what the worker is actually doing*, *the step counter*. When the first two disagree, believe the second — the ledger is a record, the health is a probe.
+
+The ledger glyph is the status table above (`○ ◐ ● ◉ ◌ ·`). The health probe:
+
+| Glyph | Meaning — and what to do |
+|-------|--------------------------|
+| `♥` | The worker is answering; the ledger is telling the truth. |
+| `✖` | Worker dead or missing while the row still reads running. |
+| `◷` | Alive, but its declaration went stale. Check the pane with `p`. |
+| `⛔` | Pinned on a permission or trust prompt — waiting for a human to answer a dialog. Attach and answer it. |
+| `!` | The worker is in an error or paused state. |
+| `·` | Nothing to check yet — no worker attached. A resting state, not a fault. |
+| `◌` | Done — no health to report. |
+
+**Beside the molecule label:** `🧠` cognition worker (the process doing the thinking), `🎛️` runtime worker (the supervisor driving a macro-molecule's DAG).
+
+**`TRUST`** is lineage coverage: `—` **not verified yet** (nobody ran the check — *not* a low score), red `██ <50%` broken evidence chain, amber `▓░ 50–85%` partial, green `██ >85%` strong.
+
+**`ENERGY`** reads `<context bar> <tokens> <cost>`. The bar is how full the worker's context window is: `▂` <25%, `▄` <50%, `▆` <75%, `█` >75%. A **lone `·` means no context window was reported** — unknown, not zero, not empty.
+
+**Heartbeat** (expanded detail pane, `→`): `🟢` output in the last 30s, `🟡` in the last 5min, `⚪` quiet for 5min or more — still alive in tmux, *not* broken — `💀` no tmux session at all.
+
+**Header strip.** `workers: N registered · N attached · N phantom`. A phantom is a roster entry with no live tmux behind it: it costs nothing and it lies about your fleet size. When the count is above zero the strip names its own remedy, `cs purge`. No filter flag can reveal a phantom — the flags filter molecules, and a phantom is not one.
+
 ### Lifecycle state machine <a id="lifecycle"></a>
 
 Six states, two terminal. Verified against the typestate in `cosmon-core`:

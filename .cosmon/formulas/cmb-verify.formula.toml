@@ -187,9 +187,81 @@ Below the first line: a justification citing reproduction.md and \
 locus-read.md, and — for `confirmed` — the true locus + a one-line \
 suggested prompt for the fix molecule that will exit through \
 bug-closure.
+
+THIS FILE IS THE DEFINITION OF THE VERDICT DOOR. Every other formula \
+that speaks {confirmed | refuted | inconclusive} — \
+`cross-provider-committee`, `converge-clean-room` — CONSUMES the \
+definition above and may not restate it. If a consumer's table and \
+this section ever disagree, THIS section wins and the consumer is the \
+bug.
+
+THE DOOR IS RELATIVE, AND THAT IS THE WHOLE HAZARD. Read the \
+definition again: `confirmed` does not mean "good" and `refuted` does \
+not mean "bad". `confirmed` means THE STATED MECHANISM HOLDS — and \
+whether that is good or bad news depends entirely on WHAT THE STATED \
+MECHANISM CLAIMS, which this formula receives as a variable and \
+therefore cannot infer:
+
+  - `stated_mechanism` claims A DEFECT ("X is broken because Y"). \
+    `confirmed` = the defect REPRODUCES = bad news = FINDINGS. This is \
+    the bug-intake polarity, and it is why `confirmed` hands off to \
+    `bug-closure`.
+  - `stated_mechanism` claims A FIX HOLDS (the generator's diagnosis + \
+    fix + falsifier, handed to a refuter seat by \
+    `cross-provider-committee`). `confirmed` = the fix holds = good \
+    news = CLEAN. This is the committee polarity.
+
+Same word, opposite polarity, decided by an input. A reader that \
+assumes one polarity reads the other backwards — a seat that \
+REPRODUCED A DEFECT would be filed as CLEAN — and until 2026-07-28 \
+both this file and `converge-clean-room` stated the committee polarity \
+UNCONDITIONALLY, so the intake polarity had no mapping at all and was \
+silently read as its own opposite.
+
+SO YOU MUST STATE THE POLARITY. IT IS NOT INFERABLE. verdict.json \
+carries a REQUIRED field beside the verdict:
+
+    "mechanism_polarity": "defect" | "fix"
+
+`defect` = the stated mechanism asserts something is broken. `fix` = \
+the stated mechanism asserts something now holds. State it even when \
+it feels obvious; the reader has no other way to know, and "obvious to \
+the writer" is exactly the information that does not survive the file \
+boundary.
+
+IF YOU WERE CONVENED AS A COMMITTEE SEAT, YOU SPEAK TWO VOCABULARIES \
+AT ONCE — say both, and say them consistently. This formula's door is \
+{confirmed | refuted | inconclusive} in verdict.md/verdict.json. A \
+seat convened through `cross-provider-committee` inside a \
+`converge-clean-room` loop ALSO owes referee-report.md whose first \
+line is {VERDICT: CLEAN | VERDICT: FINDINGS (N) | VERDICT: \
+INCONCLUSIVE}. They are the SAME judgement in two alphabets, THROUGH \
+THE POLARITY:
+
+    polarity   this formula    the converge contract   means
+    --------   -------------   ---------------------   -------------------
+    fix        confirmed       CLEAN                   the fix holds
+    fix        refuted         FINDINGS                a falsifier went red
+    defect     confirmed       FINDINGS                the defect reproduces
+    defect     refuted         CLEAN                   the claimed defect is not there
+    either     inconclusive    INCONCLUSIVE            no verdict was reachable
+
+A committee/converge seat is ALWAYS `polarity: fix` — it audits a \
+shipped fix. So for a seat, `VERDICT: FINDINGS (2)` beside `REFUTED` \
+is AGREEMENT, not contradiction: one round emitted exactly that pair \
+and it read as a seat contradicting itself.
+
+Emit BOTH files, mapped through this table, and never leave a reader \
+to infer one from the other. Clean is something you SAY affirmatively \
+in both, never something a reader fails to find: a check shaped \
+`verdict != "FINDINGS"` reads REFUTED as clean. A verdict with NO \
+polarity, or a polarity/verdict pair not on the table, is NOT-CLEAN — \
+the reader fails closed rather than picking the polarity that makes \
+the round pass. Reader's rule, stated once for both vocabularies: \
+`converge-clean-room.formula.toml`, TWO VOCABULARIES ONE MAPPING.
 """
 needs = ["read-locus"]
-acceptance = "MOLECULE_DIR/verdict.md written with `verdict: confirmed | refuted | inconclusive` on the first line, a justification citing the prior artifacts, and (for confirmed) the true locus plus a suggested fix-molecule prompt."
+acceptance = "MOLECULE_DIR/verdict.md written with `verdict: confirmed | refuted | inconclusive` on the first line, a justification citing the prior artifacts, and (for confirmed) the true locus plus a suggested fix-molecule prompt. verdict.json carries the REQUIRED `mechanism_polarity` field ('defect' when the stated mechanism claims something is broken, 'fix' when it claims something holds) — the verdict door is relative to it and is unreadable without it. When convened as a committee seat, referee-report.md + verdict.json were ALSO emitted, mapped through the polarity table above (a seat is always polarity 'fix') so the two vocabularies agree rather than reading as a self-contradiction."
 
 [[steps]]
 id = "record-divergence"

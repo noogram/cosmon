@@ -379,6 +379,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let builtin_formula_names: Vec<&str> = BUILTIN_FORMULAS.iter().map(|(n, _)| *n).collect();
 
+    // First-run consent (delib fe35 §c), moved here from `cs tackle` by
+    // ADR-163 / invariant §8w. `cs init` is the explicit, once-per-galaxy
+    // interactive moment — dispatch is not. The prompt fires only when it
+    // can actually be answered (stdin *and* stdout both terminals); an
+    // auto-decline leaves its trace on stderr instead of vanishing.
+    // Suppressed under `--json` so a question can never land in the middle
+    // of a machine-read document. Best-effort throughout: consent is a UX
+    // layer, not a safety gate, so a write failure never fails the init.
+    if !ctx.json {
+        match super::opt_in_share::ensure_consent() {
+            Ok(Some(super::opt_in_share::Decision::SkippedNoTty)) => {
+                super::opt_in_share::warn_skipped_on_stderr(&super::opt_in_share::consent_path());
+            }
+            Ok(_) => {}
+            Err(e) => eprintln!("cs init: could not record consent (non-fatal): {e}"),
+        }
+    }
+
     if ctx.json {
         let mut output = serde_json::json!({
             "status": "initialized",

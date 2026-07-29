@@ -21,6 +21,7 @@ pub mod cross_galaxy;
 pub mod daemons;
 pub mod demo;
 pub mod deps;
+pub mod dispatch_ledger;
 pub mod diverge;
 pub mod doctor;
 pub mod done;

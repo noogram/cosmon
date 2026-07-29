@@ -35,13 +35,23 @@
 #       [--verbose]                  # enable --verbose on the binary
 #       [--skip-load]                # render only, do not launchctl load
 #       [--no-prompt]                # fail instead of prompting for missing args
+#       [--i-know-this-exposes-an-unauthenticated-api]
+#                                    # consent to a non-loopback bind
 #
 # Bind address prompt:
 #   Default `127.0.0.1:4222` — loopback only, unreachable from other
-#   machines. For tailnet-accessible deployment, pass e.g.
-#   `--bind 0.0.0.0:4222` (listen on all interfaces; access is gated by
-#   the tailnet/firewall) or a specific Tailscale IP like
-#   `--bind 100.x.x.x:4222`. See docs/guides/cs-api.md §Security.
+#   machines. `cs-api` has NO authentication and POST
+#   /molecules/{id}/tackle spawns a worker, so the bind address is the
+#   only access-control boundary there is.
+#     - `0.0.0.0` / `::` is REFUSED by this script and by the binary.
+#       It names every interface the host has now or acquires later, so
+#       the exposure cannot be determined.
+#     - A tailnet address (`--bind 100.x.x.x:4222`) requires
+#       `--i-know-this-exposes-an-unauthenticated-api`, which is also
+#       written into the rendered plist so launchd can start it.
+#   Think twice before installing a non-loopback bind as a LaunchAgent:
+#   RunAtLoad means the port is open at every login, including in cafes.
+#   See docs/guides/cs-api.md §Security.
 #
 # Exit codes:
 #   0 — success
@@ -74,6 +84,7 @@ GALAXIES_ROOT=""
 WORKING_DIR=""
 BINARY=""
 VERBOSE=0
+EXPOSE_UNAUTH=0
 SKIP_LOAD=0
 NO_PROMPT=0
 
@@ -83,7 +94,7 @@ die() {
 }
 
 usage() {
-    sed -n '2,60p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,64p' "$0" | sed 's/^# \{0,1\}//'
     exit "${1:-0}"
 }
 
@@ -98,6 +109,8 @@ parse_args() {
             --working-dir)     WORKING_DIR="$2";     shift 2 ;;
             --binary)          BINARY="$2";          shift 2 ;;
             --verbose)         VERBOSE=1;            shift ;;
+            --i-know-this-exposes-an-unauthenticated-api)
+                               EXPOSE_UNAUTH=1;      shift ;;
             --skip-load)       SKIP_LOAD=1;          shift ;;
             --no-prompt)       NO_PROMPT=1;          shift ;;
             -h|--help|help)    usage 0 ;;
@@ -190,6 +203,36 @@ resolve_defaults() {
     [[ -d "$GALAXIES_ROOT" ]] || die "galaxies root does not exist: $GALAXIES_ROOT"
 }
 
+# Refuse the same binds the binary refuses, and refuse them HERE, before
+# a plist is written. A LaunchAgent that launchd cannot start is a worse
+# outcome than a rejected install: it fails at login, into a log file
+# nobody reads.
+check_bind_exposure() {
+    local ip="${BIND%:*}"
+    ip="${ip#[}"; ip="${ip%]}"
+    case "$ip" in
+        0.0.0.0|::|"")
+            die "refusing --bind ${BIND}: 0.0.0.0 / :: is every interface this host
+    has now or acquires later, so the exposure cannot be determined.
+    cs-api has no authentication and POST /molecules/{id}/tackle spawns a
+    worker. Name one concrete interface instead — the Tailscale address
+    from \`tailscale ip -4\` — or keep the loopback default." ;;
+        127.*|::1|localhost)
+            return 0 ;;
+    esac
+    if [[ "$EXPOSE_UNAUTH" -eq 1 ]]; then
+        echo "install-cs-api: ${BIND} is reachable from other machines and cs-api has" >&2
+        echo "                no authentication — anyone who can route there can spawn" >&2
+        echo "                workers. Installing as requested." >&2
+        return 0
+    fi
+    die "refusing --bind ${BIND}: that address is reachable from other machines
+    and cs-api has no authentication — anyone who can route to it can spawn
+    workers and spend your credit. Keep the loopback default, or, if this
+    address is inside a private trust boundary you control (a tailnet),
+    re-run with --i-know-this-exposes-an-unauthenticated-api."
+}
+
 render() {
     [[ -f "$TEMPLATE" ]] || die "template not found: $TEMPLATE"
 
@@ -199,6 +242,14 @@ render() {
     local verbose_frag=""
     if [[ "$VERBOSE" -eq 1 ]]; then
         verbose_frag="<string>--verbose</string>"
+    fi
+
+    # Same trick for the exposure consent: the binary refuses a
+    # non-loopback bind without it, so the rendered plist must carry it
+    # or launchd would respawn a process that exits immediately.
+    local expose_frag=""
+    if [[ "$EXPOSE_UNAUTH" -eq 1 ]]; then
+        expose_frag="<string>--i-know-this-exposes-an-unauthenticated-api</string>"
     fi
 
     # `sed -e` with separate expressions keeps each substitution readable
@@ -213,6 +264,7 @@ render() {
         -e "s|__GALAXIES_ROOT__|${GALAXIES_ROOT}|g" \
         -e "s|__WORKING_DIRECTORY__|${WORKING_DIR}|g" \
         -e "s|__VERBOSE_FLAG__|${verbose_frag}|g" \
+        -e "s|__EXPOSURE_FLAG__|${expose_frag}|g" \
         -e "s|__STDOUT_LOG__|${STDOUT_LOG}|g" \
         -e "s|__STDERR_LOG__|${STDERR_LOG}|g" \
         "$TEMPLATE"
@@ -264,8 +316,19 @@ probe_healthz() {
         return 0
     fi
 
-    # Strip bind's `0.0.0.0` / `100.x` and probe localhost on the same
-    # port; the agent listens on all interfaces for `0.0.0.0` anyway.
+    # Probe localhost on the bind's port. A loopback bind answers there
+    # directly; a non-loopback bind does not answer on 127.0.0.1 at all,
+    # so probing it would report a failure that is not one.
+    local probe_ip="${BIND%:*}"
+    probe_ip="${probe_ip#[}"; probe_ip="${probe_ip%]}"
+    case "$probe_ip" in
+        127.*|::1|localhost) ;;
+        *)
+            echo "install-cs-api: bind ${BIND} is not loopback — skipping the"
+            echo "                /healthz probe (127.0.0.1 would not answer)."
+            return 0 ;;
+    esac
+
     local port
     port="${BIND##*:}"
     [[ "$port" =~ ^[0-9]+$ ]] || { echo "install-cs-api: cannot parse port from --bind ${BIND}"; return 0; }
@@ -294,7 +357,10 @@ main() {
 
     # Interactive fill. Bind is the one choice worth confirming because
     # it drives security posture (loopback vs tailnet).
-    prompt_if_missing BIND "Bind address (loopback: 127.0.0.1:4222 / tailnet: 0.0.0.0:4222)" "127.0.0.1:4222"
+    prompt_if_missing BIND \
+        "Bind address (loopback: 127.0.0.1:4222 / tailnet: \$(tailscale ip -4):4222)" \
+        "127.0.0.1:4222"
+    check_bind_exposure
 
     resolve_defaults
     ensure_binary

@@ -10,21 +10,22 @@
 ## Context
 
 Across application galaxies, the cosmon agent fleet recurrently stamps **the
-operator's confidential affiliation** — a private organization name that must
+operator's confidential term** — a private name that must
 never appear in any external artifact — as the
 producer/author of EXTERNAL-facing artifacts: README headers, site footers
 (`footer.html`), site `index.html`, GitHub repo descriptions. In one mission the
 flow-models fleet leaked the confidential name **four times**, each at a structural
 attribution point, each caught and scrubbed by the operator *after the fact*. This is a
-recurring **D7 confidentiality breach** (standing rule: *never name the confidential affiliation externally*),
-and per-molecule "do not name the affiliation" guards demonstrably fail to prevent it.
+recurring **D7 confidentiality breach** (standing rule: *never emit the blocked
+term externally*), and per-molecule "do not say it" guards demonstrably fail to
+prevent it.
 
 The operator's smoking-gun hypothesis: the global identity context
 (`~/.claude/CLAUDE.md`) opens by naming the operator and their confidential
-affiliation, which
+blocked term, which
 structurally collides with the D7 embargo; at attribution time, Type-1 associative recall
-reaches for the operator's stated affiliation and the negative guard loses. Reinforcers
-that raise the activation of the confidential-affiliation token: a formula references
+reaches for the nearest stated name and the negative guard loses. Reinforcers
+that raise the activation of the blocked token: a formula references
 `~/dev/projects/agent-templates/`, a `/srv/cosmon/noogram/` design galaxy exists, a
 `~/dev/projects/noogram/` runtime exists, and the operator's git identity is
 `you@noogram.dev`.
@@ -41,8 +42,8 @@ operator's hypothesis is *confirmed in substance but sharpened in mechanism*:
   copyright line, repo description) that the model is conventionally forced to fill.
 - No **authorized public name** is supplied, so Type-1 associative retrieval returns the
   **highest-activation associate** of "the entity that built this" — deterministically
-  the operator's confidential affiliation, given the verbatim identity header plus the reinforcer paths.
-- The negative guard "don't say the affiliation" **never enters the competition**: suppression
+  the operator's confidential term, given the verbatim identity header plus the reinforcer paths.
+- The negative guard "don't say it" **never enters the competition**: suppression
   (Wegner ironic-process / white-bear) requires holding the forbidden token *active* to
   scan against it, and it needs System-2 monitoring at exactly the lowest-effort moment
   (stamping boilerplate) where System 2 has checked out. Negation is not a
@@ -95,7 +96,7 @@ Four layers, sequenced. All in cosmon's perimeter except the flagged operator ge
    `~/.claude/CLAUDE.md` identity line so the embargo and the Noogram default travel *in the
    same breath* (godin's verbatim rewrite is in the synthesis). A worker must **not** edit
    the operator's global system config from a worktree (system-state change). This is an
-   atomic question for the operator: *leave the fund name in the global identity line
+   atomic question for the operator: *leave the blocked term in the global identity line
    (cosmon masks externally at tackle-time) — recommended — or strip it globally?*
 
 4. **V1 FOLLOW-UP — widen detection to the publish closure + adopt whitelist-codebook.**
@@ -110,7 +111,7 @@ Four layers, sequenced. All in cosmon's perimeter except the flagged operator ge
 ## Options Considered
 
 ### Option 1 — Per-project D7 prose guards only (rejected — status quo)
-Keep injecting "do not name the fund" notes per molecule.
+Keep injecting "do not name it" notes per molecule.
 - **Pros:** Zero new code; already in place.
 - **Cons:** This is the *failing* mechanism. It is negative suppression at the wrong
   cognitive layer; it keeps the token warm; it leaked 4×/mission. Whack-a-mole the operator
@@ -121,7 +122,7 @@ Keep injecting "do not name the fund" notes per molecule.
 ### Option 2 — Pure pre-publish blacklist grep, no positive attribution (rejected)
 Ship only the `[confidential_blocklist]` gate; do not supply a default attribution.
 - **Pros:** Simple; catches the realized literal-string failure class with certainty.
-- **Cons:** Leaves the vacuum unfilled, so the model keeps *trying* to emit the fund name and
+- **Cons:** Leaves the vacuum unfilled, so the model keeps *trying* to emit the blocked term and
   the gate fires constantly — workers thrash, the gate becomes noise, and any
   paraphrase/metadata channel still escapes (shannon, turing). Detection without prevention
   treats a vacuum as a collision.
@@ -153,7 +154,7 @@ rewrite is surfaced as an operator gesture; V1 widens the surface and adopts the
 
 ## Consequences
 
-- **Positive.** The realized failure class (literal fund name in README/footer/index) is
+- **Positive.** The realized failure class (the literal term in README/footer/index) is
   closed with certainty by V0. The root cause (the vacuum) is removed by the attribution
   primitive. The fix reuses a proven, coherence-clean precedent — no new command, no daemon,
   no new state store. The doctrine is substrate-level and inherited by every galaxy via
@@ -173,7 +174,7 @@ rewrite is surfaced as an operator gesture; V1 widens the surface and adopts the
 ## Surprising insight
 
 The same vacuum that *causes* the leak is what *enables* the clean fix: you do not fight
-Type-1 retrieval, you feed it (godin/kahneman). Deeper — "the confidential affiliation never belonged in the
+Type-1 retrieval, you feed it (godin/kahneman). Deeper — "the confidential term never belonged in the
 byline *on the merits*, independent of secrecy": the public work is open AI tooling, whose
 honest author is Noogram. The confidentiality leak and the *wrong-narrator* problem have the
 same fix. The embargo is not a tax on the truth; the truth was already Noogram.

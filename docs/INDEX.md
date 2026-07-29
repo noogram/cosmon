@@ -95,6 +95,7 @@ exactly once.
 ## Verdict provenance
 
 - [provenance/issue-20/AUTHORITATIVE-INDEX.md](provenance/issue-20/AUTHORITATIVE-INDEX.md) — which of the twenty-one issue-#20 gate verdicts speaks for the current head, which was overtaken, and which subjects nobody has re-judged since the door-4 fix. Append-only: no historical verdict was edited to build it.
+- [provenance/issue-20/CORRECTIONS.md](provenance/issue-20/CORRECTIONS.md) — forward corrections to the lineage's own account: what an earlier commit message or result.md got wrong, what is true instead, and how it was measured. Append-only; nothing was amended or force-pushed.
 
 ## Sister subsystems
 

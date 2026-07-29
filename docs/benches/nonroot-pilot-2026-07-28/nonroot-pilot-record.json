@@ -1,0 +1,60 @@
+{
+  "harness": "container-nonroot-pilot",
+  "verdict": "NONROOT-PILOT-LIVE-CLEAN",
+  "reason": "two consecutive dispatches under uid 10001 each spawned a LIVE worker which made its own commit (verified as commit objects, attributed to their molecule branches), and the ownership-repair path was never entered by any process in the run",
+  "claim": "the nominal path invoked no ownership repair at all",
+  "method": "instrumentation: cs counts every ENTRY into the ownership-repair path (before any precondition), to a per-dispatch journal whose lines carry the writing pid; an empty journal is the measurement. Had a repair fired, that journal would hold an enter-repair-path line naming the target uid plus one chown line per path touched. Final-state ownership was NOT used as evidence: a chown onto the owner a path already had is invisible to stat.",
+  "identity": {
+    "pilot_uid": 10001,
+    "pilot_gid": 10001,
+    "home": "/home/cosmon-worker",
+    "demotion_configured": false
+  },
+  "provenance": {
+    "source_commit": "4c962ae898f5d7961f9645b3738d998fd923278d",
+    "source_tree": "clean",
+    "cs_path": "/usr/local/bin/cs",
+    "cs_sha256_before_dispatch_1": "625849bb897e551dc510067ea14c364490948af5183c5e2f058988a1cb793fe8",
+    "cs_sha256_after_dispatch_2": "625849bb897e551dc510067ea14c364490948af5183c5e2f058988a1cb793fe8",
+    "same_bytes_both_dispatches": true,
+    "instrument_present_in_binary": true,
+    "cs_version": "cs 0.3.0",
+    "claude_version": "2.1.220 (Claude Code)",
+    "uname": "Linux fd5407315dda 6.8.0-100-generic #100-Ubuntu SMP PREEMPT_DYNAMIC Tue Jan 13 16:39:21 UTC 2026 aarch64 GNU/Linux"
+  },
+  "config": {
+    "dir": "/home/cosmon-worker/.claude-nonroot",
+    "virgin_at_tackle": true
+  },
+  "credential": {
+    "supplied": true,
+    "route": "oauth-token-in-dispatcher-env (read-only mount, operator-supplied)",
+    "note": "the value is never recorded here or anywhere in this capture"
+  },
+  "dispatches": [
+    {
+      "n": 1,
+      "molecule": "task-20260727-e738",
+      "tmux_session": "create-file-named-artifact-1-e738",
+      "worker_spawned": true,
+      "commit_by_worker": "94aeb95368230219787fac3c575ea16ebb96786d",
+      "repair_path_entries_dispatch": 0,
+      "repair_path_entries_commit_phase": 0
+    },
+    {
+      "n": 2,
+      "molecule": "task-20260727-23bd",
+      "tmux_session": "create-file-named-artifact-2-23bd",
+      "worker_spawned": true,
+      "commit_by_worker": "2860b9d6e0e7d5c002e968ca639fb48f87b8ca80",
+      "repair_path_entries_dispatch": 0,
+      "repair_path_entries_commit_phase": 0
+    }
+  ],
+  "both_workers_spawned": true,
+  "counter_meaning": "The repair-path counter carries information ONLY when a worker actually spawns. In a run refused at the credential gate the zero is by construction — demotion is not configured, so the path cannot be entered at all — not by behaviour. A zero from such a run must never be reused for a live one.",
+  "both_artifacts_committed_by_worker": true,
+  "total_repair_path_entries": 0,
+  "findings": [],
+  "secrets_touched": "none — no credential created, read, mounted or logged"
+}

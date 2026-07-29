@@ -309,6 +309,29 @@ fn run_detail(
             model.model_label().cyan(),
             format!("← {} ({})", model.source_detail(), model.adapter_name).dimmed(),
         );
+        // The REALIZED axis beside the pin. The pin is what was *asked for*;
+        // when a seat is re-pointed mid-run — a stalled provider switched by
+        // hand from inside the pane — the pin keeps naming the old model while
+        // a different one answers. Printing the pin alone is what let a
+        // committee roster report `gpt-5.6-sol` for a seat running
+        // `gpt-5.6-terra` with nothing surfacing the divergence
+        // (converge-20260727-a302). Never back-filled from the pin: an
+        // unobserved run says so with `?`/`-`, it does not borrow the pin's
+        // confidence.
+        if let Some(realized) = cosmon_state::ops::realized_attribution(state_dir, &mol.id) {
+            if let Some(drift) = realized.realized_drift_display() {
+                println!(
+                    "    {} {}",
+                    format!("~> {drift}").yellow(),
+                    "(realized — diverged from the pin)".dimmed(),
+                );
+            } else if let Some(glyph) = realized.realized.compact_status() {
+                println!(
+                    "    {}",
+                    format!("realized: {glyph} ({})", realized.realized.disposition()).dimmed(),
+                );
+            }
+        }
     }
 
     // Coupling report — mirrors the bundle that `cs wait` prints. Same

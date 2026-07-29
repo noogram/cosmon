@@ -18,6 +18,8 @@
 //! - [`dispatch`] — create beads and nudge targets for task dispatch
 //! - [`spawn`] — the `Spawn` trait extracted against
 //!   both Adapters (ADR-097 / PR-4)
+//! - [`locale`] — the UTF-8 floor every tmux-backed worker pane needs so its
+//!   TUI is legible in a container that declares no locale
 
 #![forbid(unsafe_code)]
 
@@ -30,6 +32,7 @@ pub mod codex;
 pub mod command_runner;
 pub mod demote_provisioning;
 pub mod dispatch;
+pub mod locale;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 pub mod opencode;

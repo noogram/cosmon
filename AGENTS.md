@@ -39,8 +39,33 @@ The doc gate is not redundant with the others: `cargo check` compiles code
 without resolving a doc link, and clippy is not rustdoc. A broken intra-doc
 link passes every other gate and fails only in CI on the trunk.
 
+`cargo` is not the whole contract. Two more gates run in CI and are not
+subsumed by the five above:
+
+```text
+python3 scripts/spdx-headers.py --check
+scripts/publish.sh --check
+```
+
 Run `scripts/publish.sh --check` for release-bound changes. Runtime state,
 credentials, machine paths, internal identifiers, and unreviewed binary assets
 must never be tracked. A public release is produced from an isolated scrubbed
 projection; never rewrite the development repository in place and never push
-from an automated contributor session.
+from an automated contributor session — which is why `--check` is the only mode
+`publish.sh` has.
+
+It reports what it found and never what it found it to be: a credential-shaped
+string is named by path and line with a truncated digest, never with its value.
+Two of its rules need a waiver from time to time — cosmon's own leak detector
+must contain the shapes it detects — and the waiver is the inline marker
+`publish: allow — <reason>` on that single line. Per line, never per file: a
+whole-file exclusion is a blind spot nobody sees again, while a marker is a
+sentence someone had to write and a reviewer reads in the diff.
+
+The other two release referees, `scripts/release-checklist.sh` and
+`scripts/confidentiality-lint.sh`, are broader but cannot be hard gates on a
+bare clone: their secret scan needs `gitleaks` installed and their content
+denylist is operator-private by construction, so both honestly report PEND
+without them. `publish.sh` covers only the structural subset — decidable from a
+fresh clone with git and python3 and nothing else — which is what lets it fail
+the build.

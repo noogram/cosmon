@@ -11,6 +11,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [Cluster views — Motion / Ensemble / Peek](cluster-views.md)
 - [Constellation — the fil-rouge molecule](constellation-pattern.md)
 - [cosmon-letter-monday — godin ship-moment #1](cosmon-letter-monday.md)
+- [Run and pilot a real cosmon mission in a container — end-to-end](cosmon-mission-in-a-container.md)
 - [Recette bout-en-bout — `cosmon-remote` sur un noyau (chronométrée, non-expert)](cosmon-remote-recette-dave.md)
 - [cosmon-saas — thin-client prototype over Cloudflare Tunnel](cosmon-saas-prototype.md)
 - [Runbook — démo cosmon-saas à l'Institut Louis Bachelier](cosmon-saas-rehearsal-runbook.md)

@@ -124,11 +124,27 @@ impl Dispatch {
     /// argv, detached stdio — only the cadence is compressed so the test runs
     /// in seconds instead of hours.
     fn arm_watcher(&self, interval_ms: u64, timeout_secs: u64) -> Child {
+        self.arm_watcher_with_config_dir(interval_ms, timeout_secs, None, None)
+    }
+
+    /// [`Self::arm_watcher`], plus the two knobs task-20260727-3f46 turns on:
+    /// the Claude configuration root passed **explicitly on the argv**, and
+    /// the value of `CLAUDE_CONFIG_DIR` in the child's environment. Passing
+    /// both, pointing at different places, is how the test proves which one
+    /// the child actually obeys.
+    fn arm_watcher_with_config_dir(
+        &self,
+        interval_ms: u64,
+        timeout_secs: u64,
+        argv_config_dir: Option<&Path>,
+        env_config_dir: Option<&Path>,
+    ) -> Child {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
         cmd.args(cosmon_cli::realized_watcher::watcher_argv(
             self.mol.as_str(),
             &self.worktree,
             &self.state_dir,
+            argv_config_dir,
         ))
         .arg("--interval-ms")
         .arg(interval_ms.to_string())
@@ -138,12 +154,50 @@ impl Dispatch {
         // of mutating this process's HOME — that is what keeps the test
         // parallel-safe where the in-process unit test needs a mutex.
         .env("HOME", &self.home)
+        // The session-log root honours `CLAUDE_CONFIG_DIR` ahead of
+        // `$HOME/.claude` (task-20260727-3f46). A developer machine that
+        // exports it would send the child looking at the operator's real
+        // logs instead of this fixture, so the child starts without it —
+        // the `$HOME` redirect above is the only routing under test here.
+        .env_remove("CLAUDE_CONFIG_DIR")
+        // Run the child from the fixture, not from the developer's checkout.
+        // Both paths it needs are explicit flags, but `cs` still performs
+        // walk-up galaxy discovery at startup — and inside a long-lived
+        // galaxy that scan reads a journal with hundreds of thousands of
+        // lines, costing ~25 s of startup per child. Six children paying it
+        // in parallel blew straight through `PATIENCE` and every test in the
+        // file failed as "became a daemon", for a reason that had nothing to
+        // do with the watcher. A test must not be hostage to the size of the
+        // repository it happens to be run in.
+        .current_dir(&self.worktree)
         .env_remove("COSMON_PARENT_MOL_ID")
         .env_remove("COSMON_MOL_DIR")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+        if let Some(dir) = env_config_dir {
+            cmd.env("CLAUDE_CONFIG_DIR", dir);
+        }
         cmd.spawn().expect("spawn cs realized-watch")
+    }
+
+    /// [`Self::write_first_turn`] under an arbitrary Claude configuration
+    /// root — the container / multi-account shape, where the worker's logs do
+    /// not live under `$HOME/.claude` at all.
+    fn write_first_turn_under(&self, config_dir: &Path, model: &str) {
+        let encoded: String = self
+            .worktree
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let proj = config_dir.join("projects").join(encoded);
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(
+            proj.join("sess.jsonl"),
+            format!("{{\"type\":\"assistant\",\"message\":{{\"model\":\"{model}\"}}}}\n"),
+        )
+        .unwrap();
     }
 
     /// Write the worker's first model-bearing assistant turn, exactly where a
@@ -320,6 +374,97 @@ fn reexeced_watcher_observes_first_turn_then_winds_down() {
         d.attribution().realized,
         cosmon_core::adapter_attribution::Realized::Observed(vec!["claude-opus-4-8".to_string()]),
         "the folded attribution names the model the worker actually ran"
+    );
+}
+
+/// task-20260727-3f46, through the production entrypoint: the container /
+/// multi-account shape, where the worker's session log does not live under
+/// `$HOME/.claude` at all.
+///
+/// `$HOME/.claude` is never created — exactly as measured in the Colima
+/// container, where it did not exist and the watcher looked there anyway for
+/// seven and a half minutes. The dispatcher names the real root on the argv;
+/// the observation must land, and `x (unobservable)` must never appear.
+#[test]
+fn reexeced_watcher_reads_a_routed_claude_config_dir() {
+    let d = Dispatch::seed("task-20260727-1a04");
+    let account = tempfile::TempDir::new().unwrap();
+    let mut child = d.arm_watcher_with_config_dir(50, 600, Some(account.path()), None);
+
+    assert!(
+        !d.home.join(".claude").exists(),
+        "the fixture must reproduce the container: no $HOME/.claude at all"
+    );
+    d.write_first_turn_under(account.path(), "claude-opus-4-8");
+
+    assert!(
+        wait_until(|| !d.observations().is_empty()),
+        "a worker routed through a non-default CLAUDE_CONFIG_DIR must still \
+         be observed — this is the defect the whole molecule is about"
+    );
+
+    d.collapse();
+    wait_for_exit(&mut child, "routed-config watcher");
+    assert_eq!(
+        d.attribution().realized,
+        cosmon_core::adapter_attribution::Realized::Observed(vec!["claude-opus-4-8".to_string()]),
+        "the realized id must be readable, not an eternal (pending)"
+    );
+}
+
+/// The argv beats the environment. A `cb next`-routed account is named only
+/// on the command line; if an unrelated `CLAUDE_CONFIG_DIR` in the child's
+/// environment could override it, a multi-account fleet would read the wrong
+/// account's logs — which is worse than reading none.
+#[test]
+fn reexeced_watcher_prefers_the_dispatchers_root_over_its_own_environment() {
+    let d = Dispatch::seed("task-20260727-1a05");
+    let account = tempfile::TempDir::new().unwrap();
+    let decoy = tempfile::TempDir::new().unwrap();
+    let mut child =
+        d.arm_watcher_with_config_dir(50, 600, Some(account.path()), Some(decoy.path()));
+
+    // The worker wrote under the account the dispatcher named; the decoy the
+    // environment names carries a *different* model, so a watcher that obeyed
+    // the environment would be caught naming the wrong id.
+    d.write_first_turn_under(account.path(), "claude-opus-4-8");
+    d.write_first_turn_under(decoy.path(), "claude-haiku-4-5");
+
+    assert!(
+        wait_until(|| !d.observations().is_empty()),
+        "the watcher must observe through the dispatcher-named root"
+    );
+    d.collapse();
+    wait_for_exit(&mut child, "argv-over-env watcher");
+    assert_eq!(
+        d.attribution().realized,
+        cosmon_core::adapter_attribution::Realized::Observed(vec!["claude-opus-4-8".to_string()]),
+        "the argv root wins; the environment decoy must not be read"
+    );
+}
+
+/// The silence half, through the production entrypoint: a watcher pointed at
+/// a root that does not exist must say so on the journal — once — instead of
+/// ticking for its whole life and emitting nothing.
+#[test]
+fn reexeced_watcher_reports_a_missing_root_instead_of_ticking_in_silence() {
+    let d = Dispatch::seed("task-20260727-1a06");
+    let absent = d.home.join("nowhere");
+    let mut child = d.arm_watcher_with_config_dir(50, 600, Some(&absent), None);
+
+    assert!(
+        wait_until(
+            || d.attribution().realized == cosmon_core::adapter_attribution::Realized::Unobservable
+        ),
+        "a watcher that cannot observe must report that it cannot, so the \
+         display reads `x (unobservable)` rather than `... (pending)` forever"
+    );
+
+    d.collapse();
+    wait_for_exit(&mut child, "missing-root watcher");
+    assert!(
+        d.observations().is_empty(),
+        "nothing was observable, so nothing may be claimed as observed"
     );
 }
 

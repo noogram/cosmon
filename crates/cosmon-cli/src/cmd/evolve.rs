@@ -1386,12 +1386,41 @@ fn move_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
 /// idempotent (skips when the pointer is already present), so re-running a step
 /// never stacks duplicate stanzas.
 ///
+/// # Why `cs tackle` and `cs complete` call it too
+///
+/// For a while this ran from exactly one place — the step-advance path below —
+/// and the mechanism therefore proved that the contract *survives
+/// regeneration* while never asking whether it was there *before the first
+/// regeneration*. Measured on 2026-07-28: immediately after `cs nucleate` plus
+/// writing `committee-posture.md`, a seat's `briefing.md` contained zero
+/// references to it, so
+/// [`AdversarialBriefing::from_durable_injection`](cosmon_core::committee::AdversarialBriefing::from_durable_injection)
+/// returned `injected = false` for **every seat on its step 1** — the step on
+/// which the verdict contract must be written, and the one a provider refusal
+/// is most likely to end on. `cs tackle` now calls this on the briefing it is
+/// about to hand the worker. The call is free for everything else: the
+/// no-op-for-non-seats and idempotence properties above are exactly what make
+/// a second call site safe.
+///
+/// The same argument runs once more at the other end. [`cs
+/// complete`](super::complete) rewrites `briefing.md` down to a terse
+/// `**Status:** COMPLETED` line, and it is the verb every seat ends with — so
+/// without a third call site the pointer exists exactly while a seat is running
+/// and is gone by the time anything reads the seat's record, which is the only
+/// time such a record is read. Measured on committee-20260728-2d37's two seats
+/// on 2026-07-29: pointer present after `cs tackle`, `grep -c
+/// committee-posture.md briefing.md == 0` after `cs complete`, both seats.
+///
+/// So the pointer is re-established wherever `briefing.md` is written: before
+/// the first step (`cs tackle`), at every advance (`cs evolve`), and after the
+/// last (`cs complete`).
+///
 /// # Errors
 ///
 /// Returns an error only if the durable file exists (this *is* a committee
 /// seat) but appending the pointer to `briefing.md` fails — a real I/O fault on
 /// the seat's contract delivery, which must not pass silently.
-fn reinstate_committee_posture_reference(
+pub(super) fn reinstate_committee_posture_reference(
     mol_dir: &Path,
     briefing_path: &Path,
 ) -> anyhow::Result<()> {

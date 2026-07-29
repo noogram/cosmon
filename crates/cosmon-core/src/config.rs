@@ -682,7 +682,7 @@ impl PublishIdentityConfig {
 /// the git-identity channel. Where [`GitRemoteBlocklistConfig`] inspects
 /// the worktree's *remotes*, this one inspects the *content* of a narrow
 /// set of publish-bound files. The motivating threat: the fleet stamps the
-/// operator's confidential fund name into external boilerplate (a README,
+/// operator's confidential term into external boilerplate (a README,
 /// a footer, an index page) because the attribution slot is a *vacuum* —
 /// with no authorized public name supplied, Type-1 retrieval emits the
 /// highest-activation associate. A negative per-molecule guard ("don't
@@ -710,7 +710,7 @@ impl PublishIdentityConfig {
 /// substrings-only config is no longer silently inert.
 ///
 /// **Federation source.** Because the operator's
-/// confidential fund name is the *same* secret across every galaxy, it must
+/// confidential term is the *same* secret across every galaxy, it must
 /// not be re-typed (or committed) per galaxy. `cs done` merges the operator's
 /// machine-wide `~/.config/cosmon/config.toml::[confidential_blocklist]` into
 /// the per-galaxy config via [`ConfidentialBlocklistConfig::merged_with`], so
@@ -786,7 +786,7 @@ impl ConfidentialBlocklistConfig {
     /// no longer a silent no-op — it scans [`DEFAULT_PUBLISH_GLOBS`]. The old
     /// "either-empty short-circuits" rule was a foot-gun: it let a configured
     /// blocklist sit inert because the operator forgot the `publish_globs`
-    /// line, which is exactly how the fund name kept reaching shipped
+    /// line, which is exactly how a blocked term kept reaching shipped
     /// artifacts.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -815,7 +815,7 @@ impl ConfidentialBlocklistConfig {
     /// union of both `forbidden_substrings` and `publish_globs`.
     ///
     /// The federation primitive: the operator's
-    /// PRIVATE fund name is a federation-wide secret that must be blocked in
+    /// blocked term is a federation-wide secret that must be blocked in
     /// *every* galaxy, yet must live in exactly ONE place that is never
     /// committed to a public repo. `cs done` loads the operator's
     /// machine-wide `~/.config/cosmon/config.toml::[confidential_blocklist]`
@@ -870,11 +870,12 @@ fn union_dedup(a: &[String], b: &[String]) -> Vec<String> {
 ///
 /// The recurring "attribution vacuum" (ADR-128):
 /// when a worker reaches a "built by" / author / copyright slot and finds
-/// it empty, the model "helpfully" fills it from context — and the nearest
-/// context is the operator's *private* fund affiliation. You cannot win by
-/// telling the model *don't say X* (negation is not Type-1-executable;
-/// suppression keeps the token warm). You win by giving it *the right
-/// thing to say* so X never surfaces — "put the right thing nearest." This
+/// it empty, the model "helpfully" fills it from whatever name is nearest
+/// in context — which is rarely the one the project wants shipped. You
+/// cannot win by telling the model *don't say X* (negation is not
+/// Type-1-executable; suppression keeps the token warm). You win by giving
+/// it *the right thing to say* so nothing else surfaces — "put the right
+/// thing nearest." This
 /// block is that positive supply: one canonical name, inherited by every
 /// galaxy that runs cosmon, so the public maker name is changed in one
 /// place and never re-typed per project.
@@ -931,7 +932,7 @@ pub struct AttributionConfig {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub public_url: String,
 
-    /// Contactable, non-fund address (e.g. `"hello@noogram.org"`). A
+    /// Contactable public address (e.g. `"hello@noogram.org"`). A
     /// maker-name *with* a contactable address is the doctrine: a bare
     /// anonymous footer is its own vacuum that the next worker
     /// "helpfully" enriches from context.
@@ -999,8 +1000,16 @@ impl AttributionConfig {
     /// caller can keep the prompt byte-identical to the legacy shape. When
     /// present, the directive names the public maker so the model has the
     /// right token in hand *before* it reaches an attribution slot, and
-    /// states the operator's fund affiliation is private — positive supply,
-    /// not negated suppression.
+    /// closes the slot to every other name — positive supply, not negated
+    /// suppression.
+    ///
+    /// The directive states the rule and never the thing the rule guards:
+    /// a public instruction that some particular fact is being withheld is
+    /// itself a disclosure of that fact's existence, and this string is
+    /// both published source *and* resident in every worker's context,
+    /// where a worker paraphrasing its own brief would carry the
+    /// disclosure into an artifact. "Use this name and no other" obtains
+    /// the same behaviour while naming nothing.
     ///
     /// The `public_url` is rendered in parentheses only when set, so a
     /// name-only block still produces a clean sentence.
@@ -1020,9 +1029,9 @@ impl AttributionConfig {
         Some(format!(
             "External attribution for this fleet is {named}. \
              Anywhere a maker, author, copyright holder, or \"built by\" name \
-             is required in a shipped/public artifact, use `{name}`. The \
-             operator's fund affiliation is PRIVATE and never appears in any \
-             artifact.",
+             is required in a shipped/public artifact, use `{name}` and no \
+             other name — never substitute a different one, and never add a \
+             second one alongside it.",
         ))
     }
 
@@ -2684,10 +2693,43 @@ mod tests {
             config.attribution.directive().unwrap(),
             "External attribution for this fleet is `Noogram` (noogram.org). \
              Anywhere a maker, author, copyright holder, or \"built by\" name \
-             is required in a shipped/public artifact, use `Noogram`. The \
-             operator's fund affiliation is PRIVATE and never appears in any \
-             artifact."
+             is required in a shipped/public artifact, use `Noogram` and no \
+             other name — never substitute a different one, and never add a \
+             second one alongside it."
         );
+    }
+
+    #[test]
+    fn test_attribution_directive_discloses_no_withheld_category() {
+        // The directive ships twice over: it is published source, and it is
+        // resident in every worker's context. A rule that announces some
+        // particular fact is being withheld discloses that the fact exists,
+        // so the directive must carry the positive instruction only. This
+        // asserts the *property*, not the sentence, so a future rewording
+        // that reintroduces the leak fails here and not only in review.
+        let cfg = AttributionConfig {
+            public_name: "Noogram".to_owned(),
+            public_url: "noogram.org".to_owned(),
+            ..AttributionConfig::default()
+        };
+        let directive = cfg.directive().unwrap();
+        let folded = directive.to_lowercase();
+        for leak in [
+            "private",
+            "confidential",
+            "secret",
+            "affiliation",
+            "employer",
+            "withheld",
+            "undisclosed",
+        ] {
+            assert!(
+                !folded.contains(leak),
+                "attribution directive names a withheld category via {leak:?}: {directive}"
+            );
+        }
+        // …while still carrying the closure that makes the rule bite.
+        assert!(folded.contains("no other name"));
     }
 
     #[test]
@@ -2701,9 +2743,9 @@ mod tests {
             cfg.directive().unwrap(),
             "External attribution for this fleet is `Noogram`. \
              Anywhere a maker, author, copyright holder, or \"built by\" name \
-             is required in a shipped/public artifact, use `Noogram`. The \
-             operator's fund affiliation is PRIVATE and never appears in any \
-             artifact."
+             is required in a shipped/public artifact, use `Noogram` and no \
+             other name — never substitute a different one, and never add a \
+             second one alongside it."
         );
     }
 

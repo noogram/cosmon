@@ -256,8 +256,8 @@ and the docs surface at `docs.noogram.org`. *How that becomes a
 platform and why it matters economically is mailroom's story — see §7.*
 
 **External attribution is `Noogram` (noogram.org)** in every shipped artifact —
-the maker line, the NOTICE, the README. The operator's fund affiliation is
-private and never appears.
+the maker line, the NOTICE, the README. That name and no other: no substitute,
+no second name alongside it.
 
 ---
 

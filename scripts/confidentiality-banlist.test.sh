@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# confidentiality-banlist.test.sh — regression tests for the operator/fund
-# identity tripwire (scripts/confidentiality-banlist.sh).
+# confidentiality-banlist.test.sh — regression tests for the operator-identity
+# tripwire (scripts/confidentiality-banlist.sh).
 #
 # Runs against a THROWAWAY git repo in a tmpdir so the assertions are
 # hermetic — never against the live cosmon tree. Exercises three things:
@@ -60,12 +60,15 @@ seed docs/book/src/leak.md "Written by ${nm} Serie."
   || bad "operator name on public surface should exit 1"
 unseed docs/book/src/leak.md
 
-# ── 2c. fund name on public surface → 1 ──────────────────────────────────────
-# Accented spelling: exercises the `[ÉE]pinoia` branch without inlining the
-# ascii confidential literal into this committed test (ADR-127 §6).
-seed README.md '# Cosmon — a project of Épinoia Research'
-[ "$(run)" = "1" ] && ok "fund name in README → exit 1" \
-  || bad "fund name on public surface should exit 1"
+# ── 2c. organization name on public surface → 1 ──────────────────────────────
+# Accented spelling — assembled at runtime like every other banned term. The
+# earlier note claimed inlining the accented form was safe because it does not
+# match the ascii scan; that protects the file from its own regex, not from a
+# reader of this published test, which is the threat that matters (ADR-127 §6).
+og="É""pino""ia Research"               # accented organization name
+seed README.md "# Cosmon — a project of ${og}"
+[ "$(run)" = "1" ] && ok "organization name in README → exit 1" \
+  || bad "organization name on public surface should exit 1"
 seed README.md '# Cosmon — a stateless CLI'   # restore clean
 
 # ── 3. whole-repo advisory: internal doc naming operator → 1 ─────────────────
@@ -79,7 +82,7 @@ unseed docs/adr/001-example.md
 # ── 3b. author homeserver email alone is an intentional keep → whole-repo 0 ───
 # The homeserver domain is assembled at runtime so this committed test does not
 # inline the confidential literal (ADR-127 §6 — the test must not re-leak).
-sd="serie"".dev"                       # homeserver domain, assembled at runtime
+sd="ser""ie"".dev"                     # homeserver domain, assembled at runtime
 seed docs/adr/002-authors.md "Co-authored by someone <someone@${sd}>."
 [ "$(run --whole-repo)" = "0" ] && ok "author homeserver email is kept (whole-repo exit 0)" \
   || bad "author homeserver email should be an intentional keep"

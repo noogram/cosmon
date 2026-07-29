@@ -9,7 +9,11 @@
 set -euo pipefail
 
 IMAGE="${SPORE_E2E_IMAGE:-cosmon-spore-e2e:latest}"
-SPORE_ZIP="${SPORE_ZIP:-/Users/eserie/galaxies/sporarium/drops/math-attack-v2-20260720.zip}"
+# The drop is external and unreviewed, so its location is per-operator by
+# construction: point $SPORE_ZIP at your own copy. The previous default was an
+# absolute path into one operator's home — a machine path that must never be
+# tracked, and one that also named a galaxy outside this repository.
+SPORE_ZIP="${SPORE_ZIP:?set SPORE_ZIP to the math-attack spore drop archive (external asset, never tracked here)}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"

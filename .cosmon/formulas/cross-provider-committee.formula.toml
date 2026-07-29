@@ -229,10 +229,63 @@ MOLECULE_DIR is the `molecule_dir` field from `cs --json observe \
      that it MUST be really injected (step `dispatch-seats` injects it \
      and records the `contract_hash`). A seat with a declared-but-not- \
      injected contract, or no falsification artefact, fails witness (2). \
-  5. Run `cs reconcile --check` and confirm it is green on the \
-     `[provider_bias]` diversity lint (`requirement_downgrade_\
-     violations`). A red here means the config itself downgrades the \
-     floor — fix the config, not the roster.
+  5. WRITE THE MACHINE-READABLE ROSTER — this is the step that makes \
+     everything above a GATE instead of a promise. Write \
+     MOLECULE_DIR/roster.json (schema \
+     `cosmon_core::committee::RosterSpec`): \
+        { "stake": "root", "cross_provider": true, \
+          "generator": { "seat_id": "<gen>", "role": "generator", \
+            "adapter": "<[adapters.<name>] section this seat sits on>", \
+            "family": { "endpoint": { "provider": "…", \
+              "base_url": "…", "family": "…" }, "model": "…" }, \
+            "persona": { "role_id": "author", \
+              "briefing": { "version": 1, "contract_hash": "…", \
+                "injected": true }, \
+              "falsification_artifact": "…" } }, \
+          "refuters": [ … same shape, role "refuter" … ] } \
+     Every seat MUST name the `adapter` it sits on. That field is the \
+     only one a gate can check the others AGAINST: `cs reconcile \
+     --check` re-derives the endpoint tuple from that section's \
+     base_url + model and REFUSES the roster when the declaration does \
+     not survive the derivation. A seat naming no `adapter` is refused \
+     too — an unresolvable claim is one nothing checked. Write the \
+     declared tuple in FULL (provider, base_url, family): a base_url \
+     the roster omits is one no reader of the roster can check. \
+     `injected` is DERIVED, never declared: the gate reads the seat's \
+     own directory for the two facts — committee-posture.md present AND \
+     briefing.md pointing at it — and refuses a roster that claims \
+     `true` while the files say otherwise. At convene, before any seat \
+     is nucleated, there is no directory to read and nothing is \
+     contradicted; write `false` and let dispatch and tackle make it \
+     true by writing the files.
+  6. Run `cs reconcile --check`. READ ITS OUTPUT WITH THE TWO LINTS \
+     TOLD APART — this step's bar is NOT "no output". \
+     (a) The `[provider_bias]` CONFIG lint \
+         (`requirement_downgrade_violations`) MUST be green here. A red \
+         means the config itself downgrades the floor — fix the config, \
+         not the roster. \
+     (b) The ROSTER lint (`check_committee_roster_witnesses`) reads the \
+         roster.json you just wrote. At convene time it is EXPECTED to \
+         name every refuter as `briefing-not-injected`, and that is not \
+         a failure of this step: no seat has been dispatched yet, so no \
+         durable contract exists yet, and `injected: false` is the \
+         honest value. What MUST already be clean here are the axes that \
+         do not depend on dispatch — `family-collision`, \
+         `persona-collision`, and the family floor. If the lint names \
+         one of THOSE, the roster is inadmissible and no amount of \
+         later dispatching fixes it: widen the roster or re-point the \
+         colliding seats before nucleating anything. \
+     Record in roster.md exactly which lines the lint emitted and which \
+     of the two buckets each fell in. The `dispatch-seats` step re-runs \
+     the same command with a stricter bar — every dispatch-INDEPENDENT \
+     axis clean — while the FULLY-green bar belongs to the PILOT, after \
+     `cs tackle`, because `cs tackle` is what writes the briefing.md \
+     pointer that `briefing-not-injected` is about. A gate goes where \
+     the actor required to satisfy it can reach it. \
+     THIS IS WHY roster.json EXISTS: before it, `plan_committee` and its \
+     siblings had ZERO production callers, every predicate passed its \
+     own tests while enforcing nothing, and a roster that failed a \
+     witness was discouraged by this recipe and contradicted by no tool.
 
 Write MOLECULE_DIR/roster.md: the stake and its jury floor; the \
 generator seat (family + resolved endpoint tuple + `role_id` + the \
@@ -244,8 +297,21 @@ AND DISTINCT-PERSONA (witness 2) — proving BOTH axes differ; and the \
 `cs reconcile --check` result. State the §8b ceiling in one line: the \
 tuples are config-derived, not attested — tier (a) makes a costume \
 loud, tier (b) (`SameFamilyRefusal`) is the ADR-147 follow-on.
+
+NAME WHICH SEATS ACTUALLY BEAR THE FLOOR, not just how many sat \
+(`cosmon_core::committee::RosterPlan::floor_bearing_seats`). A seat that \
+duplicates a family a peer already covers reads on the roster but holds \
+up none of it, and the seat COUNT cannot tell the two apart. When the \
+whole floor rests on ONE seat \
+(`floor_is_single_point_of_failure`), roster.md MUST say so in those \
+words: the jury is one provider refusal away from vacuous, and a \
+conjunctive door over it reads as two independent families while being \
+one family plus one non-floor-bearing reader. Prefer widening the \
+roster until the floor is shared; if you convene the fragile one \
+anyway, the fragility is on the record and the driver must treat a \
+refusal of that seat as INCONCLUSIVE.
 """
-acceptance = "MOLECULE_DIR/roster.md written: stake + jury floor; generator family with resolved endpoint tuple, `role_id`, and the three artefact paths (or a 'falsifier absent' finding); each refuter's planned family, resolved endpoint tuple, DISTINCT `role_id`, versioned adversarial briefing, and tackle `--adapter`; TWO tables — DISTINCT-ENDPOINTS (witness 1) and DISTINCT-PERSONA (witness 2) — proving both axes differ; and a green `cs reconcile --check`. The generator family is read from {{target}}'s registered Incarnation, never the galaxy default (missing Incarnation closes with a missing-input finding). If the wired adapters cannot meet the stake's diversity floor, roster.md records the loud STOP instead."
+acceptance = "MOLECULE_DIR/roster.json written (schema `cosmon_core::committee::RosterSpec`) — the machine-readable roster `cs reconcile --check` refuses when a seat fails a witness — AND MOLECULE_DIR/roster.md written: stake + jury floor; generator family with resolved endpoint tuple, `role_id`, and the three artefact paths (or a 'falsifier absent' finding); each refuter's planned family, resolved endpoint tuple, DISTINCT `role_id`, versioned adversarial briefing, and tackle `--adapter`; TWO tables — DISTINCT-ENDPOINTS (witness 1) and DISTINCT-PERSONA (witness 2) — proving both axes differ; and the `cs reconcile --check` output recorded with its two lints told apart: the `[provider_bias]` config lint GREEN, and the roster lint clean on every DISPATCH-INDEPENDENT axis — `declares endpoint ... RESOLVES to`, `SELF-ATTESTATION`, `family-collision`, `persona-collision`, the family floor (its `briefing-not-injected` lines are expected at convene, since no seat has been dispatched yet). Every seat names the `adapter` it sits on and declares its endpoint tuple in full, so the gate can re-derive it. The generator family is read from {{target}}'s registered Incarnation, never the galaxy default (missing Incarnation closes with a missing-input finding). roster.md names the FLOOR-BEARING seats explicitly and states loudly when the floor rests on a single seat. If the wired adapters cannot meet the stake's diversity floor, roster.md records the loud STOP instead."
 
 [[steps]]
 id = "dispatch-seats"
@@ -265,8 +331,9 @@ and be tagged `temp:warm` immediately, per the auto-tag discipline.
           --var topic="Produce a diagnosis, a minimal fix diff, and a \
           FALSIFIER (a test that goes red when the fix is reverted) for: \
           {{symptom}}. Ship all three as auditable artefacts."
-        cs tackle <gen_id> --adapter <generator_family>   # Path A
         cs tag <gen_id> --add temp:warm
+     Record `--adapter <generator_family>` in dag.md as the adapter the \
+     PILOT will tackle this seat under. Do not tackle it here.
      When the target is already a completed provider-A molecule, SKIP \
      this — it IS the generator seat; its committed diff on main is the \
      artefact the refuters audit.
@@ -277,27 +344,73 @@ and be tagged `temp:warm` immediately, per the auto-tag discipline.
      a hypothesis, reproduces the symptom, reads the locus, RUNS the \
      instrument, and emits the verdict-door + `Refutes`/`RefutedBy`.
         cs nucleate cmb-verify \\
-          --refutes <generator_seat_or_target> \\
           --blocked-by <generator_seat_or_target> \\
           --var diagnosis_molecule_id=<generator_seat_or_target> \\
           --var symptom="{{symptom}}" \\
           --var stated_mechanism="<provider-A's diagnosis, verbatim>"
-        cs tackle <ref_id> --adapter <refuter_family>   # DISTINCT family — Path A
         cs tag <ref_id> --add temp:warm
-     WITNESS (2) INJECTION — really inject, do not merely declare \
-     (C4, ADR-153). Paste into each refuter's MOLECULE_DIR/briefing.md, \
-     under `## Committee posture`, the VERSIONED adversarial briefing \
-     contract (schema \
-     `cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION`): the fix \
-     diff and the falsifier are ARTEFACTS to audit, never testimony — \
-     run the falsifier yourself, try to make it (or a sharper one) go \
-     red; the generator's confidence is not evidence. Record the \
-     injected contract's `contract_hash` in dag.md — a paper contract \
-     that is declared-but-not-injected fails witness (2) at \
-     `plan_committee`. The refuter MUST ship a FALSIFICATION-ATTEMPT \
-     ARTEFACT (e.g. `MOLECULE_DIR/falsification-attempt.md`) — proof it \
-     tried to break the fix; a refuter with no such artefact is \
-     inadmissible.
+     DO NOT pass `--refutes` HERE. This recipe used to order it \
+     unconditionally, and cmb-verify — which OWNS that edge's semantics \
+     — forbids it until a REFUTED verdict lands: *"when the mechanism \
+     is still plausible at nucleation, nucleate plainly and add the \
+     edge only if step 3 lands a REFUTED verdict"*. At convene time no \
+     adjudication has happened, so an unconditional `--refutes` files a \
+     `Refutes`/`RefutedBy` pair asserting a judgement nobody made — and \
+     the calibration loop that later asks "which relayed diagnoses \
+     held?" reads pre-filed edges as findings. The edge is recorded by \
+     the seat itself, in cmb-verify's own write-back step, if and only \
+     if its verdict is `refuted`. Nucleate with `--refutes` here ONLY \
+     in cmb-verify's own stated exception: the mechanism is ALREADY \
+     refuted by a cheap static read before the seat is dispatched.
+     Do NOT `cs tackle` the seat here either — see the handoff step: \
+     tackle is the pilot's gesture, and this orchestrator cannot wait \
+     on its own children. Record the `--adapter <refuter_family>` the \
+     seat is TO BE tackled under in dag.md; handoff.md hands the \
+     commands to the pilot.
+     WITNESS (2) INJECTION — WRITE THE DURABLE FILE, NEVER PASTE INLINE \
+     (C4, ADR-153). Write the VERSIONED adversarial briefing contract \
+     into the seat's own \
+     `<SEAT_MOLECULE_DIR>/committee-posture.md`, rendered by \
+     `cosmon_core::committee::render_committee_posture(\
+     ADVERSARIAL_BRIEFING_VERSION, contract_hash, body)`. \
+     DO NOT paste it into briefing.md under a `## Committee posture` \
+     heading. That was this recipe's own instruction and it produced a \
+     seat that FAILS witness (2) with `BriefingNotInjected`: \
+     `cs evolve` regenerates briefing.md wholesale from the formula \
+     step on every advance and clobbers any inline section \
+     (committee.rs documents exactly this; committee-20260723-c0a1 \
+     measured it). `committee-posture.md` is the file NO regeneration \
+     touches. `cs tackle`, `cs evolve` and `cs complete` all re-append \
+     the stable POINTER to it automatically, so delivery survives every \
+     step AND the completed record, and is satisfied on step 1 — you \
+     write the contract once and touch \
+     briefing.md never. \
+     The contract body: the fix diff and the falsifier are ARTEFACTS to \
+     audit, never testimony — run the falsifier yourself, try to make \
+     it (or a sharper one) go red; the generator's confidence is not \
+     evidence. Record the `contract_hash` in dag.md AND in roster.json, \
+     and set that seat's `adapter` to the `[adapters.<name>]` it will be \
+     tackled under. Do NOT hand-set `persona.briefing.injected`: the \
+     gate DERIVES it from the two files and refuses a roster whose claim \
+     they contradict — a paper contract that is \
+     declared-but-not-injected is REFUSED by `cs reconcile --check`, \
+     not merely frowned at. The refuter MUST ship a \
+     FALSIFICATION-ATTEMPT ARTEFACT (e.g. \
+     `MOLECULE_DIR/falsification-attempt.md`) — proof it tried to break \
+     the fix; a refuter with no such artefact is inadmissible, and the \
+     same gate refuses it.
+     WRITE THE VERDICT CONTRACT EARLY AND UPDATE IT INCREMENTALLY. \
+     Every seat brief MUST instruct the seat to create its \
+     `referee-report.md` and `verdict.json` on its FIRST step — with \
+     whatever it knows so far, `verdict: "INCONCLUSIVE"` until it \
+     decides — and to rewrite them after each finding. A seat that \
+     defers its contract to a final summarising turn loses everything \
+     to a provider refusal, a rate limit, or a sleeping machine, and \
+     the round then cannot tell "reviewed and found nothing" from \
+     "never got to look". Measured twice in two days on \
+     converge-20260727-a302: a stalled seat kept its verdict only \
+     because it happened to have written it already. That is timing, \
+     not design.
 
   3. COLLECTOR SEAT — the conjunctive verdict-door. Nucleate a leaf \
      blocked-by EVERY refuter seat (and the generator seat if any):
@@ -307,19 +420,55 @@ and be tagged `temp:warm` immediately, per the auto-tag discipline.
           verdict.md. Emit CONJUNCTIVE verdict — refuted if ANY refuter \
           refuted OR any falsifier went red; confirmed ONLY if every \
           seat confirmed; else inconclusive. One red falsifier beats ten \
-          'looks fine'. Write committee-verdict.md."
+          'looks fine'. RE-CHECK THE FLOOR ON THE JURY THAT ACTUALLY \
+          SAT, not the one that was planned \
+          (`cosmon_core::committee::fold_committee`): for each roster \
+          seat record a DELIVERY disposition — delivered / \
+          provider-refusal / stalled / not-dispatched — and the REALIZED \
+          adapter+model beside the specified one. A seat that did not \
+          deliver carries NO family; if the delivering seats plus the \
+          generator no longer span the jury floor, the verdict is \
+          INCONCLUSIVE and never confirmed. Write committee-verdict.md."
         cs tag <collector_id> --add temp:warm
      The aggregate verdict lives HERE, downstream — the orchestrator \
      cannot wait on its own children (worker/human boundary).
 
+  4. CLOSE THE ROSTER AND PASS THE GATE THIS STEP CAN PASS. Rewrite \
+     MOLECULE_DIR/roster.json with the seats' REAL molecule ids (convene \
+     wrote planned labels), each seat's `adapter` set to the \
+     `[adapters.<name>]` section it will actually be tackled under, and \
+     `persona.falsification_artifact` set to the path the seat is \
+     required to produce. \
+     DO NOT hand-set `persona.briefing.injected`. It is no longer read: \
+     `cs reconcile --check` DERIVES it from the seat's own directory — \
+     `committee-posture.md` present AND briefing.md pointing at it — and \
+     REFUSES a roster that claims `true` while the files say otherwise. \
+     Write the durable contract; the flag follows. \
+     THIS STEP'S BAR, precisely: `cs reconcile --check` must be clean on \
+     every axis that does not depend on DISPATCH — the `[provider_bias]` \
+     config lint, `declares endpoint … RESOLVES to`, `SELF-ATTESTATION`, \
+     `family-collision`, `persona-collision`, the family floor, and any \
+     `claims injected: true` divergence. `briefing-not-injected` lines \
+     are STILL EXPECTED here and are NOT a failure of this step: the \
+     briefing.md pointer is written by the dispatch verbs (`cs tackle`, \
+     `cs evolve`, `cs complete`), and this step is forbidden from \
+     running any of them. Demanding fully-green here \
+     assigns the orchestrator a bar only the pilot's next gesture can \
+     clear — measured on committee-20260728-f744, where the durable \
+     posture file was written, the real ids were in the roster, and the \
+     check still exited 1. The FULLY-GREEN bar therefore lives in \
+     handoff.md as the pilot's POST-TACKLE check, where the actor who \
+     runs it is the actor who can satisfy it. Record in dag.md which \
+     lines you saw and which bucket each fell in.
+
 Write MOLECULE_DIR/dag.md: every nucleated seat id with its role, \
-resolved family, the `--adapter` it is (to be) tackled under, and its \
-`--blocked-by` / `--refutes` edges — the full committee closure a \
+resolved family, the `--adapter` the PILOT will tackle it under, and \
+its `--blocked-by` / `--refutes` edges — the full committee closure a \
 `cs deps {this_committee_id} --transitive` will show.
 """
 needs = ["convene"]
 requires_parent_link = true
-acceptance = "MOLECULE_DIR/dag.md written enumerating every nucleated seat (generator if needed, each refuter as a cmb-verify molecule with `--refutes`, and the collector) with role, resolved family, DISTINCT `role_id`, injected adversarial-briefing `contract_hash`, tackle `--adapter`, and typed edges. Each child was tagged `temp:warm`. The seat count matches the convened roster (the Tier-1 `count` measure). Refuter families are DISTINCT from the generator on the resolved endpoint (witness 1) AND carry distinct personas with injected briefings and a falsification artefact (witness 2)."
+acceptance = "MOLECULE_DIR/dag.md written enumerating every nucleated seat (generator if needed, each refuter as a cmb-verify molecule, and the collector) with role, resolved family, DISTINCT `role_id`, injected adversarial-briefing `contract_hash`, the `--adapter` the PILOT will tackle it under, and typed edges. Each seat's adversarial contract was written to its own `committee-posture.md` via `render_committee_posture` — NEVER pasted inline into briefing.md, which `cs evolve` clobbers. No `--refutes` edge was filed unless the mechanism was already refuted by a static read before dispatch (cmb-verify owns that edge and forbids it before a REFUTED verdict). No seat was tackled by this orchestrator — tackle is the pilot's gesture, handed over in handoff.md. roster.json was rewritten with the seats' REAL molecule ids and each seat's `adapter`, and `cs reconcile --check` is now clean on every DISPATCH-INDEPENDENT axis — resolution, self-attestation, both collisions, the family floor, and any `claims injected: true` divergence. `injected` was NOT hand-set: the gate derives it from the seats' own files. The remaining `briefing-not-injected` lines are expected here (the pointer into briefing.md is written by the dispatch verbs — `cs tackle`, `cs evolve`, `cs complete` — and this step runs none of them) and handoff.md carries the FULLY-GREEN bar as the pilot's post-tackle check, where the actor who runs it can satisfy it. Each child was tagged `temp:warm`. The seat count matches the convened roster (the Tier-1 `count` measure). Refuter families are DISTINCT from the generator on the resolved endpoint (witness 1) AND carry distinct personas with injected briefings and a falsification artefact (witness 2)."
 
 [[steps]]
 id = "handoff"
@@ -328,7 +477,13 @@ description = """
 The committee is a DAG the pilot runs; this orchestrator's job ends at \
 a clean hand-off. Do NOT tackle or wait on the seats — that is the \
 pilot's role (`cs tackle` / `cs run` are human-only; the worker/human \
-boundary is non-negotiable).
+boundary is non-negotiable). The `dispatch-seats` step above agrees: it \
+nucleates and tags, and records each seat's intended `--adapter` in \
+dag.md for you to hand over here. (It used to ORDER `cs tackle <seat> \
+--adapter <family>` two steps before this sentence forbade it. An \
+orchestrator following the recipe literally either violated the \
+boundary or stalled waiting on its own children, depending on which \
+half it read last.)
 
 Write MOLECULE_DIR/handoff.md:
   1. The exact pilot commands to run the committee — either \
@@ -337,19 +492,65 @@ Write MOLECULE_DIR/handoff.md:
      order, or a single `cs run <root>` if the seats' adapters are \
      pinned. Name the `--adapter` for every seat explicitly so a \
      later reader cannot accidentally collapse the jury to one family.
-  2. The CONJUNCTIVE decision rule restated for the record: committee \
+  2. THE FULLY-GREEN GATE, which is YOURS and not the orchestrator's. \
+     Immediately after the LAST `cs tackle` and before reading any \
+     seat's verdict, run `cs reconcile --check` and require it FULLY \
+     GREEN on the roster lint. The committee may not be aggregated \
+     until it is. This bar lives here, not in `dispatch-seats`, for a \
+     measured reason: witness (2)'s delivery test needs the briefing.md \
+     pointer, and `cs tackle` is what writes it — the orchestrator is \
+     forbidden from running tackle, so demanding fully-green there was \
+     a gate assigned to an actor who could not satisfy it (measured on \
+     committee-20260728-f744: durable posture file written, real ids in \
+     the roster, check still exited 1). A red line HERE names a seat \
+     that may not sit and whose verdict may not be counted. Never \
+     hand-edit roster.json to clear it: `injected` is derived from \
+     files, and the resolution and self-attestation lines are about \
+     `[adapters]`, not about the roster's prose. Record the command's \
+     exit code and output verbatim in handoff.md.
+  3. The CONJUNCTIVE decision rule restated for the record: committee \
      `refuted` if ANY refuter refuted or any falsifier went red; \
      `confirmed` only if EVERY seat confirmed; else `inconclusive`. \
-     A verdict-door, never a majority vote.
-  3. The §8b honesty line: this makes the jury loud, not incorruptible \
+     A verdict-door, never a majority vote. \
+     NAME THE TWO VOCABULARIES AND THEIR MAPPING, because a seat sits \
+     in both at once: cmb-verify's own door is \
+     {confirmed | refuted | inconclusive} in verdict.json, while a seat \
+     convened inside a converge loop ALSO writes \
+     {CLEAN | FINDINGS | INCONCLUSIVE} on referee-report.md's first \
+     line. THE CORRESPONDENCE IS RELATIVE TO THE SEAT'S \
+     `mechanism_polarity`, and a seat this formula convenes is always \
+     `polarity: fix` — it audits the generator's shipped fix, so \
+     confirmed↔CLEAN, refuted↔FINDINGS, inconclusive↔INCONCLUSIVE, and \
+     one seat emitting `VERDICT: FINDINGS (2)` and `REFUTED` together \
+     is agreement, not contradiction. Do NOT copy that correspondence \
+     anywhere it might be read for a `polarity: defect` molecule, where \
+     it inverts (confirmed = the defect reproduces = FINDINGS); the \
+     definition, with both rows, is `cmb-verify.formula.toml` step \
+     `verify-or-refute`, and this line consumes it. Spell it out in \
+     handoff.md, and state the reader's rule with it: require an \
+     AFFIRMATIVE clean in BOTH files, AND require the pair to be \
+     consistent under the stated polarity — a missing \
+     `mechanism_polarity` is NOT-CLEAN, never a polarity the reader \
+     picks. A check shaped `verdict != "FINDINGS"` reads REFUTED as \
+     clean — clean is something a seat says, never something a reader \
+     fails to find. AND WRITE THE FIELD, do not rely on this formula \
+     having said what the polarity always is: every seat's verdict.json \
+     carries `"mechanism_polarity": "fix"` literally, because the \
+     reader that enforces the rule \
+     (`cosmon_core::committee::read_seat_emission`, run by \
+     `cs reconcile --check` as `check_seat_verdict_polarity`) reads the \
+     FILE and not this sentence. A seat that omits it is refused — \
+     which is the point: a constraint nothing resolves is a constraint \
+     a seat can decline silently.
+  4. The §8b honesty line: this makes the jury loud, not incorruptible \
      — tier (a) endpoint distinctness is config-derived; the attested \
      `SameFamilyRefusal` (tier b) and C5's empirical calibration probe \
      are what harden it. Name the residual (stake self-classification, \
      S-3) as unclosed.
-  4. The return-citation: when the committee's verdict lands, cite it \
+  5. The return-citation: when the committee's verdict lands, cite it \
      back to the showroom surveys by RELATIVE path (syzygie, \
      ADR-049) and note C5 as the downstream that will calibrate these \
      readers.
 """
 needs = ["dispatch-seats"]
-acceptance = "MOLECULE_DIR/handoff.md written: the per-seat `cs tackle … --adapter <family>` (or `cs run`) pilot commands with every seat's family named; the conjunctive verdict-door rule restated; the §8b ceiling + unclosed stake-self-classification residual named; and the syzygie return-citation to showroom + C5. The orchestrator did NOT tackle or wait on its own seats."
+acceptance = "MOLECULE_DIR/handoff.md written: the per-seat `cs tackle … --adapter <family>` (or `cs run`) pilot commands with every seat's family named; the pilot's POST-TACKLE `cs reconcile --check` FULLY-GREEN gate stated as the bar the committee may not be aggregated without (it lives here because `cs tackle` is what writes the briefing.md pointer witness (2) tests, and the orchestrator may not run tackle); the conjunctive verdict-door rule restated; the §8b ceiling + unclosed stake-self-classification residual named; and the syzygie return-citation to showroom + C5. The orchestrator did NOT tackle or wait on its own seats."

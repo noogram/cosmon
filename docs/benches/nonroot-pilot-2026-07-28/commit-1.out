@@ -1,0 +1,10 @@
+dispatch 1
+molecule task-20260727-e738
+branch   feat/task-20260727-e738
+commit   94aeb95368230219787fac3c575ea16ebb96786d
+cat-file -t -> commit
+author   cosmon non-root pilot <nonroot-pilot@cosmon.invalid>
+committer cosmon non-root pilot <nonroot-pilot@cosmon.invalid>
+subject  feat: artifact 1
+--- ARTIFACT-1.md as committed ---
+10001

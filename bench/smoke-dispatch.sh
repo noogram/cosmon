@@ -17,9 +17,12 @@ set -euo pipefail
 BENCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$BENCH_DIR/lib/common.sh"
 
-# Resolve the molecule directory. Prefer the env the fleet injects; fall back
-# to the canonical resolved path for this molecule.
-MOLECULE_DIR="${MOLECULE_DIR:-/Users/eserie/galaxies/cosmon/.cosmon/state/fleets/default/molecules/task-20260720-35e1}"
+# Resolve the molecule directory from the env the fleet injects. There is no
+# fallback: the previous default was one operator's absolute home path pointing
+# at a molecule that has since been harvested, so it resolved on exactly zero
+# machines including that one. A dead default is worse than none — it turns a
+# missing-env error into a mkdir somewhere nobody looks.
+MOLECULE_DIR="${MOLECULE_DIR:?set MOLECULE_DIR to the molecule directory (the fleet injects it on tackle)}"
 DISPATCH_OUT="$MOLECULE_DIR/dispatch-output"
 mkdir -p "$DISPATCH_OUT"
 

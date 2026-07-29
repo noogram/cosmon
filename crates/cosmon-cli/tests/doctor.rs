@@ -104,7 +104,7 @@ fn leaks_json_mode_produces_structured_finding() {
     init_git_repo(tmp.path());
     fs::write(
         tmp.path().join("conf.toml"),
-        "key = \"AKIAIOSFODNN7EXAMPLE\"\n",
+        "key = \"AKIAIOSFODNN7EXAMPLE\"\n", // publish: allow — synthetic vector for cosmon's own leak detector
     )
     .unwrap();
     commit_all(tmp.path(), "seed");
@@ -258,7 +258,7 @@ fn security_umbrella_aggregates_blocking_leak() {
     fs::write(tmp.path().join("Cargo.toml"), "[workspace]\nmembers = []\n").unwrap();
     fs::write(
         tmp.path().join("secret.txt"),
-        "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\n",
+        "ghp_ZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZZ\n", // publish: allow — synthetic vector for cosmon's own leak detector
     )
     .unwrap();
     commit_all(tmp.path(), "seed");

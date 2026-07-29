@@ -41,6 +41,7 @@ use cosmon_state::events::worker_spawn::{
 use cosmon_state::{MoleculeData, MoleculeFilter, StateStore, WorkerData};
 use cosmon_transport::TmuxBackend;
 
+use super::dispatch_ledger;
 use super::Context;
 
 /// Tackle a molecule — launch an agent session with full context.
@@ -314,17 +315,15 @@ fn sanitize_session_name(raw: &str) -> anyhow::Result<String> {
 /// Execute the `tackle` command.
 #[allow(clippy::too_many_lines)]
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
-    // First-run consent hook (delib fe35 §c). Fires once per user: if
-    // `~/.config/cosmon/consent.toml` is missing and stdin is a TTY, the
-    // operator sees a short French prompt asking whether to share
-    // encrypted bundles with the developers. On non-tty invocations (CI,
-    // scripts, inner worker shells) the hook auto-records a decline so
-    // unattended dispatch is never blocked. Best-effort: any failure to
-    // persist the answer is logged but never aborts the tackle — consent
-    // is a UX layer, not a safety gate.
-    if let Err(e) = super::opt_in_share::ensure_consent() {
-        eprintln!("cs tackle: could not record consent (non-fatal): {e}");
-    }
+    // NOTE — no consent hook here, deliberately (ADR-163, invariant §8w).
+    // `cs tackle` carried the first-run `opt-in-share` prompt until
+    // 2026-07-27. Dispatch is precisely the path an orchestrator wraps in
+    // `OUT="$(cs tackle …)"`, so a question asked here prints into a
+    // captured variable while stdin is still the inherited terminal: no
+    // keystroke can arrive and no output can warn. A tester's container run
+    // hung the full 240s on it and spawned nothing. The question now lives
+    // on `cs init` and on `cs opt-in-share` invoked alone — both explicitly
+    // interactive moments. Nothing on this path may block on a human.
 
     // Guard: require project identity before touching transport.
     super::require_project_identity(ctx)?;
@@ -498,6 +497,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         None => mol.base_branch.clone(),
     };
 
+    // 2c. Reviewed-tree pin — the seat's worktree must carry the artefact the
+    //     contract convened it to review, or it must not launch.
+    //
+    //     Placed HERE, beside the base-branch validation and ahead of every
+    //     adapter probe, for the reason 2b gives: a dispatch that cannot be
+    //     satisfied should cost no worktree, no pane and no paid probe. It runs
+    //     under `--dry-run` too — a dry run is exactly where an operator wants
+    //     to learn the pin cannot be met.
+    //
+    //     Measured 2026-07-28 (converge-20260728-7161): the committee wrote a
+    //     pinned reviewed head/tree into each seat's contract and this command
+    //     built the seat's worktree from the HEAD of whatever worktree the
+    //     operator tackled FROM. Same command, same pin, two dispatch cwds, two
+    //     different reviewed artefacts — one seat collapsed on the mismatch and
+    //     a second declared a tree it did not have, in the file the release gate
+    //     reads. The pin never entered the decision.
+    let reviewed_start_point = resolve_reviewed_tree_pin(&mol)?;
+
     // 3. Load project config (.cosmon/config.toml).
     let config_path = cosmon_filestore::resolve_config_path(None);
     let project_config = cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
@@ -574,46 +591,25 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // missing `LlamaProvider` surfaces downstream as a typed
     // `FeatureNotCompiled` rather than as `UnknownAdapter` (ADR-100 R2,
     // tolnay rule #6).
-    let mut declared_names: Vec<String> = vec![
-        "claude".to_owned(),
-        "aider".to_owned(),
-        // Gap#5 (`task-20260615-df30`, parent `delib-20260615-73f9`):
-        // codex is an **external CLI** adapter — the `codex` binary on PATH
-        // driven through `codex exec` in a tmux pane. It was already
-        // advertised (`root_help`, `man/cs.1`), exit-classified
-        // (`adapter_exit.rs`), preflight-probed (`preflight.rs`), and
-        // tmux-supervised (`adapter_uses_tmux`), but missing from exactly
-        // two places: this registry and the `spawn_and_prompt` match. Once
-        // both land, the catch-all build-time-bug arm stops being reachable
-        // for codex and the rest works for free. This is also the
-        // copy-paste template for the opencode arm (`task-20260615-556a`).
-        "codex".to_owned(),
-        // `task-20260615-556a` (parent `delib-20260615-73f9`, ADR-125):
-        // opencode is the external-CLI sibling of codex — greenfield, so it
-        // got the full 5-touch onboarding (BUILT_IN_AXES, this registry,
-        // adapter_uses_tmux, preflight, the spawn arm + OpencodeProbe). Same
-        // `(TmuxPane, External, Vendor)` Valence; the spawn arm clones the
-        // codex one.
-        "opencode".to_owned(),
-        "openai".to_owned(),
-        "anthropic".to_owned(),
-        "llama-cpp".to_owned(),
-        "llama".to_owned(),
-        // `task-20260530-821f`: the walking-skeleton local-default
-        // adapter. In-process (no tmux), drives the harness spine
-        // through `OpenAIProvider` pointed at Ollama's OpenAI-compat
-        // `/v1` endpoint. This is the built-in `cs tackle` default
-        // (see `resolve_adapter_selection`), so it must be in the
-        // dispatch registry even when no `[adapters.local]` row exists.
-        BUILTIN_FLOOR_ADAPTER.to_owned(),
-        // `task-20260707-7d27` (academy banc Mode C, hole #1): `ollama` is a
-        // canonical alias of the `local` floor. It must be in the built-in
-        // registry so `--adapter ollama` validates *without* requiring an
-        // `[adapters.ollama]` TOML row — and, crucially, so it reaches the
-        // floor dispatch arm below instead of the "validated but not wired"
-        // catch-all it hit before this fix.
-        "ollama".to_owned(),
-    ];
+    //
+    // The built-in half is **read from** `spawn_seam::built_in_adapter_names`,
+    // never re-typed here. It used to be a literal `vec![…]` of the same ten
+    // names, and a second inventory is a first inventory that will one day
+    // disagree: `cs adapters list` projects the canonical list, and
+    // `RosterSpec::resolved` refuses a committee seat whose adapter is in
+    // neither the canonical list nor TOML. A name added to the literal and not
+    // to the canonical list would dispatch and be unrosterable; a name added
+    // to the canonical list and not to the literal would be rosterable and
+    // undispatchable. Neither can happen while there is one list.
+    //
+    // The per-adapter history that lived in the literal's comments (codex —
+    // Gap#5 `task-20260615-df30`; opencode — `task-20260615-556a` / ADR-125;
+    // `local` — `task-20260530-821f`; `ollama` — `task-20260707-7d27` hole #1)
+    // is on the rows of `BUILT_IN_AXES`, beside the names it explains.
+    let mut declared_names: Vec<String> = cosmon_core::spawn_seam::built_in_adapter_names()
+        .iter()
+        .map(|n| (*n).to_owned())
+        .collect();
     if let Some(adapters) = project_config.adapters.as_ref() {
         declared_names.extend(AdaptersConfig::available_names(adapters));
     }
@@ -839,6 +835,63 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // 3a''-C5a. Fail-closed (adapter, model) COMPOSITION gate.
+    //
+    //     Everything above resolves an id. Nothing above asks whether the
+    //     ADAPTER will accept it, and an id that resolves is not a pair that is
+    //     legal. MEASURED 2026-07-28: `cs tackle <seat> --adapter codex` with
+    //     `ANTHROPIC_MODEL=claude-opus-5` in the dispatching worker's shell
+    //     resolved to (codex, claude-opus-5, source = env_var) and dispatched.
+    //     codex rejected it at launch with HTTP 400 — "The 'claude-opus-5'
+    //     model is not supported when using Codex with a ChatGPT account" — and
+    //     the seat then sat mute at a prompt, which on a floor-bearing
+    //     committee seat is indistinguishable from a provider refusal. Worse,
+    //     two earlier codex seats' `model-selection.json` recorded
+    //     `{"model":"claude-opus-5","outcome":"available"}`: a probe had
+    //     reported a POSITIVE signal for a pair it never validated.
+    //
+    //     The verdict is DERIVED, never tabulated: the adapter's family comes
+    //     from its `base_url` (else its name lineage) and the model's from its
+    //     id prefix, through the same resolution the ADR-147 diversity floor
+    //     already uses. So a new `gpt-…` or `claude-…` needs no edit here, and
+    //     anything not resolvable to a named vendor — a local endpoint, an
+    //     undeclared adapter, an unrecognised id — returns `NotChecked` and is
+    //     NOT refused. Refusing on the unknown would break every self-hosted
+    //     endpoint cosmon supports; the bug was never the deferral of full
+    //     validation, it was claiming a positive for what went unchecked.
+    //
+    //     Placed before the C2 attribution event and before every side effect,
+    //     so an illegal pair costs no worktree, no pane, and no paid probe.
+    if let Some(model) = preferred_model.as_deref() {
+        let composition = cosmon_core::provider_diversity::classify_model_composition(
+            project_config.adapters.as_ref(),
+            adapter.as_str(),
+            model,
+        );
+        if let cosmon_core::provider_diversity::ModelComposition::Incoherent {
+            adapter_family,
+            model_family,
+        } = &composition
+        {
+            return Err(anyhow::anyhow!(
+                "cs tackle: refusing to dispatch molecule {} — the pair (adapter \
+                 '{}', model '{model}') is incoherent: the adapter resolves to the \
+                 '{adapter_family}' family and the model to '{model_family}'. The \
+                 adapter would reject it at launch (a provider 400) and the worker \
+                 would sit mute at a prompt, which reads exactly like a provider \
+                 refusal. The pin came from {}. Point the model at a {adapter_family} \
+                 model, or dispatch this molecule under a {model_family} adapter. \
+                 (If the endpoint really does serve {model_family} weights, declare \
+                 its base_url in [adapters.{}] — the family is derived from the \
+                 endpoint, never from the section name.)",
+                mol_id.as_str(),
+                adapter.as_str(),
+                describe_model_source(&model_source),
+                adapter.as_str(),
+            ));
+        }
+    }
+
     // 3a'''. Attribute the model choice as a typed event (delib-20260704-b476
     //     C2), the model sibling of `AdapterSelected`. Co-minted with the
     //     spawn and *before* the availability probe, so the attribution is
@@ -971,6 +1024,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // 4. Read briefing.md if it exists; auto-inject from fleet template if absent.
     let mol_dir = store.molecule_dir(&mol_id);
     let briefing_path = mol_dir.join("briefing.md");
+
+    // Committee-posture delivery, BEFORE the briefing is read (the read below
+    // is what the worker actually receives). `cs evolve` re-establishes this
+    // pointer on every step advance, which proved the contract survives
+    // regeneration — and left the first step, the one nothing had regenerated
+    // yet, with no pointer at all. A seat's witness (2) therefore failed with
+    // `BriefingNotInjected` on step 1 for every seat, measured 2026-07-28. The
+    // call no-ops for non-seats and is idempotent, so it costs an ordinary
+    // dispatch a `stat`.
+    super::evolve::reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
+
     let briefing = match fs::read_to_string(&briefing_path).ok() {
         Some(text) => Some(text),
         None => try_inject_fleet_briefing(&state_dir, &mol, &briefing_path),
@@ -1159,7 +1223,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    let start_point = resolve_branch_start_point(&repo_root, &mol).or_else(|| base_branch.clone());
+    // The reviewed-tree pin WINS over the blocker heuristic and the base
+    // branch. Both of those answer "where should this work start from?", a
+    // question about convenience; the pin answers "which bytes is this seat
+    // reviewing?", which is the contract. Step 2c already refused the dispatch
+    // if no base carried it, so a `Some` here is a base known to carry the
+    // pinned tree.
+    let start_point = reviewed_start_point
+        .clone()
+        .or_else(|| resolve_branch_start_point(&repo_root, &mol))
+        .or_else(|| base_branch.clone());
     let worktree_path = if args.no_worktree {
         args.workdir
             .as_deref()
@@ -1310,14 +1383,83 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // 8b. Record the dispatch BEFORE spawning it.
+    //
+    // This ordering is the fix for the invisible-worker family
+    // (task-20260727-198f). It used to be the other way round: spawn, run
+    // the readiness pipeline, then flip the molecule to Running. On a
+    // healthy dispatch that put ~98 seconds between "a detached tmux worker
+    // exists" and "anything on disk says so" (measured on
+    // `task-20260727-cd79`: egress grant 10:03:22, `worker_spawned`
+    // 10:05:01). Anything that ended this process inside that window — an
+    // operator ^C on a dispatch that looked hung, a closed terminal, a host
+    // suspend, an error return whose best-effort `terminate` did not take —
+    // left a live worker with no ledger entry at all. Six of the fleet's 240
+    // completed molecules carry that signature.
+    //
+    // A filesystem ledger and a fork/exec cannot commit atomically, so we
+    // pick the recoverable failure over the invisible one: a molecule marked
+    // Running with no worker is precisely what `orphan_scan` already finds
+    // and heals, while a worker with no molecule record is visible to
+    // nothing. See `dispatch_ledger` for the full argument; the
+    // `DispatchRecorded` token below makes the order a compile-time
+    // property rather than a convention this comment has to defend.
+    let pre_dispatch_snapshot = mol.clone();
+    let (mol, recorded) = {
+        let (updated, token) = dispatch_ledger::commit_dispatch(
+            &store,
+            &mol,
+            &dispatch_ledger::DispatchRecord {
+                worker: &wid,
+                session_name: &session_name,
+                adapter: &adapter,
+                loop_ownership,
+                model: preferred_model.as_deref(),
+                tackled_by: tackled_by.clone(),
+                worktree_path: &worktree_path,
+                repo_root: &repo_root,
+            },
+        )
+        .map_err(|e| {
+            // Nothing has been spawned yet, but the worktree and branch from
+            // step 7 exist. Undo them exactly as a spawn failure would.
+            //
+            // No `rollback_dispatch` here on purpose: `commit_dispatch` undoes
+            // its own ledger writes before returning this error (it is the
+            // only place holding the fleet lock, so a caller-side rollback
+            // would deadlock on it). The two undos are therefore disjoint —
+            // that one owns `state.json` and `fleet.json`, this one owns the
+            // worktree and the branch — and neither can forget the other's
+            // half. Falsifier for the ledger half:
+            // `dispatch_ledger::tests::an_unwritable_event_log_refuses_the_\
+            // dispatch_and_leaves_no_ledger_entry`.
+            cleanup_partial_tackle(
+                &backend,
+                &wid,
+                &repo_root,
+                &worktree_path,
+                &branch_name,
+                args.no_worktree,
+            );
+            anyhow::anyhow!(
+                "cs tackle: refusing to spawn a worker for {mol_id}: the dispatch \
+                 could not be recorded ({e}). No worker was started — an \
+                 unrecorded worker is invisible to `cs observe`, `cs patrol` and \
+                 to its own `cs evolve`, so cosmon does not start one it cannot \
+                 account for."
+            )
+        })?;
+        (updated, token)
+    };
+
     // Failure of spawn_and_prompt used to propagate via `?` straight to the
     // caller, leaving the branch and worktree we just created orphaned on
     // disk. A re-invocation would then see "branch already exists" and
     // either reuse a stale worktree or confuse the operator. `cs tackle`'s
     // symmetry contract is: either everything commits (Running molecule +
     // worker + branch + worktree) or nothing persists. On spawn failure
-    // we now undo `create_worktree`'s side effects before surfacing the
-    // error.
+    // we now undo `create_worktree`'s side effects — and the ledger entry
+    // written just above — before surfacing the error.
     let spawn_outcome = match spawn_and_prompt(
         &backend,
         &wid,
@@ -1332,9 +1474,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         project_config.adapters.as_ref(),
         preferred_model.as_deref(),
         &current_strong_set,
+        &recorded,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
+            dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
+            emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
             cleanup_partial_tackle(
                 &backend,
                 &wid,
@@ -1412,14 +1557,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
 
         // Final liveness re-check: a tight race still exists between
-        // `spawn_and_prompt` returning Ok and us taking the fleet lock
-        // — the worker process might receive SIGSEGV / be kill -9'd /
-        // crash on a second-turn input in those few milliseconds. If
-        // that happened, writing `molecule.status = Running` + a
-        // `WorkerData` entry would restate the surface lie. So we
-        // re-observe just before committing, and if the session has
-        // died in the meantime we tear down the partial state and
-        // return an error WITHOUT touching the molecule or the fleet.
+        // `spawn_and_prompt` returning Ok and this point — the worker
+        // process might receive SIGSEGV / be kill -9'd / crash on a
+        // second-turn input in those few milliseconds. If that happened,
+        // leaving the molecule Running with a `WorkerData` entry would
+        // restate the surface lie. So we re-observe, and if the session has
+        // died in the meantime we roll the ledger entry back and tear down
+        // the partial state.
         let still_alive = backend.is_alive(&wid).unwrap_or(false);
         let status = if still_alive {
             cosmon_transport::readiness::detect_status(&backend, &wid)
@@ -1428,6 +1572,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             cosmon_transport::readiness::SessionStatus::Dead
         };
         if !still_alive || status == cosmon_transport::readiness::SessionStatus::Dead {
+            dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
+            emit_worker_spawn_rolled_back(
+                &state_dir,
+                &mol_id,
+                &wid,
+                adapter.as_str(),
+                &status.to_string(),
+            );
             cleanup_partial_tackle(
                 &backend,
                 &wid,
@@ -1437,71 +1589,38 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 args.no_worktree,
             );
             return Err(anyhow::anyhow!(
-                "cs tackle: session {session_name} died between spawn and \
-                 fleet-write (status={status}); no Running state written, \
+                "cs tackle: session {session_name} died right after spawn \
+                 (status={status}); the dispatch record was rolled back and the \
                  partial tmux/branch/worktree cleaned up"
             ));
         }
     }
 
-    // 9. Update molecule status to Running, bind worker, and register in fleet.
-    //    Hold the fleet lock for molecule save + fleet registration so
-    //    concurrent tackles don't clobber fleet.json.
-    let updated = {
-        let _g = store.lock_fleet()?;
-        let mut updated = mol;
-        if updated.status == MoleculeStatus::Pending || updated.status == MoleculeStatus::Queued {
-            updated.status = MoleculeStatus::Running;
+    // 9. Stamp the PID witness on the ledger entry written at step 8b.
+    //
+    //    Only the detached-local arm yields one, and only after the process
+    //    exists — which is why it cannot be part of the pre-spawn commit.
+    //    `orphan_scan`'s PID axis reads it back to authenticate liveness (a
+    //    live or SIGSTOP'd worker matches its fingerprint and is never
+    //    reset; a `kill -9`'d one no longer does). Best-effort: the molecule
+    //    is already Running and supervised by its session, so a failed
+    //    second write costs the PID axis, never the dispatch
+    //    (noogram/cosmon#3 Defect 1).
+    let updated = if let Some(witness) = &spawn_outcome.detached_local {
+        if dispatch_ledger::stamp_pid_witness(&store, &mol_id, witness.pid, witness.pid_start_time)
+        {
+            store.load_molecule(&mol_id).unwrap_or(mol)
+        } else {
+            eprintln!(
+                "cs tackle: warning — could not stamp the PID witness for \
+                 {mol_id}; the dispatch is recorded and supervised, but \
+                 `cs patrol`'s PID liveness axis will fall back to the \
+                 session probe alone."
+            );
+            mol
         }
-        // Bind the inline live-process record (delib-20260426-1bcd #1
-        // fold-in). `bind_process` mirrors `assigned_worker` and
-        // `session_name` for backwards compatibility with readers that
-        // have not migrated yet. The validated adapter is stamped on
-        // the record so observer-side commands (`cs ensemble`, `cs peek`)
-        // can branch on the adapter's `SupervisionMode` without
-        // re-running the dispatch logic — see GAP #7
-        // (chronicle `2026-05-18-gap7-observer-side-fix.md`).
-        let mut process =
-            cosmon_core::process::MoleculeProcess::new(wid.clone(), session_name.clone())
-                .with_adapter_name(adapter.as_str())
-                // Persist the resolved model pin (or the floor `None`) so a
-                // re-dispatch reproduces this exact resolution instead of
-                // bleeding ambient `$ANTHROPIC_MODEL` (noogram/cosmon#3
-                // Defect 2). See `orphan_scan` + the runtime's re-dispatch.
-                .with_model(preferred_model.as_deref());
-        // Stamp the detached local worker's PID + launch fingerprint on the
-        // record we are about to persist. This is the point where the PID
-        // witness finally survives in `state.json` (noogram/cosmon#3
-        // Defect 1) — `orphan_scan`'s PID axis reads it back to authenticate
-        // the worker's liveness (a live or SIGSTOP'd worker matches its
-        // fingerprint and is never reset; a `kill -9`'d one no longer does).
-        if let Some(witness) = &spawn_outcome.detached_local {
-            process = process.with_pid(witness.pid);
-            if let Some(start) = witness.pid_start_time {
-                process = process.with_pid_start_time(start);
-            }
-        }
-        updated.bind_process(process);
-        // Record the dispatch claim (anti-preemption lease). A `human`
-        // claim is sticky — the resident runtime will never preempt it;
-        // a `runtime:<pid>` claim does not block re-dispatch.
-        updated.mark_tackled(tackled_by.clone());
-        store.save_molecule(&mol_id, &updated)?;
-
-        // Register the tackle-created worker in the fleet so patrol and propel
-        // can find it. Tackle workers are transient (tmux session ↔ worker),
-        // but they deserve a proper WorkerData entry for the duration of the run.
-        register_tackle_worker(
-            &store,
-            &wid,
-            &worktree_path,
-            &repo_root,
-            &updated,
-            &adapter,
-            loop_ownership,
-        )?;
-
-        updated
+    } else {
+        mol
     };
 
     // 9b'. Post-lock read-modify-write race detection (task-20260519-81d2).
@@ -1609,7 +1728,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Session-log adapters only: in-process providers (openai/anthropic/…)
     // emit at their own response seam.
     if matches!(adapter.as_str(), "claude" | "codex") {
-        spawn_realized_watcher(&state_dir, &mol_id, &worktree_path);
+        spawn_realized_watcher(
+            &state_dir,
+            &mol_id,
+            &worktree_path,
+            spawn_outcome.claude_config_dir.as_deref(),
+        );
     }
 
     // 9c. In-process Direct-API completion emit — GAP #6 fix.
@@ -1680,7 +1804,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         });
         if uses_tmux {
             out["tmux_session"] = serde_json::json!(session_name);
-            out["attach"] = serde_json::json!(format!("tmux -L {socket} attach -t {session_name}"));
+            // The attach line carries a UTF-8 locale when the spawn env
+            // declares none — see `cosmon_transport::locale` for the measurement.
+            out["attach"] = serde_json::json!(cosmon_transport::locale::attach_command_from_env(
+                &socket,
+                &session_name
+            ));
         } else {
             // No tmux session exists for this adapter; expose the log path the
             // in-process / detached worker writes so tooling never emits a
@@ -1700,7 +1829,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  worktree: {}", worktree_path.display());
         if uses_tmux {
             println!("  session:  {session_name}");
-            println!("  attach:   tmux -L {socket} attach -t {session_name}");
+            println!(
+                "  attach:   {}",
+                cosmon_transport::locale::attach_command_from_env(&socket, &session_name)
+            );
         } else {
             // In-process/detached local worker: no tmux to attach to.
             println!("  log:      {}", worker_log.display());
@@ -2971,7 +3103,27 @@ fn build_prompt(
         .map_or("🔧", cosmon_core::kind::MoleculeKind::emoji);
 
     // ── AUTONOMOUS WORK MODE HEADER ─────────────────────────────
-    let _ = writeln!(out, "# 🚨 AUTONOMOUS WORK MODE — NON-NEGOTIABLE 🚨\n");
+    // Register note (task-20260727-bbaf). The header and the closing
+    // protocol used to be written in imperatives with the reason withheld
+    // ("NON-NEGOTIABLE", "This is physics, not politeness", "There is NO
+    // other valid way to end"). Two costs, both observed on 2026-07-27:
+    // the operator read a worker pane and asked whether prompts had been
+    // INJECTED into a running molecule — they were reading our own brief;
+    // and task-20260727-1765 correctly refused the blanket order, because
+    // its molecule's real state did not support the transition the brief
+    // demanded, and was left `running` with the work done. A control a
+    // competent owner mistakes for an attack costs trust on every
+    // inspection, and an order that conflicts with good judgement gets
+    // resisted by exactly the workers you want.
+    //
+    // So the anti-stall property is now carried by EXPLANATION, not by
+    // coercion: the brief states the contract and the cost of breaking it
+    // (unattended pane, held molecule slot, a stalled worker that looks
+    // healthy), and a model that understands that does not need to be
+    // forbidden from pausing. The behavioural target is unchanged and is
+    // asserted as a property in
+    // `test_build_prompt_states_completion_contract_and_blocked_path`.
+    let _ = writeln!(out, "# Autonomous work mode\n");
     let _ = writeln!(
         out,
         "You are a cosmon worker executing {kind_emoji} {kind_str} `{}`.",
@@ -2985,8 +3137,16 @@ fn build_prompt(
         mol.total_steps
     );
     out.push_str(
-        "This is physics, not politeness. A molecule in motion stays in motion. \
-         Every moment you wait is a moment the pipeline stalls.\n\n",
+        "Nobody is reading this pane. cosmon dispatched you into a detached \
+         session and tracks the molecule's recorded state, not anything you \
+         print here. Two consequences shape the protocol at the end of this \
+         brief. First, a question asked here reaches no one, so it is never \
+         answered. Second, a worker waiting at the prompt is indistinguishable \
+         from a worker that is thinking: it holds a molecule slot and reads as \
+         healthy to the fleet until a human happens to look, often hours \
+         later. So keep moving, and put anything you would have said to an \
+         operator into the lifecycle commands instead, where it is recorded \
+         and read.\n\n",
     );
 
     // ── EXTERNAL ATTRIBUTION ────────────────────────────────────
@@ -3219,7 +3379,11 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
                 "6. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
                 mol.id, mol.formula_id
             );
-            out.push_str("7. Immediately start the next step. Do NOT pause.\n\n");
+            out.push_str(
+                "7. Go straight into the next step. There is nobody here to \
+                 check in with, and a pause between steps is invisible to the \
+                 fleet.\n\n",
+            );
         }
         OnComplete::Commit => {
             let _ = writeln!(
@@ -3227,83 +3391,213 @@ When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n
                 "5. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
                 mol.id, mol.formula_id
             );
-            out.push_str("6. Immediately start the next step. Do NOT pause.\n\n");
-        }
-    }
-
-    // Completion instructions vary based on on_complete config.
-    match on_complete {
-        OnComplete::CommitPushPr => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done:**\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Create a pull request: `gh pr create --title \"<title>\" --body \"<summary>\"`\n\
-                 3. Complete the molecule:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
-            );
-        }
-        OnComplete::CommitPush => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done:**\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Complete the molecule:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
-            );
-        }
-        OnComplete::Commit => {
-            let _ = writeln!(
-                out,
-                "**When ALL steps are done, your ONLY valid exit is:**\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```\n\
-                 There is NO other valid way to end. No summary. No \"let me know\".\n",
-                mol.id
+            out.push_str(
+                "6. Go straight into the next step. There is nobody here to \
+                 check in with, and a pause between steps is invisible to the \
+                 fleet.\n\n",
             );
         }
     }
 
-    // ── DO NOT LIST (targets specific Claude failure modes) ─────
-    out.push_str("## DO NOT — These are violations\n\n");
-    out.push_str("- Do NOT pause between steps to summarize what you did.\n");
-    out.push_str("- Do NOT ask \"shall I continue?\" or \"would you like me to proceed?\".\n");
-    out.push_str("- Do NOT describe what you are about to do — just DO IT.\n");
-    out.push_str("- Do NOT offer alternatives or ask for confirmation.\n");
-    out.push_str("- Do NOT wait for user input at the ❯ prompt between steps.\n");
+    // ── COMPLETION CONTRACT ─────────────────────────────────────
+    // Both branches, in one place: the transition that ends the molecule,
+    // and the sanctioned path for a state that does not support it.
+    push_completion_contract(&mut out, mol, on_complete);
 
-    // DO NOT items vary based on on_complete config.
+    // ── WHAT STALLS THE FLEET ───────────────────────────────────
+    // The former "DO NOT — These are violations" list. Same observed
+    // failure modes, each now stated with its cost instead of as a bare
+    // prohibition — a worker that knows *why* a pause is harmful does not
+    // need to be forbidden from pausing, and the section no longer reads
+    // like an instruction someone injected into a running session.
+    out.push_str("## What stalls the fleet\n\n");
+    out.push_str(
+        "Each of these has actually held a molecule slot open on this fleet. \
+         They share one shape: the worker addressed an operator who was not \
+         there.\n\n",
+    );
+    out.push_str(
+        "- Pausing between steps to summarise what you did. The summary is \
+         read by nobody, and the molecule sits at `running` while it waits \
+         to be read.\n",
+    );
+    out.push_str(
+        "- Asking \"shall I continue?\" or \"would you like me to proceed?\". \
+         No answer is coming. Decide, act, and record the decision in the \
+         `--evidence` of your next `cs evolve`, where a human can find it \
+         afterwards.\n",
+    );
+    out.push_str(
+        "- Offering alternatives and waiting for a pick. Same shape: pick the \
+         one you would defend, do it, and say which and why in the evidence.\n",
+    );
+    out.push_str(
+        "- Sitting at the ❯ prompt for input. This is the mute-hang the fleet \
+         cannot distinguish from healthy work; it is the single most \
+         expensive failure mode here.\n",
+    );
+
+    // Scope boundaries — deliberately NOT bullets of the stall list above.
+    // They are not failure modes; they say how far this molecule's
+    // integration reaches, which varies with on_complete. Filing them
+    // under the stall list was what made the old section read as one
+    // undifferentiated wall of prohibitions.
     match on_complete {
         OnComplete::Commit => {
-            out.push_str("- Do NOT create GitHub PRs — integration is local via molecules.\n");
-            out.push_str("- Do NOT push to remote — commits stay on the local branch.\n\n");
+            out.push_str(
+                "\n## How far integration goes\n\n\
+                 - Do NOT create GitHub PRs — integration is local via molecules.\n\
+                 - Do NOT push to remote — commits stay on the local branch; \
+                 cosmon merges them when the molecule is harvested.\n\n",
+            );
         }
         OnComplete::CommitPush => {
-            out.push_str("- Do NOT create GitHub PRs — only push the branch.\n\n");
+            out.push_str(
+                "\n## How far integration goes\n\n\
+                 - Do NOT create GitHub PRs — pushing the branch is where this \
+                 molecule's integration stops.\n\n",
+            );
         }
         OnComplete::CommitPushPr => {
             out.push('\n');
         }
     }
 
-    // ── FINAL IMPERATIVE ────────────────────────────────────────
+    // ── STARTING POINT ──────────────────────────────────────────
+    // Kept LAST on purpose, and the placement is now load-bearing rather
+    // than rhetorical. This block is the only line that names which step
+    // is current, and the brief is re-read from the tail on a mid-molecule
+    // re-prime (`cs prime`) and after a context compaction — the tail is
+    // the one region reliably still in view. What changed is the voice: it
+    // is a pointer into the checklist above, not a fresh order arriving
+    // after the molecule started, which is precisely what an operator
+    // reading a live pane on 2026-07-27 mistook for an injected prompt.
     let _ = writeln!(
         out,
-        "## ▶ Execute step {} NOW.\n\n\
-         Begin immediately. No preamble. No planning summary. Just start working.",
+        "## ▶ Start here: step {}\n\n\
+         Everything you need is above. Start with the work itself rather than \
+         a plan of it — a planning summary in this pane is read by nobody, \
+         whereas the same reasoning in a `cs evolve --evidence` is kept.",
         mol.current_step + 1
     );
 
     out
+}
+
+/// Append the **completion contract** to `out`: how the molecule ends, and
+/// what to do when the real state does not support ending it that way.
+///
+/// Two branches, deliberately given equal standing.
+///
+/// The first is the ordinary exit — `cs complete`, preceded by whatever
+/// integration `on_complete` configures. This is the transition the fleet
+/// waits on; a worker that finishes its work and prints a summary instead
+/// leaves the molecule `running` forever.
+///
+/// The second is the branch the old brief did not have, and its absence
+/// cost us a molecule. The text used to say the completion transition was
+/// the ONLY valid way to end. On 2026-07-27 `task-20260727-1765` finished
+/// and committed its deliverable, found that the molecule's real state did
+/// not support the transition, and refused to fabricate one — correctly,
+/// on the substance. It was left `running` with the work done, because our
+/// own prompt had put a good judgement in conflict with a blanket order
+/// and offered no third door. A worker that discovers the state does not
+/// support completion is doing its job, and it needs a *sanctioned* way to
+/// say so; otherwise the only two moves are a false green or a silent
+/// stall, and both are worse than the truth. `cs note` plus `cs collapse`
+/// make "not completable" a path through the protocol rather than a
+/// violation of it.
+fn push_completion_contract(out: &mut String, mol: &MoleculeData, on_complete: OnComplete) {
+    use std::fmt::Write;
+
+    out.push_str("## Finishing\n\n");
+
+    match on_complete {
+        OnComplete::CommitPushPr => {
+            let _ = writeln!(
+                out,
+                "When every step is done:\n\
+                 1. Push your branch: `git push -u origin HEAD`\n\
+                 2. Create a pull request: `gh pr create --title \"<title>\" --body \"<summary>\"`\n\
+                 3. Record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+        OnComplete::CommitPush => {
+            let _ = writeln!(
+                out,
+                "When every step is done:\n\
+                 1. Push your branch: `git push -u origin HEAD`\n\
+                 2. Record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+        OnComplete::Commit => {
+            let _ = writeln!(
+                out,
+                "When every step is done, record the completion:\n\
+                 ```\n\
+                 cs complete {} --reason \"<summary>\"\n\
+                 ```",
+                mol.id
+            );
+        }
+    }
+
+    out.push_str(
+        "\nThat command is what ends the molecule. A closing summary written \
+         in this pane instead ends nothing: the work is done and the molecule \
+         still reads as `running`, so whatever is blocked on it stays \
+         blocked. Put the summary in `--reason`, where it is kept.\n\n",
+    );
+
+    // ── THE SANCTIONED NOT-COMPLETABLE PATH ─────────────────────
+    out.push_str("### When the real state does not support completing\n\n");
+    out.push_str(
+        "Sometimes it does not, and finding that out is real work, not a \
+         failure to follow instructions. The mission may rest on a premise \
+         that turned out to be false; a gate may be red for a cause outside \
+         this molecule; the deliverable may exist while the exit criteria \
+         genuinely are not met.\n\n",
+    );
+    out.push_str(
+        "In that case do NOT call `cs complete` to satisfy this protocol. A \
+         completion the state does not support is worse than no completion, \
+         because it launders a stall into a green result that the rest of the \
+         DAG then builds on. Refusing it is the right call.\n\n",
+    );
+    out.push_str(
+        "It is also not a reason to stop and wait, which is the same silent \
+         hang by another route. Say it through the lifecycle, so the finding \
+         is recorded rather than stranded in a pane nobody opens:\n\n",
+    );
+    let _ = writeln!(
+        out,
+        "1. Commit the real work you did. It must not be lost with the \
+         worktree.\n\
+         2. Write down what you found:\n\
+         ```\n\
+         cs note {id} \"<what is actually true, and what it blocks>\"\n\
+         ```\n\
+         3. End the molecule honestly, naming the cause:\n\
+         ```\n\
+         cs collapse {id} --reason \"<why completion is not supported>\" \\\n\
+         \x20   --reason-kind blocker_stuck\n\
+         ```\n\
+         Use `gate_failed` instead when a verification gate is what stands in \
+         the way, or `resource_exhausted` when you ran out of something you \
+         cannot obtain here. Then stop — the molecule is in a terminal state \
+         a human can read and act on, which is the outcome you were after \
+         when you considered asking.",
+        id = mol.id
+    );
+    out.push('\n');
 }
 
 /// Append the **local-worker** execution protocol to `out`.
@@ -3347,23 +3641,51 @@ fn build_local_worker_protocol(out: &mut String, mol: &MoleculeData) {
          format). Empty chatter is not a deliverable — the file must contain \
          the actual work.\n",
     );
-    out.push_str("3. Move straight to the next step. Do NOT pause.\n\n");
-
-    out.push_str("## DO NOT — These are violations\n\n");
-    out.push_str("- Do NOT pause between steps to summarize what you did.\n");
-    out.push_str("- Do NOT ask \"shall I continue?\" or \"would you like me to proceed?\".\n");
     out.push_str(
-        "- Do NOT run any build, test, lint, format or documentation tooling, \
-         version control, or lifecycle command — you cannot, and cosmon does \
-         not expect you to.\n",
+        "3. Go straight into the next step. There is nobody here to check in \
+         with.\n\n",
     );
-    out.push_str("- Do NOT wait for user input.\n\n");
 
+    // Completion contract, in the vocabulary this worker actually has. It
+    // owns no lifecycle verb, so "finishing" means "the file exists and is
+    // real", and the not-completable branch — the same branch the coding
+    // agent gets via `cs note` / `cs collapse` — has to be carried by the
+    // file itself, which is the only channel out of this worker that
+    // anybody reads. Kept free of the coding-agent tokens the regression
+    // contract in
+    // `test_build_prompt_local_adapter_drops_coding_agent_directives`
+    // forbids here.
+    out.push_str("## Finishing\n\n");
+    out.push_str(
+        "You are done when the file exists and contains the actual work. \
+         cosmon records the completion for you by looking at what you wrote — \
+         a reply that describes the deliverable without writing it lands as a \
+         molecule that did nothing.\n\n",
+    );
+    out.push_str("### When you cannot produce what was asked\n\n");
+    out.push_str(
+        "If the mission rests on something false, or asks for material you do \
+         not have, do not invent a deliverable to satisfy this brief — a \
+         fabricated artifact is worse than none, because the work that reads \
+         it downstream cannot tell. Do not stop and wait either: nobody is \
+         reading this session, so waiting is indistinguishable from working \
+         and holds the molecule open.\n\n",
+    );
+    out.push_str(
+        "Write the file anyway, and let it say plainly what you found: what \
+         was asked, what is actually true, and what is missing. That is a \
+         real deliverable — it is the finding — and it reaches a human, which \
+         is what you wanted when you considered asking.\n\n",
+    );
+
+    // Kept last: on a re-prime or after truncation, the tail is the region
+    // reliably still in view, and this is the only line naming which step
+    // is current.
     let _ = writeln!(
         out,
-        "## ▶ Produce the deliverable for step {} NOW.\n\n\
-         Begin immediately. No preamble. No planning summary. Just write the \
-         artifact.",
+        "## ▶ Start here: step {}\n\n\
+         Everything you need is above. Write the artifact rather than a plan \
+         of it — the file is the only output of this session that is kept.",
         mol.current_step + 1
     );
 }
@@ -3538,6 +3860,129 @@ fn resolve_branch_start_point(repo_root: &std::path::Path, mol: &MoleculeData) -
         }
     }
     best.map(|(branch, _)| branch)
+}
+
+/// Resolve this molecule's reviewed-tree pin to a git start point, or refuse
+/// the dispatch.
+///
+/// Returns `Ok(None)` for the unpinned molecule — the overwhelming majority —
+/// which leaves every existing dispatch path byte-identical. Returns
+/// `Ok(Some(rev))` for a base known to carry the pinned tree. Returns `Err` when
+/// the pin cannot be satisfied, which is the load-bearing half: choosing the
+/// right base is a convenience, and refusing to launch onto the wrong artefact
+/// is what makes the pin a constraint instead of a sentence in a contract.
+///
+/// # The candidate bases, and why these
+///
+/// `HEAD` first, because the ambient checkout is very often already right and
+/// preferring it keeps the common case free of surprise. Then the molecule's
+/// persisted base branch, then `main` — the two places a reviewed head lives
+/// once the work under review has merged, which is the shape that produced the
+/// measured incident: the seat was pinned to a tree that `main` carried while
+/// the dispatching worktree sat on an older one.
+///
+/// The list is deliberately short and named rather than a search over all refs.
+/// A pin is satisfied by a base a human can point at; scanning history for any
+/// commit that happens to carry the tree would resolve pins nobody meant and
+/// would make the failure mode "it found something" instead of "it refused".
+fn resolve_reviewed_tree_pin(mol: &MoleculeData) -> anyhow::Result<Option<String>> {
+    use cosmon_core::committee::{
+        resolve_reviewed_tree, ReviewedTreeResolution, MIN_REVIEWED_TREE_PIN, REVIEWED_TREE_VAR,
+    };
+
+    let pin = mol.variables.get(REVIEWED_TREE_VAR).map(String::as_str);
+    // Cheap exit before any git call: an unpinned molecule asks nothing of the
+    // repository, and must not be made to require one.
+    if matches!(
+        resolve_reviewed_tree(pin, &[]),
+        ReviewedTreeResolution::NotPinned
+    ) {
+        return Ok(None);
+    }
+    let repo_root = find_repo_root().map_err(|e| {
+        anyhow::anyhow!(
+            "molecule {} pins `{REVIEWED_TREE_VAR}` but this is not a git \
+             repository ({e}), so the reviewed artefact cannot be resolved and \
+             the seat must not launch onto whatever happens to be here",
+            mol.id,
+        )
+    })?;
+
+    let mut candidates: Vec<(String, String)> = Vec::new();
+    for rev in ["HEAD"]
+        .into_iter()
+        .map(str::to_owned)
+        .chain(mol.base_branch.clone())
+        .chain(std::iter::once("main".to_owned()))
+    {
+        if candidates.iter().any(|(r, _)| *r == rev) {
+            continue;
+        }
+        if let Some(tree) = git_tree_of(&repo_root, &rev) {
+            candidates.push((rev, tree));
+        }
+    }
+
+    match resolve_reviewed_tree(pin, &candidates) {
+        ReviewedTreeResolution::NotPinned => Ok(None),
+        ReviewedTreeResolution::Resolved { start_point, tree } => {
+            eprintln!(
+                "cs tackle: reviewed tree {} pinned by the contract — cutting the \
+                 worktree from '{start_point}'.",
+                &tree[..tree.len().min(12)],
+            );
+            Ok(Some(start_point))
+        }
+        ReviewedTreeResolution::Unreadable { pin } => anyhow::bail!(
+            "molecule {} pins `{REVIEWED_TREE_VAR} = \"{pin}\"`, which is not a \
+             git tree id (expected {MIN_REVIEWED_TREE_PIN}–40 hex characters). A \
+             pin no reader can interpret enforces nothing while looking as \
+             though it does, so it is refused rather than ignored",
+            mol.id,
+        ),
+        ReviewedTreeResolution::Unsatisfiable { pin, offered } => anyhow::bail!(
+            "molecule {} pins reviewed tree {pin}, and no available base carries \
+             it: {}. The contract convened this seat to review a specific \
+             artefact; dispatching it onto another would produce a verdict about \
+             a tree nobody asked about while the seat's own files DECLARE the \
+             pinned one — a claimed measurement never made. Fetch or check out \
+             the reviewed head (e.g. `git worktree add` on the commit whose tree \
+             is {pin}), or correct `{REVIEWED_TREE_VAR}` on the molecule",
+            mol.id,
+            if offered.is_empty() {
+                "no candidate base could be resolved at all".to_owned()
+            } else {
+                offered
+                    .iter()
+                    .map(|(r, t)| format!("{r} → {}", &t[..t.len().min(12)]))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
+    }
+}
+
+/// The tree id a git rev points at, or `None` when the rev does not resolve.
+///
+/// `<rev>^{{tree}}` rather than `<rev>` on purpose: the pin is on the bytes, so
+/// a branch tip and a merge commit carrying the same content answer the same
+/// thing here, which is what stops a seat being refused for sitting on the
+/// merge of the very work it reviews.
+fn git_tree_of(repo_root: &std::path::Path, rev: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-parse",
+            &format!("{rev}^{{tree}}"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let tree = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!tree.is_empty()).then_some(tree)
 }
 
 /// Find the git repository root from CWD.
@@ -3844,7 +4289,16 @@ fn git_config_value(repo_root: &std::path::Path, key: &str) -> Option<String> {
 /// Best-effort: a spawn failure costs the first-turn guarantee for this run
 /// (the `cs wait`/`cs run` pollers and the completion seam still capture),
 /// never the dispatch itself.
-fn spawn_realized_watcher(state_dir: &Path, mol_id: &MoleculeId, worktree_path: &Path) {
+fn spawn_realized_watcher(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worktree_path: &Path,
+    // The `CLAUDE_CONFIG_DIR` the worker was launched under, straight from
+    // the spawn that resolved it. Not re-resolved here: `cb next` advances a
+    // round-robin balancer, so asking again would name a *different* account
+    // and point the watcher at the wrong logs.
+    claude_config_dir: Option<&str>,
+) {
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -3854,6 +4308,7 @@ fn spawn_realized_watcher(state_dir: &Path, mol_id: &MoleculeId, worktree_path: 
             mol_id.as_str(),
             worktree_path,
             state_dir,
+            claude_config_dir.map(Path::new),
         ))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3895,15 +4350,41 @@ pub(super) fn register_tackle_worker(
 
     // Emit EventV2::WorkerSpawned. This event IS the passive "worker created
     // at ..." metadata — its envelope timestamp is the authoritative
-    // spawned_at for the worker. We deliberately do NOT also emit a seed
+    // spawned_at for the worker.
+    //
+    // Since task-20260727-198f this fires just *before* the spawn rather
+    // than ~98 s after it: the dispatch record and this event are now one
+    // act, written on the near side of the process creation (see
+    // `super::dispatch_ledger`). The timestamp therefore marks the moment
+    // cosmon committed to the worker, not the moment the readiness pipeline
+    // finished with it — which is the boundary the energy probe and the
+    // attribution cat-test actually want, and the only one that exists
+    // before a crash can swallow it. A dispatch that then fails to spawn
+    // emits `WorkerSpawnRolledBack` and removes the fleet entry.
+    //
+    // We deliberately do NOT also emit a seed
     // WorkerHeartbeat here: a heartbeat means "the live process just proved
     // it exists" (1 bit of real entropy). Emitting one from the spawner
     // impersonates liveness — it produced the exact failure mode diagnosed
     // in task-4046 (silent exec failure, heartbeat still on the wire). The
     // only legitimate heartbeat emitters are the worker process itself and
     // its bridge (`cs heartbeat`).
-    let events_path = cosmon_filestore::resolve_state_dir(None).join("events.jsonl");
-    let _ = cosmon_state::event_log::emit_one(
+    // The store's own state root, not `resolve_state_dir(None)`. The ambient
+    // resolver answers about the process's environment; every write above this
+    // line went through `store`. In production they are the same directory and
+    // in a test they are not, which meant the event landed in a different tree
+    // than the fleet entry it describes.
+    let events_path = store.state_root().join("events.jsonl");
+    // Propagated, not discarded. The comment above claims this event and the
+    // dispatch record are one act; a `let _ =` here made that false, and the
+    // falsity had teeth: "no `worker_spawned` on the wire" is the exact
+    // forensic signature `d62ba58` used to identify six lost molecules, so a
+    // dropped error made that signature reachable from a healthy, fully
+    // recorded dispatch. `commit_dispatch` is the only caller and it runs
+    // before the spawn — its own contract is that "in every error case nothing
+    // has been spawned" — so failing here costs a dispatch that has not
+    // started and keeps the signature meaning what the forensics assume.
+    cosmon_state::event_log::emit_one(
         &events_path,
         cosmon_core::event_v2::EventV2::WorkerSpawned {
             worker_id: wid.clone(),
@@ -3914,7 +4395,13 @@ pub(super) fn register_tackle_worker(
             loop_ownership: cosmon_core::event_v2::LoopOwnershipTag::from(loop_ownership),
         },
         None,
-    );
+    )
+    .map_err(|e| {
+        anyhow::anyhow!(
+            "failed to record WorkerSpawned for {wid} at {}: {e}",
+            events_path.display()
+        )
+    })?;
 
     Ok(())
 }
@@ -3969,7 +4456,7 @@ fn report_existing_session(
             "worktree": worktree_path.to_string_lossy(),
             "branch": branch_name,
             "already_running": true,
-            "attach": format!("tmux -L {socket} attach -t {session_name}"),
+            "attach": cosmon_transport::locale::attach_command_from_env(socket, session_name),
         });
         println!("{out}");
     } else {
@@ -3979,8 +4466,29 @@ fn report_existing_session(
             mol.id, mol.formula_id
         );
         println!("  session:  {session_name}");
-        println!("  attach:   tmux -L {socket} attach -t {session_name}");
+        println!(
+            "  attach:   {}",
+            cosmon_transport::locale::attach_command_from_env(socket, session_name)
+        );
         println!("  respawn:  cs tackle {} --force", mol.id);
+    }
+    // The second detection point for the invisible-worker family
+    // (task-20260727-198f). This branch is the one moment `cs tackle` holds
+    // both facts at once — a live session, and the molecule's own status —
+    // and it used to say only "already running". On 2026-07-20 that message
+    // was printed ten times against `task-20260720-79cc` while its molecule
+    // sat `pending` and its worker worked; cosmon knew, and said nothing
+    // that would let the operator act.
+    if !matches!(mol.status, MoleculeStatus::Running | MoleculeStatus::Frozen) {
+        eprintln!(
+            "cs tackle: warning — session {session_name} is alive but molecule \
+             {} reads `{}`. The worker's dispatch was never recorded, so it \
+             cannot run `cs evolve` and its progress is not being counted. Its \
+             commits are still real — look at branch `feat/{}`. Either let it \
+             finish and merge that branch by hand, or restart it under a \
+             recorded dispatch with `cs tackle {} --force`.",
+            mol.id, mol.status, mol.id, mol.id,
+        );
     }
 }
 
@@ -4034,6 +4542,18 @@ pub(super) struct SpawnOutcome {
     /// on the `MoleculeProcess` so the runtime's PID-axis liveness check can
     /// authenticate it. `None` for every other adapter.
     pub detached_local: Option<DetachedLocalWitness>,
+    /// The Claude configuration directory this dispatch's worker was actually
+    /// launched under (`CLAUDE_CONFIG_DIR`), when the claude arm resolved one.
+    ///
+    /// Carried out of the spawn because the realized-model watcher armed a few
+    /// lines later cannot re-derive it: a `cb next`-routed account resolves to
+    /// `~/.claude-accounts/<email>/`, which appears in no environment variable
+    /// the detached child inherits. Before this field existed the watcher
+    /// looked under `$HOME/.claude` and found nothing, for the entire life of
+    /// every multi-account and every containerised run (task-20260727-3f46).
+    /// `None` for every non-claude adapter, and for a claude dispatch that
+    /// resolved no explicit config dir (the environment default applies).
+    pub claude_config_dir: Option<String>,
 }
 
 /// The PID identity of a freshly-forked detached local worker.
@@ -4047,6 +4567,9 @@ pub(super) struct DetachedLocalWitness {
 }
 
 #[allow(clippy::too_many_arguments)]
+// One `if` per early-returning arm plus a match over the rest: the length is
+// the adapter roster, not a tangle. Splitting it would only move the roster.
+#[allow(clippy::too_many_lines)]
 pub(super) fn spawn_and_prompt(
     backend: &TmuxBackend,
     wid: &cosmon_core::id::WorkerId,
@@ -4072,7 +4595,29 @@ pub(super) fn spawn_and_prompt(
     // to a strong model on a transient outage (task-20260705-ba98). Only the
     // claude branch pre-flights a fallback chain, so the other arms ignore it.
     strong_set: &[String],
+    // Proof that this dispatch is already on the ledger. Unused by the body —
+    // its whole job is to make "spawn a worker cosmon has not recorded"
+    // unrepresentable. See [`super::dispatch_ledger`] for the six molecules
+    // that were lost before this argument existed; a caller that spawns first
+    // and records afterwards now fails to compile rather than failing
+    // silently at 2.5 % per dispatch.
+    recorded: &super::dispatch_ledger::DispatchRecorded,
 ) -> anyhow::Result<SpawnOutcome> {
+    // The token proves *a* dispatch was recorded; check it is *this* one.
+    // Without this, a caller holding a stale token from an earlier molecule
+    // would satisfy the type and reintroduce the exact hole the type exists
+    // to close.
+    if recorded.molecule() != &mol.id || recorded.worker() != wid {
+        return Err(anyhow::anyhow!(
+            "cs tackle: refusing to spawn — the dispatch record is for \
+             ({}, {}) but this spawn is for ({}, {}). Recording and spawning \
+             must name the same molecule and worker.",
+            recorded.molecule(),
+            recorded.worker().as_str(),
+            mol.id,
+            wid.as_str(),
+        ));
+    }
     // Per-Adapter override row (`[adapters.openai]`, `[adapters.anthropic]`)
     // — keys the Direct-API branches lift the api_key_env / base_url /
     // default_model from. `None` means "fall back to env-var + compile-time
@@ -4104,8 +4649,12 @@ pub(super) fn spawn_and_prompt(
     // Every tmux / in-process arm below returns `()`; wrap the match's value
     // in an empty [`SpawnOutcome`] so the caller has a single uniform value
     // to persist.
-    match adapter.as_str() {
-        "claude" => spawn_claude_and_prompt(
+    // The claude arm early-returns like the local one, because it is the other
+    // arm with something to say: the config dir it resolved, which the
+    // realized-model watcher needs and cannot recompute (see
+    // [`SpawnOutcome::claude_config_dir`]).
+    if adapter.as_str() == "claude" {
+        let claude_config_dir = spawn_claude_and_prompt(
             backend,
             wid,
             session_name,
@@ -4116,7 +4665,13 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             preferred_model,
             strong_set,
-        ),
+        )?;
+        return Ok(SpawnOutcome {
+            detached_local: None,
+            claude_config_dir,
+        });
+    }
+    match adapter.as_str() {
         "aider" => spawn_aider_and_prompt(
             backend,
             wid,
@@ -4351,7 +4906,11 @@ fn spawn_claude_and_prompt(
     // the probe-fallback layer so a cheap pin never silently escalates to a
     // strong model (task-20260705-ba98).
     strong_set: &[String],
-) -> anyhow::Result<()> {
+    // Returns the `CLAUDE_CONFIG_DIR` this spawn resolved (`None` when none
+    // applied), so the caller can hand it to the realized-model watcher —
+    // resolving it a second time is not an option, since `cb next` advances a
+    // round-robin balancer and would hand the watcher a *different* account.
+) -> anyhow::Result<Option<String>> {
     // `LiveProbe` is not imported here: this path calls the Claude probe's
     // inherent `await_live_with_status`, which keeps the pane verdict the
     // refusal below quotes. The trait's `await_live` is what the
@@ -4535,11 +5094,12 @@ fn spawn_claude_and_prompt(
                  uid {running_uid} cannot use the {:?} it must write: {}. \
                  `--add-dir` grants Claude Code authorization, not filesystem \
                  ownership — a worker spawned anyway would be declared live and \
-                 then fail EACCES on its first `cs evolve`. Fix the ownership or \
-                 mode of that path (in a container, `chown -R {running_uid} \
-                 <repo>/.cosmon`).",
+                 then fail EACCES on its first `cs evolve` — or write its \
+                 artefact and be unable to commit it. Fix the ownership or mode \
+                 of that path (in a container, `chown -R {running_uid} {}`).",
                 mol.id.as_str(),
                 blocked.resource,
+                blocked.path,
                 blocked.path,
             ));
         }
@@ -4560,15 +5120,46 @@ fn spawn_claude_and_prompt(
         // override can put it outside every walked-up root. Listing it twice
         // when it is inside one is harmless (the chown skips already-owned
         // entries, and the check is idempotent); missing it once is the wedge.
-        &DemoteResources {
-            config_home: demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()),
-            worktree: worktree_path.to_path_buf(),
-            state_dirs: writable_roots
+        //
+        // Constructed through `DemoteResources::for_dispatch` rather than as a
+        // struct literal: the resource set is enumerated in ONE place, so the
+        // worktree's git plumbing — the third resource this issue found missing
+        // — is derived rather than remembered, and a fourth one cannot land on
+        // this call site and not on the transport one.
+        &DemoteResources::for_dispatch(
+            worktree_path,
+            writable_roots
                 .iter()
                 .cloned()
                 .chain(std::iter::once(mol_state_dir.to_path_buf()))
                 .collect(),
-        },
+            demote_config_home(config_dir.as_deref(), |k| std::env::var(k).ok()),
+            // The two files the pre-grant above wrote — as ROOT, on a root
+            // dispatch, a few dozen lines before this (issue #20, the
+            // consent-ownership door). The judge used to stat only the config
+            // *directory*, which is worker-owned and therefore answered yes
+            // while the `.claude.json` inside it was unopenable by the worker.
+            // Claude Code does not report that: it reads the unreadable file as
+            // a first run, replaces it, and renders the onboarding wizard
+            // nobody is there to answer. Naming the files here puts them in
+            // both the repair list and the judge list, which is the invariant
+            // the surrounding port exists to keep.
+            //
+            // The ordering is load-bearing and it is satisfied here: the
+            // pre-grant is above (`pregrant_startup_consent`), this preflight —
+            // which chowns and then judges — is here, and no worker process
+            // exists until `spawn_*` below.
+            vec![
+                consent_paths.config_file.clone(),
+                consent_paths.settings_file.clone(),
+            ],
+            // The binary this dispatch will actually exec, so the port can ask
+            // whether the DEMOTE TARGET can reach it. The external tester's
+            // recipe carries `chmod o+x /root && chmod -R o+rX /root/.local` by
+            // hand for exactly this reason; without it the pane execs nothing
+            // and the molecule burns a slot producing silence.
+            Some(&claude_bin),
+        ),
         // The probe now runs under the identity the WORKER will hold — as the
         // demote target on a root dispatch, as the dispatcher otherwise — so
         // model resolution survives demotion (regression ND1) without any live
@@ -4598,7 +5189,14 @@ fn spawn_claude_and_prompt(
                     " Set COSMON_WORKER_UID to a non-zero uid to enable \
                      privilege-drop demotion, or run cs as a non-root user."
                 }
-                cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget {
+                // Both of these carry their own remedy in their `Display`:
+                // the unprovisioned one names the path that resisted the
+                // repair, the shared-storage one names the uid to run as and
+                // the guide. A second, vaguer remedy bolted on here would
+                // compete with it, and the operator would follow whichever
+                // came last.
+                cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget { .. }
+                | cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage {
                     ..
                 } => "",
             };
@@ -4775,7 +5373,7 @@ fn spawn_claude_and_prompt(
                      Working within the quiet window; proceeding"
                 );
             }
-            Ok(())
+            Ok(config_dir)
         }
         // The composer STILL holds the pasted briefing when the in-band window
         // closed. Release the dispatcher and say so loudly. Deliberately NOT a
@@ -4797,7 +5395,7 @@ fn spawn_claude_and_prompt(
                  `tmux -L <socket> capture-pane -pS - -t <session>`. A durable \
                  cross-process backstop is COSMON #26 and is not implemented yet."
             );
-            Ok(())
+            Ok(config_dir)
         }
     }
 }
@@ -5176,6 +5774,22 @@ where
 /// can never be selected (the very failure we are guarding against).
 const MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(25);
 
+/// What an `"available"` verdict in a `model-selection.json` `probes` array
+/// actually establishes — stamped into every trail this path writes.
+///
+/// A bare `"available"` was read as a property of the *pair* (this adapter will
+/// accept this model) when it is a property of *one id under one CLI*. Two
+/// codex seats consequently carry `{"model":"claude-opus-5","outcome":
+/// "available"}` in their own trail, for a model codex rejects with an HTTP
+/// 400. The probe was not wrong; it was unlabelled. Naming its scope beside its
+/// verdict is the cheap half of the fix — the fail-closed half is the
+/// composition gate in `run`.
+const PROBE_SCOPE: &str = "`claude -p` under the worker's resolved account: proves the model id \
+     resolves and that account can reach it. It does NOT validate the \
+     (adapter, model) composition, and it never ran for a non-claude \
+     adapter — see provider_diversity::classify_model_composition, which \
+     decides that before dispatch.";
+
 /// Resolve the effective model for a claude worker by pre-flighting the
 /// fallback chain, or fail fast when no model in the chain answers
 /// Returns `Ok(Some(model))` for the probe-selected model, `Ok(None)`
@@ -5236,6 +5850,18 @@ fn resolve_worker_model(
                     "outcome": "selected",
                     "chosen": model,
                     "probes": selection.probes,
+                    // What "available" in `probes` above does and does NOT
+                    // mean. It is the verdict of `claude -p` under the
+                    // worker's own account: the id resolves and that account
+                    // can reach it. It is NOT a statement that some other
+                    // adapter would accept the id — this prober only ever
+                    // runs on the claude path, and a trail that said
+                    // "available" with no scope was read as though it did
+                    // (two codex seats carry `claude-opus-5: available` in
+                    // this very file). The composition of (adapter, model) is
+                    // decided before dispatch by
+                    // `provider_diversity::classify_model_composition`.
+                    "probe_scope": PROBE_SCOPE,
                 }),
             );
             if selection.probes.len() > 1 {
@@ -5255,6 +5881,7 @@ fn resolve_worker_model(
                     "outcome": "no-model-available",
                     "chosen": serde_json::Value::Null,
                     "probes": no_model.probed,
+                    "probe_scope": PROBE_SCOPE,
                 }),
             );
             Err(anyhow::anyhow!(
@@ -6386,6 +7013,8 @@ fn spawn_detached_local_worker(
             pid: child.id(),
             pid_start_time: process_start_time(child.id()),
         }),
+        // Not a claude dispatch — no Claude configuration routing to report.
+        claude_config_dir: None,
     })
 }
 
@@ -8384,6 +9013,29 @@ pub(super) fn env_default_model() -> Option<(String, &'static str)> {
         })
 }
 
+/// Name where a model pin came from, in words an operator can act on.
+///
+/// The composition refusal is only useful if it says which knob to turn:
+/// "the pin came from `$ANTHROPIC_MODEL`" points at the shell, "from
+/// `--model`" points at the command line, and the two remedies are
+/// different. [`ModelSelectionSource`] carries the origin for the audit
+/// trail; this renders it for a human standing at a refused dispatch.
+fn describe_model_source(source: &ModelSelectionSource) -> String {
+    match source {
+        ModelSelectionSource::Flag { .. } => "the `--model` flag".to_owned(),
+        ModelSelectionSource::FormulaPin { formula, step_id } => {
+            format!("the formula-step pin `{formula}` / `{step_id}`")
+        }
+        ModelSelectionSource::EnvVar { var } => format!("the environment variable ${var}"),
+        ModelSelectionSource::Config { path, key } => format!("`{key}` in {path}"),
+        ModelSelectionSource::GlobalConfig { path } => format!("the global config {path}"),
+        ModelSelectionSource::Default { .. } => "the no-pin floor".to_owned(),
+        // `ModelSelectionSource` is `#[non_exhaustive]`: a new origin must not
+        // break this build, and an unnamed origin is better than a wrong one.
+        _ => "an unrecognised origin".to_owned(),
+    }
+}
+
 /// Resolve the per-molecule **model** pin for a `cs tackle` invocation
 /// (delib-20260704-b476 C1) — the model sibling of
 /// [`resolve_adapter_selection`], a verbatim shape-clone of its chain.
@@ -8696,10 +9348,7 @@ mod tests {
         } else {
             owner
         };
-        let resources = DemoteResources {
-            worktree: tmp.path().to_path_buf(),
-            ..DemoteResources::default()
-        };
+        let resources = DemoteResources::for_dispatch(tmp.path(), vec![], None, vec![], None);
         (tmp, target, resources)
     }
 
@@ -8729,64 +9378,109 @@ mod tests {
         );
     }
 
-    /// COSMON-DEV #20 regression ND1, frozen as a red-first regression.
+    /// The root door, end to end through the ordered pre-flight: a root
+    /// dispatcher with a perfectly good demote target is **refused**, typed,
+    /// and nothing cognitive runs.
     ///
-    /// The previous fix bought "no root cognition" by SKIPPING the probe on the
-    /// demote path and passing the operator's pin through unverified — so a
-    /// demoted worker whose account has lost the preferred model got the very
-    /// false-active/idle worker the model pre-flight exists to prevent. Both
-    /// properties must hold at once: the probe RUNS (the worker receives the
-    /// fallback it selected) and it runs AS THE DEMOTE TARGET, never as root.
+    /// Red before the refusal landed: this returned
+    /// `Proceed { decision: Demote { to_uid: target } }` after chowning the
+    /// scratch worktree away to that uid. The reason it is refused is not that
+    /// the target is unreachable — it is reachable, `demotable_scratch` makes
+    /// sure of it — but that making the demotion *work* means handing that uid
+    /// the repository's shared object store and shared refs. See
+    /// `cosmon_core::root_spawn_policy::decide_root_spawn`.
     #[test]
-    fn root_demote_probes_as_the_demoted_uid_and_uses_the_resolved_model() {
-        use cosmon_core::root_spawn_policy::PreflightIdentity;
-
+    fn root_dispatch_with_a_good_target_refuses_and_runs_no_cognition() {
         let (_tmp, target, resources) = demotable_scratch();
-        let identities = std::cell::RefCell::new(Vec::new());
-        let outcome = preflight_root_then_model(0, Some(target), &resources, |identity| {
-            identities.borrow_mut().push(identity);
-            // The preferred pin was unreachable; this is the fallback the
-            // probe selected. The demoted worker must get THIS.
+        let probes = std::cell::Cell::new(0_u32);
+        let outcome = preflight_root_then_model(0, Some(target), &resources, |_identity| {
+            probes.set(probes.get() + 1);
             Ok(Some("probed-fallback".to_owned()))
         })
-        .expect("demote proceeds");
+        .expect("a refusal is an outcome, not an error");
 
         assert_eq!(
-            *identities.borrow(),
-            vec![PreflightIdentity::Demoted { to_uid: target }],
-            "the probe must run exactly once, demoted — as root it is defect \
-             A2, not at all it is regression ND1",
-        );
-        assert!(
-            !identities.borrow().contains(&PreflightIdentity::AsIs),
-            "a root dispatcher must never run cognition as itself",
+            outcome,
+            SpawnPreflight::Refused(
+                cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage {
+                    uid: target,
+                },
+            ),
         );
         assert_eq!(
-            outcome,
-            SpawnPreflight::Proceed {
-                decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
-                    to_uid: target
-                },
-                model: Some("probed-fallback".to_owned()),
-            },
-            "the demoted worker must spawn on the RESOLVED model, not an \
-             unverified pin",
+            probes.get(),
+            0,
+            "a live claude process ran before the refusal",
         );
     }
 
-    /// A demote whose whole model chain is unreachable still aborts rather than
-    /// spawning a worker that would freeze — the probe's abort survives
-    /// demotion exactly as it does on the non-root path.
+    /// The refusal does not depend on what the paths look like — it precedes
+    /// the question.
+    ///
+    /// Same dispatch twice, once with a state dir the target can write and once
+    /// with one it cannot. Both refuse, with the *same* reason. This is what
+    /// "refuse the path" means as opposed to "refuse this instance of it": the
+    /// `UnprovisionedTarget` verdict is no longer reachable from this funnel,
+    /// because nothing gets far enough to `stat` anything. That verdict keeps
+    /// its own coverage in `root_spawn_policy` and `demote_provisioning`, where
+    /// the dormant arm is entered explicitly.
     #[test]
-    fn root_demote_model_failure_still_aborts() {
+    fn the_root_refusal_precedes_any_look_at_the_paths() {
+        for reachable in [true, false] {
+            let tmp = TempDir::new().unwrap();
+            let state = tmp.path().join(".cosmon");
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+            let mode = if reachable { 0o700 } else { 0o500 };
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(mode)).unwrap();
+            let target = std::fs::metadata(tmp.path()).unwrap().uid();
+
+            let probes = std::cell::Cell::new(0_u32);
+            let outcome = preflight_root_then_model(
+                0,
+                Some(target),
+                &DemoteResources::for_dispatch(tmp.path(), vec![state.clone()], None, vec![], None),
+                |_| {
+                    probes.set(probes.get() + 1);
+                    Ok(Some("claude-fable-5".to_owned()))
+                },
+            )
+            .expect("a refusal is an outcome, not an error");
+
+            assert_eq!(
+                outcome,
+                SpawnPreflight::Refused(
+                    cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage {
+                        uid: target,
+                    },
+                ),
+                "state dir reachable={reachable}: the reason must not vary with \
+                 the paths, because the paths are never consulted",
+            );
+            assert_eq!(probes.get(), 0, "state dir reachable={reachable}");
+            std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+
+    /// A dead model chain cannot turn the refusal into an error.
+    ///
+    /// The resolver here fails for every identity. If the gate ever ran it
+    /// before deciding, this would be `Err` instead of a typed refusal — and an
+    /// operator would get "no reachable model" for a dispatch that was going to
+    /// be declined on security grounds whatever the model chain said.
+    #[test]
+    fn a_dead_model_chain_does_not_mask_the_root_refusal() {
         let (_tmp, target, resources) = demotable_scratch();
         let outcome = preflight_root_then_model(0, Some(target), &resources, |_identity| {
             Err(anyhow::anyhow!("no reachable model"))
-        });
-        assert!(
-            outcome.is_err(),
-            "a demoted dispatch with a dead model chain must abort, not spawn"
-        );
+        })
+        .expect("the refusal must win over the model chain");
+        assert!(matches!(
+            outcome,
+            SpawnPreflight::Refused(
+                cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage { .. }
+            ),
+        ));
     }
 
     /// The entire non-root fleet path is unchanged: the probe runs exactly
@@ -8883,90 +9577,31 @@ mod tests {
         assert!(path_usable_by_uid(&missing, owner, RequiredAccess::Write));
     }
 
-    /// End-to-end through the ordered pre-flight: a root dispatcher WITH a
-    /// valid demote target still refuses — loudly and typed — when the target
-    /// cannot reach the state dir it must write on `cs evolve`. Before the fix
-    /// this demoted happily and the worker wedged on EACCES mid-run, after the
-    /// readiness probe had already declared it live. No cognitive probe runs.
+    /// The check is not a blanket refusal *of the non-root path*: the entire
+    /// fleet still dispatches.
+    ///
+    /// The mirror-image mistake of the bug this lineage is about would be to
+    /// ground every dispatch, so the counterweight is stated here at the same
+    /// funnel. A non-root dispatcher with the identical resources proceeds, and
+    /// proceeds on the probed model.
     #[test]
-    fn unprovisioned_demote_target_refuses_before_any_worker_or_probe() {
-        let tmp = TempDir::new().unwrap();
-        let state = tmp.path().join(".cosmon");
-        std::fs::create_dir_all(&state).unwrap();
-        // The worktree is reachable; ONLY the out-of-worktree state dir is not
-        // — the precise root-owned-`.cosmon` shape `cs tackle` leaves behind
-        // when it runs as root, and the one `--add-dir` cannot repair. It is
-        // modelled read+search but not writable, so the target reaches it and
-        // still cannot perform the write.
-        std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).unwrap();
-        let target = std::fs::metadata(tmp.path()).unwrap().uid();
-
-        let probes = std::cell::Cell::new(0_u32);
-        let outcome = preflight_root_then_model(
-            0,
-            Some(target),
-            &DemoteResources {
-                worktree: tmp.path().to_path_buf(),
-                state_dirs: vec![state.clone()],
-                ..DemoteResources::default()
-            },
-            |_| {
-                probes.set(probes.get() + 1);
-                Ok(Some("claude-fable-5".to_owned()))
-            },
-        )
-        .expect("a refusal is an outcome, not an error");
-
-        assert_eq!(
-            probes.get(),
-            0,
-            "nothing cognitive may run before a refusal"
-        );
-        match outcome {
-            SpawnPreflight::Refused(
-                cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget {
-                    uid,
-                    ref path,
-                    ..
-                },
-            ) => {
-                assert_eq!(uid, target);
-                assert!(
-                    path.contains(".cosmon"),
-                    "the refusal must name the unreachable path: {path}"
-                );
-            }
-            other => panic!("expected a typed provisioning refusal, got {other:?}"),
-        }
-        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-
-    /// A demote target that CAN reach everything still demotes — the check
-    /// must not turn every root dispatch into a refusal.
-    #[test]
-    fn provisioned_demote_target_still_demotes() {
+    fn the_non_root_path_still_proceeds_at_the_same_funnel() {
         let tmp = TempDir::new().unwrap();
         std::fs::set_permissions(tmp.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
-        let target = std::fs::metadata(tmp.path()).unwrap().uid();
+        let me = nix::unistd::Uid::effective().as_raw();
         let outcome = preflight_root_then_model(
-            0,
-            Some(target),
-            &DemoteResources {
-                worktree: tmp.path().to_path_buf(),
-                ..DemoteResources::default()
-            },
-            |_| Ok(Some("resolved-under-the-demoted-identity".to_owned())),
+            me,
+            Some(10001),
+            &DemoteResources::for_dispatch(tmp.path(), vec![], None, vec![], None),
+            |_| Ok(Some("resolved-as-the-dispatcher".to_owned())),
         )
-        .expect("demote proceeds");
+        .expect("a non-root dispatch proceeds");
         assert_eq!(
             outcome,
             SpawnPreflight::Proceed {
-                decision: cosmon_core::root_spawn_policy::RootSpawnDecision::Demote {
-                    to_uid: target
-                },
-                model: Some("resolved-under-the-demoted-identity".to_owned()),
-            }
+                decision: cosmon_core::root_spawn_policy::RootSpawnDecision::SpawnAsIs,
+                model: Some("resolved-as-the-dispatcher".to_owned()),
+            },
         );
     }
 
@@ -11212,15 +11847,25 @@ mod tests {
         assert!(prompt.contains("idea-20260407-abcd"));
         assert!(prompt.contains("idea-to-plan"));
         assert!(prompt.contains("Step 1/3"));
-        // Must have autonomous work mode header.
-        assert!(prompt.contains("AUTONOMOUS WORK MODE"));
-        // Must have DO NOT list.
-        assert!(prompt.contains("DO NOT"));
-        assert!(prompt.contains("Do NOT pause between steps"));
+        // Must have the autonomous work mode header.
+        //
+        // These three strings changed deliberately in task-20260727-bbaf —
+        // the header, the anti-stall list and the closing block were
+        // rewritten out of the grammar of a prompt injection and into
+        // explanation. The expectation is updated because the text is
+        // different on purpose, NOT because the assertion was in the way:
+        // the behaviour each one guarded is asserted, by property rather
+        // than by sentence, in
+        // `test_build_prompt_states_completion_contract_and_blocked_path`
+        // and `test_build_prompt_keeps_anti_stall_property`.
+        assert!(prompt.contains("Autonomous work mode"));
+        // Must name the stall failure modes.
+        assert!(prompt.contains("What stalls the fleet"));
+        assert!(prompt.contains("Pausing between steps"));
         // Must have terminal action.
         assert!(prompt.contains("cs complete"));
-        // Must end with execute now.
-        assert!(prompt.contains("Execute step 1 NOW"));
+        // Must end by pointing at the current step.
+        assert!(prompt.contains("Start here: step 1"));
         // Must carry the canonical-text guideline (task-20260623-80f9):
         // workers FETCH standard licence/legal texts, never LLM-generate
         // them (long canonical text trips the OUTPUT content-filter).
@@ -11233,6 +11878,179 @@ mod tests {
         assert!(prompt.contains("docs/guides/diagnosis-discipline.md"));
         // The pointer must NOT inline the clause bodies — cognition rots the DNA.
         assert!(!prompt.contains("Instrument the seam before you trust"));
+    }
+
+    /// The briefing must state BOTH halves of the completion contract:
+    /// the transition that ends the molecule, and the sanctioned path for
+    /// a worker whose real state does not support that transition.
+    ///
+    /// This is the property, not the wording. The old brief said the
+    /// completion transition was the only valid way to end and gave no
+    /// third door; on 2026-07-27 `task-20260727-1765` finished its work,
+    /// found the state genuinely did not support completing, refused to
+    /// fabricate the call — correctly — and was left `running`. A worker
+    /// making that discovery must be able to record it, so the brief has
+    /// to name a terminal, recorded alternative. Asserted structurally so
+    /// that rewording the prose does not have to fight the suite.
+    #[test]
+    fn test_build_prompt_states_completion_contract_and_blocked_path() {
+        let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
+
+        for on_complete in [
+            OnComplete::Commit,
+            OnComplete::CommitPush,
+            OnComplete::CommitPushPr,
+        ] {
+            let mut config = ProjectConfig::default();
+            config.worker.on_complete = on_complete;
+            let prompt = build_prompt(
+                &mol,
+                None,
+                None,
+                &config,
+                Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+                "claude",
+                None,
+            );
+
+            // Half one: the ordinary exit, naming this molecule.
+            assert!(
+                prompt.contains(&format!("cs complete {}", mol.id)),
+                "{on_complete:?}: brief must name the completing transition"
+            );
+
+            // Half two: a sanctioned, RECORDED path for a state that does
+            // not support completing. It must offer a terminal verb (not
+            // merely advice to stop), and a way to write the finding down.
+            assert!(
+                prompt.contains(&format!("cs collapse {}", mol.id)),
+                "{on_complete:?}: brief must offer a terminal exit for a \
+                 state that does not support completion"
+            );
+            assert!(
+                prompt.contains(&format!("cs note {}", mol.id)),
+                "{on_complete:?}: brief must offer a way to record the finding"
+            );
+
+            // And it must be legible as a sanctioned branch rather than as
+            // a violation: the brief has to say, in some words, both that
+            // this situation exists and that faking the completion is the
+            // wrong answer to it.
+            assert!(
+                prompt.contains("does not support completing")
+                    || prompt.contains("does not support completion"),
+                "{on_complete:?}: the not-completable case must be named"
+            );
+            assert!(
+                prompt.contains("do NOT call `cs complete` to satisfy this protocol"),
+                "{on_complete:?}: brief must forbid fabricating the transition"
+            );
+        }
+    }
+
+    /// The rewrite out of coercive grammar must not cost the anti-stall
+    /// property, which is load-bearing: a worker that pauses to ask in an
+    /// unattended pane holds a molecule slot while still looking healthy
+    /// (the mute-hang family). The brief must therefore still name the
+    /// specific observed failure modes AND supply their reason — the
+    /// reason is what replaces the former blanket prohibition, so its
+    /// absence would be the regression.
+    #[test]
+    fn test_build_prompt_keeps_anti_stall_property() {
+        let mol = sample_molecule("idea-20260407-abcd", MoleculeStatus::Pending);
+        let prompt = build_prompt(
+            &mol,
+            None,
+            None,
+            &ProjectConfig::default(),
+            Path::new("/abs/state/fleets/default/molecules/idea-20260407-abcd"),
+            "claude",
+            None,
+        );
+
+        // The three observed stall shapes must each still be addressed.
+        assert!(prompt.contains("shall I continue?"));
+        assert!(prompt.contains("would you like me to proceed?"));
+        assert!(prompt.contains("❯ prompt"));
+
+        // …and the cost must be stated, because explanation is now what
+        // carries the property. A worker has to learn from the brief that
+        // the pane is unattended, that a stalled worker is indistinguishable
+        // from a healthy one, and that the slot stays held.
+        assert!(
+            prompt.contains("Nobody is reading this pane"),
+            "brief must state that the session is unattended"
+        );
+        assert!(
+            prompt.contains("indistinguishable"),
+            "brief must state that a stalled worker looks healthy"
+        );
+        assert!(
+            prompt.contains("holds a molecule slot"),
+            "brief must state the cost of the stall"
+        );
+
+        // The property is kept by explanation, so the coercive framing
+        // that made an operator mistake the brief for an injected prompt
+        // must be gone. Guards against a well-meaning revert.
+        assert!(!prompt.contains("NON-NEGOTIABLE"));
+        assert!(!prompt.contains("These are violations"));
+        assert!(!prompt.contains("NO other valid way to end"));
+    }
+
+    /// The local-worker twin must be consistent in EFFECT with the coding
+    /// agent's briefing, even though its wording differs: it owns no
+    /// lifecycle verb, so both halves of the contract have to be carried
+    /// by the one channel it has — the file it writes.
+    ///
+    /// Consistency here means the same three properties: it must keep the
+    /// anti-stall reason, it must offer a real move for the case where the
+    /// mission cannot be satisfied, and that move must be neither a
+    /// fabricated deliverable nor a silent wait.
+    #[test]
+    fn test_local_briefing_keeps_contract_without_lifecycle_verbs() {
+        let mol = sample_molecule("task-20260721-loc1", MoleculeStatus::Pending);
+        let mol_dir = Path::new("/abs/state/fleets/default/molecules/task-20260721-loc1");
+
+        for adapter in ["local", "ollama", "llama-cpp", "llama"] {
+            let prompt = build_prompt(
+                &mol,
+                None,
+                None,
+                &ProjectConfig::default(),
+                mol_dir,
+                adapter,
+                None,
+            );
+
+            // Anti-stall reason, not a bare prohibition.
+            assert!(
+                prompt.contains("Nobody is reading this pane"),
+                "{adapter}: local brief must state the session is unattended"
+            );
+            assert!(
+                prompt.contains("indistinguishable from working"),
+                "{adapter}: local brief must state that waiting looks like working"
+            );
+
+            // The not-satisfiable branch exists, and names both wrong answers.
+            assert!(
+                prompt.contains("When you cannot produce what was asked"),
+                "{adapter}: local brief must offer a not-satisfiable branch"
+            );
+            assert!(
+                prompt.contains("do not invent a deliverable"),
+                "{adapter}: local brief must rule out a fabricated artifact"
+            );
+            assert!(
+                prompt.contains("Do not stop and wait either"),
+                "{adapter}: local brief must rule out the silent wait"
+            );
+
+            // And the coercive framing is gone here too.
+            assert!(!prompt.contains("These are violations"), "{adapter}");
+            assert!(!prompt.contains("NON-NEGOTIABLE"), "{adapter}");
+        }
     }
 
     /// Jesse #4 clause 2 (task-20260721-676d): the worker briefing must be
@@ -11481,7 +12299,11 @@ mod tests {
 
         assert!(prompt.contains("## External attribution"));
         assert!(prompt.contains("External attribution for this fleet is `Noogram` (noogram.org)."));
-        assert!(prompt.contains("The operator's fund affiliation is PRIVATE"));
+        // The directive closes the attribution slot positively. It must NOT
+        // announce that something is being withheld — that announcement is
+        // itself a disclosure, and this prompt reaches every worker.
+        assert!(prompt.contains("use `Noogram` and no other name"));
+        assert!(!prompt.to_lowercase().contains("affiliation"));
 
         // The directive must sit ABOVE the mission so the worker reads the
         // right name before reaching any artifact slot.
@@ -12017,6 +12839,40 @@ mod tests {
             normalize_ollama_host("http://[::1]:11434"),
             "http://[::1]:11434"
         );
+    }
+
+    /// **One inventory, not two.** The dispatch registry `run` composes and
+    /// the list `RosterSpec::resolved` measures a committee seat against are
+    /// the SAME list, because both read `built_in_adapter_names`.
+    ///
+    /// `run` used to re-type the ten names as a literal `vec![…]`. It agreed
+    /// with the canonical list at the time, and nothing kept it agreeing: a
+    /// name in the literal only would dispatch and be unrosterable, a name in
+    /// the canonical list only would be rosterable and undispatchable. The
+    /// second shape is the F1 defect exactly — a gate whose inventory is not
+    /// the dispatch inventory — so this pins that there is one list to add to.
+    #[test]
+    fn the_dispatch_registry_is_the_canonical_built_in_list() {
+        let canonical = cosmon_core::spawn_seam::built_in_adapter_names();
+        // Every name the spawn seam knows must validate with no TOML row...
+        for name in canonical {
+            let registry: Vec<String> = canonical.iter().map(|s| (*s).to_owned()).collect();
+            assert!(
+                validate_adapter_name(name, &registry).is_ok(),
+                "{name} is a built-in and must validate against the registry \
+                 `run` composes"
+            );
+        }
+        // ...and the four names the committee gate can resolve from the name
+        // alone must be among them, since a seat may sit on one with no
+        // `[adapters.<name>]` section at all.
+        for cli in ["claude", "aider", "codex", "opencode"] {
+            assert!(
+                canonical.contains(&cli),
+                "{cli} is a CLI adapter cosmon dispatches; dropping it from the \
+                 canonical list would silently un-roster every seat on it"
+            );
+        }
     }
 
     /// task-20260707-7d27 (hole #1): `ollama` is a built-in floor alias —

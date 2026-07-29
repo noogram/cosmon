@@ -176,23 +176,23 @@ const CONTENT_PATTERNS: &[(Pattern, &str)] = &[
     (Pattern::Literal("xoxp-"), "possible Slack user token"),
     (Pattern::Literal("AIza"), "possible Google API key"),
     (
-        Pattern::Literal("-----BEGIN RSA PRIVATE KEY-----"),
+        Pattern::Literal("-----BEGIN RSA PRIVATE KEY-----"), // publish: allow — detector pattern table, not a key
         "PEM RSA private key header",
     ),
     (
-        Pattern::Literal("-----BEGIN OPENSSH PRIVATE KEY-----"),
+        Pattern::Literal("-----BEGIN OPENSSH PRIVATE KEY-----"), // publish: allow — detector pattern table, not a key
         "OpenSSH private key header",
     ),
     (
-        Pattern::Literal("-----BEGIN EC PRIVATE KEY-----"),
+        Pattern::Literal("-----BEGIN EC PRIVATE KEY-----"), // publish: allow — detector pattern table, not a key
         "PEM EC private key header",
     ),
     (
-        Pattern::Literal("-----BEGIN DSA PRIVATE KEY-----"),
+        Pattern::Literal("-----BEGIN DSA PRIVATE KEY-----"), // publish: allow — detector pattern table, not a key
         "PEM DSA private key header",
     ),
     (
-        Pattern::Literal("-----BEGIN PRIVATE KEY-----"),
+        Pattern::Literal("-----BEGIN PRIVATE KEY-----"), // publish: allow — detector pattern table, not a key
         "PEM PKCS#8 private key header",
     ),
 ];
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn content_pattern_detects_github_pat() {
         let mut report = ProbeReport::new(PROBE);
-        let line = b"token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123\n";
+        let line = b"token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123\n"; // publish: allow — synthetic vector for cosmon's own leak detector
         scan_content(Path::new("config.txt"), line, &[], &mut report);
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].severity, Severity::Error);
@@ -531,7 +531,7 @@ mod tests {
     #[test]
     fn content_pattern_detects_pem_header() {
         let mut report = ProbeReport::new(PROBE);
-        let payload = b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n";
+        let payload = b"-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n"; // publish: allow — synthetic test vector
         scan_content(Path::new("foo"), payload, &[], &mut report);
         assert_eq!(report.findings.len(), 1);
         assert!(report.findings[0].title.contains("OpenSSH"));
@@ -565,7 +565,7 @@ mod tests {
     fn corpus_line_does_not_double_fire_with_builtin() {
         let mut report = ProbeReport::new(PROBE);
         let corpus = vec![("ghp_".to_owned(), "corpus pattern `ghp_`".to_owned())];
-        let line = b"token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123\n";
+        let line = b"token: ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123\n"; // publish: allow — synthetic vector for cosmon's own leak detector
         scan_content(Path::new("x"), line, &corpus, &mut report);
         assert_eq!(report.findings.len(), 1);
         assert!(report.findings[0].title.contains("GitHub"));
@@ -655,7 +655,7 @@ mod tests {
         let mut report = ProbeReport::new(PROBE);
         // ASIA + 16 uppercase-alphanumeric = 20 chars total, matches the
         // documented AWS temporary access key shape.
-        let line = b"creds: ASIA1234567890ABCDEF\n";
+        let line = b"creds: ASIA1234567890ABCDEF\n"; // publish: allow — synthetic vector for cosmon's own leak detector
         scan_content(Path::new("config.txt"), line, &[], &mut report);
         assert_eq!(report.findings.len(), 1);
         assert!(report.findings[0].title.contains("AWS temporary"));
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn akia_regex_detects_real_permanent_key() {
         let mut report = ProbeReport::new(PROBE);
-        let line = b"AWS_ACCESS_KEY_ID=AKIA0123456789ABCDEF\n";
+        let line = b"AWS_ACCESS_KEY_ID=AKIA0123456789ABCDEF\n"; // publish: allow — synthetic vector for cosmon's own leak detector
         scan_content(Path::new("env.sh"), line, &[], &mut report);
         assert_eq!(report.findings.len(), 1);
         assert!(report.findings[0].title.contains("AWS access key"));

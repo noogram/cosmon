@@ -1653,6 +1653,56 @@ pub enum EventV2 {
         observed_at: DateTime<Utc>,
     },
 
+    /// **task-20260727-3f46** — the realized-model observer reported that it
+    /// *cannot* observe: the session-log root it was given does not exist, so
+    /// no [`Self::ModelObserved`] can ever arrive for this dispatch.
+    ///
+    /// # Why this event exists
+    ///
+    /// The watcher used to tick once a second, in silence, against a directory
+    /// that was not there — for the entire life of every worker in any
+    /// deployment that sets `CLAUDE_CONFIG_DIR` (which is every container
+    /// deployment). Seven and a half minutes of finding nothing looked
+    /// identical, from outside, to seven and a half minutes of a worker that
+    /// had simply not spoken yet. A check that reports nothing when it cannot
+    /// check is worse than no check: it converts a broken observation seam
+    /// into an indefinite `(pending)`.
+    ///
+    /// So the negative result is now a *positive record*. The fold turns it
+    /// into [`crate::adapter_attribution::Realized::Unobservable`], which
+    /// renders `x (unobservable)` — "no observation can arrive", distinct from
+    /// `... (pending)` — "none has arrived yet".
+    ///
+    /// # Cadence
+    ///
+    /// **Once per watch**, not once per tick. The condition is a property of
+    /// the deployment, not of the moment; repeating it every second would
+    /// drown the journal in the same sentence. An observation that later
+    /// succeeds simply wins: the fold prefers any
+    /// [`Self::ModelObserved`] over this event, so a root created mid-run
+    /// self-heals the display.
+    ///
+    /// Diagnostic, not a refusal (trace-not-lock): the watch continues after
+    /// emitting, and the dispatch is never failed because telemetry is
+    /// unhappy.
+    ModelObservationUnavailable {
+        /// The molecule whose observation seam is broken.
+        mol_id: MoleculeId,
+        /// The worker/dispatch the finding is scoped to — same per-attempt
+        /// scoping key as [`Self::ModelObserved`], so a re-tackle under a
+        /// fixed configuration is not tainted by the previous attempt's
+        /// finding.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<WorkerId>,
+        /// Adapter the observation was to be read from (`claude`, `codex`).
+        adapter_name: String,
+        /// The session-log root the observer looked for and did not find —
+        /// the actionable half of the diagnostic. A path, never a credential.
+        expected_root: String,
+        /// Wall-clock time the observer gave up on the root.
+        detected_at: DateTime<Utc>,
+    },
+
     /// **delib-20260704-b476 / C4** — the fail-closed per-galaxy model-dispatch
     /// ceiling fired: a *strong* model pin was refused because the rolling
     /// window already held `cap` strong dispatches.
@@ -2478,6 +2528,7 @@ impl EventV2 {
             | Self::AdapterSelected { mol_id, .. }
             | Self::ModelSelected { mol_id, .. }
             | Self::ModelObserved { mol_id, .. }
+            | Self::ModelObservationUnavailable { mol_id, .. }
             | Self::ModelCeilingHit { mol_id, .. }
             | Self::RemoteEgressOptIn { mol_id, .. }
             | Self::EgressUnenforceable { mol_id, .. }
@@ -3992,6 +4043,15 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
             },
+            EventV2::ModelObservationUnavailable {
+                mol_id: mid("cs-20260411-aaaa"),
+                worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
+                adapter_name: "claude".to_owned(),
+                expected_root: "/home/worker/.claude/projects".to_owned(),
+                detected_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
             EventV2::ModelCeilingHit {
                 mol_id: mid("cs-20260411-aaaa"),
                 adapter_name: "claude".to_owned(),
@@ -4254,6 +4314,7 @@ mod tests {
             | EventV2::AdapterSelected { .. }
             | EventV2::ModelSelected { .. }
             | EventV2::ModelObserved { .. }
+            | EventV2::ModelObservationUnavailable { .. }
             | EventV2::ModelCeilingHit { .. }
             | EventV2::RemoteEgressOptIn { .. }
             | EventV2::EgressUnenforceable { .. }

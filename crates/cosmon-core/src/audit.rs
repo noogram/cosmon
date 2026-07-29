@@ -147,6 +147,11 @@ impl Action {
             // concrete model an adapter actually ran. It observes the run
             // without driving a spec transition.
             | EventV2::ModelObserved { .. }
+            // Its negative sibling (task-20260727-3f46): a forensic receipt
+            // that the observation seam itself is broken (session-log root
+            // absent). It records the *inability* to observe; like the
+            // observation, it drives no spec transition.
+            | EventV2::ModelObservationUnavailable { .. }
             // Model-budget ceiling receipt (delib-20260704-b476 / C4) is a
             // forensic record that the fail-closed strong-dispatch ceiling
             // fired (downgraded or aborted a strong pin). It observes the

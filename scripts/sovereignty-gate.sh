@@ -741,7 +741,7 @@ RESOLV_SELFTEST=(
   '/opt/client-financials-2026|deny'        # unshaped private name under a former trusted lead
   '/etc/tenant-roster|deny'                 # was ok (lead `etc` trusted); now no positive referent
   '/root/cap-table|deny'                    # was ok (lead `root`); now denies
-  '/home/merger-dossier|deny'               # was ok (lead `home`); now denies
+  '/home/merger-dossier|deny'               # was ok (lead `home`); now denies. publish: allow — synthetic name in this gate's own table
   'application/customer-pii|deny'           # prose-lead reuse: application/json ok, this is not
   'state/tenant-secrets|deny'               # rel-lead reuse: state/galaxies ok, this is not
   'noogram/client-roster|deny'              # maker-lead reuse: noogram/llama-server ok, this is not

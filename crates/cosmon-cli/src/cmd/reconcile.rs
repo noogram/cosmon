@@ -289,6 +289,128 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    // ADR-153 (C4) — the dual-witness roster lint. The sibling of the two
+    // above, and the one that closes the gap they left: those check the
+    // *config* that a committee could be built from, while this checks the
+    // roster a committee actually declared. Until it existed, the witnesses in
+    // `cosmon_core::committee` had ZERO production callers — every predicate
+    // passed its own unit tests while nothing consulted it, so witness (1),
+    // witness (2) and the diversity floor were enforced only by a worker
+    // reading prose, and a roster that failed one was contradicted by nothing.
+    // Same fail-closed-under-`--check` contract as the two lints above.
+    let roster = check_committee_roster_witnesses(&state_dir, &cosmon_dir);
+    // Findings on committees that already finished. Printed in full — a
+    // historical violation is still a violation and nobody should have to grep
+    // for it — but never used to fail the gate: no action on any current work
+    // could clear them, and a refusal a human cannot act on is an outage.
+    // Measured 2026-07-28: one `completed` committee held `cs reconcile
+    // --check` red permanently on this repository.
+    if !roster.historical.is_empty() && !ctx.json {
+        eprintln!(
+            "cs reconcile: committee roster — HISTORICAL findings on molecules \
+             that already reached a terminal state. Reported, not refused: the \
+             committee is over and no current work can clear them."
+        );
+        for v in &roster.historical {
+            eprintln!("  · {v}");
+        }
+    }
+    // Legal-but-loud. A roster seating a non-floor-bearing reader, or resting
+    // its floor on one seat, is fragile and not invalid — refusing it forbade
+    // the roster the doctrine itself prescribes (measured 2026-07-28: the
+    // prescribed roster had no admissible representation, on the ballot or off
+    // it). Printed always; it decides nothing.
+    if !roster.advisories.is_empty() && !ctx.json {
+        eprintln!(
+            "cs reconcile: committee roster — ADVISORIES. True, legal, and \
+             load-bearing at fold time: reported, never refused."
+        );
+        for a in &roster.advisories {
+            eprintln!("  ! {a}");
+        }
+    }
+    let roster_violations = roster.violations;
+    if !roster_violations.is_empty()
+        || (ctx.json && !(roster.historical.is_empty() && roster.advisories.is_empty()))
+    {
+        if ctx.json {
+            let output = serde_json::json!({
+                "status": "committee_roster_witness",
+                "violations": roster_violations,
+                "historical": roster.historical,
+                "advisories": roster.advisories,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else if !roster_violations.is_empty() {
+            eprintln!(
+                "cs reconcile: committee roster violation — a declared roster \
+                 fails the dual conjunctive witness (ADR-153):"
+            );
+            for v in &roster_violations {
+                eprintln!("  ✗ {v}");
+            }
+            eprintln!(
+                "\nA seat sits only if BOTH witnesses pass: (1) its RESOLVED endpoint \
+                 tuple differs from the generator's and every peer's, and (2) it plays \
+                 a distinct role_id, carries a really-injected adversarial briefing, \
+                 and ships a falsification-attempt artefact. A witness-rejected seat \
+                 is not a low score to outweigh — it is not on the ballot. Widen the \
+                 roster, point the colliding seats at distinct providers, or deliver \
+                 the missing contract/artefact, then re-run."
+            );
+        }
+        // Only a LIVE violation fails the gate. The historical lines rode
+        // along in the JSON so a reader sees the whole picture; they must not
+        // decide the exit status.
+        if args.check && !roster_violations.is_empty() {
+            std::process::exit(1);
+        }
+    }
+
+    // The verdict-door polarity lint — the sibling of the roster lint one layer
+    // downstream. The roster lint checks WHO sat; this one checks whether what
+    // they emitted can be READ. Same fail-closed-under-`--check` contract and
+    // the same live/historical split, for the same reason.
+    let polarity = check_seat_verdict_polarity(&state_dir);
+    if !polarity.historical.is_empty() && !ctx.json {
+        eprintln!(
+            "cs reconcile: seat verdict polarity — HISTORICAL findings on molecules \
+             that already reached a terminal state. Reported, not refused."
+        );
+        for v in &polarity.historical {
+            eprintln!("  · {v}");
+        }
+    }
+    if !polarity.violations.is_empty() || (ctx.json && !polarity.historical.is_empty()) {
+        if ctx.json {
+            let output = serde_json::json!({
+                "status": "seat_verdict_polarity",
+                "violations": polarity.violations,
+                "historical": polarity.historical,
+            });
+            println!("{}", serde_json::to_string_pretty(&output)?);
+        } else if !polarity.violations.is_empty() {
+            eprintln!(
+                "cs reconcile: seat verdict polarity violation — a verdict written \
+                 in the RELATIVE cmb-verify door that no reader can map:"
+            );
+            for v in &polarity.violations {
+                eprintln!("  ✗ {v}");
+            }
+            eprintln!(
+                "\n`confirmed` does not mean \"good\" — it means THE STATED MECHANISM \
+                 HOLDS, and whether that is good news depends on what the mechanism \
+                 claimed. The definition is `.cosmon/formulas/cmb-verify.formula.toml`, \
+                 step `verify-or-refute`; the mapping in code is \
+                 `cosmon_core::committee::map_through_polarity`. State the polarity — \
+                 never assume the one that makes the round pass."
+            );
+        }
+        if args.check && !polarity.violations.is_empty() {
+            std::process::exit(1);
+        }
+    }
+
     // Invariant heal pass (opt-in via `--heal-invariants`,
     // idea-20260618-1b10). Runs *first*, before the surfaces.toml gate
     // and the surface projection — the heal is a state-coherence
@@ -624,6 +746,670 @@ fn check_no_profile_requirement_downgrade(cosmon_dir: &Path) -> Vec<String> {
         &cfg.provider_bias,
         cfg.adapters.as_ref(),
     )
+}
+
+/// Scan every molecule directory for a declared committee roster
+/// (`roster.json`) and return one message per **witness violation** — the
+/// `cs reconcile --check` gate that a witness-failing roster is REFUSED by the
+/// tool rather than merely discouraged by a recipe.
+///
+/// # Why this lint exists at all
+///
+/// `cosmon_core::committee` decides who may sit on a cross-provider jury, and
+/// for a while nothing asked it. Verified by grep on 2026-07-28:
+/// [`plan_committee`](cosmon_core::committee::plan_committee),
+/// [`committee_requirement`](cosmon_core::committee::committee_requirement),
+/// [`fold_committee`](cosmon_core::committee::fold_committee),
+/// [`jury_integrity`](cosmon_core::committee::jury_integrity),
+/// [`sor_may_not_resurrect`](cosmon_core::committee::sor_may_not_resurrect)
+/// and
+/// [`RosterPlan::floor_bearing_seats`](cosmon_core::committee::RosterPlan::floor_bearing_seats)
+/// had **no production callers** — the only committee references outside the
+/// module were the posture-injection plumbing in `cs evolve`, not the decision
+/// kernel. Every predicate passed its own tests while changing nothing, so a
+/// worker that skipped the check, or resolved an endpoint tuple wrongly,
+/// produced a roster no gate contradicted. This is the boundary that
+/// contradicts it.
+///
+/// # The roster is measured on RESOLVED tuples, not declared ones
+///
+/// `roster.json` is written by the convener, so every field in it is a claim.
+/// Planning those claims directly answers "is this file internally
+/// consistent?", which is the property next to the one that matters: a roster
+/// could name two families it does not have and pass. Each seat therefore
+/// names the `[adapters.<name>]` section it sits on, and
+/// [`RosterSpec::resolved`](cosmon_core::committee::RosterSpec::resolved)
+/// re-derives its endpoint tuple from that section's `base_url` + `model`
+/// before anything is planned. A declaration that does not survive the
+/// derivation is a violation; so is a seat that names no adapter, because an
+/// unresolvable claim is one the gate did not check.
+///
+/// # Absence of a roster is not exemption
+///
+/// A molecule with no `roster.json` is not automatically "not a committee" —
+/// that reading makes the whole gate opt-in by artefact presence, so a convener
+/// who simply never writes the file is never inspected. Two shapes are
+/// therefore refused on their own:
+///
+/// - a molecule carrying the durable `roster.md` prose but no machine-readable
+///   `roster.json` — a committee described to humans and to no gate;
+/// - a molecule carrying `committee-posture.md` (proof it was *seated* as a
+///   cross-provider seat) whose id appears on **no** roster in the tree — a
+///   seat nobody rostered, whose witnesses were therefore never counted.
+///
+/// A molecule with none of the three artefacts really is not a committee, and
+/// that is the honest remaining scope: the gate cannot refuse what leaves no
+/// trace anywhere, and says so here rather than implying otherwise.
+///
+/// An unreadable or malformed roster is reported as a violation rather than
+/// ignored: a roster the gate cannot parse is a roster the gate did not check.
+/// A missing/unreadable project config falls back to the `[provider_bias]`
+/// default — the floor then comes from the stake alone, which is the
+/// conservative reading.
+/// Whether a molecule's story is still open, read from its own `state.json`.
+///
+/// # Why the two presence checks are scoped to live work
+///
+/// A roster governs a committee that is about to be *used*. A committee that
+/// finished last week cannot grow a `roster.json` retroactively — `roster.json`
+/// did not exist when it ran — so refusing it on every future invocation makes
+/// the gate permanently red over history nobody can change. That is an outage
+/// wearing a control's clothes: a refusal has to be one a human can act on.
+///
+/// This does not reopen the opt-in hole. A live convener is inspected on every
+/// run — and now inspected on what it IS (its `formula_id`) rather than on what
+/// it chose to write — and the only way out is to reach a terminal state, which
+/// is exactly the point at which the roster stops governing anything.
+///
+/// # Why the CONTENTS check is scoped to live work too
+///
+/// It used to say "terminality excuses the absence of a roster, never its
+/// contents", and that sentence turned one finished committee into a permanent
+/// outage. Measured 2026-07-28 on this repository: `committee-20260728-f744`
+/// is `completed`, its seat `cmbverify-20260728-6178` was never tackled so its
+/// briefing carries no posture pointer, and `cs reconcile --check` was red
+/// **forever** — no action on any current work could return it to green, and
+/// the seat cannot be tackled because the committee is over.
+///
+/// A refusal nobody can act on is not a control. So a terminal molecule's
+/// roster contents are reported as a HISTORICAL advisory — printed in full,
+/// never silently dropped — and do not fail the gate. The evasion this admits
+/// is real and bounded: a convener could reach a terminal state to stop being
+/// refused. It costs a recorded, irreversible lifecycle transition in the event
+/// log, and it ends the committee it was trying to convene. That is a trade
+/// against an unconditional outage, and it is the same trade the absence check
+/// already makes.
+///
+/// Unreadable or absent state is treated as live — the conservative reading,
+/// since the alternative is exempting a molecule because its state file could
+/// not be parsed.
+fn molecule_is_live(mol_dir: &Path) -> bool {
+    read_state_field(mol_dir, "status")
+        .is_none_or(|s| !matches!(s.as_str(), "done" | "failed" | "collapsed" | "completed"))
+}
+
+/// One string field of a molecule's own `state.json`, or `None` when the file
+/// is absent, unparseable, or carries no such field.
+///
+/// The state file is written by `cs nucleate` before any worker runs and is not
+/// an artefact a convener chooses to produce — which is precisely why the
+/// committee gate reads `formula_id` from here rather than inferring
+/// committee-hood from files on disk.
+fn read_state_field(mol_dir: &Path, field: &str) -> Option<String> {
+    let raw = std::fs::read_to_string(mol_dir.join("state.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Whether this molecule's recorded formula is one that convenes a committee —
+/// the RESOLVED answer to "is this a committee?", which no artefact can opt out
+/// of.
+fn molecule_convenes_a_committee(mol_dir: &Path) -> bool {
+    read_state_field(mol_dir, "formula_id")
+        .is_some_and(|f| cosmon_core::committee::CONVENING_FORMULA_IDS.contains(&f.as_str()))
+}
+
+/// The verdict-door polarity lint: **the reader that makes
+/// `mechanism_polarity` load-bearing.**
+///
+/// The converge contract instructs that a seat's `verdict.json` carrying the
+/// relative cmb-verify door without a `mechanism_polarity` is NOT-CLEAN, and
+/// that an inconsistent `(polarity, verdict, VERDICT:)` triple is NOT-CLEAN
+/// too. Until this function existed that instruction was a **declaration about
+/// seats that nothing resolved**: no code read the field, so the mitigating
+/// sentence "a seat convened by this loop is always `polarity: fix`" could be
+/// false — or the field simply absent — and every gate stayed green. The test
+/// that governs this lineage is *can the gate still pass when the constrained
+/// party lies, or is simply absent?*, and the answer was yes.
+///
+/// Scope is decided by the VERDICT'S OWN VOCABULARY, never by the molecule's
+/// kind: only a `verdict.json` whose `verdict` field parses as
+/// [`SeatVerdict`](cosmon_core::committee::SeatVerdict) — `confirmed` /
+/// `refuted` / `inconclusive` — is subject to the polarity rule, because only
+/// that door is relative. A gate verdict written `PASS` / `BLOCKED` / `CLEAN`
+/// is absolute and needs no polarity; demanding one there would be noise, and a
+/// lint that cries on artefacts it does not govern is one people learn to
+/// ignore.
+///
+/// Same live/historical split as [`check_committee_roster_witnesses`]: a
+/// terminal molecule's verdict cannot be corrected by any current work, so it
+/// is reported and never fails the gate.
+fn check_seat_verdict_polarity(state_dir: &Path) -> RosterFindings {
+    let mut out = RosterFindings::default();
+    let Ok(fleets) = std::fs::read_dir(state_dir.join("fleets")) else {
+        return out;
+    };
+    let mut fleet_dirs: Vec<PathBuf> = fleets.filter_map(Result::ok).map(|e| e.path()).collect();
+    // Deterministic order so two runs on one tree report identically.
+    fleet_dirs.sort();
+    for fleet in fleet_dirs {
+        let Ok(molecules) = std::fs::read_dir(fleet.join("molecules")) else {
+            continue;
+        };
+        let mut mol_dirs: Vec<PathBuf> =
+            molecules.filter_map(Result::ok).map(|e| e.path()).collect();
+        mol_dirs.sort();
+        for mol_dir in mol_dirs {
+            inspect_seat_verdict(&mol_dir, &mut out);
+        }
+    }
+    out
+}
+
+/// Judge ONE molecule's verdict emission and file every finding on the side its
+/// liveness puts it.
+///
+/// Split out of [`check_seat_verdict_polarity`] for the same reason
+/// [`inspect_roster`] was split out of its enumerator: walking the tree and
+/// reading one seat are separate readings, and after absence stopped being a
+/// silent `continue` the two no longer fit in one screen.
+fn inspect_seat_verdict(mol_dir: &Path, out: &mut RosterFindings) {
+    use cosmon_core::committee::{ConvergeVerdict, MechanismPolarity, SeatVerdict};
+
+    let verdict_path = mol_dir.join(SEAT_VERDICT_FILE);
+    let raw = std::fs::read_to_string(&verdict_path).ok();
+    // Scope, and it is the whole reason absence can be judged at all.
+    // Most molecules in a tree are not seats and owe no verdict; a
+    // molecule that carries the durable adversarial contract, or that
+    // has already written a referee report, IS one and owes both files.
+    let owes_a_verdict = molecule_owes_a_seat_verdict(mol_dir);
+    if raw.is_none() && !owes_a_verdict {
+        return;
+    }
+    let label = mol_dir.file_name().map_or_else(
+        || verdict_path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    let live = molecule_is_live(mol_dir);
+    let Some(raw) = raw else {
+        // ABSENT, not malformed — and until 2026-07-28 this exited
+        // through a bare `continue` while the malformed case was
+        // recorded. That asymmetry WAS the bug: the contract's central
+        // rule is that a missing verdict is NOT-CLEAN, and the enum
+        // advertised a `NoVerdict` variant that no caller ever
+        // constructed, so the rule had no code enforcement while the
+        // type said it had.
+        out.record(
+            live,
+            cosmon_core::committee::SeatReadingRefusal::NoVerdict.explain(&label),
+        );
+        return;
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        out.record(
+            live,
+            format!(
+                "{label}: `{SEAT_VERDICT_FILE}` exists and is not valid JSON, so no \
+                 gate can read the verdict it claims to carry. A verdict a reader \
+                 cannot parse is NOT-CLEAN, never a pass"
+            ),
+        );
+        return;
+    };
+    // Which door did the seat speak? The RELATIVE one is what the
+    // polarity rule scopes to, and it is identified by what the file
+    // says rather than by what the molecule is. The ABSOLUTE one needs
+    // no polarity — but a file carrying NEITHER carries no verdict at
+    // all, which is the second `continue` that used to launder absence
+    // into silence.
+    let spoken = json.get("verdict").and_then(serde_json::Value::as_str);
+    let door = spoken.and_then(SeatVerdict::parse);
+    let absolute = spoken.and_then(ConvergeVerdict::parse);
+    if door.is_none() && absolute.is_none() {
+        out.record(
+            live,
+            cosmon_core::committee::SeatReadingRefusal::NoVerdict.explain(&label),
+        );
+        return;
+    }
+    let Some(door) = door else {
+        inspect_absolute_door(mol_dir, &label, live, absolute, out);
+        return;
+    };
+    let polarity = json
+        .get("mechanism_polarity")
+        .and_then(serde_json::Value::as_str);
+    let Some(polarity) = polarity.and_then(MechanismPolarity::parse) else {
+        out.record(
+            live,
+            match polarity {
+                Some(bad) => format!(
+                    "{label}: `{SEAT_VERDICT_FILE}` declares \
+                 `mechanism_polarity: \"{bad}\"`, which is neither `defect` nor \
+                 `fix`. The `{}` door is unreadable without a polarity this \
+                 reader recognises, and an unrecognised value may not be \
+                 guessed into one",
+                    door.label(),
+                ),
+                None => format!(
+                    "{label}: `{SEAT_VERDICT_FILE}` declares `verdict: \"{}\"` — the \
+                 RELATIVE cmb-verify door — with no `mechanism_polarity` field. \
+                 `confirmed` means the stated mechanism HOLDS, which is CLEAN \
+                 when the mechanism claimed a fix and FINDINGS when it claimed a \
+                 defect, so this verdict has no reading at all. Add \
+                 `\"mechanism_polarity\": \"defect\"|\"fix\"` — fail closed \
+                 rather than assume the polarity that makes the round pass",
+                    door.label(),
+                ),
+            },
+        );
+        return;
+    };
+    // Both doors present: refuse the agreeing-but-wrong pair. And an
+    // ABSENT report is refused rather than skipped — the contract asks
+    // for an affirmative verdict in BOTH files, so one file is one
+    // file, and the third bare `continue` was the third way absence
+    // passed for a pass.
+    let Some(reported) = read_reported_verdict(mol_dir) else {
+        out.record(
+            live,
+            cosmon_core::committee::SeatReadingRefusal::NoReport.explain(&label),
+        );
+        return;
+    };
+    let emission = cosmon_core::committee::SeatEmission {
+        seat_id: label,
+        mechanism_polarity: Some(polarity),
+        verdict: Some(door),
+        reported: Some(reported),
+    };
+    if let Err(refusal) = cosmon_core::committee::read_seat_emission(&emission) {
+        out.record(live, refusal.explain(&emission.seat_id));
+    }
+}
+
+/// The branch where `verdict.json` spoke the ABSOLUTE vocabulary
+/// (`CLEAN` / `FINDINGS` / `INCONCLUSIVE`).
+///
+/// No polarity is owed — the meaning of those words does not depend on what the
+/// stated mechanism claimed — but the report still is, and the two files must
+/// not contradict each other. Two files agreeing is not two files being right;
+/// two files disagreeing is one of them being wrong, and neither may be picked
+/// by the reader.
+fn inspect_absolute_door(
+    mol_dir: &Path,
+    label: &str,
+    live: bool,
+    absolute: Option<cosmon_core::committee::ConvergeVerdict>,
+    out: &mut RosterFindings,
+) {
+    use cosmon_core::committee::SeatReadingRefusal;
+
+    match read_reported_verdict(mol_dir) {
+        None => out.record(live, SeatReadingRefusal::NoReport.explain(label)),
+        Some(reported) if Some(reported) != absolute => out.record(
+            live,
+            SeatReadingRefusal::Incoherent {
+                implied: absolute.unwrap_or(reported),
+                reported,
+            }
+            .explain(label),
+        ),
+        Some(_) => {}
+    }
+}
+
+/// Whether this molecule owes the two-file verdict emission at all — the scope
+/// that lets an ABSENT `verdict.json` be judged instead of skipped.
+///
+/// # Why absence needs a scope and malformity does not
+///
+/// A `verdict.json` that exists names its own subject: whatever wrote it meant
+/// to emit a verdict, so an unreadable one is refusable wherever it is found.
+/// Absence is different — most molecules in a tree are not seats and owe
+/// nothing, so "no verdict.json" is the normal state of almost everything and
+/// refusing it everywhere would be an outage, not a control.
+///
+/// Three facts put a molecule in scope, and the FIRST is the one no seat can
+/// decline:
+///
+/// 1. its recorded `formula_id` is a seat formula
+///    ([`cosmon_core::committee::SEAT_FORMULA_IDS`]) — written by `cs nucleate`
+///    before any worker ran, so it says what the molecule IS rather than what
+///    its author chose to write;
+/// 2. it carries the durable `committee-posture.md`. That file is written by
+///    the **convening driver**, and the driver is a *worker*, not a code path:
+///    the committee formula's convene step
+///    (`.cosmon/formulas/cross-provider-committee.formula.toml`) instructs the
+///    LLM executing it to write the contract into each seat's own molecule
+///    directory, in the shape `render_committee_posture` defines. No `cs` verb
+///    authors it. What the verbs do is narrower — `cs tackle`, `cs evolve` and
+///    `cs complete` re-establish the *pointer* to the file in a `briefing.md`
+///    they have just written
+///    ([`reinstate_committee_posture_reference`](super::evolve::reinstate_committee_posture_reference)),
+///    and that function returns early when the file is absent — so none of them
+///    can create it, and its presence attests the convening, not the dispatch.
+///    That last property is asserted rather than asserted-about:
+///    `tackle_does_not_author_the_posture_file_it_points_at` and
+///    `complete_does_not_author_the_posture_file_it_points_at` in
+///    `tests/committee_seat_dispatch.rs` each write the file, run their verb,
+///    assert the pointer landed, delete the file, run the verb again, and check
+///    that nothing brings it back. Note the asymmetry with witness (2)'s own
+///    delivery leg, which no longer accepts mere presence: SCOPE is decided by
+///    the file being there at all (a stub still makes a molecule answerable),
+///    while DELIVERY is decided by
+///    [`RosterSpec::with_observed_delivery`](cosmon_core::committee::RosterSpec::with_observed_delivery)
+///    reading the contract and matching it against the roster's declaration. A
+///    stub therefore puts a molecule in scope and fails its witness, which is
+///    the order that leaves nothing unexamined; or
+/// 3. it already wrote a `referee-report.md` — it spoke as a seat in one file,
+///    and the contract asks for both. Without this door a seat could leave the
+///    machine-readable half off and be out of scope *for having done so*, which
+///    is opt-out by omission.
+///
+/// None is a flag a seat sets on itself, which is what keeps this from being
+/// the opt-in hole one layer along. A seat still in flight is in scope from its
+/// first step on purpose: the converge contract requires both files written on
+/// step 1, precisely so a provider refusal or a sleeping machine cannot take
+/// the account down with it.
+fn molecule_owes_a_seat_verdict(mol_dir: &Path) -> bool {
+    read_state_field(mol_dir, "formula_id")
+        .is_some_and(|f| cosmon_core::committee::SEAT_FORMULA_IDS.contains(&f.as_str()))
+        || mol_dir
+            .join(cosmon_core::committee::COMMITTEE_POSTURE_FILE)
+            .exists()
+        || mol_dir.join(SEAT_REPORT_FILE).exists()
+}
+
+/// The absolute verdict on the first non-empty line of `referee-report.md`, or
+/// `None` when the file is absent, unreadable, or carries no `VERDICT:` line.
+///
+/// The three collapse into one answer on purpose: each is *no affirmative
+/// verdict in that file*, and the caller refuses all three identically.
+fn read_reported_verdict(mol_dir: &Path) -> Option<cosmon_core::committee::ConvergeVerdict> {
+    std::fs::read_to_string(mol_dir.join(SEAT_REPORT_FILE))
+        .ok()
+        .and_then(|r| {
+            r.lines()
+                .find(|l| !l.trim().is_empty())
+                .and_then(cosmon_core::committee::ConvergeVerdict::from_report_line)
+        })
+}
+
+/// A seat's machine-readable verdict sidecar, beside its human-readable report.
+const SEAT_VERDICT_FILE: &str = "verdict.json";
+
+/// A seat's human-readable referee report, whose FIRST non-empty line carries
+/// `VERDICT: CLEAN | FINDINGS (N) | INCONCLUSIVE`.
+const SEAT_REPORT_FILE: &str = "referee-report.md";
+
+/// What the roster lint found: refusals that fail `--check`, and historical
+/// lines that are printed and do not.
+#[derive(Default)]
+struct RosterFindings {
+    /// Violations on LIVE work. A human can act on every one of these.
+    violations: Vec<String>,
+    /// Violations on molecules that already reached a terminal state. Reported
+    /// so the history stays visible, never used to fail the gate — nothing any
+    /// current work can do would clear them.
+    historical: Vec<String>,
+    /// True statements about rosters that are nonetheless LEGAL — the
+    /// non-floor-bearing readers and the single-point-of-failure floors that
+    /// [`cosmon_core::committee::RosterReport`] separates from its refusals.
+    ///
+    /// Printed in full and never used to fail the gate. They exist because the
+    /// alternative to reporting them was refusing them, and refusing them
+    /// forbade the roster the doctrine itself prescribes.
+    advisories: Vec<String>,
+}
+
+impl RosterFindings {
+    /// File one finding on the side its molecule's liveness puts it: a refusal
+    /// while the committee can still be fixed, a historical note once it
+    /// cannot.
+    fn record(&mut self, live: bool, finding: String) {
+        if live {
+            self.violations.push(finding);
+        } else {
+            self.historical.push(finding);
+        }
+    }
+}
+
+/// Read one molecule's `roster.json`, re-derive both witnesses from disk, and
+/// file every finding on the side `live` puts it.
+///
+/// Split out of [`check_committee_roster_witnesses`] so the enumeration of the
+/// tree and the judgement of one roster are readable separately; every seat id
+/// the roster claims is recorded in `rostered`, which the caller's second pass
+/// consults to tell an unrostered seat from a rostered one.
+#[allow(clippy::too_many_arguments)]
+fn inspect_roster(
+    mol_dir: &Path,
+    roster_path: &Path,
+    label: &str,
+    live: bool,
+    bias: &cosmon_core::config::ProviderBiasConfig,
+    adapters: Option<&cosmon_core::config::AdaptersConfig>,
+    rostered: &mut std::collections::BTreeSet<String>,
+    out: &mut RosterFindings,
+) {
+    let spec: cosmon_core::committee::RosterSpec = match std::fs::read_to_string(roster_path)
+        .map_err(|e| e.to_string())
+        .and_then(|raw| serde_json::from_str(&raw).map_err(|e| e.to_string()))
+    {
+        Ok(spec) => spec,
+        Err(e) => {
+            out.record(
+                live,
+                format!(
+                    "{label}: its {} could not be read as a roster ({e}) — an \
+                     unparseable roster is an UNCHECKED roster, so it is refused \
+                     rather than skipped",
+                    cosmon_core::committee::COMMITTEE_ROSTER_FILE,
+                ),
+            );
+            return;
+        }
+    };
+    rostered.insert(spec.generator.seat_id.clone());
+    rostered.extend(spec.refuters.iter().map(|s| s.seat_id.clone()));
+
+    // Witness (2)'s `injected` flag is re-derived from the seats' own
+    // directories, so a roster cannot certify its own delivery any more than it
+    // can certify its own family. `mol_dir`'s parent is the `molecules/`
+    // directory every seat lives under.
+    let molecules_root = mol_dir.parent().map(Path::to_path_buf);
+    let (spec, mut violations) = spec.with_observed_delivery(|seat_id| {
+        let seat_dir = molecules_root.as_ref()?.join(seat_id);
+        if !seat_dir.is_dir() {
+            // No directory at all. `None` does NOT mean "accept the claim" —
+            // the core reports a seat that claims delivery here, because two
+            // files cannot exist inside a directory that does not.
+            return None;
+        }
+        // The contract is READ, not counted. A file that merely occupies the
+        // path — `# posture\n`, a truncated copy, a stub — parses to `None` and
+        // fails delivery, where a presence-only witness certified it.
+        let posture_path = seat_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE);
+        let posture_text = std::fs::read_to_string(&posture_path).ok();
+        let pointer = std::fs::read_to_string(seat_dir.join("briefing.md"))
+            .is_ok_and(|b| b.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE));
+        Some(cosmon_core::committee::ObservedDelivery {
+            posture_file_exists: posture_path.exists(),
+            posture: posture_text
+                .as_deref()
+                .and_then(cosmon_core::committee::parse_committee_posture),
+            pointer,
+        })
+    });
+    let report = spec.report(bias, adapters);
+    violations.extend(report.refusals);
+    // The membership check (F7). A collapsed seat is answered from its own
+    // `state.json`, in the same `molecules/` directory the delivery witness
+    // above reads — the core stays I/O-free and asks for the answer.
+    violations.extend(spec.reconvocation_violations(&|seat_id: &str| {
+        molecules_root.as_ref().is_some_and(|root| {
+            read_state_field(&root.join(seat_id), "status")
+                .is_some_and(|s| matches!(s.as_str(), "collapsed" | "failed"))
+        })
+    }));
+    for v in violations {
+        out.record(live, format!("{label}: {v}"));
+    }
+    // Advisories ride on the roster's liveness for their prefix but never for
+    // their weight: they are printed whatever the molecule's state, because a
+    // brittle floor is as worth knowing on a finished committee as on a live
+    // one, and neither may decide an exit status.
+    for a in report.advisories {
+        out.advisories.push(format!("{label}: {a}"));
+    }
+}
+
+fn check_committee_roster_witnesses(state_dir: &Path, cosmon_dir: &Path) -> RosterFindings {
+    // A config the gate could not read is a config it did not check — the same
+    // sentence an unparseable `roster.json` already earns four screens below,
+    // and there is no reason the roster's inputs deserve a quieter rule than
+    // the roster. `.ok()` swallowed it: the lint then ran on `[provider_bias]`
+    // defaults and an EMPTY adapter inventory, silently measuring a floor
+    // nobody configured against sections it could not see.
+    //
+    // An ABSENT config is not this case — `load_project_config` returns the
+    // default for a path that does not exist — so the only way here is a file
+    // that exists and cannot be parsed, which is always a human's typo and
+    // always actionable. Reported alone, and the scan stops: with no inventory
+    // every seat would also trip the missing-`[adapters.…]` refusal, burying
+    // the one line that names the true cause under a screen of consequences.
+    let cfg = match cosmon_filestore::load_project_config(&cosmon_dir.join("config.toml")) {
+        Ok(cfg) => Some(cfg),
+        Err(e) => {
+            return RosterFindings {
+                violations: vec![format!(
+                    "{}: it could not be read as a project config ({e}) — the \
+                     roster gate resolves every seat's family against \
+                     `[adapters]` and counts its floor from `[provider_bias]`, \
+                     so a config it cannot parse is a committee it did not \
+                     check. Fix the TOML and re-run",
+                    cosmon_dir.join("config.toml").display(),
+                )],
+                historical: Vec::new(),
+                advisories: Vec::new(),
+            };
+        }
+    };
+    let bias = cfg
+        .as_ref()
+        .map(|c| c.provider_bias.clone())
+        .unwrap_or_default();
+    let adapters = cfg.as_ref().and_then(|c| c.adapters.as_ref());
+    // Every seat id any roster in the tree claims, so an unrostered seat can be
+    // told from a rostered one. Filled on the first pass, consulted on the
+    // second — a seat's roster lives in its CONVENER's directory, never its own.
+    let mut rostered: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Molecules that carry `committee-posture.md`, i.e. were seated.
+    let mut seated: Vec<String> = Vec::new();
+
+    let mut out = RosterFindings::default();
+    // `<state_dir>/fleets/<fleet>/molecules/<id>/roster.json`. Enumerated
+    // rather than globbed so a fleet or molecule dir that cannot be read is
+    // skipped without aborting the whole lint.
+    let Ok(fleets) = std::fs::read_dir(state_dir.join("fleets")) else {
+        return out;
+    };
+    let mut fleet_dirs: Vec<PathBuf> = fleets.filter_map(Result::ok).map(|e| e.path()).collect();
+    fleet_dirs.sort();
+    for fleet in fleet_dirs {
+        let Ok(molecules) = std::fs::read_dir(fleet.join("molecules")) else {
+            continue;
+        };
+        let mut mol_dirs: Vec<PathBuf> =
+            molecules.filter_map(Result::ok).map(|e| e.path()).collect();
+        // Deterministic order so two runs on one tree report identically.
+        mol_dirs.sort();
+        for mol_dir in mol_dirs {
+            let roster_path = mol_dir.join(cosmon_core::committee::COMMITTEE_ROSTER_FILE);
+            let label = mol_dir.file_name().map_or_else(
+                || roster_path.display().to_string(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            let live = molecule_is_live(&mol_dir);
+            if live
+                && mol_dir
+                    .join(cosmon_core::committee::COMMITTEE_POSTURE_FILE)
+                    .exists()
+            {
+                seated.push(label.clone());
+            }
+            if !roster_path.exists() {
+                // Not a roster — but silence here is what makes the gate
+                // opt-in. Three shapes are refused on their own, and the FIRST
+                // is the one no convener can decline: what the molecule IS,
+                // read from the `formula_id` `cs nucleate` recorded before any
+                // worker ran. The other two rest on artefacts an author chose
+                // to write, which is why they were never the whole answer.
+                if live && molecule_convenes_a_committee(&mol_dir) {
+                    out.violations.push(format!(
+                        "{label}: its formula is a committee convener and it has no \
+                         `{}`. This one is not opt-out: the gate reads `formula_id` \
+                         from the molecule's own state, so a convener that writes no \
+                         artefact at all is still inspected. Write the roster before \
+                         handing off",
+                        cosmon_core::committee::COMMITTEE_ROSTER_FILE,
+                    ));
+                } else if live && mol_dir.join("roster.md").exists() {
+                    out.violations.push(format!(
+                        "{label}: it carries the prose `roster.md` but no `{}`, so its \
+                         committee is described to humans and to NO gate. A gate cannot \
+                         refuse prose — write the machine-readable roster beside it",
+                        cosmon_core::committee::COMMITTEE_ROSTER_FILE,
+                    ));
+                }
+                continue;
+            }
+            inspect_roster(
+                &mol_dir,
+                &roster_path,
+                &label,
+                live,
+                &bias,
+                adapters,
+                &mut rostered,
+                &mut out,
+            );
+        }
+    }
+
+    // Second pass. A molecule that was SEATED — it carries the durable
+    // adversarial contract the convening driver wrote into a cross-provider
+    // seat — and appears on no roster in this tree is a seat whose two
+    // witnesses were never counted by anything. That is the same opt-in shape
+    // as a missing roster, arriving from the other end.
+    for label in seated {
+        if !rostered.contains(&label) {
+            out.violations.push(format!(
+                "{label}: it carries the durable `{}` — it was seated as a \
+                 cross-provider seat — but its id appears on NO `{}` in this tree, \
+                 so neither of its witnesses was ever counted. A seat nobody \
+                 rostered is not an exempt seat, it is an unexamined one",
+                cosmon_core::committee::COMMITTEE_POSTURE_FILE,
+                cosmon_core::committee::COMMITTEE_ROSTER_FILE,
+            ));
+        }
+    }
+    out
 }
 
 #[allow(clippy::too_many_arguments)]

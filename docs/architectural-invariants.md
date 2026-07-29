@@ -34,8 +34,8 @@ its status in a trailing `### Status` block. There is no third state.
 
 **Ratified top-level sections:** §1, §2, §3, §3b–§3g, §4, §5, §6, §7,
 §7b–§7g, §8 (incl. its ratified subsections §8a–§8f), §8b–§8d (the
-top-level fleet-split / briefing-seal / events-source sections), §8v, §9,
-§10, §11. (§1bis is *proposed* — see the list below.)
+top-level fleet-split / briefing-seal / events-source sections), §8v, §8w,
+§8x, §8y, §8z, §8aa, §9, §10, §11. (§1bis is *proposed* — see the list below.)
 
 **Proposed top-level sections:** §1bis, §8e (causal closure), §8j
 (ingress bindings), §8k′ (cross-surface wheat-paste), §8l, §8m, §8n,
@@ -2604,13 +2604,500 @@ change to that function.
 record — arm C deciding its verdict by grepping a pane, and so unable to
 express a correct *refusal* — is closed: arm C now asserts the four
 post-conditions of a refusal, and on 2026-07-25 all four held on a real
-`desktop-linux` container against Claude Code 2.1.220 (rc=1, the refusal
+`desktop-linux` container against Claude Code 2.1.220 (that is the engine
+that run was taken on; the container benches were moved to the dedicated
+`colima-cosmon-bench` profile on 2026-07-27, when the external tester
+corrected his own description of his bed — see
+[`docs/benches/engine-fidelity-2026-07-27.md`](benches/engine-fidelity-2026-07-27.md))
+(rc=1, the refusal
 quoting the screen it refused, the tmux session gone, the molecule back to
 `pending`). See
 [`docs/guides/container-worker-doors-bench.md`](guides/container-worker-doors-bench.md).
 See [ADR-162](adr/162-dispatch-boundary-ready-is-earned.md) for the
 decision record, the rejected options, and the resolution of
 [ADR-093](adr/093-cosmon-transport-liveness-detector.md).
+
+---
+
+## 8w. A question may only be asked where an answer can arrive
+
+*(ratified — [ADR-163](adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md),
+fifth door of noogram/cosmon#20)*
+
+**Cosmon may block on a human only where a human can both see the question
+and type at it. Nothing on the dispatch path may block on a human at all.**
+
+§8v governs what cosmon may believe about someone else's screen. This one
+governs cosmon's own: a prompt is not a prompt unless an answer can reach
+it.
+
+### Why the rule exists
+
+`cs tackle`'s first act was the first-run `opt-in-share` consent prompt,
+gated on `stdin().is_terminal()`. That predicate answers *"is a terminal
+attached?"*, not *"can a human see this and answer it?"*, and the two come
+apart in the one situation that matters: an orchestrator captures the
+child's stdout (`OUT="$(cs tackle …)"`) while stdin remains the inherited
+TTY. The question prints into a variable nobody reads, on an input nobody
+watches. No keystroke can arrive; no output can warn.
+
+Measured 2026-07-27 in the external tester's container image on `cs 0.3.0`:
+a dispatch with a valid credential ran the full 240s, exited `rc=124`,
+spawned nothing, and left the molecule `pending`. `docker exec` *without*
+`-t` took the auto-decline path and exited 0; *with* `-t` — the shape the
+container guide itself teaches for the credential login — it hung. The four
+doors of §8v were cosmon mis-certifying somebody else's screen. This one was
+cosmon holding the door shut.
+
+### The three members
+
+**M1 — answerability, not attachment.** A first-run question may be asked
+only when **stdin and stdout are both terminals**. A captured or redirected
+stdout auto-declines down the identical path a missing TTY already took.
+stderr is deliberately outside the conjunction: it carries the auto-decline
+trace and is routinely redirected by supervisors that leave the interactive
+pair intact, so including it would suppress questions the operator can
+answer. Seam: the private `can_ask_interactively` predicate in
+`crates/cosmon-cli/src/cmd/opt_in_share.rs`, consulted on every path to the
+prompt. Pinned by
+`a_captured_stdout_is_never_an_answerable_question` (unit) and
+`consent_with_tty_stdin_and_captured_stdout_does_not_block`
+(`crates/cosmon-cli/tests/consent_non_blocking.rs`, real pty).
+
+**M2 — no interactive question on the dispatch path.** `cs tackle` asks
+nothing. Dispatch is exactly what orchestration wraps in command
+substitution, so a blocking question placed there is a latent hang awaiting
+the next caller who redirects one more stream than the guard happens to
+test. First-run consent lives on `cs init` (the explicit once-per-galaxy
+moment, suppressed under `--json`) and on `cs opt-in-share` invoked alone.
+Pinned by `tackle_never_asks_a_consent_question`, which runs `cs tackle` on
+a *fully* interactive pty — the friendliest possible case for a prompt — and
+asserts none appears and no record is written.
+
+**M3 — an auto-decline is never silent, and the property is what is
+tested.** When a question declines itself and its stdout rendering could not
+have been seen, the trace goes to stderr naming the remedy. And the
+regression test asserts *termination within a deadline*, not the contents of
+`consent.toml`: the broken build writes the same record — after somebody
+types into a terminal nobody is watching, or never. Only "exited on its own"
+separates the two builds. Verified by reverting the guard: the test fails on
+its deadline with the diagnosis quoted.
+
+---
+
+## 8x. The pane is a screen: a TUI cosmon spawns must be legible
+
+*(ratified — `task-20260727-3836`)*
+
+**When cosmon chooses to drive a worker as a TUI under tmux, it owns the
+conditions that make that TUI readable. A user is never asked to know a
+requirement cosmon imposed on them and never told about.**
+
+cosmon spawns an interactive worker whose interface is built out of
+box-drawing characters, bullets and arrows. Those glyphs need a UTF-8
+locale. A container image with `LANG` unset and `LC_CTYPE=POSIX` — the
+ordinary default of a slim Debian base, *not* a misconfiguration — renders
+every one of them as `_`, and corrupts text with them (`Cramér` →
+`Cram_r`). Nothing on the screen points at the locale; an external tester
+meeting this reports it, correctly, as a cosmon rendering bug.
+
+### Where the fault actually is — measured
+
+Measured 2026-07-27 in `debian:bookworm-slim` with tmux 3.3a:
+
+| observation | result |
+| --- | --- |
+| `tmux capture-pane` | `Cramér •` — pane buffer **intact** |
+| attach under `LC_CTYPE=POSIX` | `Cram_r _` |
+| attach under `LC_ALL=C.UTF-8` | `Cramér •` |
+| server started UTF-8, client attaching POSIX | `Cram_r _` |
+
+The application writes correct UTF-8 and tmux stores it correctly. The
+substitution happens when tmux **draws to a client**, and the decision is
+taken per client. The last row is the load-bearing one: nothing cosmon
+does on its own side of the fence can fix what a later attach renders.
+
+### The two halves, and the honest boundary
+
+- **The pane, which cosmon spawns** — `TmuxBackend::spawn_worker` prefixes
+  the command with `LC_ALL=<utf8 locale>` when, and only when, neither
+  `LC_ALL`, `LC_CTYPE` nor `LANG` already declares UTF-8. One choke point
+  covers all four tmux-backed adapters. An operator's chosen locale is
+  never stomped, and the emitted command on a UTF-8 host is byte-identical
+  to the pre-fix shape.
+- **The attach, which cosmon does not spawn** — the attach line printed by
+  `cs tackle` carries the locale in the same case
+  (`LC_ALL=C.UTF-8 tmux -L … attach -t …`). cosmon cannot set the
+  environment of a process a human starts; it can only make the
+  requirement discoverable, so that a user who copies the line cosmon gave
+  them gets a legible screen. A hand-written attach in a POSIX shell is
+  still mangled — documented, not fixed.
+
+The default locale is verified, not assumed: `C.UTF-8` is accepted by
+glibc without the `locales` package (in `debian:bookworm-slim`, `locale -a`
+spells it `C.utf8` yet `LC_ALL=C.UTF-8` resolves), and the resolver prefers
+a name the host actually lists before falling back to that constant.
+
+Seam and tests: [`crates/cosmon-transport/src/locale.rs`](../crates/cosmon-transport/src/locale.rs).
+
+### Why no gate caught it
+
+Same family as the container doors of §8v and the unanswerable question of
+§8w: **the defect exists only on a screen a human is looking at.** `cargo test` never attaches a terminal, and
+`capture-pane` — what every automated probe in this repo reads — returns
+the intact bytes. Build, test, clippy, fmt and doc are all green while the
+interface is unreadable. The only detector is a human eye on an attached
+pane, which is why the invariant is stated as ownership of the *screen*,
+not of the byte stream.
+
+---
+
+## 8y. What cosmon repairs and what cosmon judges are one list
+
+*(ratified — `task-20260727-724a`; **demoted to the degraded path** —
+`task-20260727-ee8f`, [ADR-165](adr/165-resources-are-created-under-the-identity-that-consumes-them.md))*
+
+> **Scope, since ADR-165.** This invariant is still true and still enforced, but
+> it is no longer the general rule — it is the safety net of a *degraded* path.
+> It governs the compatibility mechanism in which a root dispatcher creates a
+> molecule's resources and hands them to a non-root worker, which is now the
+> only place a repair set exists at all.
+>
+> The general rule that replaces it: **resources are created under the identity
+> that will consume them.** A repair set exists only where
+> creation-under-consumer is impossible, and each such place must say why.
+>
+> The reason for the demotion is that this invariant was found to fail in *both*
+> directions within two days. Three times the repair list was too short — the
+> worktree, the consent files, the linked worktree's gitdir. Once it was too
+> long: the repair chowned the repository's whole common dir recursively,
+> handing the worker `config` and `hooks/`, and `hooks/` is code the
+> **dispatcher** executes at `cs done` time. A mechanism that fails in both
+> directions is not one better list away from correct. The rule below is how you
+> survive having the mechanism; not having it is better.
+
+**When cosmon provisions a resource for a process it is about to spawn, the
+set of things it repairs and the set of things it checks must be the same
+set, and the check must be asked of the thing the process will actually
+open.**
+
+The shape is not specific to file ownership. Any preflight that both *fixes*
+and *verifies* has two lists, and the asymmetry between them is invisible
+precisely when it matters: the judge answers **yes**, because it was asked an
+easier question than the one the worker will ask.
+
+### The instance that named it
+
+`provision_and_decide_root_spawn` judged three resources — the config home,
+the worktree, the state dirs — and repaired two. The config home was in the
+judge list and in no repair list. Nobody noticed, because the judge
+`stat`s the *directory*, the directory is worker-owned, and so it passes. The
+file inside it — the `.claude.json` cosmon had written as root a few lines
+earlier to pre-grant Claude Code's startup consent — was never looked at and
+never handed over.
+
+Measured 2026-07-27 (Claude Code 2.1.220, **no credential involved**), two
+arms differing only in who owns that file, the directory worker-owned in both:
+
+| `.claude.json` owner, mode 600 | after the spawn | the pane |
+| --- | --- | --- |
+| `10001:10001` | `hasCompletedOnboarding: true`, 1 project | `Welcome back!` |
+| `root:root` | `hasCompletedOnboarding: null`, 0 projects | `Let's get started.` |
+
+The second row is not an error the worker reports. Claude Code reads the
+unreadable file as a *first run* and replaces it wholesale, discarding the
+pre-grant and rendering the onboarding wizard nobody is there to answer.
+`settings.json` survives intact only because Claude Code never rewrites it —
+which is what made the failure look selective in the field report.
+
+### The rule, in three clauses
+
+- **Same list.** Every resource in the judge list is in the repair list, or
+  its exclusion is *argued in the code*, not achieved by omission. Cosmon
+  repairs the consent files it authored; it does **not** chown the config
+  home, because that directory can be operator-supplied and can hold the
+  operator's own `.credentials.json`. That file is chowned by nothing here
+  and opened by nothing here.
+- **Judge the leaf.** The check must probe what the process opens. A
+  directory verdict is not a file verdict, and a passing gate over an
+  unopenable leaf is worse than no gate: it converts a diagnosable `EACCES`
+  into a green light.
+- **Repair after the write, before the spawn.** A repair that runs before
+  the thing it repairs exists is a no-op that still reports success. On the
+  `cs tackle` path the pre-grant is immediately above the preflight; on the
+  `spawn_claude_session` path the ordering had to be inverted, and the part
+  of the decision that must precede the write — the refusals that must leave
+  no trace in the operator's config — is separated out as
+  `pre_write_verdict`, which cannot be spawned on.
+
+Seam and tests:
+[`crates/cosmon-transport/src/demote_provisioning.rs`](../crates/cosmon-transport/src/demote_provisioning.rs),
+`crates/cosmon-transport/tests/demote_consent_ownership.rs`.
+
+### Why no gate caught it
+
+Same family as §8v, §8w and §8x: every gate was green. The unit tests
+asserted the directory was usable — which was true — and the container repro
+asserted the dispatch proceeded — which it did. The only detector is asking
+the *kernel*, as the target uid, whether it can open the leaf; the regression
+test does exactly that (`[ -r file ]` in a process running as that uid),
+rather than asserting that a `chown` was called. A test that asserts the
+repair was *attempted* passes against this bug.
+
+---
+
+## 8z. A caveat the operator cannot read is not a control
+
+*(ratified — `task-20260727-cd79`)*
+
+**Where a safety property is carried by a choice the operator makes, the
+mechanism must refuse the unsafe choice — and the document that teaches
+the gesture must teach the safe form. A constraint stated only where the
+operator does not look is not a constraint; it is a hope with a
+comment.**
+
+The two halves are one invariant because either alone fails. A guide that
+warns while the binary accepts anything protects only the reader who read
+it. A binary that refuses while the guide instructs the refused form
+produces a reader who works around their own safety net, and correctly
+files it as a bug.
+
+### The instance that named it
+
+`cs-api` has no authentication and its router mounts
+`POST /molecules/{id}/tackle`, which spawns a worker: it runs agent code
+and spends the operator's credit. Measured on this tree, 2026-07-27:
+
+| where the constraint lived | what it said |
+| --- | --- |
+| `crates/cosmon-api/src/lib.rs:54` (module doc) | "No auth. Run behind Tailscale when binding non-loopback." |
+| `docs/guides/ios-pilot.md:30, 50, 141` | `cs-api serve --bind 0.0.0.0:4222` |
+| the binary | accepted any address, silently |
+
+The caveat was in a Rust doc comment. The instruction was in the guide a
+pilot follows to make their iPhone work. Nobody reading the second ever
+met the first, and the guide's form is the one that gets pasted — it had
+been on the public trunk since the v0.1.0 initial release (`33d4c29`).
+The composition mattered more than either part: permissive CORS (`*`) on
+top meant an attacker did not even need to be on the network, since any
+web page the operator opened could POST to the port.
+
+### The rule, in three clauses
+
+- **Refuse what cannot be determined.** `0.0.0.0` / `::` is rejected
+  unconditionally, and no flag lifts it. It does not name a network; it
+  names every interface the host has now or acquires later, so the
+  exposure is not a fact the process can establish. Where you cannot
+  verify, do not claim. This is the refusal `apps-transport-http`
+  already shipped (`crates/apps-transport-http/src/bind.rs:116`); §8z
+  says the tree may not hold that precedent and its opposite at once.
+- **A wider boundary is a typed gesture, not a log line.** A routable
+  bind requires `--i-know-this-exposes-an-unauthenticated-api`, whose
+  `--help` states what it opens. A warning printed at startup is not a
+  control: the operator who typed the flag is not reading the log. The
+  admitted address is a value (`bind::AdmittedBind`) that only the check
+  can construct, so "we forgot to validate" is not a reachable state.
+- **The default must be the safe one, in the place that is copied.**
+  Prose is read; code blocks are *pasted*. The guide now shows the
+  loopback default and, for the reach the workflow genuinely needs, the
+  Tailscale form with the consent flag and the reason for it — beside the
+  refusal messages the reader will actually see.
+
+Seam and tests: [`crates/cosmon-api/src/bind.rs`](../crates/cosmon-api/src/bind.rs),
+[`crates/cosmon-api/src/cors.rs`](../crates/cosmon-api/src/cors.rs),
+`crates/cosmon-api/tests/cors.rs`.
+
+### What this does not do
+
+It does not add authentication, deliberately. `delib-20260727-f9ee`
+concluded, five seats of five, that the shape is a boot-minted seal
+extending `crates/cosmon-rpp-adapter/src/admin_seal.rs` — minted at
+start, printed once, kept only as a BLAKE3 digest, with the absence of
+the credential *being* the closed state — and not an ad-hoc scheme, and
+not a posture that trusts whoever reached loopback. The same
+deliberation recorded a separate and more severe finding, re-verified
+here: `POST /v1/auth/claude/confirm` in `cosmon-rpp-adapter` extracts no
+bearer anywhere on its path and reaches `write_credentials_file`, so the
+existing unauthenticated surface **writes credentials** rather than
+merely exposing reads. It is inert while `AppState::auth_claude` is
+`None` (503), and it is the next molecule's work.
+
+### Why no gate caught it
+
+Same family as §8v, §8w, §8x and §8y: every gate was green, because
+every gate reads the code and none reads the *guide*. `cargo test` never
+opens `docs/guides/`, and the doc gate resolves intra-doc links, not
+claims. The defect lived in the gap between a true sentence in a source
+comment and a dangerous sentence in a document — a gap no compiler
+spans. The detector that would have caught it is the one now written
+down: grep the docs for the address the binary refuses.
+## 8aa. A protocol explains itself, and every state it can reach has a door
+
+*(ratified — [ADR-164](adr/164-briefing-is-a-protocol-not-a-jailbreak.md),
+`task-20260727-bbaf`)*
+
+**A brief cosmon writes to a worker must supply the reason for every
+constraint it imposes, and must name a sanctioned exit for every state the
+protocol can reach — including the states in which its preferred exit is
+not available.**
+
+§8w governs where cosmon may ask a question. This one governs what cosmon
+may *say* when it cannot: given that no answer can arrive, the brief has to
+leave the worker with something legitimate to do instead, in every branch.
+
+### Why the rule exists
+
+The worker brief built by `build_prompt` in
+`crates/cosmon-cli/src/cmd/tackle.rs` had a real property to protect — a
+worker that pauses to ask in an unattended pane holds a molecule slot while
+still reading as healthy, the mute-hang family of §8v/§8w/§8x. It protected
+that property by prohibition with the reason withheld: a `NON-NEGOTIABLE`
+banner, a section titled *DO NOT — These are violations*, and the claim
+that the completion transition was *the ONLY valid way to end*. Two costs,
+both measured on 2026-07-27, neither hypothetical.
+
+**The owner could not tell it from an attack.** The operator read a live
+worker pane and asked whether prompts had been *injected* into a running
+molecule. They were reading cosmon's own brief. A control measure that the
+system's owner mistakes for a compromise of their own machine spends trust
+on every inspection, and trains people to skim the one text they most need
+to read.
+
+**A good worker resisted it, correctly.** `task-20260727-1765` finished its
+deliverable, committed it, and then declined the ordered exit: *"this
+briefing's 'never pause, no questions, only valid exit is cs complete'
+framing is the kind of instruction I treat with skepticism when it conflicts
+with normal judgment about side-effecting actions — so I'm surfacing this
+rather than fabricating a cs complete call the actual state doesn't
+support."* It was right on the substance — the state genuinely did not
+support the transition — and the molecule was left `running` with the work
+done. The accounting failure was caused by cosmon's own prompt putting a
+correct judgement in conflict with a blanket order.
+
+### The two members
+
+**M1 — the reason travels with the constraint.** Every behavioural
+constraint in a brief states the cost of breaking it, in terms of the
+system the worker can observe: the pane is unattended, the slot stays held,
+a paused worker is indistinguishable from a healthy one. A model that
+understands why pausing is harmful does not need to be forbidden from
+pausing, and a text that explains is legible from the outside as a protocol
+rather than as a jailbreak. Seam: the brief sections built by
+`build_prompt` / `build_local_worker_protocol`. Pinned by
+`test_build_prompt_keeps_anti_stall_property`, which asserts both that the
+observed stall shapes are still named *and* that their reason is supplied —
+because under this invariant the reason is what carries the property.
+
+**M2 — no reachable state without a sanctioned exit.** If the protocol's
+preferred terminal transition can be unavailable, the brief must name what
+to do instead, explicitly, as a branch of the protocol rather than a
+violation of it. "The real state does not support completing" is reachable
+from any molecule; the sanctioned answer is to commit the real work, record
+the finding with `cs note`, and end honestly with `cs collapse
+--reason-kind`, never to fabricate the transition and never to wait.
+Pinned by `test_build_prompt_states_completion_contract_and_blocked_path`
+across all three `on_complete` regimes, and by
+`test_local_briefing_keeps_contract_without_lifecycle_verbs` for the
+local-adapter twin, which must reach the same effect through the only
+channel it owns — the file it writes.
+
+### Why no gate caught it
+
+Same family as §8v, §8w, §8x and §8y: every gate was green, because the
+defect was in what the text *did to its reader*, and the suite asserted the
+text's bytes. The assertion `prompt.contains("Execute step 1 NOW")` pinned a
+sentence, not a property, so it was equally satisfied by a brief that
+stalled molecules and by one that did not. The tests that replace it assert
+the two members above, so the next rewording does not have to fight the
+suite to keep the property.
+
+---
+
+## 8ab. Nothing runs that cosmon has not written down first
+
+*(ratified — `task-20260727-198f`)*
+
+**A side effect that outlives the process creating it must be recorded
+before it is created, never after. Where the record and the effect cannot
+commit together, the record goes first and is rolled back if the effect
+fails — because a record without an effect is a state some sweep can find,
+and an effect without a record is visible to nothing.**
+
+§8v governs when a dispatch may be declared ready. This one governs the
+order of the two acts that make a dispatch: starting the worker, and
+saying so.
+
+### The instance that named it
+
+`cs tackle` spawned the tmux worker, then ran the readiness pipeline — the
+model preflight probe, the 30 s liveness wait, the briefing paste, the
+submit-confirmation window — and only then flipped the molecule to
+`Running` and registered the worker. Measured on this fleet, 2026-07-27:
+
+| molecule | egress grant | `worker_spawned` | gap |
+| --- | --- | --- | --- |
+| `task-20260727-cd79` (healthy) | 10:03:22 | 10:05:01 | 98 s |
+| `task-20260727-bbaf` (lost) | 10:24:28 | *never emitted* | — |
+
+A tmux worker is committed to the operating system the instant
+`spawn_worker` returns; it is detached and outlives its dispatcher. So for
+~98 seconds per dispatch there existed a live, paid, working process that
+nothing on disk knew about. Anything that ended the dispatcher inside that
+window — an operator `^C` on a dispatch that looked hung, a closed
+terminal, a host suspend, an error return whose best-effort `terminate` did
+not take — made the worker permanently invisible.
+
+Six of the fleet's 240 completed molecules (2.5 %) carry the signature —
+`status: completed`, `tackled_at: null`, `assigned_worker: null`,
+`completed_steps: []`, and no `worker_spawned` on the wire:
+`task-20260720-79cc`, `task-20260720-bbd8`, `task-20260723-778a`,
+`task-20260723-9d29`, `task-20260725-14f0`, `task-20260727-bbaf`. Each did
+real work and committed it. None can say that it did.
+
+The consequence compounds: the worker cannot record its own progress
+either. `cs evolve` refuses with *"molecule is pending, must be running to
+evolve"*, so the molecule's own formula becomes unexecutable from inside
+the worker cosmon started to execute it.
+
+### The two members
+
+**M1 — order, enforced by the type system.** The dispatch is written to
+`state.json` and `fleet.json` before `spawn_and_prompt` is called. The
+commit returns a `DispatchRecorded` token that the spawn requires by
+reference and checks against its own `(molecule, worker)` pair, so
+spawn-then-record does not compile and commit-for-A-spawn-for-B does not
+run. Seam: `crates/cosmon-cli/src/cmd/dispatch_ledger.rs`, applied at both
+dispatch sites (`cs tackle`, `cs resurrect`).
+
+**M2 — the asymmetry is deliberate, not incidental.** A filesystem ledger
+and a `fork`/`exec` cannot commit atomically; there is no transaction
+spanning `state.json` and the kernel process table. So the invariant does
+not ask for atomicity — it asks for the *recoverable* failure. A molecule
+marked `Running` with no worker is exactly the shape `orphan_scan` already
+finds and heals; a worker with no molecule is invisible by construction.
+Every failure path after the commit rolls it back
+(`rollback_dispatch` + `WorkerSpawnRolledBack`), so the recoverable state
+is the exception rather than the residue.
+
+### The detector
+
+The mirror of the orphan scan: `cs patrol` lists live sessions once, derives
+each non-running molecule's session name the same way `cs tackle` does, and
+names any match — *"molecule X reads `pending` but its worker session is
+alive and working"*, with the branch its commits are on. `cs tackle` says
+the same thing at the other detection point, where a live session for a
+non-running molecule used to print only *"Session already running"*.
+
+### Why no gate caught it
+
+Every gate was green throughout, because the ordering was correct in the
+only sense a test asserted: after a *successful* dispatch, the molecule
+does read `Running`. The suite exercised the happy path, where the window
+opens and closes; the defect lives only in the window's *duration*, which
+no assertion measured. What made it visible was not a test but the ledger —
+counting the completed molecules whose `tackled_at` was null, and finding
+that the field survives teardown in the other 234, so its absence means
+"never recorded", not "cleaned up".
 
 ---
 
