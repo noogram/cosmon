@@ -24,11 +24,19 @@ exits non-zero.** The corpse is the exit code, not an operator's opinion.
 
 ## The public projection boundary
 
-Cosmon releases a clean public tree from a confidential development repository
-through `scripts/release/cosmon-release-resync.sh`: clone into an isolated object
-store, purge private paths from every publishable commit, genericize retained
-content, rewrite author/committer/message channels to Noogram, then audit the
-exact projection. The development repository is never pushed or rewritten.
+The development trunk and the public trunk are **two histories, not one**. The
+public trunk advances by ONE signed commit per release whose tree is the
+development tree verbatim and whose single parent is the previous public tip.
+`git commit-tree` is the entire mechanism: it takes a tree object that already
+exists and gives it a new parent, so it needs no checkout, no working tree, and
+it cannot conflict. The development repository is never pushed or rewritten.
+
+> This paragraph used to name `scripts/release/cosmon-release-resync.sh` as the
+> chain that produced the projection. `git log --all` on that path is EMPTY: it
+> was not deleted, it was never written — the same defect class as
+> `publish.sh`, which this document ordered for years while the file did not
+> exist. `git grep -l commit-tree` over the tree also returned nothing, so the
+> mechanism the last release depended on existed in no file. It exists now.
 
 ## The fixed sequence (janis keystone — do not reorder)
 
@@ -37,14 +45,28 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
 *downstream of the flip itself*. Therefore:
 
 ```
-   project  →  audit  →  publish one ref  →  protect
+   audit  →  build the candidate  →  sign and publish one ref  →  protect
 ```
 
-1. **project** — create a fresh isolated clone with the release-resync chain.
-2. **audit** — require `scripts/publish.sh --check` and the projection audit to pass.
-3. **publish one ref** — an operator-only gesture; never use `--all` or `--mirror`.
-4. **protect** — `scripts/apply-branch-protection.sh` (wires required checks +
+1. **audit + build** — `scripts/release/crossing.sh`, run from the development
+   worktree. It refuses on a dirty tree, on a local/remote trunk disagreement,
+   on a publish-gate waiver this very candidate introduces, and on a red
+   `scripts/publish.sh --check`; only then does it capture the tree and build
+   the UNSIGNED candidate at `refs/cosmon/crossing/v<version>`. Audit, tree
+   capture and crossing happen in one worktree in one breath, because
+   `publish.sh` audits the checkout it runs in and has no `--tree` argument.
+2. **sign and publish one ref** — the one command `crossing.sh` prints:
+   `scripts/release/sign-and-push.sh`, with the tree and expected parent pinned
+   as explicit arguments. It signs before it moves any ref and swaps the branch
+   compare-and-swap, so an unavailable key or a moved ref leaves at worst a
+   dangling object `gc` collects. Operator-only; never `--all` or `--mirror`.
+3. **protect** — `scripts/apply-branch-protection.sh` (wires required checks +
    push-protection; only settable once public).
+
+An accidental push from the development repository is made *unrepresentable*
+rather than caught: `git remote set-url --push origin 'DISABLED://…'`, once, in
+daylight. `crossing.sh` refuses until that is done, and `sign-and-push.sh`
+names the fetch URL explicitly for the deliberate push.
 
 ## The three membranes (ADR-133) — whole-file, inside-the-file, structural
 

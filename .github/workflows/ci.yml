@@ -145,6 +145,13 @@ jobs:
       # This constructs both ways a tree can move mid-build and asserts the
       # bench still calls the guard AFTER the build, not only before it.
       - run: ./scripts/source-provenance.test.sh
+      # The crossing is the only thing that moves the public trunk, and its
+      # value is entirely in what it REFUSES: a dirty tree (which would ship
+      # the previous commit's content and exit green), two trunks that
+      # disagree, a waiver the candidate introduces, a red publish gate, and a
+      # run whose audited worktree is not the one it crosses from. Hermetic:
+      # temp-dir fixture repos with a local bare remote, no network, no key.
+      - run: ./scripts/release/crossing.test.sh
 
   fixture-independence:
     name: Fixture independence (tautological-fixture tripwire)
