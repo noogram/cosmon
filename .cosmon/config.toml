@@ -1,6 +1,19 @@
 [project]
 project_id = "cosmon-9de1"
 
+# The private integration line. Every `cs done` merges here.
+#
+# `main` is a faithful local mirror of `origin/main` — the public trunk, which
+# enforces linear history and signed commits, so a merge commit cannot land on
+# it and must never be composed against it. Naming the private side is what
+# makes that structural rather than caught at the push. Publication crosses from
+# `dev` to `main` as one signed projection commit; it is not a merge.
+#
+# Pinned explicitly rather than left to the `origin/HEAD` fallback: if trunk
+# resolution drifts, `post_merge` starts declaring ordinary harvests off-trunk
+# and stops refreshing the installed binary.
+trunk_branch = "dev"
+
 # Cosmon project configuration.
 # All sections are optional — missing values use defaults.
 #
