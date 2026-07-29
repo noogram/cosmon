@@ -571,12 +571,20 @@ jobs:
       - name: Install system libdbus (Linux keyring backend)
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
-      - name: Validate merge commits against ledger
+      # Names the refusal ADR-052 §D5 actually assigns to CI: the
+      # `(<mol_id>)` provenance line on every merge commit. The ledger half
+      # of §I9 belongs to .cosmon/hooks/pre-merge-commit, which reads a
+      # working tree; on this repo's ADR-055 team residence `.cosmon/state/`
+      # is gitignored, so no tree here can carry the ledger and the script
+      # says so up front. See task-20260729-dc53.
+      - name: Validate merge-commit provenance (ledger where residence keeps it)
         run: bash scripts/check-provenance.sh
       - name: Self-test the gate against the c1cb pathology
         run: bash tests/harness/provenance-gate-test.sh
       - name: Self-test the base-sync exemption (ADR-052 §D5-bis)
         run: bash tests/harness/provenance-base-sync-test.sh
+      - name: Self-test ledger coverage vs residence (ADR-055)
+        run: bash tests/harness/provenance-residence-test.sh
 
   license-partition:
     # Living per-crate license table gate. The script in

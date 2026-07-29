@@ -18,6 +18,17 @@
 #   5. CI mirror — scripts/check-provenance.sh on the merged commit ladder
 #      reports the failing case AND the passing case correctly.
 #
+# Read scenario 5 with its scope in mind (ADR-052 §D5-ter). The repo this
+# harness builds *commits* .cosmon/state/events.jsonl, i.e. an ADR-055
+# `solo` residence. cosmon-the-repo is a `team` residence, where
+# .cosmon/state/ is gitignored and no tree can carry the ledger — so
+# scenario 5 exercises a ledger-present world the real repo cannot
+# instantiate, and a green run here says nothing about whether the ledger
+# half binds in CI. It does not. What the CI mirror binds on a team
+# residence is the subject-shape check, which is the one refusal §D5
+# assigns to CI. The residence axis itself is covered by
+# tests/harness/provenance-residence-test.sh.
+#
 # Exit codes:
 #   0  every scenario passed
 #   1  at least one scenario failed
