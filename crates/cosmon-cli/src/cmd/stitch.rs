@@ -227,8 +227,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     let repo_root = find_repo_root()?;
 
+    // The galaxy's declared trunk, read once at this edge. It is the rung the
+    // batch falls back to when the root molecule carries no `--base` and no
+    // `COSMON_BASE_BRANCH` is exported (task-20260729-b016).
+    let configured_trunk =
+        cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
+            .ok()
+            .and_then(|cfg| cfg.project.trunk_branch);
+
     if args.dry_run {
-        let rows = plan_rows(&store, &repo_root, &order, &root_id);
+        let rows = plan_rows(
+            &store,
+            &repo_root,
+            &order,
+            &root_id,
+            configured_trunk.as_deref(),
+        );
         emit_report(ctx, &rows);
         return Ok(());
     }
@@ -259,12 +273,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // the ambient chain exactly as before. Members whose persisted base
         // disagrees are refused per-row below rather than silently landed on
         // the wrong trunk.
-        let base = batch_base(s, &repo_root, &root_id);
+        let resolved = batch_base(s, &repo_root, &root_id, configured_trunk.as_deref());
+        let base = resolved.branch;
         let current =
             current_branch_name(&repo_root).unwrap_or_else(|| "(detached HEAD)".to_owned());
         if current != base {
+            // Name where the base came from: five rungs of the chain can all
+            // produce `main`, and a refusal that names only the branch cannot
+            // be acted on (task-20260729-b016).
+            let origin = resolved.source.describe();
             return Err(anyhow::anyhow!(
-                "cs stitch refuses: HEAD is on `{current}` but the configured base branch is `{base}`.\n\
+                "cs stitch refuses: HEAD is on `{current}` but the base branch resolved to `{base}` (from {origin}).\n\
                  Run `cs stitch` from the base checkout (e.g. `git switch {base}` first)."
             ));
         }
@@ -672,8 +691,9 @@ fn plan_rows(
     repo_root: &Path,
     order: &[MoleculeId],
     root_id: &MoleculeId,
+    configured_trunk: Option<&str>,
 ) -> Vec<StitchRow> {
-    let base = batch_base(store, repo_root, root_id);
+    let base = batch_base(store, repo_root, root_id, configured_trunk).branch;
     order
         .iter()
         .map(|mol_id| {
@@ -819,14 +839,24 @@ fn current_branch_name(repo_root: &Path) -> Option<String> {
 ///
 /// Precedence mirrors `cs done`: the **root** molecule's persisted
 /// `base_branch` (stamped by `cs tackle --base`), then `COSMON_BASE_BRANCH`,
-/// then `origin/HEAD`, then `"main"`. A batch has exactly one trunk because
-/// `git merge` advances the current HEAD, never a branch by name.
-fn batch_base(store: &FileStore, repo_root: &Path, root_id: &MoleculeId) -> String {
+/// then the galaxy's `[project] trunk_branch`, then `origin/HEAD`, then
+/// `"main"`. A batch has exactly one trunk because `git merge` advances the
+/// current HEAD, never a branch by name.
+///
+/// `configured_trunk` is threaded in by the caller rather than read here: the
+/// config load is the command's edge, and passing the value keeps this
+/// function a pure decision over its inputs.
+fn batch_base(
+    store: &FileStore,
+    repo_root: &Path,
+    root_id: &MoleculeId,
+    configured_trunk: Option<&str>,
+) -> cosmon_cli::base_branch::ResolvedBase {
     let persisted = store
         .load_molecule(root_id)
         .ok()
         .and_then(|m| m.base_branch);
-    cosmon_cli::base_branch::resolve(repo_root, persisted.as_deref())
+    cosmon_cli::base_branch::resolve_with_source(repo_root, persisted.as_deref(), configured_trunk)
 }
 
 /// A refusal row when a molecule's own base disagrees with the batch trunk.

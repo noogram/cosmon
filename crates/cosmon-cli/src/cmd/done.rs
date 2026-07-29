@@ -363,8 +363,13 @@ fn compute_teardown_plan(
     let wid = WorkerId::new(session_name)?;
     let repo_root = find_repo_root()?;
     // The plan must judge ancestry against the same trunk the real teardown
-    // would merge into — the molecule's own base when it has one.
-    let base = resolve_base_branch_for(&repo_root, persisted_base);
+    // would merge into — the molecule's own base when it has one, else the
+    // galaxy's configured trunk.
+    let base = resolve_base_branch_for(
+        &repo_root,
+        persisted_base,
+        configured_trunk_for(ctx).as_deref(),
+    );
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
 
     let mut planned_actions = Vec::new();
@@ -670,14 +675,32 @@ fn unmerged_work_remains(repo_root: &Path, branch: &str, base: &str) -> bool {
 /// 1. `persisted` — the molecule's `base_branch`, stamped by
 ///    `cs tackle --base <branch>`.
 /// 2. `COSMON_BASE_BRANCH`.
-/// 3. `origin/HEAD`.
-/// 4. `"main"`.
+/// 3. `configured_trunk` — `[project] trunk_branch` in `.cosmon/config.toml`.
+/// 4. `origin/HEAD`.
+/// 5. `"main"`.
 ///
 /// A molecule with no persisted base (every legacy molecule, and every
 /// molecule tackled without `--base`) resolves through the ambient chain
 /// alone — the backward-compatibility contract.
-fn resolve_base_branch_for(repo_root: &Path, persisted: Option<&str>) -> String {
-    cosmon_cli::base_branch::resolve(repo_root, persisted)
+fn resolve_base_branch_for(
+    repo_root: &Path,
+    persisted: Option<&str>,
+    configured_trunk: Option<&str>,
+) -> String {
+    cosmon_cli::base_branch::resolve(repo_root, persisted, configured_trunk)
+}
+
+/// The galaxy's `[project] trunk_branch` declaration, when it has one.
+///
+/// The config read lives here, at the command edge, so
+/// [`cosmon_cli::base_branch`] stays a pure function of its arguments. A
+/// missing or unreadable config is not an error: it simply means the galaxy
+/// never named its trunk, and resolution falls through to `origin/HEAD`.
+fn configured_trunk_for(ctx: &Context) -> Option<String> {
+    let config_path = super::resolve_config_from_context(ctx);
+    cosmon_filestore::load_project_config(&config_path)
+        .ok()
+        .and_then(|cfg| cfg.project.trunk_branch)
 }
 
 /// Verify that the branch tip is an ancestor of the configured *base*
@@ -1679,7 +1702,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             let reclaimed = if already_merged {
                 find_repo_root().map_or_else(
                     |_| Vec::new(),
-                    |root| reclaim_merged_git_artifacts(&root, &mol_id, mol.base_branch.as_deref()),
+                    |root| {
+                        reclaim_merged_git_artifacts(
+                            &root,
+                            &mol_id,
+                            mol.base_branch.as_deref(),
+                            configured_trunk_for(ctx).as_deref(),
+                        )
+                    },
                 )
             } else {
                 Vec::new()
@@ -1776,10 +1806,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     Probed against `repo_root` (the cosmon checkout itself, not the
     //     worker's `.worktrees/<mol>` worktree) because shared remotes are
     //     visible from every worktree of the same repository.
-    let blocklist_config_path = super::resolve_config_from_context(ctx);
-    let blocklist_cfg = cosmon_filestore::load_project_config(&blocklist_config_path)
+    let project_config_path = super::resolve_config_from_context(ctx);
+    let project_cfg = cosmon_filestore::load_project_config(&project_config_path)
         .unwrap_or_else(|_| ProjectConfig::default());
-    check_git_remote_blocklist(&repo_root, &blocklist_cfg.git_remote_blocklist)?;
+    check_git_remote_blocklist(&repo_root, &project_cfg.git_remote_blocklist)?;
 
     // 1c. Publish-identity gate (ADR-128 §V1 — the D7 publish-closure
     //     widening). The git author/committer identity is stamped into every
@@ -1792,11 +1822,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     that does not configure the guard.
     // Resolved ONCE for the whole teardown, molecule-first (task-20260725-61fa):
     // the base persisted by `cs tackle --base` outranks `COSMON_BASE_BRANCH`,
-    // `origin/HEAD` and the `main` default. Every guard, probe and merge below
-    // reads this binding rather than re-resolving, so they cannot disagree —
-    // and a `cs done` fired from a tmux hook with a frozen environment still
-    // targets the trunk the molecule was cut from.
-    let base_branch = resolve_base_branch_for(&repo_root, mol.base_branch.as_deref());
+    // which outranks the galaxy's `[project] trunk_branch`, which outranks
+    // `origin/HEAD` and the `main` default (task-20260729-b016). Every guard,
+    // probe and merge below reads this binding rather than re-resolving, so
+    // they cannot disagree — and a `cs done` fired from a tmux hook with a
+    // frozen environment still targets the trunk the molecule was cut from.
+    //
+    // The winning chain link is kept alongside the name: five sources can all
+    // produce `main`, so a refusal that names only the branch cannot be acted
+    // on.
+    let resolved_base = cosmon_cli::base_branch::resolve_with_source(
+        &repo_root,
+        mol.base_branch.as_deref(),
+        project_cfg.project.trunk_branch.as_deref(),
+    );
+    let base_source = resolved_base.source;
+    let base_branch = resolved_base.branch;
 
     // 1b'. Range non-emptiness precondition (delib-20260717-194b, F5 / adversary
     //      A6). Every range-scoped gate below scans `<base>..<branch>`. If base
@@ -1829,7 +1870,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &repo_root,
         &branch_name,
         &base_branch,
-        &blocklist_cfg.publish_identity,
+        &project_cfg.publish_identity,
     )?;
 
     // 1c''. Author-slot assertion (delib-20260717-194b, F4 — the load-bearing
@@ -1850,7 +1891,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //       zero-config galaxy stays byte-identical (F9). A configured galaxy
     //       fails closed when operator identity cannot be resolved: silently
     //       skipping would disable the assertion where it is needed most.
-    if !args.no_merge && !blocklist_cfg.attribution.is_empty() {
+    if !args.no_merge && !project_cfg.attribution.is_empty() {
         let operator = require_operator_identity(&repo_root)?;
         assert_operator_authored_commits(&repo_root, &base_branch, &branch_name, &operator)?;
     }
@@ -1871,7 +1912,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &branch_name,
         &base_branch,
         &scope_perimeter,
-        blocklist_cfg.scope_guard.strict,
+        project_cfg.scope_guard.strict,
     )?;
 
     // 1d. Pre-done gate — the blocking `[hooks] pre_done` hook
@@ -1896,7 +1937,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     touches nothing: no lock contention, no merge, no `merged_at`
     //     stamp, no worktree/branch/tmux teardown. The operator (or worker)
     //     fixes the gap and reruns `cs done`.
-    if let Some(ref hook_cmd) = blocklist_cfg.hooks.pre_done {
+    if let Some(ref hook_cmd) = project_cfg.hooks.pre_done {
         if pre_done_hook_skipped(args.skip_pre_done_hook) {
             eprintln!(
                 "⚠ pre_done gate skipped by operator kill-switch (--skip-pre-done-hook / COSMON_SKIP_PRE_DONE_HOOK): {hook_cmd}"
@@ -2095,18 +2136,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let real_adapter = adapter_for_coauthor(
             folded_adapter(&state_dir, &mol_id),
             &mol_id,
-            !blocklist_cfg.attribution.coauthor_trailers(None).is_empty(),
+            !project_cfg.attribution.coauthor_trailers(None).is_empty(),
             &mut warnings,
         );
-        blocklist_cfg
+        project_cfg
             .attribution
             .coauthor_trailers(real_adapter.as_deref())
     };
-    warn_unstamped_attribution(
-        &blocklist_cfg.attribution,
-        &coauthor_trailers,
-        &mut warnings,
-    );
+    warn_unstamped_attribution(&project_cfg.attribution, &coauthor_trailers, &mut warnings);
 
     // Scheduler-derived lineage trailers (delib-20260720-cff4, Phase 1).
     // The completion merge is stamped with the mission lineage read from the
@@ -2155,6 +2192,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             &repo_root,
             &branch_name,
             &base_branch,
+            base_source,
             args.strategy,
             &session_name,
             &socket,
@@ -2295,7 +2333,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // past a broken main.
     if merge_succeeded {
         let gate_outcome = match pre_merge_head.as_deref() {
-            Some(pmh) => match run_post_merge_gate(&repo_root, pmh, &blocklist_cfg.gates) {
+            Some(pmh) => match run_post_merge_gate(&repo_root, pmh, &project_cfg.gates) {
                 Ok(outcome) => outcome,
                 // A gate *error* — a declared command or `cargo check` returned
                 // non-zero, or a manifest was unparseable. Roll main back to its
@@ -2371,7 +2409,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // implementation gated on the flag alone and ignored `expected`
                 // for policy — the deviation ADR-158 documented; restored here to
                 // the ratified rule.
-                let fail_closed = *expected || blocklist_cfg.gates.fail_closed_on_unverified;
+                let fail_closed = *expected || project_cfg.gates.fail_closed_on_unverified;
                 if fail_closed {
                     let expectation = if *expected {
                         "a gate was expected but a code diff went unchecked \
@@ -2563,6 +2601,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // explicit `[project] trunk_branch` config → `origin/HEAD` → `main`
             // chain, so `main` is only ever *assumed* when nothing else answers
             // and the operator can pin it outright.
+            //
+            // Since task-20260729-b016 the same `trunk_branch` also feeds the
+            // *destination* chain (`resolve`), one rung below
+            // `COSMON_BASE_BRANCH`. On a galaxy that pins its trunk and tackles
+            // without `--base`, base and trunk therefore agree by construction
+            // and this gate opens — which is the point: naming the trunk is
+            // what makes the deploy legitimate, not a coincidence of defaults.
             //
             // The compile gate above is deliberately NOT bounded this way: it
             // VERIFIES the merge result (useful on any base), whereas the hook
@@ -3062,6 +3107,7 @@ fn reclaim_merged_git_artifacts(
     repo_root: &Path,
     mol_id: &MoleculeId,
     persisted_base: Option<&str>,
+    configured_trunk: Option<&str>,
 ) -> Vec<String> {
     let mut actions = Vec::new();
     let worktree_path = repo_root.join(".worktrees").join(mol_id.as_str());
@@ -3078,7 +3124,7 @@ fn reclaim_merged_git_artifacts(
     }
 
     if branch_exists(repo_root, &branch_name) {
-        let base_branch = resolve_base_branch_for(repo_root, persisted_base);
+        let base_branch = resolve_base_branch_for(repo_root, persisted_base, configured_trunk);
         // Ancestry is the load-bearing check, not `merged_at` — see the doc
         // comment. If the branch is not reachable from base it is the only
         // copy of the work, and deleting it here would be the 5eba wipe.
@@ -3340,6 +3386,7 @@ fn try_merge_with_escalation(
     repo_root: &Path,
     branch: &str,
     base: &str,
+    base_source: cosmon_cli::base_branch::BaseSource,
     strategy: MergeStrategy,
     session_name: &str,
     socket: &str,
@@ -3380,8 +3427,15 @@ fn try_merge_with_escalation(
             ));
         }
         MergeOutcome::NotOnBase { current, base } => {
+            // Name the SOURCE, not only the branch. Five links of the
+            // precedence chain can all produce `main`, so "the configured base
+            // branch is `main`" is true and unactionable on a galaxy whose
+            // trunk is misconfigured: the operator cannot tell an explicit
+            // `[project] trunk_branch = "main"` from a fallback that got there
+            // because nothing else answered (task-20260729-b016).
+            let origin = base_source.describe();
             return Err(anyhow::anyhow!(
-                "teardown aborted: HEAD is on `{current}` but the configured base branch is `{base}`.\n\
+                "teardown aborted: HEAD is on `{current}` but the base branch resolved to `{base}` (from {origin}).\n\
                  \n\
                  `cs done` would silently merge {branch} into `{current}` instead of `{base}` \
                  (git merges into the current HEAD, not into a branch by name). The work would \
@@ -6443,7 +6497,7 @@ mod tests {
                 .success()
         );
 
-        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None);
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None, None);
 
         assert!(
             actions.contains(&"deleted_branch".to_owned()),
@@ -6471,7 +6525,7 @@ mod tests {
         assert!(git(repo, &["checkout", "-q", "main"]).status.success());
         // Deliberately NOT merged.
 
-        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None);
+        let actions = reclaim_merged_git_artifacts(repo, &mol_id, None, None);
 
         assert!(
             !actions.contains(&"deleted_branch".to_owned()),
@@ -6491,7 +6545,7 @@ mod tests {
         init_repo(repo);
 
         let mol_id = MoleculeId::new("cs-20260719-non1").unwrap();
-        assert!(reclaim_merged_git_artifacts(repo, &mol_id, None).is_empty());
+        assert!(reclaim_merged_git_artifacts(repo, &mol_id, None, None).is_empty());
     }
 
     #[test]
@@ -8349,7 +8403,7 @@ mod tests {
         init_repo(repo);
 
         assert_eq!(
-            resolve_base_branch_for(repo, Some("release/2.0")),
+            resolve_base_branch_for(repo, Some("release/2.0"), None),
             "release/2.0",
             "a molecule that carries its own base is never overruled by the \
              environment — that is the whole point of persisting it"
@@ -8367,7 +8421,7 @@ mod tests {
         let repo = tmp.path();
         init_repo(repo);
 
-        assert_eq!(resolve_base_branch_for(repo, None), "main");
+        assert_eq!(resolve_base_branch_for(repo, None, None), "main");
     }
 
     /// The `NotOnBase` pre-flight is not weakened by the molecule's base —
@@ -8418,7 +8472,7 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_base_branch_for(repo, None),
+            resolve_base_branch_for(repo, None, None),
             "main",
             "fallback must be the cosmon default branch name"
         );
@@ -8477,6 +8531,65 @@ mod tests {
             cosmon_cli::base_branch::reference_trunk(repo, Some("release/2.0")),
             "release/2.0",
             "an explicit trunk_branch must win over origin/HEAD discovery"
+        );
+    }
+
+    /// The regression task-20260729-b016 was opened for: `trunk_branch` named
+    /// the trunk but did not govern the merge DESTINATION. With
+    /// `trunk_branch = "dev"` committed and `origin/HEAD` advertising `main`,
+    /// `cs done` resolved `main` and refused with `NotOnBase` — the config was
+    /// inert everywhere except the deploy gate.
+    ///
+    /// Repo-backed on purpose: `origin/HEAD` must be able to answer, so this
+    /// pins the *ordering* of the two rungs rather than the absence of one.
+    #[test]
+    fn configured_trunk_beats_origin_head_for_the_merge_destination() {
+        if std::env::var_os(cosmon_cli::base_branch::BASE_BRANCH_ENV).is_some() {
+            // The operator's session override outranks both rungs under test.
+            return;
+        }
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(
+            repo,
+            &[
+                "symbolic-ref",
+                "refs/remotes/origin/HEAD",
+                "refs/remotes/origin/main",
+            ],
+        )
+        .status
+        .success());
+
+        // Setup confidence: without the config, the destination is `main`.
+        assert_eq!(
+            resolve_base_branch_for(repo, None, None),
+            "main",
+            "precondition: origin/HEAD advertises main"
+        );
+
+        assert_eq!(
+            resolve_base_branch_for(repo, None, Some("dev")),
+            "dev",
+            "a galaxy that names its trunk must merge THERE, not onto whatever \
+             origin/HEAD advertises"
+        );
+    }
+
+    /// The molecule keeps the last word. A `--base` stamped at tackle time
+    /// survives a later `trunk_branch` edit: retargeting an in-flight molecule
+    /// by editing config would silently rewrite where finished work lands.
+    #[test]
+    fn persisted_base_still_beats_configured_trunk() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+
+        assert_eq!(
+            resolve_base_branch_for(repo, Some("release/2.0"), Some("dev")),
+            "release/2.0",
+            "config must not retarget a molecule that already carries a base"
         );
     }
 
@@ -9665,6 +9778,7 @@ mod tests {
             repo,
             "feat/esc-nopropel",
             "main",
+            cosmon_cli::base_branch::BaseSource::Default,
             MergeStrategy::Merge,
             "task-20260411-e001",
             "test-socket",
@@ -9744,6 +9858,7 @@ mod tests {
             repo,
             "feat/esc-clean",
             "main",
+            cosmon_cli::base_branch::BaseSource::Default,
             MergeStrategy::Merge,
             "task-20260411-e002",
             "test-socket",
@@ -9826,6 +9941,7 @@ mod tests {
             repo,
             "feat/esc-exhaust",
             "main",
+            cosmon_cli::base_branch::BaseSource::Default,
             MergeStrategy::Merge,
             "task-20260411-e006",
             "test-socket",
@@ -9924,6 +10040,7 @@ mod tests {
             repo,
             "feat/esc-already",
             "main",
+            cosmon_cli::base_branch::BaseSource::Default,
             MergeStrategy::Merge,
             "task-20260411-e004",
             "test-socket",
@@ -9959,6 +10076,7 @@ mod tests {
             repo,
             "feat/does-not-exist",
             "main",
+            cosmon_cli::base_branch::BaseSource::Default,
             MergeStrategy::Merge,
             "task-20260411-e005",
             "test-socket",
@@ -11901,7 +12019,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         // Sanity: precondition is HEAD ≠ base.
         let head = current_branch_name(repo).unwrap();
         assert_eq!(head, "feat/pilot-elsewhere");
-        assert_ne!(head, resolve_base_branch_for(repo, None));
+        assert_ne!(head, resolve_base_branch_for(repo, None, None));
 
         // The merge attempt MUST refuse — and must NOT advance the
         // current branch (which would be the silent failure).

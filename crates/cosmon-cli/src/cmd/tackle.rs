@@ -7119,6 +7119,26 @@ fn mark_detached_local_worker_stopped(
     Ok(())
 }
 
+/// The integration base of the molecule this job serves.
+///
+/// The detached local worker has no [`Context`] to ask for the galaxy's
+/// `[project] trunk_branch`, so it walks up from the state dir frozen in its
+/// own [`LocalWorkerJob`]. A missing or unreadable config is not an error: it
+/// means the galaxy never named its trunk, and resolution falls through to
+/// `origin/HEAD` exactly as before (task-20260729-b016).
+fn job_base_branch(job: &LocalWorkerJob, mol: &MoleculeData) -> String {
+    let configured_trunk = cosmon_filestore::load_project_config(
+        &cosmon_filestore::resolve_config_path_from(&job.state_dir),
+    )
+    .ok()
+    .and_then(|cfg| cfg.project.trunk_branch);
+    cosmon_cli::base_branch::resolve(
+        &job.worktree_path,
+        mol.base_branch.as_deref(),
+        configured_trunk.as_deref(),
+    )
+}
+
 /// Entry point for the detached local worker. It is intentionally not a
 /// second tackle path: all dispatch choices are frozen in [`LocalWorkerJob`],
 /// and this process only owns inference plus the terminal lifecycle emit.
@@ -7155,10 +7175,7 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // (task-20260725-61fa): on a molecule tackled with `--base <other>`, a
     // `merge-base HEAD main` would report the entire `main`↔base delta as this
     // worker's output.
-    let baseline = WorktreeBaseline::capture(
-        &job.worktree_path,
-        &cosmon_cli::base_branch::resolve(&job.worktree_path, mol.base_branch.as_deref()),
-    );
+    let baseline = WorktreeBaseline::capture(&job.worktree_path, &job_base_branch(&job, &mol));
 
     let result = run_local_agent_loop(
         &job.adapter_name,
