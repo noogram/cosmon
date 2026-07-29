@@ -513,7 +513,8 @@ pub enum EventV2 {
     /// `cs done` runs `[hooks].post_merge` (typically `just install`) after a
     /// merge lands, then pushes the outcome — `post_merge: <cmd> (exit 0)`,
     /// `post_merge hook skipped (untrusted repo)`, `deploy verified: cs @
-    /// <sha>` — into the human-facing `actions`/`warnings` **stdout** report.
+    /// tree <tree>` — into the human-facing `actions`/`warnings` **stdout**
+    /// report.
     /// That is fine for an operator `cs done`, who reads stdout. But when the
     /// **runtime** harvests a completed molecule it shells out `cs done` with
     /// `Stdio::null()` on stdout (see `cosmon_runtime::resident::shell_out`),
@@ -2952,12 +2953,16 @@ pub enum AdapterProbeResult {
 pub enum PostMergeHookResult {
     /// The hook ran to completion. `exit_code` is its process exit status;
     /// `deploy_verified` records whether the freshly-installed binary's build
-    /// commit matched the just-merged HEAD (`false` on divergence — the deploy
-    /// gap — or when verification could not run).
+    /// *tree* matched the just-merged HEAD's tree (`false` on divergence — the
+    /// deploy gap — or when verification could not run).
+    ///
+    /// Trees, not commit SHAs: a SHA is a graph coordinate that any history
+    /// rewrite moves, so comparing SHAs marks a byte-identical binary as
+    /// unverified. The tree OID is the content hash and is the invariant.
     Ran {
         /// The hook process's exit code.
         exit_code: i32,
-        /// Whether the post-deploy binary-commit check confirmed a fresh image.
+        /// Whether the post-deploy binary-tree check confirmed a fresh image.
         deploy_verified: bool,
     },
     /// The hook was **not run**. `reason` names why (e.g. `"untrusted repo"`).

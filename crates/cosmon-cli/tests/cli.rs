@@ -185,6 +185,47 @@ fn test_cli_version() {
             "--version must carry the short build SHA: {stdout}"
         );
     }
+
+    // The tree stamp is the operand `cs done` compares. It must be on
+    // `--version` too: when a DEPLOY GAP fires, the operator reproduces
+    // the verdict with `cs --version` against
+    // `git rev-parse HEAD^{tree}`, with no hidden plumbing in the loop.
+    if cosmon_cli::BUILD_TREE != "unknown" {
+        let short: String = cosmon_cli::BUILD_TREE.chars().take(8).collect();
+        assert!(
+            stdout.contains(&format!("tree {short}")),
+            "--version must carry the short build tree: {stdout}"
+        );
+    }
+}
+
+/// `cs __build-tree` is the deploy-verification contract (`cs done` runs
+/// it on the freshly-installed binary and compares against the merged
+/// HEAD's tree): it must keep printing the full stamped tree OID, bare,
+/// regardless of what `--version` renders.
+///
+/// It is a *tree* and not a SHA on purpose: a commit SHA does not survive
+/// the history rewrites a public projection performs, so comparing SHAs
+/// reports a gap on a byte-identical binary. This test also pins that the
+/// two stamps are distinct values — a regression that aliased the tree
+/// stamp back onto the SHA would restore the false alarm.
+#[test]
+fn test_build_tree_contract() {
+    let output = cosmon_bin()
+        .arg("__build-tree")
+        .output()
+        .expect("failed to run");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success());
+    assert_eq!(stdout.trim(), cosmon_cli::BUILD_TREE);
+
+    if cosmon_cli::BUILD_TREE != "unknown" {
+        assert_ne!(
+            cosmon_cli::BUILD_TREE,
+            cosmon_cli::BUILD_SHA,
+            "the tree stamp must be the commit's content hash, not its SHA"
+        );
+    }
 }
 
 /// `cs __build-sha` is a deploy-verification contract (`cs done` runs it

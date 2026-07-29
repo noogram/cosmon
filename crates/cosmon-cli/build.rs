@@ -12,9 +12,10 @@
 //!
 //! `build.rs` emits the rebuild triggers cargo needs to invalidate the
 //! binary when help-relevant sources change, and stamps the binary with
-//! the git commit it was built from (`COSMON_BUILD_SHA`).
+//! the git commit it was built from (`COSMON_BUILD_SHA`) *and* with the
+//! content of that commit's tree (`COSMON_BUILD_TREE`).
 //!
-//! ## Build-SHA stamp — substrate for deploy verification
+//! ## Build stamps — substrate for deploy verification
 //!
 //! The deploy-gap class: `cs done` runs the `post_merge` hook (`just
 //! install`) to refresh the on-disk binary after a worker branch lands,
@@ -22,15 +23,32 @@
 //! cargo seeing nothing to rebuild). The code lands on main while the
 //! deployed binary lags, so worker-green ≠ operator-green. To make the
 //! deploy *verifiable* and not merely *attempted*, every `cs` binary is
-//! stamped at build time with the commit SHA it was compiled from. The
-//! `cs done` deploy-verification step then runs `cs __build-sha` on the
-//! freshly-installed binary and asserts it matches the just-merged HEAD.
+//! stamped at build time with the identity of the source it was
+//! compiled from.
+//!
+//! Two stamps, and only one of them can answer the deploy question.
+//!
+//! - `COSMON_BUILD_SHA` is a *graph coordinate*: it names a position in
+//!   one repository's history. Rebase, squash, filter, cherry-pick and
+//!   projection-to-a-public-trunk all change it while changing nothing
+//!   the compiler ever sees.
+//! - `COSMON_BUILD_TREE` is that commit's *content* hash
+//!   (`git rev-parse HEAD^{tree}`): the exact invariant of those
+//!   operations. Two commits with the same tree are byte-identical
+//!   source; a binary built from either contains the same code.
+//!
+//! "Does my binary contain this code?" is a content question, so the
+//! `cs done` deploy check compares **trees, never SHAs** — a build-SHA
+//! comparison fires a DEPLOY GAP every time history is rewritten under
+//! a byte-identical tree, and a gate that cries wolf is worse than no
+//! gate. The SHA stamp survives as a human-facing provenance breadcrumb
+//! (which commit, in which repo) and as the `cs __build-sha` contract.
 //!
 //! `rerun-if-changed` on the git HEAD pointer (resolved via `git
 //! rev-parse --git-path`, which is correct in both plain checkouts and
-//! linked worktrees) forces the stamp to track the real commit even
+//! linked worktrees) forces both stamps to track the real commit even
 //! when a merge touches no source file in this crate — otherwise cargo
-//! would skip the recompile and the stamp would drift stale, producing
+//! would skip the recompile and the stamps would drift stale, producing
 //! a false deploy-gap warning.
 
 use std::process::Command;
@@ -42,6 +60,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
 
     emit_build_sha();
+    emit_build_tree();
     emit_build_dirty();
     emit_build_date();
 }
@@ -65,6 +84,25 @@ fn emit_build_sha() {
             println!("cargo:rerun-if-changed={path}");
         }
     }
+}
+
+/// Stamp the binary with the content hash of the tree it is built from.
+///
+/// Emits `cargo:rustc-env=COSMON_BUILD_TREE=<tree-oid>` from
+/// `git rev-parse HEAD^{tree}`, so `env!("COSMON_BUILD_TREE")` resolves at
+/// compile time. Falls back to `"unknown"` on the same terms as the SHA
+/// stamp (no git, no checkout) — an absent stamp is a soft signal, never
+/// a build failure.
+///
+/// This is the operand the deploy check compares. Unlike the commit SHA,
+/// the tree OID is preserved by every history-rewriting operation that
+/// leaves the source bytes alone, which is precisely the class of
+/// operation a public projection performs. No rerun trigger of its own:
+/// [`emit_build_sha`] already registers HEAD and `logs/HEAD`, and the
+/// tree can only change when HEAD does.
+fn emit_build_tree() {
+    let tree = git_output(&["rev-parse", "HEAD^{tree}"]).unwrap_or_else(|| "unknown".to_owned());
+    println!("cargo:rustc-env=COSMON_BUILD_TREE={tree}");
 }
 
 /// Stamp the binary with the working-tree state it was built from.

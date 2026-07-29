@@ -55,16 +55,38 @@ pub mod spore_containment;
 
 /// Git commit SHA this binary was built from, stamped by `build.rs`.
 ///
-/// The substrate for deploy verification: `cs done`
-/// runs the `post_merge` hook to refresh the deployed binary, then runs
-/// `cs __build-sha` on the freshly-installed copy and asserts the value
-/// matches the just-merged HEAD. A mismatch means the deploy silently
-/// no-op'd — the code landed on main but the binary on disk still lags.
+/// Provenance, not verification: the SHA answers *"which commit, in
+/// which repository, produced this binary"* — the question an operator
+/// asks when two galaxies install the same `cs` name. It deliberately
+/// does **not** drive the deploy check, because a commit SHA is a graph
+/// coordinate and every history rewrite (rebase, squash, projection to
+/// a public trunk) moves it while leaving the compiled source
+/// byte-identical. [`BUILD_TREE`] is the invariant of those operations
+/// and is what `cs done` compares.
 ///
 /// The value is the full 40-char SHA, or `"unknown"` for builds made
 /// outside a git checkout. See `build.rs` for how the stamp is kept in
 /// sync with the real commit.
 pub const BUILD_SHA: &str = env!("COSMON_BUILD_SHA");
+
+/// Git tree OID (content hash) this binary was built from, stamped by
+/// `build.rs`.
+///
+/// The substrate for deploy verification: `cs done` runs the
+/// `post_merge` hook to refresh the deployed binary, then runs
+/// `cs __build-tree` on the freshly-installed copy and asserts the value
+/// matches the just-merged HEAD's tree. A mismatch means the deploy
+/// silently no-op'd — the code landed on the trunk but the binary on
+/// disk still lags.
+///
+/// Trees rather than SHAs because the question is *"does this binary
+/// contain this code?"*, which is about content: two commits sharing a
+/// tree compile to the same program, and a SHA comparison would report
+/// a DEPLOY GAP on a binary that is in fact correct.
+///
+/// The value is the full 40-char tree OID, or `"unknown"` for builds
+/// made outside a git checkout.
+pub const BUILD_TREE: &str = env!("COSMON_BUILD_TREE");
 
 /// Working-tree state at compile time, stamped by `build.rs`.
 ///
@@ -83,13 +105,20 @@ pub const BUILD_DATE: &str = env!("COSMON_BUILD_DATE");
 /// exact failure that motivated the build-SHA stamp (two galaxies
 /// overwriting the same `~/.local/bin/cs`, diagnosable only via the
 /// hidden `cs __build-sha`). This surfaces the same identity on the
-/// *documented* flag: `cs 0.1.0 (78a09f5c, built 2026-07-18)`.
+/// *documented* flag:
+/// `cs 0.1.0 (78a09f5c, tree cebf2425, built 2026-07-18)`.
+///
+/// The tree segment is there because it, and not the SHA, is what the
+/// deploy check compares: when `cs done` reports a gap, the operator
+/// must be able to read the two operands off `cs --version` and
+/// `git rev-parse HEAD^{tree}` without hidden plumbing.
 #[must_use]
 pub fn long_version() -> String {
     compose_long_version(
         env!("CARGO_PKG_VERSION"),
         BUILD_SHA,
         BUILD_DIRTY,
+        BUILD_TREE,
         BUILD_DATE,
     )
 }
@@ -99,52 +128,52 @@ pub fn long_version() -> String {
 /// Split from [`long_version`] so the formatting rules are unit-testable
 /// without rebuilding under different git states:
 ///
-/// - known SHA → `<pkg> (<sha8>[-dirty][, built <date>])`
+/// - known SHA → `<pkg> (<sha8>[-dirty][, tree <tree8>][, built <date>])`
 /// - unknown SHA (tarball build, no `.git`) → bare `<pkg>`, never a
 ///   noisy `(unknown)` suffix
+/// - unknown tree → the `, tree …` segment is simply omitted
 /// - unknown date → the `, built …` segment is simply omitted
 #[must_use]
-pub fn compose_long_version(pkg: &str, sha: &str, dirty: &str, date: &str) -> String {
+pub fn compose_long_version(pkg: &str, sha: &str, dirty: &str, tree: &str, date: &str) -> String {
     if sha == "unknown" {
         return pkg.to_owned();
     }
     let short: String = sha.chars().take(8).collect();
     let dirty_marker = if dirty == "dirty" { "-dirty" } else { "" };
+    let tree_segment = if tree == "unknown" {
+        String::new()
+    } else {
+        let short_tree: String = tree.chars().take(8).collect();
+        format!(", tree {short_tree}")
+    };
     let built = if date == "unknown" {
         String::new()
     } else {
         format!(", built {date}")
     };
-    format!("{pkg} ({short}{dirty_marker}{built})")
+    format!("{pkg} ({short}{dirty_marker}{tree_segment}{built})")
 }
 
 #[cfg(test)]
 mod version_tests {
     use super::compose_long_version;
 
+    const SHA: &str = "78a09f5cdeadbeefdeadbeefdeadbeefdeadbeef";
+    const TREE: &str = "cebf2425deadbeefdeadbeefdeadbeefdeadbeef";
+
     #[test]
-    fn clean_build_shows_short_sha_and_date() {
+    fn clean_build_shows_short_sha_tree_and_date() {
         assert_eq!(
-            compose_long_version(
-                "0.1.0",
-                "78a09f5cdeadbeefdeadbeefdeadbeefdeadbeef",
-                "clean",
-                "2026-07-18"
-            ),
-            "0.1.0 (78a09f5c, built 2026-07-18)"
+            compose_long_version("0.1.0", SHA, "clean", TREE, "2026-07-18"),
+            "0.1.0 (78a09f5c, tree cebf2425, built 2026-07-18)"
         );
     }
 
     #[test]
     fn dirty_build_carries_marker() {
         assert_eq!(
-            compose_long_version(
-                "0.1.0",
-                "78a09f5cdeadbeefdeadbeefdeadbeefdeadbeef",
-                "dirty",
-                "2026-07-18"
-            ),
-            "0.1.0 (78a09f5c-dirty, built 2026-07-18)"
+            compose_long_version("0.1.0", SHA, "dirty", TREE, "2026-07-18"),
+            "0.1.0 (78a09f5c-dirty, tree cebf2425, built 2026-07-18)"
         );
     }
 
@@ -152,31 +181,38 @@ mod version_tests {
     fn unknown_sha_falls_back_to_bare_version() {
         // Tarball / no-git builds must not render "(unknown)".
         assert_eq!(
-            compose_long_version("0.1.0", "unknown", "unknown", "2026-07-18"),
+            compose_long_version("0.1.0", "unknown", "unknown", "unknown", "2026-07-18"),
             "0.1.0"
+        );
+    }
+
+    #[test]
+    fn unknown_tree_omits_tree_segment() {
+        // A binary stamped before the tree stamp existed, or built with a
+        // git that could not resolve `HEAD^{tree}`, renders exactly as it
+        // did before rather than a noisy `tree unknown`.
+        assert_eq!(
+            compose_long_version("0.1.0", SHA, "clean", "unknown", "2026-07-18"),
+            "0.1.0 (78a09f5c, built 2026-07-18)"
         );
     }
 
     #[test]
     fn unknown_date_omits_built_segment() {
         assert_eq!(
-            compose_long_version(
-                "0.1.0",
-                "78a09f5cdeadbeefdeadbeefdeadbeefdeadbeef",
-                "clean",
-                "unknown"
-            ),
-            "0.1.0 (78a09f5c)"
+            compose_long_version("0.1.0", SHA, "clean", TREE, "unknown"),
+            "0.1.0 (78a09f5c, tree cebf2425)"
         );
     }
 
     #[test]
     fn short_sha_is_not_padded() {
         // A hand-stamped or truncated SHA shorter than 8 chars passes
-        // through untouched instead of panicking on a slice bound.
+        // through untouched instead of panicking on a slice bound. Same
+        // for the tree OID.
         assert_eq!(
-            compose_long_version("0.1.0", "abc", "clean", "unknown"),
-            "0.1.0 (abc)"
+            compose_long_version("0.1.0", "abc", "clean", "de", "unknown"),
+            "0.1.0 (abc, tree de)"
         );
     }
 }
