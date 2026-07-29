@@ -17,6 +17,42 @@ this stage.
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
+## [Unreleased]
+
+### Fixed
+
+- **`cs tackle` running as root no longer leaves root-owned residue behind its
+  own refusal** (noogram/cosmon#20, reported against v0.4.0). The root-spawn
+  refusal preceded the worker session and the cognitive probe, but not the
+  filesystem provisioning: it lived inside the claude spawn path, so one
+  `sudo cs tackle` exited 1, spawned nothing, and still created root-owned
+  `.claude.json`, `settings.json`, `.worktrees/`, `.git/config`,
+  `.git/packed-refs`, `fleet.json` and `fleet.runtime.json`. After that single
+  mistake the *documented* non-root dispatch died with `mkdir: Permission
+  denied` on `.worktrees/` and the molecule timed out `pending`. The decision is
+  now taken at the entry of `cs tackle`, above every write — a strictly stronger
+  guarantee, with the typed token `root-spawn-refused:*` and the remedy text
+  unchanged. Operators already bitten: `chown <uid>:<uid> <galaxy>/.worktrees`
+  and remove the two config files (recipe in the container guide).
+- **The typed refusal is recorded append-only.** A refused dispatch no longer
+  creates an `events.jsonl` it found missing, since that would make the refusal
+  the very thing it refuses.
+
+### Changed
+
+- ADR-166's "a refused dispatch leaves no trace on the filesystem" is now
+  carried by a test that measures it. The old assertion checked the worktree's
+  *owner*, which a refused dispatch never creates; the residue was the
+  `.worktrees` **parent**, which nothing looked at. The new end-to-end test
+  snapshots every path under the galaxy root and the Claude config home — owner,
+  group and mode — and asserts the sets are identical.
+- The container guide states the scope of its `unshare`/seccomp claim (which
+  engine, which profile, which discriminating arm), names what the shared uid
+  costs — any worker can write any sibling worker's worktree — carries a
+  recovery recipe, and warns that the missing-prerequisite gate fires *before*
+  the root-spawn refusal, so a reproduction without the adapter on `PATH`
+  measures the wrong gate.
+
 ## [0.4.0] — 2026-07-29
 
 **A release about controls that measure the property next to the one that
