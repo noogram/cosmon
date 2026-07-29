@@ -659,6 +659,68 @@ from a merge dressed as one, and it is cheap. Recorded here because
 the divergence from ADR-105's costing is intentional, not an
 oversight.
 
+#### D5-ter. Amendment (2026-07-29) — what the CI mirror can and cannot see
+
+`scripts/check-provenance.sh` calls itself a "CI mirror of the
+pre-merge hook", and its header claimed both of the hook's refusals:
+subject shape *and* a recorded completion in
+`.cosmon/state/events.jsonl`. It reads that ledger with
+`git show "$head:.cosmon/state/events.jsonl"`.
+
+Measured on 2026-07-29 (task-20260729-dc53, from a finding of
+delib-20260729-0eef): on cosmon-the-repo that string has **never once
+been non-empty**. `git log --all -- .cosmon/state/events.jsonl` returns
+nothing — the ledger has never been tracked in reachable history — and
+the orphan branch `cosmon/state` exists on no ref, local or remote. So
+of the 94 merge commits in scope on `dev`, 94 were reported `checked`
+and 0 were ledger-verified, and the gate exited 0.
+
+**This is not a broken gate; it is a gate reported dishonestly.** Read
+the D5 table again. It assigns the hook the refusal of "a `mol_id`
+[with] no corresponding `cs done` event in the ledger" — which the hook
+*can* enforce, because it reads the working tree, where the ledger
+always is. It assigns CI exactly one refusal: "merges into main that
+lack the `(<mol_id>)` provenance line in the merge commit". Subject
+shape. The ledger half of the CI mirror was always a bonus that fires
+only under the ADR-055 `solo` residence, where `.cosmon/state/` is
+tracked. cosmon-the-repo is a `team` residence, where `.cosmon/state/`
+is entirely gitignored by design — so no tree of the working branch can
+carry the ledger, and no amount of repair to this script will change
+that. Re-enabling the check is not available; enforcement lives where
+D5 put it.
+
+What was wrong was the reporting. A run printed `skip … no ledger at
+scope tip` once per commit, buried among 94 lines, then summed to
+`checked=94 failed=0` — a line a reader takes for ledger coverage. And
+the self-test made the vacuity invisible: `provenance-gate-test.sh`
+scenario 5 builds a synthetic repo that *commits* `events.jsonl`, so
+the harness has always exercised a ledger-present world this repo
+cannot instantiate.
+
+Two corrections, both in the script:
+
+- The absence is announced **once, up front**, per-commit verdicts read
+  `shape` rather than `skip`, and the summary reports
+  `ledger_verified` and `shape_only` separately, with an explicit line
+  when ledger coverage is zero. No summary can now be misread.
+- The two absences are distinguished by a residence probe — the very
+  oracle §3 of ADR-055 names, `git ls-files .cosmon/state/` returns 0,
+  asked of the scope tip's tree. Untracked ⇒ absent by design, pass.
+  **Tracked but no `events.jsonl` ⇒ FAIL**, where the old code emitted
+  the same silent `skip` and exited 0. Under a residence that keeps
+  narration under git, a missing ledger is a removed ledger. That is
+  strictly more enforcement than before, and it is the only enforcement
+  this surface was ever in a position to add.
+
+Covered by `tests/harness/provenance-residence-test.sh`, whose 8
+assertions include the removed-ledger FAIL; 6 of them fail against the
+pre-amendment script.
+
+The consequence worth carrying: **do not cite a green
+`check-provenance` run as evidence that a merge's molecule reached a
+terminal state.** On a team residence it is evidence about the subject
+line and nothing more.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,

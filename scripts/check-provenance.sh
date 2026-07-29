@@ -22,14 +22,45 @@
 #                     | done(<mol_id>) | auto-merge(<mol_id>)
 #   - mol_id has a recorded molecule_completed or molecule_collapsed
 #     event in .cosmon/state/events.jsonl AT THE TIP COMMIT of the
-#     scope. We check the tip — not the merge commit itself — because
-#     `cs done` writes the completion to the on-disk ledger *before*
-#     the merge commit, but the ledger is committed by a *separate*
-#     `chore(state): track artifacts ...` commit that lands AFTER the
-#     merge commit. So the merge commit's tree never contains its own
-#     completion line; only the eventual tip does. The local hook
-#     reads the working tree (which is always current); the CI mirror
-#     reads the tip blob (which is current at push time).
+#     scope — WHEN the ledger is tracked in git at all. We check the
+#     tip — not the merge commit itself — because `cs done` writes the
+#     completion to the on-disk ledger *before* the merge commit, but
+#     the ledger is committed by a *separate* `chore(state): track
+#     artifacts ...` commit that lands AFTER the merge commit. So the
+#     merge commit's tree never contains its own completion line; only
+#     the eventual tip does. The local hook reads the working tree
+#     (which is always current); the CI mirror reads the tip blob.
+#
+# Ledger residence — why the second check is not always available
+# (task-20260729-dc53):
+#   ADR-055 gives a galaxy a *residence* for its narration. Under the
+#   `solo` residence `.cosmon/state/` is tracked, the ledger is in
+#   every tree, and both halves of this gate run. Under the `team`
+#   (and `remote`) residence `.cosmon/state/` is entirely gitignored —
+#   narration lives on the orphan branch `cosmon/state`, or on a
+#   server — and no tree of the working branch ever contains the
+#   ledger. cosmon-the-repo itself is a `team` residence, so on this
+#   repo `git show <tip>:.cosmon/state/events.jsonl` has always
+#   resolved to nothing and the ledger half has never once bound.
+#
+#   That is not a regression to repair by re-enabling the check; it is
+#   what ADR-052 §D5 asked for. Read the table there: the *hook* is the
+#   gate that refuses "a mol_id with no `cs done` event in the ledger",
+#   and it can, because it reads a working tree. The *CI check* is
+#   assigned exactly one refusal — "merges into main that lack the
+#   `(<mol_id>)` provenance line in the merge commit". Subject shape.
+#   The ledger half here is a bonus that fires under `solo`, never a
+#   mandate.
+#
+#   What this script owes the reader is therefore honesty, not a
+#   restored check. Two rules follow:
+#     - Ledger untracked at the tip (`git ls-tree .cosmon/state` empty)
+#       ⇒ expected under team/remote residence. Say so ONCE, up front,
+#       and label every verdict `shape` so no summary line can be
+#       misread as "N merges were ledger-verified".
+#     - Ledger tracked but absent/unreadable ⇒ NOT expected. Something
+#       removed the ledger from a residence that keeps it under git.
+#       That is a hard FAIL, where it used to be a silent `skip`.
 #
 # Bypass: COSMON_SKIP_PROVENANCE=1  (logged, returns 0 immediately).
 #
@@ -150,8 +181,42 @@ trap 'rm -rf "$TMPDIR_PROV"' EXIT
 # the merge commit's own tree is the wrong place to look).
 ledger=$(git show "$head:.cosmon/state/events.jsonl" 2>/dev/null || true)
 
+# Residence probe — the oracle ADR-055 itself names in its verification
+# table: "`git ls-files .cosmon/state/` returns 0 paths on the current
+# branch" IS the definition of the team/remote residence. We ask the same
+# question of the scope tip's tree rather than the index, so the answer is
+# a property of the commit under test and not of whoever's checkout we run
+# in. Empty ⇒ the ledger is absent BY DESIGN; non-empty ⇒ this residence
+# keeps its narration under git and a missing ledger is a real defect.
+state_tracked=$(git ls-tree -r --name-only "$head" -- .cosmon/state 2>/dev/null | head -n 1)
+
+if [ -n "$ledger" ]; then
+    ledger_mode="present"
+elif [ -z "$state_tracked" ]; then
+    ledger_mode="absent-by-residence"
+    echo "check-provenance: NOTE — .cosmon/state/ is untracked at the scope tip."
+    echo "  This galaxy keeps its narration off the working branch (ADR-055"
+    echo "  team/remote residence), so no tree here can carry events.jsonl and"
+    echo "  the ADR-052 §I9 ledger half of this gate CANNOT run. What runs below"
+    echo "  is the subject-shape check — which is precisely the refusal §D5"
+    echo "  assigns to CI. The ledger half is enforced by"
+    echo "  .cosmon/hooks/pre-merge-commit, which reads the working tree."
+    echo "  Do not cite a green run of this gate as evidence that a merge's"
+    echo "  molecule reached a terminal state."
+    echo
+else
+    ledger_mode="missing"
+    echo "check-provenance: .cosmon/state/ IS tracked at the scope tip" >&2
+    echo "  ($state_tracked, …) but .cosmon/state/events.jsonl is absent or" >&2
+    echo "  unreadable there. Under a residence that keeps narration under" >&2
+    echo "  git, that is a removed ledger, not an expected absence." >&2
+    echo
+fi
+
 failed=0
 checked=0
+ledger_verified=0
+shape_only=0
 while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     checked=$((checked + 1))
@@ -180,6 +245,10 @@ while IFS= read -r commit; do
         mol_id="$base_sync_mol"
         p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
         if [ -n "$p2" ] && trunk_has "$p2"; then
+            # Structurally verified, deliberately not ledger-verified
+            # (see the BASE_SYNC_RE comment): counted with the shape-only
+            # verdicts so the summary never overstates ledger coverage.
+            shape_only=$((shape_only + 1))
             echo "ok    $commit  ($mol_id)  base-sync from trunk"
         else
             echo "FAIL  $commit  ($mol_id)"
@@ -208,8 +277,20 @@ while IFS= read -r commit; do
         continue
     fi
 
-    if [ -z "$ledger" ]; then
-        echo "skip  $commit  ($mol_id)  no ledger at scope tip"
+    # No ledger to consult. Which of the two absences is it?
+    if [ "$ledger_mode" = "absent-by-residence" ]; then
+        # Expected. The subject-shape refusal — the one §D5 assigns to CI —
+        # has already passed above. Say `shape`, never `skip`: the commit
+        # WAS checked, against everything this surface can check.
+        shape_only=$((shape_only + 1))
+        echo "shape $commit  ($mol_id)  subject ok; ledger off-branch (ADR-055)"
+        continue
+    elif [ "$ledger_mode" = "missing" ]; then
+        echo "FAIL  $commit  ($mol_id)"
+        echo "      .cosmon/state/ is tracked at the scope tip but the"
+        echo "      ledger is not there — it cannot be consulted, so this"
+        echo "      merge's completion cannot be proven (ADR-052 §I9)"
+        failed=$((failed + 1))
         continue
     fi
 
@@ -244,11 +325,21 @@ while IFS= read -r commit; do
         continue
     fi
 
+    ledger_verified=$((ledger_verified + 1))
     echo "ok    $commit  ($mol_id)"
 done <<< "$merges"
 
+# Report the two coverages separately. A bare `checked=94 failed=0` reads
+# as "94 merges were validated against the ledger", which on a team
+# residence is false for all 94 of them.
 echo
-echo "check-provenance: checked=$checked failed=$failed"
+echo "check-provenance: checked=$checked ledger_verified=$ledger_verified" \
+     "shape_only=$shape_only failed=$failed"
+if [ "$ledger_verified" -eq 0 ] && [ "$checked" -gt 0 ]; then
+    echo "check-provenance: ZERO merges were ledger-verified on this surface." \
+         "The ADR-052 §I9 ledger invariant is enforced elsewhere" \
+         "(.cosmon/hooks/pre-merge-commit), not here."
+fi
 
 if [ "$failed" -ne 0 ]; then
     cat >&2 <<EOF
