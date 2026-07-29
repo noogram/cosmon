@@ -1,0 +1,10 @@
+# The crossings ledger — one line per public release, appended by
+# scripts/release/sign-and-push.sh so a tired human never types it again.
+#
+# A public commit carries exactly one provenance trailer, `Projected-From`, so
+# the mapping is already recorded IN the public history. This file is the same
+# mapping read from the development side, where the dev SHA is the key you
+# actually have in hand. The archive ref refs/cosmon/crossings/v<version> pins
+# the same dev SHA as an object, so it survives even if this file is edited.
+#
+# version	public-sha	dev-sha
