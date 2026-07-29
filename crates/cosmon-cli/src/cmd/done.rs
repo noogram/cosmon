@@ -5721,38 +5721,77 @@ fn format_cs_multiplicity_warning(binaries: &[CsBinaryOnPath]) -> Option<Vec<Str
 /// *"which copy does a deploy refresh?"*, this asks *"did the deploy
 /// actually refresh it?"*. The `post_merge` hook (`just install`) can
 /// silently no-op — wrong cwd, swallowed failure, cargo seeing nothing to
-/// rebuild — leaving the code on main while the deployed binary lags. The
-/// only way to know is to ask the freshly-installed binary which commit it
-/// was built from and compare to the just-merged HEAD.
+/// rebuild — leaving the code on the trunk while the deployed binary lags.
+/// The only way to know is to ask the freshly-installed binary what source
+/// it was built from and compare to the just-merged HEAD.
+///
+/// **Trees, never SHAs.** The comparison operand is the git *tree* OID
+/// ([`cosmon_cli::BUILD_TREE`]), not the commit SHA. A commit SHA is a
+/// graph coordinate: rebase, squash, cherry-pick and projection to a
+/// public trunk all move it while the source bytes — the only thing the
+/// compiler sees — are untouched. "Does my binary contain this code?" is a
+/// content question, and the tree OID is exactly the content hash. A
+/// SHA-based check fires a DEPLOY GAP on binaries that are in fact
+/// correct, and a gate that cries wolf is worse than no gate.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DeployVerification {
-    /// The deployed binary's build SHA matches the merged HEAD — the
-    /// deploy is confirmed, worker-green == operator-green.
-    Match { head_short: String },
-    /// The deployed binary's build SHA does **not** match the merged HEAD.
-    /// The deploy silently no-op'd: the loud-warning case.
+    /// The deployed binary's build tree matches the merged HEAD's tree —
+    /// the deploy is confirmed, worker-green == operator-green.
+    Match { head_tree_short: String },
+    /// The deployed binary's build tree does **not** match the merged
+    /// HEAD's tree. The deploy silently no-op'd: the loud-warning case.
     Mismatch {
-        deployed_short: String,
-        head_short: String,
+        deployed_tree_short: String,
+        head_tree_short: String,
     },
     /// Verification was impossible (no `cs` on PATH, git unavailable, the
-    /// deployed binary predates `cs __build-sha`, or an `unknown` stamp).
+    /// deployed binary predates `cs __build-tree`, or an `unknown` stamp).
     /// Reported as a soft note, never a warning — absence of evidence is
     /// not evidence of a gap.
     Inconclusive { reason: String },
 }
 
-/// Ask the deployed `cs` binary which commit it was built from and compare
+/// Compare the two tree OIDs and classify the deploy.
+///
+/// Split out of [`verify_deploy`] so the decision rule is unit-testable
+/// without a git repo, a PATH lookup or an installed binary — in
+/// particular so the *false-alarm* case (two different commits sharing one
+/// tree) can be pinned directly.
+///
+/// Both operands are full tree OIDs; `unknown` and empty inputs are the
+/// caller's business and never reach here.
+fn classify_deploy_trees(deployed_tree: &str, head_tree: &str) -> DeployVerification {
+    let short = |s: &str| s.chars().take(12).collect::<String>();
+    if deployed_tree == head_tree {
+        DeployVerification::Match {
+            head_tree_short: short(head_tree),
+        }
+    } else {
+        DeployVerification::Mismatch {
+            deployed_tree_short: short(deployed_tree),
+            head_tree_short: short(head_tree),
+        }
+    }
+}
+
+/// Ask the deployed `cs` binary what source it was built from and compare
 /// it to the just-merged HEAD.
 ///
 /// `repo_root` is the operator's main checkout where the merge landed, so
-/// `git rev-parse HEAD` there is the commit the deploy was supposed to
-/// ship. The deploy *target* is the first `cs` on `PATH` (the same copy a
-/// deploy refreshes and the operator's next invocation runs) — discovered
-/// via the multiplicity helper to avoid duplicating the `which` logic.
+/// `git rev-parse HEAD^{tree}` there is the *content* the deploy was
+/// supposed to ship. The deploy *target* is the first `cs` on `PATH` (the
+/// same copy a deploy refreshes and the operator's next invocation runs) —
+/// discovered via the multiplicity helper to avoid duplicating the `which`
+/// logic.
+///
+/// The comparison is tree-to-tree and never touches commit SHAs; see
+/// [`DeployVerification`] for why. A deployed binary too old to answer
+/// `__build-tree` degrades to `Inconclusive` — it is *not* silently
+/// re-checked against its SHA, which would reintroduce the false alarm on
+/// exactly the machines most likely to be running a projected trunk.
 ///
 /// This runs the freshly-installed binary as a subprocess rather than
-/// trusting the running process's own [`cosmon_cli::BUILD_SHA`]: the
+/// trusting the running process's own [`cosmon_cli::BUILD_TREE`]: the
 /// process executing `cs done` is whatever the operator invoked, which may
 /// be the *previous* binary the install just replaced. We must verify the
 /// copy on disk, not ourselves.
@@ -5760,21 +5799,21 @@ enum DeployVerification {
 /// Pure-ish: shells out to `git` and the deployed `cs`, but holds no state
 /// and never mutates anything. Any failure degrades to `Inconclusive`.
 fn verify_deploy(repo_root: &Path) -> DeployVerification {
-    let head = match Command::new("git")
-        .args(["rev-parse", "HEAD"])
+    let head_tree = match Command::new("git")
+        .args(["rev-parse", "HEAD^{tree}"])
         .current_dir(repo_root)
         .output()
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
         _ => {
             return DeployVerification::Inconclusive {
-                reason: "could not read merged HEAD (git rev-parse failed)".to_owned(),
+                reason: "could not read merged HEAD tree (git rev-parse failed)".to_owned(),
             }
         }
     };
-    if head.is_empty() {
+    if head_tree.is_empty() {
         return DeployVerification::Inconclusive {
-            reason: "merged HEAD is empty".to_owned(),
+            reason: "merged HEAD tree is empty".to_owned(),
         };
     }
 
@@ -5787,46 +5826,36 @@ fn verify_deploy(repo_root: &Path) -> DeployVerification {
         }
     };
 
-    let deployed = match Command::new(&target).arg("__build-sha").output() {
+    let deployed_tree = match Command::new(&target).arg("__build-tree").output() {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-        // Non-zero exit: the deployed binary predates `cs __build-sha`.
+        // Non-zero exit: the deployed binary predates `cs __build-tree`.
         // That is itself a sign it is stale, but during the first rollout
         // it is expected — report inconclusive with an actionable reason.
         Ok(_) => {
             return DeployVerification::Inconclusive {
                 reason: format!(
-                    "deployed `cs` ({}) predates `cs __build-sha` — re-run `just install` once this lands, then verification activates",
+                    "deployed `cs` ({}) predates `cs __build-tree` — re-run `just install` once this lands, then verification activates",
                     target.display()
                 ),
             }
         }
         Err(e) => {
             return DeployVerification::Inconclusive {
-                reason: format!("could not run `{} __build-sha`: {e}", target.display()),
+                reason: format!("could not run `{} __build-tree`: {e}", target.display()),
             }
         }
     };
 
-    if deployed.is_empty() || deployed == "unknown" {
+    if deployed_tree.is_empty() || deployed_tree == "unknown" {
         return DeployVerification::Inconclusive {
             reason: format!(
-                "deployed `cs` ({}) reports an unknown build SHA (built outside a git checkout)",
+                "deployed `cs` ({}) reports an unknown build tree (built outside a git checkout)",
                 target.display()
             ),
         };
     }
 
-    let short = |s: &str| s.chars().take(12).collect::<String>();
-    if deployed == head {
-        DeployVerification::Match {
-            head_short: short(&head),
-        }
-    } else {
-        DeployVerification::Mismatch {
-            deployed_short: short(&deployed),
-            head_short: short(&head),
-        }
-    }
+    classify_deploy_trees(&deployed_tree, &head_tree)
 }
 
 /// Render the operator-facing lines for a [`DeployVerification`].
@@ -5840,22 +5869,23 @@ fn verify_deploy(repo_root: &Path) -> DeployVerification {
 /// crying wolf. Kept pure (no I/O) so it is unit-testable.
 fn format_deploy_verification(v: &DeployVerification) -> (Option<String>, Option<Vec<String>>) {
     match v {
-        DeployVerification::Match { head_short } => {
-            (Some(format!("deploy verified: cs @ {head_short}")), None)
-        }
+        DeployVerification::Match { head_tree_short } => (
+            Some(format!("deploy verified: cs @ tree {head_tree_short}")),
+            None,
+        ),
         DeployVerification::Inconclusive { reason } => {
             (Some(format!("deploy unverified: {reason}")), None)
         }
         DeployVerification::Mismatch {
-            deployed_short,
-            head_short,
+            deployed_tree_short,
+            head_tree_short,
         } => {
             let lines = vec![
                 "⚠️  DEPLOY GAP — post_merge hook ran but the deployed `cs` did NOT refresh:".to_owned(),
-                format!("    deployed cs build : {deployed_short}"),
-                format!("    just-merged HEAD  : {head_short}"),
-                "    The code landed on main but the on-disk binary still lags — new behaviour is silently absent.".to_owned(),
-                "    Run `just install` manually from main and confirm `cs __build-sha` matches `git rev-parse HEAD`.".to_owned(),
+                format!("    deployed cs tree  : {deployed_tree_short}"),
+                format!("    merged HEAD tree  : {head_tree_short}"),
+                "    The code landed on the trunk but the on-disk binary still lags — new behaviour is silently absent.".to_owned(),
+                "    Run `just install` manually from the trunk and confirm `cs __build-tree` matches `git rev-parse HEAD^{tree}`.".to_owned(),
             ];
             (None, Some(lines))
         }
@@ -9593,7 +9623,7 @@ mod tests {
     #[test]
     fn test_deploy_verification_match_is_a_quiet_action() {
         let v = DeployVerification::Match {
-            head_short: "deadbeefcafe".to_owned(),
+            head_tree_short: "deadbeefcafe".to_owned(),
         };
         let (note, warn) = format_deploy_verification(&v);
         assert!(warn.is_none(), "a confirmed deploy must NOT warn");
@@ -9605,8 +9635,8 @@ mod tests {
     #[test]
     fn test_deploy_verification_mismatch_warns_loudly() {
         let v = DeployVerification::Mismatch {
-            deployed_short: "0000stale000".to_owned(),
-            head_short: "1111fresh111".to_owned(),
+            deployed_tree_short: "0000stale000".to_owned(),
+            head_tree_short: "1111fresh111".to_owned(),
         };
         let (note, warn) = format_deploy_verification(&v);
         assert!(
@@ -9615,15 +9645,61 @@ mod tests {
         );
         let lines = warn.expect("a mismatch must produce loud warning lines");
         let joined = lines.join("\n");
-        // The operator must see BOTH SHAs to diagnose the drift.
-        assert!(joined.contains("0000stale000"), "deployed SHA surfaced");
-        assert!(joined.contains("1111fresh111"), "merged HEAD surfaced");
+        // The operator must see BOTH trees to diagnose the drift.
+        assert!(joined.contains("0000stale000"), "deployed tree surfaced");
+        assert!(joined.contains("1111fresh111"), "merged HEAD tree surfaced");
         // Loud banner + actionable remedy.
         assert!(joined.contains("DEPLOY GAP"));
         assert!(
             joined.contains("just install"),
             "must tell the operator how to fix it"
         );
+        // The remedy must name the operand actually compared, so an
+        // operator following it by hand reproduces the verdict.
+        assert!(
+            joined.contains("__build-tree"),
+            "remedy must point at the tree stamp, not the SHA: {joined}"
+        );
+    }
+
+    /// The regression this whole child exists for. Two commits that share
+    /// a tree are byte-identical source: `git diff` between them returns
+    /// nothing, and a binary built from either contains the same code.
+    /// The deploy check must call that a **Match**.
+    ///
+    /// Concrete instance (delib fact #5): the deployed `cs` reported
+    /// `dde5ecb` while the trunk was at `cfa27a9`; `git diff` was empty
+    /// and both commits carried tree `cebf2425`. The old SHA comparison
+    /// screamed DEPLOY GAP at a binary that was correct.
+    #[test]
+    fn test_same_tree_across_different_commits_is_a_match() {
+        let tree = "cebf2425aaaabbbbccccddddeeeeffff00001111";
+        let v = classify_deploy_trees(tree, tree);
+        assert!(
+            matches!(v, DeployVerification::Match { .. }),
+            "identical trees must verify the deploy even though the commit \
+             SHAs differ (history rewrite / public projection), got {v:?}"
+        );
+    }
+
+    /// The gate must still bite: a genuinely stale binary was built from
+    /// different content, so its tree differs and the operator is warned.
+    #[test]
+    fn test_different_trees_are_a_real_gap() {
+        let v = classify_deploy_trees(
+            "0000000000000000000000000000000000000000",
+            "1111111111111111111111111111111111111111",
+        );
+        match v {
+            DeployVerification::Mismatch {
+                deployed_tree_short,
+                head_tree_short,
+            } => {
+                assert_eq!(deployed_tree_short, "000000000000");
+                assert_eq!(head_tree_short, "111111111111");
+            }
+            other => panic!("differing trees must be a gap, got {other:?}"),
+        }
     }
 
     #[test]

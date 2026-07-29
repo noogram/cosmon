@@ -472,12 +472,23 @@ enum Command {
     MarkdownHelp(cmd::markdown_help::Args),
 
     /// Introspection — print the git commit SHA this binary was built
-    /// from (the `COSMON_BUILD_SHA` stamp). Hidden plumbing used by the
-    /// `cs done` deploy-verification step to assert the freshly-installed
-    /// binary matches the just-merged HEAD. Prints
-    /// the full SHA (or `unknown`) on stdout, one line, no newline noise.
+    /// from (the `COSMON_BUILD_SHA` stamp). Hidden plumbing: a provenance
+    /// breadcrumb answering "which commit, in which repo, produced this
+    /// binary". Deploy verification uses `__build-tree` instead, because a
+    /// commit SHA does not survive the history rewrites a public
+    /// projection performs. Prints the full SHA (or `unknown`) on stdout,
+    /// one line, no newline noise.
     #[command(name = "__build-sha", hide = true)]
     BuildSha,
+
+    /// Introspection — print the git tree OID this binary was built from
+    /// (the `COSMON_BUILD_TREE` stamp). Hidden plumbing used by the
+    /// `cs done` deploy-verification step to assert the freshly-installed
+    /// binary was built from the same *content* as the just-merged HEAD.
+    /// Prints the full tree OID (or `unknown`) on stdout, one line, no
+    /// newline noise.
+    #[command(name = "__build-tree", hide = true)]
+    BuildTree,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -635,6 +646,10 @@ fn main() {
         Command::MarkdownHelp(args) => cmd::markdown_help::run(&build_cli(), &args),
         Command::BuildSha => {
             println!("{}", cosmon_cli::BUILD_SHA);
+            Ok(())
+        }
+        Command::BuildTree => {
+            println!("{}", cosmon_cli::BUILD_TREE);
             Ok(())
         }
     };
