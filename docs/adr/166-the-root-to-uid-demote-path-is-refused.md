@@ -103,7 +103,10 @@ Three properties make the refusal a control rather than a caveat:
    state is written, before `.worktrees/` exists and before git is invoked on
    the repository — as well as before the startup-consent pre-grant, before any
    `chown`, before the cognitive probe and before any process exists. A refused
-   dispatch leaves the galaxy root and the Claude config home byte-identical.
+   dispatch **adds no path and changes no ownership or mode** under the galaxy
+   root or the Claude config home. The one content mutation it makes is the
+   append-only fleet refusal record, which is stated below rather than elided —
+   "byte-identical" would be the stronger claim, and it would be false.
 
    **This clause was false as written when this ADR was published, and the test
    it cited did not carry it.** The refusal lived inside
@@ -118,7 +121,7 @@ Three properties make the refusal a control rather than a caveat:
    was the `.worktrees` **parent**, which that assertion never looked at.
 
    What now carries the clause is
-   `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+   `a_refused_root_dispatch_adds_no_path_and_changes_no_ownership_or_mode`
    (`crates/cosmon-cli/tests/refused_root_dispatch_leaves_no_residue.rs`),
    which names no path: it snapshots every entry under the galaxy root and
    under the config home with owner, group and mode, runs the refused dispatch

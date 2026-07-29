@@ -376,7 +376,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // than moving it sideways: everything the deep gate preceded, this
     // precedes too, plus every write. Only two pure reads run above it — the
     // config-identity load and the molecule load — and the test
-    // `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+    // `a_refused_root_dispatch_adds_no_path_and_changes_no_ownership_or_mode`
     // is what pins that they stay pure.
     //
     // The deep gate in `spawn_claude_and_prompt` is deliberately NOT removed.
