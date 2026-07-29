@@ -1217,7 +1217,24 @@ mod tests {
 
     /// The property the HIGH finding asked for, at the funnel every live
     /// dispatch goes through: a root dispatcher with a perfectly good demote
-    /// target gets a **typed refusal**, no worker, and **no filesystem write**.
+    /// target gets a **typed refusal**, no worker, and **no `chown`**.
+    ///
+    /// # What this does NOT establish
+    ///
+    /// It says nothing about what `cs tackle` wrote *on the way here*, and
+    /// ADR-166 used to read it as if it did ("a refused dispatch leaves no
+    /// trace on the filesystem"). It did not: the refusal used to live seven
+    /// thousand lines into `cs tackle`, and by the time this funnel was
+    /// reached the command had already created the config home's
+    /// `.claude.json`, the galaxy's `.worktrees/`, `fleet.json` and the rest —
+    /// which is COSMON-DEV #20 as reported against v0.4.0. This test could not
+    /// have seen any of it: its whole fixture is one directory in a tempdir.
+    ///
+    /// The end-to-end property is carried by
+    /// `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+    /// in `crates/cosmon-cli/tests/refused_root_dispatch_leaves_no_residue.rs`,
+    /// which snapshots every path under a real galaxy and a real config home
+    /// rather than naming one.
     ///
     /// Red before the refusal landed: the funnel returned `Demote { to_uid }`
     /// after chowning the worktree away to that uid.

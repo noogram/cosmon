@@ -467,6 +467,48 @@ pub fn decide_root_spawn(running_uid: u32, demote_target: Option<u32>) -> RootSp
     }
 }
 
+/// The environment switch that makes a non-root dispatcher take the root
+/// dispatcher's decision. See [`effective_dispatch_uid`].
+pub const SIMULATE_ROOT_DISPATCH_ENV: &str = "COSMON_SIMULATE_ROOT_DISPATCH";
+
+/// The uid [`decide_root_spawn`] must be asked about, given the process's real
+/// effective uid and the environment.
+///
+/// This exists for one reason: the property that matters about the root-spawn
+/// refusal is **when it happens**, not what it says, and "before any write"
+/// cannot be measured by a test that is not root. Root is the only identity
+/// that can create the initial condition, so every existing test of this area
+/// is `#[ignore]`d behind a root check and runs on nobody's machine — which is
+/// how a refusal that fires seven thousand lines into `cs tackle` was pinned by
+/// a green suite for a release.
+///
+/// So the *decision's input* is made injectable, and the injection is
+/// **monotone**: [`SIMULATE_ROOT_DISPATCH_ENV`] can only substitute uid `0`,
+/// and [`decide_root_spawn`] refuses uid `0` unconditionally. Setting it can
+/// therefore only turn a permitted dispatch into a refused one. There is no
+/// value of this variable — set by an operator, an attacker, or a stray export
+/// in a worker's env — that permits a spawn the real uid would forbid, which is
+/// the only property that makes a test seam in a privilege check acceptable.
+///
+/// Any value other than `"0"`, `"false"`, `"no"`, `"off"` or the empty string
+/// enables the substitution; a real root dispatcher is unaffected either way.
+///
+/// `env_lookup` is injected so this is pure and unit-testable. Production
+/// callers pass `|k| std::env::var(k).ok()`.
+#[must_use]
+pub fn effective_dispatch_uid<F>(running_uid: u32, env_lookup: F) -> u32
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match env_lookup(SIMULATE_ROOT_DISPATCH_ENV) {
+        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "0" | "false" | "no" | "off" => running_uid,
+            _ => 0,
+        },
+        None => running_uid,
+    }
+}
+
 /// Resolve the non-root demote target from an injected env lookup.
 ///
 /// The operator override is `COSMON_WORKER_UID`:
@@ -767,6 +809,31 @@ mod tests {
             decide_root_spawn(CONVENTIONAL_WORKER_UID, Some(CONVENTIONAL_WORKER_UID)),
             RootSpawnDecision::SpawnAsIs,
         );
+    }
+
+    /// The simulation switch is monotone: it can substitute uid 0 and nothing
+    /// else, so it can only ever produce a refusal.
+    #[test]
+    fn simulate_root_dispatch_can_only_tighten_the_decision() {
+        let on = |k: &str| (k == SIMULATE_ROOT_DISPATCH_ENV).then(|| "1".to_owned());
+        assert_eq!(effective_dispatch_uid(1000, on), 0);
+        assert!(matches!(
+            decide_root_spawn(effective_dispatch_uid(1000, on), Some(10001)),
+            RootSpawnDecision::Refuse { .. },
+        ));
+
+        // Every falsy spelling leaves the real uid alone, and so does absence.
+        for raw in ["", "0", "false", "no", "off", " OFF "] {
+            let env = |k: &str| (k == SIMULATE_ROOT_DISPATCH_ENV).then(|| raw.to_owned());
+            assert_eq!(effective_dispatch_uid(1000, env), 1000, "raw = {raw:?}");
+        }
+        assert_eq!(effective_dispatch_uid(1000, |_| None), 1000);
+
+        // And it cannot rescue a real root dispatcher, whatever it says.
+        for raw in ["", "0", "off", "1", "yes"] {
+            let env = |k: &str| (k == SIMULATE_ROOT_DISPATCH_ENV).then(|| raw.to_owned());
+            assert_eq!(effective_dispatch_uid(0, env), 0, "raw = {raw:?}");
+        }
     }
 
     #[test]

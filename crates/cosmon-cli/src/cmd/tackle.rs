@@ -355,10 +355,53 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ));
     }
 
+    // Root-spawn refusal, hoisted to the entry (COSMON-DEV #20, reported
+    // against v0.4.0 by @jdthaler).
+    //
+    // The refusal itself was correct and its ordering guarantees were real —
+    // it preceded the worker session and it preceded the cognitive probe. What
+    // it did not precede was **provisioning**, because it lived inside
+    // `spawn_claude_and_prompt`, seven thousand lines down. So one stray
+    // `sudo cs tackle` on the galaxy the container guide describes exited 1,
+    // spawned nothing, and still left root-owned: the Claude config home's
+    // `.claude.json` and `settings.json`, the galaxy's `.worktrees/`, the
+    // repository's `config` and `packed-refs`, and `fleet.json` /
+    // `fleet.runtime.json`. The single deterministic consequence, isolated by
+    // the reporter one variable at a time, is that the DOCUMENTED non-root
+    // dispatch then dies with `mkdir: Permission denied` on `.worktrees/` and
+    // the molecule times out `pending`. A refusal that exists to stop root from
+    // creating resources a worker must own was doing precisely that.
+    //
+    // Hoisting it here makes the existing guarantee STRICTLY stronger rather
+    // than moving it sideways: everything the deep gate preceded, this
+    // precedes too, plus every write. Only two pure reads run above it — the
+    // config-identity load and the molecule load — and the test
+    // `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+    // is what pins that they stay pure.
+    //
+    // The deep gate in `spawn_claude_and_prompt` is deliberately NOT removed.
+    // It is the one the transport spawn path (`cs thaw`, the patrol respawn
+    // backstop) reaches, and it is where the demote-provisioning funnel lives;
+    // deleting it to avoid a duplicate would reopen the CLI-vs-transport
+    // asymmetry that produced defects A1 and A3. Under `cs tackle` it is now
+    // unreachable on the refuse arm, which is the point.
+    let env_lookup = |k: &str| std::env::var(k).ok();
+    if let cosmon_core::root_spawn_policy::RootSpawnDecision::Refuse { reason } =
+        cosmon_core::root_spawn_policy::decide_root_spawn(
+            cosmon_core::root_spawn_policy::effective_dispatch_uid(
+                nix::unistd::Uid::effective().as_raw(),
+                env_lookup,
+            ),
+            cosmon_core::root_spawn_policy::resolve_demote_target(env_lookup),
+        )
+    {
+        record_root_spawn_refusal(&store.molecule_dir(&mol_id), &mol_id, None, &reason);
+        return Err(root_spawn_refusal_error(&mol_id, &reason));
+    }
+
     // Gödel self-reference guards: refuse dispatch when the calling
     // session is a broker or when spawn depth exceeds the configured
     // maximum. These are structural halting conditions — no override flag.
-    let env_lookup = |k: &str| std::env::var(k).ok();
     super::guard::refuse_broker_spawn(&env_lookup)?;
     let sr_config = {
         let cfg_path = cosmon_filestore::resolve_config_path(None);
@@ -2519,16 +2562,31 @@ fn emit_gate_failed(
 /// never a silent no-op — the anti-silent-spend discipline applied to the
 /// privilege boundary. Best-effort: a write failure must not mask the refusal
 /// the caller already returns.
+///
+/// `wid` is `None` when the refusal fires at the entry of `cs tackle`, where no
+/// worker id has been minted yet — which is the nominal case since the gate was
+/// hoisted there.
+///
+/// # Why this appends but never creates
+///
+/// The refusal exists to stop a root dispatcher from leaving root-owned residue
+/// on a galaxy whose worker uid is not root, and `events.jsonl` is not exempt
+/// from that: a `create(true)` here would make the refusal itself the very
+/// thing it refuses, one file smaller. So the sinks are opened append-only and
+/// a missing one is skipped. The trade is stated rather than hidden: on a
+/// galaxy so fresh that no event has ever been written, the typed refusal is
+/// returned to the operator and not recorded. Every galaxy that has been
+/// nucleated into has both sinks.
 fn record_root_spawn_refusal(
     mol_state_dir: &Path,
     mol_id: &MoleculeId,
-    wid: &WorkerId,
+    wid: Option<&WorkerId>,
     reason: &cosmon_core::root_spawn_policy::RootRefusalReason,
 ) {
     let line = serde_json::json!({
         "type": "tackle_refused",
         "molecule_id": mol_id.as_str(),
-        "worker_id": wid.as_str(),
+        "worker_id": wid.map(WorkerId::as_str),
         "reason": reason.as_token(),
         "detail": reason.to_string(),
     });
@@ -2539,14 +2597,45 @@ fn record_root_spawn_refusal(
         cosmon_filestore::resolve_state_dir(None).join("events.jsonl"),
         mol_state_dir.join("events.jsonl"),
     ] {
-        if let Ok(mut f) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&events_path)
-        {
+        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&events_path) {
             let _ = writeln!(f, "{line}");
         }
     }
+}
+
+/// The operator-facing error a typed root-spawn refusal turns into.
+///
+/// One function, two call sites — the hoisted gate at the entry of
+/// [`run`] and the deep gate in [`spawn_claude_and_prompt`] — so the two can
+/// never drift into telling an operator two different things about the same
+/// decision. The reporter verified this text against v0.4.0; it is unchanged.
+fn root_spawn_refusal_error(
+    mol_id: &MoleculeId,
+    reason: &cosmon_core::root_spawn_policy::RootRefusalReason,
+) -> anyhow::Error {
+    // The trailing advice must match the refusal (issue #20). Telling an
+    // operator who ALREADY set `COSMON_WORKER_UID` to set it is noise that
+    // sends them down the wrong path; that reason carries its own remedy in
+    // its Display, so we do not bolt a second one on.
+    let next_step = match reason {
+        cosmon_core::root_spawn_policy::RootRefusalReason::NoNonRootTarget => {
+            " Set COSMON_WORKER_UID to a non-zero uid to enable \
+             privilege-drop demotion, or run cs as a non-root user."
+        }
+        // Both of these carry their own remedy in their `Display`: the
+        // unprovisioned one names the path that resisted the repair, the
+        // shared-storage one names the uid to run as and the guide. A second,
+        // vaguer remedy bolted on here would compete with it, and the operator
+        // would follow whichever came last.
+        cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget { .. }
+        | cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage {
+            ..
+        } => "",
+    };
+    anyhow::anyhow!(
+        "cs tackle: {reason} (molecule {}).{next_step}",
+        mol_id.as_str()
+    )
 }
 
 /// Write captured gate output to `MOLECULE_DIR/gate-output.log`.
@@ -5179,31 +5268,8 @@ fn spawn_claude_and_prompt(
         // created; record the typed root-refusal so an audit tells this apart
         // from a crash, then bail.
         SpawnPreflight::Refused(reason) => {
-            record_root_spawn_refusal(mol_state_dir, &mol.id, wid, &reason);
-            // The trailing advice must match the refusal (issue #20). Telling an
-            // operator who ALREADY set `COSMON_WORKER_UID` to set it is noise
-            // that sends them down the wrong path; that reason carries its own
-            // remedy in its Display, so we do not bolt a second one on.
-            let next_step = match reason {
-                cosmon_core::root_spawn_policy::RootRefusalReason::NoNonRootTarget => {
-                    " Set COSMON_WORKER_UID to a non-zero uid to enable \
-                     privilege-drop demotion, or run cs as a non-root user."
-                }
-                // Both of these carry their own remedy in their `Display`:
-                // the unprovisioned one names the path that resisted the
-                // repair, the shared-storage one names the uid to run as and
-                // the guide. A second, vaguer remedy bolted on here would
-                // compete with it, and the operator would follow whichever
-                // came last.
-                cosmon_core::root_spawn_policy::RootRefusalReason::UnprovisionedTarget { .. }
-                | cosmon_core::root_spawn_policy::RootRefusalReason::DemoteSharesRepositoryStorage {
-                    ..
-                } => "",
-            };
-            return Err(anyhow::anyhow!(
-                "cs tackle: {reason} (molecule {}).{next_step}",
-                mol.id.as_str(),
-            ));
+            record_root_spawn_refusal(mol_state_dir, &mol.id, Some(wid), &reason);
+            return Err(root_spawn_refusal_error(&mol.id, &reason));
         }
         SpawnPreflight::Proceed { decision, model } => (decision, model),
     };

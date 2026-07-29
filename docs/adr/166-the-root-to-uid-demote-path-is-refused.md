@@ -98,11 +98,42 @@ Three properties make the refusal a control rather than a caveat:
    `docker exec -u <uid>:<uid>` invocation, and points at the container guide.
    §8z: a caveat the operator cannot read is not a control, and neither is a
    remedy.
-3. **It precedes every write.** The decision is I/O-free and is consulted
-   before the startup-consent pre-grant, before any `chown`, and before any
-   process exists. A refused dispatch leaves no trace on the filesystem — the
-   test that pins this asserts the worktree's owner is unchanged, because the
-   repair's whole job is to change it.
+3. **It precedes every write.** The decision is I/O-free and is taken at the
+   entry of `cs tackle`, before the config home is created, before the fleet
+   state is written, before `.worktrees/` exists and before git is invoked on
+   the repository — as well as before the startup-consent pre-grant, before any
+   `chown`, before the cognitive probe and before any process exists. A refused
+   dispatch leaves the galaxy root and the Claude config home byte-identical.
+
+   **This clause was false as written when this ADR was published, and the test
+   it cited did not carry it.** The refusal lived inside
+   `spawn_claude_and_prompt`, so it preceded the worker and the probe but not
+   the provisioning: one `sudo cs tackle` on the galaxy the container guide
+   describes exited 1, spawned nothing, and left root-owned `.claude.json`,
+   `settings.json`, `.worktrees/`, `.git/config`, `.git/packed-refs`,
+   `fleet.json` and `fleet.runtime.json` — after which the *documented* non-root
+   dispatch died with `mkdir: Permission denied` on `.worktrees/`. The cited
+   test asserted the worktree's owner was unchanged, which is true and
+   uninformative: a refused dispatch never creates a worktree. What it created
+   was the `.worktrees` **parent**, which that assertion never looked at.
+
+   What now carries the clause is
+   `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+   (`crates/cosmon-cli/tests/refused_root_dispatch_leaves_no_residue.rs`),
+   which names no path: it snapshots every entry under the galaxy root and
+   under the config home with owner, group and mode, runs the refused dispatch
+   end to end through the real `cs` binary, and asserts the two sets are
+   identical. A residue nobody predicted fails it. The scope of the older
+   assertion (`a_root_dispatch_refuses_without_touching_the_filesystem`) is
+   narrowed in its own doc comment to what it actually measures: the
+   *provisioning funnel* performs no `chown` on the refuse arm.
+
+   One thing is enforced and worth stating precisely, because it is the edge of
+   the claim: the typed refusal is *recorded* to `events.jsonl`, which is a
+   write. It is not residue because the sinks are opened **append-only** — a
+   refused dispatch never creates an events file it found missing. On a galaxy
+   so fresh that no event has ever been written, the refusal is returned to the
+   operator and not recorded.
 
 `RootSpawnDecision::Demote` and the transport-side provisioning port are kept,
 dormant and unreachable from the policy, for two reasons: they are the

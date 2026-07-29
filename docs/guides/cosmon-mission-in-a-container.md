@@ -80,11 +80,29 @@ aarch64.
 
 That is not a preference. Colima and Docker Desktop behave *differently* in two
 ways that matter here, and both were measured rather than assumed
-([the capture](../benches/engine-fidelity-2026-07-27.md)): on Colima a
-bind-mounted host directory silently ignores `chown`, and `unshare` is blocked
-by the default seccomp profile. On Docker Desktop neither happens — which sounds
-better and is worse, because it means Docker Desktop cannot *show* you a whole
-class of failure that will still bite you elsewhere.
+([the capture](../benches/engine-fidelity-2026-07-27.md)).
+
+The first: on Colima a bind-mounted host directory over virtiofs silently
+ignores `chown` — the call returns success and the owner does not change.
+
+The second needs its scope stated, because the reviewer who first reported it
+withdrew the general form and he was right to. What was measured is this: **on
+our Colima profile above (Ubuntu 24.04.4 LTS, aarch64, vz + virtiofs, docker
+runtime), `setpriv --reuid 10001 … unshare -Ur true` fails with `Operation not
+permitted` under the default container security profile and succeeds under
+`--security-opt seccomp=unconfined`, with `/proc/self/status` reading
+`Seccomp: 2` (`Seccomp_filters: 1`) in the first run and `Seccomp: 0` in the
+second.** Two runs
+differing in one flag is what makes it seccomp rather than something else — and
+that is the whole of the claim. `Seccomp: 2` together with an `EPERM` does not,
+on its own, identify which layer refused: AppArmor, a kernel with unprivileged
+user namespaces disabled, and a capability drop all produce the same errno. On
+another engine, another kernel, or another profile you have measured nothing
+until you have run the two-arm version yourself.
+
+On Docker Desktop neither behaviour appears — which sounds better and is worse,
+because it means Docker Desktop cannot *show* you a whole class of failure that
+will still bite you elsewhere.
 
 cosmon's own benches decide their engine in exactly one file,
 [`scripts/lib/bench-engine.sh`](../../scripts/lib/bench-engine.sh), and they
@@ -550,6 +568,36 @@ means per-worker refs and objects with a controlled integration step, which is a
 different worktree lifecycle and is not built. Until it is, the door is shut —
 see [ADR-166](../adr/166-the-root-to-uid-demote-path-is-refused.md).
 
+**If you are reproducing the refusal, install the adapter first.** The
+missing-prerequisite gate — the one that says *"install Claude Code"* — fires
+*before* the root-spawn decision, deliberately: a dispatch that cannot run for
+want of a tool should say so in the operator's own vocabulary. The consequence
+for a reproduction is that a container without `claude` on `PATH` shows you that
+gate and never reaches this one, and it is easy to conclude the refusal is
+absent. It is not; you measured the gate in front of it. The external reviewer
+hit this on his first attempt, which is why it is written down here.
+
+**If a root `cs tackle` already ran on this galaxy, repair it before you pilot
+as 10001.** Up to and including v0.4.0 the refusal fired late enough that root
+had already created the worktree parent, the fleet state and the two Claude
+config files — root-owned, on a galaxy whose worker is uid 10001. The visible
+symptom is not an error you can read: the *documented* non-root dispatch dies
+with `mkdir: Permission denied` on `.worktrees/` and the molecule sits `pending`
+until it times out. One line puts it back:
+
+```sh
+docker exec <container> sh -c \
+  'chown 10001:10001 /srv/mission/.worktrees && \
+   rm -f "$CLAUDE_CONFIG_DIR/.claude.json" "$CLAUDE_CONFIG_DIR/settings.json"'
+```
+
+`.worktrees/` is the single deterministic blocker — restoring it alone is enough
+to unstick the dispatch. The two config files are removed rather than chowned
+because cosmon rewrites both on the next dispatch, and because they are the
+files a root run had no business authoring. From v0.4.1 the refusal is taken at
+the entry of `cs tackle`, before any of the seven paths exist, so there is
+nothing to repair.
+
 ## Step 7 — watch the worker work
 
 Remember the picture: the worker is inside the container, so watching it means
@@ -667,6 +715,13 @@ Three plain sentences about that, and then we move on:
   keep getting proposed.
 - **A proper API door for this shape does not exist yet.** Not "is discouraged" —
   does not exist. When it does, this page will change.
+- **Pilot and workers share one uid, and that uid is one trust boundary.** Every
+  worker can write every sibling worker's worktree — not merely rewrite its refs
+  or delete a shared object, but edit the files another molecule is working on,
+  while it works on them. That is the price of removing the hand-over, it is
+  paid knowingly, and
+  [ADR-165](../adr/165-resources-are-created-under-the-identity-that-consumes-them.md)
+  is where the reasoning lives.
 
 That is the trade. It is not sold as more than it is.
 
