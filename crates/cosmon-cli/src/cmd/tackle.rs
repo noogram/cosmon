@@ -2578,16 +2578,27 @@ fn emit_gate_failed(
 ///
 /// The galaxy sink exists from `cs init` onward, so the refusal reaches it in
 /// every ordinary case — it is what the pinning test and the container repro
-/// harness read. The **per-molecule** sink is created when a molecule is
-/// dispatched, not when it is nucleated, so a molecule refused on its first
-/// `cs tackle` has none and one is not created for it. The refusal is then
-/// recorded once, at fleet scope, and `cs observe` on that molecule cannot say
-/// why it never started.
+/// harness read.
 ///
-/// Do not "fix" that by creating the file here. Creating it is the residue.
-/// If molecule-scoped visibility is wanted, the sink has to exist before the
-/// dispatch — i.e. `cs nucleate` creates it — which is a change to nucleation,
-/// not to this function.
+/// The molecule-scoped file is a different animal, and two earlier versions of
+/// this comment got it wrong by calling it a sink at all. A molecule has **no
+/// event journal of its own.** A molecule directory sometimes contains an
+/// `events.jsonl`, and when it does it holds diagnostic probe records —
+/// measured across the development galaxy, 152 of the 164 that exist contain
+/// nothing but `adapter_pane_signature_checked`, and the only other types
+/// present anywhere are `adapter_liveness_probed`, `model_observed` and
+/// `worker_spawn_attempted`. A molecule that ran to completion without a pane
+/// probe has no such file either, so its absence after a refusal is not a
+/// regression in visibility; there was nothing there to lose.
+///
+/// What *did* change: before this function appended, it created, so a refused
+/// root dispatch manufactured that file — the write the refusal exists to
+/// prevent, producing the artefact that then made the refusal look recorded.
+///
+/// Do not "fix" the absence by creating the file here. Creating it is the
+/// residue. If a real per-molecule journal is wanted it is a design decision
+/// about nucleation and about what such a journal is *for*, not a `create(true)`
+/// in a refusal path.
 fn record_root_spawn_refusal(
     mol_state_dir: &Path,
     mol_id: &MoleculeId,

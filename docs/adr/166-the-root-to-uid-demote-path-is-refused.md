@@ -133,22 +133,38 @@ Three properties make the refusal a control rather than a caveat:
    write. It is not residue because the sinks are opened **append-only** — a
    refused dispatch never creates an events file it found missing.
 
-   The consequence is asymmetric between the two sinks, and it is the
-   molecule-scoped one that is affected in the ordinary case. The galaxy sink
-   (`.cosmon/state/events.jsonl`) exists from `cs init` onward, so the refusal
-   is recorded there and that is where the container repro harness and the
-   pinning test read it. The **per-molecule** sink is created when a molecule is
-   *dispatched*, not when it is nucleated — so a molecule refused on its first
-   `cs tackle` has no `events.jsonl` of its own, and the append-only rule
-   correctly declines to create one. The refusal is therefore recorded once, at
-   fleet scope, and molecule-scoped tooling will not show why that molecule
-   never started; the fleet ledger is where the answer lives. Measured, not
-   assumed: 164 of 389 molecule directories in the development galaxy carry the
-   file.
+   Two earlier drafts of this clause described a "per-molecule sink" as though
+   a molecule had an event journal of its own. **It does not, and it never
+   did.** What the append-only rule changed is narrower than either draft said,
+   and the difference is worth stating because it was found by external review
+   twice in a row.
 
-   An earlier draft of this clause claimed that every galaxy nucleated into has
-   both sinks. That was false, and it was reported by the same external review
-   that reported the residue.
+   There is one event journal: the galaxy ledger at
+   `.cosmon/state/events.jsonl`. It exists from `cs init` onward, the refusal is
+   recorded there, and it is what the container repro harness and the pinning
+   test read.
+
+   A molecule directory may *also* contain an `events.jsonl`, and that file is
+   not a lifecycle journal — it is a side-file that diagnostic probes create
+   when they happen to run. Measured across the development galaxy: 164 of 389
+   molecule directories carry one, and of those 164, **152 contain nothing but
+   `adapter_pane_signature_checked`**. The only four event types that appear
+   anywhere in them are that probe, `adapter_liveness_probed`, `model_observed`
+   and `worker_spawn_attempted`. A molecule that ran to `completed` without a
+   pane probe has no such file; a molecule refused before dispatch has none
+   either.
+
+   Before this change the refusal record opened its sinks with `create`, so a
+   refused *root* dispatch produced that file as a side effect and the token
+   appeared in it. That was the file being manufactured by the very write the
+   refusal exists to prevent. Append-only removes the side effect, which is
+   correct, and it does not remove a journal — there was none to remove.
+
+   The consequence stated honestly, and it is broader than the refusal case:
+   molecule-scoped tooling cannot explain why a molecule never started, and it
+   could not explain a molecule that ran fine either. The fleet ledger is where
+   every answer lives. Whether a real per-molecule journal should exist is a
+   separate question this ADR does not decide.
 
 `RootSpawnDecision::Demote` and the transport-side provisioning port are kept,
 dormant and unreachable from the policy, for two reasons: they are the
