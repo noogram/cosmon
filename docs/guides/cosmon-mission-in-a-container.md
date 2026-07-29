@@ -92,13 +92,35 @@ runtime), `setpriv --reuid 10001 … unshare -Ur true` fails with `Operation not
 permitted` under the default container security profile and succeeds under
 `--security-opt seccomp=unconfined`, with `/proc/self/status` reading
 `Seccomp: 2` (`Seccomp_filters: 1`) in the first run and `Seccomp: 0` in the
-second.** Two runs
-differing in one flag is what makes it seccomp rather than something else — and
-that is the whole of the claim. `Seccomp: 2` together with an `EPERM` does not,
-on its own, identify which layer refused: AppArmor, a kernel with unprivileged
-user namespaces disabled, and a capability drop all produce the same errno. On
-another engine, another kernel, or another profile you have measured nothing
-until you have run the two-arm version yourself.
+second.** Two runs differing in one flag is what makes it seccomp rather than
+something else.
+
+That arm was then replicated on an independent bench (Ubuntu 24.04.4, kernel
+`6.8.0-100-generic`, docker 29.2.1, sysctls unchanged throughout), which held
+one further variable and sharpened the result: keep the default profile and add
+only `CAP_SYS_ADMIN`, and `unshare -Ur` succeeds as well. **Neither half is the
+cause on its own.** The default profile permits `CLONE_NEWUSER` only for a
+process holding `CAP_SYS_ADMIN`, and what refuses an unprivileged worker is that
+conjunction — a capability-conditional rule, not a flat syscall ban.
+
+Two limits on that sentence, both load-bearing:
+
+- **It is about `CLONE_NEWUSER` — `unshare -Ur` — and nothing wider.** `unshare
+  --mount` fails in *every* arm, including seccomp off with `CAP_SYS_ADMIN`
+  granted, and the error moves from `unshare failed: Operation not permitted`
+  to `cannot change root filesystem propagation: Permission denied`. By that
+  point the syscall is going through and what fails is the `mount
+  --make-rprivate /` performed afterwards. Whatever refuses that is **not
+  seccomp, and it has not been isolated.** Generalising this paragraph from
+  `-Ur` to `unshare` would make it false — the shared `Operation not permitted`
+  text is a coincidence of two different causes, and reading one cause behind
+  both symptoms is exactly the inference that has to be resisted here.
+- **`Seccomp: 2` together with an `EPERM` identifies nothing on its own.**
+  AppArmor, a kernel with unprivileged user namespaces disabled, and a
+  capability drop all produce the same errno. On another engine, another kernel,
+  or another profile you have measured nothing until you have run the arms
+  yourself — and the fix for an under-determined claim is a control arm, not a
+  more cautious wording.
 
 On Docker Desktop neither behaviour appears — which sounds better and is worse,
 because it means Docker Desktop cannot *show* you a whole class of failure that
