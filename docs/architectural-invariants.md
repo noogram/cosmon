@@ -3175,15 +3175,34 @@ not of the session that runs the verb. `cosmon_cli::base_branch::resolve`
    <branch>`, which also cuts `feat/<mol-id>` from that ref instead of the
    ambient `HEAD`;
 2. the `COSMON_BASE_BRANCH` environment variable;
-3. `git symbolic-ref refs/remotes/origin/HEAD`;
-4. the literal `"main"`.
+3. the galaxy's `[project] trunk_branch` config declaration;
+4. `git symbolic-ref refs/remotes/origin/HEAD`;
+5. the literal `"main"`.
 
-Steps 2–4 are the historical chain and remain byte-identical for every
-molecule with no persisted base, which is the backward-compatibility
-contract: a legacy molecule, or one tackled without `--base`, behaves
-exactly as it did before rung 1 existed.
+Rung 3 was added by `task-20260729-b016`. Before it, `trunk_branch` *named*
+the trunk without governing where a merge landed: it fed only the deploy gate
+(`reference_trunk`), so a galaxy with `trunk_branch = "dev"` still had
+`cs done` resolve `main` and refuse with `NotOnBase`. It sits below the
+environment variable because an `export` is an explicit session gesture while
+the config is the galaxy's standing default, and below the persisted base
+because editing config must not retarget a molecule already in flight.
 
-Rung 1 exists because rungs 2–4 are *ambient*: they are read at harvest
+Rungs 4–5 are the historical tail and remain byte-identical for every molecule
+with no persisted base and no configured trunk, which is the
+backward-compatibility contract: a legacy molecule, or one tackled without
+`--base` in a galaxy that never named its trunk, behaves exactly as it did
+before rung 1 existed.
+
+The two questions are one chain minus a prefix: `resolve` is rungs 1–2
+followed by `reference_trunk` (rungs 3–5). They can therefore only disagree
+when a molecule carries its own base or a session exports the override — which
+is exactly the intended difference.
+
+A refusal names the rung that won, not just the branch: five rungs can all
+produce `main`, and *"the configured base branch is `main`"* is unactionable on
+a misconfigured galaxy.
+
+Rung 1 exists because the rungs below it are *ambient*: they are read at harvest
 time, in the environment of whoever runs `cs done`. A `cs done` fired
 from a tmux hook inherits the environment frozen when the tmux server
 started, never sees a later `export COSMON_BASE_BRANCH`, and refuses the

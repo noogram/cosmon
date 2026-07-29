@@ -7155,9 +7155,20 @@ pub fn run_local_worker(args: &LocalWorkerArgs) -> anyhow::Result<()> {
     // (task-20260725-61fa): on a molecule tackled with `--base <other>`, a
     // `merge-base HEAD main` would report the entire `main`↔base delta as this
     // worker's output.
+    // The galaxy's declared trunk, read from the job's own state dir — the
+    // detached worker has no `Context` to ask (task-20260729-b016).
+    let configured_trunk = cosmon_filestore::load_project_config(
+        &cosmon_filestore::resolve_config_path_from(&job.state_dir),
+    )
+    .ok()
+    .and_then(|cfg| cfg.project.trunk_branch);
     let baseline = WorktreeBaseline::capture(
         &job.worktree_path,
-        &cosmon_cli::base_branch::resolve(&job.worktree_path, mol.base_branch.as_deref()),
+        &cosmon_cli::base_branch::resolve(
+            &job.worktree_path,
+            mol.base_branch.as_deref(),
+            configured_trunk.as_deref(),
+        ),
     );
 
     let result = run_local_agent_loop(

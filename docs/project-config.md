@@ -236,10 +236,24 @@ trunk_branch = "develop"
 
 Optional. Names the galaxy's **reference trunk** — its principal line of
 integration — explicitly, so cosmon never has to *assume* the trunk is called
-`main`. When set it is authoritative for the deploy-bound `post_merge` hook (see
-above). Absent by default: cosmon then follows `origin/HEAD` and falls back to
+`main`. Absent by default: cosmon then follows `origin/HEAD` and falls back to
 `main` only when there is no remote to ask, byte-identical to a galaxy that
 predates the key.
+
+When set it governs two things:
+
+- the deploy-bound `post_merge` hook (see above), which runs only when the
+  merge landed on the trunk;
+- **where a merge lands** — `cs done` and `cs stitch` resolve their base
+  through the molecule's own `--base`, then `COSMON_BASE_BRANCH`, then this
+  key, then `origin/HEAD`, then `main` (`task-20260729-b016`). Naming a private
+  trunk such as `dev` is therefore what makes a `main` that mirrors a
+  linear-history-only public repo structurally unreachable, rather than caught
+  at the push.
+
+It does **not** override a molecule that already carries a base: a molecule
+tackled with `cs tackle --base release/2.0` still merges to `release/2.0`, so
+editing this key never silently retargets work in flight.
 
 ## `config.toml` vs `CLAUDE.md` — overlap and source of truth
 
