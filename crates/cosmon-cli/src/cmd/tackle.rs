@@ -2573,10 +2573,21 @@ fn emit_gate_failed(
 /// on a galaxy whose worker uid is not root, and `events.jsonl` is not exempt
 /// from that: a `create(true)` here would make the refusal itself the very
 /// thing it refuses, one file smaller. So the sinks are opened append-only and
-/// a missing one is skipped. The trade is stated rather than hidden: on a
-/// galaxy so fresh that no event has ever been written, the typed refusal is
-/// returned to the operator and not recorded. Every galaxy that has been
-/// nucleated into has both sinks.
+/// a missing one is skipped. The trade is stated rather than hidden, and it
+/// falls on the two sinks unequally.
+///
+/// The galaxy sink exists from `cs init` onward, so the refusal reaches it in
+/// every ordinary case — it is what the pinning test and the container repro
+/// harness read. The **per-molecule** sink is created when a molecule is
+/// dispatched, not when it is nucleated, so a molecule refused on its first
+/// `cs tackle` has none and one is not created for it. The refusal is then
+/// recorded once, at fleet scope, and `cs observe` on that molecule cannot say
+/// why it never started.
+///
+/// Do not "fix" that by creating the file here. Creating it is the residue.
+/// If molecule-scoped visibility is wanted, the sink has to exist before the
+/// dispatch — i.e. `cs nucleate` creates it — which is a change to nucleation,
+/// not to this function.
 fn record_root_spawn_refusal(
     mol_state_dir: &Path,
     mol_id: &MoleculeId,

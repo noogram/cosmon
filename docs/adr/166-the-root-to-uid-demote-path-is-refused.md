@@ -131,9 +131,24 @@ Three properties make the refusal a control rather than a caveat:
    One thing is enforced and worth stating precisely, because it is the edge of
    the claim: the typed refusal is *recorded* to `events.jsonl`, which is a
    write. It is not residue because the sinks are opened **append-only** — a
-   refused dispatch never creates an events file it found missing. On a galaxy
-   so fresh that no event has ever been written, the refusal is returned to the
-   operator and not recorded.
+   refused dispatch never creates an events file it found missing.
+
+   The consequence is asymmetric between the two sinks, and it is the
+   molecule-scoped one that is affected in the ordinary case. The galaxy sink
+   (`.cosmon/state/events.jsonl`) exists from `cs init` onward, so the refusal
+   is recorded there and that is where the container repro harness and the
+   pinning test read it. The **per-molecule** sink is created when a molecule is
+   *dispatched*, not when it is nucleated — so a molecule refused on its first
+   `cs tackle` has no `events.jsonl` of its own, and the append-only rule
+   correctly declines to create one. The refusal is therefore recorded once, at
+   fleet scope, and molecule-scoped tooling will not show why that molecule
+   never started; the fleet ledger is where the answer lives. Measured, not
+   assumed: 164 of 389 molecule directories in the development galaxy carry the
+   file.
+
+   An earlier draft of this clause claimed that every galaxy nucleated into has
+   both sinks. That was false, and it was reported by the same external review
+   that reported the residue.
 
 `RootSpawnDecision::Demote` and the transport-side provisioning port are kept,
 dormant and unreachable from the policy, for two reasons: they are the
