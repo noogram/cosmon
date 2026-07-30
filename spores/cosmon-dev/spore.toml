@@ -29,6 +29,8 @@
 #                                    deep-think panel (claude-only = A->A, an echo).
 #     * `bug-closure`              (../../.cosmon/formulas/) — the CLOSED/REOPEN verdict
 #                                    over the full semantic surface = OUR closure gate.
+#                                    Since the coverage amendment it runs ASYNCHRONOUSLY,
+#                                    after the polymer has already landed a candidate.
 #   Only TWO formulas are genuinely NEW and ship in formulas/ here:
 #     * `clean-room-repro`      — the G2 reproduction gate (deterministic red, frozen
 #                                  before the fix branch, differential refutation,
@@ -46,16 +48,62 @@
 # diffuses responsibility by construction):
 #
 #   trace (root+leaf, always-on sidecar)
-#   intake(G0) -> contract(G1) -> reproduce(G2) ─┬─> implement(G4) ─┐
-#                                                 │                  ├─> green(G5) -> ci-gate(G8)
-#                                                 └─> falsify(G3) ───┘        │
-#                                                                             v
-#                                          converge (§6bis, EMERGENT — the double clean-room
-#                                          two-verdict convergence; replaces G6 breaker +
-#                                          G7 judge) ────────────────────┬─> rehearsal(G9) ─┐
-#                                                                                  └─> dissent(§9) ──┤
-#                                                                                                    v
-#                                                                              release(G10) -> confirm(G11)
+#
+#   route (SECOND ROOT — no incoming edge, no ${params.issue}) ───────────────────┐
+#                                                                                 │
+#   intake(G0) -> contract(G1) -> reproduce(G2) ─┬─> implement(G4) ─┐             │
+#                                               │                  ├─> green(G5)  │
+#                                               └─> falsify(G3) ───┘      │       │
+#                                                                         v       │
+#                                                                   ci-gate(G8)   │
+#                                                                    ┌────┴────┐  │
+#                            converge (§6bis, EMERGENT — the two-    │         │  │
+#                            verdict double clean-room; replaces  <──┘         └─> rehearsal(G9)
+#                            G6 breaker + G7 judge)                │              │
+#                                                                  └───┬──────────┘
+#                                                                      v
+#                                                          release(G10) => CANDIDATE-LANDED
+#                                                                      ⋯
+#                                                          confirm(G11) => CLOSED, ASYNCHRONOUS
+#
+# THREE ROOTS, AND THE SECOND ONE IS THE POINT. `route` descends from NOTHING —
+# not from intake, not from contract, not from reproduce — and its topic is
+# FORBIDDEN from interpolating ${params.issue}. It is the arm nobody chose: the
+# published install route, walked on a substrate that has never run cosmon, by a
+# brief that never learnt what we think is broken. The measured reason it exists:
+# every internal seat read the same exhibit list, and the winning defect was found
+# by an outsider who ran an arm no seat ran. Provider diversity diversifies the
+# JUDGE; it does not diversify the EXHIBIT. Two readers of one exhibit list are one
+# measurement taken twice. `route` gates `release` and NOT `converge`, so it cannot
+# be argued with in the convergence vocabulary.
+#
+# COVERAGE IS DECLARED, NEVER TESTIFIED. Every review seat writes
+# `surface_enumerated` — the arms, paths and commands it will exercise — BEFORE it
+# reviews. That turns "I reviewed X" from testimony into a claim with a domain, and
+# `release` compares the declared surfaces against the enumerated semantic surface
+# and BLOCKS on a gap it cannot explain. The E1 miss was never a sensitivity
+# failure: the seats produced findings twelve rounds running. It was a COVERAGE
+# failure, and a canary planted in a region no seat visits tests nothing.
+#
+# THE REHEARSAL MATRIX IS UNCONDITIONAL. Root AND non-root, amd64 AND arm64,
+# whatever `risk` says. It used to open only at release/security while `risk`
+# defaulted to `normal` — so the default posture switched off the exact arm the #20
+# defect lived in (a refused root dispatch leaving root-owned residue), and E3's
+# `#[ignore]`d root-only suite that ran on nobody's machine is the same class, second
+# occurrence, in this same file. A cell that DID NOT RUN is BLOCKED, never skipped.
+#
+# `arms_not_run[]` IS MANDATORY AND NON-EMPTY. Not a verdict — a declared blind
+# spot. A release manifest claiming there is no unrun arm is REFUSED. The winning
+# defect lived in the negative space of a document nobody wrote; this field is that
+# document, and it costs one paragraph.
+#
+# TWO FALSE SERIALIZATIONS REMOVED, ZERO CHECKS REMOVED. `review ∥ rehearsal`: both
+# are fed by `ci-gate` and both feed `release`, instead of the old
+# ci-gate -> converge -> rehearsal -> release chain — the rehearsal never needed the
+# review's verdict, only the CI's green. And `confirm` (G11) leaves the blocking
+# path: the polymer's terminal success state is CANDIDATE-LANDED at `release`, and
+# G11's external replay flips it to CLOSED afterwards. One long serial leg becomes
+# two parallel ones; that is free latency, sitting in the edge list.
 #
 # CLEAN = BALLOT-WEIGHTED CONJUNCTION. Every BALLOT-CARRYING seat (`on_ballot` and
 # `diversity_weight > 0`) must return CLEAN in the SAME verdict, and the
@@ -99,7 +147,10 @@ Germinate the robust-dev polymer: turn one externally-reported issue into a
 deterministic RED reproduction (fails on affected_ref for the RIGHT reason,
 frozen before the fix), a smallest FIX, a DOUBLE clean-room review by two distinct
 provider families (claude + codex-sol) rendered as two immutable verdicts and
-resolved by a ballot-weighted CLEAN or a typed escalation, and a RELEASE. No agent
+resolved by a ballot-weighted CLEAN or a typed escalation, an UNCONDITIONAL
+root/non-root x amd64/arm64 rehearsal of the packaged bytes, an AUTHOR-INDEPENDENT
+walk of the published install route by a brief that never learnt what is broken, and
+a RELEASE whose manifest must declare, non-empty, the arms it did NOT run. No agent
 pushes to any remote. When an external reproduction contradicts an internal proof, the reproduction wins and the proof
 becomes the bug.
 """
@@ -121,8 +172,11 @@ becomes the bug.
 #                                runaway backstop on committees convened.
 # GateFailClosed  (LOAD-BEARING): every gate BLOCKS on an absent/malformed verdict;
 #                                release SHIPs only if every upstream gate PASSED,
-#                                the convergence reached CLEAN, and the dissent field
-#                                is non-empty. Absence refuses, always — into a VOID
+#                                the convergence reached CLEAN, the author-independent
+#                                `route` verdict PASSED, every rehearsal cell rendered,
+#                                and the dissent field — now a manifest field, no longer
+#                                a node — carries a non-empty brief AND a non-empty
+#                                `arms_not_run[]`. Absence refuses, always — into a VOID
 #                                verdict that cannot advance a state, never into a
 #                                FINDINGS verdict that could be patched against.
 # DeterministicParametrization : the node set is a pure function of the params;
@@ -130,6 +184,16 @@ becomes the bug.
 # NoResourceCollision          : each node (and each of the two convergence verdicts)
 #                                writes a distinct, state-indexed path; parallel
 #                                writers never alias a resource.
+#
+# SEAL DIVERGENCE, STATED RATHER THAN HIDDEN: `spore.tla` / `spore.cfg` still model
+# the DELETED round counter (MaxRounds), the DELETED `dissent` node and the DELETED
+# `review_scale` param, and they do not yet know about `route`, the parallel
+# review/rehearsal edges or the asynchronous `confirm`. The model is
+# therefore BEHIND this manifest on the node set and the edge set, and a TLC run
+# proves a topology this file no longer declares. That is named here because a seal
+# must always say what it does not model; re-synchronising the module is a separate
+# molecule (it owns spore.tla/spore.cfg, which this one is forbidden to touch).
+# Until it lands, treat the four properties as UNPROVEN for the current topology.
 #
 # SEAL HONESTY: a released `cs` may report "TLC unavailable" (the TLC-verify wiring
 # is not in every released binary), so `cs spore run` fails closed and you germinate
@@ -149,9 +213,21 @@ properties = ["Termination", "GateFailClosed", "DeterministicParametrization", "
 # ParamSchema (blueprint §8). Three params are REQUIRED (issue, affected_ref,
 # upstream_version); the rest carry defaults so the spore expands cleanly for the
 # common single-issue case. DeterministicParametrization: the node set does NOT
-# depend on any param value (risk / review_scale / max_rounds are POSTURE params
-# that shape node TOPICS and the loop bound, never the node SET), so the seal's
-# cardinality argument is param-independent.
+# depend on any param value (risk / max_rounds are POSTURE params that shape node
+# TOPICS, never the node SET), so the seal's cardinality argument is
+# param-independent.
+#
+# `review_scale` is GONE (operator decision D1 on delib-20260729-1d4e). It was
+# declared "advisory to the converge node", which is the signature of a knob with no
+# reader: two enum values, no branch anywhere that took one, and a seat free to
+# ignore it. A parameter nobody honours is not a posture, it is a decoration that a
+# reader mistakes for a control.
+#
+# `risk` no longer has a `release` value either, and for a sharper reason: it used to
+# decide whether the rehearsal matrix widened, and its DEFAULT switched that widening
+# off. The matrix is now unconditional, so the only thing `risk` still selects is the
+# jury floor — and per D1 amendment 2 the switch to `security` is MECHANICAL, derived
+# from what the diff TOUCHES, never from a field a tired pilot fills in by habit.
 # --------------------------------------------------------------------------
 [spore.params.issue]
 type        = "string"
@@ -170,15 +246,32 @@ description = "The released version the external tester actually ran (what the w
 
 [spore.params.risk]
 type        = "enum"
-values      = ["normal", "release", "security"]
+values      = ["normal", "security"]
 default     = "normal"
-description = "Drives the review jury floor and the rehearsal matrix. normal => committee jury of 2 families (claude + codex-sol); release/security => >=3 distinct families, conjunctive; security also widens the rehearsal to root+non-root x amd64+arm64."
+description = """
+The JURY FLOOR, and nothing else — the rehearsal matrix no longer reads it (it is \
+unconditional). `normal` => the committee's two ballot-carrying families (anthropic \
+via `claude` + openai via `codex-sol`). `security` => a THIRD distinct family, \
+conjunctive, named concretely so nobody has to invent one under pressure: the \
+`openai` adapter with `base_url = https://api.mistral.ai` and \
+`default_model = mistral-large-latest` — the EU-sovereign warm standby already \
+declared in ../../.cosmon/config.toml, which `provider_diversity` resolves to family \
+`mistral`, distinct from both `anthropic` and `openai`. It needs MISTRAL_API_KEY \
+exported and no new adapter, no new spawn arm.
 
-[spore.params.review_scale]
-type        = "enum"
-values      = ["mission", "submission"]
-default     = "mission"
-description = "mission (default) => one two-verdict convergence wraps the whole deliverable (the oxymake style). submission => each gate/sub-mission carries its own. Advisory to the converge node; does not change the node SET."
+ENTRY IS MECHANICAL, NEVER THE PILOT'S JUDGEMENT (operator decision D1 amendment 2 \
+on delib-20260729-1d4e). `security` is DERIVED FROM WHAT THE DIFF TOUCHES, not from \
+this field: the germinating pilot runs `git diff --name-only <affected_ref>..HEAD` \
+and the value is `security` if ANY changed path matches the security surface — \
+crates/cosmon-core/src/auth.rs, egress*.rs, root_spawn_policy.rs, credential*.rs, \
+adapter_attribution.rs, anything under scripts/publish.sh or docs/specs/, any \
+uid/root/signing/token/key-handling path — and `normal` only when NONE does. Passing \
+`--var risk=security` by hand is allowed as a widening; passing `normal` over a \
+matching diff is a LIE the release manifest must record and BLOCK on. The reason is \
+measured, not aesthetic: `risk = normal` was the DEFAULT, and it switched off exactly \
+the arm the #20 defect lived in. A criterion a tired pilot fills in by habit is not a \
+criterion.
+"""
 
 [spore.params.max_rounds]
 type        = "int"
@@ -265,6 +358,62 @@ ${output_dir}/events.jsonl, ${output_dir}/briefs.md, ${output_dir}/hashes.tsv
 (${output_dir} is the run-scoped home germination hands you — ADR-161 — never a
 path under spores/cosmon-dev/ or the repo root). Even if the mission stalls or a
 worker dies, ${output_dir}/ must let a third party reconstruct what ran.
+"""
+
+# --- route (SECOND ROOT — the arm nobody chose) ----------------------------
+# NO INCOMING EDGE, deliberately. It does not descend from `intake`, `contract` or
+# `reproduce`, because a node that descends from the intake inherits the intake's
+# idea of what is broken, and that idea is exactly what the outsider did not have.
+#
+# The interpolation ban is the load-bearing half and it is MECHANICALLY CHECKABLE:
+# this topic must contain NO `${params.issue}`, NO `${params.affected_ref}` and NO
+# `${params.upstream_version}`. Not "should avoid" — must not contain, and a linter
+# can grep it. A brief that names the symptom cannot un-know it; the moment the
+# symptom is in the brief, the walker is walking OUR arm again and the second root is
+# a first root with extra steps.
+#
+# It gates `release`, NOT `converge`. Deliberate: routed through the convergence, its
+# findings would be answerable in the convergence's vocabulary (on-ballot /
+# off-ballot / residual / no-new-information), and an unscoped execution of our own
+# claims is not a review opinion to be weighed against other review opinions. It is a
+# measurement of the world, and the world does not carry diversity weight.
+[[spore.node]]
+id          = "route"
+kind        = "fixed"
+formula     = "task-work"
+description = "AUTHOR-INDEPENDENT INSTALL ROUTE (BLOCK, gates release): a second root with no incoming edge, forbidden from naming the issue, that installs the PUBLISHED artefact by the DOCUMENTED route on a substrate that has never run cosmon and records every deviation between what the docs promise and what happens. Unscoped execution of our own claims — not adversarial reading. Emits verdict.json."
+[spore.node.vars]
+topic = """
+COSMON — AUTHOR-INDEPENDENT INSTALL ROUTE (fail-closed). You have NOT been told what
+anyone believes is broken, and you must not go looking for it: no issue id, no
+symptom, no affected ref. That is the point of this seat, not an oversight in your
+brief. If you find yourself hunting a specific defect, you are running somebody
+else's arm.
+
+Do this instead. Read the repo's PUBLISHED surfaces and nothing else — README.md, the
+installation docs, `man cs`, `cs --help` — and treat every sentence in them as a
+PROMISE THIS PROJECT MADE TO A STRANGER. Then be that stranger: on a substrate that
+has never run cosmon (a fresh container, a fresh user, an empty HOME — never your own
+warm checkout, never a worktree with a populated .cosmon/), install the PUBLISHED
+artefact by the DOCUMENTED route, exactly as written, following no step the documents
+do not contain. Run the first things the documents tell a newcomer to run.
+
+Record EVERY DEVIATION between what the document promised and what happened, however
+small and however obviously "just a doc bug": a command that does not exist, a flag
+that was renamed, a path that is not created, a prerequisite nobody mentioned, an
+error message that names an internal identifier, a step that only works if you are
+root, a step that only works if you are NOT root. Deviations are the deliverable. A
+run that reports no deviation is a suspicious result, not a good one: say what you
+executed so a reader can judge whether you walked far enough.
+
+Emit ${output_dir}/route.md — the substrate you used, the verbatim command sequence
+you ran, and one numbered entry per deviation (promise / observed / where the document
+says it) — AND ${output_dir}/surface_enumerated.json {arms[], paths[], commands[]}
+declaring the surface you actually exercised, written BEFORE you interpret anything.
+AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+a route you could not complete is BLOCKED with the step that stopped you named — never
+PASS with a workaround you invented. `release` reads this verdict and cannot ship
+without it.
 """
 
 # --- G0 intake ------------------------------------------------------------
@@ -458,76 +607,163 @@ BALLOT-CARRYING seats only; an off-ballot CLEAN certifies nothing. A verdict tha
 measured nothing is VOID: it does not advance the state, the seat is re-dispatched
 once, and a second void collapses on `verdict-plumbing` rather than being patched
 against findings nobody collected.
+
+EVERY SEAT DECLARES ITS SURFACE BEFORE IT REVIEWS. The first artefact each seat
+writes — before it forms any opinion — is
+${output_dir}/seats/<seat>/surface_enumerated.json {arms[], paths[], commands[]}: the
+arms it will exercise, the paths it will read, the commands it will run. Written
+first, on purpose: a surface declared afterwards is a description of what the seat
+happened to do, and describes a review instead of scoping it. This converts "I
+reviewed X" from TESTIMONY into a claim WITH A DOMAIN — which is the only form in
+which a coverage gap is visible at all. A seat that renders a verdict with no
+surface_enumerated.json is VOID on the plumbing rule above, exactly like a seat with
+no verdict.json: a review whose domain is unknown measured an unknown amount, and the
+E1 miss was a coverage failure, never a sensitivity failure — the seats produced
+findings twelve rounds running while nobody ran the arm the defect lived in.
+Aggregate the seats' declarations into ${output_dir}/surface_enumerated.json (the
+union, with the seat that claimed each entry) for `release` to compare against.
 """
 issue        = "${params.issue}"
 max_rounds   = "${params.max_rounds}"
 risk         = "${params.risk}"
-review_scale = "${params.review_scale}"
 
-# --- G9 rehearsal (packaged artefact, not the dev build) ------------------
+# --- G9 rehearsal (packaged artefact, not the dev build; UNCONDITIONAL matrix) -
+# Fed by `ci-gate`, in PARALLEL with `converge`, and no longer downstream of it: the
+# rehearsal needs the CI's green and the packaged bytes, and never needed anybody's
+# review opinion. The old ci-gate -> converge -> rehearsal chain was a serialization
+# nobody had a causal reason for, and removing it removes zero checks.
+#
+# The matrix is UNCONDITIONAL — all four cells, whatever `risk` says. This is the
+# amendment with a measured proof behind it: the matrix used to widen only at
+# release/security while `risk` DEFAULTED to normal, so the default posture switched
+# off the exact arm the #20 defect lived in — a refused root dispatch that left
+# root-owned residue behind. And E3's `#[ignore]`d root-only suite, which ran on
+# nobody's machine, is the same class of hole, second occurrence, in this same file.
+# It is also the closest thing to internalising the outsider that exists: the matrix
+# IS run-the-arm-you-would-not-have-run.
 [[spore.node]]
 id          = "rehearsal"
 kind        = "fixed"
 formula     = "task-work"
-description = "G9 rehearsal (BLOCK): install the SIGNED packaged artefact (not the dev build) into the repro image and re-run the frozen red green. release/security widens to root+non-root x amd64+arm64. Emits verdict.json."
+description = "G9 rehearsal (BLOCK): install the SIGNED packaged artefact (not the dev build) and re-run the frozen red green across the UNCONDITIONAL matrix root+non-root x amd64+arm64, regardless of risk. Each cell writes its own verdict at a cell-keyed path; a cell that did not run is BLOCKED, never skipped. Fed by ci-gate in parallel with converge. Emits verdict.json."
 [spore.node.vars]
 topic = """
-COSMON-DEV ${params.issue} — G9 REHEARSAL (fail-closed). Install the PACKAGED,
-SIGNED artefact (NOT the dev build) into the clean-room repro image and re-run the
-frozen red from ${run_dir}/reproduce/ — it must go green from the packaged bytes. Matrix by
-risk: normal => the primary profile; release/security => root AND non-root, amd64
-AND arm64. Emit ${output_dir}/rehearsal.md (the matrix + the green results) AND ${output_dir}/verdict.json
-{verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: a green from the dev build
-instead of the packaged artefact is BLOCKED.
+COSMON-DEV ${params.issue} — G9 REHEARSAL (fail-closed, UNCONDITIONAL MATRIX).
+Install the PACKAGED, SIGNED artefact (NOT the dev build) and re-run the frozen red
+from ${run_dir}/reproduce/ — it must go green FROM THE PACKAGED BYTES.
+
+Run ALL FOUR CELLS, whatever ${params.risk} says: {root, non-root} x {amd64, arm64}.
+The matrix is not widened by a posture param any more, because the posture param
+defaulted to the value that switched off the arm the last real defect lived in. Each
+cell writes its OWN verdict at its OWN cell-keyed path —
+${output_dir}/cells/<uid>-<arch>/verdict.json, e.g. cells/root-arm64/verdict.json —
+plus that cell's log. Distinct paths per cell are what keeps four parallel writers
+from aliasing one file and one cell's green from being read as another's.
+
+A CELL THAT DID NOT RUN IS BLOCKED, NEVER SKIPPED. No arm64 runner, no root
+permission, an emulator you do not trust: all of those are BLOCKED cells with the
+reason named, and BLOCKED cells make this gate BLOCKED. A missing cell must never
+render as a silent pass or as an absent row — an absent row is how a whole arm goes
+missing without anybody deciding to drop it. If a cell is genuinely unobtainable in
+this environment, it is BLOCKED here and it goes into the release manifest's
+`arms_not_run[]` as a DECLARED blind spot; that is the only route by which the
+mission proceeds past an unrun arm, and it costs somebody a sentence they have to
+write and a human has to read.
+
+Emit ${output_dir}/rehearsal.md (the four-cell matrix, every cell's verdict and
+reason) AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[],
+cells: {"<uid>-<arch>": PASS|BLOCKED}} with all four keys ALWAYS present. FAIL-CLOSED:
+a green from the dev build instead of the packaged artefact is BLOCKED; a `cells` map
+with fewer than four keys is BLOCKED.
 """
 
-# --- §9 dissent (the release-gate field, not a seat) ----------------------
-[[spore.node]]
-id          = "dissent"
-kind        = "fixed"
-formula     = "task-work"
-description = "§9 dissent field (BLOCK, empty=hard-block): a non-empty contre-brief at release, explicitly overruled with named rationale, with the right-to-fork (force a 2nd independent judge on the frozen dossier). Emits {brief, overruled_by, rationale}."
-[spore.node.vars]
-topic = """
-COSMON-DEV ${params.issue} — §9 DISSENT FIELD (fail-closed, empty = hard-block).
-Produce the mandatory release contre-brief: the single strongest reason this fix
-should NOT ship (correctness, blast-radius, a residual the convergence recorded
-as off-ballot and did not block on). It must be EXPLICITLY overruled with a NAMED rationale, or it forces
-the right-to-fork (buterin): a 2nd independent judge on the frozen dossier before
-release. Emit ${output_dir}/dissent.md AND ${output_dir}/verdict.json shaped {verdict: PASS|BLOCKED, count,
-findings, brief, overruled_by, rationale}. FAIL-CLOSED: an EMPTY brief is a
-hard-block (a release with no recorded dissent is groupthink); a non-empty brief
-with no named overrule is BLOCKED.
-"""
+# --- §9 dissent: NO LONGER A NODE ----------------------------------------
+# It is a FIELD of the release manifest (operator decision D1 on
+# delib-20260729-1d4e — `rehearsal`, `dissent` and `confirm` come off the blocking
+# path). It was never a measurement: it dispatched a worker to write a paragraph that
+# the release gate then had to read back out of a verdict.json, so the node bought a
+# molecule, a worktree and a handoff for a field that the node validating it could
+# hold directly. Nothing is relaxed by the fold — the empty-brief hard-block moved
+# INTO `release` below and grew a second mandatory field (`arms_not_run[]`) and a
+# stricter one (`overruled_by` must name a HUMAN). The shape is
+# {brief, residuals[], arms_not_run[], overruled_by, rationale}.
 
 # --- G10 release (signed manifest; NO agent pushes) -----------------------
 [[spore.node]]
 id          = "release"
 kind        = "fixed"
 formula     = "task-work"
-description = "G10 release (BLOCK): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, dissent). NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
+description = "G10 release (BLOCK): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, the four-cell matrix, the route deviations, the declared-surface comparison, and the folded dissent field with its non-empty arms_not_run[]). Fed by converge, rehearsal AND route. PASS here is the polymer's terminal success state, CANDIDATE-LANDED. NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G10 RELEASE MANIFEST (fail-closed, NO PUSH). Assemble
 ${output_dir}/release-manifest.json validating the WHOLE dossier (never inferring
 success from completion), reading each upstream gate's verdict from
-${run_dir}/<gate>/verdict.json: the fix commit sha, the FROZEN red hash from G2, the clean-room image
-digest, the affected_ref (${params.affected_ref}) and upstream_version
-(${params.upstream_version}), the CI verdict, the convergence's ballot-weighted
-CLEAN verdict (verdict CLEAN with a NON-EMPTY ballot_seats set — an empty ballot is
-never a pass), the rehearsal matrix, and the non-empty dissent {brief, overruled_by,
-rationale}. Run `scripts/publish.sh --check` for the scrub projection. Emit
-${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: any missing
-manifest field => BLOCKED. NO AGENT PUSHES: the output stays on the feat-branch;
-the actual push/tag is a HUMAN gate. State this explicitly in ${output_dir}/release.md.
+${run_dir}/<gate>/verdict.json: the fix commit sha, the FROZEN red hash from G2, the
+clean-room image digest, the affected_ref (${params.affected_ref}) and
+upstream_version (${params.upstream_version}), the CI verdict, the convergence's
+ballot-weighted CLEAN verdict (verdict CLEAN with a NON-EMPTY ballot_seats set — an
+empty ballot is never a pass), the rehearsal `cells` map with ALL FOUR keys PASS, and
+the author-independent `route` verdict from ${run_dir}/route/ with its deviation list.
+
+THE DECLARED-SURFACE COMPARISON (BLOCKS). Enumerate the issue's FULL SEMANTIC SURFACE
+by the bug-closure rite — every code path, help text, man page, test and snapshot the
+issue's verb touches — and write it to ${output_dir}/surfaces.md. Then read every
+surface_enumerated.json the reviewing seats and the `route` walker wrote, and compare:
+for each element of the semantic surface, WHICH seat declared it. Write
+${output_dir}/coverage.md as that table. A surface element NO seat declared is a
+COVERAGE GAP, and a gap you cannot EXPLAIN is BLOCKED. An explanation is a sentence
+naming why the element needs no seat (it is generated from a declared one, it is
+unreachable on this platform, …), never "it looked fine". You do the enumeration here
+rather than waiting for G11 because G11's external replay is asynchronous now and the
+comparison must stay on the blocking path — the enumeration half of the closure rite
+is mechanical and available before the candidate lands.
+
+THE DISSENT FIELD, folded in (no longer a node) — shape
+{brief, residuals[], arms_not_run[], overruled_by, rationale}:
+  * `brief` — the single strongest reason this fix should NOT ship (correctness,
+    blast-radius, a residual the convergence recorded as off-ballot). EMPTY IS A
+    HARD-BLOCK: a release with no recorded dissent is groupthink.
+  * `residuals[]` — the findings the convergence recorded from OFF-BALLOT seats and
+    correctly did not block on. They block nothing and they are not allowed to vanish.
+  * `arms_not_run[]` — MANDATORY AND NON-EMPTY. Every arm, cell, platform, path or
+    scenario this mission DID NOT exercise: the rehearsal cells that came back BLOCKED
+    as unobtainable, the surfaces no seat declared and you explained away above, the
+    substrates nobody had. This is NOT a verdict; it is a DECLARED BLIND SPOT. A
+    manifest asserting there is no unrun arm is REFUSED — BLOCKED, with this sentence
+    quoted back: the last winning defect lived in the negative space of a document
+    nobody wrote, and this field is that document.
+  * `overruled_by` — REQUIRED, and it must name a HUMAN IDENTITY. Not "the panel", not
+    a molecule id, not an adapter, not you. An agent may not overrule the dissent it
+    or its siblings authored; a machine overruling a machine's objection is the loop
+    marking its own homework.
+  * `rationale` — the named reason for the overrule.
+
+Run `scripts/publish.sh --check` for the scrub projection. Emit
+${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+any missing manifest field => BLOCKED; a `risk` value of normal over a diff that
+touches the security surface (see the `risk` param's mechanical rule) => BLOCKED with
+the matching paths named. A PASS here is the polymer's TERMINAL SUCCESS STATE and it
+is called CANDIDATE-LANDED, not CLOSED — closure belongs to G11 and arrives later. NO
+AGENT PUSHES: the output stays on the feat-branch; the actual push/tag is a HUMAN
+gate. State this explicitly in ${output_dir}/release.md.
 """
 
-# --- G11 confirm (external replay closes the loop; bug-closure) -----------
+# --- G11 confirm (external replay; ASYNCHRONOUS, OFF THE BLOCKING PATH) ---
+# The polymer's terminal success state is CANDIDATE-LANDED at `release`; this node
+# flips it to CLOSED afterwards (operator decision D1 — `confirm` comes off the
+# blocking path). The `release -> confirm` edge SURVIVES, because you cannot replay a
+# candidate that does not exist yet; what changed is that nothing waits on the
+# verdict. No check is removed, only a false serialization: the thing G11 was
+# genuinely blocking on — the semantic-surface enumeration — moved UP into `release`,
+# where it now blocks on a declared-coverage gap. What stays here is the half that
+# depends on a HUMAN BEING ELSEWHERE replying, and a gate whose latency is another
+# person's inbox was never a gate; it was a queue with a gate's name on it.
 [[spore.node]]
 id          = "confirm"
 kind        = "fixed"
 formula     = "bug-closure"
-description = "G11 external confirm (BLOCK to CLOSE an env-specific issue): the reporter replays the candidate; bug-closure emits the CLOSED/REOPEN verdict over the full semantic surface. Emits verdict.md."
+description = "G11 external confirm (ASYNCHRONOUS, off the blocking path): the reporter replays the landed candidate; bug-closure emits the CLOSED/REOPEN verdict over the full semantic surface, flipping CANDIDATE-LANDED to CLOSED. Blocks nothing — release already blocked on the enumeration half. Emits verdict.md."
 [spore.node.vars]
 bug_molecule_id = "${params.issue}"
 topic = """
@@ -538,8 +774,16 @@ and record the reporter's replay of the release candidate on their environment.
 Emit ${output_dir}/surfaces.md, ${output_dir}/coverage.md, ${output_dir}/verdict.md. The verdict is CLOSED only if every
 surface is repaired AND the external replay went green on the reporter's
 environment; else REOPEN with the named gap. Absent external replay for an
-env-specific issue => REOPEN, never CLOSED (advisory before release, BLOCK to
-close).
+env-specific issue => REOPEN, never CLOSED.
+
+YOU RUN AFTER THE CANDIDATE HAS LANDED, and you block nothing: the release gate
+already reached CANDIDATE-LANDED on its own enumeration and its own declared-coverage
+comparison. Your job is to flip that state to CLOSED, or to REOPEN it. So COMPARE
+rather than repeat: read the semantic surface `release` enumerated in
+${run_dir}/release/surfaces.md and say explicitly whether your independent enumeration
+agrees with it. A surface `release` missed is a finding about the RELEASE GATE, not a
+footnote — name it as one, because it means the blocking comparison was run against a
+short list.
 """
 
 # ==========================================================================
@@ -585,35 +829,48 @@ from = "green"
 to   = "ci-gate"
 type = "verifies"
 
-# CI (cheap) before the convergence (dear).
+# CI (cheap) before the convergence (dear). ci-gate then forks: the review arm and
+# the rehearsal arm run IN PARALLEL and reconverge at release. They were serialized
+# (ci-gate -> converge -> rehearsal -> release) for no causal reason — the rehearsal
+# consumes the CI's green and the packaged bytes, never the review's verdict — so
+# un-serializing them turns one long leg into two short ones and removes zero checks.
 [[spore.edge]]
 from = "ci-gate"
 to   = "converge"
 type = "feeds"
 
-# converge forks into the rehearsal arm and the dissent arm; they reconverge at
-# release.
 [[spore.edge]]
-from = "converge"
+from = "ci-gate"
 to   = "rehearsal"
 type = "feeds"
 
+# Both arms reconverge at release. (`dissent` is no longer a node: it is a field of
+# the release manifest, validated by `release` itself.)
 [[spore.edge]]
 from = "converge"
-to   = "dissent"
-type = "produces"
+to   = "release"
+type = "feeds"
 
 [[spore.edge]]
 from = "rehearsal"
 to   = "release"
-type = "feeds"
+type = "verifies"
 
+# The THIRD arm into release: the author-independent install route, which descends
+# from nothing and therefore appears in the edge list exactly once — here. It gates
+# `release` and NOT `converge`, so its deviations cannot be answered in the
+# convergence's on-ballot / off-ballot vocabulary.
 [[spore.edge]]
-from = "dissent"
+from = "route"
 to   = "release"
 type = "verifies"
 
+# release -> confirm SURVIVES as ORDERING ONLY (you cannot replay a candidate that
+# does not exist). `release` PASS is the terminal success state CANDIDATE-LANDED;
+# `confirm` flips it to CLOSED asynchronously and nothing waits on it. `feeds`, not
+# `verifies`: the candidate is what flows to the reporter, and the old label said the
+# release was pending G11's verification, which is the serialization that was removed.
 [[spore.edge]]
 from = "release"
 to   = "confirm"
-type = "verifies"
+type = "feeds"
