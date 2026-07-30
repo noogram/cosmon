@@ -187,6 +187,10 @@ esac
 # Composed now rather than at step 5 so the refusal joins the other
 # configuration preconditions: a candidate that exists and cannot be signed off
 # is a candidate whose only honest fate is deletion.
+if [ ! -f "${SCRIPT_DIR}/signoff.sh" ]; then
+    die "scripts/release/signoff.sh is missing beside this script" \
+        "it holds the sign-off rule both halves of the crossing share; without it there is no identity to certify with"
+fi
 . "${SCRIPT_DIR}/signoff.sh"
 SIGNOFF="$(dco_signoff_line || true)"
 if [ -z "$SIGNOFF" ]; then

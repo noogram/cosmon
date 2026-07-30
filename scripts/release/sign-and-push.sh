@@ -143,6 +143,10 @@ if [ -n "$(git status --porcelain)" ]; then
 fi
 
 # ── 1b. the sign-off identity must resolve ──────────────────────────────────
+if [ ! -f "${SCRIPT_DIR}/signoff.sh" ]; then
+    die "scripts/release/signoff.sh is missing beside this script" \
+        "it holds the sign-off rule both halves of the crossing share; without it there is no identity to certify with"
+fi
 . "${SCRIPT_DIR}/signoff.sh"
 SIGNOFF="$(dco_signoff_line || true)"
 if [ -z "$SIGNOFF" ]; then
