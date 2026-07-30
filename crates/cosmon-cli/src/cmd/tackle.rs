@@ -376,7 +376,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // than moving it sideways: everything the deep gate preceded, this
     // precedes too, plus every write. Only two pure reads run above it — the
     // config-identity load and the molecule load — and the test
-    // `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+    // `a_refused_root_dispatch_adds_no_path_and_changes_no_ownership_or_mode`
     // is what pins that they stay pure.
     //
     // The deep gate in `spawn_claude_and_prompt` is deliberately NOT removed.
@@ -2578,17 +2578,33 @@ fn emit_gate_failed(
 /// test and the container repro harness read.
 ///
 /// This function used to write the same line to a **second**, molecule-local
-/// sink "defensively". That was the COSMON-DEV #20 shape in miniature: two
+/// file "defensively", and it *created* that file to do so — the write the
+/// refusal exists to prevent, producing the artefact that then made the
+/// refusal look recorded. It was the COSMON-DEV #20 shape in miniature: two
 /// writers, two truths, and the truth an operator reads is whichever file
-/// happened to be writable. The molecule-local sink has been removed. Molecule-
-/// scoped visibility now comes from
+/// happened to be writable.
+///
+/// Two earlier versions of this comment called that file a sink, and both were
+/// wrong. A molecule has **no event journal of its own.** A molecule directory
+/// sometimes contains an `events.jsonl`, and when it does it holds diagnostic
+/// probe records — measured across the development galaxy, 152 of the 164 that
+/// exist contain nothing but `adapter_pane_signature_checked`, and the only
+/// other types present anywhere are `adapter_liveness_probed`,
+/// `model_observed` and `worker_spawn_attempted`. A molecule that ran to
+/// completion without a pane probe has no such file either, so its absence
+/// after a refusal was never a regression in visibility; there was nothing
+/// there to lose.
+///
+/// Molecule-scoped visibility comes instead from
 /// [`cosmon_state::journal::MoleculeJournal`], which *projects* this row out of
 /// the galaxy ledger rather than storing a copy of it — so
 /// `cs events journal <id>` says why a molecule never started without anything
 /// having been written per-molecule at all.
 ///
-/// Do not re-add a second sink. If a per-molecule file seems needed, it is the
-/// projection that is missing a caller, not the ledger that is missing a copy.
+/// Do not "fix" the absence by creating the file here; creating it is the
+/// residue. And do not re-add a second sink: if a per-molecule file seems
+/// needed, it is the projection that is missing a caller, not the ledger that
+/// is missing a copy.
 fn record_root_spawn_refusal(
     mol_id: &MoleculeId,
     wid: Option<&WorkerId>,

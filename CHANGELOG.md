@@ -17,7 +17,7 @@ this stage.
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
-## [Unreleased]
+## [0.4.1] — 2026-07-29
 
 ### Fixed
 
@@ -52,6 +52,13 @@ this stage.
   recovery recipe, and warns that the missing-prerequisite gate fires *before*
   the root-spawn refusal, so a reproduction without the adapter on `PATH`
   measures the wrong gate.
+- The clause describing what the append-only rule changed is corrected. A
+  molecule has **no event journal**: the `events.jsonl` that sometimes sits in a
+  molecule directory is a diagnostic side-file (152 of the 164 present carry
+  nothing but `adapter_pane_signature_checked`). Before this release the refusal
+  record created that file, so a refused root dispatch manufactured the very
+  artefact that made the refusal look recorded. The fleet ledger is the one
+  journal, for refusals and for successful runs alike.
 
 ## [0.4.0] — 2026-07-29
 

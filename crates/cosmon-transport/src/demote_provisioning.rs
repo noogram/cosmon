@@ -1231,7 +1231,7 @@ mod tests {
     /// have seen any of it: its whole fixture is one directory in a tempdir.
     ///
     /// The end-to-end property is carried by
-    /// `a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical`
+    /// `a_refused_root_dispatch_adds_no_path_and_changes_no_ownership_or_mode`
     /// in `crates/cosmon-cli/tests/refused_root_dispatch_leaves_no_residue.rs`,
     /// which snapshots every path under a real galaxy and a real config home
     /// rather than naming one.

@@ -10,6 +10,30 @@
 //!
 //! The mapping is read-only here; provisioning is an explicit
 //! operator gesture (`cs nucleon bind ...`, out of crate).
+//!
+//! # The binding is *declarative*, and there is no default row
+//!
+//! Every row of the map comes from a file an operator (or the
+//! ADR-141 self-provisioning handoff) wrote. There is no wildcard
+//! `sub`, no per-issuer catch-all, and no fallback binding: the key is
+//! the exact `(iss, sub, aud)` triple, compared byte-for-byte by
+//! [`HabilitationMap::resolve_for_audience`], and an absent triple
+//! resolves to `None` — which the admission boundary turns into
+//! [`crate::RppRejectReason::UnknownSub`] (deny-by-default).
+//!
+//! The consequence worth stating out loud, because it is the question
+//! an observer asks the first time they watch a *second* identity from
+//! the same `IdP` reach a noyau: **belonging to the trusted issuer and
+//! carrying an allowlisted audience is not enough.** Trusting an
+//! issuer (`security/trusted-issuers.toml`) is authn; being bound here
+//! is authz. An `IdP` administrator who mints themselves a token
+//! signed by the trusted issuer, with the pinned audience, is refused
+//! exactly like any other stranger — *unless a binding file names
+//! their `sub`*. If such an identity does reach a noyau, the finding
+//! is a deployment fact (someone declared that `sub`), never a
+//! resolution laxity. Pinned by
+//! `tests::undeclared_sub_from_trusted_issuer_never_resolves` here and
+//! by `admission_test::undeclared_admin_sub_is_refused_fail_closed`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -307,6 +331,24 @@ impl HabilitationMap {
     /// [`crate::RppRejectReason::CrossTenantPivot`] (a grant exists, but
     /// not for the presented audience). For the admission hot path use
     /// [`Self::resolve_for_audience`], which pins the galaxy.
+    ///
+    /// # Never gate on this, and never project a *bound value* from it
+    ///
+    /// Two distinct traps, both audience-blindness:
+    ///
+    /// 1. As a **gate** it is too permissive — it answers "any grant?",
+    ///    not "a grant for the galaxy this token carries?".
+    /// 2. As a **projection source** it is ambiguous — a principal
+    ///    federated on N galaxies has N rows, and this returns the
+    ///    lexicographically-first audience, which need not be the one
+    ///    admission resolved. Anything read off the returned
+    ///    [`Resolved`] and then *enforced* (the `drain_bounds`, the
+    ///    `noyau` a file is written under) must come from
+    ///    [`Self::resolve_for_audience`] with the presented `aud`.
+    ///
+    /// What legitimately remains here: pure existence questions, where
+    /// the answer is a boolean about the principal rather than a value
+    /// about one of their galaxies.
     #[must_use]
     pub fn resolve(&self, iss: &str, sub: &str) -> Option<&Resolved> {
         self.by_key
@@ -1024,6 +1066,121 @@ audience = "cosmon-rpp-tenant"
     fn resolve_unknown_returns_none() {
         let map = HabilitationMap::default();
         assert!(map.resolve("https://idp", "sub").is_none());
+    }
+
+    // ── the binding is declarative (task-20260725-7ce4) ─────────────────
+
+    /// A second identity minted by the SAME trusted issuer, carrying the
+    /// SAME pinned audience, resolves to nothing when no file names its
+    /// `sub`. This is the invariant the `IdP`-administrator question
+    /// turns on: the map has no wildcard row and no fallback row, so
+    /// authn (trusted issuer) never leaks into authz (bound principal).
+    ///
+    /// Concretely: `sub = "2"` is bound, `sub = "1"` is not; both would
+    /// be signed by the same `IdP` and both carry the same `aud`.
+    #[test]
+    fn undeclared_sub_from_trusted_issuer_never_resolves() {
+        let td = tempfile::TempDir::new().unwrap();
+        let dir = td.path().join("nucleons/nuc-tenant");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("oidc-identity.toml"),
+            r#"
+nucleon_id = "nuc-tenant"
+phase = "Biological"
+noyau = "tenant-demo-sandbox"
+
+[oidc]
+issuer = "https://idp/git"
+sub = "2"
+audience = "client-id-a"
+"#,
+        )
+        .unwrap();
+        let map = HabilitationMap::load(td.path()).unwrap();
+
+        // The declared principal resolves, audience-pinned.
+        assert!(map
+            .resolve_for_audience("https://idp/git", "2", "client-id-a")
+            .is_some());
+
+        // Same issuer, same audience, undeclared `sub` ⇒ nothing. No
+        // default row, no per-issuer catch-all, no prefix match.
+        assert!(map
+            .resolve_for_audience("https://idp/git", "1", "client-id-a")
+            .is_none());
+        assert!(map.resolve("https://idp/git", "1").is_none());
+        assert!(map.allowed_scopes_for("https://idp/git", "1").is_empty());
+        assert!(map
+            .allowed_scopes_for_audience("https://idp/git", "1", "client-id-a")
+            .is_empty());
+
+        // Nor does a `sub` that merely *contains* or extends a declared
+        // one — the comparison is byte-for-byte, not a prefix test.
+        for near_miss in ["2 ", " 2", "22", "sub-2"] {
+            assert!(
+                map.resolve("https://idp/git", near_miss).is_none(),
+                "near-miss sub {near_miss:?} must not resolve"
+            );
+        }
+    }
+
+    /// `resolve` returns the lexicographically-first audience for a
+    /// principal federated on several galaxies, which is why an
+    /// *enforced* value (here `drain_bounds`) must be projected from
+    /// [`HabilitationMap::resolve_for_audience`] instead. Guards the
+    /// quota / drain read + enforcement faces against silently taking
+    /// the other galaxy's bounds.
+    #[test]
+    fn audience_blind_resolve_may_pick_the_other_galaxy_binding() {
+        let td = tempfile::TempDir::new().unwrap();
+        for (dir_name, aud, budget) in [("nuc-a", "aud-a", 4_u64), ("nuc-b", "aud-b", 999_u64)] {
+            let dir = td.path().join("nucleons").join(dir_name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("oidc-identity.toml"),
+                format!(
+                    r#"
+nucleon_id = "{dir_name}"
+phase = "Biological"
+noyau = "{dir_name}-noyau"
+
+[oidc]
+issuer = "https://idp/git"
+sub = "7"
+audience = "{aud}"
+
+[drain_bounds]
+budget = {budget}
+"#
+                ),
+            )
+            .unwrap();
+        }
+        let map = HabilitationMap::load(td.path()).unwrap();
+
+        // Audience-blind: the `aud-a` row wins on ordering, whichever
+        // audience the caller actually presented.
+        assert_eq!(
+            map.resolve("https://idp/git", "7").unwrap().audience,
+            "aud-a"
+        );
+
+        // Audience-pinned: each galaxy keeps its own bounds.
+        assert_eq!(
+            map.resolve_for_audience("https://idp/git", "7", "aud-a")
+                .unwrap()
+                .drain_bounds
+                .budget,
+            4
+        );
+        assert_eq!(
+            map.resolve_for_audience("https://idp/git", "7", "aud-b")
+                .unwrap()
+                .drain_bounds
+                .budget,
+            999
+        );
     }
 
     #[test]

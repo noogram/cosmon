@@ -192,11 +192,19 @@ fn recorded_root_refusal(galaxy: &Path) -> bool {
     })
 }
 
-/// The load-bearing assertion: a root dispatch is refused with **zero**
-/// filesystem residue, in the galaxy and the config home the container guide
-/// tells an operator to use.
+/// The load-bearing assertion: a refused root dispatch **adds no path and
+/// changes no ownership or mode** under the galaxy and the config home the
+/// container guide tells an operator to use.
+///
+/// Stated as what is measured, not as something stronger. This snapshots the
+/// path set with owner, group and mode — it does **not** compare file contents,
+/// and the galaxy is deliberately not byte-identical afterwards: the refusal
+/// appends its typed record to the fleet ledger, which is the one write the
+/// refusal is allowed to make and which `refusal_recorded` checks for
+/// separately. A name promising byte-identity would be a stronger claim than
+/// the body carries, which is the defect class this whole test exists to close.
 #[test]
-fn a_refused_root_dispatch_leaves_the_galaxy_and_config_home_byte_identical() {
+fn a_refused_root_dispatch_adds_no_path_and_changes_no_ownership_or_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let galaxy = tmp.path().join("galaxy");
     let config_home = tmp.path().join("claude-config");

@@ -29,6 +29,7 @@ use cosmon_remote::client::{
 };
 use cosmon_remote::config::{Profile, ProfileStore, ENV_TOKEN};
 use cosmon_remote::error::{Error, Result};
+use cosmon_remote::oidc::BearerIdentity;
 use cosmon_remote::{doctor, hints, phone_home, pkce};
 use tracing_subscriber::EnvFilter;
 
@@ -1995,6 +1996,11 @@ async fn run_login(store: &ProfileStore, name: &str, profile: &Profile, json: bo
     updated.client_id = Some(endpoints.client_id.clone());
     store.write_profile(name, &updated)?;
 
+    // Who we are now is what the *token* says, never what the profile assumed:
+    // a profile whose `sub` disagrees with the issued one is precisely when an
+    // operator reads this line as proof of identity. Echoing `profile.sub` would
+    // send them hunting the entitlement bug in the wrong place.
+    let identity = outcome.identity.as_ref();
     if json {
         print_json(
             true,
@@ -2005,18 +2011,69 @@ async fn run_login(store: &ProfileStore, name: &str, profile: &Profile, json: bo
                 "client_id": endpoints.client_id,
                 "backend": outcome.backend.as_str(),
                 "expires_at": outcome.expires_at.to_rfc3339(),
+                // Identity as carried by the retained bearer. `null` (not the
+                // profile's value) when the token carries none.
+                "token_sub": identity.map(|i| i.sub.clone()),
+                "token_iss": identity.map(|i| i.iss.clone()),
+                "profile_sub": profile.sub,
             }),
         );
     } else {
         println!(
-            "✓ Signed in to {} as {} (credential stored in {}; access token expires {})",
-            profile.host,
-            profile.sub,
-            outcome.backend.as_str(),
-            outcome.expires_at.to_rfc3339(),
+            "{}",
+            login_report(
+                &profile.host,
+                name,
+                &profile.sub,
+                identity,
+                outcome.backend.as_str(),
+                &outcome.expires_at.to_rfc3339(),
+            )
         );
     }
     Ok(())
+}
+
+/// Render the human `login` report — pure, so what the operator reads is
+/// exactly what a test can assert.
+///
+/// The identity shown is the one the retained bearer *carries*
+/// ([`oidc::BearerIdentity`]), never `profile_sub`, which is only what the local
+/// profile asked for. When the two disagree — a profile recording `sub = "1"`
+/// against a provider that issued `sub = "2"` — the line states the token's
+/// answer and names the disagreement, so an operator debugging an entitlement
+/// error looks where the truth is rather than at a local assumption.
+/// `identity` is `None` when the retained bearer carries no identity claim (the
+/// `access_token` fallback of a mock or non-OIDC token endpoint): the report
+/// then says so instead of falling back on the profile.
+fn login_report(
+    host: &str,
+    profile_name: &str,
+    profile_sub: &str,
+    identity: Option<&BearerIdentity>,
+    backend: &str,
+    expires_at: &str,
+) -> String {
+    let Some(id) = identity else {
+        return format!(
+            "✓ Signed in to {host} — the stored bearer carries no identity claim, so no \
+             identity can be shown (credential stored in {backend}; access token expires \
+             {expires_at})"
+        );
+    };
+    let line = format!(
+        "✓ Signed in to {host} as {} (issued by {}; credential stored in {backend}; \
+         access token expires {expires_at})",
+        id.sub, id.iss,
+    );
+    if id.sub == profile_sub {
+        return line;
+    }
+    format!(
+        "{line}\n  note: profile {profile_name:?} records sub {profile_sub:?}; the token was \
+         issued for {:?} — the token wins.",
+        id.sub,
+    )
 }
 
 /// `logout` — forget the persisted cosmon credential for the active profile.
@@ -2046,6 +2103,79 @@ mod tests {
 
     fn view(json: serde_json::Value) -> cosmon_remote::client::MoleculeView {
         serde_json::from_value(json).unwrap()
+    }
+
+    fn identity(sub: &str) -> BearerIdentity {
+        BearerIdentity {
+            sub: sub.to_owned(),
+            iss: "https://forge.example".to_owned(),
+        }
+    }
+
+    /// The 2026-07-25 replay: the profile recorded `sub = "1"`, the provider
+    /// issued `sub = "2"`. The login line must name the token's subject — an
+    /// operator reads it as proof of identity, so it may not replay a local
+    /// assumption. The disagreement is named rather than hidden.
+    #[test]
+    fn login_report_shows_the_token_subject_when_the_profile_disagrees() {
+        let line = login_report(
+            "cosmon.example",
+            "avatar-julien",
+            "1",
+            Some(&identity("2")),
+            "keyring",
+            "2026-07-25T09:00:00+00:00",
+        );
+        assert!(
+            line.contains("as 2 "),
+            "the token's sub must be the identity shown, got {line:?}"
+        );
+        assert!(
+            !line.contains("as 1 "),
+            "the profile's sub must never be presented as the identity, got {line:?}"
+        );
+        assert!(
+            line.contains("records sub \"1\""),
+            "the disagreement must be named, got {line:?}"
+        );
+    }
+
+    /// Agreement is the quiet case: the same line, no note.
+    #[test]
+    fn login_report_stays_quiet_when_profile_and_token_agree() {
+        let line = login_report(
+            "cosmon.example",
+            "avatar-julien",
+            "2",
+            Some(&identity("2")),
+            "keyring",
+            "2026-07-25T09:00:00+00:00",
+        );
+        assert!(line.contains("as 2 "));
+        assert!(
+            !line.contains("note:"),
+            "no disagreement to report: {line:?}"
+        );
+    }
+
+    /// A bearer carrying no identity claim (mock / non-OIDC `access_token`
+    /// fallback): say that no identity is carried, never silently substitute
+    /// the profile's `sub`.
+    #[test]
+    fn login_report_admits_when_the_bearer_carries_no_identity() {
+        let line = login_report(
+            "cosmon.example",
+            "avatar-julien",
+            "1",
+            None,
+            "file",
+            "2026-07-25T09:00:00+00:00",
+        );
+        assert!(line.contains("carries no identity claim"), "got {line:?}");
+        assert!(
+            !line.contains(" as "),
+            "no identity may be claimed at all, got {line:?}"
+        );
     }
 
     /// No `typed_links` on the wire → no children claimed. The truth

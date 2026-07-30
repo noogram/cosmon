@@ -77,6 +77,20 @@ pub enum OidcError {
     )]
     CredentialNotPersisted,
 
+    /// The token endpoint's response contained no token suitable as the cosmon
+    /// bearer: neither the `id_token` nor the `access_token` decodes as a JWT
+    /// carrying the OIDC identity claims (`iss`, `sub`, `aud`) the resource
+    /// server resolves on. Persisting either would guarantee a later
+    /// `401 malformed_jwt`, so the flow fails loud at mint time instead
+    /// (review round-1, finding 2). Usually means the provider minted no
+    /// `id_token` — check that the `openid` scope reached the authorization
+    /// request. Carries no token material.
+    #[error(
+        "token response carries no identity-bearing JWT (a cosmon bearer needs \
+         the iss, sub, and aud claims) — was the `openid` scope granted?"
+    )]
+    NoIdentityBearer,
+
     /// The loopback callback could not be captured: the listener could not bind
     /// the redirect port, the browser never returned, or the request was
     /// malformed. Carries a diagnostic, never a secret.

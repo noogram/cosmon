@@ -110,6 +110,23 @@ pub struct TokenResponse {
     /// presents `Authorization: Bearer`.
     #[serde(default)]
     pub token_type: String,
+    /// The OIDC **ID token** — the JWKS-verifiable identity assertion carrying
+    /// `iss` / `aud` / `sub`. Returned alongside `access_token` whenever the
+    /// `openid` scope was requested.
+    ///
+    /// This — not `access_token` — is the bearer cosmon-server validates. A real
+    /// OIDC provider (Forgejo) mints an `access_token` that is a JWT carrying
+    /// only provider-internal claims (`{gnt, tt, exp, iat}` — no `iss`/`aud`/`sub`),
+    /// so presenting it to `JwtVerifier::validate` fails `malformed_jwt`: the
+    /// identity claims the server needs to resolve the noyau binding
+    /// `(iss, sub) -> noyau` and check `aud` against the closed allowlist live in
+    /// the ID token instead. Defaults to empty for a non-OIDC token endpoint or
+    /// the JWT-minting test mock (whose `access_token` *is* a full-claim JWT), in
+    /// which case the caller falls back to `access_token` — but only after
+    /// verifying it actually carries the identity claims; a response where no
+    /// token does fails loud instead (see the flow module's bearer selection).
+    #[serde(default)]
+    pub id_token: String,
 }
 
 /// The token-endpoint error body (RFC 6749 §5.2).
@@ -245,6 +262,28 @@ mod tests {
         assert_eq!(tok.access_token, "at-only");
         assert!(tok.refresh_token.is_empty());
         assert_eq!(tok.expires_in, 0);
+        // Absent `id_token` (the JWT-mock / non-OIDC shape) defaults to empty so
+        // the caller falls back to the access token.
+        assert!(tok.id_token.is_empty());
+    }
+
+    #[test]
+    fn captures_the_oidc_id_token() {
+        // A real Forgejo `scope=openid` token response: the `access_token` is the
+        // provider's own opaque-to-identity JWT, and the identity assertion the
+        // server validates rides in `id_token`. The field MUST be captured, not
+        // dropped (the pre-fix `TokenResponse` ignored it — task-20260720-71fd).
+        let json = r#"{
+            "access_token": "at.provider.jwt",
+            "refresh_token": "rt-1",
+            "expires_in": 900,
+            "token_type": "bearer",
+            "id_token": "id.oidc.jwt",
+            "scope": "openid"
+        }"#;
+        let tok: TokenResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(tok.access_token, "at.provider.jwt");
+        assert_eq!(tok.id_token, "id.oidc.jwt");
     }
 
     #[test]

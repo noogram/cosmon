@@ -165,12 +165,16 @@ pub async fn get_quota(
         })?;
 
     // Effective drain bounds from the tenant's sealed binding — the
-    // same map admission resolved against, so the read face can never
-    // disagree with the enforcement face.
+    // same *triple* admission resolved against, so the read face can
+    // never disagree with the enforcement face. The audience is
+    // load-bearing here, not decorative: a principal federated on N
+    // galaxies holds N bindings with N sets of bounds, and an
+    // audience-blind lookup would quote whichever one sorts first
+    // (ADR-0023 D4 — one badge, one galaxy).
     let drain = state
         .nucleon_map
         .load()
-        .resolve(&jwt.iss, &jwt.sub)
+        .resolve_for_audience(&jwt.iss, &jwt.sub, &jwt.aud)
         .map_or_else(crate::nucleon_map::DrainBounds::default, |r| r.drain_bounds);
 
     let body = QuotaResponse {
