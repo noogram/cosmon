@@ -756,6 +756,7 @@ fn call_to_json(call: &NucleateCall) -> serde_json::Value {
         "kind": node_kind_label(call.kind),
         "blocked_by": call.blocked_by,
         "vars": call.vars,
+        "mission": call.mission,
         "for_each": call.for_each,
         "bounds": call.bounds.as_ref().map(|b| serde_json::json!({
             "output_type": b.output_type,
@@ -781,6 +782,9 @@ fn germinated_to_json(call: &NucleateCall, result: &NucleateResult) -> serde_jso
 fn print_call_human(call: &NucleateCall) {
     println!("  • {} [{}]", call.alias, node_kind_label(call.kind));
     println!("      formula: {}", call.formula);
+    if let Some(mission) = &call.mission {
+        println!("      mission: {mission}");
+    }
     if !call.blocked_by.is_empty() {
         println!("      blocked-by: {}", call.blocked_by.join(", "));
     }

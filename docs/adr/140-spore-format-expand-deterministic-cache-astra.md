@@ -406,3 +406,33 @@ A dangling `instances_var` — one naming a var the node does not declare — is
   (citation-only fixture; lives in workshop).
 - Knowledge note `2026-06-27-lanusse-astra-lightcone-intersection.md`: ASTRA vs
   spore, the two faces of one problem.
+
+## Addendum — 2026-07-30 (task-20260730-5a0d)
+
+Three parts of the schema above declared behaviour that no code performed. They
+are retired, and the ADR text above is kept as the dated record of what was
+decided rather than rewritten.
+
+- **`[spore.fleet] concurrency_cap` and `isolation`** (§D2, §D4 above) are
+  gone. `NoResourceCollision` was described as quantifying over them; nothing
+  read either field. Germination nucleates the whole expanded call list and
+  `cs tackle` creates a worktree unconditionally, so the non-aliasing property
+  the invariant needs comes from the runtime, not from the declaration. A
+  declared bound nobody enforces is worse than an absent one here, because the
+  seal's claim then rests on a runtime property the runtime does not have.
+- **`[spore.astra] emit`, `profile` and `attach_seal_verdict`** (§D6) are gone.
+  `cs spore export` is an explicit share-time verb that always writes the
+  crate, always as RO-Crate 1.1, and writes `spore:seal.verified` as `false`
+  unconditionally. `attach_seal_verdict = true` therefore read as "the verdict
+  is attached" beside a crate that said otherwise — a false statement in a
+  provenance artifact, not a missing feature. `output` stays; it is honoured.
+- **`[spore.seal] properties`** stays and is now load-bearing. Every declared
+  name must occur as an identifier in the `.tla` module or its `.cfg`;
+  `verify_seal` refuses fail-closed on one that occurs in neither, before the
+  verdict cache is consulted, so a cached pass cannot launder an unsupported
+  claim. The check is a floor — it catches the provably unsupported claim, not
+  every plausible one, which would need a TLA⁺ parser.
+
+The general rule these three instantiate: a config field with no production
+reader is a defect, and `crates/cosmon-core/tests/config_knobs_have_readers.rs`
+now fails the build on the next one.

@@ -337,16 +337,19 @@ pub struct ParamSpec {
 
 /// The fleet the mission plan lays over (`[spore.fleet]`).
 ///
-/// `concurrency_cap` and `isolation` are the bounds the seal's
-/// `NoResourceCollision` invariant quantifies over (ADR-140 D2).
+/// The stanza once also carried `concurrency_cap` and `isolation`, described as
+/// the bounds the seal's `NoResourceCollision` invariant quantifies over
+/// (ADR-140 D2). No scheduler ever read either one: germination nucleates the
+/// whole expanded call list, and `cs tackle` creates a worktree
+/// unconditionally, so `isolation` restated something already true and
+/// `concurrency_cap` bounded nothing. Retiring them is the honest move — a
+/// declared bound nobody enforces is worse than an absent one, because a TLA
+/// seal that *claims* `NoResourceCollision` over that bound reads as proof of
+/// a runtime property the runtime does not have.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FleetConfig {
     /// The referenced fleet name.
     pub name: String,
-    /// Max concurrent emergent children of a given output type in flight.
-    pub concurrency_cap: Option<u32>,
-    /// Isolation mode (e.g. `"worktree"`) guaranteeing non-aliasing writes.
-    pub isolation: Option<String>,
 }
 
 /// A per-node recipe alias (`[spore.formulas.<alias>]`).
@@ -373,16 +376,23 @@ pub struct Seal {
 }
 
 /// The descriptive-emission stanza (`[spore.astra]`, ADR-140 D6).
+///
+/// One knob, because one knob is what `cs spore export` actually honours.
+/// The stanza used to declare `emit` (automatic emission on
+/// mission-completion), `profile` (the ASTRA profile to conform to) and
+/// `attach_seal_verdict` (attach the D4 verdict as the proof artifact). None
+/// of the three was ever read: `export` is an explicit share-time verb that
+/// always writes the RO-Crate, the profile is fixed at RO-Crate 1.1 in the
+/// emitted `@context`, and the seal field of the crate is written as
+/// `verified: false` unconditionally. They are retired rather than kept,
+/// because `attach_seal_verdict = true` reading as "the verdict is attached"
+/// while the crate says `verified: false` is not a missing feature, it is a
+/// false statement in a provenance artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AstraConfig {
-    /// Whether to emit an ASTRA descriptive layer at share time.
-    pub emit: bool,
-    /// The ASTRA profile (e.g. `"ro-crate"`).
-    pub profile: Option<String>,
-    /// Output path for the descriptive artifact.
+    /// Output path for the descriptive artifact. Absent means the RO-Crate
+    /// standard filename in the export directory.
     pub output: Option<String>,
-    /// Whether to attach the D4 seal verdict as the proof artifact.
-    pub attach_seal_verdict: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -605,21 +615,12 @@ impl Spore {
                 properties: s.properties,
             }),
             params,
-            fleet: raw.fleet.map(|f| FleetConfig {
-                name: f.name,
-                concurrency_cap: f.concurrency_cap,
-                isolation: f.isolation,
-            }),
+            fleet: raw.fleet.map(|f| FleetConfig { name: f.name }),
             review: raw.review,
             formulas,
             nodes,
             edges,
-            astra: raw.astra.map(|a| AstraConfig {
-                emit: a.emit,
-                profile: a.profile,
-                output: a.output,
-                attach_seal_verdict: a.attach_seal_verdict,
-            }),
+            astra: raw.astra.map(|a| AstraConfig { output: a.output }),
         })
     }
 }
@@ -938,8 +939,6 @@ struct RawParam {
 #[derive(Deserialize)]
 struct RawFleet {
     name: String,
-    concurrency_cap: Option<u32>,
-    isolation: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -981,12 +980,7 @@ struct RawEdge {
 
 #[derive(Deserialize)]
 struct RawAstra {
-    #[serde(default)]
-    emit: bool,
-    profile: Option<String>,
     output: Option<String>,
-    #[serde(default)]
-    attach_seal_verdict: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -1034,8 +1028,6 @@ default = "full"
 
 [spore.fleet]
 name            = "default"
-concurrency_cap = 4
-isolation       = "worktree"
 
 [spore.formulas.editorial-work]
 path        = "formulas/editorial-work.formula.toml"
@@ -1111,8 +1103,6 @@ version = 1
 
 [spore.fleet]
 name = "default"
-concurrency_cap = 4
-isolation = "worktree"
 
 [spore.formulas.editorial-work]
 path = "formulas/editorial-work.formula.toml"
@@ -1164,10 +1154,7 @@ to = "index"
 type = "feeds"
 
 [spore.astra]
-emit = true
-profile = "ro-crate"
 output = "astra/ro-crate-metadata.json"
-attach_seal_verdict = true
 "#;
 
     fn minimal_with_node(node_block: &str) -> String {
@@ -1197,9 +1184,7 @@ path = "formulas/work.formula.toml"
         assert!(spore.nodes.iter().all(|n| n.kind == NodeKind::Fixed));
         // The seal and fleet are present.
         assert!(spore.seal.is_some());
-        let fleet = spore.fleet.expect("fleet present");
-        assert_eq!(fleet.concurrency_cap, Some(4));
-        assert_eq!(fleet.isolation.as_deref(), Some("worktree"));
+        assert_eq!(spore.fleet.expect("fleet present").name, "default");
         // Vars on the frame node are captured.
         let frame = spore.nodes.iter().find(|n| n.id == "frame").unwrap();
         assert_eq!(
@@ -1234,9 +1219,10 @@ path = "formulas/work.formula.toml"
 
         // The ASTRA stanza is captured.
         let astra = spore.astra.expect("astra present");
-        assert!(astra.emit);
-        assert_eq!(astra.profile.as_deref(), Some("ro-crate"));
-        assert!(astra.attach_seal_verdict);
+        assert_eq!(
+            astra.output.as_deref(),
+            Some("astra/ro-crate-metadata.json")
+        );
     }
 
     #[test]

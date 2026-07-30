@@ -38,6 +38,13 @@ verb = "germinate"   # spore -> polymer, the parallel of nucleate (formula -> mo
 # refuses by default to germinate a present-but-unverified seal; pass
 # --allow-unchecked-seal to opt into the risk explicitly. It NEVER claims a
 # seal is verified when it is not.
+#
+# `properties` is checked, not decorative: every name listed here must appear
+# as an identifier in the .tla module or its .cfg. A name that appears in
+# neither is a claim nothing TLC runs establishes, and verification refuses
+# fail-closed before the verdict cache is consulted, so a cached pass cannot
+# launder it. (Until 2026-07-30 the list was free text next to the proof —
+# it read as an assertion of what was proved and was read by no code.)
 # --------------------------------------------------------------------------
 [spore.seal]
 module = "spore.tla"
@@ -76,15 +83,14 @@ description = "quick = tight subset. full = every axis, full steelman, synthesis
 
 # --------------------------------------------------------------------------
 # [spore.fleet] : the crew (an org chart of roles) the mission plan lays over.
-# concurrency_cap and isolation are the bounds the seal's NoResourceCollision
-# invariant quantifies over: at most `concurrency_cap` emergent children of a
-# given output_type run at once, and worktree isolation guarantees their
-# writes do not alias.
+# One key, because one key is what anything reads. The stanza used to declare
+# `concurrency_cap` and `isolation` as "the bounds NoResourceCollision
+# quantifies over" — no scheduler ever consulted either, and `cs tackle`
+# creates a worktree unconditionally, so the non-aliasing guarantee comes from
+# the runtime and never came from the declaration. Retired 2026-07-30.
 # --------------------------------------------------------------------------
 [spore.fleet]
 name            = "default"
-concurrency_cap = 4
-isolation       = "worktree"
 
 # --------------------------------------------------------------------------
 # [spore.formulas.*] : the per-node recipe aliases. Each references a
@@ -230,12 +236,15 @@ type = "feeds"
 # completion) the spore emits an ASTRA-compatible descriptive layer alongside
 # its content-addressed bundle. cosmon COMPOSES with the open ASTRA schema; it
 # does not reinvent a descriptive format. The spore header + ParamSchema + DAG
-# map onto ASTRA method/provenance; the seal verdict is attached as the proof
-# artifact; the germinated mission's per-node `cs verify` traces populate run
-# provenance. The moat is the proof (provable), not the openness alone.
+# map onto ASTRA method/provenance; the germinated mission's per-node
+# `cs verify` traces populate run provenance. The moat is the proof
+# (provable), not the openness alone.
 # --------------------------------------------------------------------------
+# `cs spore export` is the explicit share-time verb: invoking it always writes
+# the crate, always as RO-Crate 1.1, and always reports the seal as present-or-
+# absent rather than attaching a verdict. The stanza's `emit`, `profile` and
+# `attach_seal_verdict` keys said otherwise and were read by nothing; they were
+# retired 2026-07-30 rather than left to imply a verdict the crate never
+# carried. `output` is the one knob export honours.
 [spore.astra]
-emit    = true
-profile = "ro-crate"          # ASTRA is RO-Crate-compatible
 output  = "astra/ro-crate-metadata.json"
-attach_seal_verdict = true    # reference the D4 seal verdict as the proof artifact

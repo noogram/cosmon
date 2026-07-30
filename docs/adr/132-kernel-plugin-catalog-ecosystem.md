@@ -180,8 +180,8 @@ supervision/port discipline — is §6 and
 
 The kernel's job at the seam is to **discover and dispatch**, never to embed.
 `AdapterEntry` (`cosmon-core::config`) already lets a TOML row declare an
-adapter's `base_url`, `api_key_env`, `default_model`, `extra_args`,
-`briefing_format`, and `pane_signatures` — **so an entire class of inference
+adapter's `base_url`, `api_key_env`, `default_model`, `extra_args`, and
+`pane_signatures` — **so an entire class of inference
 plugins (S1) plugs in with zero kernel code.** This is how `cosmon-llama`
 re-plugs after its extraction: not as an FFI crate the kernel imports, but as a
 local server an adapter is *pointed at*.
@@ -482,3 +482,14 @@ permissive *because* it cannot code-link the kernel, and it cannot code-link the
 kernel *because* that is what makes it a plugin. One line, two names. (Companion
 to ADR-126 §10 *"'private' was one word doing two jobs"* — here, *two doctrines
 were one seam.*)
+
+## Addendum — 2026-07-30 (task-20260730-5a0d)
+
+`briefing_format` is retired. It parsed, defaulted and documented a format
+selector that no dispatch path ever read: an adapter row declaring
+`briefing_format = "json"` still received markdown. The seam contract above is
+unchanged — the row is discovered and dispatched on `base_url`, `api_key_env`,
+`default_model`, `extra_args` and `pane_signatures`, all of which have readers.
+A format selector returns the day something reads it; `#[serde(default)]` makes
+re-adding it a non-breaking change, which is precisely why keeping an unread
+one bought nothing.

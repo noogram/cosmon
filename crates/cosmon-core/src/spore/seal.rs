@@ -362,7 +362,7 @@ pub fn verify_seal(
     tlc: &dyn TlcRunner,
 ) -> Result<SealStatus, CosmonError> {
     // No seal block at all: nothing to verify.
-    let Some(_seal) = seal else {
+    let Some(seal) = seal else {
         return Ok(SealStatus::Absent);
     };
 
@@ -385,6 +385,21 @@ pub fn verify_seal(
     if resolved.config_path.is_some() && resolved.config_bytes.is_none() {
         return Ok(SealStatus::UncheckedToolUnavailable {
             proof_hash: "<seal config unreadable>".to_string(),
+        });
+    }
+
+    // A seal that CLAIMS a property the proof text never defines is a claim
+    // nobody checks — the exact shape of a config field with no reader, except
+    // that here the field is a provenance assertion. TLC only ever checks what
+    // the `.cfg` names; a `properties` list is free text next to it. Refuse
+    // before the cache is consulted so a cached pass cannot launder the claim.
+    if let Some(undeclared) = undeclared_property(seal, resolved) {
+        return Ok(SealStatus::ProofFailed {
+            proof_hash: proof_hash(resolved.module_bytes, resolved.config_bytes),
+            detail: format!(
+                "seal declares property `{undeclared}`, which appears nowhere in the proof \
+                 module or its config — the claim is not established by anything TLC runs"
+            ),
         });
     }
 
@@ -418,6 +433,47 @@ pub fn verify_seal(
         }),
         TlcOutcome::Unavailable => Ok(SealStatus::UncheckedToolUnavailable { proof_hash: hash }),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Declared-property check
+// ---------------------------------------------------------------------------
+
+/// The first declared property name that appears in neither the proof module
+/// nor its config, if any.
+///
+/// The check is a whole-identifier text search over the proof bytes, which is
+/// what the artifact is: a TLA⁺ property is a named definition, so a name the
+/// module never spells cannot be one of its definitions. A name the module
+/// *does* spell may still be a comment rather than a definition — the check is
+/// deliberately a floor, catching the claim that is provably unsupported rather
+/// than adjudicating the ones that are merely plausible. Anything stronger
+/// needs a TLA⁺ parser.
+fn undeclared_property<'a>(seal: &'a Seal, resolved: &ResolvedSeal<'_>) -> Option<&'a str> {
+    seal.properties
+        .iter()
+        .map(String::as_str)
+        .filter(|p| !p.trim().is_empty())
+        .find(|p| {
+            !mentions_identifier(resolved.module_bytes, p)
+                && !resolved
+                    .config_bytes
+                    .is_some_and(|c| mentions_identifier(c, p))
+        })
+}
+
+/// `true` when `ident` occurs in `haystack` as a whole identifier.
+fn mentions_identifier(haystack: &[u8], ident: &str) -> bool {
+    let needle = ident.as_bytes();
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return false;
+    }
+    let boundary = |b: u8| !(b.is_ascii_alphanumeric() || b == b'_');
+    haystack.windows(needle.len()).enumerate().any(|(i, w)| {
+        w == needle
+            && (i == 0 || boundary(haystack[i - 1]))
+            && haystack.get(i + needle.len()).copied().is_none_or(boundary)
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +587,14 @@ impl TlcRunner for FakeTlcRunner {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// Proof-module bytes for the orchestration tests.
+    ///
+    /// The text must spell every property the fixture seal declares: since
+    /// `task-20260730-5a0d` a seal claiming a property its proof never mentions
+    /// is refused fail-closed, so a fixture that claims `Termination` over
+    /// `MODULE spore` alone would be testing the refusal, not the happy path.
+    const MODULE: &[u8] = b"MODULE spore\nTermination == TRUE";
 
     fn seal() -> Seal {
         Seal {
@@ -716,7 +780,7 @@ mod tests {
         let r1 = ResolvedSeal {
             module_path: &mp,
             config_path: None,
-            module_bytes: b"MODULE spore",
+            module_bytes: MODULE,
             config_bytes: None,
         };
         let first = verify_seal(Some(&module_only), Some(&r1), &cache, &tlc).unwrap();
@@ -732,7 +796,7 @@ mod tests {
         let with_unreadable_cfg = ResolvedSeal {
             module_path: &mp,
             config_path: Some(&cp),
-            module_bytes: b"MODULE spore",
+            module_bytes: MODULE,
             config_bytes: None,
         };
         let runs_before = tlc.run_count();
@@ -760,8 +824,8 @@ mod tests {
     #[test]
     fn proof_hash_separates_config_presence_and_the_module_config_split() {
         assert_ne!(
-            proof_hash(b"MODULE spore", None),
-            proof_hash(b"MODULE spore", Some(b"")),
+            proof_hash(MODULE, None),
+            proof_hash(MODULE, Some(b"")),
             "no config declared must not hash like an empty config"
         );
         assert_ne!(
@@ -792,8 +856,8 @@ mod tests {
         let s = seal();
         let mp = PathBuf::from("spore.tla");
         let cp = PathBuf::from("spore.cfg");
-        let r = resolved(&mp, &cp, b"MODULE spore", b"INVARIANT X");
-        let expected_hash = proof_hash(b"MODULE spore", Some(b"INVARIANT X"));
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
+        let expected_hash = proof_hash(MODULE, Some(b"INVARIANT X"));
 
         let status = verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap();
         match &status {
@@ -817,7 +881,7 @@ mod tests {
         let s = seal();
         let mp = PathBuf::from("spore.tla");
         let cp = PathBuf::from("spore.cfg");
-        let r = resolved(&mp, &cp, b"MODULE spore", b"INVARIANT X");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
 
         // First run populates the cache.
         verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap();
@@ -845,7 +909,7 @@ mod tests {
         let s = seal();
         let mp = PathBuf::from("spore.tla");
         let cp = PathBuf::from("spore.cfg");
-        let r = resolved(&mp, &cp, b"MODULE spore", b"INVARIANT X");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
 
         let status = verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap();
         assert!(matches!(
@@ -867,13 +931,18 @@ mod tests {
         let cp = PathBuf::from("spore.cfg");
 
         // Pass over the original proof, cached.
-        let original = resolved(&mp, &cp, b"MODULE spore", b"INVARIANT X");
+        let original = resolved(&mp, &cp, MODULE, b"INVARIANT X");
         verify_seal(Some(&s), Some(&original), &cache, &tlc).unwrap();
         assert_eq!(tlc.run_count(), 1);
 
         // Edit the proof: a different hash, so the cached verdict does NOT apply
         // and TLC re-runs.
-        let edited = resolved(&mp, &cp, b"MODULE spore EDITED", b"INVARIANT X");
+        let edited = resolved(
+            &mp,
+            &cp,
+            b"MODULE spore EDITED\nTermination == TRUE",
+            b"INVARIANT X",
+        );
         let status = verify_seal(Some(&s), Some(&edited), &cache, &tlc).unwrap();
         assert!(matches!(
             status,
@@ -895,7 +964,7 @@ mod tests {
         let s = seal();
         let mp = PathBuf::from("spore.tla");
         let cp = PathBuf::from("spore.cfg");
-        let r = resolved(&mp, &cp, b"MODULE spore", b"INVARIANT X");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
 
         let status = verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap();
         assert!(matches!(status, SealStatus::ProofFailed { .. }));
@@ -917,5 +986,113 @@ mod tests {
         ));
         assert_eq!(tlc.run_count(), 0);
         assert!(!gate(&status, false).germinates(), "fail-closed");
+    }
+    // --- declared properties ----------------------------------------------
+
+    /// A seal that claims a property its proof never spells is refused
+    /// fail-closed, and the refusal happens *before* the verdict cache is
+    /// consulted so a cached pass over the same bytes cannot launder it.
+    ///
+    /// Until `task-20260730-5a0d` the `properties` list was free text sitting
+    /// next to the proof: it read as an assertion of what had been established
+    /// and was consulted by nothing, so `properties = ["NoResourceCollision"]`
+    /// over a module that never defines it germinated as `seal: verified`.
+    #[test]
+    fn seal_claiming_a_property_the_proof_never_defines_is_refused() {
+        let cache = InMemorySealVerdictCache::new();
+        let tlc = FakeTlcRunner::available_with(TlcOutcome::Passed);
+        let s = Seal {
+            module: "spore.tla".to_string(),
+            config: Some("spore.cfg".to_string()),
+            properties: vec!["Termination".to_string(), "NeverDefined".to_string()],
+        };
+        let mp = PathBuf::from("spore.tla");
+        let cp = PathBuf::from("spore.cfg");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
+
+        let status = verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap();
+        match &status {
+            SealStatus::ProofFailed { detail, .. } => {
+                assert!(detail.contains("NeverDefined"), "names the claim: {detail}");
+            }
+            other => panic!("expected ProofFailed, got {other:?}"),
+        }
+        assert_eq!(tlc.run_count(), 0, "refused before TLC ever runs");
+        assert!(cache.is_empty(), "an unsupported claim is never cached");
+        assert!(
+            !gate(&status, true).germinates(),
+            "the opt-in flag must not rescue it"
+        );
+    }
+
+    /// A cached pass over the same proof bytes does not rescue an unsupported
+    /// claim — the check runs ahead of the cache lookup on purpose.
+    #[test]
+    fn a_cached_pass_does_not_launder_an_unsupported_claim() {
+        let cache = InMemorySealVerdictCache::new();
+        let tlc = FakeTlcRunner::available_with(TlcOutcome::Passed);
+        let mp = PathBuf::from("spore.tla");
+        let cp = PathBuf::from("spore.cfg");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT X");
+
+        // Warm the cache with an honest seal over these exact bytes.
+        assert!(matches!(
+            verify_seal(Some(&seal()), Some(&r), &cache, &tlc).unwrap(),
+            SealStatus::Verified { .. }
+        ));
+
+        // Same bytes, richer claim. The cache would say "passed".
+        let overclaiming = Seal {
+            module: "spore.tla".to_string(),
+            config: Some("spore.cfg".to_string()),
+            properties: vec!["NoResourceCollision".to_string()],
+        };
+        let status = verify_seal(Some(&overclaiming), Some(&r), &cache, &tlc).unwrap();
+        assert!(
+            matches!(status, SealStatus::ProofFailed { .. }),
+            "got {status:?}"
+        );
+    }
+
+    /// A property named only in the `.cfg` counts: TLC checks what the config
+    /// names, so a `PROPERTY Foo` line is as good as a module definition.
+    #[test]
+    fn a_property_named_only_in_the_config_is_accepted() {
+        let cache = InMemorySealVerdictCache::new();
+        let tlc = FakeTlcRunner::available_with(TlcOutcome::Passed);
+        let s = Seal {
+            module: "spore.tla".to_string(),
+            config: Some("spore.cfg".to_string()),
+            properties: vec!["SealInvariant".to_string()],
+        };
+        let mp = PathBuf::from("spore.tla");
+        let cp = PathBuf::from("spore.cfg");
+        let r = resolved(&mp, &cp, MODULE, b"INVARIANT SealInvariant");
+
+        assert!(matches!(
+            verify_seal(Some(&s), Some(&r), &cache, &tlc).unwrap(),
+            SealStatus::Verified { .. }
+        ));
+    }
+
+    /// The match is on whole identifiers: `Termination` claimed against a
+    /// module that only spells `TerminationX` is not established.
+    #[test]
+    fn a_prefix_of_a_defined_name_does_not_satisfy_the_claim() {
+        let cache = InMemorySealVerdictCache::new();
+        let tlc = FakeTlcRunner::available_with(TlcOutcome::Passed);
+        let mp = PathBuf::from("spore.tla");
+        let cp = PathBuf::from("spore.cfg");
+        let r = resolved(
+            &mp,
+            &cp,
+            b"MODULE spore\nTerminationX == TRUE",
+            b"INVARIANT X",
+        );
+
+        assert!(matches!(
+            verify_seal(Some(&seal()), Some(&r), &cache, &tlc).unwrap(),
+            SealStatus::ProofFailed { .. }
+        ));
     }
 }

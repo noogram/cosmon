@@ -191,6 +191,12 @@ pub struct NucleateCall {
     /// For an emergent controller only: the declared bounds the run-time fan-out
     /// stays within (ADR-140 D2). `None` otherwise.
     pub bounds: Option<Bounds>,
+    /// The node's mission brief (`[[spore.node]] mission`), relative to the
+    /// manifest — the per-node prose the spore author wrote for whoever runs
+    /// this call. Carried through so it reaches the germination output; the
+    /// node declared it and something has to receive it, or the author is
+    /// writing into a field that goes nowhere.
+    pub mission: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -290,6 +296,7 @@ pub fn expand(
                     kind: NodeKind::Fixed,
                     for_each: None,
                     bounds: None,
+                    mission: node.mission.clone(),
                 });
             }
             NodeKind::Fanout => {
@@ -306,6 +313,7 @@ pub fn expand(
                         kind: NodeKind::Fanout,
                         for_each: None,
                         bounds: None,
+                        mission: node.mission.clone(),
                     });
                 }
             }
@@ -326,6 +334,7 @@ pub fn expand(
                     kind: NodeKind::Emergent,
                     for_each: node.for_each.clone(),
                     bounds: node.bounds.clone(),
+                    mission: node.mission.clone(),
                 });
             }
         }

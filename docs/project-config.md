@@ -20,13 +20,26 @@ configuration surface without reading cosmon source code.
 |---------|---------|----------|
 | `[project]` | Project identity (`project_id`) and reference trunk (`trunk_branch`) | **yes** |
 | `[worker]` | Worker behavior on completion | no |
-| `[surfaces]` | Auto-reconcile policy | no |
-| `[documentation]` | Doc generation toggle | no |
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
+
+### Retired sections
+
+`[surfaces] auto_reconcile` and `[documentation] enabled` were removed on
+2026-07-30. Both parsed, defaulted and documented a toggle that no code read:
+setting `auto_reconcile = true` never ran `cs reconcile`, and
+`enabled = false` never suppressed anything. Unknown sections are ignored, so
+a config file that still carries them keeps working unchanged — it simply no
+longer implies a control that was never there. Run `cs reconcile` explicitly;
+that is the only behaviour either knob ever described.
+
+The gate that keeps this from recurring is
+`crates/cosmon-core/tests/config_knobs_have_readers.rs`: every field reachable
+from `ProjectConfig` must be read by production code, or carry an inline
+`// config-knob: allow — <reason>` waiver on its declaration line.
 
 > **`[adapters].default` resolution chain (Q5a, `task-20260530-c089`,
 > extended by `task-20260531-c99e`).** `cs tackle` picks its adapter,
