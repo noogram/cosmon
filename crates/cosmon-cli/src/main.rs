@@ -330,6 +330,14 @@ enum Command {
     #[command(name = "realized-watch", hide = true)]
     RealizedWatch(cmd::realized_watch::Args),
 
+    /// Internal — durable briefing-submit backstop, spawned detached by
+    /// `cs tackle` when its in-band window closes on a composer that still
+    /// holds the unsubmitted briefing. Keeps pressing submit for twenty
+    /// minutes after the dispatcher is gone (COSMON #26-B), and removes the
+    /// molecule's `briefing-pending.json` only on a delivery receipt.
+    #[command(name = "briefing-backstop", hide = true)]
+    BriefingBackstop(cmd::briefing_backstop::Args),
+
     /// Run — walk a molecule DAG of N≥1 nodes via the resident runtime (ADR-016 Layer B)
     #[command(after_help = cmd::examples::RUN)]
     Run(cmd::run::Args),
@@ -667,6 +675,7 @@ fn main() {
         Command::Peek(args) => cmd::peek::run(&ctx, &args),
         Command::Wait(args) => cmd::wait::run(&ctx, &args),
         Command::RealizedWatch(args) => cmd::realized_watch::run(&ctx, &args),
+        Command::BriefingBackstop(args) => cmd::briefing_backstop::run(&ctx, &args),
         Command::Run(args) => cmd::run::run(&ctx, &args),
         Command::Spore(args) => cmd::spore::run(&ctx, &args),
         Command::Help(args) => cmd::help::run(&args),

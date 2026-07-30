@@ -223,6 +223,29 @@ impl ComposerState {
     }
 }
 
+/// The one line of a submitted briefing that a composer scan actually looks
+/// for: its last non-empty line, trimmed.
+///
+/// Public because the *durable* backstop (COSMON #26-B) has to survive the
+/// process that sent the briefing, and therefore has to persist something to
+/// look for after that process is gone. Persisting the whole briefing would
+/// duplicate `briefing.md` into a second file for no gain; persisting this is
+/// exact, because it is the only part of the input the composer scan
+/// (`composer_indicates_pending`) ever consults.
+///
+/// Idempotent by construction — `composer_needle(needle) == Some(needle)` —
+/// which is what lets a record store the needle and hand it straight back as
+/// the `input` argument of a later
+/// [`composer_state_for`](TmuxBackend::composer_state_for) call.
+#[must_use]
+pub fn composer_needle(input: &str) -> Option<&str> {
+    input
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+}
+
 /// Pure half of [`TmuxBackend::composer_state`]: given a captured pane
 /// and the input we tried to submit, decide whether the input is still
 /// sitting unsubmitted in the TUI's bottom input zone.
@@ -245,12 +268,7 @@ impl ComposerState {
 /// placeholder floor — a collapsed paste is an unambiguous pending signal.
 fn composer_indicates_pending(captured: &str, input: &str) -> bool {
     let lines: Vec<&str> = captured.lines().map(str::trim).collect();
-    let Some(needle) = input
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-    else {
+    let Some(needle) = composer_needle(input) else {
         return false;
     };
     let pending = |line: &str| {
