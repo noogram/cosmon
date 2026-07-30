@@ -184,7 +184,46 @@ fn drive_submit(
     !poll_pending()
 }
 
-/// Pure half of [`TmuxBackend::input_still_pending`]: given a captured pane
+/// What a look at a worker's composer established about a briefing we sent.
+///
+/// # Why three states and not a bool (COSMON #26-A)
+///
+/// The pre-existing check answered `bool`, and answered `false` when the pane
+/// could not be captured at all. That is harmless while the answer only decides
+/// whether to press Enter again — a failed capture then costs one un-pressed
+/// nudge. It stops being harmless the moment "the composer is empty" is read as
+/// **the briefing was delivered**, because "I could not look" would sign the
+/// same receipt. A delivery receipt forged out of a capture error is worse than
+/// no receipt: it retires the only observation in this chain that is anchored to
+/// a string we ourselves wrote.
+///
+/// So the two ideas the bool conflated are separated in the type, and the caller
+/// must handle [`Unobservable`](Self::Unobservable) explicitly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposerState {
+    /// The briefing (or its collapsed-paste placeholder) is still sitting in
+    /// the composer: the submit keystroke has not landed.
+    Pending,
+    /// The pane was read and the briefing is no longer in the composer — the
+    /// delivery receipt, since the text matched is one we wrote ourselves.
+    Clear,
+    /// The pane could not be read. Evidence of nothing, and in particular not
+    /// of delivery.
+    Unobservable,
+}
+
+impl ComposerState {
+    /// Whether this reading is a positive sighting of the unsubmitted briefing.
+    ///
+    /// The narrow bool the submit-retry loop wants: it presses Enter only on a
+    /// *sighting*, so an unreadable pane must not manufacture a nudge.
+    #[must_use]
+    pub fn is_pending(self) -> bool {
+        self == Self::Pending
+    }
+}
+
+/// Pure half of [`TmuxBackend::composer_state`]: given a captured pane
 /// and the input we tried to submit, decide whether the input is still
 /// sitting unsubmitted in the TUI's bottom input zone.
 ///
@@ -467,8 +506,8 @@ impl TmuxBackend {
             .map_err(|e| TransportError::Io(format!("send-keys submit failed: {e}")))
     }
 
-    /// Best-effort check: is `input` still sitting unsubmitted in the
-    /// worker's TUI input box?
+    /// Look at `session_name`'s composer: is `input` still sitting there
+    /// unsubmitted, is it gone, or could the pane not be read at all?
     ///
     /// After a successful submit the pasted text scrolls up into the
     /// conversation and the input box at the bottom of the pane clears.
@@ -477,39 +516,61 @@ impl TmuxBackend {
     /// the visible pane and look for the last non-empty line of `input`
     /// among the bottom few non-empty lines: present ⇒ not submitted.
     ///
-    /// Returns `false` on any capture error — this check is advisory and
-    /// must never escalate a delivered paste into a failure.
-    fn input_still_pending(&self, session_name: &str, input: &str) -> bool {
+    /// A capture failure returns [`ComposerState::Unobservable`], never
+    /// [`ComposerState::Clear`] — see that type for why the distinction is
+    /// load-bearing.
+    fn composer_state(&self, session_name: &str, input: &str) -> ComposerState {
         let Ok(raw) = self.tmux_cmd(&["capture-pane", "-t", session_name, "-p"]) else {
-            return false;
+            return ComposerState::Unobservable;
         };
-        composer_indicates_pending(&raw, input)
+        if composer_indicates_pending(&raw, input) {
+            ComposerState::Pending
+        } else {
+            ComposerState::Clear
+        }
     }
 
-    /// Spawn-time public check: is `input` still sitting pasted-but-unsubmitted
-    /// in the worker's composer *right now*?
+    /// Best-effort check for the submit-retry loop: is `input` *visibly* still
+    /// unsubmitted?
     ///
-    /// A thin, session-resolving wrapper over the same composer scan
-    /// (`input_still_pending`) that [`TransportBackend::send_input`]'s
-    /// internal submit loop uses. It is exposed so the `cs tackle` spawn path
-    /// can run a **longer, spawn-scale** submit-confirmation than a single
-    /// `send_input` budget affords: a fresh Claude worker rendering a large
-    /// briefing paste can stay busy past `send_input`'s ~6 s budget and swallow
-    /// every re-`Enter`, leaving the worker idle on `❯ [Pasted text …]` — the
-    /// exact never-started stall reported on the 2026-07-20 knowledge fleet.
-    /// The caller polls this and re-nudges `Enter` until the worker leaves the
-    /// composer (or a spawn deadline passes).
+    /// Advisory, and deliberately collapses `Clear` and `Unobservable` into
+    /// "stop pressing": this answer only decides whether to fire another Enter,
+    /// and a capture failure must never manufacture a nudge nor escalate a
+    /// delivered paste into an error.
+    fn input_still_pending(&self, session_name: &str, input: &str) -> bool {
+        self.composer_state(session_name, input).is_pending()
+    }
+
+    /// Spawn-time public reading: what does the worker's composer say about
+    /// `input` *right now*?
+    ///
+    /// A session-resolving wrapper over the same composer scan that
+    /// [`TransportBackend::send_input`]'s internal submit loop uses, exposed so
+    /// the `cs tackle` spawn path can run a **longer, spawn-scale**
+    /// submit-confirmation than a single `send_input` budget affords: a fresh
+    /// Claude worker rendering a large briefing paste can stay busy past
+    /// `send_input`'s ~6 s budget and swallow every re-`Enter`, leaving the
+    /// worker idle on `❯ [Pasted text …]` — the exact never-started stall
+    /// reported on the 2026-07-20 knowledge fleet.
+    ///
+    /// It answers [`ComposerState`] rather than a bool because the caller uses
+    /// it as a *delivery receipt* — `Clear` means the briefing left the
+    /// composer — and a receipt must not be signed by a failed capture.
     ///
     /// # Errors
     ///
     /// Returns [`TransportError::NotFound`] if no live session matches `id`.
-    pub fn input_pending_for(&self, id: &WorkerId, input: &str) -> Result<bool, TransportError> {
+    pub fn composer_state_for(
+        &self,
+        id: &WorkerId,
+        input: &str,
+    ) -> Result<ComposerState, TransportError> {
         let sessions = self.list_sessions()?;
         let session = sessions
             .iter()
             .find(|s| s.worker_id == *id)
             .ok_or_else(|| TransportError::NotFound(id.clone()))?;
-        Ok(self.input_still_pending(&session.session_name, input))
+        Ok(self.composer_state(&session.session_name, input))
     }
 
     /// Install a `pane-died` hook on `session_name` that shells out to
@@ -1064,6 +1125,45 @@ mod tests {
         assert!(!composer_indicates_pending(&pane, "some prompt tail"));
     }
 
+    /// COSMON #26-A. The delivery receipt has to be *readable on the TUI we
+    /// actually ship against*, and that is the property nothing in this suite
+    /// held before: `classify_output` answers `AwaitingHuman` for all seven of
+    /// the captured 2.1.220 panes — idle and mid-stream alike — so `Working` is
+    /// unreachable there and cannot be a delivery condition.
+    ///
+    /// The composer scan is the observation that survives, because it matches a
+    /// string *we* wrote rather than guessing at TUI chrome. Every one of those
+    /// panes must therefore read `Clear` for a briefing that is not in the
+    /// composer. If a future TUI paints something the scan mistakes for our own
+    /// briefing, this fails here instead of costing every dispatch its full
+    /// in-band budget in the field.
+    #[test]
+    fn real_2_1_220_panes_read_clear_for_a_briefing_that_is_not_in_the_composer() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/claude-tui-2.1.220");
+        let mut seen = 0_usize;
+        for entry in std::fs::read_dir(&dir).expect("fixture directory") {
+            let path = entry.expect("fixture entry").path();
+            if path.extension().and_then(|e| e.to_str()) != Some("pane") {
+                continue;
+            }
+            let pane = std::fs::read_to_string(&path).expect("fixture pane");
+            assert!(
+                !composer_indicates_pending(&pane, "# Molecule: task-20260730-f207\nStep 1"),
+                "{}: a pane whose composer does not hold our briefing must read \
+                 Clear — the delivery receipt is the only signal left once \
+                 `Working` is unreachable on this TUI",
+                path.display()
+            );
+            seen += 1;
+        }
+        assert_eq!(
+            seen, 7,
+            "the seven captured 2.1.220 panes are the fixture; a shrinking set \
+             silently narrows what this pins"
+        );
+    }
+
     #[test]
     fn pending_false_on_empty_input() {
         // A bare-Enter nudge (empty input) has no tail to match and no
@@ -1475,8 +1575,8 @@ mod tests {
     }
 
     #[test]
-    fn input_pending_for_detects_unsubmitted_paste() {
-        // BUG #6 seam: the spawn-time submit-confirmation reads pending state
+    fn composer_state_for_detects_unsubmitted_paste() {
+        // BUG #6 seam: the spawn-time submit-confirmation reads composer state
         // through this public wrapper. A worker whose composer shows a
         // collapsed-paste placeholder must read as pending so the tackle
         // backstop keeps nudging Enter.
@@ -1500,17 +1600,19 @@ mod tests {
         let worker = backend.spawn(&agent, &config).expect("spawn failed");
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        let pending = backend
-            .input_pending_for(&worker.id, "line one\nfinal line of the brief")
-            .expect("input_pending_for failed");
-        assert!(
-            pending,
+        let state = backend
+            .composer_state_for(&worker.id, "line one\nfinal line of the brief")
+            .expect("composer_state_for failed");
+        assert_eq!(
+            state,
+            ComposerState::Pending,
             "a composer showing `[Pasted text …]` must read as pending"
         );
 
-        // A worker that never existed is NotFound, not a silent false.
+        // A worker that never existed is NotFound, not a silent `Clear` — a
+        // missing session must never sign a delivery receipt.
         let ghost = WorkerId::new("ghost-pending").unwrap();
-        assert!(backend.input_pending_for(&ghost, "x").is_err());
+        assert!(backend.composer_state_for(&ghost, "x").is_err());
 
         let _ = backend.terminate(&worker.id);
         cleanup(sock);

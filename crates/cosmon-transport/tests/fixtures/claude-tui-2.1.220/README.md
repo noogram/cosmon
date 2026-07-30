@@ -15,10 +15,17 @@ stack:
 2. `shows_composer` does not match this TUI either — otherwise these would
    classify as `Ready` rather than falling through to the chevron rule.
 
-The consequence measured downstream: `cs tackle`'s briefing-submit loop can
-only exit early on `Working`, so every dispatch pays the full 90 s
+The consequence measured downstream: `cs tackle`'s briefing-submit loop could
+only exit early on `Working`, so every dispatch paid the full 90 s
 `BRIEFING_SUBMIT_INBAND_CAP` — the flat 92/93 s an external tester reported
 against jobs of 32 s and 53 s.
+
+That exit is gone (COSMON #26-A). The loop now exits on a *delivery receipt* —
+two consecutive captures showing our own briefing text gone from the composer —
+and `Working` is a progress observation it cannot even see. These panes pin the
+half of that fix that lives here: `composer_indicates_pending` must read them
+`Clear`, since on this TUI it is the only signal left. The classifier repair
+itself is task-20260730-ec81.
 
 Keep them. A classifier repaired against a described TUI rather than a
 captured one is how this drifted in the first place: nothing in the suite
