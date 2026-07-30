@@ -12,4 +12,3 @@
 # that excludes the quarantined one, then re-check with
 #   git branch --contains <sha>
 
-a3c7b651974e6d02ff94d0db3b9878b649decf87	Pre-neutralisation fixtures commit (2026-07-30). Its seven captured TUI panes carried an operator account address, the organisation name derived from it, a subscription tier and a session path. Superseded on main by the amended, neutralised 3f61802 — but it stays reachable from every branch cut before the amendment, and an ordinary merge would carry it back into public history. Rebase such a branch onto the neutralised commit before harvesting it. ENDS WHEN: `git branch --contains` lists no branch destined for harvest; then delete this line and let git collect the object. Nothing references it — checked across the tree and the ledger on 2026-07-30 — so there is nothing to preserve it for.
