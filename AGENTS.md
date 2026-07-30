@@ -25,7 +25,19 @@ injectable ports.
 
 ## Verification
 
-Run the configured gates before submitting a change:
+Two speeds, both in the `justfile`:
+
+```text
+just quick    # every gate except the test suite — ~90 s, run after each edit
+just gates    # the whole contract below — ~8 min, run once before merging
+```
+
+The split is not cosmetic. Measured on 2026-07-30, the test suite is about
+nine tenths of the wall-clock of a full run, so lifting it out is what makes an
+edit-and-verify loop usable at all. `just check` is an alias of `gates`; it
+previously ran four of the seven gates while being named as if it ran them all.
+
+The individual commands, which is what those two recipes run:
 
 ```text
 cargo check --workspace

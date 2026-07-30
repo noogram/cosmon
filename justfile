@@ -152,12 +152,40 @@ install-mac-pilot:
     cp -R /tmp/mac-pilot-build/Build/Products/Release/mac-pilot.app ~/Applications/
     open ~/Applications/mac-pilot.app
 
-# Run all quality gates (check + test + clippy + fmt)
-check:
-    cargo check --workspace --locked
-    cargo test --workspace --locked
-    cargo clippy --workspace --locked -- -D warnings
+# Measured on 2026-07-30 over the whole workspace: fmt a few seconds, check
+# 90 s cold, clippy 40 s (it reuses what check compiled), doc 17 s, spdx and
+# publish near-instant. The test suite alone is ~5 min — about nine tenths of
+# the total — so pulling it out is what makes an edit-and-verify loop possible
+# at all. Run this after every edit; run `just gates` once before merging.
+#
+# `doc` is here and is not redundant: check compiles code without ever
+# resolving a doc link, and clippy is not rustdoc. A broken intra-doc link
+# passes every other gate and fails only in CI on the trunk.
+#
+# Every gate EXCEPT the test suite. ~90 s.
+quick:
     cargo fmt --all -- --check
+    cargo check --workspace --locked
+    cargo clippy --workspace --locked -- -D warnings
+    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+    python3 scripts/spdx-headers.py --check
+    ./scripts/publish.sh --check
+
+# `--no-fail-fast` is deliberate: cargo stops at the first red target by
+# default, which hides every later failure at identical wall-clock. A run that
+# dies early has not told you the suite is broken in one place, only that it is
+# broken in at least one.
+#
+# The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
+gates: quick
+    cargo test --workspace --locked --no-fail-fast
+    ./scripts/release/crossing.test.sh
+
+# It used to run four of the seven gates and was named as if it ran them all —
+# the recurring defect here is a check that measures the property next door.
+#
+# Alias for `gates`, kept because it is the name in everyone's fingers.
+check: gates
 
 # Supply-chain checks (mirror of .github/workflows/deny.yml)
 audit:
