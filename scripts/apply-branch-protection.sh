@@ -60,7 +60,15 @@ print(json.dumps({
         "require_code_owner_reviews": True,
     },
     "restrictions": None,
-    "required_linear_history": True,
+    # Deliberately FALSE. Linear history arrived in the v0.1.0 hardening bundle
+    # with no justification of its own, and it is the one rule in this payload
+    # that fights the tool: `cs done` lands a molecule by a merge commit, and
+    # ADR-077 makes the pilot sign that merge — cosmon's provenance rests on
+    # those merges being real. Requiring linearity forced a private integration
+    # line and a projection step onto the daily path, buying nothing: the
+    # protections that actually prevent damage are the four below and the
+    # required checks above, none of which need a straight line.
+    "required_linear_history": False,
     "allow_force_pushes": False,
     "allow_deletions": False,
 }))

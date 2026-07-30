@@ -145,12 +145,16 @@ jobs:
       # This constructs both ways a tree can move mid-build and asserts the
       # bench still calls the guard AFTER the build, not only before it.
       - run: ./scripts/source-provenance.test.sh
-      # The crossing is the only thing that moves the public trunk, and its
-      # value is entirely in what it REFUSES: a dirty tree (which would ship
-      # the previous commit's content and exit green), two trunks that
-      # disagree, a waiver the candidate introduces, a red publish gate, and a
-      # run whose audited worktree is not the one it crosses from. Hermetic:
-      # temp-dir fixture repos with a local bare remote, no network, no key.
+      # The crossing no longer sits on the daily path — merges land on the
+      # trunk directly since linear history was dropped — but the script is
+      # kept for the exceptional scrubbed projection, and a kept tool with no
+      # test is the rot this file exists to prevent. Its value is entirely in
+      # what it REFUSES: a dirty tree (which would ship the previous commit's
+      # content and exit green), two trunks that disagree, a waiver the
+      # candidate introduces, a red publish gate, and a run whose audited
+      # worktree is not the one it crosses from. Hermetic: temp-dir fixture
+      # repos with a local bare remote, no network, no key — so keeping it
+      # costs seconds, and dropping it would leave 1190 lines unwatched.
       - run: ./scripts/release/crossing.test.sh
 
   fixture-independence:

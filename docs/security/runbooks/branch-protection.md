@@ -35,11 +35,27 @@ Seven repos. Apply the same policy to each:
 | Require status checks to pass                        | enabled, strict mode   |
 | Required status checks                               | `cargo deny` · `cargo audit` · `cargo vet` (cosmon) · `Format` · `Clippy` · `Test` (per repo) |
 | Require signed commits                               | enabled                |
-| Require linear history                               | enabled                |
+| Require linear history                               | **disabled** (see below) |
 | Block force-pushes                                   | enabled                |
 | Block deletions                                      | enabled                |
 | Restrict who can push                                | empty (PR-only)        |
 | Apply rules to administrators                        | enabled                |
+
+### Why linear history is disabled
+
+It was enabled at v0.1.0 inside a security-hardening bundle, with no
+justification of its own, and it is the only line in the table that fights the
+tool this repository ships. `cs done` lands a molecule by a **merge commit**,
+and ADR-077 makes the pilot sign that merge; cosmon's provenance is those
+merges. Requiring a straight line therefore forced a private integration branch
+and a projection step onto the daily path.
+
+It bought nothing. A measurement of the live protection on 2026-07-30 found
+`required_linear_history: true` and `required_signatures: true` — and
+`allow_force_pushes: true`, `required_status_checks: []`, no required reviews.
+The bundle was enforcing the one rule that cost, while the three that prevent
+real damage were off. Those three are what this runbook now insists on; the
+shape of the history is not a security property.
 
 ## Apply via `gh` CLI (operator session, with hardware token)
 
@@ -59,7 +75,7 @@ gh api -X PUT "repos/$REPO/branches/main/protection" \
   -f "required_status_checks[contexts][]=Clippy" \
   -f "required_status_checks[contexts][]=Test" \
   -F "enforce_admins=true" \
-  -F "required_linear_history=true" \
+  -F "required_linear_history=false" \
   -F "allow_force_pushes=false" \
   -F "allow_deletions=false" \
   -F "required_conversation_resolution=true" \
@@ -100,7 +116,7 @@ Expected output (cosmon):
 {
   "required_reviews": 0,
   "signed": true,
-  "linear": true,
+  "linear": false,
   "force_push_blocked": true,
   "contexts": ["cargo deny", "cargo audit", "cargo vet", "Format", "Clippy", "Test"]
 }

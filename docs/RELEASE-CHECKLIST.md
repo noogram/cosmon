@@ -24,9 +24,22 @@ exits non-zero.** The corpse is the exit code, not an operator's opinion.
 
 ## The public projection boundary
 
-The development trunk and the public trunk are **two histories, not one**. The
-public trunk advances by ONE signed commit per release whose tree is the
-development tree verbatim and whose single parent is the previous public tip.
+> **Amended 2026-07-30.** For most of a day this section described the *normal*
+> release path, and it no longer does. The two histories existed because
+> `origin/main` required linear history, so a `cs done` merge could not land on
+> it; the requirement is gone (docs/security/runbooks/branch-protection.md) and
+> the two lines were merged back into one. **The ordinary release now tags a
+> commit of the trunk** — `scripts/release-checklist.sh`, then a signed tag,
+> then push. The projection below is kept for the exceptional case where a
+> release must ship a *scrubbed* tree that differs from the development tree,
+> which is what `CLAUDE.md` means by an isolated projection. It is a tool on
+> the shelf, not a step on the path. `scripts/release/crossing.test.sh` still
+> runs on every PR so the shelf does not rot.
+
+When a projection *is* used, the development trunk and the public trunk are
+**two histories, not one**. The public trunk advances by ONE signed commit per
+release whose tree is the development tree verbatim and whose single parent is
+the previous public tip.
 `git commit-tree` is the entire mechanism: it takes a tree object that already
 exists and gives it a new parent, so it needs no checkout, no working tree, and
 it cannot conflict. The development repository is never pushed or rewritten.
@@ -48,7 +61,12 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
    audit  →  build the candidate  →  sign and publish one ref  →  protect
 ```
 
-1. **audit + build** — `scripts/release/crossing.sh`, run from the development
+The ordinary path collapses steps 1 and 2 into *tag the trunk commit the gates
+were run on, and push the tag* — there is no candidate to build when the tree
+being released is already the tree on the trunk. Steps 1 and 2 below describe
+the projection variant, and step 3 applies to both.
+
+1. **audit + build (projection only)** — `scripts/release/crossing.sh`, run from the development
    worktree. It refuses on a dirty tree, on a local/remote trunk disagreement,
    on an unresolvable DCO sign-off identity, on a publish-gate waiver this very
    candidate introduces, and on a red `scripts/publish.sh --check`; only then
@@ -56,7 +74,7 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
    `refs/cosmon/crossing/v<version>`. Audit, tree capture and crossing happen in
    one worktree in one breath, because `publish.sh` audits the checkout it runs
    in and has no `--tree` argument.
-2. **sign and publish one ref** — the one command `crossing.sh` prints:
+2. **sign and publish one ref (projection only)** — the one command `crossing.sh` prints:
    `scripts/release/sign-and-push.sh`, with the tree and expected parent pinned
    as explicit arguments. It signs before it moves any ref and swaps the branch
    compare-and-swap, so an unavailable key or a moved ref leaves at worst a
@@ -64,10 +82,16 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
 3. **protect** — `scripts/apply-branch-protection.sh` (wires required checks +
    push-protection; only settable once public).
 
-An accidental push from the development repository is made *unrepresentable*
-rather than caught: `git remote set-url --push origin 'DISABLED://…'`, once, in
-daylight. `crossing.sh` refuses until that is done, and `sign-and-push.sh`
-names the fetch URL explicitly for the deliberate push.
+On the projection path, an accidental push from the development repository is
+made *unrepresentable* rather than caught: `git remote set-url --push origin
+'DISABLED://…'`, once, in daylight. `crossing.sh` refuses until that is done,
+and `sign-and-push.sh` names the fetch URL explicitly for the deliberate push.
+
+On the ordinary path the push URL is live, because pushing the trunk *is* the
+release. What replaces the disabled URL there is not a second mechanism but the
+branch protection itself: force-pushes blocked, deletions blocked, required
+checks strict, `enforce_admins` on. A wrong push is refused by the remote
+rather than made unspellable by the local config.
 
 ### The projection commit's message carries two trailers
 
