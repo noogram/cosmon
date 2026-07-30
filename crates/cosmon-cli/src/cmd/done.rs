@@ -10337,7 +10337,8 @@ mod tests {
     #[test]
     fn author_scan_flags_leaked_author() {
         let sep = AUTHOR_SCAN_SEP;
-        let log = format!("beef01{sep}Noogram{sep}hello@noogram.org{sep}Operator{sep}op@example.org\n");
+        let log =
+            format!("beef01{sep}Noogram{sep}hello@noogram.org{sep}Operator{sep}op@example.org\n");
         let hits = collect_non_operator_authored(&log, &test_operator());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].sha, "beef01");
@@ -10349,7 +10350,8 @@ mod tests {
     #[test]
     fn author_scan_flags_leaked_committer() {
         let sep = AUTHOR_SCAN_SEP;
-        let log = format!("c0ffee{sep}Operator{sep}op@example.org{sep}Noogram{sep}bot@noogram.org\n");
+        let log =
+            format!("c0ffee{sep}Operator{sep}op@example.org{sep}Noogram{sep}bot@noogram.org\n");
         let hits = collect_non_operator_authored(&log, &test_operator());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].committer_email, "bot@noogram.org");
@@ -10368,7 +10370,8 @@ mod tests {
     #[test]
     fn author_scan_rejects_noogram_name_with_operator_email() {
         let sep = AUTHOR_SCAN_SEP;
-        let log = format!("bad123{sep}Noogram{sep}op@example.org{sep}Operator{sep}op@example.org\n");
+        let log =
+            format!("bad123{sep}Noogram{sep}op@example.org{sep}Operator{sep}op@example.org\n");
         let hits = collect_non_operator_authored(&log, &test_operator());
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].author_name, "Noogram");
