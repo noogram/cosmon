@@ -12,6 +12,7 @@ pub mod archive;
 pub mod artifacts;
 pub mod ask;
 pub mod await_operator;
+pub mod briefing_backstop;
 pub mod claim;
 pub mod cluster;
 pub mod collapse;

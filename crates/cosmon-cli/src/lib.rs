@@ -28,6 +28,14 @@ pub mod tackle_env;
 /// exercises the real re-exec, so the two can never drift.
 pub mod realized_watcher;
 
+// The briefing-submit receipt kernel, plus the durable record and argv that let
+// a detached `cs briefing-backstop` child re-run it after `cs tackle` has
+// exited (COSMON #26-B). Documented by the module's own `//!` header and NOT by
+// a `///` here: an outer doc comment on the declaration merges with the inner
+// one and drags intra-doc link resolution up into *this* module's scope, which
+// silently breaks every `[`Item`]` the module writes about itself.
+pub mod briefing_backstop;
+
 /// Repo-supplied shell trust gate (B5, RCE-by-clone) — the `direnv allow`
 /// of cosmon. Every `sh -c` on a string the repository supplies (formula
 /// `command`/`verification` steps, `post_merge`/`pre_done` hooks) is gated on
