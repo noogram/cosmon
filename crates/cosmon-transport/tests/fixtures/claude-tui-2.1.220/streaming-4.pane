@@ -1,0 +1,50 @@
+
+│                /…/fixtures/probe                   │                                                                                                                        │
+╰─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+ ⚠ N MCP servers need authentication · run /mcp
+
+❯ Compte lentement de 1 a 40, une ligne par nombre, en detaillant chaque etape.
+
+⏺ 1 — un : le point de départ, le premier doigt levé.
+  2 — deux : on ajoute un, la première paire.
+  3 — trois : le triangle, premier nombre impair après un.
+  4 — quatre : deux paires, le premier carré après un (2×2).
+  5 — cinq : une main entière.
+  6 — six : deux mains moins quatre, ou 2×3.
+  7 — sept : les jours d'une semaine.
+  8 — huit : deux fois quatre, le cube de deux.
+  9 — neuf : trois fois trois, second carré.
+  10 — dix : les deux mains, base de notre numération.
+  11 — onze : la dizaine plus un, on repart de zéro dans les unités.
+  12 — douze : la douzaine, divisible par 2, 3, 4 et 6.
+  13 — treize : premier nombre premier de la deuxième dizaine.
+  14 — quatorze : deux semaines, une quinzaine moins un.
+  15 — quinze : trois fois cinq, le quart d'heure.
+  16 — seize : deux puissance quatre, dernier nombre en « -ze ».
+  17 — dix-sept : ici le français change de règle, on compose « dix » + « sept ».
+  18 — dix-huit : la majorité en France.
+  19 — dix-neuf : dernier avant le seuil de vingt.
+  20 — vingt : deux dizaines, on est à mi-chemin de quarante.
+  21 — vingt et un : noter le « et » qui n'apparaît qu'ici (et à 31, 41…).
+  22 — vingt-deux : retour au trait d'union, la paire de deux.
+  23 — vingt-trois : nombre premier.
+  24 — vingt-quatre : les heures d'une journée.
+  25 — vingt-cinq : cinq fois cinq, le quart de cent.
+  26 — vingt-six : les lettres de l'alphabet latin.
+  27 — vingt-sept : trois au cube.
+  28 — vingt-huit : le mois de février ordinaire ; nombre parfait (1+2+4+7+14).
+  29 — vingt-neuf : février bissextile, et nombre premier.
+  30 — trente : trois dizaines, les trois quarts du chemin.
+  31 — trente et un : le « et » revient, comme à 21.
+  32 — trente-deux : deux puissance cinq.
+  33 — trente-trois : ce qu'on dit chez le médecin.
+  34 — trente-quatre : deux fois dix-sept.
+  35 — trente-cinq : cinq fois sept.
+  36 — trente-six : six fois six, « voir trente-six chandelles ».
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  ⏸ manual mode on · ← 1 agent
