@@ -7,15 +7,20 @@
 #   (ADR-139 / ADR-140). This one germinates the ROBUST-DEV mission: one issue
 #   reported by an external tester becomes a deterministic RED reproduction (a
 #   validation gate), a smallest FIX, a DOUBLE clean-room review by two DIFFERENT
-#   provider families iterated until CLEAN, then a RELEASE. No agent pushes to a
+#   provider families rendered as two immutable verdicts, then a RELEASE. No agent pushes to a
 #   remote (the human gate is the only door to the world).
 #
 # GUIDING PRINCIPLE — REUSE, DO NOT REINVENT.
 #   This spore WIRES existing cosmon primitives; it rewrites NONE of them.
 #     * `task-work`                (../../.cosmon/formulas/) — the agentic gate legs.
 #     * `while`                    (../../.cosmon/formulas/) — the iterate-until-condition
-#                                    loop; its `max_iterations` cap IS `max_rounds`.
-#                                    Composed BY `converge-clean-room`, not copied.
+#                                    loop. NO LONGER COMPOSED HERE: it was the N-round
+#                                    infrastructure `converge-clean-room` v2 deleted
+#                                    (operator decision D1 amendment 1 on
+#                                    delib-20260729-1d4e). Two named verdict states are
+#                                    not an iteration, and borrowing an iteration
+#                                    primitive to express them would re-import the
+#                                    counter through the back door.
 #     * `cross-provider-committee` (../../.cosmon/formulas/, ADR-147) — the jury that
 #                                    is provider-diverse BY CONSTRUCTION (adapter-pinned
 #                                    seats). One claude seat + one codex-sol (gpt-5.6-sol)
@@ -28,11 +33,14 @@
 #     * `clean-room-repro`      — the G2 reproduction gate (deterministic red, frozen
 #                                  before the fix branch, differential refutation,
 #                                  false-green / false-red modes). Emits verdict.json.
-#     * `converge-clean-room`   — the §6bis double-engine convergence loop wrapper that
-#                                  composes `while` + `cross-provider-committee`, reads
-#                                  BOTH verdict.json, fail-closes on absent/malformed,
-#                                  and re-nucleates fix+reviews FORWARD each round until
-#                                  CLEAN and CLEAN, or blocks+escalates at max_rounds.
+#     * `converge-clean-room`   — the §6bis double-engine convergence, rendered as TWO
+#                                  IMMUTABLE VERDICTS (INITIAL, CONFIRMATION) over
+#                                  `cross-provider-committee`. It reads the seats'
+#                                  verdict.json, fail-closes on absent/malformed —
+#                                  into a VOID verdict that does not advance the state,
+#                                  never into a FINDINGS verdict — and computes CLEAN as
+#                                  the conjunction over the BALLOT-CARRYING seats only.
+#                                  No round counter, no round ledger, no third verdict.
 #
 # THE GATE DAG (blueprint §3, diamond topology — NOT a pipeline; a pipeline
 # diffuses responsibility by construction):
@@ -43,15 +51,28 @@
 #                                                 └─> falsify(G3) ───┘        │
 #                                                                             v
 #                                          converge (§6bis, EMERGENT — the double clean-room
-#                                          loop; replaces G6 breaker + G7 judge) ─┬─> rehearsal(G9) ─┐
+#                                          two-verdict convergence; replaces G6 breaker +
+#                                          G7 judge) ────────────────────┬─> rehearsal(G9) ─┐
 #                                                                                  └─> dissent(§9) ──┤
 #                                                                                                    v
 #                                                                              release(G10) -> confirm(G11)
 #
-# CLEAN = CONJUNCTION. Both review seats (claude AND codex-sol) must return CLEAN
-# in the SAME round. A single FINDINGS from either relaunches the loop; the fix
-# corrects the UNION of the two reports (keystone K4: a single cross-model FAIL
-# blocks; the bloc-claude counts as ONE voice, codex-sol is the second substrate).
+# CLEAN = BALLOT-WEIGHTED CONJUNCTION. Every BALLOT-CARRYING seat (`on_ballot` and
+# `diversity_weight > 0`) must return CLEAN in the SAME verdict, and the
+# ballot-carrying set must be NON-EMPTY. A single FINDINGS from a ballot-carrying
+# seat blocks; the fix corrects the UNION of the ballot-carrying reports (keystone
+# K4: a single cross-model FAIL blocks; the bloc-claude counts as ONE voice,
+# codex-sol is the second substrate). Seats the roster itself puts off the ballot —
+# a seat whose resolved family collides with the generator's carries zero diversity
+# weight — have their findings RECORDED as residuals and block nothing on their own,
+# because an off-ballot CLEAN certifies nothing and must not be asked to.
+#
+# A verdict that MEASURED NOTHING is not a verdict. An absent, malformed,
+# unparseable or undelivered seat verdict makes the whole verdict VOID: the reason
+# is recorded, the state does NOT advance, the seat is re-dispatched once, and a
+# second void collapses on `verdict-plumbing`. Fail-closed is right about the
+# VERDICT and was wrong about the CONTROL FLOW — a plumbing failure must never be
+# reported as a quality verdict and then patched against findings nobody collected.
 #
 # LIMITE DURE (codex-sol #28, buterin, blueprint §8): the edges ORDER molecules;
 # they do NOT prove a review passed or that two seats had distinct identities.
@@ -77,9 +98,9 @@ description = """
 Germinate the robust-dev polymer: turn one externally-reported issue into a
 deterministic RED reproduction (fails on affected_ref for the RIGHT reason,
 frozen before the fix), a smallest FIX, a DOUBLE clean-room review by two distinct
-provider families (claude + codex-sol) iterated until CLEAN and CLEAN or a bounded
-escalation, and a RELEASE. No agent pushes to any remote. When an external
-reproduction contradicts an internal proof, the reproduction wins and the proof
+provider families (claude + codex-sol) rendered as two immutable verdicts and
+resolved by a ballot-weighted CLEAN or a typed escalation, and a RELEASE. No agent
+pushes to any remote. When an external reproduction contradicts an internal proof, the reproduction wins and the proof
 becomes the bug.
 """
 
@@ -91,19 +112,24 @@ becomes the bug.
 # --allow-unchecked-seal to opt into the risk. It NEVER claims a seal verified
 # when it is not.
 #
-# Termination                  : the convergence loop is bounded by max_rounds (a
-#                                fatal cap, blueprint §6bis) and the gate DAG is
-#                                acyclic, so every germinated polymer either drains
-#                                or reaches a typed `blocked` escalation. No spin.
+# Termination                  : the convergence is bounded STRUCTURALLY — there are
+#                                exactly two named verdict states (INITIAL,
+#                                CONFIRMATION) and no counter to raise — and the gate
+#                                DAG is acyclic, so every germinated polymer either
+#                                drains or reaches a typed `blocked` escalation. No
+#                                spin. `max_rounds` survives only as the mechanical
+#                                runaway backstop on committees convened.
 # GateFailClosed  (LOAD-BEARING): every gate BLOCKS on an absent/malformed verdict;
 #                                release SHIPs only if every upstream gate PASSED,
 #                                the convergence reached CLEAN, and the dissent field
-#                                is non-empty. Absence refuses, always.
+#                                is non-empty. Absence refuses, always — into a VOID
+#                                verdict that cannot advance a state, never into a
+#                                FINDINGS verdict that could be patched against.
 # DeterministicParametrization : the node set is a pure function of the params;
 #                                nothing environmental perturbs the expansion.
-# NoResourceCollision          : each node (and each convergence round) writes a
-#                                distinct, round-indexed path; parallel writers and
-#                                iterated rounds never alias a resource.
+# NoResourceCollision          : each node (and each of the two convergence verdicts)
+#                                writes a distinct, state-indexed path; parallel
+#                                writers never alias a resource.
 #
 # SEAL HONESTY: a released `cs` may report "TLC unavailable" (the TLC-verify wiring
 # is not in every released binary), so `cs spore run` fails closed and you germinate
@@ -152,12 +178,22 @@ description = "Drives the review jury floor and the rehearsal matrix. normal => 
 type        = "enum"
 values      = ["mission", "submission"]
 default     = "mission"
-description = "mission (default) => one convergence loop wraps the whole deliverable (the oxymake style). submission => each gate/sub-mission carries its own nested loop. Advisory to the converge node; does not change the node SET."
+description = "mission (default) => one two-verdict convergence wraps the whole deliverable (the oxymake style). submission => each gate/sub-mission carries its own. Advisory to the converge node; does not change the node SET."
 
 [spore.params.max_rounds]
 type        = "int"
-default     = 5
-description = "Hard cap on convergence rounds. At exhaustion the mission goes `blocked` + human escalation (NOT-CONVERGED blocks like NOT-RUN) — NEVER a silent pass. Feeds the seal's Termination bound and the `while` max_iterations."
+default     = 2
+description = """
+RUNAWAY BACKSTOP, NOT THE CONTROL FLOW. Since `converge-clean-room` v2 the control \
+flow is two immutable verdict states (INITIAL, CONFIRMATION) and this number governs \
+no decision inside it. It is the mechanical ceiling on committees convened, so a \
+wiring bug that re-enters the convergence cannot foam, and it is the quantity the \
+seal's Termination bound reads. It bounds COST, never INFORMATION: raising it buys \
+more committees, not more measurement — twelve rounds over five days bought one \
+measurement and eleven repetitions of it. Two named states means two committees, so \
+the honest value is 2; any other value says something upstream is wrong. Exceeding \
+it is a WIRING failure (`exit_reason: verdict-plumbing`), not a quality signal.
+"""
 
 # --------------------------------------------------------------------------
 # Fleet — the default cosmon fleet (this is dogfooding inside the cosmon repo).
@@ -178,9 +214,10 @@ name            = "default"
 #   NEW (ship here, genuinely new plumbing the primitives cannot compose directly):
 #     clean-room-repro     -> formulas/clean-room-repro.formula.toml
 #     converge-clean-room  -> formulas/converge-clean-room.formula.toml
-# The convergence formula itself composes ../../.cosmon/formulas/while.formula.toml
-# and ../../.cosmon/formulas/cross-provider-committee.formula.toml at RUN time by
-# nucleation — they are dependencies of `converge-clean-room`, not spore nodes.
+# The convergence formula itself composes ../../.cosmon/formulas/cross-provider-committee.formula.toml
+# at RUN time by nucleation — a dependency of `converge-clean-room`, not a spore node.
+# It NO LONGER composes while.formula.toml: that was the N-round machinery, deleted
+# with the round counter it existed to drive.
 # --------------------------------------------------------------------------
 [spore.formulas.task-work]
 path          = "../../.cosmon/formulas/task-work.formula.toml"
@@ -194,7 +231,7 @@ deterministic = false
 
 [spore.formulas.converge-clean-room]
 path          = "formulas/converge-clean-room.formula.toml"
-description   = "NEW — the §6bis double-engine convergence loop: composes `while` + `cross-provider-committee`; reads BOTH verdict.json; CLEAN and CLEAN debloque; else re-nucleates fix+reviews forward; fail-close on absent verdict; blocked+escalate at max_rounds."
+description   = "NEW — the §6bis double-engine convergence as TWO IMMUTABLE VERDICTS (INITIAL, CONFIRMATION) over `cross-provider-committee`; CLEAN is the conjunction over the BALLOT-CARRYING seats; an absent/unparseable/undelivered verdict is VOID and does not advance the state; a repeated finding set or verdict shape exits immediately; no round counter, no third verdict."
 deterministic = false
 
 [spore.formulas.bug-closure]
@@ -365,33 +402,62 @@ The doc gate is the one no other subsumes: a broken intra-doc link compiles, lin
 and tests green and fails only in CI on main. Emit ${output_dir}/ci-gate.md (one line per gate
 with its captured exit code) AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count,
 findings[]}. FAIL-CLOSED and NOT-RUN blocks: a gate that did not run is BLOCKED, not
-skipped. This runs BEFORE the convergence loop (cheap before dear).
+skipped. This runs BEFORE the convergence (cheap before dear).
 """
 
-# --- §6bis converge (EMERGENT — the double clean-room loop; replaces G6+G7) -
-# The ONLY non-Tier-0 node: it nucleates children (fix + two reviews + a converge
-# check) FORWARD each round via `cs nucleate --blocked-by` (auto-parent contract
-# COSMON_PARENT_MOL_ID). Because the round count is not knowable at germination,
-# it is an EMERGENT zone and MUST declare [bounds] (ADR-140 D2). The bound is the
-# seal's Termination variant.
+# --- §6bis converge (EMERGENT — the double clean-room review; replaces G6+G7) -
+# The ONLY non-Tier-0 node: it nucleates children (a committee per verdict, plus one
+# fix between them) FORWARD via `cs nucleate --blocked-by` (auto-parent contract
+# COSMON_PARENT_MOL_ID). Whether the second verdict is convened at all is not
+# knowable at germination, so it is an EMERGENT zone and MUST declare [bounds]
+# (ADR-140 D2). The bound is the seal's Termination variant — and since v2 it is
+# STRUCTURAL: there are two named verdict states and no counter to raise.
+#
+# NOTE for anyone tempted to add a fifth key here: `RawBounds` in
+# crates/cosmon-core/src/spore/mod.rs has exactly four fields and no `Raw*` struct
+# there carries `deny_unknown_fields`, so a fifth key PARSES, VANISHES, and becomes
+# another knob with no power. New constraints go into `stop_condition`, which is
+# read, or into the formula, which is executed.
 [[spore.node]]
 id          = "converge"
 kind        = "emergent"
-for_each    = "${nodes.converge.rounds}"
+for_each    = "${nodes.converge.verdicts}"
 formula     = "converge-clean-room"
-description = "§6bis double-engine convergence loop (BLOCK). Composes `while` + `cross-provider-committee`: each round runs review-claude || review-codex-sol, reads BOTH verdict.json, CLEAN and CLEAN debloque; else re-nucleates fix(union) + reviews forward. Fail-close on absent verdict; blocked+escalate at max_rounds. Replaces G6 breaker + G7 judge."
+description = "§6bis double-engine convergence (BLOCK), as TWO IMMUTABLE VERDICTS over `cross-provider-committee`: an INITIAL verdict and — only if it found something AND the fix moved the tree sha — one CONFIRMATION verdict. CLEAN is the conjunction over the BALLOT-CARRYING seats and is never satisfied by an off-ballot voice; an absent/unparseable/undelivered seat verdict is VOID and does not advance the state; a repeated finding set or verdict shape exits immediately. No round counter, no third verdict. Replaces G6 breaker + G7 judge."
 [spore.node.bounds]
-output_type    = "review-round"
-max_instances  = 5    # the max_rounds ceiling — the foaming variant the seal bounds
-stop_condition = "both review engines (claude AND codex-sol) return CLEAN in the same round, OR max_rounds reached => `blocked` + human escalation (never a silent pass)"
-# WHICH var is the run-time round count. Without this binding the ceiling above
-# and the loop below are two unrelated numbers: `--var max_rounds=100` would
-# germinate a zone that foams twenty times past its own sealed bound and nothing
-# would say a word. Declared here, `cs spore validate` / `cs spore run` refuse it.
+output_type    = "review-verdict"
+max_instances  = 2    # STRUCTURAL: two named verdict states, not a counter set low
+stop_condition = """
+A verdict renders CLEAN — the conjunction over a NON-EMPTY set of BALLOT-CARRYING \
+seats (`on_ballot`, `diversity_weight > 0`), every seat `delivered` — and the \
+convergence stops there. Otherwise it stops BLOCKED with a typed exit_reason and a \
+human escalation, never a silent pass: `confirmation-findings` when the CONFIRMATION \
+verdict found something new, `no-new-information` / `verdict-shape-repeated` when it \
+found the same thing again, `verdict-plumbing` / `jury-not-rendered` when a jury did \
+not sit. A VOID verdict (absent, malformed, unparseable, undetermined ballot, or a \
+seat not `delivered`) does NOT advance the state and does NOT consume a verdict: the \
+seat is re-dispatched once, and a second void collapses on `verdict-plumbing`. A \
+CONFIRMATION whose target tree sha EQUALS the INITIAL's is REFUSED, not rendered — \
+re-reading an unchanged tree with the same jury cannot produce information. There is \
+no third verdict under any outcome.
+"""
+# WHICH var carries the run-time ceiling. `max_rounds` no longer DRIVES anything —
+# the control flow is the two named states — but the binding must stay: without it
+# the ceiling above and the formula's backstop are two unrelated numbers, and
+# `--var max_rounds=100` would germinate a zone that foams past its own sealed bound
+# with nothing saying a word. Declared here, `cs spore validate` / `cs spore run`
+# refuse it.
 instances_var  = "max_rounds"
 [spore.node.vars]
 topic = """
-COSMON-DEV ${params.issue} — §6bis DOUBLE CLEAN-ROOM CONVERGENCE (fail-closed).
+COSMON-DEV ${params.issue} — §6bis DOUBLE CLEAN-ROOM CONVERGENCE (fail-closed),
+rendered as TWO IMMUTABLE VERDICTS: an INITIAL verdict, and — only if it found
+something AND the fix moved the target tree sha — one CONFIRMATION verdict. There
+is no round counter and no third verdict. CLEAN is the conjunction over the
+BALLOT-CARRYING seats only; an off-ballot CLEAN certifies nothing. A verdict that
+measured nothing is VOID: it does not advance the state, the seat is re-dispatched
+once, and a second void collapses on `verdict-plumbing` rather than being patched
+against findings nobody collected.
 """
 issue        = "${params.issue}"
 max_rounds   = "${params.max_rounds}"
@@ -425,8 +491,8 @@ description = "§9 dissent field (BLOCK, empty=hard-block): a non-empty contre-b
 topic = """
 COSMON-DEV ${params.issue} — §9 DISSENT FIELD (fail-closed, empty = hard-block).
 Produce the mandatory release contre-brief: the single strongest reason this fix
-should NOT ship (correctness, blast-radius, a residual the convergence loop
-tolerated). It must be EXPLICITLY overruled with a NAMED rationale, or it forces
+should NOT ship (correctness, blast-radius, a residual the convergence recorded
+as off-ballot and did not block on). It must be EXPLICITLY overruled with a NAMED rationale, or it forces
 the right-to-fork (buterin): a 2nd independent judge on the frozen dossier before
 release. Emit ${output_dir}/dissent.md AND ${output_dir}/verdict.json shaped {verdict: PASS|BLOCKED, count,
 findings, brief, overruled_by, rationale}. FAIL-CLOSED: an EMPTY brief is a
@@ -447,8 +513,9 @@ ${output_dir}/release-manifest.json validating the WHOLE dossier (never inferrin
 success from completion), reading each upstream gate's verdict from
 ${run_dir}/<gate>/verdict.json: the fix commit sha, the FROZEN red hash from G2, the clean-room image
 digest, the affected_ref (${params.affected_ref}) and upstream_version
-(${params.upstream_version}), the CI verdict, the convergence CLEAN and CLEAN
-verdict, the rehearsal matrix, and the non-empty dissent {brief, overruled_by,
+(${params.upstream_version}), the CI verdict, the convergence's ballot-weighted
+CLEAN verdict (verdict CLEAN with a NON-EMPTY ballot_seats set — an empty ballot is
+never a pass), the rehearsal matrix, and the non-empty dissent {brief, overruled_by,
 rationale}. Run `scripts/publish.sh --check` for the scrub projection. Emit
 ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: any missing
 manifest field => BLOCKED. NO AGENT PUSHES: the output stays on the feat-branch;
@@ -518,7 +585,7 @@ from = "green"
 to   = "ci-gate"
 type = "verifies"
 
-# CI (cheap) before the convergence loop (dear).
+# CI (cheap) before the convergence (dear).
 [[spore.edge]]
 from = "ci-gate"
 to   = "converge"

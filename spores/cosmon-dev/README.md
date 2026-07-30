@@ -15,7 +15,6 @@ The spore **wires** existing cosmon primitives; it rewrites none:
 
 | primitive | role here | reference |
 |-----------|-----------|-----------|
-| `while` | the iterate-until-condition loop; `max_iterations` = `max_rounds` | `../../.cosmon/formulas/while.formula.toml` |
 | `cross-provider-committee` | the provider-diverse jury (claude + codex-sol) = the double clean-room review | `../../.cosmon/formulas/cross-provider-committee.formula.toml` (ADR-147) |
 | `bug-closure` | the CLOSED/REOPEN verdict over the full semantic surface = the closure gate | `../../.cosmon/formulas/bug-closure.formula.toml` |
 | `task-work` | the agentic gate legs (verdict contract in each node topic) | `../../.cosmon/formulas/task-work.formula.toml` |
@@ -24,11 +23,15 @@ Only **two** formulas are genuinely new (they ship in `formulas/`):
 
 - `clean-room-repro` — the G2 reproduction gate (deterministic red, frozen before
   the fix, differential refutation, false-green/false-red modes; emits verdict.json).
-- `converge-clean-room` — the §6bis double-engine convergence loop that **composes**
-  `while` + `cross-provider-committee`: each round runs review-claude ‖
-  review-codex-sol, reads BOTH verdict.json, CLEAN∧CLEAN debloque, else re-nucleates
-  fix(union)+reviews forward; fail-closes on absent verdict; blocked+escalate at
-  max_rounds.
+- `converge-clean-room` — the §6bis double-engine convergence, rendered as **two
+  immutable verdicts** over `cross-provider-committee`: an INITIAL verdict and —
+  only if it found something AND the fix moved the target tree sha — one
+  CONFIRMATION verdict. It reads the seats' verdict.json, computes CLEAN as the
+  conjunction over the **ballot-carrying** seats, and fail-closes on an absent /
+  unparseable / undelivered verdict into a **VOID** verdict that does not advance
+  the state. No round counter, no round ledger, no third verdict. `while` is
+  deliberately **not** composed — it was the N-round machinery (operator decision D1
+  amendment 1 on `delib-20260729-1d4e`).
 
 ## Layout
 
@@ -60,25 +63,31 @@ intake(G0) → contract(G1) → reproduce(G2) ─┬─→ implement(G4) ─┐
                                            └─→ falsify(G3) ───┴─→ green(G5) → ci-gate(G8)
                                                                        │
                                                                        ▼
-                       converge (§6bis, EMERGENT — the double clean-room loop, ─┬─→ rehearsal(G9) ─┐
+                       converge (§6bis, EMERGENT — the two-verdict clean-room  ─┬─→ rehearsal(G9) ─┐
                        replaces G6 breaker + G7 judge)                          └─→ dissent(§9) ───┤
                                                                                                     ▼
                                                                             release(G10) → confirm(G11)
 ```
 
-**CLEAN = conjunction**: both review seats (claude AND codex-sol) must return CLEAN
-in the same round. A single FINDINGS from either relaunches the loop; the fix
-corrects the UNION of the two reports. At `max_rounds` exhaustion the mission goes
-`blocked` + human escalation, NEVER a silent pass.
+**CLEAN = ballot-weighted conjunction**: every **ballot-carrying** seat
+(`on_ballot`, `diversity_weight > 0`) must return CLEAN in the same verdict, and the
+ballot-carrying set must be non-empty. A single FINDINGS from a ballot-carrying seat
+blocks and the fix corrects the UNION of the ballot-carrying reports; an off-ballot
+seat's findings are recorded as residuals and block nothing on their own, because an
+off-ballot CLEAN certifies nothing. A verdict that measured nothing — absent,
+malformed, unparseable, or a seat not `delivered` — is **VOID**: it does not advance
+the state, the seat is re-dispatched once, and a second void collapses on
+`verdict-plumbing`. Every non-CLEAN outcome is `blocked` + human escalation with a
+typed `exit_reason`, NEVER a silent pass.
 
 ## The seal (TLC-verified green)
 
-`spore.tla` + `spore.cfg` model the diamond gate DAG + the bounded convergence loop
-and discharge four properties: **Termination** (the loop is bounded by max_rounds;
-the DAG is acyclic; a blocked convergence cascades to a terminal state, no spin),
-**GateFailClosed** (no gate promotes on absent/failing evidence; release SHIPs only
-when every upstream gate PASSED, the loop is CLEAN, and the dissent field is
-non-empty), **DeterministicParametrization**, **NoResourceCollision**.
+`spore.tla` + `spore.cfg` model the diamond gate DAG + the bounded convergence and
+discharge four properties: **Termination** (the convergence is bounded structurally
+by its two named verdict states; the DAG is acyclic; a blocked convergence cascades
+to a terminal state, no spin), **GateFailClosed** (no gate promotes on absent/failing
+evidence; release SHIPs only when every upstream gate PASSED, the convergence is
+CLEAN, and the dissent field is non-empty), **DeterministicParametrization**, **NoResourceCollision**.
 
 Re-verify (any Java 11+; jar at `../../docs/specs/tla2tools.jar`):
 
@@ -98,7 +107,7 @@ cs spore validate spore.toml \
     --var affected_ref="v0.2.2" \
     --var upstream_version="0.2.2"
 cs spore run spore.toml --var ... --allow-unchecked-seal   # released cs: TLC-verify not wired
-cs run --resident --poll-interval 5 <germinated-root>       # absorbs the converge loop's rounds
+cs run --resident --poll-interval 5 <germinated-root>       # absorbs the converge verdicts' children
 ```
 
 ## The limite dure (blueprint §8, honoured)

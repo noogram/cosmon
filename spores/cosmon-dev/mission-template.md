@@ -22,7 +22,7 @@ gate is the only door to the world).
 | `upstream_version` | string | yes | The released version the tester actually ran (what the world saw fail). |
 | `risk` | enum `{normal, release, security}` | no (`normal`) | Drives the review jury floor and the rehearsal matrix. `release`/`security` widen both. |
 | `review_scale` | enum `{mission, submission}` | no (`mission`) | `mission`: one convergence loop wraps the whole fix. `submission`: each gate/sub-mission carries its own nested loop. |
-| `max_rounds` | int | no (`5`) | The hard cap on convergence rounds. Exhaustion is `blocked` + human escalation, NEVER a silent pass. |
+| `max_rounds` | int | no (`2`) | Runaway backstop only — the control flow is the two immutable verdicts (INITIAL, CONFIRMATION) and this number governs no decision in it. It bounds COST, never INFORMATION. Exceeding it is a wiring failure (`verdict-plumbing`), never a quality signal. |
 
 ## The invariant no worker may break
 
