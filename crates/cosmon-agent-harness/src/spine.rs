@@ -1560,8 +1560,26 @@ mod tests {
     /// independent of `run_loop`'s threshold computation. Verifies
     /// the trait-method wiring: compaction reduces the log, sets
     /// `summary_inserted`, and reports non-zero `messages_removed`.
+    ///
+    /// Takes [`COMPACTION_TEST_LOCK`] even though it never reads
+    /// [`COMPACT_CALL_COUNT`]: calling `compact` *increments* it, and the lock
+    /// serialises writers as well as readers. Without the guard this test runs
+    /// concurrently with `run_loop_does_not_compact_short_session`, bumps the
+    /// counter that test asserts is zero, and fails it — then the panic
+    /// poisons the mutex, so the third test dies on `lock().unwrap()` for a
+    /// reason that has nothing to do with compaction. Observed as a two-failure
+    /// cascade in a full `cargo test --workspace` that passed on the run before.
     #[test]
     fn compacting_log_reduces_size_when_over_target() {
+        // Recover through a poisoned lock rather than `unwrap`: a poisoned
+        // mutex means some other test panicked, and inheriting its failure here
+        // reports a second broken thing that is not broken. `lock()` returns a
+        // `Result`, and binding it without unwrapping would keep the guard only
+        // on the happy path — i.e. stop serialising exactly when another test
+        // has already gone wrong.
+        let _guard = COMPACTION_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut log = CompactingLog::from_briefing("brief");
         let tokens_before = log.estimate_tokens();
         let report = log

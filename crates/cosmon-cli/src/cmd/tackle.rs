@@ -395,7 +395,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             cosmon_core::root_spawn_policy::resolve_demote_target(env_lookup),
         )
     {
-        record_root_spawn_refusal(&store.molecule_dir(&mol_id), &mol_id, None, &reason);
+        record_root_spawn_refusal(&mol_id, None, &reason);
         return Err(root_spawn_refusal_error(&mol_id, &reason));
     }
 
@@ -2567,29 +2567,29 @@ fn emit_gate_failed(
 /// worker id has been minted yet — which is the nominal case since the gate was
 /// hoisted there.
 ///
-/// # Why this appends but never creates
+/// # One sink, appended and never created
 ///
 /// The refusal exists to stop a root dispatcher from leaving root-owned residue
 /// on a galaxy whose worker uid is not root, and `events.jsonl` is not exempt
 /// from that: a `create(true)` here would make the refusal itself the very
-/// thing it refuses, one file smaller. So the sinks are opened append-only and
-/// a missing one is skipped. The trade is stated rather than hidden, and it
-/// falls on the two sinks unequally.
+/// thing it refuses, one file smaller. So the galaxy ledger is opened
+/// append-only and a missing one is skipped. It exists from `cs init` onward,
+/// so the refusal reaches it in every ordinary case — it is what the pinning
+/// test and the container repro harness read.
 ///
-/// The galaxy sink exists from `cs init` onward, so the refusal reaches it in
-/// every ordinary case — it is what the pinning test and the container repro
-/// harness read. The **per-molecule** sink is created when a molecule is
-/// dispatched, not when it is nucleated, so a molecule refused on its first
-/// `cs tackle` has none and one is not created for it. The refusal is then
-/// recorded once, at fleet scope, and `cs observe` on that molecule cannot say
-/// why it never started.
+/// This function used to write the same line to a **second**, molecule-local
+/// sink "defensively". That was the COSMON-DEV #20 shape in miniature: two
+/// writers, two truths, and the truth an operator reads is whichever file
+/// happened to be writable. The molecule-local sink has been removed. Molecule-
+/// scoped visibility now comes from
+/// [`cosmon_state::journal::MoleculeJournal`], which *projects* this row out of
+/// the galaxy ledger rather than storing a copy of it — so
+/// `cs events journal <id>` says why a molecule never started without anything
+/// having been written per-molecule at all.
 ///
-/// Do not "fix" that by creating the file here. Creating it is the residue.
-/// If molecule-scoped visibility is wanted, the sink has to exist before the
-/// dispatch — i.e. `cs nucleate` creates it — which is a change to nucleation,
-/// not to this function.
+/// Do not re-add a second sink. If a per-molecule file seems needed, it is the
+/// projection that is missing a caller, not the ledger that is missing a copy.
 fn record_root_spawn_refusal(
-    mol_state_dir: &Path,
     mol_id: &MoleculeId,
     wid: Option<&WorkerId>,
     reason: &cosmon_core::root_spawn_policy::RootRefusalReason,
@@ -2601,16 +2601,9 @@ fn record_root_spawn_refusal(
         "reason": reason.as_token(),
         "detail": reason.to_string(),
     });
-    // Write to the global state events.jsonl (the sink `emit_gate_*` and the
-    // repro harness read) and, defensively, to the molecule-local log so the
-    // refusal is co-located with the molecule that triggered it.
-    for events_path in [
-        cosmon_filestore::resolve_state_dir(None).join("events.jsonl"),
-        mol_state_dir.join("events.jsonl"),
-    ] {
-        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&events_path) {
-            let _ = writeln!(f, "{line}");
-        }
+    let events_path = cosmon_filestore::resolve_state_dir(None).join("events.jsonl");
+    if let Ok(mut f) = fs::OpenOptions::new().append(true).open(&events_path) {
+        let _ = writeln!(f, "{line}");
     }
 }
 
@@ -5279,7 +5272,7 @@ fn spawn_claude_and_prompt(
         // created; record the typed root-refusal so an audit tells this apart
         // from a crash, then bail.
         SpawnPreflight::Refused(reason) => {
-            record_root_spawn_refusal(mol_state_dir, &mol.id, Some(wid), &reason);
+            record_root_spawn_refusal(&mol.id, Some(wid), &reason);
             return Err(root_spawn_refusal_error(&mol.id, &reason));
         }
         SpawnPreflight::Proceed { decision, model } => (decision, model),

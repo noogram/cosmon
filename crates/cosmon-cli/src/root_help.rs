@@ -110,7 +110,21 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              cs peek --json                  machine view: one JSON document,\n                                  \
                printed once, sorted by molecule id\n  \
              cs ensemble --tag temp:hot      actionable backlog snapshot\n  \
-             cs wait <id> &                  block on a worker without hanging the pilot\n\n\
+             cs wait <id> &                  block on a worker without hanging the pilot\n  \
+             cs events journal <id>          one molecule's whole history, projected\n                                  \
+               out of the ledger — including the case\n                                   \
+                where the worker produced nothing\n\n\
+             THE PER-MOLECULE JOURNAL. 'cs events journal <id>' answers \"what \
+             happened to this molecule?\" for every molecule, including the ones that \
+             have nothing to show: a dispatch refused before any worker existed leaves \
+             no worktree, no artifacts and no molecule-local log, and the journal is \
+             where the refusal is readable. It is a PROJECTION of the one canonical \
+             ledger ('.cosmon/state/events.jsonl'), never a second file written \
+             alongside it — so there is only ever one truth, it exists from the instant \
+             'cs nucleate' returns, it survives the worktree teardown and the archival \
+             at 'cs done', and asking for it writes nothing. '--json' emits the \
+             projected ledger rows verbatim; 'cs done' materialises the same rows into \
+             the archive entry as 'journal.jsonl'.\n\n\
              Observability is a fractal portal, not a dashboard: one tool (cs peek), \
              recursive, from fleet overview down to per-molecule artifact. Reach for \
              'cs peek' before 'tmux attach', 'tail -f', or 'cat briefing.md'.\n\n\

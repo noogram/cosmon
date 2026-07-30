@@ -34,6 +34,7 @@ pub mod events;
 pub mod file_energy_tracker;
 pub mod frontier;
 pub mod instrumentation;
+pub mod journal;
 pub mod ops;
 pub mod rebuild;
 pub mod token_meter;

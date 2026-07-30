@@ -202,6 +202,22 @@ pub fn write_with_warnings(
     let manifest_json = canonical_string(&manifest)?;
     write_atomic(&entry_dir.join("manifest.json"), manifest_json.as_bytes())?;
 
+    // journal.jsonl — the per-molecule journal, materialised so it survives
+    // archival even if the galaxy ledger is later pruned or the archive is
+    // read from a fresh clone.
+    //
+    // This is a *rendered projection*, not a second writer: every byte comes
+    // from `journal::MoleculeJournal::project`, whose only input is the ledger
+    // this same state root holds. Overwritten atomically on every trigger, so
+    // re-archiving a molecule whose ledger has not changed produces identical
+    // bytes — and `an_archived_journal_equals_a_fresh_projection` pins that
+    // the file never drifts into being a truth of its own.
+    let journal = crate::journal::MoleculeJournal::project_from_state_dir(state_root, &mol.id)?;
+    write_atomic(
+        &entry_dir.join("journal.jsonl"),
+        journal.render_jsonl().as_bytes(),
+    )?;
+
     // events.jsonl — append per-molecule transition.
     let event = transition_event(mol, trigger, now);
     append_jsonl(&entry_dir.join("events.jsonl"), &event)?;
@@ -650,6 +666,50 @@ mod tests {
             tackled_at: None,
             adapter: None,
         }
+    }
+
+    /// The archived journal is a projection, and stays one.
+    ///
+    /// `cs done` destroys the worktree and archives the molecule; the clause
+    /// under test is that the journal survives both. It survives because the
+    /// archive holds a rendering of the ledger fold — and this asserts the
+    /// rendering is *equal* to a fresh fold, so the file can never quietly
+    /// become an independently-authored second truth.
+    #[test]
+    fn an_archived_journal_equals_a_fresh_projection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = tmp.path();
+        let mol_dir = state.join("fleets/default/molecules/task-20260414-xyz2");
+        fs::create_dir_all(&mol_dir).unwrap();
+        fs::write(
+            state.join("events.jsonl"),
+            format!(
+                "{}\n{}\n{}\n",
+                r#"{"seq":1,"timestamp":"2026-04-14T09:00:00Z","type":"molecule_nucleated","molecule_id":"task-20260414-xyz2","formula_id":"task-work"}"#,
+                r#"{"seq":2,"timestamp":"2026-04-14T09:00:01Z","type":"molecule_nucleated","molecule_id":"task-20260414-zzz9","formula_id":"task-work"}"#,
+                r#"{"seq":3,"type":"tackle_refused","molecule_id":"task-20260414-xyz2","reason":"root-spawn-refused:demote-shares-repository-storage"}"#,
+            ),
+        )
+        .unwrap();
+
+        let m = mol("task-20260414-xyz2", MoleculeStatus::Completed);
+        let when = Utc.with_ymd_and_hms(2026, 4, 14, 10, 0, 0).unwrap();
+        let w = write(state, &mol_dir, &m, Trigger::Done, when).unwrap();
+
+        let archived = fs::read_to_string(w.entry_dir.join("journal.jsonl")).unwrap();
+        let fresh = crate::journal::MoleculeJournal::project_from_state_dir(state, &m.id)
+            .unwrap()
+            .render_jsonl();
+        assert_eq!(archived, fresh);
+        assert_eq!(
+            archived.lines().count(),
+            2,
+            "the sibling molecule's row must not be archived under this one"
+        );
+        assert!(
+            archived.contains("root-spawn-refused"),
+            "a blockage is what the archived journal exists to preserve"
+        );
     }
 
     #[test]

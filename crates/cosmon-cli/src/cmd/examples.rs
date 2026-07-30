@@ -64,7 +64,14 @@ SEE ALSO: cs wait (block until terminal), cs peek (fractal TUI).";
 pub const EVENTS: &str = "EXAMPLES:
   cs events --mol task-example-0001
   cs events --since 2026-04-13T00:00:00Z
-  cs events --kind transition --json";
+  cs events --kind transition --json
+  cs events journal task-example-0001
+  cs --json events journal task-example-0001
+
+'journal' projects one molecule's history out of the ledger. It is a view,
+never a stored file: it exists from nucleation, it shows blockages where the
+worker produced nothing (a refused dispatch, a failed gate), it survives
+worktree teardown and archival, and asking for it writes nothing.";
 
 pub const EVOLVE: &str = "EXAMPLES:
   cs evolve <mol> --evidence \"step 1 done\" \\
