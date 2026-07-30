@@ -21,6 +21,7 @@ set -eu
 SCRIPT_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
 CROSSING="${SCRIPT_DIR}/crossing.sh"
 SIGN="${SCRIPT_DIR}/sign-and-push.sh"
+SIGNOFF="${SCRIPT_DIR}/signoff.sh"
 
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT INT TERM
@@ -60,6 +61,7 @@ fixture() {
     mkdir -p "${_work}/scripts/release"
     cp "$CROSSING" "${_work}/scripts/release/crossing.sh"
     cp "$SIGN" "${_work}/scripts/release/sign-and-push.sh"
+    cp "$SIGNOFF" "${_work}/scripts/release/signoff.sh"
     chmod +x "${_work}/scripts/release/crossing.sh" "${_work}/scripts/release/sign-and-push.sh"
 
     # A stub structural gate. The real publish.sh is tested by publish.test.sh;
@@ -169,6 +171,44 @@ grep -q "git remote set-url --push origin" "${tmp}/out.${case_n}" \
     && ok "names the one daylight command that disarms it" \
     || ko "names the disarming command" "the refusal did not print it"
 
+# ── 3b. an unresolvable sign-off identity is a refusal, not a guess ─────────
+# The projection commit must carry a `Signed-off-by` trailer and no gate will
+# ever check it: `dco.yml` triggers on pull requests to main, and the crossing
+# is a direct push. So the identity has to resolve here or nowhere — and a
+# commit certified by nobody in particular is exactly the "failure that
+# succeeds" this script's own header refuses.
+#
+# `git var GIT_COMMITTER_IDENT` would NOT refuse here: with no configured
+# address it composes one from the gecos field and the local hostname and exits
+# 0. That is the trap this case pins shut.
+new_fixture
+git -C "$w" config --unset user.name
+git -C "$w" config --unset user.email
+set +e
+# The environment is hostile on purpose: a caller who can spoof the certifier
+# through `GIT_*_EMAIL` can certify in someone else's name, so those must not
+# rescue the refusal either.
+out3b="$( cd "$w" \
+    && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+       GIT_AUTHOR_NAME='Spoofed' GIT_AUTHOR_EMAIL='spoof@example.invalid' \
+       GIT_COMMITTER_NAME='Spoofed' GIT_COMMITTER_EMAIL='spoof@example.invalid' \
+       ./scripts/release/crossing.sh --skip-checklist 2>&1 )"
+rc3b=$?
+set -e
+if [ "$rc3b" -ne 0 ] && printf '%s' "$out3b" | grep -qF "sign-off identity"; then
+    ok "refuses when the Signed-off-by identity cannot be resolved"
+else
+    ko "unresolvable identity refusal" "exit ${rc3b}: ${out3b}"
+fi
+printf '%s' "$out3b" | grep -qF "git config user.name" \
+    && ok "names the one command that configures the identity" \
+    || ko "names the remedy" "the refusal did not print it"
+if [ -n "$(git -C "$w" for-each-ref refs/cosmon/ 2>/dev/null)" ]; then
+    ko "unresolved identity builds nothing" "a candidate ref exists after the refusal"
+else
+    ok "unresolved identity builds nothing (the refusal precedes the candidate)"
+fi
+
 # ── 4. a waiver INTRODUCED by this candidate is a refusal ───────────────────
 # The marker is safe because a reviewer reads it in the diff. Tonight the
 # author and the reviewer are the same person, so a marker not already
@@ -258,6 +298,22 @@ if [ -n "$cand" ]; then
     git -C "$w" log -1 --format=%B "$cand" | grep -qF "Projected-From: ${dev_sha}" \
         && ok "the trailer names the development SHA" \
         || ko "trailer content" "the trailer does not name ${dev_sha}"
+
+    # ── the DCO trailer, asserted on the OBJECT ─────────────────────────────
+    # Every commit on the public trunk must be signed off, and the crossing
+    # lands by a direct push: `dco.yml` triggers on pull requests to main only,
+    # so nothing downstream will ever look at this commit. Reading the script
+    # for the string would prove the string, not the trailer on the object.
+    signoffs="$(git -C "$w" log -1 --format=%B "$cand" \
+        | grep -cE '^Signed-off-by: .+ <.+@.+>' || true)"
+    [ "$signoffs" = "1" ] \
+        && ok "exactly one Signed-off-by trailer, in dco.yml's own shape" \
+        || ko "one sign-off" "found ${signoffs} lines matching dco.yml's regex"
+
+    git -C "$w" log -1 --format=%B "$cand" \
+        | grep -qF 'Signed-off-by: Fixture Dev <dev@example.invalid>' \
+        && ok "the sign-off names the configured user.name / user.email" \
+        || ko "sign-off identity" "the trailer does not name the fixture's git identity"
 fi
 
 # The development branch is untouched: the script builds a candidate and stops.
@@ -381,6 +437,20 @@ git -C "$w" cat-file commit "$new_public" | grep -q '^gpgsig' \
     && ok "e2e: the new public tip carries a signature" \
     || ko "signature" "the new public commit has no gpgsig header"
 
+# Both trailers, on the object that is now the public tip. `sign-and-push.sh`
+# RE-COMPOSES the message rather than reusing the candidate's, so the trailer
+# surviving crossing.sh proves nothing about the commit that actually shipped.
+body="$(git -C "$w" log -1 --format=%B "$new_public")"
+printf '%s\n' "$body" | grep -qF "Projected-From: ${dev_sha}" \
+    && ok "e2e: the pushed commit names the development SHA" \
+    || ko "pushed trailer" "Projected-From is missing from the signed commit"
+if [ "$(printf '%s\n' "$body" | grep -cE '^Signed-off-by: .+ <.+@.+>' || true)" = "1" ] \
+   && printf '%s\n' "$body" | grep -qF 'Signed-off-by: Fixture Dev <dev@example.invalid>'; then
+    ok "e2e: the pushed commit carries exactly one Signed-off-by (DCO satisfied)"
+else
+    ko "pushed sign-off" "the signed commit's DCO trailer is missing or wrong: ${body}"
+fi
+
 parents="$(git -C "$w" rev-list --parents -n1 "$new_public" | cut -d' ' -f2-)"
 [ "$parents" = "$public_sha" ] \
     && ok "e2e: exactly one parent, the previous public tip" \
@@ -437,6 +507,41 @@ fi
 [ "$(git --git-dir="$bare" rev-parse main)" = "$public_sha" ] \
     && ok "no-key: the remote never moved" \
     || ko "remote main" "the remote moved despite a failed signature"
+
+# ── the signer half refuses an unresolvable identity too ────────────────────
+# `sign-and-push.sh` RE-COMPOSES the message rather than reusing the
+# candidate's, so it owns the trailer on the object that actually ships — and it
+# is the half holding the key, i.e. the half where the certification really
+# happens. It must refuse for the same reason, and before `commit-tree -S`.
+#
+# Its own fixture, deliberately: this case unsets the git identity, and sharing
+# a fixture with a case that asserts on a PUSHED commit would let a regression
+# here reappear downstream as a contaminated remote.
+new_fixture
+sign_key
+dev_sha="$(git -C "$w" rev-parse HEAD)"
+dev_tree="$(git -C "$w" rev-parse "${dev_sha}^{tree}")"
+public_sha="$(git -C "$w" rev-parse main)"
+bare="$(git -C "$w" remote get-url origin)"
+git -C "$w" config --unset user.name
+git -C "$w" config --unset user.email
+set +e
+outsign="$( cd "$w" \
+    && GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+       GIT_COMMITTER_NAME='Spoofed' GIT_COMMITTER_EMAIL='spoof@example.invalid' \
+       ./scripts/release/sign-and-push.sh --tree "$dev_tree" --parent "$public_sha" \
+           --version 9.9.9 --dev-sha "$dev_sha" 2>&1 )"
+rcsign=$?
+set -e
+if [ "$rcsign" -ne 0 ] && printf '%s' "$outsign" | grep -qF "sign-off identity"; then
+    ok "sign-and-push refuses an unresolvable sign-off identity"
+else
+    ko "signer identity refusal" "exit ${rcsign}: ${outsign}"
+fi
+[ "$(git -C "$w" rev-parse main)" = "$public_sha" ] \
+    && [ "$(git --git-dir="$bare" rev-parse main)" = "$public_sha" ] \
+    && ok "the refused signer run signed nothing and pushed nothing" \
+    || ko "refs after signer refusal" "local or remote main moved"
 
 echo "──────────────────────────────────────────────────────────────────────"
 printf '%s passed, %s failed\n' "$pass" "$fail"
