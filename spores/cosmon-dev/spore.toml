@@ -160,14 +160,15 @@ default     = 5
 description = "Hard cap on convergence rounds. At exhaustion the mission goes `blocked` + human escalation (NOT-CONVERGED blocks like NOT-RUN) — NEVER a silent pass. Feeds the seal's Termination bound and the `while` max_iterations."
 
 # --------------------------------------------------------------------------
-# Fleet — concurrency-capped worktree isolation so the two review seats (and any
-# parallel rehearsal legs) never collide on the same files (NoResourceCollision).
-# The default cosmon fleet is used (this is dogfooding inside the cosmon repo).
+# Fleet — the default cosmon fleet (this is dogfooding inside the cosmon repo).
+# The stanza used to carry `concurrency_cap` and `isolation`; both were retired
+# in task-20260730-5a0d because no scheduler read either one. `cs tackle`
+# creates a worktree unconditionally, so non-aliasing writes hold structurally
+# rather than by declaration — which is what NoResourceCollision needs and what
+# a knob that governed nothing was never providing.
 # --------------------------------------------------------------------------
 [spore.fleet]
 name            = "default"
-concurrency_cap = 4
-isolation       = "worktree"
 
 # --------------------------------------------------------------------------
 # Per-node recipes — formula aliases. Paths RELATIVE to this manifest.

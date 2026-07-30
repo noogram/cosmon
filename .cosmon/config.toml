@@ -25,14 +25,6 @@ trunk_branch = "dev"
 # Options: "commit" (default), "commit+push", "commit+push+pr"
 on_complete = "commit"
 
-[surfaces]
-# Run `cs reconcile` automatically after state-mutating operations.
-auto_reconcile = false
-
-[documentation]
-# Enable documentation generation in worker prompts.
-enabled = true
-
 # Public-attribution source of truth (ADR-128, delib-20260617-62ff).
 # The canonical maker name every shipped/public artifact must carry, in ONE
 # place so it is never re-typed per project. `cs tackle` folds a one-line

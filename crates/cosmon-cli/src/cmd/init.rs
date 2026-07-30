@@ -902,15 +902,6 @@ fn generate_config_toml(
          # [worker]\n\
          # on_complete = \"commit\"\n\
          \n\
-         # ── Surface auto-reconcile ────────────────────────────────────────\n\
-         # Run `cs reconcile` automatically after state-mutating operations.\n\
-         # [surfaces]\n\
-         # auto_reconcile = false\n\
-         \n\
-         # ── Documentation ─────────────────────────────────────────────────\n\
-         # [documentation]\n\
-         # enabled = true\n\
-         \n\
          # ── Lifecycle hooks ───────────────────────────────────────────────\n\
          # Shell commands run at specific lifecycle points, from the repo root.\n\
          # `pre_done` is BLOCKING: it runs before the merge as\n\

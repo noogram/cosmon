@@ -408,6 +408,24 @@ fn check_pane_signature(
         }
     }
     if let Ok(cfg) = cosmon_filestore::load_project_config(&config_path) {
+        // `[adapters.<name>].pane_signatures` is ADR-079 §6's per-Adapter
+        // override: an installation whose `claude` pane reports something the
+        // compile-time registry does not know (a wrapper, a different binary
+        // name) declares it there. It is unioned in, never substituted — the
+        // registry's own signatures stay valid, so a declaration widens the
+        // gate for that Adapter and never silently narrows it.
+        if let Some(adapters) = &cfg.adapters {
+            for adapter in WHISPERABLE_ADAPTERS {
+                let Some(entry) = adapters.entry(adapter) else {
+                    continue;
+                };
+                for sig in &entry.pane_signatures {
+                    if !allowed_commands.contains(sig) {
+                        allowed_commands.push(sig.clone());
+                    }
+                }
+            }
+        }
         for cmd in cfg.whisper.allowed_commands {
             if !allowed_commands.contains(&cmd) {
                 allowed_commands.push(cmd);

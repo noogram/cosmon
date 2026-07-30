@@ -10,12 +10,6 @@
 //! [worker]
 //! on_complete = "commit"  # "commit" | "commit+push" | "commit+push+pr"
 //!
-//! [surfaces]
-//! auto_reconcile = false
-//!
-//! [documentation]
-//! enabled = true
-//!
 //! [hooks]
 //! post_merge = "just install"  # optional — runs after cs done merges
 //!
@@ -46,14 +40,6 @@ pub struct ProjectConfig {
     /// Worker behavior configuration.
     #[serde(default)]
     pub worker: WorkerConfig,
-
-    /// Surface auto-reconciliation settings.
-    #[serde(default)]
-    pub surfaces: SurfacesAutoConfig,
-
-    /// Documentation generation settings.
-    #[serde(default)]
-    pub documentation: DocumentationConfig,
 
     /// Lifecycle hooks — commands run at specific points in the molecule
     /// lifecycle (e.g. after a successful merge in `cs done`).
@@ -454,66 +440,44 @@ impl ProviderBiasConfig {
     }
 }
 
-/// Gödel self-reference guards — structural depth limiter and staleness
-/// circuit-breaker that prevent recursive spawn chains.
+/// Gödel self-reference guard — the structural depth limiter that prevents
+/// recursive spawn chains.
 ///
 /// When `cs tackle` spawns a worker, the worker inherits `CB_DEPTH` (spawn
 /// depth) and `CB_SESSION_ROLE` (broker vs worker). A broker session
 /// orchestrates other molecules but must never be spawned recursively.
 /// The depth counter caps spawn chains at `max_depth` (default 2).
 ///
-/// The staleness invariant ensures a broker never acts on a gauge reading
-/// older than `max_staleness_secs`: if the last observation exceeds the
-/// window, the molecule enters `Frozen` rather than dispatching on stale
-/// data.
-///
-/// `debounce_secs` sets the minimum interval between consecutive spawn
-/// attempts from the same parent — guards against rapid-fire retry loops.
-///
 /// ```toml
 /// [self_reference_guard]
 /// max_depth = 2
-/// debounce_secs = 5
-/// max_staleness_secs = 300
 /// ```
+///
+/// This block once also carried `debounce_secs` (minimum interval between
+/// consecutive spawns from one parent) and `max_staleness_secs` (age at which
+/// a broker's gauge reading freezes the molecule). Neither mechanism was ever
+/// built: the two fields parsed, defaulted, documented a guard, and governed
+/// nothing. They were retired rather than kept, because a config block that
+/// advertises circuit-breakers cosmon does not have is worse than one that
+/// advertises only the breaker it does.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SelfReferenceGuardConfig {
     /// Maximum spawn depth (0 = root operator session). Workers at depth
     /// `>= max_depth` are refused by `cs tackle`. Default: 2.
     #[serde(default = "default_max_depth")]
     pub max_depth: u32,
-
-    /// Minimum seconds between consecutive spawn attempts from the same
-    /// parent molecule. Default: 5.
-    #[serde(default = "default_debounce_secs")]
-    pub debounce_secs: u64,
-
-    /// Maximum age in seconds for a broker's gauge reading before the
-    /// molecule is frozen with reason `"stale-gauge"`. Default: 300.
-    #[serde(default = "default_max_staleness_secs")]
-    pub max_staleness_secs: u64,
 }
 
 impl Default for SelfReferenceGuardConfig {
     fn default() -> Self {
         Self {
             max_depth: default_max_depth(),
-            debounce_secs: default_debounce_secs(),
-            max_staleness_secs: default_max_staleness_secs(),
         }
     }
 }
 
 const fn default_max_depth() -> u32 {
     2
-}
-
-const fn default_debounce_secs() -> u64 {
-    5
-}
-
-const fn default_max_staleness_secs() -> u64 {
-    300
 }
 
 /// Git remote blocklist — substring patterns that no cosmon worktree may
@@ -1013,6 +977,23 @@ impl AttributionConfig {
     ///
     /// The `public_url` is rendered in parentheses only when set, so a
     /// name-only block still produces a clean sentence.
+    ///
+    /// # The slot fields are supply, not decoration
+    ///
+    /// [`contact`](Self::contact), [`footer`](Self::footer),
+    /// [`readme_byline`](Self::readme_byline),
+    /// [`repo_description`](Self::repo_description) and
+    /// [`authors_line`](Self::authors_line) are appended verbatim, each named
+    /// by the slot it fills, whenever they are set. Naming the maker without
+    /// handing over the *exact* string leaves the worker to compose one, and a
+    /// composed byline is the attribution vacuum this block exists to fill —
+    /// one indirection further along. A field the worker never receives is a
+    /// field with no power: these five were declared, parsed and documented
+    /// for months while nothing read them.
+    ///
+    /// Every slot empty (the default) yields the same single sentence as
+    /// before, so a galaxy that set only `public_name` sees a byte-identical
+    /// prompt.
     #[must_use]
     pub fn directive(&self) -> Option<String> {
         if self.is_empty() {
@@ -1026,12 +1007,35 @@ impl AttributionConfig {
         } else {
             format!("`{name}` ({})", self.public_url)
         };
+        let slots = [
+            ("contact address", self.contact.as_str()),
+            ("copyright / footer line", self.footer.as_str()),
+            ("README byline", self.readme_byline.as_str()),
+            ("repository description", self.repo_description.as_str()),
+            ("authors line", self.authors_line.as_str()),
+        ];
+        let filled: Vec<String> = slots
+            .iter()
+            .filter(|(_, value)| !value.is_empty())
+            .map(|(slot, value)| format!("{slot}: `{value}`"))
+            .collect();
+        // Empty when no slot is set, so the returned sentence is byte-identical
+        // to a name-only block's.
+        let supply = if filled.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " When one of these slots needs filling, use this text verbatim \
+                 rather than composing your own — {}.",
+                filled.join("; ")
+            )
+        };
         Some(format!(
             "External attribution for this fleet is {named}. \
              Anywhere a maker, author, copyright holder, or \"built by\" name \
              is required in a shipped/public artifact, use `{name}` and no \
              other name — never substitute a different one, and never add a \
-             second one alongside it.",
+             second one alongside it.{supply}",
         ))
     }
 
@@ -1358,34 +1362,6 @@ impl<'de> Deserialize<'de> for OnComplete {
     }
 }
 
-/// Surface auto-reconciliation settings.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SurfacesAutoConfig {
-    /// Whether to automatically run `cs reconcile` after state-mutating
-    /// operations. Default: `false` (explicit reconcile required).
-    #[serde(default)]
-    pub auto_reconcile: bool,
-}
-
-/// Documentation generation settings.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DocumentationConfig {
-    /// Whether documentation generation is enabled. Default: `true`.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-}
-
-/// Helper for serde default that returns `true`.
-fn default_true() -> bool {
-    true
-}
-
-impl Default for DocumentationConfig {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
-
 /// Lifecycle hooks — shell commands triggered at specific points in the
 /// molecule lifecycle.
 ///
@@ -1649,11 +1625,9 @@ pub const BUILTIN_FLOOR_ADAPTER: &str = "local";
 ///
 /// [adapters.claude]
 /// pane_signatures = ["claude"]
-/// briefing_format = "markdown"
 ///
 /// [adapters.aider]
 /// pane_signatures = ["aider", "python", "python3.11"]
-/// briefing_format = "markdown"
 /// extra_args = ["--no-auto-commits", "--yes-always"]
 /// ```
 ///
@@ -1690,18 +1664,17 @@ pub struct AdaptersConfig {
 /// constructor-injection discipline.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AdapterEntry {
-    /// `pane_current_command` signatures the propulsion / whisper
-    /// gates accept for this Adapter (ADR-079 §6). Empty means
-    /// "fall back to the Adapter's compile-time default".
+    /// `pane_current_command` signatures the whisper gate accepts for this
+    /// Adapter, on top of the compile-time `PaneSignatureRegistry` entries
+    /// (ADR-079 §6). Empty (the default) means "the registry's signatures and
+    /// nothing else".
+    ///
+    /// Unioned in, never substituted: a declaration widens the gate for that
+    /// Adapter and cannot silently narrow it, so an installation whose worker
+    /// pane reports a wrapper name reaches `cs whisper` without weakening the
+    /// gate for anyone else.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pane_signatures: Vec<String>,
-
-    /// Format the Adapter expects for the worker's bootstrap briefing.
-    /// Today only `"markdown"` is meaningful; the field exists so a
-    /// future API-driven Adapter can declare `"json"` or similar
-    /// without a schema change.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub briefing_format: Option<String>,
 
     /// Additional shell arguments the Adapter prepends to every worker
     /// invocation (e.g. Aider's `--no-auto-commits --yes-always`).
@@ -1837,27 +1810,6 @@ pub struct AdapterEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<u64>,
 
-    /// Context window (in tokens) the in-process `llama-cpp` Adapter
-    /// allocates for the `llama_context` KV-cache, overriding the
-    /// model-derived default.
-    ///
-    /// Absent (the common case) means "let cosmon size the window from
-    /// the GGUF header": `min(n_ctx_train, 16384)` — the model's trained
-    /// context length, capped for memory. The previous behaviour
-    /// hard-coded 4096, which on a Qwen3-class model (trained at 32 768)
-    /// throttled the effective prompt budget to `4096 − max_tokens` and
-    /// tripped a spurious context overflow on a normal cosmon briefing.
-    ///
-    /// Declaring `n_ctx` here pins the window explicitly: raise it toward
-    /// the model's full trained length (e.g. `32768` for Qwen3-8B) when a
-    /// workload needs a longer prompt budget, or lower it to bound
-    /// KV-cache memory on constrained hardware. The value also becomes the
-    /// provider's advertised `max_context`, so `max_tokens` is clamped
-    /// against it. Only the `llama-cpp` Adapter reads this row; a `0` is
-    /// ignored (it would mean a zero-width window).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub n_ctx: Option<u32>,
-
     /// Who runs the agent loop for this Adapter — the per-Adapter
     /// [`LoopOwnership`](crate::spawn_seam::LoopOwnership) axis
     /// (ADR-103).
@@ -1905,54 +1857,6 @@ pub struct AdapterEntry {
     /// not the other way around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-
-    /// Override the Adapter's built-in system prompt with operator-supplied
-    /// text. Used by the in-process `llama-cpp` Adapter to tune behaviour
-    /// per GGUF model.
-    ///
-    /// Background: the
-    /// `LlamaProvider` ships a single hard-coded `SYSTEM_PROMPT` that was
-    /// dialled in against Qwen3-Instruct. Other model families on the same
-    /// Path A drifted:
-    ///
-    /// - **Llama-3.3-70B-Instruct** captured the autonomous-work-mode
-    ///   template from the briefing context and hallucinated a fictional
-    ///   `cs complete` invocation instead of writing the requested line.
-    /// - **Qwen3-Coder-30B-A3B-Instruct** emitted an `exec_command`
-    ///   tool-call malformed against the expected fence shape.
-    ///
-    /// Declaring `system_prompt_override = "…"` in
-    /// `[adapters."llama-coder"]` (or any side-config) replaces the default
-    /// system message entirely. The dynamic `<tools>…</tools>` tool-schema
-    /// block is still appended (the model would have no way to discover
-    /// the registry otherwise), so the override only re-writes the role
-    /// text and trust fences — not the tool advertisement.
-    ///
-    /// Absent (the common case for Qwen3-Instruct families) means "use
-    /// the Adapter's compile-time default".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub system_prompt_override: Option<String>,
-
-    /// Per-model chat-template kwargs (e.g. Qwen3's `enable_thinking`,
-    /// model-specific tool-fence selectors).
-    ///
-    /// Plumbed end-to-end from `.cosmon/config.toml` down to
-    /// `cosmon_llama::Model::apply_chat_template_with_kwargs`. The
-    /// llama.cpp `llama_chat_apply_template` C API is **not** a Jinja
-    /// interpreter (`include/llama.h`: "does not use a jinja parser"),
-    /// so the FFI cannot consume these kwargs natively — but the
-    /// Adapter inspects them on the Rust side and can wire structural
-    /// equivalents where one exists (the `enable_thinking=false` seed is
-    /// the canonical case; see `THINK_DISABLE_SEED` in
-    /// `cosmon_provider::llama`).
-    ///
-    /// `BTreeMap` (not `HashMap`) so iteration order in error/diagnostic
-    /// strings is deterministic across runs — same discipline as
-    /// `AdaptersConfig::entries`. Empty (the absence-default) means "no
-    /// kwargs", which is the right behaviour for every Qwen3-Instruct
-    /// GGUF currently in cosmon's fleet.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub chat_template_kwargs: std::collections::BTreeMap<String, String>,
 }
 
 impl AdaptersConfig {
@@ -1989,8 +1893,6 @@ mod tests {
     fn test_default_config() {
         let config = ProjectConfig::default();
         assert_eq!(config.worker.on_complete, OnComplete::Commit);
-        assert!(!config.surfaces.auto_reconcile);
-        assert!(config.documentation.enabled);
         assert_eq!(config.energy.default_step_budget, 100);
     }
 
@@ -2173,12 +2075,6 @@ mod tests {
 
             [worker]
             on_complete = "commit+push+pr"
-
-            [surfaces]
-            auto_reconcile = true
-
-            [documentation]
-            enabled = false
             "#,
         )
         .unwrap();
@@ -2187,8 +2083,6 @@ mod tests {
             Some(crate::id::ProjectId::new("cosmon-a1b2").unwrap())
         );
         assert_eq!(config.worker.on_complete, OnComplete::CommitPushPr);
-        assert!(config.surfaces.auto_reconcile);
-        assert!(!config.documentation.enabled);
     }
 
     #[test]
@@ -2201,8 +2095,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.worker.on_complete, OnComplete::CommitPush);
-        assert!(!config.surfaces.auto_reconcile);
-        assert!(config.documentation.enabled);
     }
 
     #[test]
@@ -2699,6 +2591,58 @@ mod tests {
         );
     }
 
+    /// The five slot fields reach the worker verbatim, each named by the slot
+    /// it fills. Before `task-20260730-5a0d` they were parsed and read by
+    /// nothing, so a galaxy that had spelled out its byline still got a worker
+    /// that composed one.
+    #[test]
+    fn test_attribution_directive_hands_over_the_slot_text() {
+        let config = ProjectConfig::parse(
+            r#"
+            [attribution]
+            public_name      = "Noogram"
+            public_url       = "noogram.org"
+            contact          = "hello@noogram.org"
+            footer           = "© 2026 Noogram · noogram.org"
+            readme_byline    = "Built by Noogram."
+            repo_description = "Agent infrastructure."
+            authors_line     = "Noogram <hello@noogram.org>"
+            "#,
+        )
+        .unwrap();
+        let directive = config.attribution.directive().unwrap();
+        for expected in [
+            "contact address: `hello@noogram.org`",
+            "copyright / footer line: `© 2026 Noogram · noogram.org`",
+            "README byline: `Built by Noogram.`",
+            "repository description: `Agent infrastructure.`",
+            "authors line: `Noogram <hello@noogram.org>`",
+        ] {
+            assert!(
+                directive.contains(expected),
+                "directive must carry {expected} verbatim; got: {directive}"
+            );
+        }
+    }
+
+    /// A block with slots set but only *some* of them names only those — an
+    /// empty slot is never announced as empty, which would be its own vacuum.
+    #[test]
+    fn test_attribution_directive_names_only_the_slots_that_are_set() {
+        let config = ProjectConfig::parse(
+            r#"
+            [attribution]
+            public_name = "Noogram"
+            contact     = "hello@noogram.org"
+            "#,
+        )
+        .unwrap();
+        let directive = config.attribution.directive().unwrap();
+        assert!(directive.contains("contact address: `hello@noogram.org`"));
+        assert!(!directive.contains("README byline"));
+        assert!(!directive.contains("authors line"));
+    }
+
     #[test]
     fn test_attribution_directive_discloses_no_withheld_category() {
         // The directive ships twice over: it is published source, and it is
@@ -3048,11 +2992,9 @@ mod tests {
 
             [adapters.claude]
             pane_signatures = ["claude"]
-            briefing_format = "markdown"
 
             [adapters.aider]
             pane_signatures = ["aider", "python", "python3.11"]
-            briefing_format = "markdown"
             extra_args = ["--no-auto-commits", "--yes-always"]
             "#,
         )
@@ -3061,7 +3003,6 @@ mod tests {
         assert_eq!(adapters.default_adapter(), Some("aider"));
         let aider = adapters.entry("aider").expect("aider entry");
         assert_eq!(aider.pane_signatures, vec!["aider", "python", "python3.11"]);
-        assert_eq!(aider.briefing_format.as_deref(), Some("markdown"));
         assert_eq!(aider.extra_args, vec!["--no-auto-commits", "--yes-always"]);
         let claude = adapters.entry("claude").expect("claude entry");
         assert!(claude.extra_args.is_empty());
@@ -3125,83 +3066,10 @@ mod tests {
         assert_eq!(openai.default_model.as_deref(), Some("gpt-4o"));
     }
 
-    /// `[adapters."llama-cpp"]` parses the per-model prompt-tuning knobs
-    /// added for the multi-GGUF Path A.
-    /// `system_prompt_override` replaces the default
-    /// `SYSTEM_PROMPT` entirely; `chat_template_kwargs` ride along as a
-    /// deterministic key/value map for adapter-side interpretation.
-    #[test]
-    fn adapters_parses_llama_prompt_tuning_knobs() {
-        let config = ProjectConfig::parse(
-            r#"
-            [adapters."llama-cpp"]
-            default_model = "/cache/Llama-3.3-70B-Instruct.gguf"
-            system_prompt_override = "You are Llama-3.3-70B. Do NOT fabricate task completions or invent cs commands."
-
-            [adapters."llama-cpp".chat_template_kwargs]
-            enable_thinking = "false"
-            tool_fence = "qwen3"
-            "#,
-        )
-        .unwrap();
-        let adapters = config.adapters.expect("adapters section present");
-        let llama = adapters
-            .entry("llama-cpp")
-            .expect("llama-cpp entry present");
-        assert_eq!(
-            llama.system_prompt_override.as_deref(),
-            Some("You are Llama-3.3-70B. Do NOT fabricate task completions or invent cs commands.")
-        );
-        assert_eq!(
-            llama
-                .chat_template_kwargs
-                .get("enable_thinking")
-                .map(String::as_str),
-            Some("false")
-        );
-        assert_eq!(
-            llama
-                .chat_template_kwargs
-                .get("tool_fence")
-                .map(String::as_str),
-            Some("qwen3")
-        );
-        // BTreeMap → deterministic ordering for diagnostics.
-        let keys: Vec<&str> = llama
-            .chat_template_kwargs
-            .keys()
-            .map(String::as_str)
-            .collect();
-        assert_eq!(keys, vec!["enable_thinking", "tool_fence"]);
-    }
-
-    /// Absent `system_prompt_override` + empty `chat_template_kwargs` is
-    /// the absence-default contract: Qwen3-Instruct families never need
-    /// either knob, and a bare `[adapters."llama-cpp"]` row keeps its
-    /// today-behaviour unchanged.
-    #[test]
-    fn adapters_llama_prompt_tuning_knobs_default_to_absent_and_empty() {
-        let config = ProjectConfig::parse(
-            r#"
-            [adapters."llama-cpp"]
-            default_model = "/cache/Qwen3-8B-Instruct.gguf"
-            "#,
-        )
-        .unwrap();
-        let adapters = config.adapters.expect("adapters section present");
-        let llama = adapters
-            .entry("llama-cpp")
-            .expect("llama-cpp entry present");
-        assert_eq!(llama.system_prompt_override, None);
-        assert!(llama.chat_template_kwargs.is_empty());
-    }
-
     #[test]
     fn self_reference_guard_defaults() {
         let config = ProjectConfig::default();
         assert_eq!(config.self_reference_guard.max_depth, 2);
-        assert_eq!(config.self_reference_guard.debounce_secs, 5);
-        assert_eq!(config.self_reference_guard.max_staleness_secs, 300);
     }
 
     #[test]
@@ -3210,14 +3078,10 @@ mod tests {
             r"
             [self_reference_guard]
             max_depth = 4
-            debounce_secs = 10
-            max_staleness_secs = 120
             ",
         )
         .unwrap();
         assert_eq!(config.self_reference_guard.max_depth, 4);
-        assert_eq!(config.self_reference_guard.debounce_secs, 10);
-        assert_eq!(config.self_reference_guard.max_staleness_secs, 120);
     }
 
     #[test]
@@ -3230,8 +3094,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.self_reference_guard.max_depth, 2);
-        assert_eq!(config.self_reference_guard.debounce_secs, 5);
-        assert_eq!(config.self_reference_guard.max_staleness_secs, 300);
     }
 
     #[test]
@@ -3244,7 +3106,5 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.self_reference_guard.max_depth, 5);
-        assert_eq!(config.self_reference_guard.debounce_secs, 5);
-        assert_eq!(config.self_reference_guard.max_staleness_secs, 300);
     }
 }
