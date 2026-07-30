@@ -47,24 +47,35 @@
 # THE GATE DAG (blueprint §3, diamond topology — NOT a pipeline; a pipeline
 # diffuses responsibility by construction):
 #
-#   trace (root+leaf, always-on sidecar)
+#   trace  (root+leaf, always-on sidecar — no edges at all)
+#   route  (SECOND ROOT — no incoming edge, no ${params.issue}) ──────────────┐
+#                                                                            │
+#   intake(G0) -> contract(G1) -> reproduce(G2)                              │
+#                                     ├─> triage -> implement(G4) ─┐         │
+#                                     └─> falsify(G3) ─────────────┴─> green(G5)
+#                                                                       │     │
+#                                                                  ci-gate(G8)│
+#                                                    ┌──────────────────┴──┐  │
+#                    converge (§6bis, EMERGENT, the  │                     │  │
+#                    two-verdict double clean-room) <┘                     └> rehearsal(G9)
+#                                                    └──────────┬─────────────┘
+#                                                               v
+#                                                   release(G10) => CANDIDATE-LANDED
+#                                                               ⋯
+#                                                   confirm(G11) => CLOSED, ASYNCHRONOUS
 #
-#   route (SECOND ROOT — no incoming edge, no ${params.issue}) ───────────────────┐
-#                                                                                 │
-#   intake(G0) -> contract(G1) -> reproduce(G2) ─┬─> implement(G4) ─┐             │
-#                                               │                  ├─> green(G5)  │
-#                                               └─> falsify(G3) ───┘      │       │
-#                                                                         v       │
-#                                                                   ci-gate(G8)   │
-#                                                                    ┌────┴────┐  │
-#                            converge (§6bis, EMERGENT — the two-    │         │  │
-#                            verdict double clean-room; replaces  <──┘         └─> rehearsal(G9)
-#                            G6 breaker + G7 judge)                │              │
-#                                                                  └───┬──────────┘
-#                                                                      v
-#                                                          release(G10) => CANDIDATE-LANDED
-#                                                                      ⋯
-#                                                          confirm(G11) => CLOSED, ASYNCHRONOUS
+# THE LANE IS ENTERED MECHANICALLY, AND `triage` IS WHERE. It sits between the
+# frozen red and the fix because THE JUDGE IS THE FROZEN RED: four conjuncts over
+# artifacts on disk — the G0 fields as a schema over the issue body, an admissible
+# frozen red whose colour flipped in both directions, a declared write set inside
+# `fast_lane_max_files` and disjoint from `release_surface`, and `risk == normal` —
+# and the lane is `fast` only if all four are literally true. Every absent or
+# unevaluable input yields `full`. The operator may force `full`; forcing `fast` is
+# UNEXPRESSIBLE, because `[spore.params.lane]` is an enum over {auto, full} and
+# expansion refuses a non-member. The fast lane skips the CONFIRMATION verdict and
+# the contract re-review, names both in `lane.json.waives`, and `release` copies them
+# into `arms_not_run[]` and re-checks the bound against the diff that actually
+# landed. A lane somebody sets is the `risk` field somebody set, wearing a new name.
 #
 # THREE ROOTS, AND THE SECOND ONE IS THE POINT. `route` descends from NOTHING —
 # not from intake, not from contract, not from reproduce — and its topic is
@@ -220,7 +231,10 @@ provider families (claude + codex-sol) rendered as two immutable verdicts and
 resolved by a ballot-weighted CLEAN or a typed escalation, an UNCONDITIONAL
 root/non-root x amd64/arm64 rehearsal of the packaged bytes, an AUTHOR-INDEPENDENT
 walk of the published install route by a brief that never learnt what is broken, and
-a RELEASE whose manifest must declare, non-empty, the arms it did NOT run. No agent
+a RELEASE whose manifest must declare, non-empty, the arms it did NOT run. Which of
+the two lanes a mission runs is decided by a PREDICATE OVER ARTIFACTS — the frozen
+red is the judge — and never by a field somebody fills in: the operator may force the
+full lane, and forcing the fast one is unexpressible. No agent
 pushes to any remote. When an external reproduction contradicts an internal proof, the reproduction wins and the proof
 becomes the bug.
 """
@@ -284,17 +298,23 @@ becomes the bug.
 #
 # SEAL DIVERGENCE, STATED RATHER THAN HIDDEN: `spore.tla` / `spore.cfg` still model
 # the DELETED round counter (MaxRounds), the DELETED `dissent` node and the DELETED
-# `review_scale` param, and they do not yet know about `route`, the parallel
+# `review_scale` param, and they do not yet know about `route`, the NEW `triage` node
+# and its two edges, the parallel
 # review/rehearsal edges or the asynchronous `confirm`. The model is
 # therefore BEHIND this manifest on the node set and the edge set, and a TLC run
 # proves a topology this file no longer declares. That is named here because a seal
 # must always say what it does not model; re-synchronising the module to the
-# CURRENT node and edge set is a separate molecule. This molecule touched
+# CURRENT node and edge set is a separate molecule. An earlier molecule touched
 # spore.tla/spore.cfg for the SEAL TRIM ONLY (deleting the tautological property
 # and strengthening the Termination variant) and changed no part of the modelled
-# topology, so the divergence above is exactly as large as it was, neither wider
-# nor narrower. Until the re-synchronisation lands, treat the three properties as
-# UNPROVEN for the current topology.
+# topology. THE LANE MOLECULE WIDENED THE DIVERGENCE BY EXACTLY ONE NODE AND TWO
+# EDGES — `triage`, `reproduce -> triage`, `triage -> implement` — and touched
+# neither .tla nor .cfg. That is said here rather than left for a reader to
+# discover. The widening is benign in the seal's own terms (a node inserted on an
+# existing edge preserves acyclicity, and germination hands it one more DISTINCT
+# output path), and it is still a divergence, measured and named. Until the
+# re-synchronisation lands, treat the three properties as UNPROVEN for the current
+# topology.
 #
 # SEAL HONESTY: a released `cs` may report "TLC unavailable" (the TLC-verify wiring
 # is not in every released binary), so `cs spore run` fails closed and you germinate
@@ -375,6 +395,69 @@ the arm the #20 defect lived in. A criterion a tired pilot fills in by habit is 
 criterion.
 """
 
+[spore.params.lane]
+type        = "enum"
+values      = ["auto", "full"]
+default     = "auto"
+description = """
+WHICH LANE THIS MISSION RUNS — and the member set is the decision, not the \
+description. `auto` hands the choice to the `triage` node's four-conjunct predicate. \
+`full` is the operator's WIDENING: force every gate, no questions asked.
+
+THERE IS NO `fast` MEMBER, AND THAT ABSENCE IS THE MECHANISM (operator decision D1 \
+amendment 2 on delib-20260729-1d4e). `cs spore validate` / `cs spore run` check an \
+enum value against this list at expansion, so `--var lane=fast` is refused with \
+"value \\"fast\\" is not a member of the enum values [\\"auto\\", \\"full\\"]" — not \
+warned about, not discouraged in a comment somebody edits later. The operator may \
+force `full`; there is no knob that forces `fast`. Asymmetric authority is the shape \
+of every honest gate.
+
+The fast lane is therefore reachable by EXACTLY ONE ROUTE: all four conjuncts of the \
+`triage` predicate come back true against artifacts on disk. A `lane` parameter \
+somebody sets would be the `risk` parameter somebody set, wearing a new name — and \
+`risk = normal` was the default that switched off the exact arm the #20 defect lived \
+in. A criterion a tired pilot fills in by habit is not a criterion.
+"""
+
+[spore.params.fast_lane_max_files]
+type        = "int"
+default     = 5
+description = """
+THE BLAST-RADIUS CEILING, IN FILES, for the `triage` predicate's third conjunct. A \
+declared write set larger than this is not fast-lane eligible. Read by `triage` and \
+RE-CHECKED at `release` against the realized `git diff --name-only \
+<base_sha>..HEAD`: declared sets rot, `git diff` cannot lie, and a fast lane whose \
+realized diff broke this bound BLOCKS on `lane-escaped-its-bound` rather than \
+discovering it never applied. Raising it widens what may skip the CONFIRMATION \
+verdict, so it is a number with a cost and not a convenience.
+"""
+
+[spore.params.release_surface]
+type        = "list<string>"
+default     = [
+  "Cargo.toml",
+  "crates/*/Cargo.toml",
+  "man/",
+  "docs/book/src/reference/",
+  "crates/cosmon-cli/src/root_help.rs",
+  "crates/cosmon-cli/tests/snapshots/",
+  "scripts/publish.sh",
+  "spores/cosmon-dev/",
+]
+description = """
+THE PATHS NO FAST-LANE PATCH MAY TOUCH — version fields, generated man pages, help \
+goldens, the publish checker, and this spore itself. Declared here as a LIST the \
+predicate reads, not as prose in a topic, because a set somebody has to re-read out \
+of a paragraph is a set that drifts. Any intersection with the declared write set \
+makes `blast_radius_bounded` false and the lane `full`.
+
+Two of these are here for a reason worth stating. The generated surfaces (man, help \
+goldens, the reference book) are where a hand-edit passes every gate and is caught \
+only by regeneration — the fast lane skips the second committee, which is the reader \
+most likely to notice. And `spores/cosmon-dev/` is on the list because a patch that \
+edits the lane predicate must never be triaged by the predicate it is editing.
+"""
+
 [spore.params.max_rounds]
 type        = "int"
 default     = 2
@@ -423,6 +506,11 @@ deterministic = false
 path          = "formulas/clean-room-repro.formula.toml"
 description   = "NEW — the G2 reproduction gate: a deterministic red that fails on affected_ref for the right reason, frozen (hashed) before the fix branch, with differential refutation + false-green/false-red modes. Emits verdict.json."
 deterministic = false
+
+[spore.formulas.lane-triage]
+path          = "formulas/lane-triage.formula.toml"
+description   = "NEW — the LANE PREDICATE: four conjuncts over artifacts on disk decide fast vs full, fail-closing to full on any absent input. The only recipe here declared deterministic, because its output must be a pure function of four files that a stranger can recompute."
+deterministic = true
 
 [spore.formulas.converge-clean-room]
 path          = "formulas/converge-clean-room.formula.toml"
@@ -660,6 +748,51 @@ write it there. The record is copied INTO this verdict.json — NO SIDE LEDGER �
 the consumer recomputes `gate_key`.
 """
 
+# --- LANE TRIAGE (mechanical lane entry; between reproduce and implement) --
+# The diff decides the lane, not the pilot (operator decision D1 amendment 2 on
+# delib-20260729-1d4e). It sits HERE, and the position is the argument: the judge is
+# the FROZEN RED, so the lane cannot be decided before `reproduce` has produced one.
+# "Nobody decides eligibility — the frozen red decides. The G2 gate is the judge, and
+# it is an artifact, not an authority." (jobs)
+#
+# THE ASYMMETRY IS IN THE PARAM SCHEMA, NOT IN THIS COMMENT. `[spore.params.lane]` is
+# an enum over {auto, full}. `--var lane=full` widens; `--var lane=fast` is a
+# germination REFUSAL, because expansion checks enum membership. A comment saying
+# "there must be no knob that forces fast" is a comment; a closed enum is a door.
+#
+# WHAT THIS NODE DOES NOT DO, stated where somebody would otherwise assume it. It
+# does NOT skip `intake` or `contract` — both are UPSTREAM of the artifact that
+# decides the lane, so no lane decision can un-run them, and D1's base clause cuts no
+# node from the full lane anyway. The fold is expressed in the strictly stronger half
+# instead: `intake`'s four G0 fields are RE-DECIDED here as a schema over the issue
+# body, so a fast lane never rests on the intake agent's PASS ("the actor changes
+# from an agent to a schema check — a predicate cannot be talked into PASS", carnot);
+# and `contract` travels as a CONTENT HASH the release gate recomputes, so its
+# temporal independence is mechanical rather than hoped for. G1 is never demoted at
+# `risk = security` because G1 is never demoted at all: it is a node in both lanes.
+#
+# WHAT THE FAST LANE ACTUALLY SAVES, priced and named: the CONFIRMATION verdict — the
+# dearest node in the mission — is not convened, and the contract is not re-reviewed.
+# Both are written into `lane.json.waives` and copied verbatim into the release
+# manifest's mandatory non-empty `arms_not_run[]`. "If a lane must ship with residuals
+# it waives BREADTH (fewer arms) or DEPTH (one round) and names which." This lane
+# waives depth, and the naming is not optional.
+[[spore.node]]
+id          = "triage"
+kind        = "fixed"
+formula     = "lane-triage"
+description = "LANE ENTRY (mechanical, fail-closed to full): four conjuncts over artifacts on disk — the G0 fields as a schema over the issue body, an admissible frozen red whose colour flipped both ways, a declared write set within fast_lane_max_files and disjoint from release_surface, and risk normal — decide fast vs full. Any absent or unevaluable input resolves to full. The operator may force full; the param enum makes forcing fast unexpressible. Emits lane.json AND verdict.json."
+[spore.node.vars]
+topic = """
+COSMON-DEV ${params.issue} — LANE ENTRY. Decide the lane from the artifacts, never
+from an adjective. Fail closed to `full` on every absent, unreadable or unevaluable
+input; there is no input whose ABSENCE can yield `fast`.
+"""
+lane                = "${params.lane}"
+fast_lane_max_files = "${params.fast_lane_max_files}"
+release_surface     = "${params.release_surface}"
+risk                = "${params.risk}"
+
 # --- G4 implement (smallest fix) ------------------------------------------
 [[spore.node]]
 id          = "implement"
@@ -833,6 +966,18 @@ seat is re-dispatched once, and a second void collapses on `verdict-plumbing`. A
 CONFIRMATION whose target tree sha EQUALS the INITIAL's is REFUSED, not rendered — \
 re-reading an unchanged tree with the same jury cannot produce information. There is \
 no third verdict under any outcome.
+
+THE LANE BOUNDS THE SECOND VERDICT AND NOTHING ELSE. Read \
+${run_dir}/triage/lane.json. When `lane == "fast"`, the CONFIRMATION verdict is NOT \
+convened: the INITIAL verdict still sits, its findings still BLOCK, and the fix still \
+corrects the union of the ballot-carrying reports — what is skipped is the second \
+committee re-reading the corrected tree. That is a waiver of DEPTH, it is already \
+named in `lane.json.waives`, and `release` copies it verbatim into the manifest's \
+mandatory `arms_not_run[]`. An absent or unreadable lane.json means `full`, which \
+means BOTH verdicts: the expensive branch is the one you fall into when you know \
+nothing. The lane NEVER touches the ballot, never lowers the jury floor, and never \
+makes a VOID verdict admissible — a fast lane that could relax the conjunction would \
+be waiving the entire product of provider diversity, and that is refused.
 """
 # WHICH var carries the run-time ceiling. `max_rounds` no longer DRIVES anything —
 # the control flow is the two named states — but the binding must stay: without it
@@ -1026,6 +1171,32 @@ Then, mechanically:
     quality finding: BLOCKED with `ci-incomplete`, and it must not be written up
     as "the CI gate found a bug".
 
+THE LANE, RE-VERIFIED AGAINST THE TREE THAT ACTUALLY EXISTS (BLOCKS). Read
+${run_dir}/triage/lane.json and copy it whole into the manifest under `lane`. It was
+decided BEFORE the fix existed, from a DECLARED write set, because the judge — the
+frozen red — is upstream of the fix and no lane can be entered before its judge has
+spoken. Declared sets rot; `git diff` cannot lie. So re-evaluate it here, where the
+patch is real:
+  * `git diff --name-only <base_sha>..<release commit>` is the REALIZED write set.
+    If `lane == "fast"` and it holds more than `fast_lane_max_files` paths, or
+    intersects the `release_surface` set => BLOCKED with `lane-escaped-its-bound`,
+    naming the offending paths and both counts. A lane that outgrew its predicate
+    must be discovered here, not inferred never to have applied.
+  * If `lane == "fast"` and the realized diff matches the security surface (the
+    `risk` param's mechanical rule) => BLOCKED. Same refusal as the `risk` clause
+    below, reached by the other door.
+  * RECOMPUTE `contract_digest` from ${run_dir}/contract/contract.md and require it
+    to EQUAL the one in lane.json. That hash is the whole of the contract fold: the
+    promise was stated before the test existed, and a digest the consumer recomputes
+    is what makes that temporal independence checkable instead of testified. A
+    mismatch means the promise moved after the fact => BLOCKED.
+  * `lane.json.waives` MUST be non-empty when `lane == "fast"` and MUST be `[]` when
+    `lane == "full"`, and every entry is COPIED VERBATIM into `arms_not_run[]` below.
+    A fast lane with an empty `waives` is a saving with no price tag => BLOCKED.
+  * `lane == "fast"` with any `predicate` value not literally `true` => BLOCKED. The
+    conjunction is the only route to `fast`; a lane whose own record does not support
+    it was set by something other than the predicate.
+
 THE DECLARED-SURFACE COMPARISON (BLOCKS). Enumerate the issue's FULL SEMANTIC SURFACE
 by the bug-closure rite — every code path, help text, man page, test and snapshot the
 issue's verb touches — and write it to ${output_dir}/surfaces.md. Then read every
@@ -1049,7 +1220,10 @@ THE DISSENT FIELD, folded in (no longer a node) — shape
   * `arms_not_run[]` — MANDATORY AND NON-EMPTY. Every arm, cell, platform, path or
     scenario this mission DID NOT exercise: the rehearsal cells that came back BLOCKED
     as unobtainable, the surfaces no seat declared and you explained away above, the
-    substrates nobody had. This is NOT a verdict; it is a DECLARED BLIND SPOT. A
+    substrates nobody had, AND every entry of `lane.json.waives` verbatim — a fast
+    lane's skipped CONFIRMATION verdict is an arm nobody ran, and it belongs on this
+    list beside the arms nobody could run. This is NOT a verdict; it is a DECLARED
+    BLIND SPOT. A
     manifest asserting there is no unrun arm is REFUSED — BLOCKED, with this sentence
     quoted back: the last winning defect lived in the negative space of a document
     nobody wrote, and this field is that document.
@@ -1126,9 +1300,18 @@ from = "contract"
 to   = "reproduce"
 type = "feeds"
 
-# reproduce forks: the fix arm (implement) and the falsification arm (falsify).
+# reproduce forks: the fix arm (triage -> implement) and the falsification arm
+# (falsify). `triage` is INSERTED on the fix arm rather than hung off the side,
+# because a lane decision nothing waits on is a lane decision nothing obeys — the
+# same defect as a tag that is a wish. `implement` therefore cannot start before a
+# lane exists, and the lane cannot exist before the frozen red does.
 [[spore.edge]]
 from = "reproduce"
+to   = "triage"
+type = "feeds"
+
+[[spore.edge]]
+from = "triage"
 to   = "implement"
 type = "feeds"
 

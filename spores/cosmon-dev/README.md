@@ -2,8 +2,8 @@
 
 `cosmon-dev` is the mission that turns **one issue reported by an external tester**
 into a **deterministic red reproduction** (a validation gate), a **smallest fix**,
-a **double clean-room review by two different provider families iterated until
-CLEAN**, and a **release** — with **no agent pushing to any remote**.
+a **double clean-room review by two different provider families rendered as two
+immutable verdicts**, and a **release** — with **no agent pushing to any remote**.
 
 It is **dogfooding**: unlike a shareable spore that travels to a stranger's machine
 (math-attack in the sporarium repo), `cosmon-dev` lives *inside* cosmon and
@@ -19,10 +19,14 @@ The spore **wires** existing cosmon primitives; it rewrites none:
 | `bug-closure` | the CLOSED/REOPEN verdict over the full semantic surface = the closure gate | `../../.cosmon/formulas/bug-closure.formula.toml` |
 | `task-work` | the agentic gate legs (verdict contract in each node topic) | `../../.cosmon/formulas/task-work.formula.toml` |
 
-Only **two** formulas are genuinely new (they ship in `formulas/`):
+Only **three** formulas are genuinely new (they ship in `formulas/`):
 
 - `clean-room-repro` — the G2 reproduction gate (deterministic red, frozen before
   the fix, differential refutation, false-green/false-red modes; emits verdict.json).
+- `lane-triage` — the lane predicate: four conjuncts over artifacts on disk decide
+  fast versus full, fail-closing to full on any absent input. The only recipe here
+  declared `deterministic = true`, because its output has to be a pure function of
+  four files that a stranger can recompute.
 - `converge-clean-room` — the §6bis double-engine convergence, rendered as **two
   immutable verdicts** over `cross-provider-committee`: an INITIAL verdict and —
   only if it found something AND the fix moved the target tree sha — one
@@ -52,10 +56,11 @@ Only **two** formulas are genuinely new (they ship in `formulas/`):
 spores/cosmon-dev/
 ├── README.md              # this file
 ├── spore.toml             # the wiring: params + fleet + formula aliases + DAG + seal
-├── spore.tla / spore.cfg  # the TLC-VERIFIED seal (4 properties, green — see below)
+├── spore.tla / spore.cfg  # the seal (3 properties — and what it does not model)
 ├── mission-template.md    # the parameterized briefing
 ├── formulas/
 │   ├── clean-room-repro.formula.toml      # NEW — G2 reproduction gate
+│   ├── lane-triage.formula.toml           # NEW — the lane predicate (deterministic)
 │   └── converge-clean-room.formula.toml   # NEW — §6bis two-verdict convergence
 │                                          #   CANONICAL; `.cosmon/formulas/` holds
 │                                          #   a byte-identical projection of it
@@ -73,16 +78,125 @@ spores/cosmon-dev/
 ## The gate DAG (blueprint §3 — diamond, not pipeline)
 
 ```
-trace (root+leaf, always-on sidecar)
-intake(G0) → contract(G1) → reproduce(G2) ─┬─→ implement(G4) ─┐
-                                           └─→ falsify(G3) ───┴─→ green(G5) → ci-gate(G8)
-                                                                       │
-                                                                       ▼
-                       converge (§6bis, EMERGENT — the two-verdict clean-room  ─┬─→ rehearsal(G9) ─┐
-                       replaces G6 breaker + G7 judge)                          └─→ dissent(§9) ───┤
-                                                                                                    ▼
-                                                                            release(G10) → confirm(G11)
+trace  (root+leaf, always-on sidecar — no edges)
+route  (second root — no incoming edge, forbidden from naming the issue) ──┐
+                                                                           │
+intake(G0) → contract(G1) → reproduce(G2)                                  │
+                              ├─→ triage → implement(G4) ─┐                │
+                              └─→ falsify(G3) ────────────┴─→ green(G5)    │
+                                                               │           │
+                                                          ci-gate(G8)      │
+                                              ┌────────────────┴──────┐    │
+                                       converge (§6bis, EMERGENT)     └─→ rehearsal(G9)
+                                              └────────────┬───────────────┘
+                                                           ▼
+                                              release(G10) ⇒ CANDIDATE-LANDED
+                                                           ⋯
+                                              confirm(G11) ⇒ CLOSED, asynchronous
 ```
+
+`dissent` is no longer a node — it is a field of the release manifest, validated by
+`release` itself. `rehearsal` runs in parallel with `converge` rather than behind it,
+and `confirm` is off the blocking path.
+
+## The two lanes
+
+> **Fast lane if — and only if — you can name one command that goes red on the
+> released binary and green on your patch, and your patch changes no public interface
+> (no CLI flag, no config key, no on-disk format): everything else is the full lane,
+> and if you are unsure, it is the full lane.**
+
+Nobody decides that by judgement. The `triage` node evaluates four conjuncts against
+artifacts on disk and the lane is `fast` only if **all four** are literally true:
+
+| conjunct | what it reads | false means |
+|----------|---------------|-------------|
+| `intake_fields_present` | the four G0 fields as a **schema over the issue body** — verbatim symptom, OS+UID+arch+version, transcript, deterministic-or-flaky | an evidence field is missing |
+| `frozen_red_admissible` | `reproduce/verdict.json`: PASS, non-empty `frozen_hash`, the differential refutation recorded **in both directions**, §8 keys self-consistent | there is no artifact that can judge |
+| `blast_radius_bounded` | the **declared** `write_set`: non-empty, ≤ `fast_lane_max_files` (5), disjoint from `release_surface` | too wide, or **absent** — omission is the expensive answer |
+| `risk_normal` | `risk == normal` **and** no declared path matching the security surface | anything security-touching |
+
+Three properties of that table are the whole design:
+
+1. **The judge is an artifact, not an authority.** *"'Known cause, bounded fix' is not
+   an operator adjective — it is the existence of a frozen red whose colour flips
+   under one variable. That artifact **is** the definition."*
+2. **It fails closed in one direction only.** Every absent, unreadable or unevaluable
+   input yields `full`. There is no input whose *absence* can produce `fast`.
+3. **The authority is asymmetric, and the schema enforces it.** `--var lane=full`
+   widens, always. `--var lane=fast` is a germination refusal — `[spore.params.lane]`
+   is an enum over `{auto, full}` and expansion checks membership:
+
+   ```
+   $ cs spore validate spore.toml … --var lane=fast
+   cs: expand failed: param "lane": value "fast" is not a member of the enum values ["auto", "full"]
+   ```
+
+   The operator may force the full lane; **there is no knob that forces the fast
+   one.** A `lane` field somebody fills in would be the `risk` field somebody filled
+   in, wearing a new name — and `risk = normal` was the default that switched off
+   exactly the arm the #20 defect lived in.
+
+**What the fast lane actually buys, and what it costs.** It skips the CONFIRMATION
+verdict (the dearest node in the mission — the INITIAL verdict still sits and its
+findings still block; what is skipped is the second committee re-reading the
+corrected tree) and it does not re-review the G1 contract, which travels as a content
+hash `release` recomputes. Both are written into `lane.json.waives` and copied
+verbatim into the manifest's mandatory non-empty `arms_not_run[]`. A lane that saves
+time without recording what it stopped doing has lost the record of its own cost.
+
+**What the fast lane never touches:** the ballot. It cannot lower the jury floor,
+cannot make a VOID verdict admissible, and cannot waive the CLEAN∧CLEAN conjunction —
+that conjunction is the entire product of provider diversity.
+
+**The lane is re-checked where the patch is real.** `triage` decides from a *declared*
+write set, because it runs before the fix exists. Declared sets rot; `git diff` cannot
+lie. So `release` re-evaluates the bound against `git diff --name-only
+<base_sha>..HEAD` and BLOCKs a fast lane that outgrew its predicate with
+`lane-escaped-its-bound`.
+
+**What `triage` does not do:** it does not skip `intake` or `contract`. Both are
+upstream of the artifact that decides the lane, so no lane decision can un-run them.
+The fold is the stronger half instead — intake's fields are *re-decided by a schema*
+(a predicate cannot be talked into PASS) and the contract travels as a digest.
+
+## The priority lane (a procedure, not a mechanism)
+
+A priority fix preempts the running fleet using **verbs that already exist**. There is
+nothing to build:
+
+```bash
+cs claim <mol>            # for each ready-but-unstarted molecule: a durable
+                          #   hold:pilot the resident defers on. Idempotent.
+cs freeze <worker> --by <new-worker> --reason "preempted by <mol>"
+                          # ONLY the running workers whose write set intersects
+                          #   the priority fix. Freezing the rest buys nothing.
+cs tackle <priority-mol>  # dispatch
+cs release <mol> ; cs thaw <worker>    # afterwards, in that order
+```
+
+*"A tag is a wish; `cs freeze` is a state transition with an event."* The partial
+state is already safe: the branch is a real ref, the worktree survives until
+`cs done`, and the verdict files live outside the worktree — which is precisely why
+ADR-161 exists.
+
+**Three gaps, recorded rather than papered over:**
+
+1. **No atomic verb.** The resident can dispatch between the claim sweep and the
+   freeze. Closed by `cs preempt` (K5); until then the race is narrow and real.
+2. **A frozen worker's in-context reasoning does not survive.** So every gate step's
+   acceptance requires an **append** to `${output_dir}/progress.jsonl` — not one
+   write at the end. A worker frozen mid-step must leave behind what it had.
+3. **Freezing must be subtree-wide.** Freeze a `converge` worker and its committee
+   seat molecules keep running, unwatched, with a collector nobody will dispatch —
+   that is the orphan-seat shape, manufactured on purpose.
+
+**The hazard that had to be closed before this lane was usable at all:** a frozen
+molecule's already-emitted verdicts certify a tree that no longer exists once the
+priority fix lands. The fix is `base_sha` plus the `release` ancestry clause — every
+upstream verdict's `base_sha` must be an ancestor of the release commit, or the
+release BLOCKs. Both have landed (S3), so the priority lane is usable. Without them,
+"preempt and resume" is a way of shipping a stale certificate.
 
 **CLEAN = ballot-weighted conjunction**: every **ballot-carrying** seat
 (`on_ballot`, `diversity_weight > 0`) must return CLEAN in the same verdict, and the
