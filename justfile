@@ -37,22 +37,14 @@ install:
 # a manifest whose enforcement lives only in one operator's untracked
 # .git/hooks is a list, not a guard.
 #
-# Only the files this repo ships are copied, and each is announced, so a hook
-# you wrote yourself is never silently replaced by a build step.
+# The logic lives in a script, not here, because `just` recipes are not
+# testable and this one's load-bearing behaviour is a REFUSAL: it installs a
+# missing hook, accepts an identical one, and refuses to replace one that
+# differs. `[hooks].post_merge` runs `just install` unattended after every
+# harvest, so an overwrite here is a local git config mutating itself several
+# times a day. See scripts/install-hooks.test.sh.
 install-hooks:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    hooks_dir="$(git rev-parse --git-path hooks)"
-    mkdir -p "$hooks_dir"
-    for src in hooks/*; do
-        name="$(basename "$src")"
-        [ "$name" = "telegram-notify.sh" ] && continue   # invoked by path, not a git hook
-        if [ -e "$hooks_dir/$name" ] && ! cmp -s "$src" "$hooks_dir/$name"; then
-            echo "    hooks: replacing $name (differs from tracked source)"
-        fi
-        install -m 755 "$src" "$hooks_dir/$name"
-    done
-    echo "    hooks: installed $(ls hooks | grep -v telegram-notify | tr '\n' ' ')"
+    @./scripts/install-hooks.sh
 
 # Build & install the PRIVATE federation tooling to ~/.local/bin.
 #

@@ -145,6 +145,14 @@ jobs:
       # This constructs both ways a tree can move mid-build and asserts the
       # bench still calls the guard AFTER the build, not only before it.
       - run: ./scripts/source-provenance.test.sh
+      # `just install` runs unattended after every harvest via
+      # `[hooks].post_merge`, so the hook installer must never replace a
+      # developer's local hook — it installs a missing one, accepts an
+      # identical one, and refuses a differing one. The refusal is the whole
+      # point and a refusal nothing exercises cannot fire: this test was
+      # confirmed to go red (3 of 8, including "IT WAS OVERWRITTEN") against
+      # the announce-then-overwrite version it replaced.
+      - run: ./scripts/install-hooks.test.sh
       # The crossing no longer sits on the daily path — merges land on the
       # trunk directly since linear history was dropped — but the script is
       # kept for the exceptional scrubbed projection, and a kept tool with no
