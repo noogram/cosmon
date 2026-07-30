@@ -1,0 +1,22 @@
+publish: allow — cargo-vet's imported audit records.
+
+`imports.lock` is written wholesale by `cargo vet`, from audit files published
+by Mozilla, Google and the other importers named in `supply-chain/config.toml`.
+Every address it carries sits in a `who = "Name <address>"` field and belongs to
+the UPSTREAM AUDITOR who signed that record — it is their public attestation,
+already published at the source this file mirrors, and it is the attribution
+that makes the record worth anything. None of it is operator identity, which is
+what check F exists to keep out of the public projection.
+
+The inline `publish: allow` marker cannot be used here, and that is the only
+reason this sidecar exists: the next `cargo vet` run rewrites the file and
+erases every marker in it, so the waiver would silently stop existing while the
+addresses stayed. The blob pin below does the job the marker cannot — refresh
+the imports and the pin lapses, the gate reds, and a human re-reads what the
+refresh brought in before restating the hash.
+
+To restate it after a legitimate refresh:
+
+    git hash-object -- supply-chain/imports.lock
+
+publish-allow-blob: 839bf1af027f7efb252c6d6dbb364a229294331e

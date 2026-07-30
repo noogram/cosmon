@@ -363,7 +363,7 @@ cat <<EOF
 Prêt. Depuis n'importe quel répertoire :
 
     # connecte le worker Claude (une fois) — remplace l'email d'exemple par le tien, tel quel, sans chevrons :
-    cosmon-remote auth login --email toi@exemple.fr
+    cosmon-remote auth login --email toi@exemple.invalid
     cosmon-remote molecule nucleate task-work --topic "..." --kind task
     cosmon-remote molecule tackle <id>                 # lance le travail (coûte du crédit)
     cosmon-remote molecule result <id>                 # récupère le livrable

@@ -67,12 +67,19 @@ from an automated contributor session — which is why `--check` is the only mod
 `publish.sh` has.
 
 It reports what it found and never what it found it to be: a credential-shaped
-string is named by path and line with a truncated digest, never with its value.
-Two of its rules need a waiver from time to time — cosmon's own leak detector
+string is named by path and line with a truncated digest, and a contact address
+by its domain with the local part digested — never the value itself.
+Some of its rules need a waiver from time to time — cosmon's own leak detector
 must contain the shapes it detects — and the waiver is the inline marker
 `publish: allow — <reason>` on that single line. Per line, never per file: a
 whole-file exclusion is a blind spot nobody sees again, while a marker is a
 sentence someone had to write and a reviewer reads in the diff.
+
+Two formats cannot hold that marker: a key container has no comment syntax, and
+a lockfile is rewritten wholesale by its tool, which erases any marker on the
+next run. Those get a tracked `<path>.publish-allow` sidecar stating the reason
+and pinning the waived blob by hash — so the waiver lapses when the file
+changes, and someone re-reads it before restating the hash.
 
 The other two release referees, `scripts/release-checklist.sh` and
 `scripts/confidentiality-lint.sh`, are broader but cannot be hard gates on a

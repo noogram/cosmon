@@ -81,6 +81,16 @@ each line's character count is unchanged. The load-bearing check is the
 verdict itself: `classify_output` returns `AwaitingHuman` for all seven both
 before and after, which is exactly the property these fixtures exist to pin.
 
-`scripts/publish.sh --check` passed on the un-neutralised captures. That is a
+`scripts/publish.sh --check` passed on the un-neutralised captures. That was a
 gap in the gate, not a clearance: a personal address inside a captured TUI
-frame is precisely the shape it claims to name.
+frame is precisely the shape it claims to name. Check C could not have seen it
+— C reads `/Users/<c>` and `/home/<c>`, so it recognises an operator only when
+they are spelt as a filesystem path, and a captured frame is not a path.
+
+The gate now has check **F, operator identity**: any contact address whose
+domain is not reserved-for-documentation, non-routable, or this project's
+published maker address is a finding, reported by domain with the local part
+digested. `scripts/publish.test.sh` rebuilds a frame of this exact shape and
+fails unless the gate reds on it. These files stay green because
+`example.invalid` provably reaches no mailbox — which is the whole reason the
+substitution above chose a reserved domain rather than a plausible one.

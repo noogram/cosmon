@@ -331,6 +331,121 @@ fi
 printf 'PK\003\004\000\001\002\377' >"$d/blob.bin"
 expect_fail "D. a binary edited away from its pin reddens the gate" "$d" "blob.bin"
 
+# ── F. the captured TUI frame the gate used to pass ─────────────────────────
+# THE ORIGINAL MISS, REBUILT. Seven `tmux capture-pane` frames of a real Claude
+# Code session were committed under `crates/cosmon-transport/tests/fixtures/`
+# carrying the operator's account address and the organisation name that TUI
+# paints from it. `publish.sh --check` returned CLEAN on them. Check C could not
+# have seen it: C reads `/Users/<c>` and `/home/<c>`, so it recognises an
+# operator only when they are spelt as a filesystem path, and a captured frame
+# is not a path.
+#
+# The fixture below is that frame's shape — box-drawing furniture, the derived
+# organisation line, a synthetic address at a registrable domain that is
+# nobody's. If this case ever goes green, the gate has gone back to passing the
+# artefact it was extended to catch.
+d="$(new_repo case-identity-pane)" || exit 2
+mkdir -p "$d/crates/x/tests/fixtures/tui"
+cat >"$d/crates/x/tests/fixtures/tui/idle.pane" <<'PANE'
+╭─────────────────────────────────────────────────────────────────╮
+│ ❯                                                               │
+╰─────────────────────────────────────────────────────────────────╯
+  Account: a.person@mailbox-provider.net's Organization
+PANE
+expect_fail "F. a captured TUI frame carrying an operator address reddens the gate" \
+  "$d" "crates/x/tests/fixtures/tui/idle.pane"
+
+# …and it is reported WITHOUT the address. Same doctrine as B: a gate that
+# prints what it found has moved the leak into every CI log that ran it. The
+# domain is what explains the finding; the local part is the part that names a
+# human, and it is the part withheld.
+run_gate "$d"
+if grep -qF "a.person@" "$WORK/out.txt"; then
+  bad "F. the gate PRINTED the local part — the finding re-publishes the address"
+else
+  ok "F. address reported by domain + digest, local part withheld"
+fi
+if grep -qF "@mailbox-provider.net" "$WORK/out.txt"; then
+  ok "F. the finding names the routable domain that explains it"
+else
+  bad "F. no domain in the finding — a reviewer cannot tell why it fired"
+fi
+
+# ── F′. reserved and project domains must NOT red ───────────────────────────
+# The counterweight, and the reason the rule is a DOMAIN test. A gate that flags
+# `operator@example.invalid` flags the neutralised fixtures it exists to bless,
+# and gets switched off in a week. RFC 2606 / 6761 domains provably reach no
+# mailbox; `noogram.org` is this project's published maker address.
+d="$(new_repo case-identity-ok)" || exit 2
+cat >"$d/notes.md" <<'OK'
+operator@example.invalid's Org · test@example.com · dev@cosmon.test
+u@sub.example.org · hello@noogram.org · noreply@users.noreply.github.com
+OK
+run_gate "$d"
+if [ "$(cat "$WORK/rc.txt")" = "0" ]; then
+  ok "F′. reserved, non-routable and maker domains stay green"
+else
+  bad "F′. a documentation address false-positived — the gate is unkeepable"
+  sed 's/^/      /' "$WORK/out.txt" | head -20
+fi
+
+# ── F′′. the lockfile sidecar, and its limits ───────────────────────────────
+# `supply-chain/imports.lock` carries the PUBLIC addresses of upstream auditors,
+# one per cargo-vet `who =` record, and is regenerated wholesale — so an inline
+# marker is erased on the next `cargo vet` run and the waiver silently stops
+# existing. That is the second reason a format can force the sidecar, alongside
+# "has no comment syntax", and the blob pin is what keeps it from outliving the
+# file it was written for.
+d="$(new_repo case-identity-sidecar)" || exit 2
+printf 'who = "A Person <a.person@mailbox-provider.net>"\n' >"$d/imports.lock"
+expect_fail "F′′. an unwaived lockfile address reddens the gate" "$d" "imports.lock"
+pin_sidecar "$d" "imports.lock" 'publish: allow — upstream auditor identities, published at the source.'
+run_gate "$d"
+if [ "$(cat "$WORK/rc.txt")" = "0" ]; then
+  ok "F′′. a pinned sidecar clears the lockfile"
+else
+  bad "F′′. sidecar-waived lockfile still red — the escape hatch does not work"
+  sed 's/^/      /' "$WORK/out.txt" | head -20
+fi
+# The format condition holds for THIS rule too: a commentable file has the
+# inline marker, which is strictly better, and may not reach for the sidecar.
+d="$(new_repo case-identity-sidecar-ext)" || exit 2
+printf 'contact: a.person@mailbox-provider.net\n' >"$d/notes.md"
+pin_sidecar "$d" "notes.md" 'publish: allow — I would rather not annotate the line.'
+expect_fail "F′′. the sidecar does NOT apply to a commentable format" "$d" "notes.md"
+# And the rule condition: a lockfile hatch is not a key hatch.
+d="$(new_repo case-identity-sidecar-rule)" || exit 2
+printf 'token = "ghp_%s"\n' "$(printf 'F%.0s' $(seq 1 36))" >"$d/deps.lock"
+pin_sidecar "$d" "deps.lock" 'publish: allow — auditor identities.'
+expect_fail "F′′. the lockfile sidecar does NOT waive a credential on the same file" "$d" "deps.lock"
+
+# ── F′′′. the allowlist that swallows everything ────────────────────────────
+# The failure mode a must-hit alone cannot see: the regex fires on every address
+# and the domain allowlist accepts them all, so the scan runs perfectly and
+# reports a clean tree. The gate's own canary checks both directions; this case
+# makes that canary load-bearing by breaking the allowlist exactly as a
+# regression would.
+d="$(new_repo case-identity-allow-drift)" || exit 2
+printf 'contact: a.person@mailbox-provider.net\n' >"$d/notes.md"
+expect_fail "F′′′. baseline - the routable address is found" "$d" "notes.md"
+python3 - "$d/scripts/publish.sh" <<'PYALLOW'
+import sys
+p = sys.argv[1]
+s = open(p).read()
+old = 'IDENT_TLD_ALLOW=" example invalid test localhost local "\n'
+assert old in s, "fixture: IDENT_TLD_ALLOW shape changed"
+s = s.replace(old, 'IDENT_TLD_ALLOW=" example invalid test localhost local net "\n', 1)
+open(p, 'w').write(s)
+PYALLOW
+run_gate "$d"
+rc="$(cat "$WORK/rc.txt")"
+if [ "$rc" = "2" ] && grep -qF 'operator-identity CANARY FAILED' "$WORK/out.txt"; then
+  ok "F′′′. an allowlist that accepts a routable domain reddens the build"
+else
+  bad "F′′′. a widened allowlist was accepted - exit $rc, and the hit is now invisible"
+  sed 's/^/      /' "$WORK/out.txt" | head -20
+fi
+
 # ── The refusal to write ────────────────────────────────────────────────────
 # The guide says the development repository is never rewritten in place. The
 # tool named in that sentence must therefore have no in-place verb at all.

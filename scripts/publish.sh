@@ -42,6 +42,10 @@
 #   D. BINARY ASSETS   — every tracked binary is pinned in a reviewed manifest.
 #   E. RESIDENCE       — delegated to `scripts/artifact-map-audit.py`, which
 #                        owns "who is this artifact for" (ADR-133).
+#   F. OPERATOR IDENTITY — no contact address that names a human, in tracked
+#                        content. A machine path names an operator by their
+#                        login; an address names them outright, and C could not
+#                        see it.
 #
 # "Internal identifiers" is deliberately NOT a check here: the confidential
 # denylist is operator-private by construction (ADR-127 §6 — a detector that
@@ -105,7 +109,7 @@ trap 'rm -f "$findings"' EXIT
 
 echo "============================================================================"
 echo " publish --check — structural release membrane (runtime state · credentials"
-echo "                   · machine paths · binary assets · residence)"
+echo "                   · machine paths · binary assets · residence · identity)"
 echo "============================================================================"
 
 # ── Shared: the tracked text surface, and the tracked symlink surface ────────
@@ -191,14 +195,17 @@ OPTOUT_RE='publish: allow'
 # "per line, never per file: a whole-file exclusion is a blind spot nobody sees
 # again". That was one.
 #
-#   1. FORMAT. Only extensions that genuinely cannot carry a comment. Anything
-#      else has the inline marker, which is strictly better, and this hatch may
-#      not become the easy way around it.
+#   1. FORMAT. Only extensions on which an inline marker cannot survive —
+#      either the format has no comment syntax at all (PEM and friends), or the
+#      file is REGENERATED wholesale by a tool that would erase the marker on
+#      its next run (a `*.lock`). Anything else has the inline marker, which is
+#      strictly better, and this hatch may not become the easy way around it.
+#      The eligible set is per RULE, not global: see `sidecar_ext_re_for_rule`.
 #   2. REASON. The body must contain "$OPTOUT_RE". Non-empty is not a reason;
 #      a byte is not a sentence someone had to write.
-#   3. RULE. Only the two key-shaped rules. A PEM file has no business
-#      containing a GitHub token, and if it does, that is a finding the format
-#      never forced anyone to waive.
+#   3. RULE. Only the rules the format actually forces. A PEM file has no
+#      business containing a GitHub token, and if it does, that is a finding
+#      the format never forced anyone to waive.
 #   4. BLOB. The waived content is PINNED by hash in the sidecar
 #      (`publish-allow-blob: <sha>`). Replace the file and the waiver stops
 #      applying — otherwise a waiver written for a synthetic test key silently
@@ -209,15 +216,39 @@ OPTOUT_RE='publish: allow'
 # which handed the strongest of the four conditions to the party it constrains.
 # A sidecar omitting one line was accepted unpinned and its waiver outlived its
 # file.
-SIDECAR_EXT_RE='\.(pem|der|key|crt|cer|p12|pfx|jks|keystore)$'
-SIDECAR_RULES='pem-private-key private-key-openssh'
+#
+# Conditions (1) and (3) are one table, because they are one question: for THIS
+# rule, which formats force the hatch? A rule with no row has no sidecar hatch
+# at all, which is the default and must stay the default.
+#
+#   pem-private-key / private-key-openssh → key containers. No comment syntax:
+#     the first byte is `-----BEGIN`, and a preamble breaks the parsers.
+#   operator-identity → `*.lock`. A lockfile is regenerated wholesale by its
+#     tool, so an inline marker is erased on the next run and the waiver
+#     silently stops existing. `supply-chain/imports.lock` is the live case:
+#     cargo-vet imports third-party audit records that carry their AUTHORS'
+#     public addresses, one per `who =` line, and neither the count nor the
+#     content is ours to annotate. The blob pin does the work the marker cannot:
+#     regenerate the lock and the waiver lapses until a human re-reads it.
+#
+# Echo the extension ERE eligible for rule $1; non-zero when the rule has no
+# sidecar hatch. A `case` rather than a table variable so an unlisted rule is
+# unwaivable by construction rather than by a lookup that could return empty.
+sidecar_ext_re_for_rule() {
+  case "$1" in
+    pem-private-key|private-key-openssh)
+      printf '%s' '\.(pem|der|key|crt|cer|p12|pfx|jks|keystore)$' ;;
+    operator-identity)
+      printf '%s' '\.lock$' ;;
+    *) return 1 ;;
+  esac
+}
 
-credential_waived_by_sidecar() {
-  local path="$1" rule="$2" sidecar="$1.publish-allow" body pinned actual
-  # (3) rule-specific.
-  case " $SIDECAR_RULES " in *" $rule "*) ;; *) return 1 ;; esac
-  # (1) comment-less formats only.
-  printf '%s' "$path" | grep -qE "$SIDECAR_EXT_RE" || return 1
+waived_by_sidecar() {
+  local path="$1" rule="$2" sidecar="$1.publish-allow" body pinned actual ext_re
+  # (3) rule-specific, and (1) the formats that rule forces — one lookup.
+  ext_re="$(sidecar_ext_re_for_rule "$rule")" || return 1
+  printf '%s' "$path" | grep -qE "$ext_re" || return 1
   [ -s "$sidecar" ] || return 1
   git ls-files --error-unmatch -- "$sidecar" >/dev/null 2>&1 || return 1
   body="$(cat "$sidecar" 2>/dev/null)" || return 1
@@ -272,7 +303,7 @@ while IFS=$'\t' read -r rule re; do
     loc="${line%%:*}"; rest="${line#*:}"
     lno="${rest%%:*}"; body="${rest#*:}"
     case "$body" in *"$OPTOUT_RE"*) continue ;; esac
-    credential_waived_by_sidecar "$loc" "$rule" && continue
+    waived_by_sidecar "$loc" "$rule" && continue
     # `-e` for the same reason as the `git grep` below: a pattern starting
     # with `-` is otherwise parsed as an option, and the digest silently
     # becomes the digest of the empty string.
@@ -565,6 +596,131 @@ elif "$PY" scripts/artifact-map-audit.py >/dev/null 2>&1; then
   pass "E. artifact-map residence audit → every tracked path is public-audience"
 else
   fail "E. artifact-map residence audit failed — run scripts/artifact-map-audit.py for detail"
+fi
+
+# ── F. OPERATOR IDENTITY ─────────────────────────────────────────────────────
+# WHY THIS RULE EXISTS, MEASURED
+# ------------------------------
+# `crates/cosmon-transport/tests/fixtures/claude-tui-2.1.220/*.pane` are seven
+# `tmux capture-pane` frames of a real Claude Code session, committed so the
+# output classifier is pinned against a captured TUI rather than a described
+# one. The frames carried the operator's account address and, painted beside it,
+# the organisation name that TUI derives from that address. `publish.sh --check`
+# passed on them, and check C is why it could not have done otherwise: C reads
+# `/Users/<c>` and `/home/<c>`, so it sees an operator only when they are spelt
+# as a filesystem path. An address in a captured frame is not a path.
+#
+# That is the same defect as the one in this file's header — a control naming a
+# property it does not measure — arriving through the gate meant to refuse it.
+# The guide's clause is "runtime state, credentials, machine paths, internal
+# identifiers"; a captured terminal frame is runtime state, and the identity it
+# carries is the part that cannot be un-published.
+#
+# THE RULE, AND WHY IT IS A DOMAIN TEST
+# -------------------------------------
+# Fail-closed on any contact address whose domain is not reserved-for-documentation,
+# non-routable, or owned by this project's public maker. There is no way to tell
+# a real person's address from an invented one by looking at the local part —
+# `operator@…`, `bob@…` and a real login are the same shape — so the decidable
+# question is the only one asked: could this address reach a mailbox? A reserved
+# domain (RFC 2606 / RFC 6761) provably cannot, which is exactly why those
+# domains exist and why the neutralised fixtures were moved onto one.
+#
+# SCOPE, STATED SO IT IS NOT MISREAD
+# ----------------------------------
+# This check names ADDRESSES. The organisation name in those frames was caught
+# here only because that TUI renders it as `<address>'s Organization` — an org
+# name standing alone is a word, structurally indistinguishable from any other
+# word, and belongs to the operator-private denylist referees
+# (`confidentiality-lint.sh`, `release-checklist.sh` GATE 4). Saying so is the
+# point: the alternative is a third control claiming coverage it has not got.
+#
+# WHAT IT REPORTS. The domain, and a digest of the local part — never the
+# address. B's doctrine applies verbatim here: a gate that prints what it found
+# has moved the leak from a tracked file into every CI log that ran it. The
+# domain is what explains the finding, and the path and line are what fix it.
+IDENT_RE='[A-Za-z0-9._%+-]+@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z][A-Za-z]+'
+
+# Reserved and non-routable TLDs. No mailbox can exist under any of them.
+IDENT_TLD_ALLOW=" example invalid test localhost local "
+# Domains (and their subdomains) that are allowed to be routable. Two families
+# only, and neither can name a person by accident:
+#   RFC 2606 second-level documentation names;
+#   this project's PUBLIC maker addresses — the external attribution is Noogram
+#   (noogram.org), so those addresses are published on purpose, and `git@` /
+#   `users.noreply.github.com` are a transport endpoint and a deliberately
+#   anonymous forwarder rather than anyone's mailbox.
+IDENT_DOMAIN_ALLOW="example.com example.net example.org noogram.org noogram.dev github.com"
+
+identity_domain_allowed() {
+  local d a
+  d="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  d="${d%.}"
+  case " $IDENT_TLD_ALLOW " in *" ${d##*.} "*) return 0 ;; esac
+  for a in $IDENT_DOMAIN_ALLOW; do
+    [ "$d" = "$a" ] && return 0
+    case "$d" in *".$a") return 0 ;; esac
+  done
+  return 1
+}
+
+# CANARY, both directions. A must-hit alone cannot see the failure mode that
+# matters most here: the rule fires on everything and `identity_domain_allowed`
+# swallows the lot, which reports a clean tree from a scan that ran perfectly.
+# So one synthetic routable address must be a finding and one reserved address
+# must not, and the regex half runs through `git grep` in a throwaway repo — the
+# same engine as the scan, for the reason spelt out in B's canary.
+ident_canary_dir="$(mktemp -d)" || exit 2
+ident_canary_fail() {
+  rm -rf "$ident_canary_dir"
+  echo "publish: operator-identity CANARY FAILED — $1" >&2
+  echo "  Refusing to report a clean tree we did not actually scan." >&2
+  exit 2
+}
+git -C "$ident_canary_dir" init -q >/dev/null 2>&1 ||
+  ident_canary_fail "could not create the throwaway git repository the canary scans"
+# Shape-only synthetic samples. `mailbox-provider.example` would defeat the
+# point of the must-hit, so the routable one uses a domain that is registrable
+# and is nobody's: it is checked below to be REJECTED, never contacted.
+printf 'who = "A Person <a.person@mailbox-provider.net>"\n' >"$ident_canary_dir/canary-routable.txt"
+printf 'who = "A Person <a.person@example.invalid>"\n' >"$ident_canary_dir/canary-reserved.txt"
+git -C "$ident_canary_dir" add -A >/dev/null 2>&1 ||
+  ident_canary_fail "could not track the canary files"
+for f in canary-routable.txt canary-reserved.txt; do
+  git -C "$ident_canary_dir" grep -nIE -e "$IDENT_RE" -- "$f" >/dev/null 2>&1 ||
+    ident_canary_fail "the address regex no longer matches its own synthetic sample in $f"
+done
+identity_domain_allowed "mailbox-provider.net" &&
+  ident_canary_fail "the domain allowlist accepts a routable third-party domain — every address would pass"
+identity_domain_allowed "example.invalid" ||
+  ident_canary_fail "the domain allowlist rejects a reserved domain — the rule would red on its own fixtures"
+rm -rf "$ident_canary_dir"
+
+# Self and suite are excluded for the reason C excludes them: a detector must
+# contain the shapes it detects (ADR-127 §6), and the canary above is the
+# compensating control — it proves both directions of this rule on files the
+# exclusion cannot reach.
+ident_hits=0
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  loc="${line%%:*}"; rest="${line#*:}"; lno="${rest%%:*}"; rest="${rest#*:}"
+  case "$rest" in *"$OPTOUT_RE"*) continue ;; esac
+  waived_by_sidecar "$loc" "operator-identity" && continue
+  while IFS= read -r addr; do
+    [ -z "$addr" ] && continue
+    dom="${addr##*@}"
+    identity_domain_allowed "$dom" && continue
+    d="$(printf '%s' "${addr%@*}" | digest)"
+    printf '  operator-identity: %s:%s: <local withheld, sha256:%s>@%s (routable domain — a contact address names a human)\n' \
+      "$loc" "$lno" "$d" "$dom" >>"$findings"
+    ident_hits=$((ident_hits + 1))
+  done < <(printf '%s\n' "$rest" | grep -oE -e "$IDENT_RE")
+done < <(git grep -nIE -e "$IDENT_RE" -- . ':(exclude)scripts/publish.sh' ':(exclude)scripts/publish.test.sh' 2>/dev/null)
+
+if [ "$ident_hits" -gt 0 ]; then
+  fail "F. ${ident_hits} routable contact address(es) in the tracked tree (local parts withheld)"
+else
+  pass "F. no routable contact addresses in tracked content (both canary directions held)"
 fi
 
 echo "----------------------------------------------------------------------------"
