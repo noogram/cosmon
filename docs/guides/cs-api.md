@@ -66,12 +66,9 @@ Inbox / whispers / galaxies (v1):
 | POST   | `/whispers/{id}/spark`          | `{ok, whisper_id, spark: {id, …}}` or **404** / **400** empty body    |
 | GET    | `/inbox?status=pending,running` | `{molecules: [{id, kind, status, topic, tags, created_at, …}, …]}`    |
 | GET    | `/galaxies`                     | `{galaxies_root, galaxies: [{name, path, pending_count, …}, …]}`      |
-<<<<<<< HEAD
 | GET    | `/motion?window=15m`            | `{timestamp, window, galaxies_scanned, workers, running_molecules, recent_git_commits, recent_whispers, recent_sparks}` — see [motion-view.md](motion-view.md) |
-=======
 | GET    | `/ensemble?scope=local`         | `{scope, galaxies: [{name, workers, molecule_groups, …}, …], totals}` |
 | GET    | `/peek?scale=city\|building\|skin` | `{scale, focus, text}` — monospace snapshot (see [cluster-views](cluster-views.md)) |
->>>>>>> feat/task-20260423-d3ae
 
 ### Exercising the v1 endpoints
 
