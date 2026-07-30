@@ -136,7 +136,7 @@ else
   if ! grep -qx '.cosmon/' .gitignore 2>/dev/null; then
     echo '.cosmon/' >>.gitignore
     git add .gitignore
-    git -c user.name="Bob Doe" -c user.email="bob@addl.fr" \
+    git -c user.name="Bob Doe" -c user.email="bob@addl.example" \
         commit -q -m "chore: ignore .cosmon/"
   fi
 fi
@@ -195,7 +195,7 @@ fi
 # --- (g) git log author must be Bob Doe ---------------------------
 log "step g — author sanity check"
 authors="$(git log --all --pretty=format:'%an <%ae>' | sort -u || true)"
-if [[ "$authors" == "Bob Doe <bob@addl.fr>" ]]; then
+if [[ "$authors" == "Bob Doe <bob@addl.example>" ]]; then
   mark_green "g: every commit authored by Bob Doe"
 else
   mark_red "g: unexpected authors in git log:"
