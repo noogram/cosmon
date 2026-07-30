@@ -135,7 +135,13 @@ rien).
   1. FREEZE. Content-hash the red harness (blake3 or sha256) and write
      MOLECULE_DIR/freeze.sha256 BEFORE the fix branch opens. The green at G5 must
      come from this UNCHANGED test (verify the hash matches). Record the parent
-     commit the red was observed red on.
+     commit the red was observed red on. RECORD ALSO THE BRANCH THE FIX MUST
+     ARRIVE ON — `feat/<mol_id>` — as `fix_branch` in freeze.sha256's header and
+     in the verdict below. Written at FREEZE time, before anybody knows where the
+     patch will land, it makes a self-named branch detectable FROM THE ARTIFACT
+     SIDE: the release gate compares the branch the candidate actually sits on
+     against the one the frozen red demanded, and a mismatch is a finding rather
+     than a naming convention nobody was checking.
   2. DIFFERENTIAL REFUTATION. Retourne exactly ONE variable — apply the expected
      fix (or, for a resolver issue, feed the resolver the corrected dispatch args)
      — and confirm the colour BASCULES (red -> green). Then revert it and confirm
@@ -153,7 +159,7 @@ transitions of the differential refutation, and the named false-green / false-re
 modes.
 """
 needs = ["write-and-observe-red"]
-acceptance = "MOLECULE_DIR/freeze.sha256 written before the fix branch; reproduce.md §3 records the differential refutation (one variable flips the colour both ways) and the explicit false-green + false-red modes."
+acceptance = "MOLECULE_DIR/freeze.sha256 written before the fix branch, carrying the parent commit AND the `fix_branch` (feat/<mol_id>) the fix must arrive on; reproduce.md §3 records the differential refutation (one variable flips the colour both ways) and the explicit false-green + false-red modes."
 
 [[steps]]
 id = "emit-verdict"
@@ -166,17 +172,57 @@ Write MOLECULE_DIR/verdict.json:
   {
     "verdict": "PASS" | "BLOCKED",
     "count": <number of findings>,
+    "population": <the denominator: how many candidate seams/paths you examined>,
     "findings": [ { "loc", "quote", "fix", "severity" } ],
     "frozen_hash": "<sha256 of the red harness>",
-    "parent_commit": "<the ref/commit the red was observed red on>",
-    "affected_ref": "${affected_ref}"
+    "parent_commit": "<the ref/commit the red was observed RED on>",
+    "base_sha": "<the commit THIS VERDICT WAS COMPUTED ON>",
+    "fix_branch": "<the branch the fix must arrive on: feat/<mol_id>>",
+    "subject_digest": "<content hash of the red harness + the fixture it reads>",
+    "affected_ref": "${affected_ref}",
+    "negative_control": {
+      "gate_key": "<sha256 of this step's text + the clean-room script invoked>",
+      "mutation": "<what you deliberately broke>",
+      "target": "<what the mutation was applied to>",
+      "observed_verdict": "<the verdict this gate returned on the broken world>",
+      "evidence_digest": "<hash of the captured output of that mutated run>"
+    }
   }
+
+`parent_commit` AND `base_sha` ARE TWO DIFFERENT FACTS, and they were one field
+until now. `parent_commit` is what the red was RED on. `base_sha` is what THIS
+VERDICT was COMPUTED on. Collapsed, a verdict computed on a tree nobody is
+shipping counts as evidence about the tree everybody is; `release` checks that
+every upstream `base_sha` is an ANCESTOR of the release commit, and it cannot do
+that against a field that means something else.
+
+`fix_branch` is recorded HERE, at freeze time, before anybody knows where the
+patch will land — which is what makes a self-named branch detectable from the
+ARTIFACT side rather than from a convention nobody was checking.
+
+`population` IS THE DENOMINATOR. `count == 0` with `population == 0` is a vacuous
+green — a universal over an empty domain forbids nothing — and it is exactly the
+shape a gate emits when its ledger was untracked, when its suite was `#[ignore]`d,
+and when it printed `skip` and exited 0.
+
+`negative_control` IS THE ADMISSION TEST, and this gate already owns its logic:
+the differential refutation above IS a colour-moves check, applied to the red.
+Here the same check is applied to THIS GATE. Run it against a deliberately broken
+world — e.g. a harness whose assertion reads a literal constant instead of the
+composed resolver — and record the verdict it returned. `observed_verdict ==
+verdict` means the gate is COLOUR-BLIND and its PASS is VOID. Amortise it:
+`gate_key` keys the record, so if ${run_dir}/admissions/<gate_key>.json already
+exists you COPY IT FORWARD and run no mutation — the cost is O(gate edits), not
+O(missions). NO SIDE LEDGER: the record is copied INTO this verdict.json and the
+consumer RECOMPUTES `gate_key` instead of reading a file it was handed.
 
 PASS iff: the red was observed failing on ${affected_ref} for the right reason, it
 is frozen (hash recorded), the differential refutation flipped the colour both
-ways, and the false-green / false-red modes are named. Any of these absent =>
-BLOCKED with the missing element as a finding. FAIL-CLOSED: a missing or malformed
+ways, the false-green / false-red modes are named, AND every admission key above
+is present and self-consistent. Any of these absent => BLOCKED with the missing
+element as a finding. A PASS missing an admission key is INADMISSIBLE, not merely
+incomplete. FAIL-CLOSED: a missing or malformed
 verdict.json is read by the downstream as BLOCKED — never a silent PASS.
 """
 needs = ["freeze-and-refute"]
-acceptance = "MOLECULE_DIR/verdict.json written with verdict/count/findings/frozen_hash/parent_commit/affected_ref. PASS only when all four G2 conditions hold; otherwise BLOCKED with the missing element named. The gate is fail-closed."
+acceptance = "MOLECULE_DIR/verdict.json written with verdict/count/population/findings/frozen_hash/parent_commit/base_sha/fix_branch/subject_digest/affected_ref/negative_control. `base_sha` sits BESIDE `parent_commit`, never collapsed into it. PASS only when all four G2 conditions hold AND every admission key is present with observed_verdict != verdict; otherwise BLOCKED with the missing element named. The gate is fail-closed."

@@ -66,7 +66,13 @@ post_merge = "just install"
 # is a Rust workspace, so we configure the cargo invocations that match
 # the Definition of Done in CLAUDE.md.
 build_command  = "cargo check --workspace"
-test_command   = "cargo test --workspace"
+# `--no-fail-fast` is not a style preference: without it cargo stops at the
+# FIRST failing target, so one stale suite silently hides every red behind it
+# and a worker reports "one failure" for a run that never reached the other
+# crates. Fail-fast is an INFORMATION-DESTROYING operation at identical
+# wall-clock — the run still costs what it costs; only the report shrinks.
+# One run then yields the failure VECTOR instead of the first failure.
+test_command   = "cargo test --workspace --no-fail-fast"
 lint_command   = "cargo clippy --workspace -- -D warnings"
 format_command = "cargo fmt --all -- --check"
 # A broken intra-doc link is invisible to every gate above: `cargo check`

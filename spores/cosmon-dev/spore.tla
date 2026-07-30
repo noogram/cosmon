@@ -6,7 +6,7 @@
 \*   A spore declares a `[spore.seal]` that NAMES safety properties of the whole
 \*   polymer it germinates. This module is the mechanical proof the seal stands
 \*   for: it models the germinated DAG's gate semantics + the bounded convergence
-\*   loop and lets TLC discharge the four properties the seal claims.
+\*   loop and lets TLC discharge the three properties the seal claims.
 \*
 \* WHAT IS MODELLED
 \*   * the gate DAG (blueprint §3, diamond topology) as a finite set of nodes with
@@ -36,23 +36,56 @@
 \*   * human controls (identities, credentials, branch-protection) — the spore
 \*     germs the topology, not the human independence (blueprint §8 limite dure).
 \*
-\* THE FOUR PROPERTIES (the seal's `properties = [...]`)
+\* THE THREE PROPERTIES (the seal's `properties = [...]`)
 \*   Termination                  — every germinated polymer either DRAINS (every
 \*                                  node Done) or reaches the typed `blocked`
 \*                                  escalation at MaxRounds. The gate DAG is acyclic
 \*                                  and the convergence loop is bounded by MaxRounds,
 \*                                  so no cycle and no unbounded foaming. No spin.
+\*                                  NOT STRENGTHENED to the well-founded variant over
+\*                                  |F| (strictly decreasing finding-set cardinality)
+\*                                  that D3 offered as an option, and the reason is the
+\*                                  same discipline the decision is about: the machine
+\*                                  that edited this file had NO JAVA RUNTIME, so a new
+\*                                  variant could not be discharged by TLC here. An
+\*                                  unchecked strengthening is a stronger CLAIM at
+\*                                  unchanged evidence — precisely the move D3 forbids.
+\*                                  It also belongs with the re-synchronisation that
+\*                                  replaces this round counter with the two named
+\*                                  verdict states, since a finding-set variant added to
+\*                                  the counter model would deepen a divergence rather
+\*                                  than close it.
 \*   GateFailClosed  (LOAD-BEARING) — no gate promotes on absent/failing evidence:
 \*                                  a gate BLOCKS on a missing upstream verdict, the
 \*                                  convergence yields CLEAN only when BOTH engines
 \*                                  are CLEAN, release SHIPs only when every upstream
 \*                                  gate PASSED, the loop is CLEAN, and the dissent
 \*                                  field is non-empty. Absence refuses, always.
-\*   DeterministicParametrization — the node set is a pure function of the params;
-\*                                  nothing environmental perturbs the expansion.
-\*   NoResourceCollision          — no two nodes (nor two convergence rounds) write
-\*                                  the same artifact path (the round index makes
-\*                                  round-1 disjoint from round-2).
+\*   NoResourceCollision          — no two nodes (nor two convergence rounds) are
+\*                                  handed the same OUTPUT PATH (the round index makes
+\*                                  round-1 disjoint from round-2). SCOPE, stated where
+\*                                  the property is: this quantifies over the node
+\*                                  output paths germination hands out and over NOTHING
+\*                                  ELSE — not the shared source tree, not the shared
+\*                                  cargo `target/`, not any path a gate's prose names
+\*                                  by hand. Inside this module `ArtifactPath(r) == r`,
+\*                                  so what is discharged is the injectivity of
+\*                                  `ToString`: sound, cheap, worth keeping, and NOT a
+\*                                  statement about a real disk. Real file collisions
+\*                                  are covered separately, by an executable test that
+\*                                  does I/O — see
+\*                                  crates/cosmon-core/tests/spore_real_file_collision.rs,
+\*                                  whose witness ("Route", "route") is two distinct
+\*                                  STRINGS this property certifies as non-colliding
+\*                                  and one directory on APFS or NTFS.
+\*
+\* A PROPERTY THAT WAS DELETED, AND WHY (operator decision D3 on delib-20260729-1d4e).
+\*   `DeterministicParametrization` asserted `Roles = ExpandedRoles` where both names
+\*   denoted the SAME thirteen-element literal set — no reachable state could falsify
+\*   it. It was a theorem about the identity function wearing a property's name. The
+\*   FACT it gestured at is still true and still documented in spore.toml (the node set
+\*   does not depend on any param value); it is simply no longer dressed as a check,
+\*   because a check that cannot fail is a line in a status report.
 \*
 \* Modeled as a bounded finite-state pipeline (drainage to an absorbing terminal
 \* state, or a bounded loop to a CLEAN fixpoint / BLOCKED escalation). Launch
@@ -68,7 +101,7 @@ CONSTANTS
 ASSUME MaxRounds \in Nat /\ MaxRounds >= 1
 
 \* --------------------------------------------------------------------------
-\* Node identities — the expansion of the DAG (DeterministicParametrization).
+\* Node identities — the expansion of the DAG.
 \* Every node is fixed (germinates exactly one molecule); the ONLY emergent node,
 \* `converge`, is modelled as a single control node PLUS an internal bounded round
 \* counter (its emergent children are the rounds, bounded by MaxRounds). The node
@@ -446,9 +479,24 @@ GateFailClosed ==
     /\ ShipImpliesAllGatesPromoted
 
 \* ==========================================================================
-\* Property 3 — NoResourceCollision (safety): no two distinct Done nodes write the
-\* same artifact path, and no two convergence rounds write the same round path
-\* (the round index is what keeps iterated writers disjoint).
+\* Property 3 — NoResourceCollision (safety): no two distinct Done nodes are handed
+\* the same artifact path, and no two convergence rounds the same round path (the
+\* round index is what keeps iterated writers disjoint).
+\*
+\* SCOPE, STATED AT THE PROPERTY AND NOT IN A FOOTNOTE. `ArtifactPath(r) == r`, so
+\* the first conjunct is `m # n => m # n` and the second is the injectivity of
+\* `ToString`. That is what is discharged: a statement about the STRINGS
+\* germination hands out as node output paths. It says nothing about the shared
+\* source tree, nothing about the shared cargo `target/`, and nothing about any
+\* path a gate's prose names by hand — WHAT IS NOT MODELLED, above, lists
+\* filesystem races for exactly this reason.
+\*
+\* Two strings can be distinct and name ONE directory: APFS and NTFS fold case,
+\* and ("Route", "route") are both legal node ids. That collision is real, it is
+\* invisible here, and it is covered by an executable test that does I/O —
+\* crates/cosmon-core/tests/spore_real_file_collision.rs — with germination
+\* refusing the pair (`RefusedOutputHome::CaseAliased`). The seal says what it
+\* proves; the test measures what the seal does not model.
 \* ==========================================================================
 NoResourceCollision ==
     /\ \A m, n \in Roles :
@@ -458,20 +506,23 @@ NoResourceCollision ==
           (i # j) => RoundPath(i) # RoundPath(j)
 
 \* ==========================================================================
-\* Property 4 — DeterministicParametrization (safety): the node set is a pure
-\* function of the params. risk / review_scale / max_rounds are POSTURE params
-\* that never alter the node set — so the set equals its param-independent image
-\* in every state, and the convergence fan-out is bounded by MaxRounds.
+\* DELETED — Property 4, `DeterministicParametrization` (operator decision D3 on
+\* delib-20260729-1d4e).
+\*
+\* It read `Roles = ExpandedRoles /\ Cardinality(Roles) = 13 /\ round <= MaxRounds`,
+\* where `ExpandedRoles` was a second literal spelling of the SAME thirteen-element
+\* set as `Roles`. No reachable state could falsify the first two conjuncts — they
+\* were theorems about the identity function — and the third is already carried by
+\* `TypeOK` (`round \in 0..MaxRounds`). A property that cannot fail reports; it does
+\* not check.
+\*
+\* The FACT it gestured at survives, in prose, where facts of that kind belong: the
+\* node set is a pure function of the params (risk / max_rounds are POSTURE params
+\* that shape node TOPICS, never the node SET). See spore.toml's ParamSchema block.
+\* If that ever needs to become a real property, it has to compare the expansion
+\* against the PARAMS — two things that can actually disagree — not a literal
+\* against a copy of itself.
 \* ==========================================================================
-ExpandedRoles ==
-    { "trace", "intake", "contract", "reproduce", "falsify", "implement",
-      "green", "ci_gate", "converge", "rehearsal", "dissent", "release",
-      "confirm" }
-
-DeterministicParametrization ==
-    /\ Roles = ExpandedRoles
-    /\ Cardinality(Roles) = 13
-    /\ round <= MaxRounds
 
 \* ==========================================================================
 \* Bundled invariant (the safety set; Termination is a temporal PROPERTY).
@@ -480,6 +531,5 @@ SealInvariant ==
     /\ TypeOK
     /\ GateFailClosed
     /\ NoResourceCollision
-    /\ DeterministicParametrization
 
 =============================================================================
