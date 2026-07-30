@@ -13,9 +13,26 @@
 # so this script re-verifies those exact OIDs rather than re-deriving new ones
 # from whatever the repository looks like now.
 #
+# ── It RE-COMPOSES the message, so it owns the trailers ─────────────────────
+# The message below is built here, not carried over from the candidate, so the
+# commit that actually lands on the public trunk gets its trailers from this
+# script. That includes the DCO `Signed-off-by`: `.github/workflows/dco.yml`
+# triggers on `pull_request: branches: [main]` only, and step 4 is a direct
+# push, so nothing downstream will ever look at this commit.
+#
+# The identity is resolved here rather than accepted as a fifth argument, and
+# that asymmetry with `--tree` / `--parent` is deliberate. Those two were
+# DECIDED by the audited run, so re-verifying the pinned OIDs is right. The
+# sign-off is not a decision, it is a certification of origin by whoever holds
+# the key at step 2 — which is this script's caller. An argument would let that
+# caller certify in someone else's name. See `signoff.sh` for the two sources it
+# refuses and why. An identity that does not resolve is a refusal at step 1b,
+# before anything is signed.
+#
 # ── Fail-closed comes from the ORDER, not from a flag ───────────────────────
 #   1. verify the tree still exists and the parent is still the local and
 #      remote public tip;
+#   1b. resolve the sign-off identity, or refuse;
 #   2. `git commit-tree -S` — the signature happens HERE, before any ref moves.
 #      An unavailable key fails at this line and nothing has changed;
 #   3. `git update-ref <branch> <new> <old>` — a compare-and-swap. A branch that
@@ -125,6 +142,20 @@ if [ -n "$(git status --porcelain)" ]; then
     die "the working tree is not clean"
 fi
 
+# ── 1b. the sign-off identity must resolve ──────────────────────────────────
+if [ ! -f "${SCRIPT_DIR}/signoff.sh" ]; then
+    die "scripts/release/signoff.sh is missing beside this script" \
+        "it holds the sign-off rule both halves of the crossing share; without it there is no identity to certify with"
+fi
+. "${SCRIPT_DIR}/signoff.sh"
+SIGNOFF="$(dco_signoff_line || true)"
+if [ -z "$SIGNOFF" ]; then
+    die "the DCO sign-off identity does not resolve in this repository" \
+        "every commit on the public trunk carries Signed-off-by, and dco.yml never sees this one — it lands by a direct push" \
+        "run this once:" \
+        "    $(dco_signoff_remedy)"
+fi
+
 # ── 2. sign ─────────────────────────────────────────────────────────────────
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -138,6 +169,7 @@ development history that produced it stays in the development repository and
 is named by the trailer below.
 
 Projected-From: ${DEV_SHA}
+${SIGNOFF}
 EOF
 
 NEW="$(git commit-tree -S -p "$PARENT" "$TREE" -F "$MSG")" || die "signing failed"
@@ -169,7 +201,11 @@ fi
 printf '%s\t%s\t%s\n' "$VERSION" "$NEW" "$DEV_SHA" >> "$LEDGER"
 if git symbolic-ref -q HEAD >/dev/null; then
     git add -- "$LEDGER"
-    git commit -q -m "chore(release): record the v${VERSION} crossing" -- "$LEDGER" \
+    # `-s`: this one is a DEVELOPMENT commit, so `dco.yml` would catch it in a
+    # pull request rather than never — but a script that composes one signed-off
+    # commit and one un-signed-off commit invites the reader to wonder which
+    # rule applies, and the answer is the same rule.
+    git commit -q -s -m "chore(release): record the v${VERSION} crossing" -- "$LEDGER" \
         || LEDGER_NOTE="the ledger line is written but uncommitted — commit ${LEDGER} yourself"
 else
     LEDGER_NOTE="HEAD is detached, so the ledger line is written but uncommitted"

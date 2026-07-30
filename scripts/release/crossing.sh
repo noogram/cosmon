@@ -33,6 +33,7 @@
 #
 # ── The order below is the design, not a style ──────────────────────────────
 #   0. the remote's push URL must already be disarmed;
+#   0b. refuse if the DCO sign-off identity does not resolve — see below;
 #   1. refuse on a dirty tree — `commit-tree` reads a COMMITTED tree, so with
 #      uncommitted edits it would succeed, sign, and ship the PREVIOUS commit's
 #      content while the operator watched a green exit. A failure that succeeds
@@ -63,6 +64,21 @@
 # `gitleaks` and the operator's private denylist, and a sequence whose blocking
 # gate can PEND is not a sequence that fails closed. The full checklist is run
 # too, immediately after, and is advisory.
+#
+# ── Why the sign-off is composed here and checked first ─────────────────────
+# Every commit on the public trunk must carry a `Signed-off-by` trailer, and
+# `.github/workflows/dco.yml` triggers on `pull_request: branches: [main]`
+# ONLY. The crossing lands by a direct push to that trunk, so no CI check ever
+# looks at a projection commit: the trailer has to be right at composition time
+# because there is no second chance downstream and no gate that will complain.
+#
+# The identity is resolved the way `git commit -s` resolves it — `user.name`
+# and `user.email` as git reads them — and an unresolvable identity is a
+# refusal, placed with the other configuration preconditions so it costs
+# nothing. The rule lives in `signoff.sh` because `sign-and-push.sh`
+# re-composes this same message for the signature; see that file's header for
+# why `git var GIT_COMMITTER_IDENT` and an environment variable are both
+# refused as sources.
 #
 # ── Waiver policy ───────────────────────────────────────────────────────────
 # The inline publish-gate waiver earns its safety entirely from being a
@@ -166,6 +182,23 @@ case "$PUSH_URL" in
             "    git remote set-url --push ${REMOTE} 'DISABLED://accidental-push-from-dev'"
         ;;
 esac
+
+# ── 0b. the sign-off identity must resolve, or nothing is built ─────────────
+# Composed now rather than at step 5 so the refusal joins the other
+# configuration preconditions: a candidate that exists and cannot be signed off
+# is a candidate whose only honest fate is deletion.
+if [ ! -f "${SCRIPT_DIR}/signoff.sh" ]; then
+    die "scripts/release/signoff.sh is missing beside this script" \
+        "it holds the sign-off rule both halves of the crossing share; without it there is no identity to certify with"
+fi
+. "${SCRIPT_DIR}/signoff.sh"
+SIGNOFF="$(dco_signoff_line || true)"
+if [ -z "$SIGNOFF" ]; then
+    die "the DCO sign-off identity does not resolve in this repository" \
+        "every commit on the public trunk carries Signed-off-by, and dco.yml never sees this one — it lands by a direct push" \
+        "run this once:" \
+        "    $(dco_signoff_remedy)"
+fi
 
 # ── 1. a dirty tree is the refusal that matters most ────────────────────────
 DIRTY="$(git status --porcelain)"
@@ -279,7 +312,8 @@ fi
 
 CANDIDATE_REF="refs/cosmon/crossing/v${VERSION}"
 
-# Exactly ONE trailer, parseable by `lineage::parse_trailers`. Not 120 stacked
+# Exactly ONE provenance trailer, parseable by `lineage::parse_trailers`, beside
+# the DCO sign-off resolved at step 0b. Not 120 stacked
 # provenance blocks: the public commit has one parent and one tree, and
 # enumerating 120 development commits under it would describe a history the
 # public trunk does not have — actively false rather than merely lossy. The
@@ -295,6 +329,7 @@ development history that produced it stays in the development repository and
 is named by the trailer below.
 
 Projected-From: ${DEV_SHA}
+${SIGNOFF}
 EOF
 
 CANDIDATE="$(git commit-tree -p "$PUBLIC_SHA" "$TREE" -F "$MSG")"

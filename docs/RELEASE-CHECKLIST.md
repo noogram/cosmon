@@ -50,11 +50,12 @@ a radar, not a gate** until the flip. The exogeneity of every gate is
 
 1. **audit + build** — `scripts/release/crossing.sh`, run from the development
    worktree. It refuses on a dirty tree, on a local/remote trunk disagreement,
-   on a publish-gate waiver this very candidate introduces, and on a red
-   `scripts/publish.sh --check`; only then does it capture the tree and build
-   the UNSIGNED candidate at `refs/cosmon/crossing/v<version>`. Audit, tree
-   capture and crossing happen in one worktree in one breath, because
-   `publish.sh` audits the checkout it runs in and has no `--tree` argument.
+   on an unresolvable DCO sign-off identity, on a publish-gate waiver this very
+   candidate introduces, and on a red `scripts/publish.sh --check`; only then
+   does it capture the tree and build the UNSIGNED candidate at
+   `refs/cosmon/crossing/v<version>`. Audit, tree capture and crossing happen in
+   one worktree in one breath, because `publish.sh` audits the checkout it runs
+   in and has no `--tree` argument.
 2. **sign and publish one ref** — the one command `crossing.sh` prints:
    `scripts/release/sign-and-push.sh`, with the tree and expected parent pinned
    as explicit arguments. It signs before it moves any ref and swaps the branch
@@ -67,6 +68,28 @@ An accidental push from the development repository is made *unrepresentable*
 rather than caught: `git remote set-url --push origin 'DISABLED://…'`, once, in
 daylight. `crossing.sh` refuses until that is done, and `sign-and-push.sh`
 names the fetch URL explicitly for the deliberate push.
+
+### The projection commit's message carries two trailers
+
+`Projected-From: <dev sha>` and `Signed-off-by: <name> <email>`. Both scripts
+compose the message — `sign-and-push.sh` re-composes it rather than reusing the
+candidate's — so the rule that resolves the sign-off identity lives once, in
+`scripts/release/signoff.sh`, and both source it.
+
+The sign-off is not decoration. `.github/workflows/dco.yml` triggers on
+`pull_request: branches: [main]` **only**, and the crossing lands by a direct
+push to that trunk, so no CI check ever looks at a projection commit. Measured
+on 2026-07-30: 273 of `main`'s 316 commits carry no `Signed-off-by` trailer, and
+the gate never saw one of them. The gap was found by opening a pull request, not
+by any gate. The trailer therefore has to be right at composition time; there is
+no second chance downstream.
+
+The identity comes from `user.name` / `user.email` as git resolves them, the
+same pair `git commit -s` reads. `git var GIT_COMMITTER_IDENT` is refused as a
+source because it *guesses* — gecos field plus local hostname — and exits 0; an
+environment variable is refused because a caller who can set it can certify in
+someone else's name. An identity that does not resolve is a refusal before
+anything is built or signed.
 
 ## The three membranes (ADR-133) — whole-file, inside-the-file, structural
 
