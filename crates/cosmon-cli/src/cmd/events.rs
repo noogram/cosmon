@@ -32,6 +32,8 @@ enum Sub {
     Stats(StatsArgs),
     /// Validate the log for schema and sequencing invariants.
     Validate(ValidateArgs),
+    /// Project one molecule's journal out of the log.
+    Journal(JournalArgs),
 }
 
 #[derive(clap::Args)]
@@ -86,6 +88,16 @@ struct ValidateArgs {
     ops_dir: Option<PathBuf>,
 }
 
+#[derive(clap::Args)]
+struct JournalArgs {
+    /// The molecule to project (e.g. `task-20260730-7a74`).
+    molecule: String,
+
+    /// Path to the state store root (overrides walk-up discovery).
+    #[arg(long)]
+    ops_dir: Option<PathBuf>,
+}
+
 /// Execute the `events` command.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     match &args.sub {
@@ -93,7 +105,34 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Query(a) => run_query(ctx, a),
         Sub::Stats(a) => run_stats(ctx, a),
         Sub::Validate(a) => run_validate(ctx, a),
+        Sub::Journal(a) => run_journal(ctx, a),
     }
+}
+
+/// Project and print one molecule's journal.
+///
+/// Read-only by construction: the journal is a fold of the ledger, never a
+/// stored file, so this command creates nothing and can be run on a molecule
+/// that was refused before it ever had a directory. `--json` emits the
+/// projected ledger rows verbatim as JSONL, which is the form the archive
+/// materialises and the form a diff can compare.
+fn run_journal(ctx: &Context, args: &JournalArgs) -> anyhow::Result<()> {
+    let molecule = cosmon_core::id::MoleculeId::new(&args.molecule)
+        .map_err(|e| anyhow::anyhow!("invalid molecule id `{}`: {e}", args.molecule))?;
+    let state_dir = cosmon_filestore::resolve_state_dir(args.ops_dir.as_deref());
+    let journal = cosmon_state::journal::MoleculeJournal::project_from_state_dir(
+        state_dir.as_path(),
+        &molecule,
+    )?;
+
+    let mut out = std::io::stdout().lock();
+    if ctx.json {
+        write!(out, "{}", journal.render_jsonl())?;
+    } else {
+        write!(out, "{}", journal.render_markdown())?;
+    }
+    out.flush()?;
+    Ok(())
 }
 
 /// Resolve the `events.jsonl` path from the args or walk-up discovery.

@@ -55,6 +55,11 @@ MONITORING — the operator\*(Aqs toolkit (use these, not tmux/tail/cat):
                                   printed once, sorted by molecule id
   cs ensemble \-\-tag temp:hot      actionable backlog snapshot
   cs wait <id> &                  block on a worker without hanging the pilot
+  cs events journal <id>          one molecule\*(Aqs whole history, projected
+                                  out of the ledger — including the case
+                                   where the worker produced nothing
+.PP
+THE PER\-MOLECULE JOURNAL. \*(Aqcs events journal <id>\*(Aq answers "what happened to this molecule?" for every molecule, including the ones that have nothing to show: a dispatch refused before any worker existed leaves no worktree, no artifacts and no molecule\-local log, and the journal is where the refusal is readable. It is a PROJECTION of the one canonical ledger (\*(Aq.cosmon/state/events.jsonl\*(Aq), never a second file written alongside it — so there is only ever one truth, it exists from the instant \*(Aqcs nucleate\*(Aq returns, it survives the worktree teardown and the archival at \*(Aqcs done\*(Aq, and asking for it writes nothing. \*(Aq\-\-json\*(Aq emits the projected ledger rows verbatim; \*(Aqcs done\*(Aq materialises the same rows into the archive entry as \*(Aqjournal.jsonl\*(Aq.
 .PP
 Observability is a fractal portal, not a dashboard: one tool (cs peek), recursive, from fleet overview down to per\-molecule artifact. Reach for \*(Aqcs peek\*(Aq before \*(Aqtmux attach\*(Aq, \*(Aqtail \-f\*(Aq, or \*(Aqcat briefing.md\*(Aq.
 .PP
