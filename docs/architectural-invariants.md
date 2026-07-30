@@ -2459,10 +2459,11 @@ so it cannot pass vacuously.
 **M2 — `Ready` is earned by composer evidence, never inherited from a
 chevron.**
 Seam: the private `shows_composer` predicate, consulted before any other
-path to `SessionStatus::Ready`. Two things count as evidence, and both
-need an input line *plus* something that identifies it as the composer's:
-the placeholder sitting **on** a chevron line, or a non-menu chevron line
-standing in the same pane tail as the composer's own footer. All rules are
+path to `SessionStatus::Ready`. Three things count as evidence, and each
+needs an input line *plus* something that identifies it as the composer's:
+the placeholder sitting **on** a chevron line; a non-menu chevron line
+standing in the same pane tail as the composer's own footer; or a non-menu
+chevron line **ruled directly above and below**. All rules are
 scoped to the pane tail — scrollback is history, and history must not
 certify the present. Pinned by
 `a_bare_chevron_without_composer_co_evidence_is_not_ready` (the
@@ -2480,6 +2481,62 @@ The price-of-the-fix guards are part of the invariant, not decoration:
 `the_composer_is_still_ready` and
 `a_composer_showing_a_suggestion_is_still_ready` fail the moment the
 closed default starts refusing healthy workers.
+
+The third disjunct arrived in task-20260730-ec81 and is the worked example
+of what the "What this forbids" bullet below permits. Claude Code 2.1.220
+stopped boxing its composer and started **ruling** it — one full-width run
+of `─` above the input line, one below — so the first two disjuncts stopped
+matching and seven real panes classified `AwaitingHuman`, which the gate
+refuses. The bypass-permissions footer's `⏵⏵` was the only accident keeping
+`cs tackle` dispatchable; a session launched in manual mode (footer
+`⏸ manual mode on`) could not be dispatched into at all. The new disjunct
+survives the bullet's test because a rule line is one that is **nothing
+but** rule: a modal borrows a box border (`╭───╮`, `│ … │`), and every such
+line carries a glyph that disqualifies it. The chevron must still not rest
+on a menu option, which is the same guard the second disjunct uses — so
+this adds a way to *prove* a composer, not a way to skip the proof. Pinned
+by `a_ruled_menu_is_not_a_ruled_composer` (a menu ruled top and bottom, the
+screen this could plausibly have admitted),
+`a_ruled_input_line_is_composer_evidence`,
+`a_box_border_is_not_a_horizontal_rule`, and the fixture suite
+`tests/claude_tui_2_1_220.rs`, which holds all seven captured panes.
+
+**M2b — `Working` is earned by a *running clock*, never by a marker in
+scrollback.**
+Seam: `shows_work_in_flight`, consulted *before* `shows_composer` in
+`classify_output`'s order. The composer used to be tested first, on the
+rule "an input box at the bottom means idle, whatever the scrollback says".
+That rule's truth came entirely from the prompt **vanishing** for the
+duration of a turn; 2.1.220 keeps it painted for the whole stream, so the
+premise expired and `Working` became unreachable — six panes captured four
+seconds apart mid-stream all showed the composer. Downstream, `cs tackle`'s
+briefing-submit loop has `Working` as its only early exit, so an
+unreachable arm is a flat 90 s added to every dispatch.
+
+What replaces the disappearing prompt is a spinner glyph at the head of a
+line in the status slot **plus** a running clock — `(3s · …` or `esc to
+interrupt`. Both halves are load-bearing, and the second one is what
+preserves the original rule's real purpose: when a turn ends, the same slot
+keeps `✻ Baked for 16s` until the next turn starts, and when the pane is
+idle it holds `◐ medium · /effort`. Admitting either would report `Working`
+for a pane idle since yesterday, and would let the briefing-submit loop
+declare a briefing delivered on the strength of the previous turn's
+leftovers. A clock that has stopped cannot certify a turn in flight, which
+is why the reorder does not undo what checking the composer first was
+protecting. Pinned by `only_a_running_clock_counts_as_work_in_flight`,
+`stale_tool_use_still_does_not_outrank_a_ruled_composer`, and the fixture
+tests `the_working_arm_is_reachable_on_this_tui` and
+`the_idle_pane_is_not_working`.
+
+Its search window is eight trailing non-empty lines rather than five, and
+the widening is scoped to this predicate alone. The 2.1.220 composer costs
+four lines on its own, so a five-line tail leaves one row for the slot and
+a tmux warning is sitting in it in `streaming-1.pane`. It is safe *here*
+and would not be elsewhere: the status slot is a row this TUI **overwrites
+in place**, so a running clock cannot scroll into history and go on
+certifying a turn that ended. The composer and menu rules have no such
+property — a composer genuinely does scroll away above a modal — and keep
+the tight tail.
 
 **M3 — an unrecognised screen is refused, not admitted.**
 Seam: the *end* of `classify_output`'s order. A pane parked at an input
@@ -2560,7 +2617,15 @@ halves of C0 on the same pane: `observe` says `Live`, the gate says
   boxes its modals too, so `│ ❯ a) Re-authorise now │` satisfied a
   box-frame disjunct and became `Ready`. Any new disjunct must say "the
   input line beside me belongs to the composer" in a way a modal cannot
-  borrow.
+  borrow. The rule-sandwich disjunct added in M2 is the worked example of
+  one that passes: a modal borrows a *border*, and a border is never a line
+  that is nothing but rule.
+- **Accepting a finished turn as work in flight.** The status slot keeps
+  its last summary (`✻ Baked for 16s`) until the next turn starts, so a
+  spinner glyph alone certifies nothing. Work evidence needs a clock that
+  is still running — otherwise a pane idle for hours reports `Working`, and
+  the briefing-submit loop stops confirming the submit it exists to
+  confirm.
 - **Reading scrollback as the current state.** Whole-capture substring
   scans re-open the corridor from behind: a composer thirty lines ago, a
   `⏺` from an earlier turn, a permission question answered twenty lines
@@ -2585,11 +2650,12 @@ The gate is measurable, and the measurement is cheap. Replace
 `output.contains(markers::READY_TYPE) || pane_tail(output).iter().any(|l|
 l.contains(markers::READY_PROMPT))`, a whole-capture scan for the
 placeholder plus a tail scan for the chevron — and `cargo test -p
-cosmon-transport --lib` goes from 258 passed / 0 failed to 247 / **11
-failed** (measured 2026-07-25 at this head; the figure was 253 → 243 / 10
-before M5's tests landed). A fourth marker would have flipped one of those
-eleven. That number is what this section is worth; a change that lowers it
-is a change that weakens the default.
+cosmon-transport --lib` goes from 284 passed / 0 failed to 272 / **12
+failed** (measured 2026-07-30 at this head; it was 258 → 247 / 11 on
+2026-07-25, and 253 → 243 / 10 before M5's tests landed). A marker added to
+name one more screen would have flipped one of those twelve. That number is
+what this section is worth; a change that lowers it is a change that
+weakens the default.
 
 M5 has its own, cheaper measurement, and it is the one that matters for the
 lesson: put `Loading` back on the `Live` side of `dispatch_gate_liveness`
