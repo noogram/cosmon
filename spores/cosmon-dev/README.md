@@ -98,11 +98,28 @@ typed `exit_reason`, NEVER a silent pass.
 ## The seal (TLC-verified green)
 
 `spore.tla` + `spore.cfg` model the diamond gate DAG + the bounded convergence and
-discharge four properties: **Termination** (the convergence is bounded structurally
+discharge three properties: **Termination** (the convergence is bounded structurally
 by its two named verdict states; the DAG is acyclic; a blocked convergence cascades
 to a terminal state, no spin), **GateFailClosed** (no gate promotes on absent/failing
 evidence; release SHIPs only when every upstream gate PASSED, the convergence is
-CLEAN, and the dissent field is non-empty), **DeterministicParametrization**, **NoResourceCollision**.
+CLEAN, and the dissent field is non-empty), and **NoResourceCollision** (no two nodes
+are handed the same output path).
+
+`DeterministicParametrization` was **deleted** (operator decision D3 on
+delib-20260729-1d4e): it asserted `Roles = ExpandedRoles` over one literal
+thirteen-element set, so no reachable state could falsify it.
+
+**What the seal does not model.** `NoResourceCollision` quantifies over the node
+output paths germination hands out — not the shared source tree, not the shared
+cargo `target/`, not a path a gate's prose names by hand. Inside the module
+`ArtifactPath(r) == r`, so what is discharged is the injectivity of `ToString`.
+Real file collisions are covered separately by an executable test that does I/O,
+`crates/cosmon-core/tests/spore_real_file_collision.rs`; its witness is the pair
+`("Route", "route")` — two distinct strings the seal certifies as non-colliding,
+one directory on APFS or NTFS — and germination now refuses that pair.
+
+> The seal must always say two things: what it proves and what it does not model.
+> A proof of the model must never be presented as a proof of the real environment.
 
 Re-verify (any Java 11+; jar at `../../docs/specs/tla2tools.jar`):
 

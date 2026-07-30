@@ -130,6 +130,76 @@
 # the TOPOLOGY, not the human independence (identities, credentials,
 # branch-protection stay external controls).
 #
+# AND HERE IS WHAT §8 DID NOT FORBID. Read as a proposition, the paragraph above
+# forbids exactly one class of observation: a gate that shipped without a
+# parseable verdict file. It forbids nothing about the relation between that
+# file's CONTENTS and the world. `{"verdict":"PASS","count":0,"findings":[]}`
+# satisfies it completely — and that is precisely the byte sequence a gate emits
+# when it measured the property NEXT DOOR, when its ledger was untracked, when
+# its suite was `#[ignore]`d, and when its `..._byte_identical` assertion compared
+# modes. Seven observations, seven passes; a rule all seven counter-examples
+# satisfy was never a claim about them. Say it in the file it governs:
+#
+#   *A well-formed verdict artifact saying PASS is exactly what a gate measuring
+#   the property next door emits; §8 constrains the SHAPE of the evidence, never
+#   its RELEVANCE.*
+#
+# That is not repaired by stronger prose — rewriting §8 more emphatically
+# produces an eighth instance. It is repaired by three fields that a PASS is
+# INADMISSIBLE without, because each one is falsifiable by a consumer:
+#
+#   * `negative_control {mutation, target, observed_verdict, evidence_digest}` —
+#     the gate was run against a DELIBERATELY BROKEN world and returned the
+#     OPPOSITE verdict. `observed_verdict == verdict` means the gate is
+#     colour-blind and its PASS is VOID. This is the `falsify` node's own
+#     discipline — *a test whose colour does not move when the fix is mutated is
+#     a tautology, not an oracle* — applied to EVERY gate instead of to one. The
+#     asymmetry had no justification: G2 got the treatment because G2's output is
+#     a test and tests are where we habitually think about colour. The property is
+#     not about tests.
+#   * `population` — the DENOMINATOR. `count == 0 ∧ population == 0` is a vacuous
+#     green: a universal over an empty domain forbids nothing. The CI wait loop
+#     that read zero pending runs over an EMPTY LIST is the same logical error as
+#     the `#[ignore]`d suite and the provenance gate that printed `skip` and
+#     exited 0. One schema field retires an entire failure family, which is a
+#     better return than any amount of increased carefulness.
+#   * `subject_digest` — a hash of WHAT WAS MEASURED, RECOMPUTED BY THE CONSUMER,
+#     never asserted by the producer. A digest the consumer only reads back is a
+#     producer's testimony with a hexadecimal accent.
+#
+# AMORTISED BY FREEZE-AND-KEY, or it is unpayable. The negative control is an
+# ADMISSION test on the GATE'S OWN DEFINITION, keyed by a hash of that definition
+# (the node's `topic` + the script it invokes). A gate whose definition hash has
+# no admission record is BLOCKED at first use; once admitted, every subsequent
+# mission COPIES THE RECORD FORWARD and pays nothing. Cost is O(gate edits), not
+# O(missions). The mutations are scoped to the gate's own decision, never
+# workspace-wide, and each is minutes: plant one `clippy::needless_return` and
+# confirm the RECORDED clippy exit code flips; install the dev build instead of
+# the packaged artefact and confirm `rehearsal` BLOCKS; strip the arch field and
+# confirm `intake` BLOCKS.
+#
+# NO SIDE LEDGER. The admission record is copied INTO each gate's `verdict.json`
+# and the consumer RECOMPUTES the key. An `admission.json` the consumer reads
+# without recomputing is the provenance gate rebuilt — the one that printed `skip`
+# and exited 0.
+#
+# `base_sha` IS NOT `parent_commit`. Two different facts, collapsed into one field
+# until now: `parent_commit` is what the red was RED on; `base_sha` is what THIS
+# VERDICT WAS COMPUTED ON. Every verdict.json carries `base_sha`, and `release`
+# BLOCKS if any upstream verdict's `base_sha` is not an ancestor of the release
+# commit — which is how a verdict computed on a tree nobody is shipping stops
+# counting as evidence about the tree everybody is.
+#
+# WHY THE ENFORCEMENT POINT IS THE RELEASE MANIFEST, AND THE FALSIFIER THAT
+# AUDITS THAT CLAIM. Every one of the seven §8-satisfying gates shares one
+# property: the thing the gate guarded PROCEEDED whether or not the gate ran. The
+# release manifest has the inverse property — ITS ABSENCE IS THE ABSENCE OF THE
+# RELEASE. You cannot silently stop enforcing a rule whose enforcement product is
+# the artifact the mission exists to produce. That is the whole immunity argument,
+# and it is written here so it can be AUDITED rather than assumed:
+#   FALSIFIER — exhibit a path by which a release ships WITHOUT a manifest, and
+#   the argument is refuted and withdrawn.
+#
 # RECIPIENT QUICKSTART (run from inside spores/cosmon-dev/):
 #   cs spore validate spore.toml \
 #       --var issue="#21 --resident ignores COSMON_DEFAULT_ADAPTER" \
@@ -156,7 +226,7 @@ becomes the bug.
 """
 
 # --------------------------------------------------------------------------
-# Seal — a TLC proof over spore.tla + spore.cfg (four properties). Paths are
+# Seal — a TLC proof over spore.tla + spore.cfg (THREE properties). Paths are
 # RELATIVE to this manifest (portability invariant). Seal-verification contract
 # (ADR-140 D4): absent / present+checked / present+unchecked-honest. `cs spore
 # run` refuses by default to germinate a present-but-unverified seal; pass
@@ -179,11 +249,38 @@ becomes the bug.
 #                                `arms_not_run[]`. Absence refuses, always — into a VOID
 #                                verdict that cannot advance a state, never into a
 #                                FINDINGS verdict that could be patched against.
-# DeterministicParametrization : the node set is a pure function of the params;
-#                                nothing environmental perturbs the expansion.
 # NoResourceCollision          : each node (and each of the two convergence verdicts)
-#                                writes a distinct, state-indexed path; parallel
-#                                writers never alias a resource.
+#                                is handed a DISTINCT OUTPUT PATH by germination.
+#
+# WHAT THAT THIRD PROPERTY DOES NOT SAY, stated where it is claimed rather than in
+# a footnote. Its argument quantifies over the node OUTPUT PATHS germination hands
+# out (`${output_dir}` = `<state>/spore-runs/<germination-id>/<alias>/`, ADR-161)
+# and over NOTHING ELSE. It says nothing about the shared source tree, nothing
+# about the shared cargo `target/` two parallel gates both build into, and nothing
+# about any path a gate's PROSE names by hand. `spore.tla:34-35` lists filesystem
+# races under WHAT IS NOT MODELLED, and inside the module `ArtifactPath(r) == r`,
+# so the property is the injectivity of `ToString` — sound, cheap, worth keeping,
+# and not a statement about your disk. The previous wording here, "parallel
+# writers never alias a resource", claimed the disk. That was the overclaim, and
+# it is withdrawn.
+#
+#   THE SEAL MUST ALWAYS SAY TWO THINGS: WHAT IT PROVES AND WHAT IT DOES NOT
+#   MODEL. A PROOF OF THE MODEL MUST NEVER BE PRESENTED AS A PROOF OF THE REAL
+#   ENVIRONMENT.  (operator, D3 on delib-20260729-1d4e)
+#
+# Real file collisions are covered SEPARATELY, by an executable test that does
+# I/O rather than by a second lexical argument:
+# `crates/cosmon-core/tests/spore_real_file_collision.rs`. Its witness is the pair
+# ("Route", "route") — two ids the grammar accepts, two DISTINCT strings the seal
+# therefore certifies as non-colliding, and ONE directory on APFS or NTFS, where
+# the second node's `verdict.json` destroys the first's. Germination now refuses
+# that pair on every platform (`RefusedOutputHome::CaseAliased`).
+#
+# `DeterministicParametrization` IS DELETED (operator decision D3). It was
+# tautological: it asserted `Roles = ExpandedRoles` where both names denote the
+# SAME thirteen-element literal set, so no reachable state could falsify it. It
+# was a theorem about the identity function wearing a property's name, and a
+# property that cannot fail is a line in a status report, not a check.
 #
 # SEAL DIVERGENCE, STATED RATHER THAN HIDDEN: `spore.tla` / `spore.cfg` still model
 # the DELETED round counter (MaxRounds), the DELETED `dissent` node and the DELETED
@@ -191,9 +288,13 @@ becomes the bug.
 # review/rehearsal edges or the asynchronous `confirm`. The model is
 # therefore BEHIND this manifest on the node set and the edge set, and a TLC run
 # proves a topology this file no longer declares. That is named here because a seal
-# must always say what it does not model; re-synchronising the module is a separate
-# molecule (it owns spore.tla/spore.cfg, which this one is forbidden to touch).
-# Until it lands, treat the four properties as UNPROVEN for the current topology.
+# must always say what it does not model; re-synchronising the module to the
+# CURRENT node and edge set is a separate molecule. This molecule touched
+# spore.tla/spore.cfg for the SEAL TRIM ONLY (deleting the tautological property
+# and strengthening the Termination variant) and changed no part of the modelled
+# topology, so the divergence above is exactly as large as it was, neither wider
+# nor narrower. Until the re-synchronisation lands, treat the three properties as
+# UNPROVEN for the current topology.
 #
 # SEAL HONESTY: a released `cs` may report "TLC unavailable" (the TLC-verify wiring
 # is not in every released binary), so `cs spore run` fails closed and you germinate
@@ -207,15 +308,16 @@ becomes the bug.
 [spore.seal]
 module     = "spore.tla"
 config     = "spore.cfg"
-properties = ["Termination", "GateFailClosed", "DeterministicParametrization", "NoResourceCollision"]
+properties = ["Termination", "GateFailClosed", "NoResourceCollision"]
 
 # --------------------------------------------------------------------------
 # ParamSchema (blueprint §8). Three params are REQUIRED (issue, affected_ref,
 # upstream_version); the rest carry defaults so the spore expands cleanly for the
-# common single-issue case. DeterministicParametrization: the node set does NOT
-# depend on any param value (risk / max_rounds are POSTURE params that shape node
-# TOPICS, never the node SET), so the seal's cardinality argument is
-# param-independent.
+# common single-issue case. The node set does NOT depend on any param value (risk
+# / max_rounds are POSTURE params that shape node TOPICS, never the node SET).
+# That is still true and still worth knowing — it is simply no longer dressed up
+# as a checked property, because the module stated it as `Roles = ExpandedRoles`
+# over one literal set and nothing could ever falsify it.
 #
 # `review_scale` is GONE (operator decision D1 on delib-20260729-1d4e). It was
 # declared "advisory to the converge node", which is the signature of a knob with no
@@ -410,10 +512,28 @@ Emit ${output_dir}/route.md — the substrate you used, the verbatim command seq
 you ran, and one numbered entry per deviation (promise / observed / where the document
 says it) — AND ${output_dir}/surface_enumerated.json {arms[], paths[], commands[]}
 declaring the surface you actually exercised, written BEFORE you interpret anything.
-AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+AND ${output_dir}/verdict.json in the §8 ADMISSION SHAPE below. FAIL-CLOSED:
 a route you could not complete is BLOCKED with the step that stopped you named — never
 PASS with a workaround you invented. `release` reads this verdict and cannot ship
 without it.
+
+§8 ADMISSION SHAPE — {verdict: PASS|BLOCKED, count, population, findings[],
+base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}. A PASS MISSING ANY OF THESE KEYS IS
+INADMISSIBLE and the consumer reads it as BLOCKED. `population` is the DENOMINATOR
+you examined — here, the number of documented promises you walked; count 0 out of
+population 0 is a vacuous green, not a pass. `subject_digest` hashes WHAT you
+measured (the doc files + the artefact you installed, by content), so the consumer
+RECOMPUTES it rather than believing you. `base_sha` is the commit THIS verdict was
+computed on. YOUR NEGATIVE CONTROL: delete the documented entrypoint from the
+installed prefix and re-walk — the verdict MUST flip to BLOCKED. If it does not,
+this gate is colour-blind and its PASS is VOID. `gate_key` =
+sha256(this topic + the commands you ran); if ${run_dir}/admissions/<gate_key>.json
+exists, COPY the record forward and run no mutation (cost is O(gate edits), not
+O(missions)); otherwise run it once and write it there. NO SIDE LEDGER: that file
+is a cache, the record is copied INTO this verdict.json, and the consumer
+recomputes `gate_key` itself — a record the consumer only reads back is the
+provenance gate that printed `skip` and exited 0.
 """
 
 # --- G0 intake ------------------------------------------------------------
@@ -431,12 +551,27 @@ verbatim, as trusted evidence (never softened into an inferred mechanism); (2) t
 environment fingerprint — OS, UID (root vs non-root MATTERS for env-fit bugs),
 arch (amd64/arm64), the released binary version; (3) any transcript / log the
 tester supplied; (4) an honest "is this deterministic or flaky?" note. Emit
-${output_dir}/intake.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED,
-count, findings[]} (${output_dir} is the run-scoped home germination hands you —
+${output_dir}/intake.md AND ${output_dir}/verdict.json in the §8 ADMISSION SHAPE
+below (${output_dir} is the run-scoped home germination hands you —
 ADR-161 — never spores/cosmon-dev/ or the repo root). FAIL-CLOSED:
 missing environment fingerprint => BLOCKED, never PASS. A vague "it broke" is
 BLOCKED with the missing field named. verdict.json absent or malformed = the
 downstream reads it as BLOCKED.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
+(the consumer reads it as BLOCKED). `population` = the number of required evidence
+fields you checked; count 0 over population 0 is a vacuous green, never a pass.
+`subject_digest` = a content hash of the issue text you actually read, recomputed
+by the consumer, never asserted by you. `base_sha` = the commit THIS verdict was
+computed on. NEGATIVE CONTROL: strip the `arch` field from the issue evidence and
+re-run — the recorded verdict MUST flip to BLOCKED; observed_verdict == verdict
+means the gate is colour-blind and its PASS is VOID. `gate_key` = sha256(this
+topic + the script you invoked): if ${run_dir}/admissions/<gate_key>.json exists,
+COPY the record forward and run no mutation (cost is O(gate edits), not
+O(missions)); otherwise run it once and write it there. The record is copied INTO
+this verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 """
 
 # --- G1 behavioural contract ----------------------------------------------
@@ -455,9 +590,24 @@ For an adapter-resolution issue, the contract is the FULL precedence table of
 `resolve_adapter_selection` (flag > formula-step > $COSMON_DEFAULT_ADAPTER > config
 > global-config > builtin floor), stated as the semantic the composed resolver
 must honour under every dispatch path (including --resident). Emit
-${output_dir}/contract.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED,
-count, findings[]} (${output_dir}: the run-scoped home, ADR-161). FAIL-CLOSED: a contract
+${output_dir}/contract.md AND ${output_dir}/verdict.json in the §8 ADMISSION SHAPE
+below (${output_dir}: the run-scoped home, ADR-161). FAIL-CLOSED: a contract
 that merely restates the symptom (not the promise) is BLOCKED.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
+(the consumer reads it as BLOCKED). `population` = the number of precedence rows /
+promise clauses you stated; count 0 over population 0 is a vacuous green.
+`subject_digest` = a content hash of the resolver source you read the promise
+from, recomputed by the consumer, never asserted by you. `base_sha` = the commit
+THIS verdict was computed on. NEGATIVE CONTROL: hand this gate a contract.md that
+merely restates the symptom and re-run — the recorded verdict MUST flip to
+BLOCKED; observed_verdict == verdict means the gate is colour-blind and its PASS
+is VOID. `gate_key` = sha256(this topic + the script you invoked): if
+${run_dir}/admissions/<gate_key>.json exists, COPY the record forward and run no
+mutation; otherwise run it once and write it there. The record is copied INTO this
+verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 """
 
 # --- G2 reproduce (the deterministic red; NEW formula) --------------------
@@ -490,8 +640,24 @@ whose colour does not move when the fix is mutated is a tautology, not an oracle
 (diagnosis-discipline CLAUSE 4). Independently, confirm the fixture does NOT derive
 its oracle from the thing under test (no reuse of the same constant / resolver the
 code under test uses to compute the expected value). Emit ${output_dir}/falsify.md
-AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED: if the
+AND ${output_dir}/verdict.json in the §8 ADMISSION SHAPE below. FAIL-CLOSED: if the
 mutation does not redden the test, BLOCKED with the tautology named.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
+(the consumer reads it as BLOCKED). You already run the colour-moves discipline on
+ONE artifact; these keys are the same discipline turned on YOU. `population` = the
+number of mutations you applied; count 0 over population 0 is a vacuous green.
+`subject_digest` = the frozen red's content hash from ${run_dir}/reproduce/,
+recomputed by the consumer. `base_sha` = the commit THIS verdict was computed on.
+NEGATIVE CONTROL: hand this gate a test whose colour does NOT move under the
+mutation and re-run — the recorded verdict MUST flip to BLOCKED; observed_verdict
+== verdict means the gate is colour-blind and its PASS is VOID. `gate_key` =
+sha256(this topic + the script you invoked): if ${run_dir}/admissions/<gate_key>.json
+exists, COPY the record forward and run no mutation; otherwise run it once and
+write it there. The record is copied INTO this verdict.json — NO SIDE LEDGER — and
+the consumer recomputes `gate_key`.
 """
 
 # --- G4 implement (smallest fix) ------------------------------------------
@@ -510,7 +676,23 @@ Keep the domain core I/O-free (ports stay injectable). Return Result; no unwrap 
 expect. Document every public item. Update the CLI/UI parity audit if a
 user-facing command changed. This node has NO authority to relax any gate. Emit
 ${output_dir}/implement.md (the patch summary + the files touched) AND
-${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED.
+${output_dir}/verdict.json in the §8 ADMISSION SHAPE below. FAIL-CLOSED.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
+(the consumer reads it as BLOCKED). `population` = the number of contract clauses
+from G1 your patch had to satisfy; count 0 over population 0 is a vacuous green.
+`subject_digest` = a content hash of the files you touched, recomputed by the
+consumer. `base_sha` = the commit THIS verdict was computed on — and it is NOT the
+same fact as the reproduction's `parent_commit`, which is what the red was RED on.
+NEGATIVE CONTROL: reach green by EDITING THE FROZEN TEST instead of the code and
+re-run — the recorded verdict MUST flip to BLOCKED; observed_verdict == verdict
+means the gate is colour-blind and its PASS is VOID. `gate_key` = sha256(this
+topic + the script you invoked): if ${run_dir}/admissions/<gate_key>.json exists,
+COPY the record forward and run no mutation; otherwise run it once and write it
+there. The record is copied INTO this verdict.json — NO SIDE LEDGER — and the
+consumer recomputes `gate_key`.
 """
 
 # --- G5 green on the original red -----------------------------------------
@@ -526,9 +708,26 @@ EXACT frozen red from ${run_dir}/reproduce/ (same image, same fixture, same comm
 timeout) against the fixed tree and confirm it now passes UNCHANGED. Compare the
 frozen hash: the test bytes MUST be identical to the ones hashed at G2 (never a
 substituted or edited test blessed to green — see 'never bless a golden to get
-green'). Emit ${output_dir}/green.md AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}.
+green'). Emit ${output_dir}/green.md AND ${output_dir}/verdict.json in the §8
+ADMISSION SHAPE below.
 FAIL-CLOSED: a green obtained by editing the test, or a hash mismatch vs the frozen
 red, is BLOCKED.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], base_sha, subject_digest, negative_control{gate_key, mutation, target,
+observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY IS INADMISSIBLE
+(the consumer reads it as BLOCKED). `population` = the number of assertions the
+frozen red actually executed — NOT the number it declares; a suite that ran zero
+assertions and reported zero failures is the `#[ignore]`d suite again, and
+`population` is the field that makes it visible. `subject_digest` = the frozen
+red's content hash, recomputed by the consumer against ${run_dir}/reproduce/.
+`base_sha` = the commit THIS verdict was computed on. NEGATIVE CONTROL: run the
+same frozen red against the UNFIXED tree and re-run — the recorded verdict MUST
+flip to BLOCKED; observed_verdict == verdict means the gate is colour-blind and
+its PASS is VOID. `gate_key` = sha256(this topic + the script you invoked): if
+${run_dir}/admissions/<gate_key>.json exists, COPY the record forward and run no
+mutation; otherwise run it once and write it there. The record is copied INTO this
+verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 """
 
 # --- G8 CI gate (cheap before dear) ---------------------------------------
@@ -536,22 +735,67 @@ red, is BLOCKED.
 id          = "ci-gate"
 kind        = "fixed"
 formula     = "task-work"
-description = "G8 CI (BLOCK, NOT-RUN blocks): check + test + clippy -Dwarnings + fmt + doc, BEFORE the dear judgement loop. Emits verdict.json."
+description = "G8 CI (BLOCK, NOT-RUN blocks, BLOCKED-INCOMPLETE is its own outcome): check + test --no-fail-fast + clippy -Dwarnings + fmt + doc, BEFORE the dear judgement loop. Waits on a NAMED run id, never on an empty query. Result files are keyed per gate and per attempt; a duplicate key BLOCKS. Emits verdict.json."
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G8 CI GATE (fail-closed, cheap-before-dear). Run the
 repo's configured gates and record each exit status to a FILE (never read an exit
 code through a pipe):
   cargo check --workspace
-  cargo test --workspace          (wrap in `timeout 600`; a timeout is a FINDING)
+  cargo test --workspace --no-fail-fast   (wrap in `timeout 600`; a timeout is a FINDING)
   cargo clippy --workspace -- -D warnings
   cargo fmt --all -- --check
   RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 The doc gate is the one no other subsumes: a broken intra-doc link compiles, lints,
-and tests green and fails only in CI on main. Emit ${output_dir}/ci-gate.md (one line per gate
-with its captured exit code) AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count,
-findings[]}. FAIL-CLOSED and NOT-RUN blocks: a gate that did not run is BLOCKED, not
-skipped. This runs BEFORE the convergence (cheap before dear).
+and tests green and fails only in CI on main.
+
+`--no-fail-fast` IS LOAD-BEARING, NOT A PREFERENCE. Without it cargo stops at the
+FIRST failing target, so one stale suite hides every red behind it and you report
+"one failure" for a run that never reached the other crates. Fail-fast is an
+INFORMATION-DESTROYING operation at IDENTICAL wall-clock — the run costs what it
+costs; only the report shrinks. One run then yields the FAILURE VECTOR instead of
+the first failure. Free exergy, one flag.
+
+COUNT THE SUITES, AND SAY SO. Record `suites_run` and `suites_total` and compare
+them. If `suites_run < suites_total` the outcome is BLOCKED-INCOMPLETE — A
+DISTINCT OUTCOME THAT MUST NEVER BE REPORTED AS "the CI gate found a bug". A run
+that stopped early found out less than it was asked to; calling that a finding
+converts a measurement failure into a quality verdict, which is the exact
+substitution the convergence's VOID rule refuses elsewhere.
+
+BIND THE RESULT FILENAME, PER GATE AND PER ATTEMPT. Each gate's captured status
+goes to ${output_dir}/gates/<gate>/<attempt>.json — never one shared file, never
+last-writer-wins. If a gate key would be written twice, BLOCK with
+`duplicate-gate-record` and name both writers. Last-writer-wins on a verdict path
+is how one gate's green comes to stand for another's.
+
+WAIT ON A NAMED ENTITY, NEVER ON THE EMPTINESS OF A QUERY. If this gate waits on a
+remote CI run: RESOLVE THE RUN ID whose `head_sha` EQUALS the commit under test;
+if no such run exists after a bounded interval, BLOCK with `ci-run-not-found`; only
+then wait on THAT ID. Polling "are there any pending runs?" and reading zero over
+an EMPTY LIST is a universal over an empty domain — it forbids nothing, and it is
+the same logical error as the `#[ignore]`d suite and the provenance gate that
+printed `skip` and exited 0.
+
+Emit ${output_dir}/ci-gate.md (one line per gate with its captured exit code) AND
+${output_dir}/verdict.json in the §8 ADMISSION SHAPE below. FAIL-CLOSED and NOT-RUN
+blocks: a gate that did not run is BLOCKED, not skipped. This runs BEFORE the
+convergence (cheap before dear).
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED|BLOCKED-INCOMPLETE,
+count, population, suites_run, suites_total, findings[], base_sha, subject_digest,
+negative_control{gate_key, mutation, target, observed_verdict, evidence_digest}},
+and A PASS MISSING ANY KEY IS INADMISSIBLE (the consumer reads it as BLOCKED).
+`population` = the number of gates you actually executed; count 0 over population
+0 is a vacuous green. `subject_digest` = the tree sha you built, recomputed by the
+consumer. `base_sha` = the commit THIS verdict was computed on. NEGATIVE CONTROL:
+plant one `clippy::needless_return` in a workspace crate and re-run — the RECORDED
+CLIPPY EXIT CODE must flip and the verdict with it; observed_verdict == verdict
+means the gate is colour-blind and its PASS is VOID. That mutation is minutes, and
+it is paid once: `gate_key` = sha256(this topic + the script you invoked), so if
+${run_dir}/admissions/<gate_key>.json exists you COPY the record forward and run
+NOTHING. The record is copied INTO this verdict.json — NO SIDE LEDGER — and the
+consumer recomputes `gate_key` rather than trusting the file.
 """
 
 # --- §6bis converge (EMERGENT — the double clean-room review; replaces G6+G7) -
@@ -622,6 +866,26 @@ E1 miss was a coverage failure, never a sensitivity failure — the seats produc
 findings twelve rounds running while nobody ran the arm the defect lived in.
 Aggregate the seats' declarations into ${output_dir}/surface_enumerated.json (the
 union, with the seat that claimed each entry) for `release` to compare against.
+
+§8 ADMISSION SHAPE — every seat's verdict.json AND this node's folded verdict.json
+are {verdict, count, population, findings[], base_sha, subject_digest,
+negative_control{gate_key, mutation, target, observed_verdict, evidence_digest}},
+and A CLEAN MISSING ANY KEY IS INADMISSIBLE — VOID on the plumbing rule above,
+exactly like an absent verdict.json, never a FINDINGS verdict to be patched
+against. `population` = the number of surface elements the seat DECLARED and then
+actually exercised; a CLEAN with population 0 is a seat that reviewed nothing, and
+it is the emptiest of the empty domains — twelve rounds of findings never told us
+what was NOT looked at. `subject_digest` = the tree sha the seat reviewed,
+recomputed by the consumer; a CONFIRMATION whose subject_digest EQUALS the
+INITIAL's is the unchanged-tree refusal already stated above, now mechanically
+detectable. `base_sha` = the commit THIS verdict was computed on. NEGATIVE
+CONTROL: hand the folding logic a seat verdict.json that is absent or malformed
+and confirm the fold renders VOID — not CLEAN, and not FINDINGS. If a broken seat
+file can still produce a CLEAN, the conjunction is decorative and its CLEAN is
+VOID. `gate_key` = sha256(this topic + the committee formula it nucleates): if
+${run_dir}/admissions/<gate_key>.json exists, COPY the record forward and run no
+mutation; otherwise run it once and write it there. The record is copied INTO the
+verdict.json — NO SIDE LEDGER — and the consumer recomputes `gate_key`.
 """
 issue        = "${params.issue}"
 max_rounds   = "${params.max_rounds}"
@@ -671,10 +935,29 @@ mission proceeds past an unrun arm, and it costs somebody a sentence they have t
 write and a human has to read.
 
 Emit ${output_dir}/rehearsal.md (the four-cell matrix, every cell's verdict and
-reason) AND ${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[],
-cells: {"<uid>-<arch>": PASS|BLOCKED}} with all four keys ALWAYS present. FAIL-CLOSED:
-a green from the dev build instead of the packaged artefact is BLOCKED; a `cells` map
-with fewer than four keys is BLOCKED.
+reason) AND ${output_dir}/verdict.json in the §8 ADMISSION SHAPE below, whose
+`cells: {"<uid>-<arch>": PASS|BLOCKED}` map carries all four keys ALWAYS.
+FAIL-CLOSED: a green from the dev build instead of the packaged artefact is
+BLOCKED; a `cells` map with fewer than four keys is BLOCKED.
+
+§8 ADMISSION SHAPE — verdict.json is {verdict: PASS|BLOCKED, count, population,
+findings[], cells{}, base_sha, subject_digest, negative_control{gate_key,
+mutation, target, observed_verdict, evidence_digest}}, and A PASS MISSING ANY KEY
+IS INADMISSIBLE (the consumer reads it as BLOCKED). `population` = 4, always, and
+it is the whole point of writing it down: the denominator is FIXED by the matrix,
+so a `cells` map with three entries is arithmetically visible rather than
+rhetorically absent. `subject_digest` = the content digest of the PACKAGED
+ARTEFACT you installed — not the commit id, which is the property NEXT DOOR to
+tree identity; the consumer recomputes it from the artefact, which is what makes
+"I installed the packaged bytes" checkable instead of testified. `base_sha` = the
+commit THIS verdict was computed on. NEGATIVE CONTROL: install the DEV BUILD
+instead of the packaged artefact and re-run — this gate MUST BLOCK; if it still
+renders PASS it never distinguished the two, and its PASS is VOID. `gate_key` =
+sha256(this topic + the install script you invoked): if
+${run_dir}/admissions/<gate_key>.json exists, COPY the record forward and run no
+mutation; otherwise run it once — it is minutes — and write it there. The record
+is copied INTO this verdict.json — NO SIDE LEDGER — and the consumer recomputes
+`gate_key`.
 """
 
 # --- §9 dissent: NO LONGER A NODE ----------------------------------------
@@ -693,7 +976,7 @@ with fewer than four keys is BLOCKED.
 id          = "release"
 kind        = "fixed"
 formula     = "task-work"
-description = "G10 release (BLOCK): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, the four-cell matrix, the route deviations, the declared-surface comparison, and the folded dissent field with its non-empty arms_not_run[]). Fed by converge, rehearsal AND route. PASS here is the polymer's terminal success state, CANDIDATE-LANDED. NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
+description = "G10 release (BLOCK, and the §8 ADMISSION ENFORCEMENT POINT — the one check whose absence is the absence of the release): assemble the signed manifest (commit, red-hash, image digest, versions, CI ids, all verdicts, the four-cell matrix, the route deviations, the declared-surface comparison, and the folded dissent field with its non-empty arms_not_run[]). Refuses any upstream verdict lacking population / subject_digest / base_sha / negative_control; BLOCKS on a vacuous green (count 0 over population 0), on a colour-blind gate (observed_verdict == verdict), on a recomputed digest or gate_key that disagrees, and on any upstream base_sha that is NOT an ancestor of the release commit. Fed by converge, rehearsal AND route. PASS here is the polymer's terminal success state, CANDIDATE-LANDED. NO agent pushes to any remote — the human gate is the only door. Emits verdict.json."
 [spore.node.vars]
 topic = """
 COSMON-DEV ${params.issue} — G10 RELEASE MANIFEST (fail-closed, NO PUSH). Assemble
@@ -705,6 +988,43 @@ upstream_version (${params.upstream_version}), the CI verdict, the convergence's
 ballot-weighted CLEAN verdict (verdict CLEAN with a NON-EMPTY ballot_seats set — an
 empty ballot is never a pass), the rehearsal `cells` map with ALL FOUR keys PASS, and
 the author-independent `route` verdict from ${run_dir}/route/ with its deviation list.
+
+§8 ADMISSION, VALIDATED HERE — AND THIS IS WHY IT IS HERE. Every gate above shares
+one property with the seven that let a defect through: the thing it guarded
+proceeded whether or not it ran. THIS manifest has the inverse property — its
+absence is the absence of the release — so it is the one enforcement point that
+cannot be silently switched off. The immunity argument is written down so it can
+be AUDITED: FALSIFIER — exhibit a path by which a release ships WITHOUT this
+manifest and the argument is refuted and withdrawn.
+
+For EVERY upstream verdict.json you read, REFUSE it as evidence unless it carries
+all of: `population`, `subject_digest`, `base_sha`, and
+`negative_control{gate_key, mutation, target, observed_verdict, evidence_digest}`.
+Then, mechanically:
+  * A PASS with `count == 0` AND `population == 0` is a VACUOUS GREEN => BLOCKED.
+    A universal over an empty domain forbids nothing.
+  * RECOMPUTE `subject_digest` yourself from the artefact the gate names. A digest
+    you only read back is the producer's testimony with a hexadecimal accent.
+  * RECOMPUTE `gate_key` = sha256(that gate's topic + the script it invoked) and
+    check it EQUALS the `gate_key` inside its `negative_control`. A record you do
+    not re-key is an `admission.json` by another name — the provenance gate that
+    printed `skip` and exited 0, rebuilt.
+  * `negative_control.observed_verdict == verdict` => THE GATE IS COLOUR-BLIND and
+    its PASS is VOID => BLOCKED, naming the gate. A well-formed verdict artifact
+    saying PASS is exactly what a gate measuring the property NEXT DOOR emits; §8
+    constrains the SHAPE of the evidence, never its RELEVANCE, and the negative
+    control is the only field in the shape that speaks to relevance.
+  * `base_sha` ANCESTRY (BLOCKS): for every upstream verdict, `git merge-base
+    --is-ancestor <base_sha> <release commit>` must succeed. IF ANY UPSTREAM
+    VERDICT'S `base_sha` IS NOT AN ANCESTOR OF THE RELEASE COMMIT => BLOCKED,
+    naming the gate and both shas. A verdict computed on a tree nobody is shipping
+    is not evidence about the tree everybody is. Note `base_sha` is NOT
+    `parent_commit`: the reproduction's `parent_commit` is what the red was RED
+    on, `base_sha` is what the verdict was COMPUTED on, and the two were one field
+    until now.
+  * `ci-gate` reporting BLOCKED-INCOMPLETE is a MEASUREMENT failure, never a
+    quality finding: BLOCKED with `ci-incomplete`, and it must not be written up
+    as "the CI gate found a bug".
 
 THE DECLARED-SURFACE COMPARISON (BLOCKS). Enumerate the issue's FULL SEMANTIC SURFACE
 by the bug-closure rite — every code path, help text, man page, test and snapshot the
@@ -740,7 +1060,12 @@ THE DISSENT FIELD, folded in (no longer a node) — shape
   * `rationale` — the named reason for the overrule.
 
 Run `scripts/publish.sh --check` for the scrub projection. Emit
-${output_dir}/verdict.json {verdict: PASS|BLOCKED, count, findings[]}. FAIL-CLOSED:
+${output_dir}/verdict.json in the SAME §8 admission shape you enforce on everyone
+else — {verdict, count, population, findings[], base_sha, subject_digest,
+negative_control{gate_key, mutation, target, observed_verdict, evidence_digest}} —
+because a validator exempt from its own rule is the eighth instance. `population`
+= the number of manifest fields you validated. YOUR NEGATIVE CONTROL: strip
+`arms_not_run[]` from the manifest and re-run — this gate MUST BLOCK. FAIL-CLOSED:
 any missing manifest field => BLOCKED; a `risk` value of normal over a diff that
 touches the security surface (see the `risk` param's mechanical rule) => BLOCKED with
 the matching paths named. A PASS here is the polymer's TERMINAL SUCCESS STATE and it

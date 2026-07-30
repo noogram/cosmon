@@ -138,14 +138,16 @@ pub fn node_output_dir(run_dir: &Path, alias: &str) -> Result<PathBuf, Forbidden
 /// repo root.
 ///
 /// # Errors
-/// Returns [`EscapedOutputHome`] when an alias would compose a path outside the
-/// run home. Germination is refused as a whole: no call is handed a home if any
-/// one of them escapes, so a hostile node cannot be silently dropped while its
-/// siblings run.
+/// Returns [`RefusedOutputHome::Escaped`] when an alias would compose a path
+/// outside the run home, and [`RefusedOutputHome::CaseAliased`] when two aliases
+/// are distinct strings that name one directory on a case-insensitive
+/// filesystem. Germination is refused as a whole: no call is handed a home if
+/// any one of them is refused, so a hostile node cannot be silently dropped
+/// while its siblings run.
 pub fn inject_run_outputs(
     calls: &mut [NucleateCall],
     run_dir: &Path,
-) -> Result<(), EscapedOutputHome> {
+) -> Result<(), RefusedOutputHome> {
     // Check every alias BEFORE mutating anything, so a refusal leaves the call
     // list untouched: all-or-nothing, never a half-injected polymer.
     for call in calls.iter() {
@@ -153,6 +155,7 @@ pub fn inject_run_outputs(
             alias: call.alias.clone(),
         })?;
     }
+    refuse_case_aliased_homes(calls)?;
 
     let run_dir_str = run_dir.to_string_lossy().into_owned();
     for call in calls.iter_mut() {
@@ -181,6 +184,68 @@ pub fn inject_run_outputs(
             .insert(RUN_DIR_VAR.to_string(), run_dir_str.clone());
     }
     Ok(())
+}
+
+/// Refuse a call list whose aliases are distinct as strings but name the SAME
+/// directory once a real filesystem folds their case.
+///
+/// # Why this is not already covered by the seal
+///
+/// `spore.tla`'s `NoResourceCollision` quantifies over the MODEL: it proves the
+/// map from node to output path is injective *as a map on strings*. A real
+/// filesystem is not a set of strings. macOS APFS and Windows NTFS are
+/// case-insensitive by default, so the perfectly injective pair `("Route",
+/// "route")` — both accepted by
+/// [`validate_node_id`](super::validate_node_id), whose alphabet includes
+/// uppercase ASCII — resolves to ONE directory, and two nodes then interleave
+/// their `verdict.json` in it. The seal is sound and it does not model this;
+/// this function is the executable counterpart the model declines to be.
+///
+/// The refusal is unconditional rather than probed, because a spore is a
+/// portable moule: a germination that succeeds on Linux and silently aliases on
+/// a reviewer's Mac is worse than one that refuses everywhere. Purely lexical,
+/// so the zero-I/O core keeps its property.
+///
+/// # Errors
+/// Returns [`RefusedOutputHome::CaseAliased`] naming the first colliding pair.
+fn refuse_case_aliased_homes(calls: &[NucleateCall]) -> Result<(), RefusedOutputHome> {
+    let mut seen: Vec<(String, &str)> = Vec::with_capacity(calls.len());
+    for call in calls {
+        let folded = call.alias.to_ascii_lowercase();
+        if let Some((_, first)) = seen.iter().find(|(other, _)| *other == folded) {
+            return Err(RefusedOutputHome::CaseAliased {
+                first: (*first).to_string(),
+                second: call.alias.clone(),
+            });
+        }
+        seen.push((folded, &call.alias));
+    }
+    Ok(())
+}
+
+/// Why a germination is refused an output home.
+///
+/// Two distinct failures, kept distinct: one alias that leaves the run home, and
+/// two aliases that share a directory once the filesystem folds their case. A
+/// single opaque "bad alias" error would name one node where the second fault
+/// needs a pair to be actionable.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RefusedOutputHome {
+    /// An alias composes a path outside `<state>/spore-runs/<id>/`.
+    #[error(transparent)]
+    Escaped(#[from] EscapedOutputHome),
+    /// Two aliases differ only by ASCII case, so a case-insensitive filesystem
+    /// hands both nodes one directory and their gate records overwrite each
+    /// other. The seal's `NoResourceCollision` cannot see this: it proves
+    /// injectivity over strings, and the collision happens in the environment.
+    #[error("germination aliases \"{first}\" and \"{second}\" differ only in ASCII case and would name ONE directory on a case-insensitive filesystem (APFS, NTFS); refusing to germinate")]
+    CaseAliased {
+        /// The alias seen first, in declaration order.
+        first: String,
+        /// The later alias that folds onto it.
+        second: String,
+    },
 }
 
 /// A germination alias would compose an output directory outside the run home.
@@ -497,7 +562,56 @@ type = "feeds"
         let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
 
         let err = inject_run_outputs(&mut calls, &run).expect_err("must refuse");
-        assert_eq!(err.alias, "../../tracked-output");
+        assert_eq!(
+            err,
+            RefusedOutputHome::Escaped(EscapedOutputHome {
+                alias: "../../tracked-output".to_string()
+            })
+        );
         assert_eq!(calls, before, "a refused injection mutates nothing");
+    }
+
+    /// Operator decision D3 on delib-20260729-1d4e: *cover real file collisions
+    /// SEPARATELY, by an executable test*.
+    ///
+    /// `("Route", "route")` is the witness. Both pass `validate_node_id`, both
+    /// are distinct strings — so the seal's string-injectivity argument holds
+    /// and reports no collision — and both name ONE directory on APFS/NTFS.
+    /// The model is right about the model; the environment disagrees, and the
+    /// refusal is where that disagreement is resolved.
+    #[test]
+    fn aliases_differing_only_in_case_are_refused() {
+        let mut calls = expanded();
+        calls[0].alias = "Route".to_string();
+        calls[1].alias = "route".to_string();
+        let before = calls.clone();
+        let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
+
+        // Lexically the two homes are DISTINCT — this is precisely what the
+        // seal proves, and precisely why it is not enough.
+        assert_ne!(
+            node_output_dir(&run, "Route").unwrap(),
+            node_output_dir(&run, "route").unwrap(),
+        );
+
+        let err = inject_run_outputs(&mut calls, &run).expect_err("must refuse");
+        assert_eq!(
+            err,
+            RefusedOutputHome::CaseAliased {
+                first: "Route".to_string(),
+                second: "route".to_string(),
+            }
+        );
+        assert_eq!(calls, before, "a refused injection mutates nothing");
+    }
+
+    /// The refusal must not fire on the shapes the convention actually
+    /// produces, or it would be a gate that blocks everything and therefore
+    /// measures nothing.
+    #[test]
+    fn distinct_aliases_are_not_refused() {
+        let mut calls = expanded();
+        let run = run_dir(Path::new("/repo/.cosmon/state"), "germ-1");
+        inject_run_outputs(&mut calls, &run).expect("benign aliases must germinate");
     }
 }
