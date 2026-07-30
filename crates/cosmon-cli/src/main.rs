@@ -491,9 +491,66 @@ enum Command {
     BuildTree,
 }
 
+/// Install the process-wide `tracing` subscriber that carries `cs`'s own
+/// warnings to the operator (COSMON #26).
+///
+/// Until this existed, every `tracing::warn!` in this crate was emitted into a
+/// process with no subscriber installed, which drops the event on the floor at
+/// *any* `RUST_LOG` level. That silence was not cosmetic: the loudest of those
+/// warnings is the briefing-submit `ProceedStillPending` line, which names the
+/// tmux socket, the session, and the exact bare-submit command that recovers a
+/// worker whose briefing never left the composer. It is the entire mitigation
+/// for a known gap — nothing in this process presses submit after the in-band
+/// window closes — and the operator was getting a dispatch that exits 0, a
+/// worker that never started, and nothing to read.
+///
+/// The three choices here each have a wrong answer that looks right:
+///
+/// * **`warn` by default, not `info`.** A CLI that prints info-level chatter on
+///   every invocation trains its operator to ignore its output, which is
+///   precisely how a loud warning stops being loud. The default floor is
+///   therefore `warn`: on a healthy run `cs` stays exactly as quiet as it is
+///   today, and the only new bytes are the ones that were being discarded.
+/// * **`RUST_LOG` overrides, it does not merely add.** It is what an operator
+///   reaches for and what the external report measured, so a set `RUST_LOG`
+///   wins outright — including when it asks for *less* than `warn`.
+/// * **stderr, never stdout.** `cs` has `--json` on every command and its stdout
+///   is parsed by orchestrators. A subscriber on stdout would corrupt
+///   machine-readable output, which is a worse defect than the silence it fixes.
+///
+/// `--verbose` raises the floor to `info`, so the flag means one thing across
+/// both output channels: the hand-rolled `println!`s the subcommands gate on
+/// [`cmd::Context::verbose`], and the instrumented events. An explicit
+/// `RUST_LOG` still wins over `--verbose`, because naming a filter is the more
+/// specific gesture.
+///
+/// Failure to install is deliberately swallowed: a subscriber already set by a
+/// library, or a malformed filter, must not stop the command the operator
+/// actually asked for.
+fn install_tracing(verbose: bool) {
+    use std::io::IsTerminal;
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(if verbose { "info" } else { "warn" }));
+
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        // ANSI is a courtesy to a human at a terminal and pure noise inside a
+        // captured `worker.stderr`, which is where these lines are most often
+        // read — hours later, by a pilot reconstructing a stuck dispatch.
+        .with_ansi(std::io::stderr().is_terminal())
+        .try_init();
+}
+
 #[allow(clippy::too_many_lines)]
 fn main() {
     let cli = Cli::parse();
+
+    // Before any dispatch: from here on a `tracing::warn!` reaches the operator
+    // instead of the floor.
+    install_tracing(cli.verbose);
 
     let ctx = cmd::Context {
         verbose: cli.verbose,
