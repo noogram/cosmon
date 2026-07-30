@@ -246,6 +246,40 @@ Nothing above is retracted. M1–M4 are still necessary, still enforced, still
 pinned. The correction is that they were described as sufficient, and the
 container was the only place that could say otherwise.
 
+## Postscript — the sixth member, and the premise that expired (2026-07-30, `task-20260730-ec81`)
+
+M1–M5 shut the corridor against screens this build had never seen. They said
+nothing about the build's model of the screens it *had* seen going stale, and
+five days later it had.
+
+Claude Code 2.1.220 changed two things at once. It stopped **boxing** its
+composer and started **ruling** it — one full-width `─` above the input line,
+one below — so neither `shows_composer` disjunct matched. And it stopped hiding
+the composer during a turn. Seven panes captured from a live session — one idle,
+six four seconds apart mid-stream — all classified `AwaitingHuman`. The first
+change made every non-bypass session undispatchable outright; the second made
+`SessionStatus::Working` unreachable, and `Working` is `cs tackle`'s
+briefing-submit loop's only early exit, so every dispatch paid its whole 90 s
+budget. An external tester measured the flat 92/93 s against jobs of 32 s and
+53 s.
+
+The lesson is a different one from M5's, and it is worth separating. M5 was
+about a *default* left open. This was about a *premise* that quietly expired:
+"an input box at the bottom means idle" was true only while the prompt vanished
+for the duration of a turn, and its whole truth came from the disappearance.
+When the disappearance went away the rule kept running, still shaped like a
+sound rule, now certifying the opposite of what it was written to certify. No
+test noticed, because not one test in the suite held a frame the TUI had
+actually painted — every pane in it was a string literal someone typed from a
+description.
+
+The repair is recorded as **M2**'s third disjunct and **M2b** in §8v. The
+guard against the next expiry is `tests/fixtures/claude-tui-2.1.220/` — seven
+real captures, asserted by `tests/claude_tui_2_1_220.rs`. A classifier verified
+against a described TUI drifts on exactly the schedule this one did.
+
+Nothing above is retracted.
+
 ## References
 
 - **Closure verdict** — `bug-closure-20260725-8c79`, §"The named gaps" #3

@@ -210,6 +210,28 @@ mod markers {
     pub const FIRST_RUN_THEME: &str = "Choose the text style";
     /// Companion marker for the same first-run wizard banner.
     pub const FIRST_RUN_WELCOME: &str = "Let's get started";
+    /// The glyph a full-width horizontal rule is drawn from — `U+2500 BOX
+    /// DRAWINGS LIGHT HORIZONTAL`.
+    ///
+    /// Claude Code 2.1.220 stopped boxing its composer and started *ruling* it:
+    /// one full-width run of this character above the input line and one below,
+    /// with nothing else on either. See [`is_horizontal_rule_line`] for why that
+    /// pair is composer-specific evidence where a box frame was not.
+    pub const RULE_CHAR: char = '─';
+    /// The glyphs Claude Code cycles through in its status slot — the line it
+    /// paints directly above the composer while a turn is in flight.
+    ///
+    /// Version-coupled by construction: this TUI rotates its spinner and has
+    /// changed the set before. The fixtures under
+    /// `tests/fixtures/claude-tui-2.1.220/` are what makes a future change fail
+    /// loudly here instead of silently costing every dispatch its full budget.
+    ///
+    /// `◐` is deliberately **absent**. It occupies the same slot when the pane
+    /// is idle (`◐ medium · /effort`), so admitting it would call every idle
+    /// 2.1.220 pane `Working`.
+    pub const SPINNER_GLYPHS: [char; 8] = ['✢', '✳', '✶', '✻', '✽', '✺', '✴', '❋'];
+    /// The interrupt hint carried by the status line while a turn is running.
+    pub const INTERRUPT_HINT: &str = "esc to interrupt";
 }
 
 /// How many trailing lines of the pane [`detect_status`] asks the backend for.
@@ -287,6 +309,131 @@ fn pane_tail(output: &str) -> Vec<&str> {
         .filter(|l| !l.trim().is_empty())
         .take(TAIL_LINES)
         .collect()
+}
+
+/// The same window as [`pane_tail`], in the order the TUI painted it.
+///
+/// [`pane_tail`]'s callers all ask *"is any line in the tail like this?"*, for
+/// which order is irrelevant. The 2.1.220 composer is recognised by a
+/// three-line *arrangement* instead — rule, input line, rule — so it needs the
+/// lines the right way round and adjacent to each other. Blank lines are
+/// dropped by both, which is what lets the arrangement survive the blank row
+/// this TUI leaves between its lower rule and its footer.
+fn pane_tail_ordered(output: &str) -> Vec<&str> {
+    let mut tail = pane_tail(output);
+    tail.reverse();
+    tail
+}
+
+/// The shortest run of [`markers::RULE_CHAR`] that counts as a rule.
+///
+/// The composer's rules span the whole pane (200 columns in the captured
+/// fixtures). The floor exists only to keep a short divider drawn inside prose
+/// — `───` between two paragraphs of an answer — from standing in for one.
+const MIN_RULE_WIDTH: usize = 8;
+
+/// How many trailing non-empty lines [`shows_work_in_flight`] searches for the
+/// status slot.
+///
+/// Four of them are spent on the composer itself before the slot is reached;
+/// the rest is headroom for whatever else the TUI parks down there (a tmux
+/// warning occupies the first spare row in `streaming-1.pane`). See that
+/// function's doc for why this window may be wider than [`TAIL_LINES`] without
+/// letting scrollback speak.
+const STATUS_SLOT_LINES: usize = 8;
+
+/// `true` when `line` is a bare full-width horizontal rule and nothing else.
+///
+/// **Nothing else** is the load-bearing half. This TUI still boxes its modals
+/// (`╭───╮` … `│ ❯ a) Re-authorise now │` … `╰───╯`), and a box corner or a
+/// vertical bar anywhere on the line disqualifies it here — which is what keeps
+/// [`shows_rule_framed_composer`] from re-opening the corridor that offering a
+/// box frame as composer evidence once opened. Only the composer draws a rule
+/// that is *only* a rule.
+fn is_horizontal_rule_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.chars().count() >= MIN_RULE_WIDTH && trimmed.chars().all(|c| c == markers::RULE_CHAR)
+}
+
+/// `true` when the pane's tail shows Claude Code 2.1.220's composer — an input
+/// line sandwiched between two bare horizontal rules.
+///
+/// This is the composer signature that replaced the boxed one, and its absence
+/// from [`markers`] is why seven real 2.1.220 panes — one idle, six mid-stream
+/// — all classified [`SessionStatus::AwaitingHuman`]. The footer disjuncts in
+/// [`is_composer_footer_line`] happened to rescue the *bypass-permissions*
+/// spawn (its footer paints `⏵⏵`) and nothing else: the same build launched by
+/// hand in manual mode painted `⏸ manual mode on` and could not be dispatched
+/// into at all.
+///
+/// The arrangement is demanded, not merely the ingredients: rule, then an input
+/// line that [`is_menu_option_line`] does not claim, then rule, adjacent in the
+/// tail. A menu whose cursor rests on an option is still refused, so the closed
+/// default of [`shows_composer`] is preserved rather than widened — this adds
+/// one more way to *prove* a composer, never one more way to skip the proof.
+fn shows_rule_framed_composer(output: &str) -> bool {
+    pane_tail_ordered(output).windows(3).any(|w| {
+        is_horizontal_rule_line(w[0])
+            && is_horizontal_rule_line(w[2])
+            && chevron_content(w[1]).is_some()
+            && !is_menu_option_line(w[1])
+    })
+}
+
+/// `true` when the pane's status slot — the line directly above the composer —
+/// says a turn is **in flight right now**.
+///
+/// The evidence is a spinner glyph at the head of the line plus a running
+/// clock: `✢ Coalescing… (3s · thinking with medium effort)`. Both halves are
+/// required, and the second one is the whole reason this predicate is narrow.
+/// When a turn finishes, the same slot keeps a summary — `✻ Baked for 16s` —
+/// and keeps it until the *next* turn starts. Accepting that would call a pane
+/// idle since yesterday `Working`, and would let the briefing-submit loop
+/// declare a briefing delivered on the strength of the previous turn's
+/// leftovers. A parenthesised elapsed timer, or the interrupt hint, only
+/// appears while something is actually running.
+///
+/// # Why its window is not [`pane_tail`]'s
+///
+/// The 2.1.220 composer costs four non-empty lines on its own — footer, lower
+/// rule, input line, upper rule — so a five-line tail leaves exactly one row
+/// for the status slot, and in `streaming-1.pane` a tmux warning is sitting in
+/// it. The slot is six rows up in that frame and the classifier could not see
+/// it. [`STATUS_SLOT_LINES`] is the window that reaches it.
+///
+/// Widening is safe *here* and would not be for the other rules, which is why
+/// it is not shared. The status slot is a fixed row this TUI **overwrites**,
+/// never a line it appends: when a turn ends the running clock is replaced in
+/// place by the `Baked for 16s` summary, so a `(3s · …` line cannot survive
+/// into scrollback and go on certifying a turn that finished. The composer and
+/// menu rules have no such property — a composer genuinely does scroll away
+/// above a modal — so they keep the tight tail.
+fn shows_work_in_flight(output: &str) -> bool {
+    let window: Vec<&str> = output
+        .lines()
+        .rev()
+        .filter(|l| !l.trim().is_empty())
+        .take(STATUS_SLOT_LINES)
+        .collect();
+    window.iter().any(|line| {
+        let content = unframe(line);
+        let Some(first) = content.chars().next() else {
+            return false;
+        };
+        if !markers::SPINNER_GLYPHS.contains(&first) {
+            return false;
+        }
+        content.contains(markers::INTERRUPT_HINT) || has_elapsed_timer(content)
+    })
+}
+
+/// `true` when `line` carries a parenthesised elapsed-seconds token — the
+/// `(3s · …` of a status line whose clock is still running.
+fn has_elapsed_timer(line: &str) -> bool {
+    line.split('(').skip(1).any(|rest| {
+        let digits = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+        digits.len() < rest.len() && digits.starts_with('s')
+    })
 }
 
 /// The box-drawing characters Claude Code paints around its composer.
@@ -377,16 +524,19 @@ fn is_composer_footer_line(line: &str) -> bool {
 /// history must not certify the present: a capture that scrolled past a
 /// composer thirty lines ago says nothing about the menu on screen today.
 ///
-/// Two things count as evidence, and both need an input line *plus* something
-/// that identifies it as the composer's:
+/// Three things count as evidence, and each needs an input line *plus*
+/// something that identifies it as the composer's:
 ///
 /// 1. the composer placeholder [`markers::READY_TYPE`] sitting **on** a chevron
 ///    line — an empty input box that says in words that it wants a message. In
 ///    body prose ("Type your message to get started") the same phrase is a
-///    welcome banner talking *about* the composer, not a composer; and
+///    welcome banner talking *about* the composer, not a composer;
 /// 2. a chevron line that is not a menu option ([`is_menu_option_line`]),
 ///    standing in the same tail as the composer's own footer
-///    ([`is_composer_footer_line`]).
+///    ([`is_composer_footer_line`]); and
+/// 3. a chevron line that is not a menu option, ruled directly above and below
+///    ([`shows_rule_framed_composer`]) — the arrangement Claude Code 2.1.220
+///    draws, where the boxed composer of (2)'s era used to be.
 ///
 /// A bare chevron on its own is deliberately **not** enough. It is the shape of
 /// any empty input line, including the paste-the-authorization-code field one
@@ -423,10 +573,16 @@ fn shows_composer(output: &str) -> bool {
     }
 
     // (2) A non-menu input line under the composer's own footer.
-    tail.iter().any(|l| is_composer_footer_line(l))
+    if tail.iter().any(|l| is_composer_footer_line(l))
         && tail
             .iter()
             .any(|l| chevron_content(l).is_some() && !is_menu_option_line(l))
+    {
+        return true;
+    }
+
+    // (3) The 2.1.220 arrangement: a non-menu input line ruled above and below.
+    shows_rule_framed_composer(output)
 }
 
 /// `true` when the pane's tail shows an input line that [`shows_composer`] has
@@ -533,9 +689,33 @@ pub fn classify_output(output: &str) -> SessionStatus {
         return SessionStatus::Loading;
     }
 
-    // Check the composer FIRST — if the pane is showing an input box at the
-    // bottom, Claude is idle regardless of past ⏺ markers in scrollback. This
-    // fixes false "working" detection from old tool-use output.
+    // A status line whose clock is still running outranks the composer, and
+    // this ordering is the second half of the 2.1.220 repair.
+    //
+    // The composer used to be checked first, on the rule "an input box at the
+    // bottom means idle, whatever the scrollback says". That rule was sound
+    // while the prompt *vanished* for the duration of a turn — its truth came
+    // entirely from the disappearance. In 2.1.220 the composer stays painted
+    // for the whole stream, so the premise is gone and with it every path to
+    // `Working`: six panes captured four seconds apart mid-stream showed the
+    // composer in every frame. Downstream, `cs tackle`'s briefing-submit loop
+    // has `Working` as its only early exit, so an unreachable arm is a flat
+    // 90 s added to every dispatch.
+    //
+    // What replaces the disappearing prompt is `shows_work_in_flight`, which
+    // reads the slot the composer's rules do not cover — and reads it narrowly
+    // enough that a *finished* turn's leftover summary does not qualify. That
+    // narrowness is what keeps the original rule's real purpose intact: a `⏺`
+    // from an earlier turn still must not report `Working` over an idle pane,
+    // and it cannot, because a completed turn leaves no running clock.
+    if shows_work_in_flight(output) {
+        return SessionStatus::Working;
+    }
+
+    // Then the composer — if the pane is showing an input box at the bottom and
+    // nothing is in flight above it, Claude is idle regardless of past ⏺
+    // markers in scrollback. This fixes false "working" detection from old
+    // tool-use output.
     //
     // The evidence rule lives in `shows_composer`, and it is the closed
     // default that shuts the issue-#20 corridor: a chevron pointing at a menu
@@ -2139,6 +2319,120 @@ mod tests {
                 "a box frame certified the {label} as a composer:\n{pane}"
             );
         }
+    }
+
+    /// The rule sandwich is what makes a 2.1.220 composer legible, and it must
+    /// not become a way for a *menu* to be legible as one.
+    ///
+    /// A modal ruled top and bottom is a plausible screen for this TUI to draw,
+    /// and the only thing standing between it and `Ready` is that its chevron
+    /// rests on an option. That is the same guard rule (2) relies on; this pins
+    /// that rule (3) inherited it rather than opening a third path.
+    #[test]
+    fn a_ruled_menu_is_not_a_ruled_composer() {
+        let pane = " Choose a login method\n\
+                    ────────────────────────────────────────\n\
+                    ❯ 1. Claude account\n\
+                    ────────────────────────────────────────\n";
+        assert_eq!(
+            classify_output(pane),
+            SessionStatus::AwaitingHuman,
+            "a menu cursor between two rules was certified as a composer:\n{pane}"
+        );
+    }
+
+    /// The 2.1.220 composer, reduced to the arrangement that identifies it.
+    ///
+    /// Neither footer marker is present — this is the manual-mode pane, whose
+    /// `⏸ manual mode on` footer matches nothing in [`markers`]. Before rule (3)
+    /// that made the whole session undispatchable.
+    #[test]
+    fn a_ruled_input_line_is_composer_evidence() {
+        let pane = "  20 — vingt : deux dizaines.\n\
+                    ────────────────────────────────────────\n\
+                    ❯ \n\
+                    ────────────────────────────────────────\n\
+                    \n  ⏸ manual mode on · ← 1 agent\n";
+        assert_eq!(classify_output(pane), SessionStatus::Ready);
+    }
+
+    /// A box border is drawn from the same glyph as a rule, and it is not one.
+    ///
+    /// `╭───╮` would satisfy a naive "does this line contain rule characters?"
+    /// test, and satisfying it top and bottom is exactly what a boxed modal
+    /// does. [`is_horizontal_rule_line`] demands the line be *nothing but* rule.
+    #[test]
+    fn a_box_border_is_not_a_horizontal_rule() {
+        assert!(!is_horizontal_rule_line("╭───────────────╮"));
+        assert!(!is_horizontal_rule_line("│───────────────│"));
+        assert!(!is_horizontal_rule_line("──── Tips ──────"));
+        assert!(!is_horizontal_rule_line("───"));
+        assert!(is_horizontal_rule_line("  ────────────────  "));
+    }
+
+    /// The status slot holds one of three things, and only one of them means a
+    /// turn is running.
+    ///
+    /// `◐ medium · /effort` is what an *idle* 2.1.220 pane parks there, and
+    /// `✻ Baked for 16s` is what a *finished* turn leaves there until the next
+    /// one starts. Admitting either would report `Working` for a pane that has
+    /// been idle for hours — and would let the briefing-submit loop call a
+    /// briefing delivered on the strength of the previous turn's leftovers.
+    #[test]
+    fn only_a_running_clock_counts_as_work_in_flight() {
+        for idle_slot in [
+            "◐ medium · /effort",
+            "✻ Baked for 16s",
+            "✻ Baked for 4m 12s",
+        ] {
+            let pane = format!(
+                "{idle_slot}\n\
+                 ────────────────────────────────────────\n\
+                 ❯ \n\
+                 ────────────────────────────────────────\n"
+            );
+            assert_eq!(
+                classify_output(&pane),
+                SessionStatus::Ready,
+                "a status slot that is not running a clock was read as work in flight:\n{pane}"
+            );
+        }
+
+        for running_slot in [
+            "✢ Coalescing… (3s · thinking with medium effort)",
+            "✻ Cogitating… (41s · ↑ 1.2k tokens · esc to interrupt)",
+            "✽ Working… (esc to interrupt)",
+        ] {
+            let pane = format!(
+                "{running_slot}\n\
+                 ────────────────────────────────────────\n\
+                 ❯ \n\
+                 ────────────────────────────────────────\n"
+            );
+            assert_eq!(
+                classify_output(&pane),
+                SessionStatus::Working,
+                "a running clock above the composer was read as idle:\n{pane}"
+            );
+        }
+    }
+
+    /// Work evidence outranks the composer, and that reordering must not undo
+    /// what checking the composer first was protecting.
+    ///
+    /// The original order existed to stop a `⏺` left in scrollback from
+    /// reporting `Working` over an idle pane. The guard survives the reorder
+    /// because the new evidence is a *running clock*, which a finished turn does
+    /// not leave behind — not because the composer still wins.
+    #[test]
+    fn stale_tool_use_still_does_not_outrank_a_ruled_composer() {
+        let pane = "⏺ Read(src/lib.rs)\n\
+                    ⏺ Done.\n\
+                    ✻ Baked for 16s\n\
+                    ────────────────────────────────────────\n\
+                    ❯ \n\
+                    ────────────────────────────────────────\n";
+        assert_eq!(classify_output(pane), SessionStatus::Ready);
     }
 
     /// [`is_menu_option_line`] used to key on exactly two characters, so `10.`,
