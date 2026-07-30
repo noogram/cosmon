@@ -1,0 +1,19 @@
+# Per-commit waivers for scripts/check-provenance.sh (ADR-052 §I9).
+#
+# One merge commit per line: <full-sha> <TAB> <reason>. Comments and blank
+# lines ignored. A waived commit is reported as `WAIVE`, counted apart from
+# both `ok` and `shape`, and its reason is printed — a waiver that nobody
+# reads is the same as no gate.
+#
+# Per commit, never per pattern. The gate exists because "every merge traces
+# to a molecule" is nearly always true; the rare merge that genuinely is not a
+# molecule harvest must cost someone a written sentence a reviewer sees in the
+# diff, not a widened regex that silently forgives every future merge too.
+# Same discipline as `publish: allow — <reason>`, which is per line and never
+# per file for exactly this reason.
+#
+# COSMON_SKIP_PROVENANCE=1 still exists and still turns the whole gate off.
+# It is the wrong tool here: it would forgive this one merge by blinding the
+# gate to all 107.
+
+d6c7c0927b53823e637f8b6f6f61257574b5e505	One-time collapse of the two trunks (2026-07-30). `main` required linear history, so `cs done` merges could not land on it and a private `dev` line existed to receive them; when that requirement was dropped, the two lines were reunited by merging `origin/main` INTO `dev`. That direction made the dev line the first-parent spine and left the published trunk hanging off as a second parent, which is exactly what this gate refuses. The incoming side is 626e09b1e57c345f48a9894845e0b2177a6055b0 — `origin/main` itself at the time, so every line it carries was gated when it landed there. Nothing ungated entered through this merge; what changed is which side git calls the spine.

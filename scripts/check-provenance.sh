@@ -217,6 +217,7 @@ failed=0
 checked=0
 ledger_verified=0
 shape_only=0
+waived=0
 while IFS= read -r commit; do
     [ -n "$commit" ] || continue
     checked=$((checked + 1))
@@ -270,9 +271,29 @@ while IFS= read -r commit; do
     done
 
     if [ -z "$mol_id" ]; then
+        # Last chance before FAIL: an explicit, per-commit, reasoned waiver.
+        # Read from the scope tip's tree rather than the working checkout, so
+        # the verdict is a property of the commit under test.
+        # `|| true`: the file is optional, `grep -v` returns 1 on an all-comment
+        # file, and under `set -euo pipefail` either would abort the whole gate
+        # rather than fail this one commit — a gate that dies is not a gate that
+        # refuses, and the summary line would never print.
+        waiver=$( { git show "$head:docs/provenance-waivers.tsv" 2>/dev/null \
+            | grep -v '^[[:space:]]*#' \
+            | awk -F'\t' -v c="$commit" '$1==c {print $2; exit}'; } || true )
+        if [ -n "$waiver" ]; then
+            waived=$((waived + 1))
+            echo "WAIVE $commit"
+            echo "      $subject"
+            echo "      reason: $waiver"
+            continue
+        fi
         echo "FAIL  $commit"
         echo "      subject does not match cosmon provenance pattern:"
         echo "      $subject"
+        echo "      (a merge genuinely outside the discipline takes a line in"
+        echo "      docs/provenance-waivers.tsv with a written reason, not a"
+        echo "      widened pattern and not COSMON_SKIP_PROVENANCE=1)"
         failed=$((failed + 1))
         continue
     fi
@@ -334,7 +355,7 @@ done <<< "$merges"
 # residence is false for all 94 of them.
 echo
 echo "check-provenance: checked=$checked ledger_verified=$ledger_verified" \
-     "shape_only=$shape_only failed=$failed"
+     "shape_only=$shape_only waived=$waived failed=$failed"
 if [ "$ledger_verified" -eq 0 ] && [ "$checked" -gt 0 ]; then
     echo "check-provenance: ZERO merges were ledger-verified on this surface." \
          "The ADR-052 §I9 ledger invariant is enforced elsewhere" \

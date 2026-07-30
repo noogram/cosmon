@@ -52,7 +52,15 @@ fixture() {
     _bare="${_root}/public.git"
     _work="${_root}/dev"
     mkdir -p "$_root"
-    git init --quiet --bare "$_bare"
+    # `-b main` on BOTH, and the bare one is the load-bearing half. Without it
+    # the bare repo's HEAD follows the machine's `init.defaultBranch`, which is
+    # `main` on the author's box and `master` on a stock runner. `main` still
+    # gets pushed into it either way, so the bare repo looks fine — but a later
+    # `git clone` of it follows the dangling HEAD, checks nothing out, and the
+    # clone's first commit lands on `master`. The failure then surfaces three
+    # lines away as `src refspec main does not match any`, naming the push and
+    # not the init that caused it.
+    git init --quiet --bare -b main "$_bare"
     git init --quiet -b main "$_work"
     git -C "$_work" config user.email dev@example.invalid
     git -C "$_work" config user.name 'Fixture Dev'
