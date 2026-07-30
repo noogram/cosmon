@@ -1,0 +1,231 @@
+formula = "lane-triage"
+version = 1
+description = """
+The LANE PREDICATE of the `cosmon-dev` spore — the node that decides whether this
+mission runs the FAST lane or the FULL lane, and decides it FROM AN ARTIFACT rather
+than from anybody's adjective.
+
+WHY A FORMULA AND NOT A `task-work` TOPIC. Everything else in this spore is an
+agentic leg whose judgement is the deliverable. This one is the opposite: its output
+must be a pure function of four files, recomputable by a stranger, and its whole
+value is that it CANNOT be talked into `fast`. `task-work` is declared
+`deterministic = false` and says so; this recipe is declared `deterministic = true`
+and earns it the only way a recipe can — by requiring the predicate to be computed
+by a RECORDED COMMAND whose output is the artifact, so a reader re-runs it instead
+of believing it.
+
+  HONEST NOTE ON THAT FLAG. `[spore.formulas.*].deterministic` round-trips into
+  `SporeFormula::deterministic` and, as of this writing, has NO non-test reader in
+  the workspace — it is a live member of the very class K1 exists to detect. It is
+  declared here because it is the schema's only slot for the fact, and the fact is
+  true; it is NOT load-bearing, and nothing in this spore branches on it. What is
+  load-bearing is the fail-closed conjunction below, which any consumer recomputes
+  from `lane.json` without trusting this file at all.
+
+THE ASYMMETRY, WHICH IS THE WHOLE POINT. The operator may force the FULL lane
+(`--var lane=full`). There is NO knob that forces `fast` — and that is enforced by
+the param schema rather than by this prose: `[spore.params.lane]` is an `enum` whose
+member set is `{auto, full}`, and `cs spore validate` / `cs spore run` refuse
+`--var lane=fast` with "value \\"fast\\" is not a member of the enum values". A
+sentence saying "do not do this" is advice; a closed enum is a refusal.
+
+  "The operator may force `full`; there is no knob that forces `fast`. Asymmetric
+  authority is the shape of every honest gate." (carnot, delib-20260729-1d4e)
+
+FAIL-CLOSED IN ONE DIRECTION ONLY. Every absent input, every unparseable file,
+every conjunct you could not evaluate resolves the lane to `full`. There is no
+input whose ABSENCE can produce `fast`. A predicate that fails open is a default
+wearing a criterion's clothes, and `risk = "normal"` — the default that switched off
+the exact arm the #20 defect lived in — is what that costs.
+
+VARIABLES:
+  - topic                : the mission's issue line (the spore interpolates it).
+  - lane                 : `auto` (evaluate the predicate) | `full` (forced widening).
+  - fast_lane_max_files  : the blast-radius ceiling, in files.
+  - release_surface      : the comma-joined path set no fast-lane patch may touch.
+  - risk                 : normal | security — one of the four conjuncts.
+
+ARTIFACT PATHS — `lane.json` and `verdict.json` are written to the RUN-SCOPED OUTPUT
+HOME germination hands this node in `output_dir` (ADR-161), never the worktree, never
+the spore definition tree, never the repo root. A sibling gate is read through
+`${run_dir}/<gate>/`.
+"""
+id_prefix = "lane"
+freeze_on_last_step = false
+
+[vars.topic]
+description = "The mission's issue line, for the record the predicate writes."
+required = true
+
+[vars.lane]
+description = "`auto` — evaluate the predicate. `full` — the operator forced the full lane; skip the predicate and record who forced it. There is deliberately no `fast` value."
+default = "auto"
+
+[vars.fast_lane_max_files]
+description = "The blast-radius ceiling in files. A declared write set larger than this is not fast-lane eligible."
+default = "5"
+
+[vars.release_surface]
+description = "Comma-joined path set (version fields, generated man pages, help goldens, publish.sh, the spore itself). Any intersection with the declared write set forces the full lane."
+required = true
+
+[vars.risk]
+description = "normal | security. `security` forces the full lane unconditionally."
+default = "normal"
+
+# Tier 0 — a leaf predicate. It nucleates nothing; it reads four files and writes
+# two. The only node in this spore that is meant to be boring.
+[tier]
+level = 0
+
+[[steps]]
+id = "evaluate-the-predicate"
+title = "Evaluate the four conjuncts and write lane.json"
+description = """
+MOLECULE_DIR is the run-scoped `${output_dir}` germination handed you (ADR-161).
+
+WRITE THE SCRIPT FIRST, THEN RUN IT. Put the whole evaluation in
+MOLECULE_DIR/lane.sh and run it once, capturing its status to a FILE (never read an
+exit code through a pipe). The script IS the determinism claim: a reader re-runs it
+against the same four inputs and gets the same lane, or this recipe lied about
+itself.
+
+SHORT CIRCUIT. If `${lane}` is `full`, write `lane.json` with `lane: "full"`,
+`reason: "forced-full"`, the four conjuncts recorded as `null` (not `false` — you
+did not evaluate them, and a fabricated `false` is a measurement you did not take),
+and stop. Forcing `full` is always allowed and needs no justification. There is no
+symmetric branch, because `${lane}` cannot hold the value `fast`.
+
+OTHERWISE, EVALUATE FOUR CONJUNCTS. The lane is `fast` iff ALL FOUR are `true`.
+Any conjunct you cannot evaluate is `false` — never `null`, never "assumed fine".
+
+  1. `intake_fields_present` — A SCHEMA OVER THE ISSUE BODY, NOT A READ OF
+     `${run_dir}/intake/verdict.json`. Check the four G0 fields directly in the
+     issue text: (a) the verbatim symptom; (b) the environment fingerprint, all of
+     OS + UID (root vs non-root) + arch + the released binary version; (c) a
+     transcript or log; (d) an explicit deterministic-or-flaky note. All four
+     present => true. This is the intake fold (operator decision D1): the actor
+     changes from an agent to a schema check, which is strictly stronger, because a
+     predicate cannot be talked into PASS. The `intake` NODE still runs — it is
+     upstream of the artifact that decides the lane, so no lane decision can un-run
+     it — but its PASS no longer SUFFICES for the fast lane. This conjunct does.
+
+  2. `frozen_red_admissible` — read `${run_dir}/reproduce/verdict.json` and require
+     ALL of: `verdict == "PASS"`; `frozen_hash` present and non-empty; the
+     differential refutation recorded in BOTH directions (red -> green under the
+     expected fix AND green -> red on revert — one direction is half a measurement);
+     and the §8 admission keys present and self-consistent (`population`,
+     `base_sha`, `subject_digest`, `negative_control` with
+     `observed_verdict != verdict`). Absent, unparseable, or PASS-without-a-key =>
+     false. THIS IS THE JUDGE. "'Known cause, bounded fix' is not an operator
+     adjective — it is the existence of a frozen red whose colour flips under one
+     variable. That artifact IS the definition." (carnot)
+
+  3. `blast_radius_bounded` — evaluated against the DECLARED write set, because at
+     this point in the DAG the fix DOES NOT EXIST YET and `git diff` has nothing to
+     say. Read the mission's `write_set` variable. Then: the declared set must be
+     non-empty, must hold at most `${fast_lane_max_files}` files, and must intersect
+     `${release_surface}` NOWHERE. AN ABSENT OR EMPTY `write_set` IS `false`, NOT
+     `true` — omission means "this patch may touch its whole crate", and omission
+     must be the expensive answer or the field is a formality. Declared sets rot and
+     `git diff` cannot lie, so this conjunct is RE-EVALUATED AT `release` against
+     the realized `git diff --name-only <base_sha>..HEAD`; a realized set that
+     breaks the bound while `lane == "fast"` BLOCKS the release with
+     `lane-escaped-its-bound`. Deciding on the declaration and verifying on the
+     realization is the only order the topology permits, and the verification is
+     what keeps the declaration honest.
+
+  4. `risk_normal` — `${risk}` is `normal` AND no path in the declared write set
+     matches the security surface enumerated in the `risk` param's description
+     (auth, egress, root-spawn, credential, adapter-attribution, `scripts/publish.sh`,
+     `docs/specs/`, any uid/root/signing/token/key-handling path). Either half
+     failing => false => the full lane, with G1 `contract` standing as its own node
+     and its own verdict, which it always does. Entry is mechanical: it is derived
+     from what the change TOUCHES, never from the field a tired pilot fills in by
+     habit.
+
+ALSO RECORD, AND IT COSTS ONE COMMAND: `contract_digest` =
+sha256(`${run_dir}/contract/contract.md`). That is the contract fold. The promise was
+stated BEFORE the test existed, and the hash is what makes that temporal independence
+CHECKABLE later instead of hoped for — "temporal independence, enforced mechanically,
+beats identity independence enforced by hope" (jobs). In the fast lane the contract is
+not re-reviewed; it travels as this digest, and `release` recomputes it.
+
+WRITE MOLECULE_DIR/lane.json:
+  {
+    "lane": "fast" | "full",
+    "predicate": {
+      "intake_fields_present":  true|false|null,
+      "frozen_red_admissible":  true|false|null,
+      "blast_radius_bounded":   true|false|null,
+      "risk_normal":            true|false|null
+    },
+    "reason": "<one sentence naming the FIRST conjunct that failed, or 'forced-full', or 'all four conjuncts hold'>",
+    "waives": [ ... ],
+    "declared_write_set": [ ... ],
+    "contract_digest": "<sha256 of contract.md>",
+    "fast_lane_max_files": ${fast_lane_max_files},
+    "base_sha": "<the commit THIS lane was decided on>"
+  }
+
+`waives` IS MANDATORY AND IT IS THE PRICE TAG. In the FULL lane it is `[]`. In the
+FAST lane it is exactly `["convergence-confirmation", "contract-re-review"]` — the
+CONFIRMATION verdict is not convened even if the INITIAL verdict found something
+(the INITIAL's findings still block and are still fixed; what is skipped is the
+second committee re-reading the corrected tree), and the G1 contract is not
+re-litigated, travelling as `contract_digest` instead. That is a waiver of DEPTH,
+named, and every entry of `waives` is COPIED VERBATIM into the release manifest's
+mandatory non-empty `arms_not_run[]`. A lane that saves time without writing down
+what it stopped doing is a lane that lost the record of its own cost.
+"""
+acceptance = "MOLECULE_DIR/lane.sh exists and was run with its status captured to a file; MOLECULE_DIR/lane.json carries lane, all four predicate keys, reason, waives, declared_write_set, contract_digest, fast_lane_max_files and base_sha. `fast` appears only when all four conjuncts are literally true; every absent or unevaluable input produced `full`. In the forced-full branch the conjuncts are null, never fabricated."
+
+[[steps]]
+id = "emit-verdict"
+title = "Emit the fail-closed verdict.json in the §8 admission shape"
+description = """
+This node consumes a gate verdict (`reproduce`) and its output gates the rest of the
+mission, so it obeys the same admission shape it relies on. A validator exempt from
+its own rule is the next instance of the class this spore was rewritten to close.
+
+Write MOLECULE_DIR/verdict.json:
+  {
+    "verdict": "PASS" | "BLOCKED",
+    "count": <number of conjuncts that came back false>,
+    "population": 4,
+    "findings": [ { "loc", "quote", "fix", "severity" } ],
+    "base_sha": "<the commit THIS verdict was computed on>",
+    "subject_digest": "<sha256 over the exact bytes of the four inputs you read:
+                        the issue body, reproduce/verdict.json, the declared
+                        write_set, and contract.md>",
+    "negative_control": {
+      "gate_key": "<sha256 of this step's text + lane.sh>",
+      "mutation": "...", "target": "...",
+      "observed_verdict": "...", "evidence_digest": "..."
+    }
+  }
+
+PASS HERE MEANS "A LANE WAS DECIDED", NOT "THE LANE IS FAST". Both lanes are
+successful outcomes of this node; `full` is the normal case and must never be
+reported as a failure. BLOCKED is for the cases where no lane could be decided at
+all — `${run_dir}/reproduce/` unreadable, the issue body unavailable — and even then
+the emitted `lane.json` says `full`, because a mission with a broken triage runs the
+whole gate set, not none of it.
+
+`population` IS 4, ALWAYS, and that is the point of writing it: the denominator is
+FIXED by the predicate, so a `predicate` object with three keys is arithmetically
+visible rather than rhetorically absent.
+
+YOUR NEGATIVE CONTROL — the one mutation that matters, run in the FAIL-CLOSED
+direction. Hand this node a `${run_dir}/reproduce/verdict.json` with `frozen_hash`
+set to the empty string and re-run `lane.sh`. THE RECORDED LANE MUST FLIP TO
+`"full"`. If it still says `fast`, the predicate is not reading the artifact it
+claims to be reading, the judge is decorative, and every `fast` it ever emitted is
+VOID. Record the observed lane in `observed_verdict`. Amortise it: `gate_key` =
+sha256(this step's text + lane.sh), so if `${run_dir}/admissions/<gate_key>.json`
+exists you COPY THE RECORD FORWARD and run no mutation; otherwise run it once and
+write it there. NO SIDE LEDGER — the record is copied INTO this verdict.json and the
+consumer recomputes `gate_key` rather than trusting a file it was handed.
+"""
+needs = ["evaluate-the-predicate"]
+acceptance = "MOLECULE_DIR/verdict.json written with verdict/count/population(=4)/findings/base_sha/subject_digest/negative_control. The negative control ran in the fail-closed direction (empty frozen_hash => lane flips to full) or was copied forward under an existing gate_key. A `full` lane is recorded as PASS, never as a failure."
