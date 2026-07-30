@@ -1,6 +1,20 @@
 formula = "converge-clean-room"
-version = 2
+version = 3
 description = """
+CANONICAL SOURCE: spores/cosmon-dev/formulas/converge-clean-room.formula.toml.
+`.cosmon/formulas/converge-clean-room.formula.toml` is a BYTE-IDENTICAL
+PROJECTION of this file and nothing else — edit this one, then re-project.
+`cs nucleate converge-clean-room` resolves the PROJECTION
+(`cosmon_filestore::resolve_formulas_dir` searches exactly one directory and
+never a spore tree), which is why a decision applied only here reaches no
+operator. The projection is enforced by
+`crates/cosmon-cli/tests/formula_projection_parity.rs`; two hand-edited copies
+of one rule are two copies that drift, and the one that drifts is the one
+somebody reads as the original. This file drifted for a month across 355 lines
+and nobody saw it, because the projection entered the tree inside the squashed
+v0.4.0 release commit: a release projection preserves content and erases the
+traceability of what happened between two releases.
+
 The §6bis DOUBLE clean-room review of the `cosmon-dev` spore — a provider-diverse
 two-engine review rendered as TWO IMMUTABLE VERDICTS, not as an N-round loop:
 
@@ -12,34 +26,62 @@ two-state convergence (blueprint §6bis).
 
 WHY THE N-ROUND MACHINERY IS GONE (operator decision D1 amendment 1 on
 delib-20260729-1d4e, `notes/001-human.md` of that molecule — the canonical text,
-cited here and not copied). Version 1 of this formula drove `while` with
-`max_rounds = 5`. On the record it produced twelve rounds across five days that
-were ONE measurement repeated eleven times: the union finding set was never
-computed, so the round-to-round delta was not small but UNDEFINED, and the jury
-never once made a claim that could have been wrong (FINDINGS x12, CLEAN x0). A
-ceiling of 2 would have left the machinery alive with a low counter. The operator
-asked for the machinery, not the counter. So: two named states, and with no
-N-round infrastructure the round ledger has no reason to exist either.
+cited here and not copied). Versions 1 and 2 of this formula existed SIMULTANEOUSLY
+at the two paths above; the v1 machine drove `while` with `max_rounds = 5`. On the
+record it produced twelve rounds across five days that were ONE measurement
+repeated eleven times: the union finding set was never computed, so the
+round-to-round delta was not small but UNDEFINED, and the jury never once made a
+claim that could have been wrong (FINDINGS x12, CLEAN x0). A ceiling of 2 would
+have left the machinery alive with a low counter. The operator asked for the
+machinery, not the counter. So: two named states, and with no N-round
+infrastructure the round ledger has no reason to exist either.
+
+WHAT THIS VERSION DOES NOT DROP. The N-round machinery went; four things the
+repo-level copy had learned ON TOP of it did not, and are carried here because
+each was paid for by a measurement, not by a preference: the ROSTER IS AN OUTPUT,
+per-seat DELIVERY disposition, REALIZED-versus-SPECIFIED endpoints, and the
+POLARITY-relative reading of a seat's verdict. Applying the v2 rewrite wholesale
+would have been a regression dressed as a cleanup.
 
 REUSE, DO NOT REINVENT — this formula is PURE WIRING over ONE existing primitive:
-  * `cross-provider-committee` (../../../.cosmon/formulas/cross-provider-committee.formula.toml,
+  * `cross-provider-committee` (<repo>/.cosmon/formulas/cross-provider-committee.formula.toml,
     ADR-147) — the jury that is provider-diverse BY CONSTRUCTION (adapter-pinned
-    seats). Each verdict convenes ONE committee with a claude seat and a codex-sol
-    (gpt-5.6-sol) seat. We do NOT re-implement the seat DAG or the diversity
-    witnesses; we convene a committee per verdict.
-  * `while` (../../../.cosmon/formulas/while.formula.toml) is NO LONGER composed.
+    seats). Each verdict convenes ONE committee whose seats are CHOSEN AGAINST the
+    generator's family (see THE ROSTER IS AN OUTPUT below). We do NOT re-implement
+    the seat DAG or the diversity witnesses; we convene a committee per verdict.
+  * `while` (<repo>/.cosmon/formulas/while.formula.toml) is NO LONGER composed.
+    Cross-references here are REPO-ROOT-RELATIVE, not file-relative: this file is
+    read at two paths (see CANONICAL SOURCE above) and a `../../../` prefix is
+    correct at exactly one of them.
     It was the N-round infrastructure. Two named states are not an iteration and
     borrowing an iteration primitive to express them would re-import the counter
     through the back door.
 NEVER a deep-think panel: N claude personas share weights/policy/framing ->
 "rationalisation collective deguisee en debat" (janis). A→A is an echo, not a
-witness. The bloc-claude counts for ONE voice; codex-sol is the second SUBSTRATE
-(keystone K4).
+witness. A bloc of one family counts for ONE voice, however many seats it fills.
+
+THE ROSTER IS AN OUTPUT, NOT A CONSTANT (measured, converge-20260727-a302).
+This formula used to hard-code `claude + codex-sol`. In a galaxy whose default
+adapter is claude, the fix molecule under audit is tackled `--adapter claude`, so
+its registered Incarnation is anthropic — and the committee kernel then rejects
+the claude SEAT as a FamilyCollision: same resolved endpoint tuple as the
+generator it audits. Of the two seats the recipe named, only ONE ever bore the
+diversity floor. A conjunctive CLEAN-and-CLEAN door over that roster READS as two
+independent families while being, structurally, one family plus one
+non-floor-bearing reader. It is not the kernel that is wrong — plan_committee did
+exactly the right thing — it is the RECIPE that named a roster the kernel must
+reject half of, and then said nothing about what to do with the rejected seat.
+So: READ the generator's family FIRST, then pick seats so that EVERY seat's
+family differs from the generator's AND from each other's. Never hard-code the
+pair. See `RosterPlan::floor_bearing_seats` /
+`floor_is_single_point_of_failure` — the seat COUNT cannot tell "two families"
+from "one family plus a reader"; only the floor-bearing set can.
 
 THE TWO VERDICTS (each convenes ONE committee; nucleated FORWARD, strictly acyclic):
 
       artefact courant (target sha S0)
-        └─> INITIAL committee ── review-claude ‖ review-codex-sol
+        └─> INITIAL committee ── seat-1 (family != generator's) ‖ seat-2 (family
+                 │               != generator's AND != seat-1's)
                  │
                  ├── CLEAN (ballot-weighted) ──> terminal CLEAN. No confirmation:
                  │        nothing was fixed, so no sha differs, and a same-sha
@@ -80,19 +122,176 @@ certify. Waiving the conjunction, as was then done, is the worst available waive
 it is the entire product of provider diversity. The fix is not to waive it but to
 compute the conjunction the design always specified.
 
-PROVIDER DIVERSITY IS TIGHTENED HERE, NOT TRADED. Under version 1 a missing codex
-verdict was laundered into a FINDINGS round and the loop advanced with one substrate
-having spoken. Under ROUND-VOID below the convergence STOPS until the second
-substrate actually speaks.
+A SEAT THAT DID NOT REVIEW (the mid-review provider refusal).
+Measured twice in two days: a seat's provider refused the work partway through on
+cybersecurity policy, and the operator switched the model from inside the pane to
+let it continue. A provider-diverse jury that needs a human at every verdict is not
+automatic, and a SILENT human rescue is the worst outcome of all three available
+— it leaves no trace that the jury needed rescuing. The rule:
+  1. Classify every seat's DELIVERY, separately from its verdict: delivered /
+     provider-refusal / stalled / not-dispatched. "Looked and could not decide"
+     and "was never allowed to look" are different facts; collapsing them is how
+     a jury silently shrinks.
+  2. Re-check the floor on the DELIVERING seats plus the generator
+     (`cosmon_core::committee::fold_committee`). If they no longer span the jury
+     floor, the verdict is VOID — never CLEAN, and NOT a plain FINDINGS either
+     (there is no jury to have found anything).
+  3. A VOID verdict does NOT advance the state and does NOT consume anything on
+     the quality axis: it is a jury failure, not a quality failure. Under the
+     N-round machine this had to be said as "does not consume a max_rounds slot";
+     with two named states there is no slot to consume, which is one of the
+     places the two-verdict shape is simply smaller. Record it in verdicts.md
+     with the refusing seat and its provider reason verbatim, then re-dispatch
+     ONCE (R3) — drawing the seat from ANOTHER family when that is what keeps the
+     floor intact. Do NOT retry the same seat silently, and do NOT let a human
+     switch it in-pane without the switch appearing in verdicts.md.
+  4. A SECOND void stops the convergence loudly (R3), so a repeatedly-refusing
+     provider blocks instead of looping.
+
+SPECIFIED IS NOT REALIZED. When a seat is re-pointed mid-verdict, the roster keeps
+reporting the model that was SPECIFIED while a different one answers. The
+diversity floor is a claim about WHAT ANSWERED, never about what was configured,
+so verdicts.md MUST carry the realized adapter+model beside the specified one for
+every seat, THE GENERATOR INCLUDED (`cs observe` renders it as `pin~>realized`;
+a bare pin with no realized id is an UNCONFIRMED seat, not a confirmed match).
+The seat that PROPOSES is scored on the same terms as the seats that read: it
+seeds the reference family, so an unwatched generator holds up no part of the
+floor either. If a seat's realized family collapses onto the generator's or a
+peer's, the floor is not met however the roster reads — that is rule 2 above, and
+it is why the check runs on the realized tuple.
+
+An UNCONFIRMED seat carries NO PART of the floor. A bare pin is not a quiet
+"same as rostered"; it is a family nobody can vouch for, and counting it would
+turn absence of evidence into evidence of diversity. Where the observed seats
+alone do not span the floor, the verdict is VOID — the same door a seat that
+could not execute goes through.
+
+PROVIDER DIVERSITY BUYS ERROR-INDEPENDENCE, NOT COVERAGE — brief for it
+separately. Measured in round 3 (2026-07-28): the critical finding of the whole
+convergence was found by the SAME-FAMILY reader, the seat carrying zero
+diversity weight. The floor-bearing cross-family seat AND the driver both
+verified the same fix by replaying the author's own scenario, and both passed it.
+
+Two seats on distinct families will not make the same MISTAKE about what they
+read. Nothing about their families stops them READING THE SAME PLACE — and
+replaying the author's scenario is the place every seat drifts toward, because
+the artefact hands it to them. A jury that is diverse in provider and identical
+in itinerary is one reader with error bars.
+
+So the convener owes each seat a DISTINCT ENTRY POINT, named in the brief and
+recorded in verdicts.md beside its family:
+  * one seat replays the author's own scenario (the control — it must exist, or
+    nobody checks the claim as made);
+  * at least one enters from the OPPOSITE end: the state the fix says cannot
+    happen, the input the test fixture never constructs, the branch reachable
+    only when the artefact is ABSENT rather than wrong;
+  * at least one reads the gate as an ADVERSARY of its author: not "is this
+    right?" but "what would I have to write for this to pass while lying?".
+Two seats reporting the same entry point is the same finding twice, whatever
+their tuples say — record it as one, and re-brief.
+
+This is a briefing rule, not a scoring rule: entry-point distinctness is not
+folded into the diversity floor and does not gate convening. The floor stays
+what it is (resolved-endpoint distinctness, ADR-147); this sits beside it, and
+saying it out loud in the brief is the whole intervention. Making it a
+countable requirement would be a second self-attested axis — a convener writing
+"distinct entry points: yes" — which is the exact defect class round 3 spent
+itself closing.
+
+A SIBLING SWITCH IS INVISIBLE TO THE TUPLE. The recurring case is not a family
+change: `gpt-5.6-sol` stalls on a provider guardrail and the seat is re-pointed
+at `gpt-5.6-terra` — same provider, same base_url, same family, identical tuple.
+Three times in two days on one seat, which makes it the normal operating
+condition and not an edge path. So verdicts.md records the realized MODEL, and
+records the fact that a human re-pointed the seat after dispatch, as two
+separate facts: a switch back to the rostered pin changed nothing measurable
+and is still a rescue. A verdict that needed hands is NEVER an intact jury, and a
+jury that is not intact may REFUTE but may NEVER CERTIFY: it is VOID, whatever
+the floor arithmetic says. Recording the rescue and then certifying anyway is the
+failure this clause closes — a caveat the operator cannot act on is not a control.
+The four conditions are all of: floor met on what ANSWERED, every roster seat
+delivered, every realized endpoint observed (the generator's included — it is not
+a special case), and no hand in any pane.
+
+PROVIDER DIVERSITY IS TIGHTENED HERE, NOT TRADED. Under the N-round machine a
+missing codex verdict was laundered into a FINDINGS round and the loop advanced
+with one substrate having spoken. Under R3 below the convergence STOPS until the
+second substrate actually speaks.
 
 FAIL-CLOSED VERDICT CONTRACT (codex-sol #28). Each reviewer emits BOTH:
   * referee-report.md — human-readable; first line `VERDICT: CLEAN` |
-    `VERDICT: FINDINGS (N)`, then {line, quote, fix} per severity;
-  * verdict.json sidecar — {verdict, count, findings:[...]} plus the ballot fields
-    (`on_ballot`, `diversity_weight`, and a reason when off-ballot).
+    `VERDICT: FINDINGS (N)` | `VERDICT: INCONCLUSIVE`, then {line, quote, fix}
+    per severity;
+  * verdict.json sidecar — {verdict, count, findings:[...]}, the required
+    `mechanism_polarity` field (see below), and the ballot fields (`on_ballot`,
+    `diversity_weight`, and a reason when off-ballot).
 Absence still refuses. What changed is WHAT absence refuses INTO: a void verdict
 (a fact about our plumbing) instead of a FINDINGS verdict (a claim about the
 artefact). Fail-closed was right about the VERDICT and wrong about the CONTROL FLOW.
+
+TWO VOCABULARIES, ONE MAPPING — read this before writing any reader.
+A seat convened through `cross-provider-committee` is a **cmb-verify** molecule,
+and cmb-verify's own verdict-door speaks {confirmed | refuted | inconclusive}
+while this contract speaks {CLEAN | FINDINGS | INCONCLUSIVE}. A seat therefore
+legitimately emits BOTH.
+
+THIS TABLE IS A CONSUMER, NOT A DEFINITION. `cmb-verify.formula.toml`, step
+`verify-or-refute`, DEFINES the door; this file consumes it. Where the two ever
+disagree, cmb-verify wins and this file is the bug — which is not hypothetical:
+until 2026-07-28 this table stated the committee polarity as if it were
+unconditional, and a seat reproducing a defect would have been filed CLEAN.
+
+`confirmed` DOES NOT MEAN "GOOD". It means THE STATED MECHANISM HOLDS, and
+whether that is good news depends on what the stated mechanism claimed — which
+is an INPUT to the seat, not something a reader can infer. So cmb-verify's
+verdict.json carries a required `mechanism_polarity` field, and the mapping is
+read through it:
+
+  polarity   cmb-verify      this contract   means
+  --------   -------------   -------------   -----------------------------------
+  fix        confirmed       CLEAN           the audited fix holds; nothing found
+  fix        refuted         FINDINGS        a falsifier went red
+  defect     confirmed       FINDINGS        the claimed defect REPRODUCES
+  defect     refuted         CLEAN           the claimed defect is not there
+  either     inconclusive    INCONCLUSIVE    no verdict was reachable
+
+A seat convened by this formula is ALWAYS `polarity: fix` — it audits a shipped
+fix, never a bug report. So for a seat, `VERDICT: FINDINGS (2)` beside `REFUTED`
+is AGREEMENT, not contradiction: one round observed exactly that pair and it read
+as a seat contradicting itself.
+
+BUT THAT SENTENCE IS A DECLARATION, NOT A GUARANTEE, so do not lean on it. It
+says what a seat OUGHT to be; nothing about the sentence makes a seat write the
+field, or write it truthfully. The question that governs this whole lineage is
+*can the gate still pass when the constrained party lies, or is simply absent?*
+— and for a rule that lives only here, the answer is yes. So the polarity is
+read by code: `cosmon_core::committee::read_seat_emission` maps the triple and
+refuses a missing field or an off-table row, and `cs reconcile --check` runs it
+over the seats on disk (`check_seat_verdict_polarity`). Reading this paragraph
+is not enough; run the gate.
+
+THE READER MUST REQUIRE AN AFFIRMATIVE `CLEAN` IN BOTH FILES, and must never
+infer clean from the ABSENCE of FINDINGS. `verdict != "FINDINGS"` reads REFUTED
+as clean — the exact shape this whole contract exists to refuse — and so does
+`not report.contains("FINDINGS")`. Clean is a thing a seat says, not a thing a
+reader fails to find. Where a seat emits cmb-verify's vocabulary instead, map it
+through the table above and require the pair that lands on CLEAN; anything not
+on the table is NOT-CLEAN.
+
+AND THE RESIDUAL THE BOTH-FILES RULE DOES NOT CLOSE: requiring an affirmative
+CLEAN in both files still passes a seat that emits `confirmed` AND
+`VERDICT: CLEAN` together while its polarity is `defect` — i.e. a seat saying
+"the defect reproduces" and "nothing found" in one breath. Two files agreeing is
+not two files being right. So the reader ALSO requires that the pair be
+CONSISTENT under the seat's stated polarity: a verdict.json with NO
+`mechanism_polarity`, or a (polarity, verdict, VERDICT) triple that is not one
+row of the table above, is an INCOHERENT PAIR and therefore VOID (R1) — never
+NOT-CLEAN, and never the polarity that makes the verdict pass. Fail closed on the
+missing field rather than assuming: assuming is how this defect was introduced in
+the first place. The two-verdict machine routes the unreadable pair to VOID rather
+than to FINDINGS, which is strictly tighter than the N-round machine's NOT-CLEAN:
+an unparseable verdict is an UNRENDERED one, and patching against findings that
+were never collected is what the N-round record spent five days doing.
 
 review_scale: `mission` => one two-verdict convergence wraps the whole deliverable
 (the oxymake style). `submission` => each gate/sub-mission carries its own.
@@ -164,14 +363,23 @@ nucleation goes FORWARD with fresh ids).
 
   1. Create MOLECULE_DIR/verdicts.md with exactly two rows to fill, and no round
      column — the state IS the row:
-       | verdict | target_sha | committee | claude seat | codex-sol seat | ballot-CLEAN? | jury_status |
-       | INITIAL      |  |  |  |  |  |  |
-       | CONFIRMATION |  |  |  |  |  |  |
-     Record the artefact under review (the ci-gate-passed fixed tree) and RESOLVE
-     ITS TREE SHA now, verbatim, as `target_sha` of the INITIAL row. That sha is
-     load-bearing: the CONFIRMATION verdict is admissible only against a DIFFERENT
-     one (SAME-SHA REFUSAL, below).
-  2. Convene the INITIAL committee by nucleating cross-provider-committee — do NOT
+       | verdict | target_sha | committee | seat | family | entry point | delivery | specified~>realized | ballot | token | jury_status |
+       | INITIAL      |  |  |  |  |  |  |  |  |  |  |
+       | CONFIRMATION |  |  |  |  |  |  |  |  |  |  |
+     One block of seat rows per verdict. Record the artefact under review (the
+     ci-gate-passed fixed tree) and RESOLVE ITS TREE SHA now, verbatim, as
+     `target_sha` of the INITIAL row. That sha is load-bearing: the CONFIRMATION
+     verdict is admissible only against a DIFFERENT one (SAME-SHA REFUSAL, below).
+  2. READ THE GENERATOR'S FAMILY BEFORE CHOOSING SEATS. The artefact under review
+     was produced by some molecule tackled under some adapter; read that
+     molecule's registered Incarnation and resolve its endpoint tuple — never
+     assume the galaxy default, and never assume it is NOT the default either.
+     That family is the axis every seat must differ from. Choosing `claude +
+     codex` blind is exactly the defect this step exists to prevent: in a
+     claude-default galaxy the claude seat is a FamilyCollision the kernel
+     rejects, leaving the entire floor on codex alone. Record the generator
+     family, and its own specified~>realized pair, in verdicts.md.
+  3. Convene the INITIAL committee by nucleating cross-provider-committee — do NOT
      re-implement the seats:
        cs nucleate cross-provider-committee \\
          --decayed-from {this_mol_id} --tag temp:warm --tag converge-verdict:initial \\
@@ -179,23 +387,37 @@ nucleation goes FORWARD with fresh ids).
          --var symptom="${issue} — audit the fix as ARTEFACTS, not testimony" \\
          --var stake="<normal->root | release/security->max>"
      The committee's roster enforces provider diversity on the RESOLVED endpoint
-     (not the adapter NAME): one claude seat (`--adapter claude`) and one codex-sol
-     seat (`--adapter codex`, model gpt-5.6-sol). At risk security/release the jury
-     floor is >=3 distinct families, conjunctive.
-  3. Each seat MUST emit the fail-closed verdict contract: referee-report.md (first
-     line `VERDICT: CLEAN` | `VERDICT: FINDINGS (N)`) AND verdict.json sidecar
-     {verdict, count, findings:[{loc,quote,fix,severity}], on_ballot,
-     diversity_weight, off_ballot_reason?}. Inject that contract into each seat's
-     briefing (the committee's dispatch-seats step does the injection; record the
-     contract_hash). The BALLOT FIELDS ARE PART OF THE CONTRACT, not an optional
-     courtesy — the conjunction is computed over them.
-  4. DISPATCH THE SEATS. A nucleated-but-untackled committee is a BLOCKED
-     convergence, not a pending one — version 1 handed off here and called it done,
-     which is how a convergence sat looking healthy while no jury had been asked to
-     sit. Run the per-seat `cs tackle <seat> --adapter <family>` commands the
-     committee's handoff.md hands you (or `cs run` over the committee root), then
-     capture each seat's state and write it into verdicts.md as `jury_status`
-     (`not-dispatched` until you have witnessed otherwise).
+     (not the adapter NAME). Pass it seats whose families ALL differ from the
+     generator's and from each other's, so that NO single seat carries the whole
+     floor (`floor_bearing_seats` empty at floor 2 = symmetric). At risk
+     security/release the jury floor is >=3 distinct families, conjunctive — and
+     the same collision would eat one of those three, so read the generator
+     family there too.
+     If only one non-generator family is wired, you MAY convene the fragile
+     one-bearer roster, but verdicts.md MUST record `floor_is_single_point_of_
+     failure = true` and a refusal of that seat is VOID, never CLEAN.
+  4. BRIEF A DISTINCT ENTRY POINT PER SEAT (see PROVIDER DIVERSITY BUYS
+     ERROR-INDEPENDENCE in the header) and record each seat's entry point in
+     verdicts.md beside its family. Diverse tuples on one itinerary are one
+     reader with error bars.
+  5. Each seat MUST emit the fail-closed verdict contract: referee-report.md (first
+     line `VERDICT: CLEAN` | `VERDICT: FINDINGS (N)` | `VERDICT: INCONCLUSIVE`)
+     AND verdict.json sidecar {verdict, count, findings:[{loc,quote,fix,severity}],
+     mechanism_polarity, on_ballot, diversity_weight, off_ballot_reason?}. Inject
+     that contract into each seat's briefing (the committee's dispatch-seats step
+     does the injection; record the contract_hash). THE POLARITY FIELD AND THE
+     BALLOT FIELDS ARE PART OF THE CONTRACT, not an optional courtesy — the
+     mapping is read through the polarity and the conjunction is computed over the
+     ballot. The brief MUST require both files to be written on the seat's FIRST
+     step and updated incrementally — a contract deferred to a final summarising
+     turn is lost entirely to a provider refusal or a sleeping machine.
+  6. DISPATCH THE SEATS. A nucleated-but-untackled committee is a BLOCKED
+     convergence, not a pending one — the N-round version handed off here and
+     called it done, which is how a convergence sat looking healthy while no jury
+     had been asked to sit. Run the per-seat `cs tackle <seat> --adapter <family>`
+     commands the committee's handoff.md hands you (or `cs run` over the committee
+     root), then capture each seat's state and write it into verdicts.md as
+     `jury_status` (`not-dispatched` until you have witnessed otherwise).
 
 WHY YOU MAY TACKLE THESE SEATS WHEN THE COMMITTEE'S OWN ORCHESTRATOR MAY NOT — the
 contradiction operator decision D2 asked to be resolved IN WRITING, so that it stops
@@ -216,7 +438,7 @@ being an unwritten preference each worker resolves differently:
   The rule in one line: DISPATCH IS FORBIDDEN TO THE AUTHOR OF THE BRIEFING, NOT TO
   THE OWNER OF THE VERDICT.
 """
-acceptance = "MOLECULE_DIR/verdicts.md initialised with the two named verdict rows (INITIAL, CONFIRMATION) and NO round counter, the INITIAL row carrying the resolved target tree sha verbatim. The INITIAL committee is a cross-provider-committee nucleation (NOT a reimplemented panel) carrying a claude seat and a codex-sol seat, each bound to the referee-report.md + verdict.json fail-closed contract INCLUDING the ballot fields, and the stake maps risk->jury floor. The seats were DISPATCHED, not merely nucleated, and each seat's jury_status is recorded from a witnessed state. Wired --decayed-from this molecule."
+acceptance = "MOLECULE_DIR/verdicts.md initialised with the two named verdict rows (INITIAL, CONFIRMATION) and NO round counter, the INITIAL row carrying the resolved target tree sha verbatim. The generator's family was READ from the artefact's registered Incarnation and recorded with its own specified~>realized pair, and the seats were chosen so their families differ from it and from each other — never a hard-coded claude+codex pair; when only one non-generator family was wired, verdicts.md records floor_is_single_point_of_failure = true. Each seat carries a DISTINCT briefed entry point, recorded beside its family. The INITIAL committee is a cross-provider-committee nucleation (NOT a reimplemented panel), each seat bound to the referee-report.md + verdict.json fail-closed contract INCLUDING mechanism_polarity and the ballot fields, written on the seat's first step and updated incrementally, and the stake maps risk->jury floor. The seats were DISPATCHED, not merely nucleated, and each seat's jury_status is recorded from a witnessed state. Wired --decayed-from this molecule."
 
 [[steps]]
 id = "render-two-verdicts"
@@ -228,54 +450,78 @@ same reading rules, and then a terminal outcome.
 
 READING RULES — apply these to EVERY verdict, INITIAL and CONFIRMATION alike.
 
-R1. NORMALIZE THE TOKEN, NEVER COMPARE A BARE STRING. Version 1 computed
-    `verdict == "CLEAN"` against a record whose 26 seat files say `FINDINGS` x11,
-    `refuted` x7, `REFUTED` x2, `CLEAN` x2, `INCONCLUSIVE` x1, `confirmed` x1.
-    CLEAN was partly unreachable for a LEXICAL reason. The accepted token set is
-    exactly:
-      -> CLEAN       : `CLEAN`, `clean`; and `confirmed` WHEN `count == 0` and
-                       `findings == []` (the cmb-verify polarity: the fix mechanism
-                       was confirmed and nothing was found).
-      -> FINDINGS    : `FINDINGS`, `findings`, `refuted`, `REFUTED`; and `confirmed`
-                       is NOT mapped here (see the incoherent pair below).
+R1. NORMALIZE THE TOKEN THROUGH THE SEAT'S POLARITY, NEVER COMPARE A BARE STRING.
+    The N-round version computed `verdict == "CLEAN"` against a record whose 26
+    seat files say `FINDINGS` x11, `refuted` x7, `REFUTED` x2, `CLEAN` x2,
+    `INCONCLUSIVE` x1, `confirmed` x1. CLEAN was partly unreachable for a LEXICAL
+    reason. But lexical normalisation alone is not enough, and mapping a bare
+    `confirmed` to CLEAN is the defect closed on 2026-07-28: `confirmed` means THE
+    STATED MECHANISM HOLDS, and under polarity `defect` that reads FINDINGS. So
+    read `mechanism_polarity` FIRST and take the row from the header's table:
+      -> CLEAN       : `CLEAN`, `clean`; and `confirmed` under polarity `fix` WHEN
+                       `count == 0` and `findings == []`; and `refuted` under
+                       polarity `defect`.
+      -> FINDINGS    : `FINDINGS`, `findings`; `refuted` under polarity `fix`;
+                       `confirmed` under polarity `defect`.
       -> INCONCLUSIVE: `INCONCLUSIVE`, `inconclusive`. Its own outcome. It is not
                        CLEAN and it is not a finding; a ballot-carrying seat that
                        could not decide DID NOT SIT, so it makes the verdict VOID
                        (R3) with jury_status `stalled`.
-    An INCOHERENT PAIR — `confirmed` with `count > 0`, or `CLEAN` with a non-empty
-    findings array, or `FINDINGS (N)` with `count != N` — is VOID, not NOT-CLEAN.
-    An UNRECOGNISED token is VOID, not NOT-CLEAN: an unparseable verdict is an
-    unrendered one. Record the offending literal verbatim so the human sees the
-    dialect that needs adding rather than a "malformed" with no body.
+    A seat convened here is always `polarity: fix`, but that is a DECLARATION and
+    not a guarantee — a MISSING or off-table `mechanism_polarity` is VOID, never
+    the polarity that makes the verdict pass.
+    An INCOHERENT PAIR — a (polarity, verdict, `VERDICT:`) triple that is not one
+    row of the table, or `CLEAN` with a non-empty findings array, or
+    `FINDINGS (N)` with `count != N` — is VOID, not NOT-CLEAN. Two files agreeing
+    is not two files being right. An UNRECOGNISED token is VOID too: an
+    unparseable verdict is an unrendered one. Record the offending literal
+    verbatim so the human sees the dialect that needs adding rather than a
+    "malformed" with no body.
+    This is `cosmon_core::committee::read_seat_emission`, and `cs reconcile
+    --check` runs it over the seats on disk (`check_seat_verdict_polarity`). Run
+    it — a rule only a worker reads is a rule a worker can forget.
 
-R2. RESOLVE THE BALLOT BEFORE COMPUTING ANYTHING. For each seat read `on_ballot`
-    and `diversity_weight`. If BOTH are absent, DERIVE the ballot mechanically from
-    the seat's resolved provider family against the generator's, which is the rule
-    the seats already state in their own `off_ballot_reason`: a family colliding
-    with the generator's is off-ballot with zero weight. If the family is not
-    recoverable either, the ballot is UNDETERMINED and the verdict is VOID (R3) —
-    never guess it, in either direction. Guessing on-ballot re-creates the block on
-    a voice that cannot certify; guessing off-ballot can empty the ballot and
+R2. RESOLVE THE BALLOT BEFORE COMPUTING ANYTHING, ON THE REALIZED TUPLE. For each
+    seat read `on_ballot` and `diversity_weight`. If BOTH are absent, DERIVE the
+    ballot mechanically from the seat's REALIZED provider family against the
+    generator's realized family — the rule the seats already state in their own
+    `off_ballot_reason`: a family colliding with the generator's is off-ballot with
+    zero weight. Never the SPECIFIED pin: a seat re-pointed after dispatch reports
+    a family that did not answer, and an UNCONFIRMED seat (a bare pin with no
+    realized id) carries NO PART of the floor. If the realized family is not
+    recoverable, the ballot is UNDETERMINED and the verdict is VOID (R3) — never
+    guess it, in either direction. Guessing on-ballot re-creates the block on a
+    voice that cannot certify; guessing off-ballot can empty the ballot and
     manufacture a CLEAN out of nobody.
 
 R3. VOID VERDICT (the rule three seats reached independently in three vocabularies,
     with no dissent). A verdict is VOID when ANY of: a ballot-carrying seat's
-    verdict.json is absent; it is malformed; its token is unrecognised or
-    incoherent (R1); its ballot is undetermined (R2); or the seat's DELIVERY
-    DISPOSITION is anything other than `delivered` — provider-refusal, stalled,
-    or never-dispatched all make the verdict void, whatever files are on disk.
+    verdict.json is absent; it is malformed; its token, polarity or pair is
+    unrecognised, missing or incoherent (R1); its ballot is undetermined (R2); the
+    DELIVERING seats plus the generator no longer span the jury floor on their
+    REALIZED tuples (`cosmon_core::committee::fold_committee`); a human re-pointed
+    any seat from inside its pane (A SIBLING SWITCH, header — a verdict that needed
+    hands may refute but may never certify); or the seat's DELIVERY DISPOSITION is
+    anything other than `delivered` — provider-refusal, stalled, or never-dispatched
+    all make the verdict void, whatever files are on disk.
     On VOID:
       * record the reason and the per-seat jury_status
-        (`rendered` | `not-dispatched` | `stalled` | `refused`);
+        (`rendered` | `not-dispatched` | `stalled` | `refused`), the provider's
+        stated refusal verbatim where there is one, and the realized endpoint;
       * DO NOT ADVANCE THE STATE — a verdict that measured nothing is not a
-        verdict, and INITIAL stays INITIAL;
+        verdict, and INITIAL stays INITIAL. A jury failure is not a quality
+        failure, and with two named states there is no counter for it to consume;
       * increment `voided_rounds` and RE-DISPATCH THE SAME SEAT ONCE (same
-        committee, same target sha — a re-dispatch is not a re-review);
+        committee, same target sha — a re-dispatch is not a re-review), drawing it
+        from ANOTHER family when that is what keeps the floor intact. Never retry
+        the same seat silently, and never let an in-pane rescue go unrecorded;
       * on a SECOND void, stop:
           cs collapse {this_mol_id} --reason "converge: <what was missing>" \\
               --reason-kind blocker_stuck
-        with `exit_reason = "verdict-plumbing"` in the emitted verdict, or
-        `"jury-not-rendered"` when the ballot-carrying set never rendered at all.
+        with `exit_reason = "verdict-plumbing"` in the emitted verdict,
+        `"jury-not-rendered"` when the ballot-carrying set never rendered at all,
+        or `"jury-vacated"` when refusals emptied the floor and no further family
+        is wired.
     This does NOT weaken fail-closed: the convergence still never says CLEAN on an
     absent verdict. It stops a PLUMBING failure being reported as a QUALITY verdict
     and then patched against findings that were never collected. A jury that did not
@@ -285,15 +531,23 @@ R3. VOID VERDICT (the rule three seats reached independently in three vocabulari
 R4. THE CONJUNCTION IS BALLOT-WEIGHTED.
       ballot_seats = { seats with on_ballot == true and diversity_weight > 0 }
       CLEAN  iff  ballot_seats is NON-EMPTY
-                  and every seat in ballot_seats normalized to CLEAN
+                  and every seat in ballot_seats normalized to CLEAN under its
+                      stated polarity, affirmatively, IN BOTH FILES (R1)
                   and every seat of the committee is `delivered` (R3)
+                  and the delivering seats + the generator span the jury floor on
+                      their REALIZED tuples (R3)
+    NEVER `verdict != "FINDINGS"` and never "the report does not mention FINDINGS":
+    both read REFUTED as clean, the failure this contract exists to refuse. Clean is
+    a thing a seat says, not a thing a reader fails to find.
     An EMPTY ballot_seats set is NEVER CLEAN — it is `jury-not-rendered`. Off-ballot
     seats' findings are RECORDED and TYPED into `off_ballot_residuals` and carried
     into converge-verdict.json; they do not block on their own, and an off-ballot
-    CLEAN adds nothing to the conjunction.
+    CLEAN adds nothing to the conjunction. Note which way the evidence runs: the
+    critical finding of round 3 came from the off-ballot reader, so residuals are
+    the last thing to discard — they carry no floor and they are still information.
 
-R5. FINDING KEYS AND THE SHAPE HASH — the union set version 1 never computed, which
-    is why its round-to-round delta was UNDEFINED rather than small.
+R5. FINDING KEYS AND THE SHAPE HASH — the union set the N-round version never
+    computed, which is why its round-to-round delta was UNDEFINED rather than small.
       key(f)        = sha256( normalize(loc) ‖ severity ‖ sha256(normalize(fix)) )
       normalize(loc)= "<path>:<ENCLOSING SYMBOL>" with the line number STRIPPED.
                       Line numbers move under any edit and symbol names do not, so
@@ -311,7 +565,10 @@ THE STATE MACHINE.
 
   INITIAL.
     Wait for the committee's seats to reach terminal (`cs wait` — permitted here;
-    see the dispatch/ownership rule in step 1). Apply R1-R5.
+    see the dispatch/ownership rule in step 1). Classify DELIVERY BEFORE OPINION:
+    a seat that could not execute has no opinion to read. Record each seat's
+    delivery, its realized adapter+model beside the specified one (`cs observe`
+    renders drift as `pin~>real`), and its entry point. Then apply R1-R5.
       * VOID           -> R3.
       * CLEAN          -> TERMINAL CLEAN. Do NOT convene a confirmation: nothing was
                           fixed, so no tree sha differs, and a same-sha re-review is
@@ -332,14 +589,17 @@ THE STATE MACHINE.
                        --tag converge-verdict:confirmation \\
                        --var target="<fix_id>" --var symptom="${issue}" \\
                        --var stake="<risk-derived>"
-                        and DISPATCH its seats (step 1, item 4).
+                        re-reading the generator family (the FIX is the new
+                        generator, and it may not share the INITIAL fix's family),
+                        re-briefing distinct entry points, and DISPATCHING its
+                        seats (step 1, items 2, 4 and 6).
 
   SAME-SHA REFUSAL. Before rendering CONFIRMATION, resolve its target tree sha and
   compare it to INITIAL's. If they are EQUAL, the confirmation is REFUSED, not
   rendered and not counted: re-reading an unchanged tree with the same jury cannot
-  produce information, and version 1 spent five days demonstrating exactly that.
-  Record it as VOID with reason `same-sha-re-review` and follow R3's second-void
-  path (there is nothing to re-dispatch that would change it).
+  produce information, and the N-round version spent five days demonstrating exactly
+  that. Record it as VOID with reason `same-sha-re-review` and follow R3's
+  second-void path (there is nothing to re-dispatch that would change it).
 
   CONFIRMATION. Apply R1-R5, then:
       * VOID                          -> R3.
@@ -365,10 +625,19 @@ MANDATORY.
      `--tag converge-verdict:<initial|confirmation>` (auditability). `cs run
      --resident` absorbs them (ADR-038); `COSMON_PARENT_MOL_ID` wires them here.
   2. NEVER render a verdict while its seats are still running — `cs wait` first.
-  3. NEVER let a void verdict advance the state (R3). This is the rule version 1
-     lacked and the one every other rule here depends on.
-  4. An absent verdict is never CLEAN — it is VOID (R3), and VOID never ships.
-  5. `${max_rounds}` governs nothing in this machine. Check it only as a runaway
+  3. NEVER let a void verdict advance the state (R3). This is the rule the N-round
+     version lacked and the one every other rule here depends on.
+  4. An absent verdict is never CLEAN — it is VOID (R3), and VOID never ships. So is
+     a verdict whose value is not an AFFIRMATIVE CLEAN under its stated polarity,
+     including one that simply is not "FINDINGS". A missing `mechanism_polarity` is
+     VOID, never the polarity that makes the verdict pass. `cs reconcile --check`
+     refuses both shapes.
+  5. A seat that did not DELIVER carries no family and no verdict, and an
+     UNCONFIRMED realized endpoint carries no part of the floor. A human switching a
+     refusing seat's model from inside the pane is only acceptable when the switch is
+     written into verdicts.md; a silent rescue is forbidden precisely because it
+     leaves the record saying the jury was intact when it was not.
+  6. `${max_rounds}` governs nothing in this machine. Check it only as a runaway
      backstop: if the committees convened would exceed it, that is a WIRING BUG in
      this node, not a quality signal — collapse with `exit_reason
      "verdict-plumbing"` and say so.
@@ -378,7 +647,7 @@ instead of once over the whole deliverable — the machine is identical, only th
 `target` scope narrows.
 """
 needs = ["open-initial-verdict"]
-acceptance = "MOLECULE_DIR/verdicts.md records the INITIAL row and, when one was admissible, the CONFIRMATION row, each with its target sha, per-seat normalized token, per-seat jury_status, the ballot-carrying subset, F(v) and shape(v). No round counter appears anywhere. The verdict tokens were NORMALIZED (R1), never compared as bare strings; the ballot was RESOLVED before the conjunction (R2); CLEAN was computed as the conjunction over a NON-EMPTY ballot-carrying set with every seat delivered (R4), off-ballot findings recorded as residuals that blocked nothing on their own. Any void verdict did NOT advance the state, was re-dispatched exactly once, and a second void collapsed with exit_reason verdict-plumbing / jury-not-rendered (R3). A CONFIRMATION against the INITIAL's own tree sha was REFUSED, not rendered. A repeated finding set or a repeated shape hash exited immediately as no-new-information / verdict-shape-repeated rather than convening anything further. No third verdict was convened under any outcome. `while` was NOT composed."
+acceptance = "MOLECULE_DIR/verdicts.md records the INITIAL row and, when one was admissible, the CONFIRMATION row, each with its target sha, per-seat normalized token, per-seat DELIVERY disposition, per-seat realized model beside the specified one, per-seat entry point, per-seat jury_status, the ballot-carrying subset, F(v) and shape(v). No round counter appears anywhere. The verdict tokens were NORMALIZED THROUGH THE SEAT'S mechanism_polarity (R1), never compared as bare strings and never via `verdict != FINDINGS`; a missing or off-table polarity was VOID, never the polarity that makes the verdict pass. The ballot was RESOLVED on the REALIZED tuple before the conjunction (R2), and an unconfirmed realized endpoint carried no part of the floor. CLEAN was computed as the conjunction over a NON-EMPTY ballot-carrying set with every seat delivered and the delivering seats spanning the jury floor on what ANSWERED (R4), off-ballot findings recorded as residuals that blocked nothing on their own. Any void verdict — including a jury below its floor, an in-pane rescue, or a refusing seat — did NOT advance the state, was re-dispatched exactly once with the provider's stated reason recorded verbatim, and a second void collapsed with exit_reason verdict-plumbing / jury-not-rendered / jury-vacated (R3). A CONFIRMATION against the INITIAL's own tree sha was REFUSED, not rendered. A repeated finding set or a repeated shape hash exited immediately as no-new-information / verdict-shape-repeated rather than convening anything further. No third verdict was convened under any outcome. `while` was NOT composed."
 
 [[steps]]
 id = "emit-converge-verdict"
@@ -394,17 +663,28 @@ Write MOLECULE_DIR/converge-verdict.json:
                  | "no-new-information"
                  | "verdict-shape-repeated"
                  | "verdict-plumbing"
-                 | "jury-not-rendered",
+                 | "jury-not-rendered"
+                 | "jury-vacated",
     "instrument_or_artifact": "instrument" | "artifact",
     "rounds_measured":  <verdicts that actually rendered: 1 or 2>,
     "rounds_attempted": <committees convened, voids included>,
     "voided_rounds":    <count of void verdicts, with reasons below>,
     "max_rounds": ${max_rounds},
+    "generator_family": "<the realized family the seats were chosen against>",
+    "floor_bearing_seats": [ "<seat ids that actually held the floor>" ],
+    "floor_is_single_point_of_failure": true | false,
     "verdicts": {
       "initial":      { "token": "CLEAN"|"FINDINGS"|"INCONCLUSIVE"|"VOID",
                         "target_sha": "<tree sha>",
-                        "jury_status": { "<seat>": "rendered"|"not-dispatched"
-                                                  |"stalled"|"refused" },
+                        "seats": { "<seat>": {
+                            "jury_status": "rendered"|"not-dispatched"
+                                          |"stalled"|"refused",
+                            "delivery": "delivered"|"provider-refusal"
+                                       |"stalled"|"not-dispatched",
+                            "mechanism_polarity": "fix"|"defect"|null,
+                            "entry_point": "<the itinerary it was briefed to take>",
+                            "specified_model": "<pin>",
+                            "realized_model": "<what answered>" | null } },
                         "ballot_seats": ["<seat>", ...],
                         "finding_keys": ["<key>", ...],
                         "shape": "<hash>" },
@@ -412,25 +692,39 @@ Write MOLECULE_DIR/converge-verdict.json:
                         "refused_reason": "same-sha-re-review" | null }
     },
     "off_ballot_residuals": [ {seat, family, severity, loc, fix, key} ],
+    "hand_rescues": [ {verdict, seat, specified, realized, who_switched} ],
     "void_reasons": [ {verdict, seat, reason, literal_token} ]
   }
 
 `exit_reason` is exactly that enum and nothing else. `instrument_or_artifact` names
-WHAT the exit is about: an exit on no-new-information or on plumbing is a statement
-about our INSTRUMENT, and only `confirmation-findings` is a statement about the
-ARTEFACT. `rounds_measured` and `rounds_attempted` are split because version 1's
-single `rounds_run` could not tell twelve measurements from one measurement and
-eleven repetitions.
+WHAT the exit is about: an exit on no-new-information, on plumbing, or on a vacated
+jury is a statement about our INSTRUMENT, and only `confirmation-findings` is a
+statement about the ARTEFACT. `rounds_measured` and `rounds_attempted` are split
+because the N-round version's single `rounds_run` could not tell twelve
+measurements from one measurement and eleven repetitions.
+
+`realized_model` beside `specified_model` is the diversity floor's actual subject:
+a null realized id is an UNCONFIRMED seat, not a confirmed match, and it carries no
+part of the floor. `hand_rescues` is non-empty exactly when a verdict was VOID for
+needing hands — the caveat the operator can act on, in place of the caveat they
+could not.
+
+`floor_is_single_point_of_failure = true` on a CLEAN verdict is not a
+contradiction, but it IS a caveat the release gate must see: the run converged on
+a jury whose diversity rested on one seat, so its CLEAN is worth exactly one
+family's error-independence plus one reader's.
 
 verdict "CLEAN" iff a verdict rendered a ballot-weighted CLEAN (R4) — INITIAL, or
-CONFIRMATION over a DIFFERENT tree sha. Everything else is "BLOCKED" with an
-escalation note for the human. FAIL-CLOSED: a missing or malformed
+CONFIRMATION over a DIFFERENT tree sha — over a jury whose DELIVERING seats spanned
+the floor on OBSERVED endpoints with no hand in any pane. Everything else is
+"BLOCKED" with an escalation note for the human. FAIL-CLOSED: a missing or malformed
 converge-verdict.json is read by the release gate as BLOCKED.
 
 Also write MOLECULE_DIR/synthesis.md: the two-verdict trace (blueprint §6bis), the
 substrates that had to sign CLEAN and which of them actually carried the ballot,
-the off-ballot residuals by name, and — if blocked — the exact findings that did not
-converge and whether the block is about the instrument or the artefact.
+every specified~>realized drift and every hand rescue, the off-ballot residuals by
+name, and — if blocked — the exact findings that did not converge and whether the
+block is about the instrument or the artefact.
 """
 needs = ["render-two-verdicts"]
-acceptance = "MOLECULE_DIR/converge-verdict.json written with verdict, an exit_reason drawn from the six-value enum, instrument_or_artifact, the split rounds_measured / rounds_attempted, voided_rounds with per-void reasons and the offending literal tokens, per-verdict jury_status, target_sha, ballot_seats, finding_keys and shape, plus off_ballot_residuals. CLEAN only when a ballot-weighted CLEAN rendered (never on an empty ballot set, never on a same-sha re-review); every other outcome is BLOCKED with an escalation note, never a silent pass. synthesis.md carries the two-verdict trace, names which substrate carried the ballot, and says whether a block is about the instrument or the artefact."
+acceptance = "MOLECULE_DIR/converge-verdict.json written with verdict, an exit_reason drawn from the seven-value enum, instrument_or_artifact, the split rounds_measured / rounds_attempted, voided_rounds with per-void reasons and the offending literal tokens, generator_family, floor_bearing_seats, floor_is_single_point_of_failure, and per-verdict target_sha, ballot_seats, finding_keys, shape and per-seat records carrying jury_status, delivery disposition, mechanism_polarity, entry point, specified model and realized model, plus off_ballot_residuals and hand_rescues. CLEAN only when a ballot-weighted CLEAN rendered over a jury whose delivering seats spanned the floor on OBSERVED endpoints with no hand in any pane (never on an empty ballot set, never on a same-sha re-review, never on an unconfirmed realized endpoint); every other outcome is BLOCKED with an escalation note, never a silent pass. synthesis.md carries the two-verdict trace, every specified~>realized drift and hand rescue, names which substrate carried the ballot, and says whether a block is about the instrument or the artefact."

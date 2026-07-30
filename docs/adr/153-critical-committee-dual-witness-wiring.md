@@ -162,6 +162,13 @@ nothing resolved**: no code read the field, so the gate still passed when the
 constrained party lied, or was simply absent — the same test this ADR applies to
 the roster, failed at the next joint.
 
+Since `converge-clean-room` v3 the same shape lands one notch tighter: a missing
+or off-table polarity is **VOID**, not NOT-CLEAN. NOT-CLEAN is a claim about the
+artefact and routes to a fix; an unreadable verdict is an *unrendered* one, and
+patching against findings that were never collected is the waste the twelve-round
+record measured. The gate below is unchanged — it is what makes either reading
+enforceable rather than declared.
+
 Closed the same way, in the same gate: `check_seat_verdict_polarity` in
 `cs reconcile --check` reads each seat's `verdict.json` and `referee-report.md`
 and refuses both shapes, over
