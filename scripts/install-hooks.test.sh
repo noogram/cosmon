@@ -38,10 +38,18 @@ cmp -s "hooks/pre-push" "$d/pre-push" \
     || ko "installed content matches the tracked source" "content differs"
 
 # 2. identical → no-op, green, mtime untouched
-before=$(stat -f %m "$d/pre-push" 2>/dev/null || stat -c %Y "$d/pre-push")
+#
+# mtime via python3, not `stat`. The two `stat`s disagree on `-f`: BSD reads it
+# as a format string, GNU as "filesystem status" — so `stat -f %m file` SUCCEEDS
+# on Linux and prints block counts, and a `|| stat -c %Y` fallback never fires.
+# The comparison then failed on garbage, which is how this test went green on
+# macOS and red in CI. A fallback guarded by an exit code cannot catch a command
+# that succeeds at doing something else.
+mtime() { python3 -c 'import os,sys; print(os.stat(sys.argv[1]).st_mtime_ns)' "$1"; }
+before=$(mtime "$d/pre-push")
 sleep 1
 run "$d"
-after=$(stat -f %m "$d/pre-push" 2>/dev/null || stat -c %Y "$d/pre-push")
+after=$(mtime "$d/pre-push")
 [ "$RC" -eq 0 ] && ok "identical destination is accepted" \
                 || ko "identical destination is accepted" "rc=$RC"
 [ "$before" = "$after" ] \
