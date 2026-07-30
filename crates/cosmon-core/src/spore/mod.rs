@@ -448,8 +448,9 @@ impl NodeKind {
 ///
 /// `max_instances` is the ceiling the seal quantifies over, but the *loop* an
 /// emergent zone actually runs is driven by one of the node's own `vars` (the
-/// cosmon-dev spore passes `max_rounds` to `converge-clean-room`, which feeds it
-/// to `while`'s `max_iterations`). Nothing structurally tied the two together:
+/// cosmon-dev spore passes `max_rounds` to `converge-clean-room`, where it is the
+/// runaway backstop on committees convened). Nothing structurally tied the two
+/// together:
 /// a spore could declare `max_instances = 5` and then hand its own loop
 /// `max_rounds = 100`, so the emergent zone would foam five times past its own
 /// sealed ceiling and both `cs spore validate` and `cs spore run` would say
@@ -479,8 +480,11 @@ pub struct Bounds {
 /// explicit [`instances_var`](Bounds::instances_var).
 ///
 /// These are the names the shipped formulas already use — `while` caps its loop
-/// with `max_iterations` and `converge-clean-room` renames that cap `max_rounds`
-/// — so the ceiling is enforced on spores written before the field existed. A
+/// with `max_iterations`, and `converge-clean-room` keeps `max_rounds` as the
+/// runaway backstop on committees convened even though it no longer composes
+/// `while` — so the ceiling is enforced on spores written before the field
+/// existed. Both names stay listed: the heuristic covers spores whose loop var is
+/// either, and a name dropped here silently stops being checked. A
 /// spore that drives its loop from some *other* var declares `instances_var` and
 /// gets the exact check instead of this heuristic one.
 pub const CONVENTIONAL_INSTANCE_VARS: &[&str] =

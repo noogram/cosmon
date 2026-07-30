@@ -33,6 +33,19 @@ Only **two** formulas are genuinely new (they ship in `formulas/`):
   deliberately **not** composed — it was the N-round machinery (operator decision D1
   amendment 1 on `delib-20260729-1d4e`).
 
+  Four things the N-round machine had learned on top of itself are carried into the
+  two-verdict shape rather than dropped with it: the **roster is an output** (read
+  the generator's family first; never hard-code `claude + codex`), per-seat
+  **delivery** disposition, **realized-versus-specified** endpoints (the floor is a
+  claim about what answered), and the **polarity-relative** reading of a seat's
+  verdict (`confirmed` is CLEAN only under polarity `fix`).
+
+  **This file is the canonical source.** `.cosmon/formulas/converge-clean-room.formula.toml`
+  is a byte-identical projection of it — that is the path `cs nucleate
+  converge-clean-room` resolves. The two copies drifted for a month across 355 lines
+  because both were hand-edited; parity is now a gate
+  (`crates/cosmon-cli/tests/formula_projection_parity.rs`).
+
 ## Layout
 
 ```
@@ -43,7 +56,9 @@ spores/cosmon-dev/
 ├── mission-template.md    # the parameterized briefing
 ├── formulas/
 │   ├── clean-room-repro.formula.toml      # NEW — G2 reproduction gate
-│   └── converge-clean-room.formula.toml   # NEW — §6bis double-engine loop
+│   └── converge-clean-room.formula.toml   # NEW — §6bis two-verdict convergence
+│                                          #   CANONICAL; `.cosmon/formulas/` holds
+│                                          #   a byte-identical projection of it
 ├── clean-room/            # the chambre-blanche container discipline (§4)
 │   ├── README.md          #   one image, three postures, disposable login, two net modes
 │   ├── Dockerfile         #   debian bookworm-slim by digest, claude-code pinned, autoupdate off
