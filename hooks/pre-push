@@ -1,0 +1,33 @@
+#!/bin/sh
+# Refuse to push any unsigned commit — fast local mirror of GitHub's
+# required-signatures gate, catching it before the network round-trip.
+#
+# Also refuses any commit listed in docs/quarantined-commits.tsv. A commit
+# amended away from a branch tip is still reachable from every OTHER branch
+# that was cut before the amendment, and a later ordinary merge carries it
+# back. Push is the boundary that matters — a local merge leaks nothing — so
+# this is where the refusal belongs.
+z40=0000000000000000000000000000000000000000
+fail=0
+quarantine=$(git rev-parse --show-toplevel 2>/dev/null)/docs/quarantined-commits.tsv
+while read local_ref local_sha remote_ref remote_sha; do
+  [ "$local_sha" = "$z40" ] && continue
+  if [ "$remote_sha" = "$z40" ]; then
+    range="$local_sha --not --remotes"
+  else
+    range="$remote_sha..$local_sha"
+  fi
+  for c in $(git rev-list $range 2>/dev/null); do
+    case "$(git log -1 --format='%G?' "$c")" in
+      G|U) : ;;
+      *) echo "pre-push: UNSIGNED commit $(git rev-parse --short "$c"): $(git log -1 --format=%s "$c")" >&2; fail=1 ;;
+    esac
+    if [ -f "$quarantine" ] && grep -q "^$c	" "$quarantine" 2>/dev/null; then
+      echo "pre-push: QUARANTINED commit $(git rev-parse --short "$c")" >&2
+      echo "  reason: $(grep "^$c	" "$quarantine" | cut -f2)" >&2
+      fail=1
+    fi
+  done
+done
+[ "$fail" = 0 ] || { echo "pre-push: aborting. Unsigned: re-sign (git rebase --exec 'git commit --amend -S --no-edit'). Quarantined: rebase or cherry-pick the branch's own commits onto a parent that excludes it — see docs/quarantined-commits.tsv." >&2; exit 1; }
+exit 0

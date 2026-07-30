@@ -28,7 +28,31 @@ install:
     install target/release/cosmon-daemon-supervisor ~/.local/bin/cosmon-daemon-supervisor
     mkdir -p ~/.local/share/man/man1
     install -m 644 crates/cosmon-cli/man/cs.1 ~/.local/share/man/man1/cs.1
+    @just install-hooks
     @just _check-cs-multiplicity
+
+# `hooks/` has been tracked for months with nothing installing it, so every
+# script in it was a gate nobody passed through — the shape this repo keeps
+# finding. `pre-push` in particular enforces docs/quarantined-commits.tsv, and
+# a manifest whose enforcement lives only in one operator's untracked
+# .git/hooks is a list, not a guard.
+#
+# Only the files this repo ships are copied, and each is announced, so a hook
+# you wrote yourself is never silently replaced by a build step.
+install-hooks:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    hooks_dir="$(git rev-parse --git-path hooks)"
+    mkdir -p "$hooks_dir"
+    for src in hooks/*; do
+        name="$(basename "$src")"
+        [ "$name" = "telegram-notify.sh" ] && continue   # invoked by path, not a git hook
+        if [ -e "$hooks_dir/$name" ] && ! cmp -s "$src" "$hooks_dir/$name"; then
+            echo "    hooks: replacing $name (differs from tracked source)"
+        fi
+        install -m 755 "$src" "$hooks_dir/$name"
+    done
+    echo "    hooks: installed $(ls hooks | grep -v telegram-notify | tr '\n' ' ')"
 
 # Build & install the PRIVATE federation tooling to ~/.local/bin.
 #
