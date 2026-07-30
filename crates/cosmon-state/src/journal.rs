@@ -145,8 +145,14 @@ impl JournalEntry {
         if !row_names(&row, molecule) {
             return None;
         }
+        // `type` is the canonical discriminator; `kind` is what pre-V2 writers
+        // used, and rows in that shape are still in the development galaxy's
+        // ledger (`molecule_evolved` is one). Reading only `type` renders them
+        // as "unknown" — a projection that shrugs at the history it was asked
+        // to show.
         let event_type = row
             .get("type")
+            .or_else(|| row.get("kind"))
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
@@ -527,6 +533,19 @@ mod tests {
             &MoleculeId::new("task-20260730-aaaa").expect("well-formed id"),
         );
         assert!(journal.render_markdown().contains("records nothing"));
+    }
+
+    #[test]
+    fn a_legacy_row_tagged_kind_is_named_rather_than_rendered_unknown() {
+        // Pre-V2 writers used `kind`, and rows in that shape are still in the
+        // development galaxy's ledger. Reading only `type` renders a real
+        // history entry as "unknown".
+        let ledger = r#"{"timestamp":"2026-07-30T08:00:00Z","kind":"molecule_evolved","molecule_id":"task-20260730-aaaa","step":1,"total":2}"#;
+        let journal = MoleculeJournal::project(
+            ledger.lines(),
+            &MoleculeId::new("task-20260730-aaaa").expect("well-formed id"),
+        );
+        assert_eq!(journal.entries[0].event_type, "molecule_evolved");
     }
 
     #[test]
