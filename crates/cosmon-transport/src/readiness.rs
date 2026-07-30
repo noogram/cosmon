@@ -444,8 +444,13 @@ fn shows_composer(output: &str) -> bool {
 /// on screen right now. That matters in both directions: it keeps an unnamed
 /// menu out of `Working` (the corridor stays shut even when the pane has
 /// history), and it keeps a pasted-but-unsubmitted briefing out of `Working`
-/// too, which is the signal the briefing-submit confirmation loop reads as
-/// "delivered" before it stops re-pressing Enter.
+/// too — a pane whose composer still holds the briefing has not started work,
+/// whatever an older `⏺` further up says.
+///
+/// Note what no longer depends on this: `cs tackle`'s briefing-submit loop used
+/// to read `Working` as "delivered". It does not any more — delivery is proven
+/// by the briefing text leaving the composer — because on Claude Code 2.1.220
+/// this classifier never answers `Working` at all (COSMON #26-A).
 fn awaits_a_human_at_a_chevron(output: &str) -> bool {
     pane_tail(output)
         .iter()
@@ -2292,10 +2297,10 @@ mod tests {
     }
 
     /// The same rule, doing its other job. A composer still holding an
-    /// unsubmitted pasted briefing must not read `Working` — that is the
-    /// signal the briefing-submit confirmation loop takes as "delivered", and
-    /// reading it here would stop the re-`Enter` nudges on the exact pane they
-    /// exist to rescue (the 2026-07-20 paste-sans-submit stall).
+    /// unsubmitted pasted briefing must not read `Working`: it is the exact
+    /// pane the re-`Enter` nudges exist to rescue (the 2026-07-20
+    /// paste-sans-submit stall), and calling it a worker that started is how a
+    /// patrol pass would walk past it.
     #[test]
     fn a_pasted_briefing_is_not_a_worker_that_started_working() {
         let pane = "⏺ Reading files...\n ❯ [Pasted text #1 +86 lines]\n";
