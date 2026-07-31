@@ -214,7 +214,6 @@ def await_receipt(
     """
     t0 = t0 if t0 is not None else time.time()
     submits = 0
-    pressing = True
     ceased_reason = None
     if first_submit:
         press_submit()
@@ -244,12 +243,20 @@ def await_receipt(
                 ),
             )
         now = time.time()
-        if pressing and now - last_retry >= retry_interval_s:
+        if now - last_retry >= retry_interval_s:
             if stop_pressing_on_clear and composer_pending() is False:
-                # The composer emptied: whatever we pasted is either submitted
-                # or queued, and another carriage return can only land
-                # somewhere it was not meant to.
-                pressing = False
+                # The composer is empty: whatever we pasted is either submitted
+                # or queued, and another carriage return can only land somewhere
+                # it was not meant to. Skip this press.
+                #
+                # Skip, not latch. The first version of this set a flag and
+                # never pressed again, and a single transient reading — one
+                # `capture-pane` that caught the composer mid-redraw — was
+                # enough to disarm the retry for the rest of the dispatch. One
+                # trial did exactly that: one carriage return sent, the paste
+                # still sitting in the composer eight seconds later. The
+                # composer is re-read every cycle instead, so a briefing that
+                # reappears is pressed again.
                 ceased_reason = "composer_cleared"
             else:
                 press_submit()
