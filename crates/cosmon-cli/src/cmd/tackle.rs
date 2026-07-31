@@ -325,6 +325,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // on `cs init` and on `cs opt-in-share` invoked alone — both explicitly
     // interactive moments. Nothing on this path may block on a human.
 
+    // Command-scope leg of the dispatch profile (COSMON #26-C). The spawn's own
+    // clock starts inside `spawn_claude_and_prompt` and therefore cannot see
+    // what `cs tackle` spends before and after it — which is where the residual
+    // seconds of a dispatch turned out to live.
+    let cmd_t0 = std::time::Instant::now();
+    tracing::info!(
+        target: "cosmon::dispatch", phase = "tackle.enter", elapsed_ms = 0_u64,
+        "dispatch stage"
+    );
+
     // Guard: require project identity before touching transport.
     super::require_project_identity(ctx)?;
 
@@ -1288,6 +1298,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;
         wt_dir
     };
+    tracing::info!(
+        target: "cosmon::dispatch", phase = "worktree.ready",
+        elapsed_ms = u64::try_from(cmd_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "dispatch stage"
+    );
 
     // 7b. Install SessionStart hook in worktree for propulsion re-injection.
     // install_session_hook(&worktree_path, mol_id.as_str());
@@ -1518,6 +1533,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         preferred_model.as_deref(),
         &current_strong_set,
         &recorded,
+        cmd_t0,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
@@ -1887,6 +1903,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
+    tracing::info!(
+        target: "cosmon::dispatch", phase = "tackle.return",
+        elapsed_ms = u64::try_from(cmd_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "dispatch stage"
+    );
     Ok(())
 }
 
@@ -4770,6 +4791,9 @@ pub(super) fn spawn_and_prompt(
     // and records afterwards now fails to compile rather than failing
     // silently at 2.5 % per dispatch.
     recorded: &super::dispatch_ledger::DispatchRecorded,
+    // `cs tackle`'s own entry instant, threaded down so every phase of the
+    // dispatch profile shares one origin (COSMON #26-C).
+    dispatch_t0: std::time::Instant,
 ) -> anyhow::Result<SpawnOutcome> {
     // The token proves *a* dispatch was recorded; check it is *this* one.
     // Without this, a caller holding a stale token from an earlier molecule
@@ -4833,6 +4857,7 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             preferred_model,
             strong_set,
+            dispatch_t0,
         )?;
         return Ok(SpawnOutcome {
             detached_local: None,
@@ -5074,6 +5099,9 @@ fn spawn_claude_and_prompt(
     // the probe-fallback layer so a cheap pin never silently escalates to a
     // strong model (task-20260705-ba98).
     strong_set: &[String],
+    // `cs tackle`'s own entry instant, so every phase of the dispatch profile
+    // shares one origin (COSMON #26-C).
+    dispatch_t0: std::time::Instant,
     // Returns the `CLAUDE_CONFIG_DIR` this spawn resolved (`None` when none
     // applied), so the caller can hand it to the realized-model watcher —
     // resolving it a second time is not an option, since `cb next` advances a
@@ -5084,6 +5112,28 @@ fn spawn_claude_and_prompt(
     // refusal below quotes. The trait's `await_live` is what the
     // substrate-agnostic spawn paths (aider, headless) use.
     use cosmon_transport::readiness::{ClaudeTuiProbe, Liveness};
+
+    // Dispatch-latency instrumentation (COSMON #26-C). Every boundary below is
+    // stamped against `dispatch_t0`, which is `cs tackle`'s OWN entry instant
+    // threaded down from `run` — not a second clock started here. An earlier
+    // version did start one, and its log read `worktree.ready=2424`,
+    // `spawn.enter=0`: a profile whose phases do not share an origin cannot be
+    // summed, and the reader has to know which line belongs to which clock.
+    //
+    // At `info` these are off by default (the CLI subscriber filters to `warn`
+    // unless `RUST_LOG` says otherwise), so a normal dispatch pays only the
+    // `Instant::elapsed` at each of eight points. `RUST_LOG=cosmon::dispatch=info`
+    // turns the profile on without turning on everything else.
+    let stage = |phase: &'static str| {
+        tracing::info!(
+            target: "cosmon::dispatch",
+            phase,
+            elapsed_ms = u64::try_from(dispatch_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+            "dispatch stage"
+        );
+    };
+    stage("spawn.enter");
+
     let claude_bin = which_claude().unwrap_or_else(|| "claude".to_owned());
     let perm_mode = permission_mode_override.unwrap_or(default_permission_mode(mol));
     // Inject COSMON_MOL_DIR so the worker process knows the molecule state
@@ -5352,6 +5402,11 @@ fn spawn_claude_and_prompt(
         }
         SpawnPreflight::Proceed { decision, model } => (decision, model),
     };
+    // Everything before this point is cosmon's own: config-dir resolution, the
+    // three fail-closed gates, and the paid `claude --model <m> -p ping` probe
+    // inside `resolve_worker_model`. The probe is a real cognitive round-trip
+    // and is the one pre-spawn cost that is not cosmon's arithmetic.
+    stage("preflight.model_resolved");
 
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
@@ -5380,6 +5435,7 @@ fn spawn_claude_and_prompt(
     );
 
     backend.spawn_worker(session_name, &worktree_path.to_string_lossy(), &claude_cmd)?;
+    stage("session.spawned");
 
     // First stage: a side-effect-free liveness poll (the substrate-agnostic
     // `poll_until_live` driver over `ClaudeTuiProbe`). Replaces the pre-fix
@@ -5402,6 +5458,7 @@ fn spawn_claude_and_prompt(
         maybe_terminate(backend, wid);
         return Err(e);
     }
+    stage("pane.observable");
 
     // Second stage: block until the worker is alive and accepting work via
     // the substrate-agnostic `LiveProbe` contract (task-20260426-d781). The
@@ -5476,7 +5533,22 @@ fn spawn_claude_and_prompt(
         }
     }
 
+    // The wait above is Claude Code's own boot: everything between
+    // `session.spawned` and here is the harness reaching a composer, not cosmon
+    // arithmetic. It is the term to subtract before claiming a cosmon-side cost.
+    stage("readiness.live");
+
+    // `send_input` is not a single write: it pastes, sleeps 500 ms for the TUI
+    // to render, presses submit, and then runs its OWN bounded poll-and-re-press
+    // loop until the composer reads clear. See `send_input.settled` from the
+    // transport for that loop's cycle count and exit reason.
+    //
+    // Its final reading is deliberately NOT carried into the receipt below.
+    // Doing so was tried, measured (1.09 s -> 14 ms) and withdrawn: the receipt
+    // needs two observations spaced in time, not two counts of one observation.
+    // See `run_briefing_submit_loop`.
     backend.send_input(wid, prompt)?;
+    stage("briefing.paste.done");
 
     // Spawn-scale briefing-submit confirmation (BUG #6 — the paste-sans-submit
     // stall observed on the 2026-07-20 knowledge fleet: 4/11 workers sat
@@ -5505,7 +5577,20 @@ fn spawn_claude_and_prompt(
     // ([`arm_briefing_backstop`], COSMON #26-B), which is not this process and
     // therefore not this dispatcher's cost. See
     // [`BriefingSubmitDisposition::ProceedStillPending`].
+    let confirm_t0 = std::time::Instant::now();
     let outcome = confirm_briefing_submitted(backend, wid, prompt, BRIEFING_SUBMIT_INBAND_CAP);
+    // The outcome is named, not inferred from the elapsed time: a dispatch that
+    // exits on a receipt and one that exits on the cap are indistinguishable by
+    // duration alone whenever the receipt lands near the cap.
+    tracing::info!(
+        target: "cosmon::dispatch",
+        phase = "confirm.done",
+        elapsed_ms = u64::try_from(dispatch_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+        confirm_ms = u64::try_from(confirm_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+        outcome = ?outcome,
+        cap_ms = u64::try_from(BRIEFING_SUBMIT_INBAND_CAP.as_millis()).unwrap_or(u64::MAX),
+        "dispatch stage"
+    );
     match briefing_submit_disposition(outcome) {
         BriefingSubmitDisposition::Proceed => {
             if outcome == BriefingSubmitOutcome::SessionGone {
@@ -9887,6 +9972,76 @@ mod tests {
             &mut || clock.set(clock.get() + BRIEFING_SUBMIT_POLL),
         );
         (outcome, clock.get(), nudges.get())
+    }
+
+    /// The receipt needs two observations SPACED IN TIME, not two counts of
+    /// one observation (COSMON #26-C, withdrawn seam).
+    ///
+    /// `cs tackle` briefly seeded this loop with the `ComposerState` its own
+    /// paste loop had just seen, turning the nominal receipt from two 1 s-apart
+    /// looks into one seeded look plus a confirming look ~14 ms later. Measured
+    /// 1.09 s -> 14 ms, and refuted in adversarial review: a transient frame
+    /// that merely lacks the paste — a redraw carrying a spinner or a scrolled
+    /// transcript — reads `Clear`, and two samples 14 ms apart of a repainting
+    /// terminal are one sample counted twice.
+    ///
+    /// # What this test does and does not pin
+    ///
+    /// It pins the KERNEL's cost: an unseeded delivery waits one full poll
+    /// between its two looks. It does **not** pin the caller: a future change
+    /// that memoised `confirm_briefing_submitted`'s first probe, or handed the
+    /// loop a stale reading through its `probe` closure, would leave this green.
+    /// The claim was overstated in review and is corrected here rather than
+    /// left standing — a test that advertises a guarantee it does not check is
+    /// worse than no test, because it retires the suspicion that would have
+    /// found the gap.
+    #[test]
+    fn the_receipt_costs_one_full_poll_between_its_two_looks() {
+        let (outcome, waited, nudges) =
+            simulate_briefing_submit(BRIEFING_SUBMIT_INBAND_CAP, |_| {
+                cosmon_transport::tmux::ComposerState::Clear
+            });
+
+        assert_eq!(outcome, BriefingSubmitOutcome::Delivered);
+        assert_eq!(
+            nudges, 0,
+            "a composer that is already clear must never be nudged"
+        );
+        assert_eq!(
+            waited, BRIEFING_SUBMIT_POLL,
+            "the two readings backing a receipt must be separated by a poll; a \
+             receipt signed without that gap is one observation counted twice"
+        );
+    }
+
+    /// The part of the guarantee that IS structural: a receipt costs two calls
+    /// to the probe, so the kernel cannot sign one from a single look however
+    /// its caller is written.
+    ///
+    /// Weaker than the spacing claim above and honest about it — a caller that
+    /// returns a cached reading from its first probe call still defeats this.
+    /// What it does rule out is the kernel growing a shortcut of its own.
+    #[test]
+    fn a_receipt_costs_two_probe_calls() {
+        let clock = std::cell::Cell::new(std::time::Duration::ZERO);
+        let probes = std::cell::Cell::new(0_usize);
+        let outcome = run_briefing_submit_loop(
+            BRIEFING_SUBMIT_INBAND_CAP,
+            &mut || {
+                probes.set(probes.get() + 1);
+                Some(cosmon_transport::tmux::ComposerState::Clear)
+            },
+            &mut || {},
+            &mut || clock.get(),
+            &mut || clock.set(clock.get() + BRIEFING_SUBMIT_POLL),
+        );
+
+        assert_eq!(outcome, BriefingSubmitOutcome::Delivered);
+        assert_eq!(
+            probes.get(),
+            2,
+            "the receipt must rest on two looks at the pane, not on one"
+        );
     }
 
     /// THE latency test (COSMON #26-A, acceptance 4).

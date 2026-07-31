@@ -274,6 +274,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // pin's fallback tail off the strong model (task-20260705-ba98).
         &[],
         &recorded,
+        // `cs resurrect` starts the profile here, at the spawn. Everything this
+        // command did first — worktree repair, model resolution, the ledger
+        // commit, the state promotion — is therefore NOT in the profile, so its
+        // `spawn.enter=0` is an origin and not a claim that nothing preceded it.
+        // Named rather than fixed: `cs tackle` is the dispatch path the #26
+        // latency question is about, and threading a second origin here would
+        // add a number nobody has asked a question about yet.
+        std::time::Instant::now(),
     ) {
         // The spawn we recorded did not happen: undo the ledger entry so the
         // molecule returns to the state the operator can retry from, rather

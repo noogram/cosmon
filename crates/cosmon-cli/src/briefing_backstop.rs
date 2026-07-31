@@ -371,6 +371,27 @@ pub fn briefing_submit_step(state: ComposerState, clear_streak: u8) -> BriefingS
 ///
 /// `now` returns elapsed-since-start, not an absolute instant, so a test can
 /// drive virtual time by advancing a counter in `sleep`.
+/// # Why there is no seed parameter (COSMON #26-C, withdrawn)
+///
+/// `cs tackle` briefly handed this loop the `ComposerState` its own paste loop
+/// had just seen, so the receipt could start from one confirmation instead of
+/// zero. It measured beautifully — 1.09 s of dispatch latency down to 14 ms —
+/// and it was wrong.
+///
+/// The two-consecutive-`Clear` rule was never only about *counting* two
+/// readings. Part of what it bought was the [`BRIEFING_SUBMIT_POLL`] of
+/// wall-clock BETWEEN them: two looks at a repainting terminal, one second
+/// apart, are two independent samples. A seeded look taken ~14 ms before the
+/// confirming one is a single sample counted twice, and any transient frame
+/// that happens to lack the paste — a redraw carrying a spinner, a scrolled
+/// transcript — is then enough to sign a delivery for a briefing still sitting
+/// in the composer.
+///
+/// The duplication that seemed to justify the seam was real but superficial:
+/// the same *question* was asked twice. The spacing between the answers was
+/// not duplication, it was the evidence. Latency on this path is worth having,
+/// and it is not worth having here — the dispatch profile puts the dominant
+/// term elsewhere entirely, in the per-dispatch `claude --model <m> -p ping`.
 pub fn run_briefing_submit_loop(
     budget: std::time::Duration,
     probe: &mut dyn FnMut() -> Option<ComposerState>,

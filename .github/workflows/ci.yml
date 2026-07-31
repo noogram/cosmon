@@ -233,6 +233,14 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    # The only job here that carried no bound, while three of its neighbours do.
+    # On 2026-07-30 it died twice at ~50 minutes on `cargo test --workspace`,
+    # both times with the step's conclusion empty and NO LOG ARCHIVE UPLOADED —
+    # the runner was lost rather than a test asserting false, so the failure was
+    # undiagnosable from outside. An explicit bound makes Actions cut the job
+    # itself, which uploads what ran. This does not fix that failure; it makes
+    # the next occurrence readable, which nothing local could.
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:

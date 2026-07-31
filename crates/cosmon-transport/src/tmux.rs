@@ -266,6 +266,96 @@ pub fn composer_needle(input: &str) -> Option<&str> {
 /// unmatched later `╭`: scrollback and transcript decorations can contain box
 /// tops too.  If its top has scrolled away, retain a narrow bottom-window
 /// placeholder floor — a collapsed paste is an unambiguous pending signal.
+/// Did this capture show us anything at all?
+///
+/// # The hole this closes (COSMON #26-C)
+///
+/// [`ComposerState::Unobservable`] was introduced so that "I could not look"
+/// could never be mistaken for "the briefing is gone". It guarded only the
+/// *failed* capture. A capture that **succeeds** and comes back blank — a pane
+/// caught mid-redraw, a frame between an erase and the next paint — walked
+/// straight past it: [`composer_indicates_pending`] finds no placeholder in an
+/// empty string, so the reading was `Clear`, and two of those in a row are what
+/// [`crate::tmux::ComposerState::Clear`]'s consumer accepts as a delivery
+/// receipt for a briefing nobody submitted.
+///
+/// # Why the rule is this weak, and not "a composer must be visible"
+///
+/// A stronger rule was tried and measured wrong. Requiring composer chrome — a
+/// `╭`/`╰` border or a `›`/`❯`/`>` glyph — accepts all eight panes captured
+/// from Claude Code 2.1.220 (`tests/fixtures/claude-tui-2.1.220/`), so it looked
+/// safe. It is not: `tests/briefing_backstop_survival.rs` drives a worker that
+/// receives its Enter, wipes its screen and prints one bare word. The briefing
+/// was *delivered* — the rig's marker file proves the keystroke landed — and the
+/// chrome rule refuses to sign for it, forever. It converts a forged-receipt bug
+/// into a never-signed-receipt bug: the dispatcher pays the whole in-band cap
+/// and arms a durable backstop against a worker that is perfectly fine.
+///
+/// A pane showing `done` is a pane we *read*, and the briefing is not in it.
+/// That is a receipt. A pane showing nothing is not a reading at all. The
+/// difference is content, not chrome, and only the second one is the defect.
+fn capture_has_content(captured: &str) -> bool {
+    captured.lines().any(|line| !line.trim().is_empty())
+}
+
+/// Turn one successful `capture-pane` into a typed reading about `input`.
+///
+/// Pure, and separated from [`TmuxBackend::composer_state`] for one reason: the
+/// classification is where the delivery receipt is actually decided, and a
+/// decision that can only be exercised against a live tmux server is a decision
+/// whose regressions are found in production.
+///
+/// The caller supplies the "the capture itself failed" case; everything here is
+/// about what a capture that SUCCEEDED is allowed to mean. Order is
+/// load-bearing: emptiness is checked before the pending scan, because it is the
+/// pending scan's `false` — "I did not find the briefing" — that a blank frame
+/// used to turn into "the briefing is gone".
+fn classify_composer(captured: &str, input: &str) -> ComposerState {
+    if !capture_has_content(captured) {
+        return ComposerState::Unobservable;
+    }
+    if composer_indicates_pending(captured, input) {
+        ComposerState::Pending
+    } else {
+        ComposerState::Clear
+    }
+}
+
+/// Squash a run of composer lines into the text the user would see if the
+/// terminal were infinitely wide: no whitespace, no box-drawing, no prompt
+/// glyphs.
+///
+/// # Why a scan line-by-line is not enough (COSMON #26-C)
+///
+/// A briefing's needle is its last non-empty *logical* line. The terminal wraps
+/// it at the pane width, so a 160-column final line in an 80-column pane arrives
+/// as two physical capture lines and **no single line contains the needle**. The
+/// per-line scan then reports "not pending" for a composer that is visibly
+/// holding the briefing, both captures a second apart agree, and the delivery
+/// receipt is signed for a briefing nobody submitted. It is the same forged
+/// receipt as the blank-frame one, entered through a different door.
+///
+/// Removing whitespace is what makes the comparison wrap-invariant: wrapping
+/// inserts a line break and nothing else. Removing the box-drawing and prompt
+/// glyphs is what lets a ruled composer (`│ text │`) be compared against the raw
+/// briefing line the caller handed us.
+///
+/// False positives are bounded by the region: only the composer's own lines are
+/// joined, never the transcript above it, so two unrelated lines cannot be
+/// spliced into a needle that spans them.
+fn flatten_composer_region(lines: &[&str]) -> String {
+    lines
+        .iter()
+        .flat_map(|line| line.chars())
+        .filter(|c| !c.is_whitespace() && !COMPOSER_CHROME.contains(c))
+        .collect()
+}
+
+/// Glyphs a composer draws around its own text, stripped before a wrap-invariant
+/// comparison. Not a general box-drawing set: exactly what cosmon's own scan
+/// already treats as chrome elsewhere in this module.
+const COMPOSER_CHROME: [char; 8] = ['╭', '╮', '╰', '╯', '─', '│', '›', '❯'];
+
 fn composer_indicates_pending(captured: &str, input: &str) -> bool {
     let lines: Vec<&str> = captured.lines().map(str::trim).collect();
     let Some(needle) = composer_needle(input) else {
@@ -276,12 +366,21 @@ fn composer_indicates_pending(captured: &str, input: &str) -> bool {
             || line.contains(CODEX_PASTED_PLACEHOLDER)
             || line.contains(needle)
     };
+    // The wrap-invariant form of the same question, asked over a whole region.
+    // Empty needles cannot match here — `composer_needle` already refused an
+    // all-whitespace briefing above, and a needle that flattens to nothing
+    // would otherwise be `contains`-true against every composer on screen.
+    let flat_needle = flatten_composer_region(&[needle]);
+    let region_pending = |region: &[&str]| {
+        region.iter().any(|line| pending(line))
+            || (!flat_needle.is_empty() && flatten_composer_region(region).contains(&flat_needle))
+    };
 
     // Pair the final closing border with the nearest preceding opening border.
     // An unmatched `╭` below a real composer must not hide that composer.
     if let Some(end) = lines.iter().rposition(|line| line.starts_with('╰')) {
         if let Some(start) = lines[..end].iter().rposition(|line| line.starts_with('╭')) {
-            return lines[start..=end].iter().any(|line| pending(line));
+            return region_pending(&lines[start..=end]);
         }
     }
 
@@ -291,7 +390,7 @@ fn composer_indicates_pending(captured: &str, input: &str) -> bool {
         .iter()
         .rposition(|line| matches!(line.chars().next(), Some('›' | '❯' | '>')))
     {
-        if lines[start..].iter().any(|line| pending(line)) {
+        if region_pending(&lines[start..]) {
             return true;
         }
     }
@@ -541,23 +640,17 @@ impl TmuxBackend {
         let Ok(raw) = self.tmux_cmd(&["capture-pane", "-t", session_name, "-p"]) else {
             return ComposerState::Unobservable;
         };
-        if composer_indicates_pending(&raw, input) {
-            ComposerState::Pending
-        } else {
-            ComposerState::Clear
-        }
+        classify_composer(&raw, input)
     }
 
-    /// Best-effort check for the submit-retry loop: is `input` *visibly* still
-    /// unsubmitted?
-    ///
-    /// Advisory, and deliberately collapses `Clear` and `Unobservable` into
-    /// "stop pressing": this answer only decides whether to fire another Enter,
-    /// and a capture failure must never manufacture a nudge nor escalate a
-    /// delivered paste into an error.
-    fn input_still_pending(&self, session_name: &str, input: &str) -> bool {
-        self.composer_state(session_name, input).is_pending()
-    }
+    // `input_still_pending` — a `bool` wrapper that collapsed `Clear` and
+    // `Unobservable` into "stop pressing" — used to sit here. It was harmless
+    // while its answer only decided whether to fire another Enter, and became a
+    // hazard the moment the submit loop's last reading was forwarded to the
+    // delivery receipt: forwarding the bool would have handed the receipt an
+    // "I could not look" dressed as a confirmed-clear composer. It is deleted
+    // rather than left unused, so the conflation cannot be reintroduced by
+    // reaching for a helper that is already there (COSMON #26-C).
 
     /// Spawn-time public reading: what does the worker's composer say about
     /// `input` *right now*?
@@ -779,21 +872,47 @@ impl TransportBackend for TmuxBackend {
         //
         // Verification is best-effort — a capture failure must never turn a
         // delivered paste into a hard error, so a poll that cannot read the
-        // pane reads as "not pending" and ends the loop.
+        // pane ends the loop rather than escalating.
+        //
+        // This loop's final reading is NOT handed to `cs tackle`'s delivery
+        // receipt. That seam was built, measured (1.09 s -> 14 ms) and
+        // withdrawn: the receipt needs two looks separated in time, and a
+        // reading taken here is ~14 ms older than the receipt's own first look
+        // — one sample counted twice. See `run_briefing_submit_loop`.
         //
         // `composer_indicates_pending` scopes the literal-tail check to the
         // visible composer, so Codex's submitted transcript echo no longer
         // masquerades as a pending paste.
         let budget = submit_retry_budget(input);
+        // Instrumented (COSMON #26-C): this loop and `cs tackle`'s
+        // `confirm_briefing_submitted` both wait for "the composer no longer
+        // holds what we pasted". The cycle count and exit reason are what let a
+        // dispatch profile say which of the two paid, instead of inferring it.
+        let submit_t0 = std::time::Instant::now();
+        let mut cycles: u32 = 0;
+        let mut last_seen = ComposerState::Unobservable;
         let cleared = drive_submit(
             budget,
             || {
+                cycles = cycles.saturating_add(1);
                 std::thread::sleep(std::time::Duration::from_millis(SUBMIT_POLL_INTERVAL_MS));
-                self.input_still_pending(&session_name, input)
+                let state = self.composer_state(&session_name, input);
+                last_seen = state;
+                state.is_pending()
             },
             || {
                 let _ = self.press_submit(&session_name);
             },
+        );
+        tracing::info!(
+            target: "cosmon::dispatch",
+            phase = "send_input.settled",
+            elapsed_ms = u64::try_from(submit_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
+            polls = cycles,
+            budget,
+            observed = ?last_seen,
+            reason = if cleared { "composer-clear" } else { "budget-exhausted" },
+            "dispatch stage"
         );
 
         // Observability (review task-20260711-a7a5, H2). Without this the
@@ -1590,6 +1709,160 @@ mod tests {
 
         let _ = backend.terminate(&worker.id);
         cleanup(sock);
+    }
+
+    /// A `capture-pane` that SUCCEEDS and comes back blank is not evidence
+    /// that the briefing left the composer — it is not a reading at all.
+    ///
+    /// This is the hole COSMON #26-C closed. `Unobservable` guarded only the
+    /// *failed* capture. A blank-but-successful one fell through
+    /// `composer_indicates_pending` (which finds no placeholder in an empty
+    /// string) and was classified `Clear`. Two of those in a row are what
+    /// `run_briefing_submit_loop` accepts as a delivery receipt.
+    ///
+    /// Deleting the emptiness guard from `classify_composer` reddens this.
+    #[test]
+    fn a_blank_but_successful_capture_is_not_evidence_of_a_clear_composer() {
+        let briefing = "do the thing\nfinal line of the brief";
+        for blank in ["", "\n", "   \n\t\n   ", "\n\n\n"] {
+            assert_eq!(
+                classify_composer(blank, briefing),
+                ComposerState::Unobservable,
+                "a blank frame must classify as unobservable, never as a clear \
+                 composer: {blank:?}"
+            );
+        }
+    }
+
+    /// A final briefing line wider than the pane is WRAPPED by the terminal,
+    /// and must still be recognised as sitting in the composer.
+    ///
+    /// The scenario is the reviewer's, verbatim: a 160-column needle in an
+    /// 80-column pane. The per-line scan asks `line.contains(needle)` of each
+    /// physical capture line, and neither half contains the whole needle. Before
+    /// the wrap-invariant comparison, both captures — a full second apart, both
+    /// carrying content — classified `Clear`, and the receipt was signed for a
+    /// briefing still visibly pasted. Same forged receipt as the blank frame,
+    /// through a different door.
+    ///
+    /// Deleting the `flatten_composer_region` arm of `region_pending` reddens
+    /// this.
+    #[test]
+    fn a_needle_wrapped_across_two_physical_lines_still_reads_as_pending() {
+        let needle: String = std::iter::repeat_n('x', 160).collect();
+        let briefing = format!("do the thing\n{needle}");
+        let (first, second) = needle.split_at(80);
+
+        // A ruled composer, wrapped by an 80-column pane.
+        let ruled = format!("╭──────╮\n│ {first}\n│ {second}\n╰──────╯");
+        assert_eq!(
+            classify_composer(&ruled, &briefing),
+            ComposerState::Pending,
+            "a wrapped needle in a ruled composer is still an unsubmitted briefing"
+        );
+
+        // The glyph-composer shape, same wrap.
+        let glyph = format!("❯ {first}\n{second}");
+        assert_eq!(
+            classify_composer(&glyph, &briefing),
+            ComposerState::Pending,
+            "a wrapped needle in a glyph composer is still an unsubmitted briefing"
+        );
+    }
+
+    /// The counterweight to wrap-invariance: flattening must not splice two
+    /// unrelated composer lines into a needle that spans them, and must not
+    /// match a briefing that genuinely left.
+    #[test]
+    fn flattening_does_not_invent_a_needle_that_is_not_there() {
+        let briefing = "do the thing\nalpha-beta-gamma";
+        assert_eq!(
+            classify_composer("❯ \n", briefing),
+            ComposerState::Clear,
+            "an empty composer is a receipt, wrapped scan or not"
+        );
+        // `alpha` and `gamma` are present but the needle `alpha-beta-gamma` is
+        // not: flattening removes whitespace, never reorders or invents text.
+        assert_eq!(
+            classify_composer("❯ alpha\ngamma\n", briefing),
+            ComposerState::Clear,
+            "two fragments that do not spell the needle must not read as pending"
+        );
+    }
+
+    /// The counter-example that decided how weak the rule had to be.
+    ///
+    /// A stronger rule — "a delivery receipt requires visible composer chrome"
+    /// — was implemented, passed every unit test and all eight real panes, and
+    /// was then refuted by `tests/briefing_backstop_survival.rs`: its worker
+    /// receives the Enter, erases the screen and prints one bare word. The
+    /// briefing WAS delivered. Chrome-gating that reading never signs the
+    /// receipt, so the record is never cleared and the wait times out.
+    ///
+    /// A pane bearing content we read, without the briefing in it, is a
+    /// receipt. Only a pane bearing nothing is not.
+    #[test]
+    fn a_pane_that_was_wiped_after_delivery_still_signs_the_receipt() {
+        let briefing = "do the thing\nCOSMON-BACKSTOP-NEEDLE-1234";
+        assert_eq!(
+            classify_composer("done\n", briefing),
+            ComposerState::Clear,
+            "a legible pane without the briefing in it is a delivery receipt, \
+             chrome or no chrome"
+        );
+        assert_eq!(
+            classify_composer("Loading...\nstill loading\n", briefing),
+            ComposerState::Clear,
+            "the rule is about content, not about recognising a composer"
+        );
+    }
+
+    /// The counterweight: the classification must accept every pane Claude Code
+    /// actually renders, or a delivery receipt becomes a permanent
+    /// `Unobservable` and every dispatch pays the whole in-band cap.
+    ///
+    /// All eight panes were captured from Claude Code 2.1.220 on 2026-07-30 —
+    /// one idle, six mid-stream.
+    #[test]
+    fn every_captured_claude_pane_signs_the_receipt_for_an_absent_briefing() {
+        let panes: [(&str, &str); 7] = [
+            (
+                "idle",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/idle.pane"),
+            ),
+            (
+                "streaming-1",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-1.pane"),
+            ),
+            (
+                "streaming-2",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-2.pane"),
+            ),
+            (
+                "streaming-3",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-3.pane"),
+            ),
+            (
+                "streaming-4",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-4.pane"),
+            ),
+            (
+                "streaming-5",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-5.pane"),
+            ),
+            (
+                "streaming-6",
+                include_str!("../tests/fixtures/claude-tui-2.1.220/streaming-6.pane"),
+            ),
+        ];
+        let absent = "a briefing line that is nowhere in these panes";
+        for (name, pane) in panes {
+            assert_eq!(
+                classify_composer(pane, absent),
+                ComposerState::Clear,
+                "{name}: a real pane not holding the briefing must sign the receipt"
+            );
+        }
     }
 
     #[test]
