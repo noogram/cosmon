@@ -15,13 +15,23 @@ from collections import defaultdict
 
 
 def load(paths):
+    """Every trial line, with the injected CPU load folded into the scenario.
+
+    The load condition is part of what a row *is*, not a footnote: the same
+    scenario at load 0 and at load 8 are different measurements, and merging
+    them would silently average a machine that was busy with one that was not.
+    """
     rows = []
     for p in paths:
         with open(p) as fh:
             for line in fh:
                 line = line.strip()
-                if line:
-                    rows.append(json.loads(line))
+                if not line:
+                    continue
+                r = json.loads(line)
+                if r.get("cpu_load"):
+                    r["scenario"] = f"{r['scenario']}+load{r['cpu_load']}"
+                rows.append(r)
     return rows
 
 
