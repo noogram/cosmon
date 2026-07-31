@@ -187,8 +187,48 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
     }
     let mut caller = caller.spawn().expect("spawn the arming caller");
     let caller_pgid = caller.id();
-    let status = caller.wait().expect("the caller returns immediately");
-    assert!(status.success(), "arming the backstop failed: {status}");
+
+    // Let the caller finish arming — WITHOUT reaping it.
+    //
+    // # Why not `caller.wait()` here (the CI-runner hazard)
+    //
+    // `caller_pgid` is the caller's pid, and a pid belongs to a process only
+    // while the kernel is still holding it. Reaping releases it for reuse
+    // **immediately**, so a `kill -KILL -<pgid>` issued after `wait()` names a
+    // process group that may already belong to something else. On a developer's
+    // machine that window is too narrow to hit. On a CI runner churning through
+    // hundreds of test binaries it is not, and the signal then lands on whatever
+    // won the pid lottery — at the limit, the harness running this very test,
+    // which dies without a verdict and without uploading a log.
+    //
+    // `waitpid(WNOWAIT)` waits for the exit and leaves the zombie in place. A
+    // zombie still owns its pid: the kernel cannot hand it to anyone until it is
+    // collected. So between here and the reap below, `caller_pgid` means exactly
+    // one thing, and the kill has a well-defined target.
+    //
+    // The ordering matters in the other direction too: the caller has to have
+    // ARMED the backstop before anything kills its group, which is why this
+    // waits for its exit rather than firing straight after `spawn`.
+    // `waitid` and not `waitpid`: `WNOWAIT` is a `waitid` flag, and `waitpid`
+    // answers EINVAL for it.
+    let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+    // SAFETY: `caller_pgid` is our own live child's pid, `info` is a valid
+    // writable `siginfo_t`, and `WNOWAIT` leaves the child collectable by the
+    // `caller.wait()` below — so `Child`'s own reaping contract is preserved.
+    let rc = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            caller_pgid as libc::id_t,
+            &raw mut info,
+            libc::WEXITED | libc::WNOWAIT,
+        )
+    };
+    assert_eq!(
+        rc,
+        0,
+        "waiting for the arming caller failed: {}",
+        std::io::Error::last_os_error()
+    );
 
     // Property 2 — the caller is really dead, and so is anything that stayed in
     // its process group. If the backstop had been spawned as an ordinary child
@@ -198,6 +238,11 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
         .arg("-KILL")
         .arg(format!("-{caller_pgid}"))
         .output();
+
+    // Now the pid may be released: nothing reads it again.
+    let status = caller.wait().expect("the caller returns immediately");
+    assert!(status.success(), "arming the backstop failed: {status}");
+
     wait_for("the caller's process group to empty", || {
         !process_group_alive(caller_pgid)
     });
