@@ -173,23 +173,27 @@ fn expiring_cred(access: &str, refresh: &str) -> StoredCredential {
 #[tokio::test]
 async fn discover_resolves_endpoints_and_client_id() {
     let server = MockServer::start().await;
-    Mock::given(method("GET"))
-        .and(path("/.well-known/openid-configuration"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "issuer": "https://forge.example",
-            "authorization_endpoint": format!("{}/authorize", server.uri()),
-            "token_endpoint": format!("{}/token", server.uri()),
-        })))
-        .mount(&server)
-        .await;
+    // The registry carries the issuer — validated against the pinned
+    // expected_issuer before OIDC Discovery is fetched.
     Mock::given(method("GET"))
         .and(path("/.well-known/cosmon-oauth-clients"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
+            "issuer": server.uri(),
             "clients": [
                 {"audience": "cs-rpp-adapter", "client_id": "abc-123"},
                 {"audience": "claude-web", "client_id": "def-456"},
             ],
+        })))
+        .mount(&server)
+        .await;
+    // OIDC Discovery is fetched from the validated issuer.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issuer": server.uri(),
+            "authorization_endpoint": format!("{}/authorize", server.uri()),
+            "token_endpoint": format!("{}/token", server.uri()),
         })))
         .mount(&server)
         .await;
@@ -204,9 +208,85 @@ async fn discover_resolves_endpoints_and_client_id() {
     )
     .await
     .unwrap();
-    assert_eq!(ep.issuer, "https://forge.example");
+    assert_eq!(ep.issuer, server.uri());
     assert_eq!(ep.client_id, "abc-123");
     assert_eq!(ep.token_endpoint, format!("{}/token", server.uri()));
+}
+
+#[tokio::test]
+async fn discover_fails_when_registry_issuer_mismatches_pinned_issuer() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/.well-known/cosmon-oauth-clients"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "schema_version": 2,
+            "issuer": "https://wrong-idp.example",
+            "clients": [{"audience": "cs-rpp-adapter", "client_id": "abc"}],
+        })))
+        .mount(&server)
+        .await;
+
+    let http = reqwest::Client::new();
+    let err = oidc::discover(
+        &http,
+        &server.uri(), // pinned expected_issuer
+        &server.uri(),
+        "cs-rpp-adapter",
+        vec!["openid".into()],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::Discovery { .. })
+        ),
+        "expected Discovery error on issuer mismatch, got {err:?}"
+    );
+}
+
+#[tokio::test]
+async fn discover_fails_when_discovery_issuer_differs_from_pinned_issuer() {
+    let server = MockServer::start().await;
+    // Registry issuer matches the pinned issuer, so Step 2 passes.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/cosmon-oauth-clients"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "schema_version": 2,
+            "issuer": server.uri(),
+            "clients": [{"audience": "cs-rpp-adapter", "client_id": "abc"}],
+        })))
+        .mount(&server)
+        .await;
+    // OIDC Discovery declares a *different* issuer than the pinned one — the
+    // §3.3 gate (Step 4) must reject it even though the registry issuer matched.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/openid-configuration"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "issuer": "https://wrong-idp.example",
+            "authorization_endpoint": format!("{}/authorize", server.uri()),
+            "token_endpoint": format!("{}/token", server.uri()),
+        })))
+        .mount(&server)
+        .await;
+
+    let http = reqwest::Client::new();
+    let err = oidc::discover(
+        &http,
+        &server.uri(), // pinned expected_issuer
+        &server.uri(),
+        "cs-rpp-adapter",
+        vec!["openid".into()],
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::Discovery { .. })
+        ),
+        "expected Discovery error on discovery-issuer mismatch, got {err:?}"
+    );
 }
 
 // --- single-use rotation ------------------------------------------------
@@ -879,6 +959,129 @@ async fn refresh_fails_loud_when_the_rotated_id_token_claims_are_unusable() {
     }
 }
 
+// --- adversarial: the token's `iss` names a different authority ----------
+
+/// A token endpoint that mints a fully-formed identity `id_token` whose `iss`
+/// names a DIFFERENT authority (`https://evil.example`) than the one the flow
+/// authenticated against (`https://forge.example`). `sub`/`aud` are valid, so
+/// the token passes identity-bearer selection — only the OIDC Core §3.1.3.7
+/// issuer check can reject it. Answers both grants, driving the login and
+/// refresh seats.
+struct WrongIssuerMock;
+
+impl Respond for WrongIssuerMock {
+    fn respond(&self, _request: &Request) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "access_token": bookkeeping_jwt(1),
+            "refresh_token": "rt-next",
+            "expires_in": 900,
+            "token_type": "bearer",
+            "id_token": jwt(serde_json::json!({
+                "iss": "https://evil.example",
+                "sub": "operator",
+                "aud": "client-A",
+            })),
+        }))
+    }
+}
+
+#[tokio::test]
+async fn login_fails_loud_when_the_id_token_issuer_differs_from_the_authenticated_issuer() {
+    // The provider serving the pinned issuer's discovery mints a token whose
+    // `iss` names a different authority. Persisting it would file a bearer under
+    // `https://forge.example`'s key while the resource server resolves its real
+    // `iss` elsewhere — so the login must fail loud and persist NOTHING.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(WrongIssuerMock)
+        .mount(&server)
+        .await;
+
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    let endpoints = oidc::OidcEndpoints::new(
+        "https://forge.example",
+        "http://unused.example/authorize",
+        format!("{}/token", server.uri()),
+        "client-A",
+        format!("http://127.0.0.1:{port}/callback"),
+        vec!["openid".into()],
+    );
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+
+    let http = reqwest::Client::new();
+    let err = oidc::login(
+        &http,
+        &store,
+        &endpoints,
+        "operator",
+        std::time::Duration::from_secs(10),
+        fake_browser,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::TokenIssuerMismatch { .. })
+        ),
+        "expected TokenIssuerMismatch at login, got {err:?}"
+    );
+    let key = endpoints.credential_key("operator");
+    assert!(
+        store.load(&key).unwrap().is_none(),
+        "a token for a different issuer must never land in the store"
+    );
+}
+
+#[tokio::test]
+async fn refresh_fails_loud_when_the_rotated_id_token_issuer_differs() {
+    // The rotation seat: a credential pinned to `https://forge.example` must not
+    // be overwritten by a rotation whose id_token names a different `iss`. The
+    // refresh fails loud and the seed pair stays put.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(WrongIssuerMock)
+        .mount(&server)
+        .await;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let store = CredentialStore::file_at(tmp.path());
+    let k = key(); // issuer == https://forge.example
+    store
+        .store(&k, &expiring_cred("at-seed", "rt-seed"))
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let cfg = oidc::RefreshConfig {
+        token_endpoint: format!("{}/token", server.uri()),
+        client_id: "client-A".into(),
+        rotation: oidc::RefreshRotation::Rotating,
+    };
+    let err = oidc::refresh_credential(&http, &store, &k, &cfg, ChronoDuration::seconds(60))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            cosmon_remote::Error::Oidc(cosmon_remote::OidcError::TokenIssuerMismatch { .. })
+        ),
+        "expected TokenIssuerMismatch at refresh, got {err:?}"
+    );
+    let stored = store.load(&k).unwrap().unwrap();
+    assert_eq!(
+        stored.access_token().expose(),
+        "at-seed",
+        "a wrong-issuer rotation must not overwrite the store"
+    );
+}
+
 // --- the login outcome reports the TOKEN's identity, not the profile's ---
 
 /// A provider that issues an `id_token` for a subject the caller did NOT ask
@@ -989,14 +1192,19 @@ async fn login_outcome_reports_the_token_subject_not_the_requested_one() {
 /// `id_token` at refresh time either.
 struct OpenidGatingProvider {
     granted_openid: Arc<std::sync::atomic::AtomicBool>,
+    /// The issuer this provider serves discovery under — stamped into the `iss`
+    /// of every `id_token` it mints, so the flow's OIDC Core §3.1.3.7 issuer
+    /// check accepts the bearer it authenticated against.
+    issuer: String,
     seq: AtomicUsize,
     valid_refresh: Mutex<std::collections::HashSet<String>>,
 }
 
 impl OpenidGatingProvider {
-    fn new(granted_openid: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    fn new(issuer: String, granted_openid: Arc<std::sync::atomic::AtomicBool>) -> Self {
         Self {
             granted_openid,
+            issuer,
             seq: AtomicUsize::new(1),
             valid_refresh: Mutex::new(std::collections::HashSet::new()),
         }
@@ -1055,7 +1263,14 @@ impl OpenidGatingProvider {
             "token_type": "bearer",
         });
         if self.granted_openid.load(Ordering::SeqCst) {
-            body["id_token"] = serde_json::json!(identity_jwt(&format!("id-{n}")));
+            // Stamp the provider's own issuer so the flow's issuer check accepts
+            // the bearer; the `marker` claim keeps candidates distinguishable.
+            body["id_token"] = serde_json::json!(jwt(serde_json::json!({
+                "iss": self.issuer,
+                "sub": "operator",
+                "aud": "client-A",
+                "marker": format!("id-{n}"),
+            })));
         }
         ResponseTemplate::new(200).set_body_json(body)
     }
@@ -1087,24 +1302,27 @@ async fn mount_gating_provider(
     if let Some(scopes) = published_scopes {
         client["scopes"] = serde_json::json!(scopes);
     }
+    // Registry is fetched first; its issuer is validated then used to fetch
+    // OIDC Discovery. Both must carry the same issuer URL.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/cosmon-oauth-clients"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "schema_version": 2,
+            "issuer": server.uri(),
+            "clients": [client],
+        })))
+        .mount(server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/.well-known/openid-configuration"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "issuer": "https://forge.example",
+            "issuer": server.uri(),
             "authorization_endpoint": format!("{}/authorize", server.uri()),
             "token_endpoint": format!("{}/token", server.uri()),
         })))
         .mount(server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/.well-known/cosmon-oauth-clients"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "schema_version": 1,
-            "clients": [client],
-        })))
-        .mount(server)
-        .await;
-    let provider = Arc::new(OpenidGatingProvider::new(granted_openid));
+    let provider = Arc::new(OpenidGatingProvider::new(server.uri(), granted_openid));
     Mock::given(method("GET"))
         .and(path("/authorize"))
         .respond_with(SharedProvider(provider.clone()))
@@ -1214,7 +1432,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
     let identity = outcome
         .identity
         .expect("the post-login bearer carries identity claims");
-    assert_eq!(identity.iss, "https://forge.example");
+    assert_eq!(identity.iss, server.uri());
     assert_eq!(identity.sub, "operator");
 
     // --- and after a refresh -------------------------------------------------
@@ -1249,7 +1467,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
         oidc::bearer_identity(&rotated)
             .expect("the post-refresh bearer carries identity claims")
             .iss,
-        "https://forge.example"
+        server.uri()
     );
 }
 

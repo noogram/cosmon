@@ -91,6 +91,29 @@ pub enum OidcError {
     )]
     NoIdentityBearer,
 
+    /// The identity-bearing token the provider minted carries an `iss` claim
+    /// that does not match the issuer this flow authenticated against — the
+    /// pinned `expected_issuer` validated during [`crate::oidc::discover`].
+    /// OpenID Connect Core §3.1.3.7 requires an id_token's `iss` to match the
+    /// OP's issuer; a mismatch means the token is scoped to a different
+    /// authority than the one we resolved endpoints for, so persisting it under
+    /// this issuer's credential key would file a bearer whose real identity the
+    /// resource server resolves elsewhere. Fails loud at mint/rotate time. This
+    /// is not a signature check (the client presents, the server verifies) — it
+    /// catches an honestly misconfigured provider, not a forged claim. Carries
+    /// only the two issuer URLs (public discovery identifiers), never a token.
+    #[error(
+        "token issuer {found:?} does not match the authenticated issuer {expected:?} \
+         — the provider minted a token for a different authority"
+    )]
+    TokenIssuerMismatch {
+        /// The `iss` claim read out of the minted token.
+        found: String,
+        /// The issuer this flow authenticated against (the pinned expected
+        /// issuer). A public discovery identifier, never secret.
+        expected: String,
+    },
+
     /// The loopback callback could not be captured: the listener could not bind
     /// the redirect port, the browser never returned, or the request was
     /// malformed. Carries a diagnostic, never a secret.

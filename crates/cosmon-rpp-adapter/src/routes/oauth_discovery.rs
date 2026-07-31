@@ -3,6 +3,15 @@
 //! `GET /.well-known/cosmon-oauth-clients` — the OAuth client-id
 //! reverse-discovery endpoint (delib-20260710-33b7 §C8, `task-20260710-909a`).
 //!
+//! Serves the [`crate::oauth_discovery::ClientRegistry`] document
+//! (`schema_version` 2). The document carries only the `issuer` and the
+//! audience-keyed `client_id` entries; OIDC endpoints are intentionally
+//! absent — the client fetches them from the `IdP`'s own
+//! `/.well-known/openid-configuration`. This keeps the document's scope
+//! to `client_id` reverse discovery (the one thing the standard cannot
+//! provide) and makes it `IdP`-agnostic (Forgejo, Auth0, Keycloak all serve
+//! standard OIDC Discovery).
+//!
 //! Operational-class route: outside `/v1/`, **no JWT gate** (the document
 //! is public — `client_id` needs integrity, not confidentiality), and
 //! excluded from the §8p frozen API surface (same class as `/healthz`,
@@ -19,9 +28,7 @@
 //! outside the §8j clause-(c) leaky bucket (which is keyed on the JWT
 //! `sub` and no-ops without one). `DoS` control for the operational class is
 //! delegated to the network edge — see `crate::router` and
-//! `docs/architectural-invariants.md` §8j. The residual read amplification
-//! reaches exact `/healthz` parity once `task-20260710-a575` (F2) drops the
-//! `exists()` pre-check in `load_registry`.
+//! `docs/architectural-invariants.md` §8j.
 
 use std::sync::Arc;
 

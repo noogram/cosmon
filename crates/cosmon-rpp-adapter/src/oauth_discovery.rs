@@ -16,9 +16,9 @@
 //! the `forgejo-issuer.toml` handoff as the pinned `audiences`, see
 //! [`crate::trust_bootstrap`]), **publishes** it.
 //!
-//! `client_id` is **public** — it needs integrity, not confidentiality
-//! (buterin): swapping it swaps the audience, so the document is served
-//! over the TLS/install channel and the client validates
+//! `client_id` is **public** — it needs integrity, not confidentiality:
+//! swapping it swaps the audience, so the document is served over the
+//! TLS/install channel and the client validates
 //! `doc.issuer == expected_issuer` before trusting it. The
 //! resource-server wall that makes the audience an isolation boundary is
 //! separate and already enforced: [`crate::jwt::JwtVerifier::validate`]
@@ -26,7 +26,7 @@
 //! audiences ([`crate::jwt::JwksStore::audiences_for`]) — never a
 //! wildcard. Presenting an `aud=A` token to a `B` resource fails there.
 //!
-//! # The wire document (`schema_version = 1`)
+//! # The wire document (`schema_version = 2`)
 //!
 //! `GET <host>/.well-known/cosmon-oauth-clients` returns one
 //! cosmon-namespaced document (deliberately **not** an IANA well-known —
@@ -37,16 +37,23 @@
 //!
 //! ```json
 //! {
-//!   "schema_version": 1,
+//!   "schema_version": 2,
 //!   "issuer": "https://forgejo.example.ts.net",
-//!   "authorization_endpoint": "https://forgejo.example.ts.net/login/oauth/authorize",
-//!   "token_endpoint": "https://forgejo.example.ts.net/login/oauth/access_token",
 //!   "clients": [
 //!     { "audience": "cs-rpp-adapter", "client_id": "…", "redirect_uris": ["http://127.0.0.1:7777/callback"], "scopes": ["cosmon:molecule:read"] },
 //!     { "audience": "claude-web",     "client_id": "…", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"], "scopes": ["cosmon:mcp"] }
 //!   ]
 //! }
 //! ```
+//!
+//! The `authorization_endpoint` and `token_endpoint` fields that appeared
+//! in `schema_version` 1 are **removed** in version 2. They duplicated
+//! information already published by the `IdP`'s own OIDC Discovery document
+//! (`/.well-known/openid-configuration`), which is the authoritative
+//! source for all standard `IdPs` (Forgejo, Auth0, Keycloak). Clients fetch
+//! endpoints from the `IdP` directly; this document's sole purpose is
+//! `client_id` reverse discovery — the one thing the standard cannot
+//! provide.
 //!
 //! # Evolution rules (semver for JSON — tolnay Q7)
 //!
@@ -71,17 +78,16 @@
 //! Two sources, highest precedence first:
 //!
 //! 1. `<state_dir>/security/oauth-clients.toml` — the **authoritative**
-//!    registry, written by the provisioner (`task-20260710-d988`, the
-//!    2-app Forgejo image) or the operator. It carries the full document
-//!    including per-audience `redirect_uris`/`scopes`. Served verbatim
-//!    after validation.
+//!    registry, written by the provisioner or the operator. It carries the
+//!    full document including per-audience `redirect_uris`/`scopes`.
+//!    Served verbatim after validation.
 //! 2. Absent → **derived** from `<state_dir>/security/trusted-issuers.toml`
 //!    ([`crate::jwks_fetch::TrustedIssuers`]). Since Forgejo hardcodes
-//!    `aud = client_id`, every pinned `audience` *is* a `client_id`; the
-//!    authorize/token endpoints are the Forgejo canonical paths joined to
-//!    the issuer. This keeps the endpoint functional on today's converged
-//!    handoff without waiting for the richer file; the explicit file
-//!    overrides it whenever present.
+//!    `aud = client_id`, every pinned `audience` *is* a `client_id`. This
+//!    keeps the endpoint functional on the converged handoff without
+//!    waiting for the richer file; the explicit file overrides it whenever
+//!    present. For non-Forgejo `IdPs` (Auth0, Keycloak) where
+//!    `aud != client_id`, the explicit file is required.
 //!
 //! When neither yields a usable issuer the loader returns `Ok(None)` and
 //! the route answers `404 discovery_unconfigured` — the surface is
@@ -97,31 +103,26 @@ use crate::jwks_fetch::{TrustedIssuer, TrustedIssuers};
 /// registry file declaring any other version is refused fail-closed
 /// ([`DiscoveryError::UnsupportedSchema`]) rather than served
 /// half-understood.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Relative path of the authoritative registry file under `state_dir`.
 pub const REGISTRY_REL_PATH: &str = "security/oauth-clients.toml";
-
-/// Forgejo's canonical `OAuth2` authorization endpoint path, joined to the
-/// issuer in the derive-from-trusted-issuers fallback
-/// (`modules/setting/oauth2.go`). The explicit `oauth-clients.toml`
-/// overrides this for non-Forgejo `IdPs`.
-pub const FORGEJO_AUTHORIZE_PATH: &str = "/login/oauth/authorize";
-
-/// Forgejo's canonical `OAuth2` token endpoint path (Forgejo names it
-/// `access_token`, not `token`), joined to the issuer in the fallback.
-pub const FORGEJO_TOKEN_PATH: &str = "/login/oauth/access_token";
 
 /// The reverse-discovery document. **Audience-keyed**, covering every
 /// provisioned OAuth app (A = CLI, B = MCP connector) in one payload.
 ///
 /// This is the **server-side** representation: it derives `Serialize` to
 /// *produce* the wire document. The canonical *client* mirror
-/// (`cosmon-remote`, `task-20260710-2565`) is deserialize-only and
-/// `#[non_exhaustive]`; the shared contract is the JSON shape and
-/// `schema_version`, not the Rust type. `Deserialize` is derived here too
-/// so an operator-authored `oauth-clients.toml` and the roundtrip tests
-/// parse into the same type.
+/// (`cosmon-remote`) is deserialize-only and `#[non_exhaustive]`; the
+/// shared contract is the JSON shape and `schema_version`, not the Rust
+/// type. `Deserialize` is derived here too so an operator-authored
+/// `oauth-clients.toml` and the roundtrip tests parse into the same type.
+///
+/// Authorization and token endpoints are **not** in this document — the
+/// client fetches them from the `IdP`'s own OIDC Discovery document
+/// (`/.well-known/openid-configuration`), which is the authoritative
+/// source for all supported `IdPs`. This keeps the document's scope narrow:
+/// purely `client_id` reverse discovery.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ClientRegistry {
@@ -130,12 +131,6 @@ pub struct ClientRegistry {
     /// The OIDC issuer URL — matched byte-for-byte against the client's
     /// pinned `expected_issuer` before the document is trusted.
     pub issuer: String,
-    /// `OAuth2` authorization endpoint the client drives the PKCE flow
-    /// against.
-    pub authorization_endpoint: String,
-    /// `OAuth2` token endpoint the client exchanges the code / refreshes
-    /// against.
-    pub token_endpoint: String,
     /// One entry per provisioned OAuth app, keyed by `audience`.
     #[serde(default)]
     pub clients: Vec<OAuthClient>,
@@ -153,8 +148,6 @@ impl ClientRegistry {
     ///
     /// let reg = ClientRegistry::new(
     ///     "https://idp.test".to_owned(),
-    ///     "https://idp.test/login/oauth/authorize".to_owned(),
-    ///     "https://idp.test/login/oauth/access_token".to_owned(),
     ///     vec![
     ///         OAuthClient::new("cs-rpp-adapter".to_owned(), "cs-rpp-adapter".to_owned()),
     ///         OAuthClient::new("claude-web".to_owned(), "claude-web".to_owned()),
@@ -172,17 +165,10 @@ impl ClientRegistry {
     /// The public constructor (the struct is `#[non_exhaustive]`, so it
     /// cannot be struct-literal-built from another crate).
     #[must_use]
-    pub fn new(
-        issuer: String,
-        authorization_endpoint: String,
-        token_endpoint: String,
-        clients: Vec<OAuthClient>,
-    ) -> Self {
+    pub fn new(issuer: String, clients: Vec<OAuthClient>) -> Self {
         Self {
             schema_version: CURRENT_SCHEMA_VERSION,
             issuer,
-            authorization_endpoint,
-            token_endpoint,
             clients,
         }
     }
@@ -194,9 +180,9 @@ impl ClientRegistry {
     ///
     /// - [`DiscoveryError::UnsupportedSchema`] if `schema_version` is not
     ///   [`CURRENT_SCHEMA_VERSION`].
-    /// - [`DiscoveryError::Degenerate`] if the issuer, either endpoint,
-    ///   the `clients` list, or any client's `audience`/`client_id` is
-    ///   empty — a document a client could not act on.
+    /// - [`DiscoveryError::Degenerate`] if the issuer, the `clients` list,
+    ///   or any client's `audience`/`client_id` is empty — a document a
+    ///   client could not act on.
     pub fn validate(&self) -> Result<(), DiscoveryError> {
         if self.schema_version != CURRENT_SCHEMA_VERSION {
             return Err(DiscoveryError::UnsupportedSchema {
@@ -207,11 +193,6 @@ impl ClientRegistry {
         if self.issuer.trim().is_empty() {
             return Err(DiscoveryError::Degenerate {
                 reason: "empty issuer".to_owned(),
-            });
-        }
-        if self.authorization_endpoint.trim().is_empty() || self.token_endpoint.trim().is_empty() {
-            return Err(DiscoveryError::Degenerate {
-                reason: "empty authorization_endpoint or token_endpoint".to_owned(),
             });
         }
         if self.clients.is_empty() {
@@ -414,9 +395,12 @@ pub fn load_registry(state_dir: &Path) -> Result<Option<ClientRegistry>, Discove
 /// then provides an explicit `oauth-clients.toml`.
 ///
 /// Each audience becomes a client with `client_id == audience` (Forgejo
-/// `aud = client_id`); the authorize/token endpoints are the Forgejo
-/// canonical paths joined to the issuer. `redirect_uris`/`scopes` are
-/// empty — the explicit file is the way to publish those.
+/// `aud = client_id`). For non-Forgejo `IdPs` where `aud != client_id`
+/// the explicit file is required. `redirect_uris`/`scopes` are empty —
+/// the explicit file is the way to publish those.
+///
+/// Authorization and token endpoints are **not** derived: the client
+/// fetches them from the `IdP`'s own OIDC Discovery document.
 ///
 /// Returns `None` when no issuer carries a usable audience.
 #[must_use]
@@ -451,19 +435,7 @@ pub fn derive_from_trusted_issuers(issuers: &TrustedIssuers) -> Option<ClientReg
         .map(|a| OAuthClient::new(a.clone(), a.clone()))
         .collect();
 
-    Some(ClientRegistry::new(
-        issuer.iss.clone(),
-        join_endpoint(&issuer.iss, FORGEJO_AUTHORIZE_PATH),
-        join_endpoint(&issuer.iss, FORGEJO_TOKEN_PATH),
-        clients,
-    ))
-}
-
-/// Join a Forgejo OAuth path onto an issuer URL, collapsing a trailing
-/// slash so `http://h/git/` + `/login/oauth/authorize` yields a single
-/// separator.
-fn join_endpoint(issuer: &str, path: &str) -> String {
-    format!("{}{}", issuer.trim_end_matches('/'), path)
+    Some(ClientRegistry::new(issuer.iss.clone(), clients))
 }
 
 #[cfg(test)]
@@ -474,8 +446,6 @@ mod tests {
     fn sample() -> ClientRegistry {
         ClientRegistry::new(
             "https://forgejo.example.ts.net".to_owned(),
-            "https://forgejo.example.ts.net/login/oauth/authorize".to_owned(),
-            "https://forgejo.example.ts.net/login/oauth/access_token".to_owned(),
             vec![
                 OAuthClient::new("cs-rpp-adapter".to_owned(), "cid-a".to_owned())
                     .with_redirect_uris(vec!["http://127.0.0.1:7777/callback".to_owned()])
@@ -489,16 +459,12 @@ mod tests {
     #[test]
     fn json_shape_matches_the_contract() {
         let v = serde_json::to_value(sample()).unwrap();
-        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["schema_version"], 2);
         assert_eq!(v["issuer"], "https://forgejo.example.ts.net");
-        assert_eq!(
-            v["authorization_endpoint"],
-            "https://forgejo.example.ts.net/login/oauth/authorize"
-        );
-        assert_eq!(
-            v["token_endpoint"],
-            "https://forgejo.example.ts.net/login/oauth/access_token"
-        );
+        // Endpoints are NOT part of this document — the client fetches them
+        // from the IdP's own OIDC Discovery document.
+        assert!(v.get("authorization_endpoint").is_none());
+        assert!(v.get("token_endpoint").is_none());
         assert_eq!(v["clients"][0]["audience"], "cs-rpp-adapter");
         assert_eq!(v["clients"][0]["client_id"], "cid-a");
         assert_eq!(v["clients"][1]["audience"], "claude-web");
@@ -557,10 +523,8 @@ mod tests {
         std::fs::create_dir_all(&sec).unwrap();
         std::fs::write(
             sec.join("oauth-clients.toml"),
-            "schema_version = 1\n\
+            "schema_version = 2\n\
              issuer = \"https://explicit.test\"\n\
-             authorization_endpoint = \"https://explicit.test/login/oauth/authorize\"\n\
-             token_endpoint = \"https://explicit.test/login/oauth/access_token\"\n\
              client_secret = \"TOP_LEVEL_SHOULD_NEVER_LEAK\"\n\
              [[clients]]\n\
              audience = \"cs-rpp-adapter\"\n\
@@ -592,14 +556,23 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_newer_schema_version() {
+    fn validate_rejects_wrong_schema_version() {
         let mut doc = sample();
-        doc.schema_version = 2;
+        doc.schema_version = 1;
         assert!(matches!(
             doc.validate(),
             Err(DiscoveryError::UnsupportedSchema {
-                found: 2,
-                supported: 1
+                found: 1,
+                supported: 2
+            })
+        ));
+
+        doc.schema_version = 3;
+        assert!(matches!(
+            doc.validate(),
+            Err(DiscoveryError::UnsupportedSchema {
+                found: 3,
+                supported: 2
             })
         ));
     }
@@ -613,12 +586,7 @@ mod tests {
             Err(DiscoveryError::Degenerate { .. })
         ));
 
-        let no_clients = ClientRegistry::new(
-            "https://idp.test".to_owned(),
-            "https://idp.test/a".to_owned(),
-            "https://idp.test/t".to_owned(),
-            vec![],
-        );
+        let no_clients = ClientRegistry::new("https://idp.test".to_owned(), vec![]);
         assert!(matches!(
             no_clients.validate(),
             Err(DiscoveryError::Degenerate { .. })
@@ -626,8 +594,6 @@ mod tests {
 
         let empty_client_id = ClientRegistry::new(
             "https://idp.test".to_owned(),
-            "https://idp.test/a".to_owned(),
-            "https://idp.test/t".to_owned(),
             vec![OAuthClient::new("a".to_owned(), String::new())],
         );
         assert!(matches!(
@@ -650,10 +616,8 @@ mod tests {
         .unwrap();
         std::fs::write(
             sec.join("oauth-clients.toml"),
-            "schema_version = 1\n\
+            "schema_version = 2\n\
              issuer = \"https://explicit.test\"\n\
-             authorization_endpoint = \"https://explicit.test/login/oauth/authorize\"\n\
-             token_endpoint = \"https://explicit.test/login/oauth/access_token\"\n\
              [[clients]]\n\
              audience = \"cs-rpp-adapter\"\n\
              client_id = \"explicit-cid\"\n\
@@ -678,8 +642,6 @@ mod tests {
             sec.join("oauth-clients.toml"),
             "schema_version = 99\n\
              issuer = \"https://explicit.test\"\n\
-             authorization_endpoint = \"https://explicit.test/a\"\n\
-             token_endpoint = \"https://explicit.test/t\"\n\
              [[clients]]\n\
              audience = \"a\"\n\
              client_id = \"cid\"\n",
@@ -722,15 +684,7 @@ mod tests {
 
         let doc = load_registry(dir.path()).unwrap().unwrap();
         assert_eq!(doc.issuer, "http://host/git/");
-        // Trailing slash collapsed, Forgejo path joined.
-        assert_eq!(
-            doc.authorization_endpoint,
-            "http://host/git/login/oauth/authorize"
-        );
-        assert_eq!(
-            doc.token_endpoint,
-            "http://host/git/login/oauth/access_token"
-        );
+        // Endpoints are not in the document — fetched from IdP OIDC Discovery.
         // aud == client_id (Forgejo hardcode).
         assert_eq!(
             doc.lookup("cs-rpp-adapter").unwrap().client_id,
@@ -817,8 +771,9 @@ mod tests {
             "[[issuer]]\niss = \"http://host/git\"\naudiences = [\"cs-rpp-adapter\"]\n",
         )
         .unwrap();
-        // No oauth-clients.toml on disk at all.
+        // No oauth-clients.toml on disk at all — falls through to derive.
         let doc = load_registry(dir.path()).unwrap().unwrap();
+        assert_eq!(doc.issuer, "http://host/git");
         assert_eq!(
             doc.lookup("cs-rpp-adapter").unwrap().client_id,
             "cs-rpp-adapter"
@@ -896,12 +851,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, a)| OAuthClient::new(a.clone(), format!("cid-{i}")))
                 .collect();
-            let doc = ClientRegistry::new(
-                issuer.clone(),
-                format!("{issuer}/a"),
-                format!("{issuer}/t"),
-                clients,
-            );
+            let doc = ClientRegistry::new(issuer.clone(), clients);
             let json = serde_json::to_string(&doc).unwrap();
             let back: ClientRegistry = serde_json::from_str(&json).unwrap();
             prop_assert_eq!(doc, back);
@@ -920,12 +870,7 @@ mod tests {
                 .enumerate()
                 .map(|(i, a)| OAuthClient::new(a.clone(), format!("cid-{i}")))
                 .collect();
-            let doc = ClientRegistry::new(
-                "https://idp.test".to_owned(),
-                "https://idp.test/a".to_owned(),
-                "https://idp.test/t".to_owned(),
-                clients,
-            );
+            let doc = ClientRegistry::new("https://idp.test".to_owned(), clients);
             for (i, a) in auds.iter().enumerate() {
                 let found = doc.lookup(a).unwrap();
                 prop_assert_eq!(&found.client_id, &format!("cid-{i}"));

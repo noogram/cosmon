@@ -6,10 +6,11 @@
 //!
 //! Scenarios:
 //!
-//! 1. Explicit `oauth-clients.toml` seeded → `200` with the exact
-//!    audience-keyed document, `Cache-Control: no-store`, no JWT required.
+//! 1. Explicit `oauth-clients.toml` seeded (schema_version 2) → `200` with
+//!    the exact audience-keyed document, `Cache-Control: no-store`, no JWT
+//!    required. No `authorization_endpoint`/`token_endpoint` on the wire.
 //! 2. Only `trusted-issuers.toml` seeded (no explicit file) → `200` with
-//!    the derived document (`client_id == audience`, Forgejo endpoints).
+//!    the derived document (`client_id == audience`, no endpoints).
 //! 3. Nothing configured → `404 discovery_unconfigured`.
 //! 4. Malformed `oauth-clients.toml` → `500 discovery_error` (fail-closed).
 //! 5. A `client_secret` poisoning `oauth-clients.toml` → **never** on the wire
@@ -108,10 +109,8 @@ async fn explicit_registry_is_served_audience_keyed_no_jwt_required() {
     let sec = security_dir(dir.path());
     std::fs::write(
         sec.join("oauth-clients.toml"),
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          issuer = \"https://forgejo.example.ts.net\"\n\
-         authorization_endpoint = \"https://forgejo.example.ts.net/login/oauth/authorize\"\n\
-         token_endpoint = \"https://forgejo.example.ts.net/login/oauth/access_token\"\n\
          [[clients]]\n\
          audience = \"cs-rpp-adapter\"\n\
          client_id = \"runtime-cid-a\"\n\
@@ -129,8 +128,12 @@ async fn explicit_registry_is_served_audience_keyed_no_jwt_required() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cache_control.as_deref(), Some("no-store"));
-    assert_eq!(body["schema_version"], 1);
+    assert_eq!(body["schema_version"], 2);
     assert_eq!(body["issuer"], "https://forgejo.example.ts.net");
+    // Endpoints are not in this document; the client fetches them from the
+    // IdP's own OIDC Discovery document.
+    assert!(body.get("authorization_endpoint").is_none());
+    assert!(body.get("token_endpoint").is_none());
 
     // Audience-keyed: the CLI (A) and the MCP connector (B) coexist.
     let clients = body["clients"].as_array().unwrap();
@@ -166,10 +169,8 @@ async fn client_secret_never_leaks_through_served_endpoint() {
     let sec = security_dir(dir.path());
     std::fs::write(
         sec.join("oauth-clients.toml"),
-        "schema_version = 1\n\
+        "schema_version = 2\n\
          issuer = \"https://forgejo.example.ts.net\"\n\
-         authorization_endpoint = \"https://forgejo.example.ts.net/login/oauth/authorize\"\n\
-         token_endpoint = \"https://forgejo.example.ts.net/login/oauth/access_token\"\n\
          client_secret = \"TOP_LEVEL_SHOULD_NEVER_LEAK\"\n\
          [[clients]]\n\
          audience = \"cs-rpp-adapter\"\n\
@@ -226,11 +227,11 @@ async fn derived_registry_when_only_trusted_issuers_present() {
     let (status, _cc, body) = get_discovery(app).await;
 
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["schema_version"], 2);
     assert_eq!(body["issuer"], "http://host/git");
-    assert_eq!(
-        body["authorization_endpoint"],
-        "http://host/git/login/oauth/authorize"
-    );
+    // Endpoints are not part of this document.
+    assert!(body.get("authorization_endpoint").is_none());
+    assert!(body.get("token_endpoint").is_none());
     let clients = body["clients"].as_array().unwrap();
     // Forgejo aud == client_id.
     let a = clients

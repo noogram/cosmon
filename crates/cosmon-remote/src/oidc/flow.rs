@@ -192,8 +192,19 @@ pub struct LoginOutcome {
 }
 
 /// Resolve the provider endpoints and the provisioned `client_id` for `audience`
-/// (delib C8): standard OIDC discovery for the endpoints, the cosmon
-/// reverse-discovery document for the `client_id`.
+/// (delib C8): the cosmon reverse-discovery document for the `issuer` and
+/// `client_id`, then standard OIDC Discovery for the endpoints.
+///
+/// Fetch order is intentional — `ClientRegistry` must come first because it
+/// carries the `issuer` URL we validate against the caller's pinned
+/// `expected_issuer` before trusting any endpoint. This is the integrity
+/// check: a MITM that swaps the issuer cannot substitute its own OIDC
+/// Discovery document for an issuer the caller did not pin.
+///
+/// After the issuer is validated, `ProviderMetadata` is fetched from the
+/// registry-declared issuer. RFC 8414 §3.3 requires `meta.issuer` to match
+/// the caller's pinned `issuer_base`; we enforce this as an additional
+/// consistency gate before trusting the returned endpoints.
 pub async fn discover(
     http: &reqwest::Client,
     issuer_base: &str,
@@ -201,8 +212,38 @@ pub async fn discover(
     audience: &str,
     fallback_scopes: Vec<String>,
 ) -> Result<OidcEndpoints> {
-    let meta = ProviderMetadata::fetch(http, issuer_base).await?;
+    // Step 1: fetch the client registry to obtain the issuer and client_id.
     let registry = ClientRegistry::fetch(http, host_base).await?;
+
+    // Step 2: validate the registry's issuer against the caller's pinned
+    // expected_issuer (trailing-slash-normalised). A mismatch means the
+    // server is misconfigured or the document was tampered with.
+    if registry.issuer.trim_end_matches('/') != issuer_base.trim_end_matches('/') {
+        return Err(OidcError::Discovery {
+            reason: format!(
+                "cosmon-oauth-clients issuer {:?} does not match expected issuer {:?}",
+                registry.issuer, issuer_base
+            ),
+        }
+        .into());
+    }
+
+    // Step 3: fetch OIDC provider metadata from the validated issuer.
+    let meta = ProviderMetadata::fetch(http, &registry.issuer).await?;
+
+    // Step 4: RFC 8414 §3.3 — the discovery document's own `issuer` claim must
+    // match the caller's pinned issuer.
+    if meta.issuer.trim_end_matches('/') != issuer_base.trim_end_matches('/') {
+        return Err(OidcError::Discovery {
+            reason: format!(
+                "OIDC discovery issuer {:?} does not match expected issuer {:?} — \
+                 check the IdP configuration",
+                meta.issuer, issuer_base
+            ),
+        }
+        .into());
+    }
+
     let client = registry
         .client_for(audience)
         .ok_or_else(|| OidcError::Discovery {
@@ -356,6 +397,10 @@ pub async fn login(
     // persisting a bearer the server would 401).
     let key = endpoints.credential_key(sub);
     let bearer = identity_bearer(&tokens)?;
+    // The bearer must carry the issuer we authenticated against (OIDC Core
+    // §3.1.3.7): otherwise we would file a token under this issuer's key while
+    // the resource server resolves its real `iss` elsewhere. Fail before persist.
+    ensure_token_issuer(bearer, &endpoints.issuer)?;
     // Read the identity back out of the bearer we actually retained — not out of
     // `sub`, which is only what the caller *asked* to log in as.
     let identity = bearer_identity(bearer);
@@ -517,12 +562,13 @@ async fn rotate(
                     // the rotated bearer is the fresh id_token too (see
                     // `identity_bearer`). A claim-less rotation fails here, loud,
                     // before it can clobber the store with a doomed bearer.
-                    let refreshed = build_credential(
-                        identity_bearer(&tokens)?,
-                        &tokens.refresh_token,
-                        tokens.expires_in,
-                        now,
-                    );
+                    let bearer = identity_bearer(&tokens)?;
+                    // The rotated bearer must still name the issuer this key was
+                    // minted under (OIDC Core §3.1.3.7) — a provider that rotates
+                    // to a different `iss` must not overwrite the stored credential.
+                    ensure_token_issuer(bearer, key.issuer())?;
+                    let refreshed =
+                        build_credential(bearer, &tokens.refresh_token, tokens.expires_in, now);
                     let Some(fresh) = refreshed.reconcile_refresh(&cred, cfg.rotation) else {
                         // A rotating provider returned an empty refresh token: the
                         // token we just presented is already spent, so there is no
@@ -614,6 +660,27 @@ fn identity_bearer(tokens: &TokenResponse) -> Result<&str> {
         .into_iter()
         .find(|t| carries_identity_claims(t))
         .ok_or_else(|| OidcError::NoIdentityBearer.into())
+}
+
+/// Reject a minted bearer whose `iss` claim does not name the issuer this flow
+/// authenticated against. The OIDC Core §3.1.3.7 issuer check, applied at
+/// mint/rotate time so a token scoped to a different authority is never filed
+/// under `expected_issuer`'s credential key (see
+/// [`OidcError::TokenIssuerMismatch`]). Trailing-slash-normalised to match the
+/// discovery-side issuer checks in [`discover`]. `bearer` is always an
+/// [`identity_bearer`] selection, so it carries a non-empty `iss`; a missing
+/// claim is read as the empty string and still fails the compare rather than
+/// passing silently.
+fn ensure_token_issuer(bearer: &str, expected_issuer: &str) -> Result<()> {
+    let found = bearer_identity(bearer).map(|id| id.iss).unwrap_or_default();
+    if found.trim_end_matches('/') != expected_issuer.trim_end_matches('/') {
+        return Err(OidcError::TokenIssuerMismatch {
+            found,
+            expected: expected_issuer.to_owned(),
+        }
+        .into());
+    }
+    Ok(())
 }
 
 /// Who a bearer *asserts* it is — read out of the token itself.
@@ -1160,6 +1227,20 @@ mod tests {
         let id = identity_jwt("id");
         let tokens = token_response(&bookkeeping_jwt(), &id);
         assert_eq!(identity_bearer(&tokens).unwrap(), id);
+    }
+
+    #[test]
+    fn ensure_token_issuer_normalises_trailing_slash_but_rejects_a_different_authority() {
+        // Mirrors the discovery-side issuer comparison: a trailing slash is
+        // insignificant, a different authority is a hard mismatch.
+        let bearer = identity_jwt("id");
+        assert!(ensure_token_issuer(&bearer, "https://forge.example").is_ok());
+        assert!(ensure_token_issuer(&bearer, "https://forge.example/").is_ok());
+        let err = ensure_token_issuer(&bearer, "https://evil.example").unwrap_err();
+        assert!(
+            matches!(err, Error::Oidc(OidcError::TokenIssuerMismatch { .. })),
+            "expected TokenIssuerMismatch, got {err:?}"
+        );
     }
 
     #[test]
