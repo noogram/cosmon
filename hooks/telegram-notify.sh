@@ -65,11 +65,22 @@ passes_filter() {
 }
 
 # Escape HTML special characters for Telegram's HTML parse mode.
+#
+# The backslashes before `&` are load-bearing, not decoration. Since bash 5.2,
+# an unescaped `&` in the REPLACEMENT half of `${var//pat/repl}` stands for the
+# matched text, the way it does in `sed`. Written without them, this function
+# replaced `>` with `>gt;` and `<` with `<lt;` — so every notification carrying
+# an angle bracket reached Telegram mangled, on any host with a modern bash.
+# It went unnoticed because the `&` case is accidentally correct: the matched
+# text there IS `&`, so `&amp;` came out right while its two neighbours did not.
+#
+# Ordering still matters for the usual reason: `&` first, or the ampersands this
+# function introduces would be escaped again by the later rules.
 escape_html() {
   local text="$1"
-  text="${text//&/&amp;}"
-  text="${text//</&lt;}"
-  text="${text//>/&gt;}"
+  text="${text//&/\&amp;}"
+  text="${text//</\&lt;}"
+  text="${text//>/\&gt;}"
   echo "$text"
 }
 
