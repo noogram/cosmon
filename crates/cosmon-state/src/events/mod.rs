@@ -17,4 +17,5 @@
 //! fail because telemetry is unhappy.
 
 pub mod autonomy;
+pub mod input_injection;
 pub mod worker_spawn;

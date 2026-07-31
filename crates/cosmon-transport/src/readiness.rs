@@ -41,6 +41,7 @@
 use std::time::{Duration, Instant};
 
 use cosmon_core::id::WorkerId;
+use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
 use cosmon_core::transport::{TransportBackend, TransportError};
 
 /// Send just an Enter keypress to a session (no preceding text).
@@ -49,7 +50,17 @@ use cosmon_core::transport::{TransportBackend, TransportError};
 /// the correct option is already highlighted.
 fn send_enter(backend: &dyn TransportBackend, worker_id: &WorkerId) -> Result<(), TransportError> {
     // send_input sends [text, Enter]. Empty text + Enter = just Enter.
-    backend.send_input(worker_id, "")
+    //
+    // Attributed like every other injection (COSMON #26 residual). The probe
+    // holds no molecule — readiness runs before a molecule is bound to the
+    // pane — so the seam traces this without a ledger entry. That is the
+    // honest shape: the alternative is filing a keystroke under a molecule
+    // that was not the one being answered.
+    backend.send_input_observed(
+        worker_id,
+        "",
+        &InjectionProvenance::new(InjectionOrigin::ReadinessProbe, "answer-trust-prompt"),
+    )
 }
 
 /// Observed state of a Claude Code session based on its terminal output.
@@ -850,7 +861,14 @@ pub fn wait_ready(
                             .status(&SessionStatus::BypassPermsPrompt)
                             .note("sending 2 + Enter to accept bypass permissions"),
                     );
-                    backend.send_input(worker_id, "2")?;
+                    backend.send_input_observed(
+                        worker_id,
+                        "2",
+                        &InjectionProvenance::new(
+                            InjectionOrigin::ReadinessProbe,
+                            "accept-bypass-perms",
+                        ),
+                    )?;
                     bypass_answers += 1;
                 }
                 // Continue polling — Claude dismisses the prompt and settles

@@ -4886,6 +4886,7 @@ pub(super) fn spawn_and_prompt(
             worktree_path,
             prompt,
             mol,
+            mol_state_dir,
             adapter_entry,
             preferred_model,
         ),
@@ -5547,7 +5548,11 @@ fn spawn_claude_and_prompt(
     // Doing so was tried, measured (1.09 s -> 14 ms) and withdrawn: the receipt
     // needs two observations spaced in time, not two counts of one observation.
     // See `run_briefing_submit_loop`.
-    backend.send_input(wid, prompt)?;
+    backend.send_input_observed(
+        wid,
+        prompt,
+        &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+    )?;
     stage("briefing.paste.done");
 
     // Spawn-scale briefing-submit confirmation (BUG #6 — the paste-sans-submit
@@ -5578,7 +5583,13 @@ fn spawn_claude_and_prompt(
     // therefore not this dispatcher's cost. See
     // [`BriefingSubmitDisposition::ProceedStillPending`].
     let confirm_t0 = std::time::Instant::now();
-    let outcome = confirm_briefing_submitted(backend, wid, prompt, BRIEFING_SUBMIT_INBAND_CAP);
+    let outcome = confirm_briefing_submitted(
+        backend,
+        wid,
+        prompt,
+        BRIEFING_SUBMIT_INBAND_CAP,
+        &cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir),
+    );
     // The outcome is named, not inferred from the elapsed time: a dispatch that
     // exits on a receipt and one that exits on the cap are indistinguishable by
     // duration alone whenever the receipt lands near the cap.
@@ -5809,6 +5820,7 @@ fn confirm_briefing_submitted(
     wid: &cosmon_core::id::WorkerId,
     prompt: &str,
     budget: std::time::Duration,
+    provenance: &cosmon_core::injection::InjectionProvenance,
 ) -> BriefingSubmitOutcome {
     use cosmon_transport::tmux::ComposerState;
     let started = std::time::Instant::now();
@@ -5842,7 +5854,7 @@ fn confirm_briefing_submitted(
         // Empty input == a bare submit keystroke (see `send_input`), which is
         // exactly the manual recovery that unstalled these workers.
         &mut || {
-            let _ = backend.send_input(wid, "");
+            let _ = backend.send_input_observed(wid, "", provenance);
         },
         &mut || started.elapsed(),
         &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
@@ -6323,7 +6335,8 @@ fn spawn_codex_and_prompt(
     session_name: &str,
     worktree_path: &std::path::Path,
     prompt: &str,
-    _mol: &MoleculeData,
+    mol: &MoleculeData,
+    mol_state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
 ) -> anyhow::Result<()> {
@@ -6433,7 +6446,11 @@ fn spawn_codex_and_prompt(
     // the claude branch does. `codex exec` already baked the prompt into the
     // command line, so nothing is injected there.
     if mode == codex::CodexMode::Interactive {
-        backend.send_input(wid, prompt)?;
+        backend.send_input_observed(
+            wid,
+            prompt,
+            &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+        )?;
     }
 
     Ok(())

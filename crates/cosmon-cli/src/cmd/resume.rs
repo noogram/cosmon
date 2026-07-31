@@ -87,13 +87,38 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
         // Try to send the nudge via all backends.
         let mut sent = false;
+        // A resumed worker may or may not carry a molecule; without one the
+        // injection is traced but has no ledger to be filed in.
+        let (prompt_provenance, submit_provenance) = worker.frozen_molecule.as_ref().map_or_else(
+            || {
+                (
+                    cosmon_core::injection::InjectionProvenance::new(
+                        cosmon_core::injection::InjectionOrigin::Resume,
+                        "resume-prompt",
+                    ),
+                    cosmon_core::injection::InjectionProvenance::new(
+                        cosmon_core::injection::InjectionOrigin::Resume,
+                        "resume-submit",
+                    ),
+                )
+            },
+            |mol_id| {
+                let dir = store.molecule_dir(mol_id);
+                (
+                    cosmon_cli::injection_provenance::resume(mol_id, &dir),
+                    cosmon_cli::injection_provenance::resume_submit(mol_id, &dir),
+                )
+            },
+        );
         for be in &backends {
             if be.is_alive(&worker.id).unwrap_or(false)
-                && be.send_input(&worker.id, resume_msg).is_ok()
+                && be
+                    .send_input_observed(&worker.id, resume_msg, &prompt_provenance)
+                    .is_ok()
             {
                 // Brief pause then extra Enter to submit pasted text.
                 std::thread::sleep(std::time::Duration::from_millis(300));
-                let _ = be.send_input(&worker.id, "");
+                let _ = be.send_input_observed(&worker.id, "", &submit_provenance);
                 sent = true;
                 break;
             }

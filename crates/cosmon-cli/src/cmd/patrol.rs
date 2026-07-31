@@ -1943,9 +1943,21 @@ pub(crate) fn propel_stale_molecules(
                 sweep.escalated.push((wid, mid, attempts));
             }
             NudgeDecision::Nudge { attempt, .. } => {
-                if be.send_input(&wid, PROPULSION_NUDGE).is_ok() {
+                let mol_state_dir = store.molecule_dir(&mid);
+                if be
+                    .send_input_observed(
+                        &wid,
+                        PROPULSION_NUDGE,
+                        &cosmon_cli::injection_provenance::propulsion(&mid, &mol_state_dir),
+                    )
+                    .is_ok()
+                {
                     std::thread::sleep(std::time::Duration::from_millis(300));
-                    let _ = be.send_input(&wid, "");
+                    let _ = be.send_input_observed(
+                        &wid,
+                        "",
+                        &cosmon_cli::injection_provenance::propulsion_submit(&mid, &mol_state_dir),
+                    );
                     record_propel(store, &mid, attempt, now);
                     sweep.propelled.push((wid, mid, age));
                 }
@@ -2238,12 +2250,24 @@ pub(crate) fn nudge_stalled_molecules(
         ) {
             continue;
         }
-        let briefing = store.molecule_dir(&mol.id).join("briefing.md");
-        if be.send_input(&wid, &nudge_message(&briefing)).is_err() {
+        let mol_state_dir = store.molecule_dir(&mol.id);
+        let briefing = mol_state_dir.join("briefing.md");
+        if be
+            .send_input_observed(
+                &wid,
+                &nudge_message(&briefing),
+                &cosmon_cli::injection_provenance::patrol_nudge(&mol.id, &mol_state_dir),
+            )
+            .is_err()
+        {
             continue;
         }
         std::thread::sleep(std::time::Duration::from_millis(300));
-        let _ = be.send_input(&wid, "");
+        let _ = be.send_input_observed(
+            &wid,
+            "",
+            &cosmon_cli::injection_provenance::patrol_nudge_submit(&mol.id, &mol_state_dir),
+        );
         // Persist the nudge — increment count + stamp timestamp. The save
         // is best-effort: a write error logs but does not fail the patrol.
         if let Ok(mut updated) = store.load_molecule(&mol.id) {
@@ -3146,7 +3170,14 @@ pub(crate) fn dialogue_scan_sweep(
                 // TmuxBackend::send_input), which selects the highlighted
                 // default (option 1 / "Yes") on a Claude Code permission
                 // prompt — exactly the "nobody to press Enter" keystroke.
-                let _ = be.send_input(wid, "");
+                let _ = be.send_input_observed(
+                    wid,
+                    "",
+                    &cosmon_cli::injection_provenance::dialogue_auto_confirm(
+                        &mol.id,
+                        &store.molecule_dir(&mol.id),
+                    ),
+                );
             }
             DialogueAction::Alerted | DialogueAction::CanaryRed => {
                 // Surface to a human; tag so `cs ensemble` shows the block.

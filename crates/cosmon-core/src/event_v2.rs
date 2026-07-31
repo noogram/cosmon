@@ -38,6 +38,7 @@ use strum::EnumCount;
 
 use crate::expiry::ExpiryPolicy;
 use crate::id::{MoleculeId, WorkerId};
+use crate::injection::InjectionOrigin;
 use crate::quality_band::QualityBand;
 use crate::spawn_seam::LoopOwnership;
 
@@ -2428,6 +2429,65 @@ pub enum EventV2 {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         refused_molecule: Option<String>,
     },
+
+    /// **COSMON #26 residual** — bytes were injected into a worker's session,
+    /// and this is who sent them.
+    ///
+    /// Emitted once per call at the single seam every tmux injection passes
+    /// through (`TmuxBackend::send_input_observed`), *before* the bytes are
+    /// sent, so an injection that then fails to land is still on the record.
+    ///
+    /// # The hole this closes
+    ///
+    /// An operator found `cs done` sitting unsubmitted in a worker's composer
+    /// (issue #26, reported by jdthaler). No production path was found that
+    /// sends that literal string as TUI input — and there was no way to check,
+    /// because text in a composer is anonymous. Six callers can write to a
+    /// pane (tackle briefing, patrol nudge, patrol heal, propulsion, thaw,
+    /// resume, plus the briefing backstop and whisper), and afterwards the
+    /// pane cannot say which one did. This event is the missing attribution:
+    /// digest the string found in a composer, grep the ledger, read the
+    /// origin.
+    ///
+    /// # Confidentiality
+    ///
+    /// `input_digest` is a truncated BLAKE3 fingerprint
+    /// ([`injection_digest`](crate::injection::injection_digest)) and
+    /// `input_len` its length — the content itself is **never** recorded.
+    /// `events.jsonl` is tracked in git and a briefing can quote private
+    /// material; the digest answers "is this the text cosmon sent?" without
+    /// republishing it.
+    ///
+    /// # Why the bare submit is a row and not a skip
+    ///
+    /// `bare_submit` marks the empty-input form: a naked Enter that submits
+    /// whatever the composer already holds. It leaves no text behind, so a
+    /// stray one aimed at the wrong session is undetectable after the fact
+    /// unless it is logged here. It is the case the instrument exists for, not
+    /// an edge of it.
+    InputInjected {
+        /// The molecule whose worker received the injection, when the caller
+        /// resolved one. `None` for injections outside a molecule context.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mol_id: Option<MoleculeId>,
+        /// The worker the injection targeted.
+        worker_id: WorkerId,
+        /// The transport session name the bytes were aimed at, as resolved at
+        /// send time. Empty when the session could not be resolved — which is
+        /// itself the interesting case, since the injection then went nowhere.
+        session: String,
+        /// Which caller drove the injection.
+        origin: InjectionOrigin,
+        /// Short free-form label for why, at finer grain than `origin`.
+        purpose: String,
+        /// Length in bytes of the injected input (`0` for a bare submit).
+        input_len: usize,
+        /// Truncated BLAKE3 fingerprint of the input. Never the input.
+        input_digest: String,
+        /// Whether this was the bare-submit form — an empty input whose only
+        /// effect is the submit keystroke.
+        bare_submit: bool,
+    },
 }
 
 /// Default value for the `adapter_name` field on Worker-Spawn Port
@@ -2549,6 +2609,7 @@ impl EventV2 {
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
+            Self::InputInjected { mol_id, .. } => mol_id.as_ref(),
             Self::OperatorSpark { mol_ref, .. } => mol_ref.as_ref(),
             Self::OperatorSigned { mol_id, .. } => mol_id.as_ref(),
             Self::WorkerKilled { .. }
@@ -4211,6 +4272,16 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
             },
+            EventV2::InputInjected {
+                mol_id: Some(mid("cs-20260411-aaaa")),
+                worker_id: wid("quartz"),
+                session: "cs-quartz".to_owned(),
+                origin: InjectionOrigin::PatrolNudge,
+                purpose: "propel-nudge".to_owned(),
+                input_len: 42,
+                input_digest: "0123456789abcdef".to_owned(),
+                bare_submit: false,
+            },
         ];
 
         // Exhaustiveness guard (C10 test review, review-report.md F2).
@@ -4337,7 +4408,8 @@ mod tests {
             | EventV2::WorkerSpawnRolledBack { .. }
             | EventV2::ChronicleAdded { .. }
             | EventV2::AdrInscribed { .. }
-            | EventV2::ConfigDriftDetected { .. } => {}
+            | EventV2::ConfigDriftDetected { .. }
+            | EventV2::InputInjected { .. } => {}
         }
     }
 

@@ -26,6 +26,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cosmon_core::id::WorkerId;
+use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
 use cosmon_core::transport::{
     AgentDefinition, RuntimeConfig, SessionInfo, SpawnHandle, TransportBackend, TransportError,
 };
@@ -539,26 +540,38 @@ impl TmuxBackend {
         Ok(())
     }
 
+    /// Resolve the live tmux session belonging to `worker`.
+    ///
+    /// The one place the `(worker → session)` lookup happens on the send path.
+    /// It used to be spelled twice inside `send_input` (once per branch) and a
+    /// third time inside [`Self::load_buffer`]; the provenance seam needs the
+    /// answer *before* either branch runs, and three lookups per injection is
+    /// three chances for them to disagree about which pane the bytes hit.
+    fn resolve_session(&self, worker: &WorkerId) -> Result<String, TransportError> {
+        let sessions = self.list_sessions()?;
+        sessions
+            .iter()
+            .find(|s| s.worker_id == *worker)
+            .map(|s| s.session_name.clone())
+            .ok_or_else(|| TransportError::NotFound(worker.clone()))
+    }
+
     /// Mint a fresh paste-buffer bound to `worker` and load `payload` into it.
     ///
     /// The returned [`TmuxBuffer`] carries both the per-call unique buffer
-    /// name and the worker's session name, so the only subsequent paste
-    /// path ([`Self::paste_buffer`]) cannot target a different session
-    /// than the one the buffer was minted for.
+    /// name and the target session name (resolved by the caller via
+    /// [`Self::resolve_session`]), so the only subsequent paste path
+    /// ([`Self::paste_buffer`]) cannot target a different session than the one
+    /// the buffer was minted for.
     ///
     /// On failure, any partial tmux buffer is deleted best-effort before
     /// returning — see the module-level invariant.
     fn load_buffer<'a>(
         &'a self,
         worker: &WorkerId,
+        session_name: &str,
         payload: &[u8],
     ) -> Result<TmuxBuffer<'a>, TransportError> {
-        let sessions = self.list_sessions()?;
-        let session = sessions
-            .iter()
-            .find(|s| s.worker_id == *worker)
-            .ok_or_else(|| TransportError::NotFound(worker.clone()))?;
-
         let n = BUF_COUNTER.fetch_add(1, Ordering::Relaxed);
         let name = format!(
             "cosmon-input-{}-{}-{}",
@@ -580,7 +593,7 @@ impl TmuxBackend {
 
         Ok(TmuxBuffer {
             backend: self,
-            session: session.session_name.clone(),
+            session: session_name.to_owned(),
             name,
             consumed: false,
         })
@@ -772,6 +785,66 @@ impl TmuxBackend {
     }
 }
 
+/// Record one injection's provenance — the ledger line, then the trace line.
+///
+/// Called by [`TmuxBackend::send_input_observed`] before any byte leaves for
+/// the pane. Split out of the seam for one reason: it is the whole of what
+/// COSMON #26 asked for, and a reader auditing "what does cosmon write about an
+/// injection?" should be able to read it in one screen rather than reconstruct
+/// it from a submit-retry loop.
+///
+/// Two channels, deliberately:
+///
+/// - The **event**, appended to the molecule's `events.jsonl` through the
+///   existing emission helper. Durable, git-tracked, and the thing a later
+///   forensic query reads. Requires a
+///   [`ledger`](cosmon_core::injection::InjectionProvenance::ledger) — the
+///   transport holds a tmux socket, not a galaxy, so only the caller can say
+///   which molecule's log this belongs in.
+/// - The **trace line**, always. When no ledger was supplied the injection is
+///   still visible to an operator tailing logs, which is strictly better than
+///   an injection that happened invisibly. It also names the gap: a
+///   `ledger=absent` line is a call site that has not been taught its molecule
+///   yet.
+///
+/// Never fails, never blocks: telemetry being unhappy must not stop a worker
+/// from being nudged.
+fn record_injection(
+    worker: &WorkerId,
+    session: &str,
+    input: &str,
+    provenance: &InjectionProvenance,
+) {
+    if let Some(ledger) = provenance.ledger.as_ref() {
+        cosmon_state::events::input_injection::emit_input_injected(
+            ledger.state_dir(),
+            Some(&ledger.mol_id),
+            worker,
+            session,
+            provenance.origin,
+            &provenance.purpose,
+            input,
+        );
+    }
+    tracing::info!(
+        target: "cosmon::dispatch",
+        phase = "send_input.injected",
+        origin = provenance.origin.as_str(),
+        purpose = %provenance.purpose,
+        worker = %worker.name(),
+        session = %session,
+        input_len = input.len(),
+        input_digest = %cosmon_core::injection::injection_digest(input),
+        bare_submit = input.is_empty(),
+        ledger = if provenance.ledger.is_some() {
+            "recorded"
+        } else {
+            "absent"
+        },
+        "injection provenance"
+    );
+}
+
 impl TransportBackend for TmuxBackend {
     fn spawn(
         &self,
@@ -820,14 +893,42 @@ impl TransportBackend for TmuxBackend {
         Ok(sessions.iter().any(|s| s.worker_id == *id))
     }
 
+    /// Every tmux injection funnels here, and here only.
+    ///
+    /// The unattributed door: it hands
+    /// [`send_input_observed`](TransportBackend::send_input_observed) an
+    /// [`InjectionProvenance::unattributed`] stamp rather than doing the work
+    /// itself. That delegation is what makes "one seam" a structural fact
+    /// instead of a convention — there is no body here for a future caller to
+    /// slip past the instrument through.
     fn send_input(&self, id: &WorkerId, input: &str) -> Result<(), TransportError> {
+        self.send_input_observed(id, input, &InjectionProvenance::unattributed())
+    }
+
+    fn send_input_observed(
+        &self,
+        id: &WorkerId,
+        input: &str,
+        provenance: &InjectionProvenance,
+    ) -> Result<(), TransportError> {
+        // Provenance first, wire second (COSMON #26 residual). Resolve the
+        // target session up front — both branches below need it — and record
+        // the injection *before* any byte is sent.
+        //
+        // Ordering is the whole design. An event emitted after a successful
+        // send would leave precisely the misfires unattributed: an injection
+        // aimed at a session that no longer exists, or one tmux refused, is
+        // the case an operator staring at unexplained text most needs named.
+        // A resolution that fails is therefore recorded with an empty
+        // `session` and *then* returned as the error it is — the attempt is on
+        // the record either way.
+        let resolved = self.resolve_session(id);
+        let session_name = resolved.as_deref().unwrap_or_default().to_owned();
+        record_injection(id, &session_name, input, provenance);
+        let session_name = resolved?;
+
         if input.is_empty() {
-            let sessions = self.list_sessions()?;
-            let session = sessions
-                .iter()
-                .find(|s| s.worker_id == *id)
-                .ok_or_else(|| TransportError::NotFound(id.clone()))?;
-            self.press_submit(&session.session_name)?;
+            self.press_submit(&session_name)?;
             return Ok(());
         }
 
@@ -835,8 +936,7 @@ impl TransportBackend for TmuxBackend {
         // `send-keys` would silently truncate. The RAII TmuxBuffer handle
         // ensures the buffer name is per-call unique and the paste target
         // is coupled to the minted buffer — see module header.
-        let buf = self.load_buffer(id, input.as_bytes())?;
-        let session_name = buf.session.clone();
+        let buf = self.load_buffer(id, &session_name, input.as_bytes())?;
 
         // Clear the worker's input line before pasting. If a previous
         // nudge is still sitting unsubmitted in the TUI input box — the
@@ -987,8 +1087,15 @@ impl TransportBackend for TmuxBackend {
             &format!("run-shell '{signal_cmd}'"),
         ]);
 
-        // Send /exit to Claude Code's interactive prompt.
-        self.send_input(id, "/exit")?;
+        // Send /exit to Claude Code's interactive prompt. Attributed like
+        // every other injection: an adapter quit command landing in the wrong
+        // pane is as damaging as a stray briefing, and just as anonymous
+        // without this.
+        self.send_input_observed(
+            id,
+            "/exit",
+            &InjectionProvenance::new(InjectionOrigin::GracefulExit, "adapter-quit"),
+        )?;
 
         // Block on wait-for with a timeout via a spawned process.
         let socket = self.socket.clone();
