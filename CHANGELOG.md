@@ -17,6 +17,73 @@ this stage.
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
+## [0.5.0] — 2026-07-31
+
+### Fixed
+
+- **`cs tackle` can no longer forge a briefing-delivery receipt from an empty
+  pane** (part of noogram/cosmon#26). A `capture-pane` that succeeded but
+  returned a blank frame was classified as "the briefing left the composer", and
+  two such readings in a row signed the delivery receipt. A blank frame now
+  reads `Unobservable`, which signs nothing. In the same family, the receipt's
+  needle scan is now wrap-invariant: a briefing whose final line is wider than
+  the pane is no longer declared absent because the terminal wrapped it.
+- **Every dispatch stopped paying a flat ~90 s briefing-confirmation tax**
+  (noogram/cosmon#26). Claude Code 2.1.220 no longer exposes a reliable
+  `Working` state, so the old exit condition never fired and every dispatch ran
+  out the whole window. Delivery is now proven by the briefing leaving the
+  composer. Measured: 105–107 s dispatches down to 24–25 s.
+- **The briefing submit-retry now survives the process that started it**
+  (noogram/cosmon#26). Past the short in-band window, a detached
+  `cs briefing-backstop` in its own process group keeps pressing on a
+  twenty-minute budget and removes the pending record only on a delivery
+  receipt.
+- **`cs` no longer discards its own warnings** (reported by @jdthaler on
+  noogram/cosmon#26). The CLI installs a tracing subscriber on stderr — warnings
+  and above by default, `RUST_LOG` honoured — so recovery instructions such as
+  the still-pending briefing message actually reach an operator.
+- **`briefing_backstop_survival` no longer hangs 60 s on every Linux run**
+  (noogram/cosmon#31). Its liveness check shelled out to `kill -0 -<pgid>`,
+  which procps `kill` parses as an option and answers 0 unconditionally — a
+  tautology that panicked the test on Linux and took the CI `Test` job from
+  326 s to five consecutive lost runners. The test now proves its claim
+  behaviourally: a live bystander in the killed group must die of SIGKILL, and
+  the detached backstop's marker must still appear.
+- **`cosmon-remote` presents the OIDC `id_token` as bearer and requests
+  `openid`** (noogram/cosmon#27, contributed against by @jdthaler's report).
+  Bearer selection requires usable identity claims, the login report names the
+  identity the token carries, and the rpp-adapter pins the audience on every
+  enforced binding projection.
+- **The Telegram notify hook no longer mangles angle brackets** on bash ≥ 5.2,
+  where an unescaped `&` in a replacement names the matched text; `kind: info`
+  events render as prose instead of a raw JSON envelope.
+- **`event-listener` 5.4.1 → 5.4.2**, closing RUSTSEC-2026-0221 (unsound
+  `Send`/`Sync` on `StackSlot`).
+
+### Added
+
+- **A dispatch-latency profile** on `RUST_LOG=cosmon::dispatch=info`: one
+  monotonic clock from `cs tackle` entry through preflight, model resolution,
+  spawn, readiness, paste and delivery receipt. Measured on real dispatches, it
+  attributes the remaining seconds — the dominant term is the per-dispatch
+  model probe, not the harness boot.
+- **Spore verdicts are two immutable rounds** — initial then confirmation —
+  replacing the N-round convergence loop; a PASS with no paired counter-verdict
+  is inadmissible, and the diff decides the lane.
+- **The per-molecule journal is a projection of the ledger** — one writer, no
+  second source of truth.
+- **`cs config` fails the build on a knob no reader consumes.**
+- **The release crossing exists as a primitive** (`scripts/release/crossing.sh`
+  + `sign-and-push.sh`), with an end-to-end test that runs the whole crossing
+  under a real signature.
+
+### Changed
+
+- `just quick` / `just gates` split the verification contract: every gate but
+  the test suite in ~90 s, the whole contract before merging.
+- `verify_deploy` compares build trees, never SHAs.
+- `[project] trunk_branch` governs the merge destination.
+
 ## [0.4.1] — 2026-07-29
 
 ### Fixed
