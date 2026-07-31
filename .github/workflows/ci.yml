@@ -230,39 +230,159 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo clippy --workspace --locked -- -D warnings
 
-  # TEMPORARY, and the temporariness is the point (COSMON, 2026-07-31).
+  # TEMPORARY, like its sibling above, and for the same investigation.
   #
-  # This job does not gate anything. It exists to answer one question the
-  # authoritative `test` job below cannot: WHICH test stops terminating.
+  # nextest turned out to be too slow to be the instrument here: on the runner it
+  # reached 503 of 7129 tests in 28 minutes, which extrapolates past six hours.
+  # One process per test is the wrong shape for a suite whose tests spawn `cs`,
+  # tmux and git — the process cost dominates. So this shards the AUTHORITATIVE
+  # runner instead, keeping cargo/libtest's own execution model intact and only
+  # reducing the surface each job covers.
   #
-  # That job's `cargo test --workspace --locked` step went from 326 s to
-  # unbounded on 2026-07-30, while its cache restore (15 s) and its
-  # `Build cs binary` step (52 s) stayed identical to the last green run — so
-  # neither a cold cache nor a slow runner explains it, and a job killed
-  # mid-step uploads no log to say more. The hang does not reproduce locally:
-  # the same tree runs 7473 tests green in ~10 minutes, including under a
-  # CI-shaped PATH with no `claude` on it. Two hypotheses were formed from that
-  # silence and both were wrong, which is why this job observes instead of
-  # guessing a third time.
+  # Keeping the model is the point. The hang appears under `cargo test`, and a
+  # diagnostic that changes the execution model can only find a different bug.
+  # Each shard therefore runs plain `cargo test` with libtest's own threading,
+  # bounded, and says which crates it covered.
   #
-  # nextest runs one process per test and can kill a test that outlives a bound,
-  # which is the capability `cargo test` does not have. It is the INSTRUMENT
-  # here, not the gate: `test` below stays the contract in CLAUDE.md, unchanged,
-  # and this job is deleted once the culprit is named and fixed. Its one-process
-  # -per-test model also surfaces different resource collisions than cargo's, so
-  # promoting it to gate would be a separate decision resting on demonstrated
-  # parity and declared test groups — not on this job happening to be useful.
+  # Reading it, in one cycle instead of several:
+  #   - one shard bounds out            -> the zone is those crates
+  #   - the doctest job bounds out      -> the category is doctests, invisible to nextest
+  #   - every shard passes              -> interaction or leakage BETWEEN crates
+  #   - several shards bound out        -> shared pollution, not one bad test
   #
-  # nextest does not run doctests; those stay with `test`.
-  test-diagnostic:
-    name: Test (diagnostic — names a hanging test, gates nothing)
+  # Gates nothing, deleted once the culprit is named.
+  test-shard:
+    name: Test (shard ${{ matrix.name }} — diagnostic, gates nothing)
     runs-on: ubuntu-latest
-    # 90 = 45 (compile) + 35 (run) + ~10 for the upload. The job bound must stay
-    # STRICTLY above the sum of its steps', or it becomes the thing that cuts —
-    # and a job cancelled on its own bound skips `if: always()`, which is how the
-    # first attempt lost its entire output. Bounding the steps without raising
-    # this would have moved that defect into the compile step, not removed it.
-    timeout-minutes: 90
+    # 80 = 30 (compile) + 25 (run) + setup, prebuild and upload. The step bounds
+    # must stay strictly inside this one: a job cut on its OWN bound skips
+    # `if: always()`, which is exactly how the three previous diagnostic runs
+    # lost their artifacts. 60 left no room for the tail.
+    timeout-minutes: 80
+    continue-on-error: true
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: cli
+            needs_cs: false
+            args: "-p cosmon-cli"
+            # 1026s local, 2148 tests — the heaviest crate by 2x
+          - name: api
+            needs_cs: true
+            args: "-p cosmon-api"
+            # 550s local, 84 tests
+          - name: remote
+            needs_cs: false
+            args: "-p cosmon-remote"
+            # 539s local, 231 tests
+          - name: core
+            needs_cs: false
+            args: "-p cosmon-core -p cosmon-fuzz -p cosmon-hash -p cosmon-style"
+            # 471s local
+          - name: runtime
+            needs_cs: true
+            args: "-p cosmon-runtime -p cosmon-pilot -p cosmon-daemon -p cosmon-mcp -p cosmon-graph -p cosmon-archive -p cosmon-observability -p cosmon-process-witness -p cosmon-cockpit-http -p claudion -p cosmon -p xtask"
+            # 466s local
+          - name: provider
+            needs_cs: false
+            args: "-p cosmon-provider -p cosmon-state -p cosmon-agent-harness -p cosmon-ask -p cosmon-notary -p cosmon-ops-tools -p cosmon-registry -p cosmon-surface-canon"
+            # 471s local
+          - name: transport
+            needs_cs: true
+            args: "-p cosmon-transport -p cosmon-daemon-supervisor -p cosmon-thin-cli -p apps-transport-http -p cosmon-bridge-claude -p cosmon-scenario -p cosmon-scheduler -p cosmon-verify -p neurion-core"
+            # 468s local
+          - name: filestore
+            needs_cs: false
+            args: "-p cosmon-filestore -p cosmon-rpp-adapter -p cosmon-surface -p cosmon-client -p cosmon-cockpit -p cosmon-crashtest -p cosmon-oidc-testkit -p cosmon-thin-macro -p topon-core"
+            # 477s local
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install system libdbus (Linux keyring backend)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      # One cache for the whole matrix: without a shared key every shard gets its
+      # own and compiles the workspace from cold, which is what made the previous
+      # diagnostic job's timing unreadable.
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: test-shard
+      # Only where a test actually shells out to the binary. `cosmon-api`,
+      # `cosmon-runtime` and `cosmon-thin-cli` look for `target/debug/cs` on
+      # disk and build it themselves if it is missing — which under any parallel
+      # runner means several concurrent `cargo build` queued on the Cargo lock.
+      # `cosmon-cli` needs no prebuild: it OWNS the binary, so cargo hands it
+      # `CARGO_BIN_EXE_cs` for free. Building it in all eight shards would
+      # recompile most of the graph on every runner for nothing.
+      - name: Build cs binary (only for shards whose tests shell out to it)
+        if: matrix.needs_cs
+        run: cargo build --bin cs -p cosmon-cli --locked
+
+      # Compile separately and bounded, so a slow build cannot present itself as
+      # a hanging test — the mistake the first diagnostic job made.
+      - name: Compile this shard's tests
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          # The runner declares its own disk, before and after. Three diagnostic
+          # runs have now died mid-step with no log, no artifact and no step
+          # conclusion — the shape of a runner lost, not of a bound firing. A
+          # full `target/debug` for this workspace is tens of gigabytes locally
+          # against ~14 GB free here, so exhaustion is a candidate; these two
+          # lines are what turn that from a guess into a reading.
+          { echo "--- df before ---"; df -h /; } | tee shard-build.log
+          cargo test --locked ${{ matrix.args }} --no-run 2>&1 \
+            | tee -a shard-build.log
+          { echo "--- df after ---"; df -h /; du -sh target 2>/dev/null; } \
+            | tee -a shard-build.log
+
+      - name: Run this shard
+        timeout-minutes: 25
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          {
+            echo "shard=${{ matrix.name }}"
+            echo "args=${{ matrix.args }}"
+            echo "nproc=$(nproc)"
+            echo "online=$(getconf _NPROCESSORS_ONLN)"
+            echo "--- df ---"; df -h /
+            echo "--- mem ---"; free -m || true
+          } | tee shard.log
+
+          # `set +e` + PIPESTATUS: with pipefail and the shell's implicit -e a
+          # bounded-out cargo aborts the script before `rc` is written, and the
+          # code is the reading. `--kill-after` covers a cargo ignoring SIGINT.
+          set +e
+          timeout --signal=INT --kill-after=30s 20m \
+            cargo test --locked ${{ matrix.args }} \
+              -- --nocapture 2>&1 | tee -a shard.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "shard_rc=$rc" | tee -a shard.log
+          exit "$rc"
+
+      - name: Upload this shard's output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: shard-${{ matrix.name }}
+          path: |
+            shard-build.log
+            shard.log
+          if-no-files-found: warn
+
+  # The half nextest cannot see at all: it does not run doctests. 116 of them
+  # here, in one opaque `rustdoc` phase, so a doctest that hangs is invisible to
+  # every per-test instrument and would have been misread as an interaction
+  # between ordinary tests.
+  test-doc:
+    name: Test (doctests — diagnostic, gates nothing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     continue-on-error: true
     permissions:
       contents: read
@@ -272,82 +392,27 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
-      # The instrument is pinned as hard as the gate: this action by SHA like
-      # every other, AND cargo-nextest by exact version. A measurement whose
-      # measuring device can change under it between two runs is not a
-      # measurement — and this device exists precisely to compare runs.
-      - uses: taiki-e/install-action@e0475f5c1b710607c5f74c0e9f71a9d5f0b62aa5  # v2
         with:
-          tool: cargo-nextest@0.9.132
-      - name: Build cs binary (parity gate prerequisite)
-        run: cargo build --bin cs -p cosmon-cli --locked
-
-      # Compilation is its own step so the bound below covers EXECUTION only.
-      # The first attempt bounded the two together and the reading was
-      # uninterpretable: this job's cache key is its own, so its first run
-      # restored nothing (`rust-cache` took 1 second, against 15 for the `Test`
-      # job) and spent most of its budget compiling from cold. Attributing that
-      # to nextest's runtime would have been the wrong conclusion.
-      - name: Compile the test binaries (not what we are measuring)
-        # Bounded too, and generously: this job's cache key is its own, so its
-        # first run restores nothing and compiles the workspace from cold —
-        # `rust-cache` took 1 second here against 15 for the `Test` job. Its own
-        # log is uploaded, so a compile that overruns says so instead of
-        # presenting itself as a hanging test.
-        timeout-minutes: 45
-        run: |
-          set -o pipefail
-          cargo nextest run --workspace --locked --no-run 2>&1 \
-            | tee nextest-build.log
-
-      - name: Run the suite one process per test, bounded
-        # A bound INSIDE the step, and a step-level budget above it. The job
-        # -level `timeout-minutes` is a backstop and must never be the thing
-        # that cuts: GitHub cancels a job hard on that, and the upload step
-        # below — the entire deliverable — then never runs. That is exactly how
-        # the first attempt lost its own output.
-        timeout-minutes: 35
+          shared-key: test-shard
+      - name: Run the doctests
+        timeout-minutes: 30
         continue-on-error: true
         run: |
           set -o pipefail
-          # The runner declares its own shape. The last hypothesis built on the
-          # documented core count was wrong; this one is measured on the box.
-          {
-            echo "nproc=$(nproc)"
-            echo "online=$(getconf _NPROCESSORS_ONLN)"
-            rustc -vV
-          } | tee nextest.log
-
-          # `set +e` around the pipeline: with pipefail and the shell's implicit
-          # -e, a failing nextest aborts the script before `rc` is ever written,
-          # and the exit code IS the reading. `--kill-after` covers a nextest
-          # that does not honour SIGINT, so it cannot eat the time reserved for
-          # the upload.
+          { echo "nproc=$(nproc)"; df -h /; free -m || true; } | tee doc.log
           set +e
-          timeout --signal=INT --kill-after=30s 30m \
-            cargo nextest run --workspace --locked \
-              --profile ci-diagnostic \
-              --no-fail-fast \
-              --status-level all 2>&1 | tee -a nextest.log
+          timeout --signal=INT --kill-after=30s 25m \
+            cargo test --workspace --locked --doc 2>&1 | tee -a doc.log
           rc=${PIPESTATUS[0]}
           set -e
-
-          echo "nextest_rc=$rc" | tee -a nextest.log
+          echo "doc_rc=$rc" | tee -a doc.log
           exit "$rc"
-
-      # `always()` is the whole point: the run this exists for is the one that
-      # ends badly. `nextest.log` is written progressively by `tee`, so it holds
-      # the last test announced even when the run is cut — that line is the
-      # deliverable, not the JUnit summary that a cut run never reaches.
-      - name: Upload the diagnostic output
+      - name: Upload the doctest output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
-          name: test-diagnostic
-          path: |
-            nextest-build.log
-            nextest.log
-            target/nextest/ci-diagnostic/junit.xml
+          name: doctests
+          path: doc.log
           if-no-files-found: warn
 
   test:

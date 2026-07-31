@@ -147,6 +147,23 @@ format_message() {
       header="Task Dispatched"
       body="<b>$(escape_html "$title")</b> → $(escape_html "$target") [$(escape_html "$priority"), $(escape_html "$channel")]"
       ;;
+    # A plain operator note. Without this arm a `kind: "info"` event fell to the
+    # default below, which dumps the WHOLE event envelope into a <pre> — so an
+    # operator reading their phone got raw JSON with the sentence they wanted
+    # buried inside it. Observed in the field on 2026-07-31.
+    #
+    # `.message` is the only field this kind carries, and it is already prose;
+    # the formatter's job here is to get out of its way.
+    info)
+      local message
+      message=$(echo "$json" | jq -r '.message // empty')
+      if [[ -z "$message" ]]; then
+        echo ""
+        return
+      fi
+      header="Cosmon"
+      body="$(escape_html "$message")"
+      ;;
     error_occurred)
       local context message
       context=$(echo "$json" | jq -r '.context')

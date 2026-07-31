@@ -64,6 +64,35 @@ eq "text with none of the three is returned unchanged" \
 eq "a phase arrow survives the round trip" \
    '[P1-&gt;P2] gates green' "$(escape_html '[P1->P2] gates green')"
 
+# The formatter, not just the escaper. A `kind` with no arm of its own falls to
+# the default branch, which dumps the whole event envelope into a <pre> — so the
+# operator receives raw JSON with their sentence buried in it. That is what
+# `kind: "info"` did until 2026-07-31, and it is invisible to any test that only
+# exercises `escape_html`.
+eval "$(sed -n '/^format_message()/,/^}/p' "$HOOK")"
+
+INFO_JSON='{"timestamp":"2026-07-31T15:31:54Z","kind":"info","message":"[P2] gates green"}'
+INFO_OUT="$(format_message "$INFO_JSON")"
+
+case "$INFO_OUT" in
+  *'"kind"'*|*'"timestamp"'*|*"<pre>"*)
+    ko "an info event is rendered as prose, not as its own envelope" \
+       "no JSON keys, no <pre>" "$INFO_OUT" ;;
+  *"[P2] gates green"*)
+    ok "an info event is rendered as prose, not as its own envelope" ;;
+  *)
+    ko "an info event is rendered as prose, not as its own envelope" \
+       "contains the message text" "$INFO_OUT" ;;
+esac
+
+# An unknown kind must still fall back rather than vanish: the default branch is
+# a diagnostic of last resort and deleting it would silence a real event.
+UNKNOWN_OUT="$(format_message '{"timestamp":"t","kind":"not_a_known_kind","x":1}')"
+case "$UNKNOWN_OUT" in
+  *"not_a_known_kind"*) ok "an unknown kind still reaches the operator" ;;
+  *) ko "an unknown kind still reaches the operator" "mentions the kind" "$UNKNOWN_OUT" ;;
+esac
+
 echo "──────────────────────────────────────────────────────────────────────"
 echo "telegram-notify.test: $pass passed, $fail FAILED."
 [[ $fail -eq 0 ]]
