@@ -148,6 +148,62 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    # --- the sh implementation holds the same invariants ------------------
+    tmp = tempfile.mkdtemp(prefix="cosmon-receipt-sh-test-")
+    try:
+        receipts = os.path.join(tmp, "receipts")
+        os.makedirs(receipts)
+        nonce_file = os.path.join(tmp, "nonce")
+        with open(nonce_file, "w") as fh:
+            fh.write("shnonce42\n")
+        env = dict(
+            os.environ,
+            COSMON_RECEIPT_DIR=receipts,
+            COSMON_RECEIPT_NONCE_FILE=nonce_file,
+        )
+        sh_hook = os.path.join(HERE, "ack_hook.sh")
+
+        def run_sh(e=env, payload=PAYLOAD):
+            return subprocess.run(
+                ["/bin/sh", sh_hook],
+                input=payload,
+                capture_output=True,
+                text=True,
+                env=e,
+                timeout=20,
+            )
+
+        r = run_sh()
+        check("sh: exit 0", r.returncode == 0, f"rc={r.returncode}")
+        check("sh: stdout empty", r.stdout == "", repr(r.stdout[:60]))
+        check("sh: receipt keyed to the nonce",
+              os.path.exists(os.path.join(receipts, "ack-shnonce42.json")))
+        check("sh: no prompt content persisted", not tree_contains(tmp, PROMPT))
+        check("sh: no temp file left behind",
+              not any(f.startswith(".ack-tmp-") for f in os.listdir(receipts)))
+
+        for name, e in {
+            "sh, receipt dir missing": {**env, "COSMON_RECEIPT_DIR": os.path.join(tmp, "gone")},
+            "sh, receipt dir unset": {k: v for k, v in env.items() if k != "COSMON_RECEIPT_DIR"},
+            "sh, nonce file missing": {**env, "COSMON_RECEIPT_NONCE_FILE": os.path.join(tmp, "gone")},
+        }.items():
+            r = run_sh(e)
+            check(f"{name}: exit 0", r.returncode == 0, f"rc={r.returncode}")
+            check(f"{name}: stdout empty", r.stdout == "")
+
+        with open(nonce_file, "w") as fh:
+            fh.write("../../../../tmp/sh-escaped\n")
+        before = set(os.listdir(receipts))
+        r = run_sh()
+        after = set(os.listdir(receipts))
+        check("sh path traversal: contained",
+              r.returncode == 0
+              and not os.path.exists("/tmp/sh-escaped.json")
+              and len(after - before) == 1,
+              str(sorted(after - before)))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
     if failures:
         print(f"\n{len(failures)} check(s) failed: {failures}")
         return 1

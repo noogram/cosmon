@@ -83,6 +83,38 @@ PROD_LINES_PER_PASTE_BLOCK = 12
 STDOUT_SENTINEL = "COSMON-HOOK-STDOUT-SENTINEL-7QX"
 
 
+class CpuLoad:
+    """N spinning processes, for the loaded-machine condition.
+
+    The race harness listed "a loaded fleet" as the first thing it could not
+    speak for, and the first pass of this experiment stumbled into the same
+    fact by accident: trials that overlapped a `cargo check` lost the submit far
+    more often than trials on an idle machine. An accident is not a
+    measurement, so the load is made explicit and switchable here.
+    """
+
+    def __init__(self, n: int):
+        self.procs = []
+        for _ in range(max(0, n)):
+            self.procs.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", "while True: pass"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            )
+        if self.procs:
+            atexit.register(self.stop)
+
+    def stop(self):
+        for p in self.procs:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        self.procs = []
+
+
 class Tmux:
     """A private tmux server, killed on every exit path including a signal."""
 
@@ -233,6 +265,16 @@ SCENARIOS = {
     "no_retry": {"no_retry": True},
     "tuned": {"retry_ms": 2000},
     "tuned_busy": {"retry_ms": 2000, "busy": True},
+    "hybrid": {"retry_ms": 300, "stop_on_clear": True},
+    "hybrid_busy": {"retry_ms": 300, "stop_on_clear": True, "busy": True},
+    "resume": {"resume": True, "retry_ms": 300, "stop_on_clear": True},
+    # The same mechanism with the sh implementation of the hook: the Python
+    # one spends ~370 ms of every receipt starting an interpreter.
+    "sh_no_retry": {"hook_impl": "sh", "no_retry": True},
+    "sh_hybrid": {"hook_impl": "sh", "retry_ms": 300, "stop_on_clear": True},
+    "sh_hybrid_busy": {
+        "hook_impl": "sh", "retry_ms": 300, "stop_on_clear": True, "busy": True,
+    },
     "busy": {"busy": True},
     "user_hook": {"overlay": "ours+user"},
     "blocking_hook": {"overlay": "ours+blocking"},
@@ -247,7 +289,7 @@ SCENARIOS = {
 
 
 def build_overlay(kind: str, overlay_path: str, receipt_dir: str, nonce_file: str,
-                  stdout_leak: bool) -> bool:
+                  stdout_leak: bool, hook_impl: str = "python") -> bool:
     """Write the ephemeral overlay. Returns False when the arm runs without one."""
     if kind == "none":
         return False
@@ -255,6 +297,8 @@ def build_overlay(kind: str, overlay_path: str, receipt_dir: str, nonce_file: st
         receipt_dir,
         nonce_file,
         stdout_leak=STDOUT_SENTINEL if stdout_leak else None,
+        hook_path=rcpt.ACK_HOOK_SH if hook_impl == "sh" else rcpt.ACK_HOOK,
+        runner="/bin/sh" if hook_impl == "sh" else "/usr/bin/env python3",
     )
     if kind == "broken":
         # The hook command cannot execute: the exact shape of "the mechanism is
@@ -316,7 +360,8 @@ def prod_submit(tm: Tmux, session: str, buf: str, marker: str, size: int,
 
 def event_submit(tm: Tmux, session: str, buf: str, marker: str, nonce: str,
                  receipt_dir: str, nonce_file: str, suppress_cr: bool,
-                 ack_deadline_s: float, retry_s: float) -> dict:
+                 ack_deadline_s: float, retry_s: float,
+                 stop_on_clear: bool) -> dict:
     """The candidate: stamp the nonce, paste, submit at once, wait for a receipt."""
     rcpt.stamp_nonce(nonce_file, nonce)
     tm.run(["send-keys", "-t", session, "C-u"])
@@ -339,6 +384,7 @@ def event_submit(tm: Tmux, session: str, buf: str, marker: str, nonce: str,
         composer_pending=read_composer,
         ack_deadline_s=ack_deadline_s,
         retry_interval_s=retry_s,
+        stop_pressing_on_clear=stop_on_clear,
         t0=t0,
         first_submit=not suppress_cr,
     )
@@ -389,6 +435,7 @@ def trial(tm: Tmux, args, arm: str, scen_name: str, size: int, rep: int) -> dict
             receipt_dir,
             nonce_file,
             scen.get("stdout_leak", False),
+            scen.get("hook_impl", "python"),
         )
     row["overlay"] = scen.get("overlay", "ours") if arm == "event" else "none"
 
@@ -396,6 +443,11 @@ def trial(tm: Tmux, args, arm: str, scen_name: str, size: int, rep: int) -> dict
     env["TERM"] = "xterm-256color"
 
     claude_argv = args.claude_bin
+    if scen.get("resume"):
+        # A session that was not started fresh: `--continue` reopens the most
+        # recent conversation in this cwd. The question is only whether an
+        # overlay handed to a resumed process still installs the hook.
+        claude_argv += " --continue"
     if use_overlay:
         claude_argv += f" --settings {overlay_path}"
     cmd = f"python3 {SPY} {log_path} -- {claude_argv}"
@@ -450,7 +502,7 @@ def trial(tm: Tmux, args, arm: str, scen_name: str, size: int, rep: int) -> dict
                     tm, session, buf, marker,
                     rcpt.mint_nonce(), receipt_dir, nonce_file,
                     scen.get("suppress_cr", False), args.ack_deadline_s,
-                    retry_s,
+                    retry_s, scen.get("stop_on_clear", False),
                 )
             res["dispatch_index"] = d
 
@@ -515,6 +567,13 @@ def main() -> int:
     ap.add_argument("--between-dispatch-s", type=float, default=2.0)
     ap.add_argument("--ready-timeout", type=float, default=90.0)
     ap.add_argument("--busy-wait-s", type=float, default=3.0)
+    ap.add_argument(
+        "--load",
+        type=int,
+        default=0,
+        help="spin N CPU hogs for the whole run — the loaded-machine condition "
+        "the race harness could not speak for.",
+    )
     args = ap.parse_args()
 
     if not shutil.which("tmux"):
@@ -549,6 +608,7 @@ def main() -> int:
         )
         return 2
 
+    load = CpuLoad(args.load)
     tm = Tmux(args.socket)
     tm.kill_server()
     total = len(arms) * len(scenarios) * len(sizes) * args.reps
@@ -563,6 +623,7 @@ def main() -> int:
                             # `prod` is the baseline for the two real conditions.
                             continue
                         row = trial(tm, args, arm, scen, size, rep)
+                        row["cpu_load"] = args.load
                         out.write(json.dumps(row) + "\n")
                         done += 1
                         d0 = (row.get("dispatches") or [{}])[0]
@@ -575,6 +636,7 @@ def main() -> int:
                             flush=True,
                         )
     tm.kill_server()
+    load.stop()
     return 0
 
 

@@ -29,6 +29,7 @@ from typing import Callable, Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ACK_HOOK = os.path.join(HERE, "ack_hook.py")
+ACK_HOOK_SH = os.path.join(HERE, "ack_hook.sh")
 
 
 # --------------------------------------------------------------------------
@@ -43,6 +44,7 @@ def hook_command(
     measure_key: Optional[str] = None,
     stdout_leak: Optional[str] = None,
     hook_path: str = ACK_HOOK,
+    runner: str = "/usr/bin/env python3",
 ) -> str:
     """The shell command Claude Code runs on `UserPromptSubmit`.
 
@@ -58,7 +60,7 @@ def hook_command(
         env.append(f"COSMON_RECEIPT_KEY={measure_key}")
     if stdout_leak:
         env.append(f"COSMON_RECEIPT_STDOUT_LEAK={stdout_leak}")
-    return " ".join(env) + f" /usr/bin/env python3 {hook_path}"
+    return " ".join(env) + f" {runner} {hook_path}"
 
 
 def mint_overlay(path: str, commands, timeout_s: int = 5) -> str:
@@ -178,6 +180,7 @@ def await_receipt(
     grace_after_ack_s: float = 0.0,
     t0: Optional[float] = None,
     first_submit: bool = True,
+    stop_pressing_on_clear: bool = False,
 ) -> Receipt:
     """Submit, then wait for the strongest evidence available.
 
@@ -198,9 +201,21 @@ def await_receipt(
     When the deadline passes with no receipt, the composer is consulted and the
     outcome is *demoted*, never relabelled: `evidence` becomes `COMPOSER` (or
     `UNOBSERVED`) and `fallback_reason` says which of the failure modes this is.
+
+    `stop_pressing_on_clear` exists because of a measurement, not a hunch. On a
+    pane that is already mid-response, Claude Code *queues* the pasted message:
+    the composer empties within a second while `UserPromptSubmit` does not fire
+    until the queue drains, seconds later. A loop that presses until the receipt
+    arrives therefore keeps hammering an empty composer for the whole gap. The
+    two signals answer different questions and the loop needs both: the composer
+    clearing says *stop pressing*, the receipt says *it was accepted*. With this
+    set, the composer is consulted before each re-press and a cleared composer
+    ends the pressing while the wait for the receipt continues.
     """
     t0 = t0 if t0 is not None else time.time()
     submits = 0
+    pressing = True
+    ceased_reason = None
     if first_submit:
         press_submit()
         submits += 1
@@ -219,16 +234,26 @@ def await_receipt(
                 submits_sent=submits,
                 submits_after_evidence=0,
                 ack_session_id=ack.get("session_id") or None,
-                extra={
-                    k: ack[k]
-                    for k in ("prompt_len", "prompt_tag", "hook_ts", "written_ts")
-                    if k in ack
-                },
+                extra=dict(
+                    {
+                        k: ack[k]
+                        for k in ("prompt_len", "prompt_tag", "hook_ts", "written_ts")
+                        if k in ack
+                    },
+                    ceased_pressing=ceased_reason,
+                ),
             )
         now = time.time()
-        if now - last_retry >= retry_interval_s:
-            press_submit()
-            submits += 1
+        if pressing and now - last_retry >= retry_interval_s:
+            if stop_pressing_on_clear and composer_pending() is False:
+                # The composer emptied: whatever we pasted is either submitted
+                # or queued, and another carriage return can only land
+                # somewhere it was not meant to.
+                pressing = False
+                ceased_reason = "composer_cleared"
+            else:
+                press_submit()
+                submits += 1
             last_retry = now
         time.sleep(poll_s)
 
