@@ -257,7 +257,12 @@ jobs:
   test-diagnostic:
     name: Test (diagnostic — names a hanging test, gates nothing)
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # 90 = 45 (compile) + 35 (run) + ~10 for the upload. The job bound must stay
+    # STRICTLY above the sum of its steps', or it becomes the thing that cuts —
+    # and a job cancelled on its own bound skips `if: always()`, which is how the
+    # first attempt lost its entire output. Bounding the steps without raising
+    # this would have moved that defect into the compile step, not removed it.
+    timeout-minutes: 90
     continue-on-error: true
     permissions:
       contents: read
@@ -276,23 +281,71 @@ jobs:
           tool: cargo-nextest@0.9.132
       - name: Build cs binary (parity gate prerequisite)
         run: cargo build --bin cs -p cosmon-cli --locked
-      - name: Run the suite one process per test, bounded
+
+      # Compilation is its own step so the bound below covers EXECUTION only.
+      # The first attempt bounded the two together and the reading was
+      # uninterpretable: this job's cache key is its own, so its first run
+      # restored nothing (`rust-cache` took 1 second, against 15 for the `Test`
+      # job) and spent most of its budget compiling from cold. Attributing that
+      # to nextest's runtime would have been the wrong conclusion.
+      - name: Compile the test binaries (not what we are measuring)
+        # Bounded too, and generously: this job's cache key is its own, so its
+        # first run restores nothing and compiles the workspace from cold —
+        # `rust-cache` took 1 second here against 15 for the `Test` job. Its own
+        # log is uploaded, so a compile that overruns says so instead of
+        # presenting itself as a hanging test.
+        timeout-minutes: 45
         run: |
-          # nextest's exit code IS the measurement here, and it reaches this
-          # shell through a pipe. GitHub's default shell already sets pipefail;
-          # saying so explicitly makes the dependency visible instead of relying
-          # on a runner default that this job's whole value rests on.
           set -o pipefail
-          cargo nextest run --workspace --locked \
-            --profile ci-diagnostic --no-fail-fast 2>&1 | tee nextest.log
+          cargo nextest run --workspace --locked --no-run 2>&1 \
+            | tee nextest-build.log
+
+      - name: Run the suite one process per test, bounded
+        # A bound INSIDE the step, and a step-level budget above it. The job
+        # -level `timeout-minutes` is a backstop and must never be the thing
+        # that cuts: GitHub cancels a job hard on that, and the upload step
+        # below — the entire deliverable — then never runs. That is exactly how
+        # the first attempt lost its own output.
+        timeout-minutes: 35
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # The runner declares its own shape. The last hypothesis built on the
+          # documented core count was wrong; this one is measured on the box.
+          {
+            echo "nproc=$(nproc)"
+            echo "online=$(getconf _NPROCESSORS_ONLN)"
+            rustc -vV
+          } | tee nextest.log
+
+          # `set +e` around the pipeline: with pipefail and the shell's implicit
+          # -e, a failing nextest aborts the script before `rc` is ever written,
+          # and the exit code IS the reading. `--kill-after` covers a nextest
+          # that does not honour SIGINT, so it cannot eat the time reserved for
+          # the upload.
+          set +e
+          timeout --signal=INT --kill-after=30s 30m \
+            cargo nextest run --workspace --locked \
+              --profile ci-diagnostic \
+              --no-fail-fast \
+              --status-level all 2>&1 | tee -a nextest.log
+          rc=${PIPESTATUS[0]}
+          set -e
+
+          echo "nextest_rc=$rc" | tee -a nextest.log
+          exit "$rc"
+
       # `always()` is the whole point: the run this exists for is the one that
-      # ends badly, and its output is the deliverable.
+      # ends badly. `nextest.log` is written progressively by `tee`, so it holds
+      # the last test announced even when the run is cut — that line is the
+      # deliverable, not the JUnit summary that a cut run never reaches.
       - name: Upload the diagnostic output
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: test-diagnostic
           path: |
+            nextest-build.log
             nextest.log
             target/nextest/ci-diagnostic/junit.xml
           if-no-files-found: warn
