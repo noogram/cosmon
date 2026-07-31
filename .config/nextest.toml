@@ -1,0 +1,42 @@
+# nextest configuration.
+#
+# nextest is present here as an INSTRUMENT, not as the gate. The authoritative
+# contract in CLAUDE.md is `cargo test --workspace`, and it stays that way until
+# parity and resource-group behaviour have been demonstrated rather than assumed
+# — nextest runs one process per test, which surfaces a different set of
+# collisions than cargo's one-process-per-binary model, and cosmon's suite
+# spawns tmux servers, git worktrees and `cs` children that share state.
+#
+# What it is here to do today is name a test that does not terminate.
+# On 2026-07-30 the CI `Test` step went from 326 s to unbounded while the cache
+# restore (15 s) and the `Build cs binary` step (52 s) stayed identical to the
+# last green run — so something hangs, and a job killed mid-step uploads no log
+# to say what. `cargo test` has no per-test bound that could turn that silence
+# into a name; nextest does.
+
+[profile.default]
+# Deliberately empty of policy: the default profile must keep behaving like a
+# plain run for anyone who reaches for nextest locally without asking for the
+# diagnostic.
+
+# The diagnostic profile. Invoked explicitly:
+#   cargo nextest run --workspace --locked --profile ci-diagnostic --no-fail-fast
+[profile.ci-diagnostic]
+# Report a test as SLOW once it passes the period, and KILL it after five of
+# them — 5 minutes total. The whole suite ran in 326 s on the last green CI run,
+# so a single test still alive at 5 minutes is not slow, it is stuck.
+slow-timeout = { period = "60s", terminate-after = 5, grace-period = "10s" }
+
+# Do not stop at the first casualty: if more than one test hangs, one run should
+# name all of them rather than sending us round the 45-minute loop per name.
+fail-fast = false
+
+# Bounded, and below the runner's core count on purpose. The suite spawns tmux
+# servers and `cs` children; running it wide on a 2-core runner changes the
+# timing of exactly the thing under investigation.
+test-threads = 4
+
+# A machine-readable verdict that survives a job the runner loses, uploaded as
+# an artifact by the workflow with `if: always()`.
+[profile.ci-diagnostic.junit]
+path = "junit.xml"

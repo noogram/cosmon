@@ -230,6 +230,73 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
       - run: cargo clippy --workspace --locked -- -D warnings
 
+  # TEMPORARY, and the temporariness is the point (COSMON, 2026-07-31).
+  #
+  # This job does not gate anything. It exists to answer one question the
+  # authoritative `test` job below cannot: WHICH test stops terminating.
+  #
+  # That job's `cargo test --workspace --locked` step went from 326 s to
+  # unbounded on 2026-07-30, while its cache restore (15 s) and its
+  # `Build cs binary` step (52 s) stayed identical to the last green run — so
+  # neither a cold cache nor a slow runner explains it, and a job killed
+  # mid-step uploads no log to say more. The hang does not reproduce locally:
+  # the same tree runs 7473 tests green in ~10 minutes, including under a
+  # CI-shaped PATH with no `claude` on it. Two hypotheses were formed from that
+  # silence and both were wrong, which is why this job observes instead of
+  # guessing a third time.
+  #
+  # nextest runs one process per test and can kill a test that outlives a bound,
+  # which is the capability `cargo test` does not have. It is the INSTRUMENT
+  # here, not the gate: `test` below stays the contract in CLAUDE.md, unchanged,
+  # and this job is deleted once the culprit is named and fixed. Its one-process
+  # -per-test model also surfaces different resource collisions than cargo's, so
+  # promoting it to gate would be a separate decision resting on demonstrated
+  # parity and declared test groups — not on this job happening to be useful.
+  #
+  # nextest does not run doctests; those stay with `test`.
+  test-diagnostic:
+    name: Test (diagnostic — names a hanging test, gates nothing)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install system libdbus (Linux keyring backend)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # The instrument is pinned as hard as the gate: this action by SHA like
+      # every other, AND cargo-nextest by exact version. A measurement whose
+      # measuring device can change under it between two runs is not a
+      # measurement — and this device exists precisely to compare runs.
+      - uses: taiki-e/install-action@e0475f5c1b710607c5f74c0e9f71a9d5f0b62aa5  # v2
+        with:
+          tool: cargo-nextest@0.9.132
+      - name: Build cs binary (parity gate prerequisite)
+        run: cargo build --bin cs -p cosmon-cli --locked
+      - name: Run the suite one process per test, bounded
+        run: |
+          # nextest's exit code IS the measurement here, and it reaches this
+          # shell through a pipe. GitHub's default shell already sets pipefail;
+          # saying so explicitly makes the dependency visible instead of relying
+          # on a runner default that this job's whole value rests on.
+          set -o pipefail
+          cargo nextest run --workspace --locked \
+            --profile ci-diagnostic --no-fail-fast 2>&1 | tee nextest.log
+      # `always()` is the whole point: the run this exists for is the one that
+      # ends badly, and its output is the deliverable.
+      - name: Upload the diagnostic output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: test-diagnostic
+          path: |
+            nextest.log
+            target/nextest/ci-diagnostic/junit.xml
+          if-no-files-found: warn
+
   test:
     name: Test
     runs-on: ubuntu-latest
