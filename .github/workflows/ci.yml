@@ -371,31 +371,176 @@ jobs:
             shard.log
           if-no-files-found: warn
 
-  # The zone, after one sharded cycle: every other crate in this workspace runs
-  # green in one to three minutes, and `cosmon-cli` alone does not finish. So
-  # this job stops grouping and starts naming.
+  # The zone is `cosmon-cli`: every other crate and the doctests finish in one to
+  # three minutes, and it alone does not. This job names the target inside it.
   #
-  # 65 test binaries, compiled once, then run ONE AT A TIME under their own
-  # bound, each announced before it starts. A binary that outlives the bound is
-  # reported by name and the loop carries on to find any others — the log is
-  # written progressively, so the name survives even a runner that dies.
+  # # Why a matrix and not a loop
   #
-  # `cargo test --test <name>` keeps libtest's own threading inside each binary,
-  # which is the model the failure appears under. Splitting further — one test
-  # per process — would change the model and could only find a different bug.
+  # The previous attempt ran the 68 targets sequentially in ONE runner, and lost
+  # everything: the step began at 18:10:09, never concluded, and the job died at
+  # 47 minutes without reaching its 40-minute step bound or its 90-minute job
+  # bound. Five diagnostic runs now share that signature — a step that never
+  # concludes and a job that dies — so the runner is being LOST rather than cut,
+  # and no `if: always()` upload survives that. Four artifacts were lost to it.
+  #
+  # A matrix removes the dependency on an artifact entirely: **the job NAME is
+  # the evidence.** One red square names its own target, read off the checks
+  # list, with nothing to download. It also removes the coupling a sequential
+  # loop reintroduces — a target that pollutes or exhausts its runner cannot
+  # reach the ones after it, which in one runner it silently could.
+  #
+  # `--lib` and `--bin cs` are entries too. They pass locally at the runner's
+  # four threads (142 tests in 1.2 s, 1622 in 29 s) but that is macOS, and a
+  # local green cannot clear a Linux red. Here they are settled on the box.
   #
   # Deleted with the rest of this diagnostic once the culprit is fixed.
-  test-cli-targets:
-    name: Test (cosmon-cli, one binary at a time — diagnostic, gates nothing)
+  test-cli-target:
+    name: "cli/${{ matrix.name }}"
     runs-on: ubuntu-latest
-    # 90 = 30 (compile) + 40 (run) + setup, cache and upload. 75 left five
-    # minutes for the tail, which is the same shape that lost the first three
-    # diagnostic artifacts: the job's own bound must never be what cuts, because
-    # a job cancelled on it skips `if: always()`.
-    timeout-minutes: 90
+    timeout-minutes: 30
     continue-on-error: true
     permissions:
       contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: lib
+            args: "--lib"
+          - name: bin-cs
+            args: "--bin cs"
+          - name: api-cli-coverage
+            args: "--test api_cli_coverage"
+          - name: archive-read
+            args: "--test archive_read"
+          - name: archive-verify-cli
+            args: "--test archive_verify_cli"
+          - name: archive-wiring
+            args: "--test archive_wiring"
+          - name: bootstrap-monotonicity
+            args: "--test bootstrap_monotonicity"
+          - name: briefing-backstop-survival
+            args: "--test briefing_backstop_survival"
+          - name: cli
+            args: "--test cli"
+          - name: committee-roster-reconcile-lint
+            args: "--test committee_roster_reconcile_lint"
+          - name: committee-seat-dispatch
+            args: "--test committee_seat_dispatch"
+          - name: config-adapter-provider-override
+            args: "--test config_adapter_provider_override"
+          - name: config-adapters-list
+            args: "--test config_adapters_list"
+          - name: consent-non-blocking
+            args: "--test consent_non_blocking"
+          - name: constellation
+            args: "--test constellation"
+          - name: cross-galaxy
+            args: "--test cross_galaxy"
+          - name: demo
+            args: "--test demo"
+          - name: demo-clean-machine
+            args: "--test demo_clean_machine"
+          - name: demo-local-acceptance
+            args: "--test demo_local_acceptance"
+          - name: doctor
+            args: "--test doctor"
+          - name: done-attribution-stamp
+            args: "--test done_attribution_stamp"
+          - name: done-merge-conflict
+            args: "--test done_merge_conflict"
+          - name: done-molecule-base-branch
+            args: "--test done_molecule_base_branch"
+          - name: done-no-branch-archive
+            args: "--test done_no_branch_archive"
+          - name: done-pre-done-gate
+            args: "--test done_pre_done_gate"
+          - name: energy-budget
+            args: "--test energy_budget"
+          - name: ensemble-snapshot
+            args: "--test ensemble_snapshot"
+          - name: fleet-resolve
+            args: "--test fleet_resolve"
+          - name: formula-projection-parity
+            args: "--test formula_projection_parity"
+          - name: help-goldens
+            args: "--test help_goldens"
+          - name: invariant-archived-terminal
+            args: "--test invariant_archived_terminal"
+          - name: journal-projection
+            args: "--test journal_projection"
+          - name: local-adapter-output-honesty
+            args: "--test local_adapter_output_honesty"
+          - name: local-model-selection
+            args: "--test local_model_selection"
+          - name: mindguard-surface-visual
+            args: "--test mindguard_surface_visual"
+          - name: opt-in-share
+            args: "--test opt_in_share"
+          - name: pane-died-hook
+            args: "--test pane_died_hook"
+          - name: peek-snapshot
+            args: "--test peek_snapshot"
+          - name: pilot-experimental-gate
+            args: "--test pilot_experimental_gate"
+          - name: provider-bias-reconcile-lint
+            args: "--test provider_bias_reconcile_lint"
+          - name: public-attribution-domain
+            args: "--test public_attribution_domain"
+          - name: purge-stale-tmux
+            args: "--test purge_stale_tmux"
+          - name: readme-cli-table
+            args: "--test readme_cli_table"
+          - name: realized-model-matrix
+            args: "--test realized_model_matrix"
+          - name: realized-watch-reexec
+            args: "--test realized_watch_reexec"
+          - name: reconcile-idempotent-cli
+            args: "--test reconcile_idempotent_cli"
+          - name: refused-root-dispatch-leaves-no-residue
+            args: "--test refused_root_dispatch_leaves_no_residue"
+          - name: restart-fidelity-no-neurion
+            args: "--test restart_fidelity_no_neurion"
+          - name: seat-verdict-polarity-reconcile-lint
+            args: "--test seat_verdict_polarity_reconcile_lint"
+          - name: sensorium-strip
+            args: "--test sensorium_strip"
+          - name: session-roundtrip
+            args: "--test session_roundtrip"
+          - name: session-route
+            args: "--test session_route"
+          - name: shipped-binary-version-alignment
+            args: "--test shipped_binary_version_alignment"
+          - name: spec-audit-c1cb
+            args: "--test spec_audit_c1cb"
+          - name: spec-audit-multi
+            args: "--test spec_audit_multi"
+          - name: spore-e2e-fixture
+            args: "--test spore_e2e_fixture"
+          - name: tackle-adapter-flag
+            args: "--test tackle_adapter_flag"
+          - name: tackle-claude-config-dir
+            args: "--test tackle_claude_config_dir"
+          - name: tackle-inprocess-completion
+            args: "--test tackle_inprocess_completion"
+          - name: tackle-inprocess-no-harvest
+            args: "--test tackle_inprocess_no_harvest"
+          - name: tag-single-writer
+            args: "--test tag_single_writer"
+          - name: test-artifact-map
+            args: "--test test_artifact_map"
+          - name: test-migrate-genre
+            args: "--test test_migrate_genre"
+          - name: test-migrate-solo-total
+            args: "--test test_migrate_solo_total"
+          - name: tracing-subscriber-installed
+            args: "--test tracing_subscriber_installed"
+          - name: verdict-polarity-coherence
+            args: "--test verdict_polarity_coherence"
+          - name: verify-graph
+            args: "--test verify_graph"
+          - name: zombie-prevention
+            args: "--test zombie_prevention"
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
       - name: Install system libdbus (Linux keyring backend)
@@ -404,76 +549,10 @@ jobs:
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
         with:
           shared-key: test-shard
-      - name: Compile cosmon-cli's tests once
-        timeout-minutes: 30
+      - name: Run this target
         run: |
-          set -o pipefail
-          { echo "nproc=$(nproc)"; df -h /; free -m || true; } | tee cli-targets.log
-          cargo test -p cosmon-cli --locked --no-run 2>&1 | tee -a cli-targets.log
-
-      - name: Run each test binary under its own bound
-        timeout-minutes: 40
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          # 300s: the slowest of these takes ~170s locally, so a binary still
-          # alive at five minutes is not slow, it is stuck.
-          BOUND=300
-          stuck=(); failed=(); passed=0
-
-          run_target() {   # run_target <label> <cargo args...>
-            local label="$1"; shift
-            # Announced and flushed BEFORE launching: if the runner dies, this
-            # line is the last thing written and it names the culprit.
-            echo "=== RUN $label" | tee -a cli-targets.log
-            local start=$SECONDS rc=0
-            set +e
-            timeout --signal=INT --kill-after=15s "$BOUND" \
-              cargo test -p cosmon-cli --locked "$@" -- --nocapture \
-              >>cli-targets.log 2>&1
-            rc=$?
-            set -e
-            local took=$((SECONDS - start))
-            if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
-              echo "=== STUCK $label after ${took}s" | tee -a cli-targets.log
-              stuck+=("$label")
-            elif [ $rc -ne 0 ]; then
-              echo "=== FAIL $label rc=$rc in ${took}s" | tee -a cli-targets.log
-              failed+=("$label")
-            else
-              echo "=== ok $label in ${took}s" | tee -a cli-targets.log
-              passed=$((passed + 1))
-            fi
-          }
-
-          # The library first, and alone. `--lib --bins` together is two
-          # binaries in one invocation, which is not "one at a time" and would
-          # blur the answer across them. The library is also the likeliest
-          # target: the last unfinished run was streaming `visual::tests` and
-          # `resurrect::tests`, both of which live in it.
-          run_target "<lib>" --lib
-          run_target "<bin cs>" --bin cs
-          for f in crates/cosmon-cli/tests/*.rs; do
-            run_target "$(basename "$f" .rs)" --test "$(basename "$f" .rs)"
-          done
-
-          {
-            echo "=== SUMMARY"
-            echo "passed=$passed"
-            echo "failed=${failed[*]-}"
-            echo "stuck=${stuck[*]-}"
-          } | tee -a cli-targets.log
-
-          [ ${#stuck[@]} -eq 0 ] || exit 2
-          [ ${#failed[@]} -eq 0 ] || exit 1
-
-      - name: Upload the per-binary output
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
-        with:
-          name: cli-targets
-          path: cli-targets.log
-          if-no-files-found: warn
+          { echo "target=${{ matrix.name }}"; nproc; df -h /; free -m || true; } || true
+          cargo test -p cosmon-cli --locked ${{ matrix.args }} -- --nocapture
 
   # The half nextest cannot see at all: it does not run doctests. 116 of them
   # here, in one opaque `rustdoc` phase, so a doctest that hangs is invisible to
