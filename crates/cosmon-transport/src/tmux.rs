@@ -849,6 +849,31 @@ impl TransportBackend for TmuxBackend {
         self.paste_buffer(buf)?;
 
         // Brief pause to let the paste complete and the UI render.
+        //
+        // Measured, 232 trials against Claude Code 2.1.220 on tmux 3.5a
+        // (task-20260731-3aa4, harness in `experiments/briefing-submit-race/`,
+        // full tables in that molecule's `results.md`). The pane ran under a
+        // PTY interposer, so "did the submit byte reach the application" is a
+        // recorded fact rather than an inference from what the TUI drew:
+        //
+        // - the CR reached the application in **232/232** trials. Nothing is
+        //   lost between cosmon and Claude Code, at any briefing size up to
+        //   300 lines, idle or mid-response;
+        // - the briefing stayed in the composer in 2 trials — **both with the
+        //   CR delivered**, and both in the 0 ms cell, where the CR lands a
+        //   median 26 ms after the bracketed-paste terminator. That is a race
+        //   inside the TUI, not a lost keystroke, and this pause is what keeps
+        //   cosmon out of it;
+        // - 0 failures in 176 trials at every delay from 50 ms up, including
+        //   32/32 at the 500 ms below.
+        //
+        // So the constant is load-bearing but not calibrated: the measurement
+        // supports "pause before submitting" and does not pin the value at
+        // 500 ms. It also **exonerates this line as the COSMON #26 residual** —
+        // at 500 ms every briefing submitted on the first keystroke — so a
+        // reader chasing a still-stranded worker should look past it. Do not
+        // shrink it on throughput grounds without re-running the harness; 44
+        // trials at 250 ms bound that cell's failure rate only at ≲ 7 %.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         self.press_submit(&session_name)?;
