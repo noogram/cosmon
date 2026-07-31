@@ -266,10 +266,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: cli
-            needs_cs: false
-            args: "-p cosmon-cli"
-            # 1026s local, 2148 tests — the heaviest crate by 2x
           - name: api
             needs_cs: true
             args: "-p cosmon-api"
@@ -373,6 +369,110 @@ jobs:
           path: |
             shard-build.log
             shard.log
+          if-no-files-found: warn
+
+  # The zone, after one sharded cycle: every other crate in this workspace runs
+  # green in one to three minutes, and `cosmon-cli` alone does not finish. So
+  # this job stops grouping and starts naming.
+  #
+  # 65 test binaries, compiled once, then run ONE AT A TIME under their own
+  # bound, each announced before it starts. A binary that outlives the bound is
+  # reported by name and the loop carries on to find any others — the log is
+  # written progressively, so the name survives even a runner that dies.
+  #
+  # `cargo test --test <name>` keeps libtest's own threading inside each binary,
+  # which is the model the failure appears under. Splitting further — one test
+  # per process — would change the model and could only find a different bug.
+  #
+  # Deleted with the rest of this diagnostic once the culprit is fixed.
+  test-cli-targets:
+    name: Test (cosmon-cli, one binary at a time — diagnostic, gates nothing)
+    runs-on: ubuntu-latest
+    # 90 = 30 (compile) + 40 (run) + setup, cache and upload. 75 left five
+    # minutes for the tail, which is the same shape that lost the first three
+    # diagnostic artifacts: the job's own bound must never be what cuts, because
+    # a job cancelled on it skips `if: always()`.
+    timeout-minutes: 90
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install system libdbus (Linux keyring backend)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          shared-key: test-shard
+      - name: Compile cosmon-cli's tests once
+        timeout-minutes: 30
+        run: |
+          set -o pipefail
+          { echo "nproc=$(nproc)"; df -h /; free -m || true; } | tee cli-targets.log
+          cargo test -p cosmon-cli --locked --no-run 2>&1 | tee -a cli-targets.log
+
+      - name: Run each test binary under its own bound
+        timeout-minutes: 40
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          # 300s: the slowest of these takes ~170s locally, so a binary still
+          # alive at five minutes is not slow, it is stuck.
+          BOUND=300
+          stuck=(); failed=(); passed=0
+
+          run_target() {   # run_target <label> <cargo args...>
+            local label="$1"; shift
+            # Announced and flushed BEFORE launching: if the runner dies, this
+            # line is the last thing written and it names the culprit.
+            echo "=== RUN $label" | tee -a cli-targets.log
+            local start=$SECONDS rc=0
+            set +e
+            timeout --signal=INT --kill-after=15s "$BOUND" \
+              cargo test -p cosmon-cli --locked "$@" -- --nocapture \
+              >>cli-targets.log 2>&1
+            rc=$?
+            set -e
+            local took=$((SECONDS - start))
+            if [ $rc -eq 124 ] || [ $rc -eq 137 ]; then
+              echo "=== STUCK $label after ${took}s" | tee -a cli-targets.log
+              stuck+=("$label")
+            elif [ $rc -ne 0 ]; then
+              echo "=== FAIL $label rc=$rc in ${took}s" | tee -a cli-targets.log
+              failed+=("$label")
+            else
+              echo "=== ok $label in ${took}s" | tee -a cli-targets.log
+              passed=$((passed + 1))
+            fi
+          }
+
+          # The library first, and alone. `--lib --bins` together is two
+          # binaries in one invocation, which is not "one at a time" and would
+          # blur the answer across them. The library is also the likeliest
+          # target: the last unfinished run was streaming `visual::tests` and
+          # `resurrect::tests`, both of which live in it.
+          run_target "<lib>" --lib
+          run_target "<bin cs>" --bin cs
+          for f in crates/cosmon-cli/tests/*.rs; do
+            run_target "$(basename "$f" .rs)" --test "$(basename "$f" .rs)"
+          done
+
+          {
+            echo "=== SUMMARY"
+            echo "passed=$passed"
+            echo "failed=${failed[*]-}"
+            echo "stuck=${stuck[*]-}"
+          } | tee -a cli-targets.log
+
+          [ ${#stuck[@]} -eq 0 ] || exit 2
+          [ ${#failed[@]} -eq 0 ] || exit 1
+
+      - name: Upload the per-binary output
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: cli-targets
+          path: cli-targets.log
           if-no-files-found: warn
 
   # The half nextest cannot see at all: it does not run doctests. 116 of them
