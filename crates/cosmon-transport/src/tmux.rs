@@ -80,6 +80,18 @@ const SUBMIT_RETRY_BUDGET_MAX: u32 = 40;
 const LINES_PER_PASTE_BLOCK: usize = 12;
 
 /// Pause between submit-verification polls, in milliseconds.
+///
+/// Shorter than the composer takes to clear after an *accepted* submit: 414 ms
+/// median, 668 ms p90, 1567 ms max over 230 instrumented trials
+/// (task-20260731-3aa4). So a poll routinely reads "still pending" on a
+/// briefing that is already on its way, and the loop presses submit again —
+/// up to four extra carriage returns behind one accepted briefing at that tail.
+///
+/// What those extra presses do is **unmeasured**; that experiment pressed
+/// submit exactly once by construction. A stray CR landing on a settled
+/// composer is a plausible way to submit an empty prompt or answer a dialog
+/// that appeared in between, which is worth establishing before anyone reads a
+/// high `polls` count in `send_input.settled` as a stuck submit.
 const SUBMIT_POLL_INTERVAL_MS: u64 = 300;
 
 /// The submit keystroke, spelled as a raw hex byte for `tmux send-keys -H`.
@@ -869,11 +881,15 @@ impl TransportBackend for TmuxBackend {
         //
         // So the constant is load-bearing but not calibrated: the measurement
         // supports "pause before submitting" and does not pin the value at
-        // 500 ms. It also **exonerates this line as the COSMON #26 residual** —
-        // at 500 ms every briefing submitted on the first keystroke — so a
-        // reader chasing a still-stranded worker should look past it. Do not
-        // shrink it on throughput grounds without re-running the harness; 44
-        // trials at 250 ms bound that cell's failure rate only at ≲ 7 %.
+        // 500 ms. Do not shrink it on throughput grounds without re-running the
+        // harness; 44 trials at 250 ms bound that cell's failure rate only at
+        // ≲ 7 %.
+        //
+        // What the 32/32 at 500 ms does **not** say: it does not clear this
+        // line as the COSMON #26 residual. Not implicated is not exonerated —
+        // the rule-of-three bound on an empty cell of 32 is ≈ 9 %, which still
+        // permits a race firing once per tens of dispatches. It says only that
+        // a reader chasing a stranded worker should look elsewhere first.
         std::thread::sleep(std::time::Duration::from_millis(500));
 
         self.press_submit(&session_name)?;
