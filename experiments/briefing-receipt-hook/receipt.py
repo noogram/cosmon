@@ -22,6 +22,7 @@ Three things live here:
 import json
 import os
 import secrets
+import shlex
 import stat
 import time
 from dataclasses import dataclass, field, asdict
@@ -50,17 +51,23 @@ def hook_command(
 
     Environment is set inline rather than inherited, because the hook's
     contract must not depend on what the pane happened to export.
+
+    Every value is `shlex.quote`d. This is not decoration: an unquoted value
+    containing a space silently truncates the assignment and turns the rest
+    into a command, which is how the stdout-leak probe spent three trials
+    measuring a hook that had never run. A path with a space in it would do the
+    same thing to the receipt directory in production.
     """
     env = [
-        f"COSMON_RECEIPT_DIR={receipt_dir}",
-        f"COSMON_RECEIPT_NONCE_FILE={nonce_file}",
+        f"COSMON_RECEIPT_DIR={shlex.quote(receipt_dir)}",
+        f"COSMON_RECEIPT_NONCE_FILE={shlex.quote(nonce_file)}",
     ]
     if measure_key:
         env.append("COSMON_RECEIPT_MEASURE=1")
-        env.append(f"COSMON_RECEIPT_KEY={measure_key}")
+        env.append(f"COSMON_RECEIPT_KEY={shlex.quote(measure_key)}")
     if stdout_leak:
-        env.append(f"COSMON_RECEIPT_STDOUT_LEAK={stdout_leak}")
-    return " ".join(env) + f" {runner} {hook_path}"
+        env.append(f"COSMON_RECEIPT_STDOUT_LEAK={shlex.quote(stdout_leak)}")
+    return " ".join(env) + f" {runner} {shlex.quote(hook_path)}"
 
 
 def mint_overlay(path: str, commands, timeout_s: int = 5) -> str:
