@@ -15,8 +15,8 @@
 //! So this file kills the parent. It arms the backstop the way `cs tackle` does
 //! — through [`cosmon_cli::briefing_backstop::detach`], the one implementation
 //! both paths use — then SIGKILLs the arming process *and its entire process
-//! group*, verifies the group is empty, and only then waits for the work to
-//! happen anyway.
+//! group*, proves the signal landed by the death of a live bystander planted in
+//! that group, and only then waits for the work to happen anyway.
 //!
 //! # The rig
 //!
@@ -31,8 +31,13 @@
 //!
 //! 1. **The record is durable.** It is on disk, written by one process and read
 //!    by another that shares nothing with it but a path.
-//! 2. **The caller is really gone.** `kill -0` on its process group answers
-//!    ESRCH — so the backstop cannot be hiding in it.
+//! 2. **The kill really reached the group.** A live bystander (`sleep 300`)
+//!    joins the caller's group before the signal, `kill(2)` must return 0, and
+//!    the bystander must die of SIGKILL specifically. An earlier version asked
+//!    the external `kill -0 -<pgid>` whether the group had emptied instead —
+//!    on Linux, procps `kill` without `--` parses `-<pgid>` as an option and
+//!    exits 0 unconditionally, so that check was a tautology and hung this
+//!    test for its full 60 s patience on every Linux run.
 //! 3. **The retry still lands.** The marker file appears: an Enter reached the
 //!    pane after the kill.
 //! 4. **The receipt is signed.** The record file is removed — which the
@@ -54,7 +59,7 @@
 #![cfg(unix)]
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 /// Upper bound on any single wait here. Generous enough for a loaded runner,
@@ -95,16 +100,6 @@ fn wait_for(what: &str, mut cond: impl FnMut() -> bool) {
         std::thread::sleep(Duration::from_millis(50));
     }
     panic!("timed out after {PATIENCE:?} waiting for: {what}");
-}
-
-/// Does any process still live in group `pgid`? `kill -0` on a negative pid
-/// asks exactly that, and answers non-zero (ESRCH) when the group is empty.
-fn process_group_alive(pgid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(format!("-{pgid}"))
-        .output()
-        .is_ok_and(|o| o.status.success())
 }
 
 #[test]
@@ -188,34 +183,52 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
     let mut caller = caller.spawn().expect("spawn the arming caller");
     let caller_pgid = caller.id();
 
-    // Let the caller finish arming — WITHOUT reaping it.
+    // A live occupant of the caller's group, so the SIGKILL below has something
+    // to kill.
     //
-    // # Why not `caller.wait()` here (the CI-runner hazard)
+    // # Why this exists (COSMON, 2026-07-31)
+    //
+    // Without it the group holds nothing but the caller's `WNOWAIT` zombie by
+    // the time the signal goes out, and the kernels disagree about what that
+    // means: Linux signals it and returns 0, macOS refuses with EPERM. Accepting
+    // both would mean accepting a run where the signal was never delivered — and
+    // then the marker in Property 3 proves only that the backstop ran, not that
+    // it SURVIVED A KILL, which is the entire claim of this file.
+    //
+    // A sleeper in the group makes the delivery checkable: the signal must
+    // succeed, and the sleeper must be dead afterwards. Both are asserted.
+    let mut bystander = Command::new("sleep");
+    bystander
+        .arg("300")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    {
+        use std::os::unix::process::CommandExt as _;
+        // Join the caller's group rather than leading one: `setpgid(0, pgid)`.
+        bystander.process_group(caller_pgid as i32);
+    }
+    let mut bystander = bystander.spawn().expect("spawn the group bystander");
+
+    // Wait for the caller to finish arming — WITHOUT reaping it.
     //
     // `caller_pgid` is the caller's pid, and a pid belongs to a process only
-    // while the kernel is still holding it. Reaping releases it for reuse
-    // **immediately**, so a `kill -KILL -<pgid>` issued after `wait()` names a
-    // process group that may already belong to something else. On a developer's
-    // machine that window is too narrow to hit. On a CI runner churning through
-    // hundreds of test binaries it is not, and the signal then lands on whatever
-    // won the pid lottery — at the limit, the harness running this very test,
-    // which dies without a verdict and without uploading a log.
+    // while the kernel is holding it. Reaping releases it for reuse
+    // immediately, so a group kill issued after `wait()` could name a group
+    // that already belongs to something else. `WNOWAIT` leaves the zombie in
+    // place, and a zombie still owns its pid, so the signal below has a target
+    // that cannot have been reassigned.
     //
-    // `waitpid(WNOWAIT)` waits for the exit and leaves the zombie in place. A
-    // zombie still owns its pid: the kernel cannot hand it to anyone until it is
-    // collected. So between here and the reap below, `caller_pgid` means exactly
-    // one thing, and the kill has a well-defined target.
-    //
-    // The ordering matters in the other direction too: the caller has to have
-    // ARMED the backstop before anything kills its group, which is why this
-    // waits for its exit rather than firing straight after `spawn`.
     // `waitid` and not `waitpid`: `WNOWAIT` is a `waitid` flag, and `waitpid`
-    // answers EINVAL for it.
+    // answers EINVAL for it. The constants come from `libc` and never from
+    // literals — `WNOWAIT` is `0x01000000` on Linux and `0x20` on macOS, and a
+    // hard-coded value silently turns this call into a no-op on the other
+    // platform, which is exactly how an earlier investigation mis-attributed a
+    // bug of its own to a kernel difference.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
     // SAFETY: `caller_pgid` is our own live child's pid, `info` is a valid
     // writable `siginfo_t`, and `WNOWAIT` leaves the child collectable by the
     // `caller.wait()` below — so `Child`'s own reaping contract is preserved.
-    let rc = unsafe {
+    let waited = unsafe {
         libc::waitid(
             libc::P_PID,
             caller_pgid as libc::id_t,
@@ -223,29 +236,78 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
             libc::WEXITED | libc::WNOWAIT,
         )
     };
+    // Asserted, not ignored: if this call did not actually wait, the kill below
+    // would race the caller and could fire BEFORE the backstop is armed —
+    // turning a passing run into evidence of nothing.
     assert_eq!(
-        rc,
+        waited,
         0,
         "waiting for the arming caller failed: {}",
         std::io::Error::last_os_error()
     );
 
-    // Property 2 — the caller is really dead, and so is anything that stayed in
-    // its process group. If the backstop had been spawned as an ordinary child
-    // it would be in this group and would die right here, which is precisely
-    // the failure mode the thread-based attempt had.
-    let _ = Command::new("kill")
-        .arg("-KILL")
-        .arg(format!("-{caller_pgid}"))
-        .output();
+    // Property 2 — the caller's whole process group is killed. If the backstop
+    // had been spawned as an ordinary child it would be in this group and would
+    // die right here, which is precisely the failure mode the thread-based
+    // attempt had.
+    //
+    // Direct `kill(2)` rather than shelling out to `kill(1)`: the errno is the
+    // only thing that separates the outcomes, and a subprocess discards it.
+    // SAFETY: a plain `kill(2)` with a negative pid, which is the documented
+    // way to signal a process group; no memory is touched.
+    let killed = unsafe { libc::kill(-(caller_pgid as libc::pid_t), libc::SIGKILL) };
+    assert_eq!(
+        killed,
+        0,
+        "signalling the caller's process group failed: {}. The group holds a \
+         live bystander, so this must succeed — an ESRCH or EPERM here means \
+         the signal never reached anything and nothing below would prove \
+         survival.",
+        std::io::Error::last_os_error()
+    );
 
-    // Now the pid may be released: nothing reads it again.
+    // The signal really landed on the group: its live occupant is dead, and dead
+    // of THIS signal.
+    //
+    // `signal() == Some(SIGKILL)` and not `code().is_none()`: the latter only
+    // says "died of something", which a stray SIGTERM or a SIGSEGV would satisfy
+    // just as well. The claim being checked is narrow — our SIGKILL reached this
+    // group — so the assertion is narrow too.
+    let bystander_end = bystander.wait().expect("reap the group bystander");
+    assert_eq!(
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            bystander_end.signal()
+        },
+        Some(libc::SIGKILL),
+        "the group's live occupant did not die of our SIGKILL ({bystander_end}) \
+         — the signal did not reach the group, so nothing below bears on whether \
+         the backstop survived one"
+    );
+
+    // Collect the caller's corpse. Nothing reads `caller_pgid` after this point,
+    // so the pid may safely be released.
     let status = caller.wait().expect("the caller returns immediately");
     assert!(status.success(), "arming the backstop failed: {status}");
 
-    wait_for("the caller's process group to empty", || {
-        !process_group_alive(caller_pgid)
-    });
+    // NOTE — there is deliberately no "wait until the process group is empty"
+    // here. It was isolated as a defect during the 2026-07-31 CI incident.
+    //
+    // That wait looked like it proved the kill had bitten. On Linux it was a
+    // tautology. The check shelled out to `kill -0 -<pgid>`, and procps `kill`
+    // WITHOUT `--` swallows `-<pgid>` as an option and exits 0 unconditionally
+    // — measured on Debian: `kill -0 -54321` answers 0 for a pgid that does not
+    // exist at all, and answers "No such process" only when spelled
+    // `kill -0 -- -54321`. So on every Linux run the group read "alive" no
+    // matter what was in it, the wait spent its full 60 s patience, and the
+    // panic left tmux sessions and a detached backstop behind each time. BSD
+    // `kill` on macOS parses `-<pgid>` as a negative pid, which is the only
+    // reason the check ever appeared to work anywhere.
+    //
+    // What proves the kill landed is the bystander assertion above. What proves
+    // the backstop survived it is Property 3 below. Neither asks a subprocess
+    // to parse a negative number, and neither needs the group to report itself
+    // empty — an answer it turns out we were never actually receiving.
 
     // Property 3 — the retry still lands. Nothing but the detached backstop can
     // press this Enter: the caller is gone and the test never touches the pane.
