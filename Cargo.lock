@@ -1263,6 +1263,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmon-pilot-checkpoint"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "cosmon-hash",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cosmon-process-witness"
 version = "0.5.0"
 dependencies = [

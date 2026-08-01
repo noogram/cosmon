@@ -98,6 +98,7 @@ members = [
     # session discovery / incremental-read port. Library only; the `cs sessions`
     # cockpit that consumes it is M5.
     "crates/cosmon-session-probe",
+    "crates/cosmon-pilot-checkpoint",
 ]
 # ── No `exclude` needed (ADR-126 §6 + delib-20260622-187a B1) ────────────────
 # The pre-publication scope trim git-rm'd every non-product crate so that the
@@ -179,6 +180,7 @@ insta = "1"
 arc-swap = "1"
 claudion = { path = "crates/claudion" }
 cosmon-session-probe = { path = "crates/cosmon-session-probe" }
+cosmon-pilot-checkpoint = { path = "crates/cosmon-pilot-checkpoint" }
 ctrlc = "3"
 cosmon-api = { path = "crates/cosmon-api" }
 cosmon-bridge-claude = { path = "crates/cosmon-bridge-claude" }

@@ -1,0 +1,24 @@
+[package]
+name = "cosmon-pilot-checkpoint"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Cockpit-side, not a frontier crate: a third-party provider author adds an
+# adapter against `cosmon-session-probe` (Apache-2.0) and never links this.
+# Checkpoint publication and drift comparison are cosmon's own cockpit logic.
+license = "AGPL-3.0-only"
+description = "PilotCheckpoint publication and tri-valued drift comparison (mission co-pilotage M3)"
+
+[dependencies]
+chrono = { workspace = true }
+cosmon-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
