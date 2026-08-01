@@ -573,7 +573,13 @@ fn main() {
     // Best-effort: no-op when the state dir does not exist yet, and
     // any error is swallowed so the hot path proceeds.
     {
-        let state_dir = cosmon_filestore::resolve_state_dir(None);
+        // Honour the same state dir the command itself will act on. This
+        // used to hard-code `None`, which ignored `--config` and sent the
+        // presence event to whatever galaxy the cwd walked up to — so a
+        // caller who had named its store explicitly still touched the
+        // ambient one, and could not opt out of its cost
+        // (task-20260727-0510).
+        let state_dir = ctx.state_dir();
         let sid = operator_event::current_session_id();
         let nucleon_id = operator_event::current_nucleon_id();
         let orbitale_id = operator_event::current_orbitale_id();

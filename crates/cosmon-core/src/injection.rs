@@ -88,7 +88,7 @@ pub fn injection_digest(input: &str) -> String {
 /// it names an uninstrumented path rather than inventing an origin for it.
 ///
 /// `#[non_exhaustive]` because the set of senders grows with the CLI. Wire
-/// format is the snake_case variant name.
+/// format is the `snake_case` variant name.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
