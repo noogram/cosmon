@@ -1437,6 +1437,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmon-session-probe"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "claudion",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "cosmon-state"
 version = "0.1.0"
 dependencies = [
