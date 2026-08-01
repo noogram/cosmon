@@ -1282,8 +1282,11 @@ impl RuntimeLoop {
             let backoff = teardown_backoff(self.config.teardown_backoff_base, attempts);
             entry.next_attempt = Instant::now() + backoff;
             let detail = format!(
-                "attempt {attempts}/{TEARDOWN_ATTEMPT_CEILING}, retry in {}s ({}): {reason}",
-                backoff.as_secs(),
+                // Milliseconds, not seconds: the schedule is compressible (the
+                // regression test runs it at a 10 ms base) and a trace line
+                // reading "retry in 0s" is worse than no number at all.
+                "attempt {attempts}/{TEARDOWN_ATTEMPT_CEILING}, retry in {}ms ({}): {reason}",
+                backoff.as_millis(),
                 if repeated { "same error" } else { "new error" },
             );
             self.trace.write_tick(
@@ -1336,7 +1339,21 @@ impl RuntimeLoop {
             ),
             (
                 "note",
-                vec!["note".to_owned(), molecule_id.to_owned(), note],
+                vec![
+                    "note".to_owned(),
+                    molecule_id.to_owned(),
+                    note,
+                    // Attribute the note to the runtime, not to `human` (the
+                    // default when `--as-worker` is absent). The notes file is
+                    // append-only and someone will read this one while
+                    // deciding what happened; a machine-written note signed as
+                    // a person is a lie in an audit trail. A colon is not a
+                    // legal `WorkerId` character, so the id is hyphenated —
+                    // unlike the `--by runtime:<pid>` dispatch claim, which is
+                    // a different vocabulary with different rules.
+                    "--as-worker".to_owned(),
+                    format!("runtime-{}", std::process::id()),
+                ],
             ),
         ];
         for (verb, args) in calls {

@@ -129,7 +129,10 @@ case "$verb" in
     echo "$*" >> "$TAG_LOG"
     ;;
   note)
-    echo "$mol" >> "$NOTE_LOG"
+    # Record the molecule and the trailing flags, dropping the (multi-line)
+    # body so the log stays line-oriented.
+    shift 3
+    echo "$mol $*" >> "$NOTE_LOG"
     ;;
   patrol)
     printf '{"auto_transitioned":{"molecules":[]}}'
@@ -261,9 +264,22 @@ fn a_deterministic_teardown_failure_backs_off_then_parks_and_is_surfaced() {
     );
     let notes = read_lines(&note_log_path);
     assert_eq!(
-        notes,
-        vec!["a".to_string()],
-        "expected exactly one `cs note a` carrying the teardown error",
+        notes.len(),
+        1,
+        "expected exactly one `cs note a` carrying the teardown error, got {notes:?}",
+    );
+    assert!(
+        notes[0].starts_with("a "),
+        "the note must land on the blocked molecule; got {:?}",
+        notes[0],
+    );
+    // The notes file is append-only and someone reads it while deciding what
+    // happened. `cs note` attributes to `human` unless told otherwise, and a
+    // machine-written note signed as a person is a lie in an audit trail.
+    assert!(
+        notes[0].contains("--as-worker runtime-"),
+        "the note must be attributed to the runtime, not to `human`; got {:?}",
+        notes[0],
     );
 
     // The trace still holds the forensic record — the surfacing is additive.
