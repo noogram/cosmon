@@ -30,6 +30,54 @@ use serde::{Deserialize, Serialize};
 
 use crate::id::{MoleculeId, SessionId};
 
+/// Which seat a pilot session occupies on a mission (ADR-168 §D6).
+///
+/// The default is [`PilotRole::Copilot`], and that is the whole point:
+/// FAIL-CLOSED-AUTHORITY says an unknown session, lease or epoch implies
+/// read-only. A presence file written by an older `cs` has no `role` field;
+/// deserialising it must not silently mint a primary.
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::presence::PilotRole;
+///
+/// // A snapshot from before the field existed decodes as read-only.
+/// let old: PilotRole = serde_json::from_str("null").unwrap_or_default();
+/// assert_eq!(old, PilotRole::Copilot);
+/// assert!(!old.is_primary());
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PilotRole {
+    /// Holds (or claims to hold) the pilot lease — may emit operator gestures.
+    Primary,
+    /// Observes, messages, checkpoints and reports. Never mutates.
+    #[default]
+    Copilot,
+}
+
+impl PilotRole {
+    /// Return `true` iff this role is [`PilotRole::Primary`].
+    ///
+    /// Exists so call-sites read as a question about authority rather than as
+    /// an enum comparison, and so the fail-closed default has one place to be
+    /// wrong instead of many.
+    #[must_use]
+    pub fn is_primary(self) -> bool {
+        matches!(self, Self::Primary)
+    }
+
+    /// The lowercase wire name — the same token the JSON snapshot carries.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Copilot => "copilot",
+        }
+    }
+}
+
 /// A heartbeat older than this duration is considered stale. Paired with
 /// a PID-liveness check in [`Presence::is_live`] and the filestore `gc`,
 /// a session that crashes hard (kernel panic, SIGKILL) disappears from
@@ -51,17 +99,13 @@ pub const STALE_AFTER: Duration = Duration::minutes(3);
 /// use cosmon_core::presence::{Presence, STALE_AFTER};
 ///
 /// let now = Utc::now();
-/// let p = Presence {
-///     session_id: SessionId::new("demo-sid").unwrap(),
-///     galaxy: "cosmon".to_owned(),
-///     cwd: "/tmp/proj".into(),
-///     pid: 4242,
-///     started_at: now,
-///     heartbeat_at: now,
-///     current_molecule: None,
-///     headline: "idle".to_owned(),
-///     tty: None,
-/// };
+/// let p = Presence::new(
+///     SessionId::new("demo-sid").unwrap(),
+///     "cosmon",
+///     "/tmp/proj",
+///     4242,
+///     now,
+/// );
 /// assert!(p.is_live(now));
 /// assert!(!p.is_live(now + STALE_AFTER + Duration::seconds(1)));
 /// ```
@@ -96,9 +140,90 @@ pub struct Presence {
     /// for disambiguating two sessions in the same galaxy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tty: Option<String>,
+    /// The provider that minted the underlying model session — `claude`,
+    /// `codex`, … . Half of the PROVIDER-ID-NATIVE key (ADR-168 §D2); the
+    /// other half is [`Self::native_session_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The provider's own id for the session, read from inside its log —
+    /// never decoded from a directory name and never a display title. A
+    /// `/rename` must not move a session, which is why the key is this and
+    /// not [`Self::headline`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_session_id: Option<String>,
+    /// Which seat this pilot occupies. Absent on a pre-M2 snapshot, which
+    /// decodes as [`PilotRole::Copilot`] — read-only, per
+    /// FAIL-CLOSED-AUTHORITY.
+    #[serde(default)]
+    pub role: PilotRole,
+    /// The session this one is co-piloting, as a cosmon session id. Set on a
+    /// co-pilot; `None` on a primary. This is what makes presence *reciprocal*
+    /// rather than merely parallel: a peer scan can tell "also here" from
+    /// "watching me".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub follows: Option<SessionId>,
+    /// What this pilot can do, as free-form tokens (`observe`, `message`,
+    /// `checkpoint`, …). Advertised, not enforced — the lease is what
+    /// refuses, per ADR-168 §D6.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    /// The most recent checkpoint this pilot published, if any. A co-pilot
+    /// reads it to know where a takeover would resume from without replaying
+    /// the transcript (CHECKPOINT-NOT-SCROLLBACK).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_id: Option<String>,
 }
 
 impl Presence {
+    /// Build the minimal presence of a session that has advertised nothing
+    /// beyond being alive: no molecule, no headline, no provider, and the
+    /// fail-closed [`PilotRole::Copilot`] seat.
+    ///
+    /// Exists so that adding a co-pilot field is an additive change at every
+    /// call-site instead of a compile error at each one — the six M2 fields
+    /// were added to a struct with five literal constructors, and the next
+    /// six should cost less.
+    #[must_use]
+    pub fn new(
+        session_id: SessionId,
+        galaxy: impl Into<String>,
+        cwd: impl Into<PathBuf>,
+        pid: u32,
+        at: DateTime<Utc>,
+    ) -> Self {
+        Self {
+            session_id,
+            galaxy: galaxy.into(),
+            cwd: cwd.into(),
+            pid,
+            started_at: at,
+            heartbeat_at: at,
+            current_molecule: None,
+            headline: String::new(),
+            tty: None,
+            provider: None,
+            native_session_id: None,
+            role: PilotRole::default(),
+            follows: None,
+            capabilities: Vec::new(),
+            checkpoint_id: None,
+        }
+    }
+
+    /// The canonical `<provider>:<native-session-id>` selector, when this
+    /// session has published both halves.
+    ///
+    /// Returns `None` rather than a partial key: half a selector cannot
+    /// address a session, and rendering `claude:` as if it could is exactly
+    /// the confusion PROVIDER-ID-NATIVE exists to prevent.
+    #[must_use]
+    pub fn selector(&self) -> Option<String> {
+        match (&self.provider, &self.native_session_id) {
+            (Some(p), Some(n)) => Some(format!("{p}:{n}")),
+            _ => None,
+        }
+    }
+
     /// Return `true` iff the most recent heartbeat is within
     /// [`STALE_AFTER`] of `now`.
     ///
@@ -121,15 +246,15 @@ mod tests {
 
     fn sample(now: DateTime<Utc>) -> Presence {
         Presence {
-            session_id: SessionId::new("sid-test").unwrap(),
-            galaxy: "cosmon".to_owned(),
-            cwd: PathBuf::from("/tmp/proj"),
-            pid: 4242,
-            started_at: now,
-            heartbeat_at: now,
-            current_molecule: None,
             headline: "idle".to_owned(),
             tty: Some("ttys012".to_owned()),
+            ..Presence::new(
+                SessionId::new("sid-test").unwrap(),
+                "cosmon",
+                PathBuf::from("/tmp/proj"),
+                4242,
+                now,
+            )
         }
     }
 
@@ -179,5 +304,48 @@ mod tests {
             !json.contains("\"current_molecule\""),
             "current_molecule should be skipped: {json}"
         );
+    }
+
+    // A snapshot written by a `cs` that predates M2 has none of the six
+    // co-pilot fields. It must still decode — and it must decode to the
+    // read-only seat, not to an authority nobody granted.
+    #[test]
+    fn a_pre_m2_snapshot_decodes_as_a_read_only_copilot() {
+        let legacy = r#"{
+            "session_id": "sid-legacy",
+            "galaxy": "cosmon",
+            "cwd": "/tmp/proj",
+            "pid": 4242,
+            "started_at": "2026-04-24T12:00:00Z",
+            "heartbeat_at": "2026-04-24T12:00:00Z",
+            "headline": "idle"
+        }"#;
+        let p: Presence = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.role, PilotRole::Copilot);
+        assert!(!p.role.is_primary());
+        assert!(p.follows.is_none());
+        assert!(p.capabilities.is_empty());
+        assert_eq!(p.selector(), None);
+    }
+
+    #[test]
+    fn a_selector_needs_both_halves_or_it_is_none() {
+        let now = fixed_now();
+        let mut p = sample(now);
+        assert_eq!(p.selector(), None);
+        p.provider = Some("claude".to_owned());
+        assert_eq!(p.selector(), None, "half a key addresses nothing");
+        p.native_session_id = Some("4940f28e".to_owned());
+        assert_eq!(p.selector().as_deref(), Some("claude:4940f28e"));
+    }
+
+    #[test]
+    fn role_round_trips_through_its_wire_name() {
+        for role in [PilotRole::Primary, PilotRole::Copilot] {
+            let json = serde_json::to_string(&role).unwrap();
+            assert_eq!(json, format!("\"{}\"", role.as_str()));
+            let back: PilotRole = serde_json::from_str(&json).unwrap();
+            assert_eq!(role, back);
+        }
     }
 }

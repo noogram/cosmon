@@ -1255,9 +1255,28 @@ pub const PRESENCE: &str = "EXAMPLES:
   cs presence ping            # heartbeat for current session
   cs presence ls              # list live sessions
   cs presence gc              # garbage-collect dead sessions
-  cs presence poll            # one-shot poll, exit
+  cs presence poll            # one-shot poll of the text channel, exit
+
+CO-PILOTING (mission co-pilotage M2):
+  cs presence ping --provider claude --native-session-id 4940f28e \\
+      --role primary --capability mutate
+  cs presence ping --provider codex --native-session-id 019823ab \\
+      --role copilot --follows claude-sid --capability observe
+  cs presence ls --role copilot --follows claude-sid
+  cs presence send --to claude-sid --message 'evidence ref is circular'
+  cs presence inbox                 # read pending envelopes and consume them
+  cs presence inbox --peek          # look without consuming
+  cs presence inbox --all           # include already-read envelopes
 
 Live-session registry — who is currently working in the fleet.
 Sessions ping their liveness; `ls` enumerates; `gc` reaps the dead.
 
-SEE ALSO: cs ensemble, cs peek (presence row in TUI).";
+`send`/`inbox` carry traced envelopes: each has an id, a sequence, a
+content hash and a state (queued|read|expired). Delivery is at least
+once and consumption is idempotent — a message not acknowledged is
+served again, and the same envelope delivered twice is read once.
+This is a different channel from `cs whisper --to-session`, whose
+plain text line `poll` reads, and from `cs whisper <molecule>`, which
+perturbs a worker (ADR-038) and is untouched by any of it.
+
+SEE ALSO: cs ensemble, cs peek (presence row in TUI), cs whisper.";

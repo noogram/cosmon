@@ -183,6 +183,10 @@ impl PresenceStore {
                 let seek = self.seek_path(&p.session_id);
                 let _ = fs::remove_file(&log);
                 let _ = fs::remove_file(&seek);
+                // …and the pilot mailbox pair. A dead session's inbox is not
+                // a backlog to preserve: nobody will ever acknowledge it, so
+                // keeping it would make `pending` grow without bound.
+                crate::PilotMailbox::new(&self.state_root).remove(&p.session_id);
             }
         }
         Ok(removed)
@@ -224,15 +228,14 @@ mod tests {
 
     fn sample(sid: &str, heartbeat: DateTime<chrono::Utc>, pid: u32) -> Presence {
         Presence {
-            session_id: SessionId::new(sid).unwrap(),
-            galaxy: "cosmon".to_owned(),
-            cwd: PathBuf::from("/tmp/proj"),
-            pid,
-            started_at: heartbeat,
-            heartbeat_at: heartbeat,
-            current_molecule: None,
             headline: "idle".to_owned(),
-            tty: None,
+            ..Presence::new(
+                SessionId::new(sid).unwrap(),
+                "cosmon",
+                PathBuf::from("/tmp/proj"),
+                pid,
+                heartbeat,
+            )
         }
     }
 
@@ -307,6 +310,35 @@ mod tests {
         assert_eq!(remaining.len(), 2);
         assert!(remaining.iter().any(|s| s.as_str() == "sid-fresh"));
         assert!(remaining.iter().any(|s| s.as_str() == "sid-live"));
+    }
+
+    // A collected session's mailbox goes with it. Nobody left alive will ever
+    // acknowledge those envelopes, so keeping them would make the survivors'
+    // `pending` list grow forever with messages addressed to the dead.
+    #[test]
+    fn gc_takes_the_mailbox_with_the_snapshot() {
+        use cosmon_core::pilot_message::PilotMessage;
+
+        let (tmp, store) = make_store();
+        let mailbox = crate::PilotMailbox::new(tmp.path());
+        let old = Utc::now() - STALE_AFTER - Duration::minutes(1);
+        let dead = sample("sid-dead", old, 999_999_999);
+        store.upsert(&dead).unwrap();
+
+        let m = PilotMessage::new(
+            SessionId::new("sid-sender").unwrap(),
+            dead.session_id.clone(),
+            1,
+            "cas/x",
+            "x",
+            Utc::now(),
+            None,
+        );
+        mailbox.deliver(&m).unwrap();
+        assert!(mailbox.inbox_path(&dead.session_id).exists());
+
+        assert_eq!(store.gc().unwrap(), 1);
+        assert!(!mailbox.inbox_path(&dead.session_id).exists());
     }
 
     #[test]
