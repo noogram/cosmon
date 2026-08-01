@@ -164,6 +164,15 @@ pub struct EventLogWriter {
     /// Byte offset up to which we have scanned the file. Catch-up reads
     /// start here on every emit.
     scanned_to: u64,
+    /// Byte offset the priming scan in [`EventLogWriter::open`] actually
+    /// started from — `0` for a full walk, the checkpoint's `scanned_to`
+    /// when the sidecar was usable.
+    ///
+    /// Exists so a test can observe *which path was taken*, not merely
+    /// that both paths agree. They agree by construction, so an assertion
+    /// on the result alone stays green with the checkpoint disabled and
+    /// proves nothing (diagnosis-discipline CLAUSE 4).
+    primed_from: u64,
     /// UTC timestamp of the most recently observed cs verb emission
     /// ([`EventV2::is_verb`]) — populated from the catch-up scan and
     /// from our own writes. Drives the latency input of the Kahneman K1
@@ -261,6 +270,7 @@ impl EventLogWriter {
             next_seq: Seq(0),
             mol_seqs: HashMap::new(),
             scanned_to: 0,
+            primed_from: 0,
             last_verb_ts: None,
             emitter: EmitterHeader::from_env(),
         };
@@ -269,6 +279,7 @@ impl EventLogWriter {
         // leaves the cursor at 0, and the catch-up below degrades to the
         // full walk — same answer, slower.
         writer.restore_checkpoint();
+        writer.primed_from = writer.scanned_to;
         writer.catch_up_scan()?;
         Ok(writer)
     }
@@ -1369,13 +1380,24 @@ mod tests {
         assert!(idx.is_file(), "emitting must publish a checkpoint sidecar");
 
         let resumed = EventLogWriter::open(&path).unwrap();
-        assert!(
-            resumed.scanned_to > 0,
-            "a valid sidecar must seed the cursor rather than rescan from 0"
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        // Observe the path taken, not just the answer. The two paths agree
+        // by construction, so asserting on the answer alone stays green
+        // with the checkpoint disabled and would prove nothing: disable
+        // the restore and this line, and only this line, reddens.
+        assert_eq!(
+            resumed.primed_from, file_len,
+            "a valid sidecar must seed the cursor at the log's end, leaving \
+             nothing for the priming scan to parse"
         );
 
         std::fs::remove_file(&idx).unwrap();
         let full = EventLogWriter::open(&path).unwrap();
+        assert_eq!(
+            full.primed_from, 0,
+            "without a sidecar the priming scan must start from byte 0 — \
+             otherwise this comparison is not against a full walk"
+        );
 
         assert_eq!(resumed.next_seq, full.next_seq);
         assert_eq!(resumed.mol_seqs, full.mol_seqs);

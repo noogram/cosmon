@@ -54,6 +54,20 @@ fn journal_cmd(root: &Path, json: bool) -> Command {
     cmd
 }
 
+/// The ledger's own scan-cursor cache (`events.jsonl.seqidx`), which the
+/// event-log writer rewrites beside `events.jsonl` on every append.
+///
+/// Exempted from the residue comparison for the same reason, and only the
+/// same reason, as the ambient `operator_present` row: it is a consequence
+/// of `main`'s presence emission, which happens before any subcommand is
+/// dispatched. It is a cache of a fold over the ledger, holds nothing the
+/// ledger does not, and is regenerated from it if deleted. A journal that
+/// created a file of its own still fails the comparison — the exemption is
+/// this one path, not the directory it lives in.
+fn is_ledger_cache(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e == "seqidx")
+}
+
 /// Every path under `root`, with its bytes — the comparison a residue check
 /// needs. Directories contribute their path with empty content; mtime is
 /// deliberately absent, since it changes for innocent reasons.
@@ -172,8 +186,16 @@ fn projecting_a_journal_creates_nothing_and_appends_no_row_of_its_own() {
     assert!(out.status.success());
 
     let after = snapshot(tmp.path());
-    let paths_before: Vec<&PathBuf> = before.iter().map(|(p, _)| p).collect();
-    let paths_after: Vec<&PathBuf> = after.iter().map(|(p, _)| p).collect();
+    let paths_before: Vec<&PathBuf> = before
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|p| !is_ledger_cache(p))
+        .collect();
+    let paths_after: Vec<&PathBuf> = after
+        .iter()
+        .map(|(p, _)| p)
+        .filter(|p| !is_ledger_cache(p))
+        .collect();
     assert_eq!(
         paths_before, paths_after,
         "projecting a journal must not create or remove anything"
