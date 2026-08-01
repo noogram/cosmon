@@ -122,16 +122,28 @@ surface. They are recorded here because each one, left alone, silently falsifies
 an invariant the moment a co-pilot depends on it. Each must land as a *failing
 test first* in the molecule named.
 
-| # | Defect | Invariant it breaks | Owner |
-|---|---|---|---|
-| P1 | `PresenceStore` writes `presence/<sid>.json`; `cs diverge` reads `presence/<sid>/presence.json` | PROVIDER-ID-NATIVE — no session is addressable by id | M2 |
-| P2 | An unresolvable session exits 1 (*disagree*), not 2 (*inconclusive*) | ADVISORY-DRIFT — unknown is rendered as a verdict | M3 |
-| P3 | `poll` advances the seek before the reader consumes the tail | MESSAGE-TRACE — delivery is at-most-once, not at-least-once | M2 |
-| P4/P5 | A stale seek past a rotated end silently swallows the backlog; a seek inside a multi-byte character panics the reader | MESSAGE-TRACE, and the M1 acceptance clause on truncation and rotation | M1/M2 |
+| # | Defect | Invariant it breaks | Owner | Status |
+|---|---|---|---|---|
+| P1 | `PresenceStore` writes `presence/<sid>.json`; `cs diverge` reads `presence/<sid>/presence.json` | PROVIDER-ID-NATIVE — no session is addressable by id | M2 | **Closed** by `task-20260731-0c2d`. `cs diverge` now decodes the path through `PresenceStore`, the writer that owns it. |
+| P2 | An unresolvable session exits 1 (*disagree*), not 2 (*inconclusive*) | ADVISORY-DRIFT — unknown is rendered as a verdict | M3 | Open. |
+| P3 | `poll` advances the seek before the reader consumes the tail | MESSAGE-TRACE — delivery is at-most-once, not at-least-once | M2 | **Closed** by `task-20260731-0c2d`. The tail is flushed before the seek moves. |
+| P4/P5 | A stale seek past a rotated end silently swallows the backlog; a seek inside a multi-byte character panics the reader | MESSAGE-TRACE, and the M1 acceptance clause on truncation and rotation | M1/M2 | **Closed** by `task-20260731-0c2d` for the text channel, which clamps the offset both ways. The traced mailbox has no offset at all (see below), so neither failure exists there. |
+
+M2 chose not to *fix* the byte cursor for the pilot mailbox but to not have
+one. P4 and P5 are properties of offsets rather than of that particular code:
+an offset is a claim about a file, and the file can invalidate it without
+telling anyone. `<sid>.inbox.jsonl` is consumed by acknowledging a
+`MessageId` in `<sid>.inbox.ack.jsonl`, which is a claim about a *message*,
+and a message cannot be rotated out from under its own id. The clamping above
+is what the legacy `cs whisper --to-session` channel gets, because that channel
+keeps its offset.
 
 ### D5 — State schema
 
-Additive to what exists. `PilotPresence` is the existing `Presence` struct plus
+Additive to what exists. `PilotPresence` and `PilotMessage` landed in M2
+(`task-20260731-0c2d`) as `cosmon_core::presence::Presence`'s six new fields
+and `cosmon_core::pilot_message::PilotMessage`; `PilotLease`,
+`PilotCheckpoint` and `DriftFinding` remain M3/M4 work. `PilotPresence` is the existing `Presence` struct plus
 six fields; the other four records are new files under `.cosmon/state/`, each
 one line of JSON, each readable with `cat` and `jq`.
 
