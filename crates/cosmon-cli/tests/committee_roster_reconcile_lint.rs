@@ -24,6 +24,16 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// The contract prose every fixture here is convened over.
+///
+/// The hash beside it is now **computed from this text** rather than typed.
+/// The fixtures used to declare `blake3:test` — a digest-shaped string that is
+/// the digest of nothing, which is precisely the defect the digest check
+/// exists to refuse. A fixture that means "delivered" has to declare a hash
+/// that holds, or the suite proves the gate green on the very shape it refuses
+/// in the field.
+const POSTURE_BODY: &str = "Audit the artefacts. The generator's confidence is not evidence.";
+
 fn cosmon_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     cmd.env_remove("COSMON_PARENT_MOL_ID")
@@ -120,7 +130,7 @@ fn seat(
             "role_id": role_id,
             "briefing": {
                 "version": cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-                "contract_hash": "blake3:test",
+                "contract_hash": cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
                 "injected": injected,
             },
             "falsification_artifact": artifact,
@@ -150,8 +160,8 @@ fn deliver(mol_dir: &Path, seat_id: &str) {
         // means "delivered" has to deliver something.
         cosmon_core::committee::render_committee_posture(
             cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-            "blake3:test",
-            "Audit the artefacts. The generator's confidence is not evidence.",
+            &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+            POSTURE_BODY,
         ),
     )
     .expect("posture");
@@ -707,8 +717,9 @@ fn a_stub_posture_file_is_refused_where_presence_alone_accepted_it() {
 ///
 /// What this does NOT catch is stated where the check lives
 /// (`RosterSpec::with_observed_delivery`): the convener authors both artefacts,
-/// so a fabricated body under a self-consistent header still passes, and the
-/// hash is a label rather than a verified digest of the body.
+/// so a fabricated body under a self-consistent header still passes. The hash
+/// itself is no longer taken on trust — see
+/// [`a_contract_hash_that_is_not_the_bodys_digest_is_refused`] below.
 #[test]
 fn a_posture_file_declaring_another_contract_is_refused() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -751,9 +762,85 @@ fn a_posture_file_declaring_another_contract_is_refused() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("blake3:some-other-contract") && stderr.contains("blake3:test"),
+        stderr.contains("blake3:some-other-contract")
+            && stderr.contains(&cosmon_core::committee::committee_contract_hash(
+                POSTURE_BODY
+            )),
         "the refusal must name BOTH hashes, or a reader cannot tell which \
          artefact to go and look at; got:\n{stderr}"
+    );
+}
+
+/// **The digest falsifier at the CLI boundary.**
+///
+/// The `contract-hash` was the last self-attested leg: it was compared against
+/// the roster's copy of itself and never against the prose it claims to
+/// address. The omission was licensed by a written justification — that live
+/// rosters carry opaque labels, so verifying would "refuse every committee
+/// convened to date". Measured 2026-08-01 over the 29 live contracts in the
+/// default fleet: none is an opaque label, 20 already verify, and the 9 that
+/// do not are digest-shaped fabrications — one value appears verbatim under
+/// three *different* contract bodies.
+///
+/// This case is the shape those 9 have, and the shape the old check could not
+/// see: the file and the roster **agree perfectly**, so every comparison
+/// between the two parties passes, and the hash still addresses nothing. It is
+/// asserted on the binary because this module's whole reason for existing is
+/// that a predicate can pass its unit tests while enforcing nothing.
+#[test]
+fn a_contract_hash_that_is_not_the_bodys_digest_is_refused() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state_dir, mol_dir) = setup_project(tmp.path());
+    let seat_dir = mol_dir.parent().expect("molecules dir").join("ref_seat");
+    fs::create_dir_all(&seat_dir).expect("seat dir");
+
+    // A real digest — of some OTHER text. Well-formed, correct width, correct
+    // prefix, and not this body's.
+    let forged =
+        cosmon_core::committee::committee_contract_hash("a contract nobody was seated under");
+    fs::write(
+        seat_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+        cosmon_core::committee::render_committee_posture(
+            cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
+            &forged,
+            POSTURE_BODY,
+        ),
+    )
+    .expect("posture");
+    fs::write(
+        seat_dir.join("briefing.md"),
+        cosmon_core::committee::committee_posture_reference(),
+    )
+    .expect("briefing");
+
+    // The roster declares the SAME forged hash, so the file-versus-roster
+    // comparison — everything the witness checked before — passes.
+    let mut rostered = seat(
+        "ref_seat",
+        "refuter",
+        "openai",
+        "adversary",
+        true,
+        Some("falsification-attempt.md"),
+    );
+    rostered["persona"]["briefing"]["contract_hash"] = serde_json::json!(forged);
+    write_roster(&mol_dir, vec![rostered]);
+
+    let out = reconcile_check(&state_dir);
+    assert!(
+        !out.status.success(),
+        "a contract-hash that is the digest of nothing beneath it must be \
+         REFUSED, even when the seat's file and the convener's roster agree \
+         on it perfectly"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("contract-hash")
+            && stderr.contains(&cosmon_core::committee::committee_contract_hash(
+                POSTURE_BODY
+            )),
+        "the refusal must name the hash that failed AND what the body actually \
+         digests to, or a convener cannot repair it; got:\n{stderr}"
     );
 }
 
