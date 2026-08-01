@@ -24,14 +24,21 @@ review.
 ## Layout
 
 ```text
-claude/
-  projects/-fixture-galaxy/00000000-0000-4000-8000-000000000001.jsonl
-codex/
-  sessions/2026/08/01/rollout-2026-08-01T00-00-00-00000000-0000-4000-8000-0000000000c1.jsonl
+claude/projects/-fixture-decoy-galaxy/
+  00000000-0000-4000-8000-000000000001.jsonl   # no title — an unnamed session
+  00000000-0000-4000-8000-000000000002.jsonl   # an `ai-title` record — a named one
+codex/sessions/2026/08/01/
+  rollout-2026-08-01T00-00-00-…-0000000000c1.jsonl
+  rollout-2026-08-01T02-00-00-…-0000000000c2.jsonl
 ```
 
+All four announce the same working directory, `/fixture/galaxy` — that is what
+makes "two sessions in one cwd" testable per provider, and one named plus one
+unnamed Claude session is what makes "a name is an alias, not a key" testable.
+
 The Claude tree keeps the `projects/<sanitised-cwd>/` layer because the
-adapter's contract is that it *ignores* that directory name (probe P6): the
-fixture directory is named after a path the fixture logs do not use, so a
-reader that decoded the name would resolve the wrong working directory and the
-tests would catch it.
+adapter's contract is that it *ignores* that directory name (probe P6). The
+directory is deliberately named `-fixture-decoy-galaxy`, which decodes to
+`/fixture/decoy/galaxy` — a path no fixture log uses. An adapter that read the
+directory name instead of the record would resolve the wrong working directory
+and `clause_the_project_directory_name_is_never_decoded` would fail.
