@@ -664,6 +664,15 @@ pub struct RuntimeLoopConfig {
     pub max_runtime: Option<Duration>,
     /// Path to the `cs` binary. Defaults to `"cs"` resolved on `PATH`.
     pub cs_binary: PathBuf,
+    /// Delay before the *first* retry of a failed `cs done`. Each further
+    /// attempt doubles it, clamped to [`TEARDOWN_BACKOFF_CAP`], and the whole
+    /// schedule stops at [`TEARDOWN_ATTEMPT_CEILING`] attempts.
+    ///
+    /// A field rather than a constant only because the regression test has to
+    /// watch the full schedule run to its ceiling; a test that had to wait out
+    /// the production schedule would be a test nobody runs. The default is
+    /// [`TEARDOWN_BACKOFF_BASE`].
+    pub teardown_backoff_base: Duration,
 }
 
 impl RuntimeLoopConfig {
@@ -676,6 +685,7 @@ impl RuntimeLoopConfig {
             poll_interval: Duration::from_secs(1),
             max_runtime: None,
             cs_binary: PathBuf::from("cs"),
+            teardown_backoff_base: TEARDOWN_BACKOFF_BASE,
         }
     }
 }
@@ -733,8 +743,71 @@ pub struct RunSummary {
     /// A non-zero value means the operator has molecules that need a brief
     /// restored (from `prompt.md` frontmatter) or a collapse.
     pub briefless_parked: u32,
+    /// Number of molecules the loop **gave up harvesting** — `cs done` failed
+    /// [`TEARDOWN_ATTEMPT_CEILING`] consecutive times, so the loop stopped
+    /// retrying and marked the molecule
+    /// [`BLOCKED_ON_TEARDOWN`](cosmon_core::tag::BLOCKED_ON_TEARDOWN).
+    ///
+    /// Counted once per molecule, not once per attempt: parking is precisely
+    /// the decision to stop attempting. A non-zero value means at least one
+    /// completed molecule cannot be merged and every descendant of it is
+    /// stalled behind a cause only an operator can clear.
+    pub teardown_blocked: u32,
     /// Why the loop exited.
     pub exit: ExitReason,
+}
+
+/// How many consecutive failed `cs done` attempts on one molecule the loop
+/// tolerates before it stops retrying and parks the harvest.
+///
+/// The number is small on purpose. A teardown abort is usually *deterministic*
+/// — an untracked file in the main checkout that the merge would overwrite, a
+/// branch that stopped being fast-forward, a HEAD that moved off the base —
+/// and nothing the loop does between two attempts can change any of them. Five
+/// attempts is enough to ride out the genuinely transient cases (an index lock
+/// held by a concurrent `git`, a worktree mid-write) and short enough that the
+/// operator sees the park within a couple of minutes rather than never.
+pub const TEARDOWN_ATTEMPT_CEILING: u32 = 5;
+
+/// Backoff before the first `cs done` retry. Doubles per attempt, capped at
+/// [`TEARDOWN_BACKOFF_CAP`].
+pub const TEARDOWN_BACKOFF_BASE: Duration = Duration::from_secs(2);
+
+/// Ceiling on the exponential backoff between two `cs done` retries.
+pub const TEARDOWN_BACKOFF_CAP: Duration = Duration::from_secs(60);
+
+/// The delay before retry number `attempts` (1-based): `base · 2^(n−1)`,
+/// clamped to [`TEARDOWN_BACKOFF_CAP`].
+///
+/// Pure so the schedule is testable without a loop, a clock, or a `cs` binary.
+///
+/// # Why a schedule at all
+///
+/// The loop wakes on every FS event under `.cosmon/state/`, so a failing
+/// `cs done` that is immediately re-armed re-fires as fast as the filesystem
+/// notifies — five identical failures inside one second were observed on a
+/// real run, indefinitely. Retry is for transient failures; spending it on a
+/// deterministic one buys nothing and hides everything.
+fn teardown_backoff(base: Duration, attempts: u32) -> Duration {
+    let shift = attempts.saturating_sub(1).min(16);
+    base.saturating_mul(1_u32 << shift)
+        .min(TEARDOWN_BACKOFF_CAP)
+}
+
+/// Per-molecule bookkeeping for a `cs done` that keeps failing.
+#[derive(Debug, Clone)]
+struct TeardownRetry {
+    /// Consecutive failed attempts, including the one just recorded.
+    attempts: u32,
+    /// The most recent failure text, kept verbatim for the trace, the park
+    /// note, and the "same error again" judgement in the trace detail.
+    last_error: String,
+    /// Earliest instant at which the `Done` may be re-armed. Meaningless once
+    /// [`Self::parked`] is set — a parked harvest is never re-armed.
+    next_attempt: Instant,
+    /// Whether the ceiling was reached and the molecule marked
+    /// [`BLOCKED_ON_TEARDOWN`](cosmon_core::tag::BLOCKED_ON_TEARDOWN).
+    parked: bool,
 }
 
 /// The ADR-095 resident loop body.
@@ -760,6 +833,17 @@ pub struct RuntimeLoop {
     /// sealed binary, tripping the seal on the very next tick after a
     /// successful drain. See [`ExitReason::ConfigDrift`].
     launch_seal: String,
+    /// Failed-harvest bookkeeping, keyed by molecule id.
+    ///
+    /// Present only for molecules whose `cs done` has failed at least once and
+    /// not yet succeeded. This is the state that turns a 5 Hz retry storm into
+    /// an exponential backoff and, past [`TEARDOWN_ATTEMPT_CEILING`], into a
+    /// park the operator can see. It is deliberately in-memory: a fresh
+    /// `cs run` re-derives from disk and attempts the harvest once more, which
+    /// is the right behaviour when the operator restarted the runtime *because*
+    /// they cleared the obstruction. The durable half of the record is the tag
+    /// and the note written on the molecule itself.
+    teardown_retries: std::collections::HashMap<String, TeardownRetry>,
 }
 
 impl RuntimeLoop {
@@ -778,6 +862,7 @@ impl RuntimeLoop {
             scheduler,
             trace: TraceWriter::new(trace_path),
             launch_seal: String::new(),
+            teardown_retries: std::collections::HashMap::new(),
         }
     }
 
@@ -828,6 +913,7 @@ impl RuntimeLoop {
             reaps: 0,
             ticks: 0,
             briefless_parked: 0,
+            teardown_blocked: 0,
             exit: ExitReason::Drained,
         };
         // Phantom-running reap gate (task-20260606-21d4, DoD a). Counts
@@ -898,6 +984,25 @@ impl RuntimeLoop {
                     continue;
                 }
             };
+            // Re-arm the harvests whose backoff has elapsed, and forget the
+            // ones that are no longer ours to worry about. This is the *only*
+            // place a failed `Done` re-enters the frontier: the failure path
+            // below deliberately does NOT `forget_dispatch`, so the molecule
+            // stays parked in the scheduler's `merged` set until its backoff
+            // expires here. A molecule past the ceiling is never re-armed.
+            self.teardown_retries
+                .retain(|id, _| snapshot.molecules.iter().any(|m| m.id == *id));
+            let now = Instant::now();
+            let ready: Vec<String> = self
+                .teardown_retries
+                .iter()
+                .filter(|(_, r)| !r.parked && now >= r.next_attempt)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in &ready {
+                self.scheduler.forget_dispatch(id);
+            }
+
             let decisions = self.scheduler.next_decisions(&snapshot);
 
             if decisions.is_empty() {
@@ -1054,7 +1159,26 @@ impl RuntimeLoop {
                         Decision::Tackle { .. } => {
                             summary.tackles = summary.tackles.saturating_add(1);
                         }
-                        Decision::Done(_) => summary.dones = summary.dones.saturating_add(1),
+                        Decision::Done(id) => {
+                            summary.dones = summary.dones.saturating_add(1);
+                            // The harvest went through — drop any backoff
+                            // history so a later failure starts from attempt 1.
+                            self.teardown_retries.remove(&id);
+                        }
+                    }
+                } else if let Decision::Done(id) = &d {
+                    // A failed harvest. Do NOT `forget_dispatch` here: that is
+                    // what made a *deterministic* teardown abort (an untracked
+                    // file in the main checkout the merge would overwrite)
+                    // re-fire as fast as the FS watcher notified — five
+                    // identical failures inside one second, forever, while the
+                    // molecule stayed `completed`-but-unharvested and every
+                    // descendant stayed `pending`. Re-arming is the backoff
+                    // sweep's job at the top of the tick, and past the ceiling
+                    // it never happens again.
+                    let reason = err.clone().unwrap_or_default();
+                    if self.park_or_back_off_teardown(id, &reason, &hash_after)? {
+                        summary.teardown_blocked = summary.teardown_blocked.saturating_add(1);
                     }
                 } else if matches!(&result, Err(ResidentError::TackleRefusedBriefless { .. })) {
                     // Permanent refusal (task-20260711-919a briefless guard,
@@ -1104,6 +1228,146 @@ impl RuntimeLoop {
 
         self.trace.flush()?;
         Ok(summary)
+    }
+
+    /// Record one failed `cs done` for `molecule_id` and decide what happens
+    /// next: back off, or give up and park the harvest.
+    ///
+    /// Returns `Ok(true)` on the transition into the parked state — once per
+    /// molecule, so the caller's counter counts molecules rather than attempts.
+    ///
+    /// # What "park" means here
+    ///
+    /// Past [`TEARDOWN_ATTEMPT_CEILING`] the loop stops retrying and writes the
+    /// verdict where an operator will actually meet it:
+    ///
+    /// * a `teardown-blocked` line on the NDJSON trace (the post-mortem record);
+    /// * the tag [`BLOCKED_ON_TEARDOWN`](cosmon_core::tag::BLOCKED_ON_TEARDOWN)
+    ///   on the molecule, which `cs peek` counts in its vital bar;
+    /// * a `cs note` carrying the teardown error verbatim, so the *cause* is
+    ///   readable from the molecule and not only from a trace file.
+    ///
+    /// Both writes go through the transactional CLI rather than
+    /// `cosmon_state` — RR-1: the runtime is a client of the core, never a
+    /// second writer to it. Either can fail (a molecule collapsed underneath
+    /// us, a `cs` that is mid-reinstall); the failure is traced and the park
+    /// still stands, because the alternative — retrying the harvest because we
+    /// could not write down that we stopped — is the freeze we are fixing.
+    fn park_or_back_off_teardown(
+        &mut self,
+        molecule_id: &str,
+        reason: &str,
+        hash_after: &str,
+    ) -> Result<bool, ResidentError> {
+        let entry = self
+            .teardown_retries
+            .entry(molecule_id.to_owned())
+            .or_insert_with(|| TeardownRetry {
+                attempts: 0,
+                last_error: String::new(),
+                next_attempt: Instant::now(),
+                parked: false,
+            });
+        if entry.parked {
+            // Should not happen — a parked harvest is never re-armed — but a
+            // future scheduler could emit the `Done` on its own. Stay parked.
+            return Ok(false);
+        }
+        let repeated = entry.last_error == reason;
+        entry.attempts = entry.attempts.saturating_add(1);
+        reason.clone_into(&mut entry.last_error);
+        let attempts = entry.attempts;
+
+        if attempts < TEARDOWN_ATTEMPT_CEILING {
+            let backoff = teardown_backoff(self.config.teardown_backoff_base, attempts);
+            entry.next_attempt = Instant::now() + backoff;
+            let detail = format!(
+                // Milliseconds, not seconds: the schedule is compressible (the
+                // regression test runs it at a 10 ms base) and a trace line
+                // reading "retry in 0s" is worse than no number at all.
+                "attempt {attempts}/{TEARDOWN_ATTEMPT_CEILING}, retry in {}ms ({}): {reason}",
+                backoff.as_millis(),
+                if repeated { "same error" } else { "new error" },
+            );
+            self.trace.write_tick(
+                "teardown-retry",
+                "teardown-backoff",
+                Some(hash_after),
+                Some(hash_after),
+                Some(&detail),
+            )?;
+            return Ok(false);
+        }
+
+        entry.parked = true;
+        let detail = format!("gave up after {attempts} consecutive failed harvests: {reason}");
+        self.trace.write_tick(
+            "teardown-blocked",
+            "teardown-ceiling-reached",
+            Some(hash_after),
+            Some(hash_after),
+            Some(&detail),
+        )?;
+        self.surface_teardown_block(molecule_id, attempts, reason)?;
+        Ok(true)
+    }
+
+    /// Write the park where the operator looks: a tag `cs peek` counts, and a
+    /// note carrying the cause.
+    fn surface_teardown_block(
+        &mut self,
+        molecule_id: &str,
+        attempts: u32,
+        reason: &str,
+    ) -> Result<(), ResidentError> {
+        let note = format!(
+            "Harvest parked by the resident runtime: `cs done` failed {attempts} \
+             consecutive times and the runtime stopped retrying. The molecule is \
+             completed but unmerged, so every molecule blocked on it stays pending \
+             until an operator clears the cause and runs `cs done {molecule_id}` by \
+             hand. Last error:\n\n{reason}"
+        );
+        let calls: [(&str, Vec<String>); 2] = [
+            (
+                "tag",
+                vec![
+                    "tag".to_owned(),
+                    molecule_id.to_owned(),
+                    "--add".to_owned(),
+                    cosmon_core::tag::BLOCKED_ON_TEARDOWN.to_owned(),
+                ],
+            ),
+            (
+                "note",
+                vec![
+                    "note".to_owned(),
+                    molecule_id.to_owned(),
+                    note,
+                    // Attribute the note to the runtime, not to `human` (the
+                    // default when `--as-worker` is absent). The notes file is
+                    // append-only and someone will read this one while
+                    // deciding what happened; a machine-written note signed as
+                    // a person is a lie in an audit trail. A colon is not a
+                    // legal `WorkerId` character, so the id is hyphenated —
+                    // unlike the `--by runtime:<pid>` dispatch claim, which is
+                    // a different vocabulary with different rules.
+                    "--as-worker".to_owned(),
+                    format!("runtime-{}", std::process::id()),
+                ],
+            ),
+        ];
+        for (verb, args) in calls {
+            if let Err(e) = shell_out_raw(&self.config, &args) {
+                self.trace.write_tick(
+                    "teardown-blocked",
+                    "teardown-surface-failed",
+                    None,
+                    None,
+                    Some(&format!("cs {verb} {molecule_id}: {e}")),
+                )?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1383,6 +1647,33 @@ fn shell_out(config: &RuntimeLoopConfig, d: &Decision) -> Result<(), ResidentErr
         });
     }
     Ok(())
+}
+
+/// Shell out an arbitrary `cs` invocation and report failure as a string.
+///
+/// Used for the runtime's *bookkeeping* calls — the `cs tag` / `cs note` that
+/// record a parked harvest — as opposed to [`shell_out`], which enacts a
+/// scheduler [`Decision`] and therefore owes the caller a typed
+/// [`ResidentError`] it can branch on. Here the only branch is "it worked or
+/// it did not", and either way the loop keeps going: failing to write down
+/// that we stopped retrying is not a reason to start retrying again.
+fn shell_out_raw(config: &RuntimeLoopConfig, args: &[String]) -> Result<(), String> {
+    let output = Command::new(&config.cs_binary)
+        .args(args)
+        .current_dir(&config.cwd)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .env("COSMON_RUNTIME_ACTIVE", "1")
+        .output()
+        .map_err(|e| format!("spawn failed: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(format!(
+        "exit {}: {}",
+        output.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&output.stderr).trim()
+    ))
 }
 
 /// Render a resident decision into the transactional CLI arguments.
@@ -1704,6 +1995,54 @@ impl TraceWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The retry schedule doubles, so the *time* spent retrying a failure that
+    /// cannot resolve itself is bounded by a handful of attempts rather than
+    /// by how fast the FS watcher can wake the loop. The observed defect was
+    /// five identical `cs done` failures inside one second, forever.
+    #[test]
+    fn teardown_backoff_doubles_per_attempt() {
+        let base = Duration::from_secs(2);
+        assert_eq!(teardown_backoff(base, 1), Duration::from_secs(2));
+        assert_eq!(teardown_backoff(base, 2), Duration::from_secs(4));
+        assert_eq!(teardown_backoff(base, 3), Duration::from_secs(8));
+        assert_eq!(teardown_backoff(base, 4), Duration::from_secs(16));
+    }
+
+    /// Attempt 0 is not a thing (the counter is 1-based and incremented before
+    /// the schedule is consulted), but the schedule must not underflow if a
+    /// future caller asks — `saturating_sub` keeps it at the base delay rather
+    /// than shifting by `-1`.
+    #[test]
+    fn teardown_backoff_does_not_underflow_at_zero() {
+        assert_eq!(
+            teardown_backoff(Duration::from_secs(2), 0),
+            Duration::from_secs(2)
+        );
+    }
+
+    /// The doubling is clamped: an unbounded schedule would eventually stop
+    /// retrying in practice while still claiming, in the summary, that it is
+    /// waiting to retry. It never gets that far in production (the ceiling
+    /// stops the schedule first), but the clamp is what makes that statement
+    /// true rather than merely likely.
+    #[test]
+    fn teardown_backoff_is_clamped() {
+        assert_eq!(
+            teardown_backoff(Duration::from_secs(2), 30),
+            TEARDOWN_BACKOFF_CAP
+        );
+    }
+
+    /// A very small base (what the regression test uses to watch the whole
+    /// schedule run) must still produce a strictly increasing schedule — the
+    /// clamp must not flatten it into a fixed-rate retry.
+    #[test]
+    fn teardown_backoff_scales_with_its_base() {
+        let base = Duration::from_millis(10);
+        assert_eq!(teardown_backoff(base, 1), Duration::from_millis(10));
+        assert_eq!(teardown_backoff(base, 3), Duration::from_millis(40));
+    }
 
     /// Terse `EnsembleMolecule` for tests: no merge / stuck stamp. The
     /// discriminant-bearing tests set `merged_at` / `stuck_at` explicitly on
