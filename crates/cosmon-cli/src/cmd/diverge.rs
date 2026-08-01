@@ -128,8 +128,26 @@ struct Session {
 /// it is the successful return of `Ok(())` with a non-zero exit code
 /// applied before returning.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
-    let a = resolve_session(ctx, &args.a)?;
-    let b = resolve_session(ctx, &args.b)?;
+    // An unresolvable session is *unknown*, not *disagreeing* — ADR-168 D4/P2.
+    // Returning the `Err` here would exit 1, which is the code for "these two
+    // sessions provably diverge": a co-pilot that cannot find a session would
+    // report a divergence it never observed. The module contract above already
+    // says unresolvable is `2`; this is what makes it true.
+    let (a, b) = match (resolve_session(ctx, &args.a), resolve_session(ctx, &args.b)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (ra, rb) => {
+            let mut causes = Vec::new();
+            if let Err(e) = &ra {
+                causes.push(format!("{}: {e}", args.a));
+            }
+            if let Err(e) = &rb {
+                causes.push(format!("{}: {e}", args.b));
+            }
+            let report = unresolved_report(args, &causes.join("; "));
+            emit(ctx, &report)?;
+            std::process::exit(Agreement::Inconclusive.exit_code());
+        }
+    };
 
     let mol_id = args
         .molecule
@@ -145,14 +163,44 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         _ => Agreement::Inconclusive,
     };
 
-    if ctx.json {
-        let json = serde_json::to_string_pretty(&report)?;
-        println!("{json}");
-    } else {
-        print_human(&report);
-    }
+    emit(ctx, &report)?;
 
     std::process::exit(outcome.exit_code());
+}
+
+/// Render a report on stdout, honouring `--json`.
+fn emit(ctx: &Context, report: &DivergeReport) -> anyhow::Result<()> {
+    if ctx.json {
+        let json = serde_json::to_string_pretty(report)?;
+        println!("{json}");
+    } else {
+        print_human(report);
+    }
+    Ok(())
+}
+
+/// The report for a comparison that could not start: every clause inconclusive,
+/// each carrying the reason the session could not be resolved.
+///
+/// The reason is repeated on every clause rather than printed once, because the
+/// JSON form is what a caller parses and a clause list where the cause appears
+/// only in a sibling field is a clause list that gets read without it.
+fn unresolved_report(args: &Args, cause: &str) -> DivergeReport {
+    InternalReport {
+        a: args.a.clone(),
+        b: args.b.clone(),
+        molecule: args.molecule.clone(),
+        clauses: ["state", "current_step", "briefing_seals", "git_merge_base"]
+            .into_iter()
+            .map(|clause| ClauseVerdict {
+                clause: clause.to_owned(),
+                verdict: "inconclusive".to_owned(),
+                detail: format!("session unresolved — {cause}"),
+            })
+            .collect(),
+        outcome: Agreement::Inconclusive,
+    }
+    .into_public()
 }
 
 /// JSON-stable report body.
@@ -690,5 +738,35 @@ mod tests {
         assert_eq!(Agreement::Agree.exit_code(), 0);
         assert_eq!(Agreement::Diverge.exit_code(), 1);
         assert_eq!(Agreement::Inconclusive.exit_code(), 2);
+    }
+
+    #[test]
+    fn an_unresolvable_session_is_inconclusive_not_a_divergence() {
+        // ADR-168 D4/P2. Exit 1 means "these two sessions provably diverge";
+        // a session we could not even find has been observed to do nothing of
+        // the sort. The whole point of a co-pilot is to not manufacture the
+        // finding it exists to catch.
+        let args = Args {
+            a: "not-a-session".to_owned(),
+            b: "/nowhere/at/all".to_owned(),
+            molecule: None,
+        };
+        let report = unresolved_report(&args, "not a known presence id");
+
+        assert_eq!(report.outcome, "inconclusive");
+        assert_eq!(
+            Agreement::Inconclusive.exit_code(),
+            2,
+            "and the code that outcome maps to is 2, not 1"
+        );
+        assert_eq!(report.clauses.len(), 4, "every clause is reported");
+        for clause in &report.clauses {
+            assert_eq!(clause.verdict, "inconclusive");
+            assert!(
+                clause.detail.contains("not a known presence id"),
+                "each clause carries the cause: {}",
+                clause.detail
+            );
+        }
     }
 }

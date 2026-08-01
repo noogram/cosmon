@@ -1,0 +1,79 @@
+{
+  "id": "cp-claude-001",
+  "mission_id": "task-20260731-67f2",
+  "session_id": "sess-claude",
+  "lease_epoch": 1,
+  "scope": {
+    "includes": [
+      "checkpoint publication",
+      "session-probe port"
+    ],
+    "excludes": [
+      "cs sessions cockpit"
+    ]
+  },
+  "current_hypotheses": [
+    {
+      "id": "h-cursor",
+      "subject": "cursor-is-byte-offset",
+      "stance": "affirm",
+      "statement": "A resume cursor is a byte offset, not a line count, so a partial trailing line can be re-read.",
+      "evidence": [
+        {
+          "locator": "crates/cosmon-session-probe/src/cursor.rs"
+        }
+      ]
+    },
+    {
+      "id": "h-rotation",
+      "subject": "rotation-restarts-read",
+      "stance": "affirm",
+      "statement": "A rotated or truncated log must rewind the cursor and report a restart cause.",
+      "evidence": [
+        {
+          "locator": "docs/adr/168-a-co-pilot-inherits-the-session-substrate-not-its-delivery-contract.md"
+        }
+      ]
+    }
+  ],
+  "evidence_refs": [
+    {
+      "locator": "docs/adr/168-a-co-pilot-inherits-the-session-substrate-not-its-delivery-contract.md"
+    }
+  ],
+  "completed_actions": [
+    "Read the mission brief and ADR-168.",
+    "Published the session-probe port and its two adapters."
+  ],
+  "intended_next_actions": [
+    {
+      "id": "i-merge",
+      "subject": "merge-after-gates",
+      "stance": "affirm",
+      "statement": "Merge this branch once the seven gates are green.",
+      "evidence": [
+        {
+          "locator": "justfile"
+        }
+      ]
+    },
+    {
+      "id": "i-adapter",
+      "subject": "third-provider-needs-adapter-only",
+      "stance": "affirm",
+      "statement": "A third provider is an adapter plus fixtures, with no cockpit edit.",
+      "evidence": [
+        {
+          "locator": "crates/cosmon-session-probe/src/port.rs"
+        }
+      ]
+    }
+  ],
+  "open_risks": [
+    "The cockpit surface does not exist yet, so nothing exercises the port end to end."
+  ],
+  "unresolved_questions": [
+    "Does a Codex log publish a proactive quota signal, or only an error after the fact?"
+  ],
+  "created_at": "2026-07-31T10:00:00Z"
+}
