@@ -27,6 +27,17 @@
 //! *O(file size)*. This is what lets the 10-way stress test fit inside the
 //! 500 ms lock budget.
 //!
+//! That cursor used to start at zero on every [`EventLogWriter::open`], so
+//! the *O(new bytes)* claim held only for a writer kept alive across
+//! emits. The `cs` CLI is the opposite shape: [`emit_one`] opens, writes
+//! one line and drops, so every invocation paid a full parse of the log.
+//! At 151 MB that was ~5 s per `cs` call in a long-lived galaxy
+//! (task-20260727-0510). The cursor is now checkpointed to a sidecar
+//! ([`seq_index_path`]) after each append, so a fresh writer resumes where
+//! the last one stopped. The sidecar is a cache of a fold over a prefix:
+//! if it is missing, stale, or does not fingerprint-match the file, the
+//! writer silently falls back to the full walk.
+//!
 //! ## Why both `seq` and `mol_seq`
 //!
 //! - `seq` is monotone **per file**. It anchors `causal_parent` references
@@ -54,6 +65,7 @@ use cosmon_core::event_v2::{EmitterKind, Envelope, EventV2, Seq};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::quality_band::{self, QualityBand};
 use fs2::FileExt;
+use sha2::{Digest, Sha256};
 
 /// Environment variable carrying the emitter kind for the current
 /// process — read by [`EventLogWriter::open`] when no explicit emitter
@@ -81,6 +93,54 @@ const LOCK_FAST_BUDGET: Duration = Duration::from_millis(20);
 /// burning a core hammering the kernel.
 const LOCK_RETRY_INTERVAL: Duration = Duration::from_millis(1);
 
+/// Filename suffix of the checkpoint sidecar that lets a freshly-opened
+/// writer resume the priming scan instead of re-parsing the whole log.
+///
+/// Sits next to `events.jsonl` as `events.jsonl.seqidx`. It is a pure
+/// cache — deleting it costs one slow open and nothing else.
+const SEQ_INDEX_SUFFIX: &str = ".seqidx";
+
+/// How many bytes at the end of the checkpointed prefix are digested into
+/// the sidecar's fingerprint.
+///
+/// Enough that a rotated log cannot plausibly present the same trailing
+/// bytes at the same offset; small enough that validating a checkpoint is
+/// one short read regardless of how large the log has grown.
+const CHECKPOINT_PROBE_BYTES: u64 = 4096;
+
+/// The fold state of a prefix of `events.jsonl`, persisted beside it.
+///
+/// Everything here is recoverable by walking the file from byte 0; the
+/// sidecar exists only so that walk does not have to happen on every
+/// open. `probe_digest` is what makes trusting it safe — see
+/// [`EventLogWriter::restore_checkpoint`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SeqCheckpoint {
+    /// Byte offset up to which the fold below is complete.
+    scanned_to: u64,
+    /// Global sequence to assign at `scanned_to`.
+    next_seq: Seq,
+    /// Latest verb timestamp seen in `[0, scanned_to)`.
+    #[serde(default)]
+    last_verb_ts: Option<DateTime<Utc>>,
+    /// Per-molecule next sequence over `[0, scanned_to)`.
+    mol_seqs: HashMap<MoleculeId, Seq>,
+    /// Fingerprint of the last [`CHECKPOINT_PROBE_BYTES`] of the prefix,
+    /// so a rotated or rewritten log is not mistaken for this one.
+    probe_digest: String,
+}
+
+/// Path of the checkpoint sidecar for an events log.
+///
+/// Public so operational tooling (archive, purge, rotation) can name the
+/// file it must move or remove alongside the log itself.
+#[must_use]
+pub fn seq_index_path(events_path: &Path) -> PathBuf {
+    let mut raw = events_path.as_os_str().to_owned();
+    raw.push(SEQ_INDEX_SUFFIX);
+    PathBuf::from(raw)
+}
+
 /// An append-only writer for `events.jsonl` that assigns monotone sequence
 /// numbers under a `flock(2)` advisory lock.
 ///
@@ -104,6 +164,15 @@ pub struct EventLogWriter {
     /// Byte offset up to which we have scanned the file. Catch-up reads
     /// start here on every emit.
     scanned_to: u64,
+    /// Byte offset the priming scan in [`EventLogWriter::open`] actually
+    /// started from — `0` for a full walk, the checkpoint's `scanned_to`
+    /// when the sidecar was usable.
+    ///
+    /// Exists so a test can observe *which path was taken*, not merely
+    /// that both paths agree. They agree by construction, so an assertion
+    /// on the result alone stays green with the checkpoint disabled and
+    /// proves nothing (diagnosis-discipline CLAUSE 4).
+    primed_from: u64,
     /// UTC timestamp of the most recently observed cs verb emission
     /// ([`EventV2::is_verb`]) — populated from the catch-up scan and
     /// from our own writes. Drives the latency input of the Kahneman K1
@@ -177,6 +246,13 @@ impl EventLogWriter {
     ///
     /// The parent directory must exist.
     ///
+    /// Priming resumes from the checkpoint sidecar
+    /// ([`seq_index_path`]) when one is present and still describes a
+    /// prefix of the file; only the bytes appended past that checkpoint
+    /// are parsed. Without a usable sidecar the whole file is walked,
+    /// which is what every open used to do — see the module docs for what
+    /// that cost a long-lived galaxy.
+    ///
     /// # Errors
     ///
     /// Returns `std::io::Error` if the file cannot be opened or scanned.
@@ -194,12 +270,16 @@ impl EventLogWriter {
             next_seq: Seq(0),
             mol_seqs: HashMap::new(),
             scanned_to: 0,
+            primed_from: 0,
             last_verb_ts: None,
             emitter: EmitterHeader::from_env(),
         };
-        // Prime the caches by walking everything currently on disk. This
-        // is the only O(file size) read we perform; subsequent emits read
-        // only the delta.
+        // Seed the cursor from the sidecar, then fold in whatever was
+        // appended after it. A missing, stale, or unreadable sidecar
+        // leaves the cursor at 0, and the catch-up below degrades to the
+        // full walk — same answer, slower.
+        writer.restore_checkpoint();
+        writer.primed_from = writer.scanned_to;
         writer.catch_up_scan()?;
         Ok(writer)
     }
@@ -328,7 +408,118 @@ impl EventLogWriter {
         }
         self.scanned_to += written;
 
+        // Publish the cursor while we still hold the lock, so the next
+        // process to open this log resumes here instead of re-parsing
+        // everything before it.
+        self.save_checkpoint();
+
         Ok(global_seq)
+    }
+
+    /// Seed the caches from the checkpoint sidecar, if it describes a
+    /// prefix of the file we just opened.
+    ///
+    /// Without this, [`Self::open`] walked and JSON-parsed the entire
+    /// `events.jsonl` on every construction. That is invisible for a
+    /// long-lived writer but not for [`emit_one`], which opens, emits and
+    /// drops — the shape every `cs` invocation uses. In a galaxy whose
+    /// log had reached 151 MB / ~500 k lines, that single unconditional
+    /// emission cost ~5 s of CPU per `cs` call, and considerably more
+    /// with several workers contending; measured 4.92 s vs 0.03 s against
+    /// an empty log, same binary, same flags (task-20260727-0510).
+    ///
+    /// Best-effort by construction: any failure — no sidecar, unreadable,
+    /// unparseable, or a digest that no longer matches the file — leaves
+    /// the cursor at zero and the caller falls back to the full walk. The
+    /// sidecar is a cache of a pure fold over a prefix, never a source of
+    /// truth, so a wrong or absent one costs time and never correctness.
+    fn restore_checkpoint(&mut self) {
+        let Ok(bytes) = std::fs::read(seq_index_path(&self.path)) else {
+            return;
+        };
+        let Ok(checkpoint) = serde_json::from_slice::<SeqCheckpoint>(&bytes) else {
+            return;
+        };
+        let Ok(meta) = self.file.metadata() else {
+            return;
+        };
+        // A checkpoint past EOF describes a file that has since been
+        // truncated or rotated: reject it and rescan.
+        if checkpoint.scanned_to > meta.len() {
+            return;
+        }
+        // The length matching is not enough — a rotated log can regrow to
+        // the same size with entirely different content. Re-digest the
+        // tail of the claimed prefix and require it to match.
+        let Ok(digest) = self.prefix_probe_digest(checkpoint.scanned_to) else {
+            return;
+        };
+        if digest != checkpoint.probe_digest {
+            return;
+        }
+
+        self.scanned_to = checkpoint.scanned_to;
+        self.next_seq = checkpoint.next_seq;
+        self.last_verb_ts = checkpoint.last_verb_ts;
+        self.mol_seqs = checkpoint.mol_seqs;
+    }
+
+    /// Write the current cursor to the checkpoint sidecar.
+    ///
+    /// Called from [`Self::emit_locked`] under the `flock`, so concurrent
+    /// writers cannot interleave sidecar updates. The write itself is
+    /// `write to temp` + `rename`, which is atomic within a directory on
+    /// every POSIX filesystem — a reader never observes a half-written
+    /// checkpoint, only the previous one or the new one.
+    ///
+    /// Silent on failure: a galaxy that cannot write the sidecar (read-only
+    /// mount, full disk) must still be able to emit events.
+    fn save_checkpoint(&mut self) {
+        let Ok(probe_digest) = self.prefix_probe_digest(self.scanned_to) else {
+            return;
+        };
+        let checkpoint = SeqCheckpoint {
+            scanned_to: self.scanned_to,
+            next_seq: self.next_seq,
+            last_verb_ts: self.last_verb_ts,
+            mol_seqs: self.mol_seqs.clone(),
+            probe_digest,
+        };
+        let Ok(encoded) = serde_json::to_vec(&checkpoint) else {
+            return;
+        };
+        let path = seq_index_path(&self.path);
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(format!(".{pid}.tmp", pid = std::process::id()));
+        let tmp = PathBuf::from(tmp);
+        if std::fs::write(&tmp, &encoded).is_ok() {
+            if std::fs::rename(&tmp, &path).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        } else {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    /// Digest the final [`CHECKPOINT_PROBE_BYTES`] of the file prefix
+    /// `[0, prefix_len)` — the fingerprint that lets a checkpoint be
+    /// recognised as still describing this file.
+    ///
+    /// Leaves the file positioned at the end so a following append and the
+    /// delta reads in [`Self::catch_up_scan`] are unaffected.
+    fn prefix_probe_digest(&mut self, prefix_len: u64) -> std::io::Result<String> {
+        let probe_len = prefix_len.min(CHECKPOINT_PROBE_BYTES);
+        let start = prefix_len - probe_len;
+        let mut buf = vec![0u8; usize::try_from(probe_len).unwrap_or(0)];
+        if !buf.is_empty() {
+            self.file.seek(SeekFrom::Start(start))?;
+            self.file.read_exact(&mut buf)?;
+        }
+        self.file.seek(SeekFrom::End(0))?;
+        let mut hasher = Sha256::new();
+        hasher.update(prefix_len.to_le_bytes());
+        hasher.update(&buf);
+        Ok(format!("{digest:x}", digest = hasher.finalize()))
     }
 
     /// Read any bytes appended past `scanned_to` and fold them into the
@@ -1153,6 +1344,139 @@ mod tests {
         assert!(
             w.last_verb_ts.is_some(),
             "writer must recover last_verb_ts from disk on reopen"
+        );
+    }
+
+    /// Append `n` nucleation events for `mol`, one writer, then drop it.
+    fn seed(path: &Path, mol: &str, n: usize) {
+        let mut w = EventLogWriter::open(path).unwrap();
+        for _ in 0..n {
+            w.emit(
+                EventV2::MoleculeNucleated {
+                    molecule_id: mid(mol),
+                    formula_id: "f".to_owned(),
+                    parent_id: None,
+                    blocks: Vec::new(),
+                },
+                None,
+            )
+            .unwrap();
+        }
+        w.sync().unwrap();
+    }
+
+    /// The whole point of the sidecar: a resumed open must land on exactly
+    /// the state a full walk of the file produces. The comparison is made
+    /// against a real full walk (sidecar deleted), not against a
+    /// hand-written expectation, so the two paths cannot drift apart.
+    #[test]
+    fn checkpointed_open_agrees_with_full_scan() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        seed(&path, "cs-20260411-aaaa", 3);
+        seed(&path, "cs-20260411-bbbb", 2);
+
+        let idx = seq_index_path(&path);
+        assert!(idx.is_file(), "emitting must publish a checkpoint sidecar");
+
+        let resumed = EventLogWriter::open(&path).unwrap();
+        let file_len = std::fs::metadata(&path).unwrap().len();
+        // Observe the path taken, not just the answer. The two paths agree
+        // by construction, so asserting on the answer alone stays green
+        // with the checkpoint disabled and would prove nothing: disable
+        // the restore and this line, and only this line, reddens.
+        assert_eq!(
+            resumed.primed_from, file_len,
+            "a valid sidecar must seed the cursor at the log's end, leaving \
+             nothing for the priming scan to parse"
+        );
+
+        std::fs::remove_file(&idx).unwrap();
+        let full = EventLogWriter::open(&path).unwrap();
+        assert_eq!(
+            full.primed_from, 0,
+            "without a sidecar the priming scan must start from byte 0 — \
+             otherwise this comparison is not against a full walk"
+        );
+
+        assert_eq!(resumed.next_seq, full.next_seq);
+        assert_eq!(resumed.mol_seqs, full.mol_seqs);
+        assert_eq!(resumed.last_verb_ts, full.last_verb_ts);
+        assert_eq!(resumed.scanned_to, full.scanned_to);
+    }
+
+    /// A log that was rotated away and regrew to the *same* length must not
+    /// be mistaken for the checkpointed one. Length alone cannot tell them
+    /// apart, which is why the sidecar carries a digest of the prefix tail.
+    #[test]
+    fn rotated_log_of_equal_length_invalidates_the_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        seed(&path, "cs-20260411-aaaa", 4);
+
+        let bytes = std::fs::read(&path).unwrap();
+        let checkpointed = EventLogWriter::open(&path).unwrap().next_seq;
+        assert_eq!(checkpointed, Seq(4));
+
+        // Same byte count, different history — one line of the same length
+        // as the file, carrying nothing this writer can sequence from.
+        let filler = vec![b'x'; bytes.len() - 1];
+        let mut rotated = filler;
+        rotated.push(b'\n');
+        std::fs::write(&path, &rotated).unwrap();
+
+        let w = EventLogWriter::open(&path).unwrap();
+        assert_eq!(
+            w.next_seq,
+            Seq(0),
+            "a rewritten log of identical length must force a full rescan"
+        );
+    }
+
+    /// A checkpoint that claims more bytes than the file holds describes a
+    /// truncated log; trusting it would skip real lines.
+    #[test]
+    fn truncated_log_invalidates_the_checkpoint() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        seed(&path, "cs-20260411-aaaa", 4);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let first = raw.lines().next().unwrap().to_owned();
+        std::fs::write(&path, format!("{first}\n")).unwrap();
+
+        let w = EventLogWriter::open(&path).unwrap();
+        assert_eq!(
+            w.next_seq,
+            Seq(1),
+            "a truncated log must be rescanned, not resumed past its end"
+        );
+    }
+
+    /// Bytes appended by something that never wrote a checkpoint — an
+    /// external tool, or a writer killed before its sidecar update — are
+    /// still folded in, because the resumed cursor only ever claims a
+    /// prefix and the delta scan covers the rest.
+    #[test]
+    fn appends_made_without_a_checkpoint_are_still_scanned() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("events.jsonl");
+        seed(&path, "cs-20260411-aaaa", 2);
+
+        // Reuse a real envelope so the appended line is sequenceable, and
+        // bump its seq the way an independent appender would.
+        let last = read_all(&path).unwrap().pop().unwrap();
+        let mut raw: serde_json::Value = serde_json::to_value(&last).unwrap();
+        raw["seq"] = serde_json::json!(9);
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        writeln!(file, "{raw}").unwrap();
+        drop(file);
+
+        let w = EventLogWriter::open(&path).unwrap();
+        assert_eq!(
+            w.next_seq,
+            Seq(10),
+            "the delta past the checkpoint must still be folded in"
         );
     }
 }
