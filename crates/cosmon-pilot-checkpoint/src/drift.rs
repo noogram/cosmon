@@ -222,21 +222,21 @@ pub struct DriftReport {
     pub checkpoint_b: Option<CheckpointId>,
     /// Every finding, agreement and inconclusive record produced.
     pub findings: Vec<DriftFinding>,
-    /// The overall answer. See [`DriftReport::roll_up`] for the rule.
+    /// The overall answer.
+    ///
+    /// Fail-closed, in this order: a `FINDING` outranks everything (something
+    /// was actually shown), then `INCONCLUSIVE` (something could not be
+    /// compared), and `AGREE` survives only when neither occurred *and* at
+    /// least one agreement was established. An empty finding list is
+    /// `INCONCLUSIVE` — nothing compared is not agreement.
     pub verdict: Verdict,
     /// When the comparison ran.
     pub created_at: DateTime<Utc>,
 }
 
 impl DriftReport {
-    /// Fold the per-finding verdicts into the report's verdict.
-    ///
-    /// Order matters and is fail-closed: a `FINDING` outranks everything
-    /// (something was actually shown), then `INCONCLUSIVE` (something could not
-    /// be compared), and `AGREE` only survives when neither of the first two
-    /// occurred *and* at least one agreement was actually established. An empty
-    /// finding list is `INCONCLUSIVE`, never `AGREE` — nothing compared is not
-    /// agreement.
+    /// Fold the per-finding verdicts into the report's verdict, per the rule
+    /// documented on [`DriftReport::verdict`].
     fn roll_up(findings: &[DriftFinding]) -> Verdict {
         if findings.iter().any(|f| f.verdict == Verdict::Finding) {
             Verdict::Finding
