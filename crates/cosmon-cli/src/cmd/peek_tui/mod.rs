@@ -1017,6 +1017,32 @@ fn molecule_health_for_row(r: &RowView) -> MoleculeHealth {
     molecule_health(core_status, worker.as_ref())
 }
 
+/// How many rows carry [`BLOCKED_ON_TEARDOWN`](cosmon_core::tag::BLOCKED_ON_TEARDOWN)
+/// — molecules the resident runtime completed but could not merge.
+///
+/// Pure and separate from the rendering so the count has a test that does not
+/// need a terminal. It counts *rows*, not tags: one molecule blocking a whole
+/// subtree is one alarm, and the operator's next move (`cs peek`, find it, fix
+/// the cause, `cs done` it by hand) is per molecule.
+///
+/// # Why the count is not also a sort key
+///
+/// It would be tempting to float these rows above the fold. The peek table's
+/// sort key is a function of the change-detection key (`mol_id`, `status`,
+/// `step`, `updated_at`) and tags are in neither, so ordering on a tag would
+/// let the table reorder under the operator's cursor during a tick the
+/// change detector calls idle. The alarm goes in the vital bar, which is
+/// always on screen and never moves.
+fn blocked_on_teardown_count(rows: &[RowView]) -> usize {
+    rows.iter()
+        .filter(|r| {
+            r.tags
+                .iter()
+                .any(|t| t == cosmon_core::tag::BLOCKED_ON_TEARDOWN)
+        })
+        .count()
+}
+
 /// Predicate: should this molecule's heartbeat be promoted to
 /// [`HeartbeatTier::Stalled`] because no observable forward motion has
 /// occurred for longer than the step's wall-clock budget?
@@ -3145,6 +3171,21 @@ impl App {
             format!("{stale_pending} pending>48h"),
             stale_style,
         ));
+
+        // Harvests the resident runtime gave up on. This segment exists
+        // because a frozen DAG and a slow one look identical from the outside:
+        // the molecule reads `completed`, its descendants read `pending`, and
+        // the only trace of the cause was a line in `runtime-trace.jsonl`.
+        // Rendered only when non-zero — an empty accusation every tick is how
+        // a real one stops being read.
+        let blocked_teardown = blocked_on_teardown_count(&self.rows);
+        if blocked_teardown > 0 {
+            spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                format!("⚠ {blocked_teardown} blocked-on-teardown"),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ));
+        }
 
         spans.push(Span::styled(" │ ", Style::default().fg(Color::DarkGray)));
 
@@ -5424,6 +5465,51 @@ mod tests {
             energy_budget: None,
             adapter: cosmon_core::adapter_attribution::AdapterAttribution::default(),
         }
+    }
+
+    /// The vital bar's alarm counts molecules whose harvest the resident
+    /// runtime gave up on. A `completed` molecule is otherwise the *quietest*
+    /// row peek can draw — it bands below the fold with the corpses — which is
+    /// how a DAG frozen on an unmergeable branch came to be indistinguishable
+    /// from a slow one.
+    #[test]
+    fn blocked_on_teardown_count_counts_the_tagged_rows() {
+        let mut clean = row_with("completed", HeartbeatTier::Active);
+        clean.mol_id = "clean".into();
+        let mut stuck = row_with("completed", HeartbeatTier::Active);
+        stuck.mol_id = "stuck".into();
+        stuck.tags = vec![cosmon_core::tag::BLOCKED_ON_TEARDOWN.to_owned()];
+
+        assert_eq!(blocked_on_teardown_count(&[clean.clone()]), 0);
+        assert_eq!(blocked_on_teardown_count(&[clean, stuck]), 1);
+    }
+
+    /// One molecule is one alarm, whatever else it carries. The count drives a
+    /// single "N blocked-on-teardown" segment, so double-counting a row that
+    /// also happens to be hot or held would inflate the number the operator
+    /// reads as "how many merges are stuck".
+    #[test]
+    fn blocked_on_teardown_count_counts_rows_not_tags() {
+        let mut r = row_with("completed", HeartbeatTier::Active);
+        r.tags = vec![
+            "temp:hot".to_owned(),
+            cosmon_core::tag::BLOCKED_ON_TEARDOWN.to_owned(),
+            "no-auto-harvest".to_owned(),
+        ];
+        assert_eq!(blocked_on_teardown_count(&[r]), 1);
+    }
+
+    /// The match is exact. A tag that merely *starts with* the alarm's key —
+    /// or one that is a near-miss spelling — is a different label and must not
+    /// raise an alarm the runtime never wrote.
+    #[test]
+    fn blocked_on_teardown_count_matches_the_tag_exactly() {
+        let mut r = row_with("completed", HeartbeatTier::Active);
+        r.tags = vec![
+            "blocked-on-teardown-maybe".to_owned(),
+            "blocked".to_owned(),
+        ];
+        assert_eq!(blocked_on_teardown_count(&[r]), 0);
     }
 
     /// Default watchdog filter — only `running` molecules are visible.

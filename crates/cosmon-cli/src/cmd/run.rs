@@ -812,6 +812,7 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "dones": summary.dones,
             "reaps": summary.reaps,
             "briefless_parked": summary.briefless_parked,
+            "teardown_blocked": summary.teardown_blocked,
             "trace": trace_path.display().to_string(),
         });
         println!("{}", serde_json::to_string_pretty(&json_out)?);
@@ -824,14 +825,26 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         } else {
             String::new()
         };
+        // A blocked harvest is the loudest thing this summary can report: the
+        // molecule is completed, unmerged, and everything downstream of it is
+        // stalled behind a cause only an operator can clear.
+        let blocked = if summary.teardown_blocked > 0 {
+            format!(
+                ", {} blocked on teardown (see `cs peek`)",
+                summary.teardown_blocked
+            )
+        } else {
+            String::new()
+        };
         println!(
-            "\n{} {} ticks, {} tackles, {} dones, {} reaps{} — {}",
+            "\n{} {} ticks, {} tackles, {} dones, {} reaps{}{} — {}",
             "Done:".bold(),
             summary.ticks,
             summary.tackles,
             summary.dones,
             summary.reaps,
             parked,
+            blocked,
             reason,
         );
     }

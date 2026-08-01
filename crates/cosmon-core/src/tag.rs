@@ -46,6 +46,31 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 /// Maximum full tag length (including `:` and value, in bytes).
 pub const MAX_TAG_LEN: usize = 128;
 
+/// The tag the resident runtime writes on a molecule whose branch it gave up
+/// merging — the harvest failed the same way too many times in a row.
+///
+/// # Why this string is a cross-crate constant
+///
+/// Two seams must agree on it, and neither owns the other:
+///
+/// - **`cs run`** (the resident runtime) *writes* it, via `cs tag --add`,
+///   after its exponential-backoff retry of `cs done` hits its ceiling. Some
+///   teardown aborts cannot resolve themselves — an untracked file in the main
+///   checkout that the merge would overwrite, a branch that is no longer
+///   fast-forward — so retrying forever only burns cycles and floods the
+///   runtime trace while the molecule stays `completed`-but-unharvested and
+///   every descendant stays `pending`.
+/// - **`cs peek`** *reads* it, to count the molecules in that state in its
+///   vital bar. A frozen DAG and a slow one look identical otherwise: the only
+///   symptom is the absence of progress, and the only record of the cause was
+///   a line in `runtime-trace.jsonl` that nobody opens.
+///
+/// The tag is the durable half of the surfacing (the runtime also writes a
+/// `cs note` carrying the verbatim teardown error). It is deliberately *not*
+/// cleared by the runtime: clearing it is the operator gesture that says the
+/// obstruction was removed, and a `cs done` by hand is what proves it.
+pub const BLOCKED_ON_TEARDOWN: &str = "blocked-on-teardown";
+
 /// A typed label attached to a molecule.
 ///
 /// Immutable once constructed. The canonical text form is `key` or
