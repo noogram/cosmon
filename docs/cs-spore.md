@@ -44,6 +44,38 @@ bounds, an edge cycle, an unknown node kind, a param-type mismatch, plus
 structural checks (duplicate node ids, dangling edges, unknown formula or
 edge aliases).
 
+## The bundle's recipes must reach the mission registry
+
+`cs spore run` reads the bundle's formulas **by path**, relative to the
+manifest. What it germinates stores them **by id**. `cs tackle` later
+resolves that id against the mission project's `.cosmon/formulas/` — the
+registry of the galaxy the molecule now lives in, not the directory the
+spore came from.
+
+So a bundle whose recipes were never copied into that registry germinates
+fine and then dispatches with none of its per-step `adapter` / `model`
+pins: the id resolves to nothing and every node runs on the adapter
+default. This was silent until task-20260725-eb3b, and cost a 23-node
+run its entire documented model tiering while the recorded reason read
+"no formula-step model pin" — a sentence about a recipe that pins
+nothing, not one that was never found.
+
+Two things now say it out loud:
+
+- **at germination** — `cs spore run` warns, once per recipe, when a
+  bundle formula that declares pins is absent from the mission registry,
+  or is *shadowed* there by a same-named copy declaring different pins
+  (dispatch would honour the registry's copy, not the bundle's). It names
+  the path to install to.
+- **at dispatch** — `cs tackle` warns on stderr and records the real
+  cause in the `adapter_selected` / `model_selected` events, so an audit
+  after the fact can tell a broken reference from a deliberate absence.
+
+The remedy is a copy: put each `[spore.formulas.*]` file into
+`.cosmon/formulas/` of the project you germinate into. Neither warning
+refuses the run — a run without its pins is degraded, not invalid, and
+you may be installing the recipes next.
+
 ## The three verbs
 
 | Verb | Role |
