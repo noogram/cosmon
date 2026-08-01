@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::agent::AgentRole;
 use crate::id::{AgentId, WorkerId};
+use crate::injection::InjectionProvenance;
 
 // ---------------------------------------------------------------------------
 // Supporting types
@@ -124,9 +125,42 @@ pub trait TransportBackend {
 
     /// Send text input to a worker's session.
     ///
+    /// Prefer [`send_input_observed`](Self::send_input_observed) at any call
+    /// site that knows *why* it is writing to a pane: this method stamps the
+    /// injection [`Unattributed`](crate::injection::InjectionOrigin::Unattributed)
+    /// in the provenance ledger, which is honest but useless to the operator
+    /// reading it back.
+    ///
     /// # Errors
     /// Returns [`TransportError::NotFound`] if the worker does not exist.
     fn send_input(&self, id: &WorkerId, input: &str) -> Result<(), TransportError>;
+
+    /// Send text input to a worker's session, declaring who is sending it.
+    ///
+    /// The attributed form of [`send_input`](Self::send_input), and the seam
+    /// where a backend records an [`InputInjected`] provenance event
+    /// (COSMON #26 residual). An empty `input` is the *bare submit* — a naked
+    /// Enter — and is deliberately in scope: it is the injection a pane cannot
+    /// testify about afterwards, since it leaves no text behind.
+    ///
+    /// The default implementation forwards to `send_input`, so a backend with
+    /// nothing to record (the mock, an in-process harness) is unaffected. A
+    /// backend that *does* instrument must override this method and route its
+    /// own `send_input` through it, so that no injection can reach the wire by
+    /// a path the instrument does not see.
+    ///
+    /// # Errors
+    /// Returns [`TransportError::NotFound`] if the worker does not exist.
+    ///
+    /// [`InputInjected`]: crate::event_v2::EventV2::InputInjected
+    fn send_input_observed(
+        &self,
+        id: &WorkerId,
+        input: &str,
+        _provenance: &InjectionProvenance,
+    ) -> Result<(), TransportError> {
+        self.send_input(id, input)
+    }
 
     /// Capture the last `lines` lines of output from a worker's session.
     ///

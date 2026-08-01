@@ -3493,9 +3493,18 @@ fn try_merge_with_escalation(
 
         // Send the propel signal to the worker via tmux.
         if backend.is_alive(&wid).unwrap_or(false) {
-            let _ = backend.send_input(&wid, propel_msg);
+            let mol_state_dir = store.molecule_dir(mol_id);
+            let _ = backend.send_input_observed(
+                &wid,
+                propel_msg,
+                &cosmon_cli::injection_provenance::propulsion(mol_id, &mol_state_dir),
+            );
             std::thread::sleep(std::time::Duration::from_millis(300));
-            let _ = backend.send_input(&wid, "");
+            let _ = backend.send_input_observed(
+                &wid,
+                "",
+                &cosmon_cli::injection_provenance::propulsion_submit(mol_id, &mol_state_dir),
+            );
         } else if !ctx.json {
             eprintln!("  ⚠ worker {session_name} is not alive — cannot send propel signal");
         }

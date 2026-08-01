@@ -45,6 +45,11 @@ pub mod trust;
 
 pub mod adr;
 
+// The census of everywhere `cs` can put text in a worker's composer
+// (COSMON #26 residual). Documented by the module's own `//!` header for the
+// same intra-doc-link reason as `briefing_backstop` above.
+pub mod injection_provenance;
+
 /// Resolution of a molecule's integration base branch — the single place that
 /// answers "which trunk does this molecule's work belong to?" for both the
 /// branch cut (`cs tackle`) and the harvest (`cs done`).

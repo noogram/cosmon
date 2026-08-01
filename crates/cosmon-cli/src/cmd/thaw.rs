@@ -99,7 +99,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         };
 
         if !prompt.is_empty() {
-            let _ = backend.send_input(&worker_id, &prompt);
+            // The molecule is known only when the worker was frozen holding
+            // one; a thaw of a molecule-less worker traces without a ledger
+            // rather than inventing a molecule to file the event under.
+            let provenance = worker.frozen_molecule.as_ref().map_or_else(
+                || {
+                    cosmon_core::injection::InjectionProvenance::new(
+                        cosmon_core::injection::InjectionOrigin::Thaw,
+                        "thaw-prompt",
+                    )
+                },
+                |mol_id| {
+                    cosmon_cli::injection_provenance::thaw(mol_id, &store.molecule_dir(mol_id))
+                },
+            );
+            let _ = backend.send_input_observed(&worker_id, &prompt, &provenance);
         }
     }
 

@@ -327,8 +327,16 @@ fn apply_remedy(
                     "awaiting operator — questions pending, not nudged".to_owned(),
                 );
             }
-            let briefing = store.molecule_dir(&mol.id).join("briefing.md");
-            if be.send_input(&wid, &nudge_text(&briefing)).is_ok() {
+            let mol_state_dir = store.molecule_dir(&mol.id);
+            let briefing = mol_state_dir.join("briefing.md");
+            if be
+                .send_input_observed(
+                    &wid,
+                    &nudge_text(&briefing),
+                    &cosmon_cli::injection_provenance::patrol_heal(&mol.id, &mol_state_dir),
+                )
+                .is_ok()
+            {
                 bump_nudge_count(store, &mol.id);
                 ApplyResult::Success("nudged".to_owned())
             } else {
@@ -351,7 +359,17 @@ fn apply_remedy(
             }
             // Empty input = the transport's bare-Enter submit path, which carries
             // the multi-block Enter-budget retry loop.
-            if be.send_input(&wid, "").is_ok() {
+            if be
+                .send_input_observed(
+                    &wid,
+                    "",
+                    &cosmon_cli::injection_provenance::patrol_heal_submit(
+                        &mol.id,
+                        &store.molecule_dir(&mol.id),
+                    ),
+                )
+                .is_ok()
+            {
                 ApplyResult::Success("transport re-submitted (Enter)".to_owned())
             } else {
                 ApplyResult::Failure("transport submit failed".to_owned())

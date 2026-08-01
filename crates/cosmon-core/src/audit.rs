@@ -200,7 +200,12 @@ impl Action {
             // runtime *declined* to dispatch on a stale launch snapshot;
             // the spec transition system never sees a fired action because
             // none fired — that absence is the whole point.
-            | EventV2::ConfigDriftDetected { .. } => None,
+            | EventV2::ConfigDriftDetected { .. }
+            // COSMON #26 residual: `InputInjected` attributes keystrokes sent
+            // into a worker pane. Pure provenance — it says who wrote to a
+            // composer, never that a molecule advanced. The spec transition
+            // system must not read a nudge as a lifecycle action.
+            | EventV2::InputInjected { .. } => None,
         }
     }
 }

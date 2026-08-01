@@ -748,7 +748,7 @@ pub fn emit_worker_spawn_rolled_back(
 /// best-effort, never failing — bumps the process-wide error counter
 /// ([`emit_error_count`]), and writes exactly one stderr line on the
 /// first failure. The hot path stays non-blocking but loud.
-fn write_event(state_dir: &Path, event: EventV2) {
+pub(super) fn write_event(state_dir: &Path, event: EventV2) {
     let path = resolve_events_log_path(state_dir);
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

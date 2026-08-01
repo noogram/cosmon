@@ -304,7 +304,11 @@ fn run_to_molecule(
             anyhow::anyhow!("payload is not valid UTF-8 — tmux paste requires text")
         })?;
         backend
-            .send_input(&wid, payload_str)
+            .send_input_observed(
+                &wid,
+                payload_str,
+                &cosmon_cli::injection_provenance::whisper(&mol_id, &mol_dir),
+            )
             .map_err(|e| anyhow::anyhow!("send_input failed: {e}"))?;
     }
 

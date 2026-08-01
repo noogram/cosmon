@@ -1152,8 +1152,18 @@ impl CosmonService {
         });
         let backend = cosmon_transport::TmuxBackend::new(&socket);
 
+        // Attributed like every other injection (COSMON #26 residual). The
+        // nudge tool addresses a worker, not a molecule, so there is no ledger
+        // to file the event under — the seam traces it instead.
         backend
-            .send_input(&worker_id, &params.message)
+            .send_input_observed(
+                &worker_id,
+                &params.message,
+                &cosmon_core::injection::InjectionProvenance::new(
+                    cosmon_core::injection::InjectionOrigin::Whisper,
+                    "mcp-nudge",
+                ),
+            )
             .map_err(|e| McpError::internal_error(format!("nudge failed: {e}"), None))?;
 
         let output = serde_json::json!({

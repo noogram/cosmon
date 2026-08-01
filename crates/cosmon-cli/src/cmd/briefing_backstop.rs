@@ -155,6 +155,19 @@ pub fn run(_ctx: &Context, args: &Args) -> anyhow::Result<()> {
         "briefing backstop: resuming submit pressure after the dispatcher exited"
     );
 
+    // The record names its molecule as a raw string (it survives a process
+    // boundary); a record whose id no longer parses still gets its injections
+    // traced, just without a ledger to file them in.
+    let provenance = cosmon_core::id::MoleculeId::new(&record.molecule).map_or_else(
+        |_| {
+            cosmon_core::injection::InjectionProvenance::new(
+                cosmon_core::injection::InjectionOrigin::BriefingBackstop,
+                "backstop-submit",
+            )
+        },
+        |mol_id| cosmon_cli::injection_provenance::briefing_backstop(&mol_id, &args.state_dir),
+    );
+
     let outcome = run_briefing_submit_loop(
         budget,
         &mut || probe(&backend, &worker, &record.needle),
@@ -162,7 +175,7 @@ pub fn run(_ctx: &Context, args: &Args) -> anyhow::Result<()> {
             nudges += 1;
             // Empty input == a bare submit keystroke (see `send_input`), which
             // is exactly the manual recovery that unstalled these workers.
-            let _ = backend.send_input(&worker, "");
+            let _ = backend.send_input_observed(&worker, "", &provenance);
         },
         &mut || started.elapsed(),
         &mut || std::thread::sleep(poll),

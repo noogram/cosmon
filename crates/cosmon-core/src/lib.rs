@@ -163,6 +163,13 @@ pub mod gate;
 pub mod governance;
 #[doc(hidden)]
 pub mod hook;
+// Provenance vocabulary for keystroke injection into a worker session
+// (COSMON #26 residual). Documented by the module's own `//!` header and NOT by
+// a `///` here: an outer doc comment on the declaration merges with the inner
+// one and drags intra-doc link resolution up into *this* module's scope, which
+// silently breaks every `[`Item`]` the module writes about itself.
+#[doc(hidden)]
+pub mod injection;
 #[doc(hidden)]
 pub mod interaction;
 #[doc(hidden)]
