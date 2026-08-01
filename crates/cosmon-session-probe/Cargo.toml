@@ -1,0 +1,24 @@
+[package]
+name = "cosmon-session-probe"
+publish.workspace = true
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+# Frontier crate (ADR-092): a third-party provider adapter author would
+# `cargo add` this port without wanting AGPL — the whole point of the M1
+# contract is that a new provider is an adapter, not a cockpit edit.
+license = "Apache-2.0"
+description = "session-probe-core — the provider-neutral session discovery / incremental-read port (mission co-pilotage M1)"
+
+[dependencies]
+chrono = { workspace = true }
+claudion = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
