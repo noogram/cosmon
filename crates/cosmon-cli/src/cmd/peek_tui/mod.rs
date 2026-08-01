@@ -5505,10 +5505,7 @@ mod tests {
     #[test]
     fn blocked_on_teardown_count_matches_the_tag_exactly() {
         let mut r = row_with("completed", HeartbeatTier::Active);
-        r.tags = vec![
-            "blocked-on-teardown-maybe".to_owned(),
-            "blocked".to_owned(),
-        ];
+        r.tags = vec!["blocked-on-teardown-maybe".to_owned(), "blocked".to_owned()];
         assert_eq!(blocked_on_teardown_count(&[r]), 0);
     }
 

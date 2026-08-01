@@ -767,14 +767,14 @@ pub struct RunSummary {
 /// attempts is enough to ride out the genuinely transient cases (an index lock
 /// held by a concurrent `git`, a worktree mid-write) and short enough that the
 /// operator sees the park within a couple of minutes rather than never.
-const TEARDOWN_ATTEMPT_CEILING: u32 = 5;
+pub const TEARDOWN_ATTEMPT_CEILING: u32 = 5;
 
 /// Backoff before the first `cs done` retry. Doubles per attempt, capped at
 /// [`TEARDOWN_BACKOFF_CAP`].
-const TEARDOWN_BACKOFF_BASE: Duration = Duration::from_secs(2);
+pub const TEARDOWN_BACKOFF_BASE: Duration = Duration::from_secs(2);
 
 /// Ceiling on the exponential backoff between two `cs done` retries.
-const TEARDOWN_BACKOFF_CAP: Duration = Duration::from_secs(60);
+pub const TEARDOWN_BACKOFF_CAP: Duration = Duration::from_secs(60);
 
 /// The delay before retry number `attempts` (1-based): `base · 2^(n−1)`,
 /// clamped to [`TEARDOWN_BACKOFF_CAP`].
@@ -790,7 +790,8 @@ const TEARDOWN_BACKOFF_CAP: Duration = Duration::from_secs(60);
 /// deterministic one buys nothing and hides everything.
 fn teardown_backoff(base: Duration, attempts: u32) -> Duration {
     let shift = attempts.saturating_sub(1).min(16);
-    base.saturating_mul(1_u32 << shift).min(TEARDOWN_BACKOFF_CAP)
+    base.saturating_mul(1_u32 << shift)
+        .min(TEARDOWN_BACKOFF_CAP)
 }
 
 /// Per-molecule bookkeeping for a `cs done` that keeps failing.
@@ -1274,7 +1275,7 @@ impl RuntimeLoop {
         }
         let repeated = entry.last_error == reason;
         entry.attempts = entry.attempts.saturating_add(1);
-        entry.last_error = reason.to_owned();
+        reason.clone_into(&mut entry.last_error);
         let attempts = entry.attempts;
 
         if attempts < TEARDOWN_ATTEMPT_CEILING {
@@ -1283,11 +1284,7 @@ impl RuntimeLoop {
             let detail = format!(
                 "attempt {attempts}/{TEARDOWN_ATTEMPT_CEILING}, retry in {}s ({}): {reason}",
                 backoff.as_secs(),
-                if repeated {
-                    "same error"
-                } else {
-                    "new error"
-                },
+                if repeated { "same error" } else { "new error" },
             );
             self.trace.write_tick(
                 "teardown-retry",
@@ -1300,8 +1297,7 @@ impl RuntimeLoop {
         }
 
         entry.parked = true;
-        let detail =
-            format!("gave up after {attempts} consecutive failed harvests: {reason}");
+        let detail = format!("gave up after {attempts} consecutive failed harvests: {reason}");
         self.trace.write_tick(
             "teardown-blocked",
             "teardown-ceiling-reached",

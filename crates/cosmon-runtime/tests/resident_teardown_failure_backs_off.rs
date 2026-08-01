@@ -57,12 +57,8 @@ use std::time::Duration;
 
 use cosmon_runtime::{
     ExitReason, ReadyFrontierScheduler, ResidentScheduler, RuntimeLoop, RuntimeLoopConfig,
+    TEARDOWN_ATTEMPT_CEILING as CEILING,
 };
-
-/// The loop's ceiling on consecutive failed harvests, mirrored here because
-/// the constant is private to the runtime. A change on either side must be a
-/// deliberate edit on both — which is the point.
-const CEILING: u32 = 5;
 
 /// POSIX-`sh` stub speaking the `cs` subset the loop uses. `done a` always
 /// fails with the untracked-file teardown abort after bumping a counter,
