@@ -196,22 +196,27 @@ working?" exactly where it was: with the `Working` / `⏺` acceptance signal.
 
 | condition | n | receipt | composer fallback | unobserved |
 |---|---|---|---|---|
-| event arm, with retry (the operational shape) | 71 | 67 (94 %) | 4 (6 %) | 0 |
+| event arm, with retry (the operational shape) | 86 | 81 (94 %) | 5 (6 %) | 0 |
 | event arm, single CR, no retry | 62 | 53 (85 %) | 0 | 9 (15 %) |
 | hook broken by design | 8 | 0 | 8 (100 %) | 0 |
 | prod arm | 15 | — | 15 | 0 |
 
-Rows exclude four trials lost to two harness bugs found and fixed mid-run (an
-unquoted environment value that stopped the hook from running at all, and a
-latched flag that disarmed the retry after one transient composer reading);
-both are described in the git history and re-measured after the fix.
+171 dispatches in total. The rows exclude the trials produced before two
+harness bugs were found and fixed mid-run — an unquoted environment value that
+stopped the hook from ever running, and a latched flag that disarmed the retry
+after one transient composer reading. Both were re-measured after the fix and
+the re-measurements are what appear above; the git history has both.
 
 Two readings:
 
 1. **The fallback is not hypothetical.** Even with the hook installed and
    working, 6 % of dispatches in the operational shape got no receipt inside an
-   8 s deadline and had to fall back — all of them during the host's heaviest
-   window. A design that treats the receipt as always-available is wrong.
+   8 s deadline and had to fall back — four of the five during the host's
+   heaviest window (load > 300), the fifth a busy pane whose queue drained at
+   8.1 s. A design that treats the receipt as always-available is wrong. Note
+   what the prod arm did in the same 171 dispatches: 15/15 composer reads
+   observed the submit, 0 failures. The weaker signal is the more available
+   one, which is precisely why it stays.
 2. **The single-CR row is the swallowed-Enter rate at 0 ms delay under load:
    15 %**, against 3.6 % in the race harness's near-idle matrix. That is the
    loaded-fleet effect the earlier experiment named as its first unknown, and it
