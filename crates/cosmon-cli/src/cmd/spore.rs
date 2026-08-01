@@ -310,6 +310,93 @@ fn run_run(ctx: &Context, args: &RunArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The per-step `adapter` / `model` pins a formula declares, as
+/// `(step_id, adapter, model)` — the thing that silently stops applying when
+/// the recipe is not in the registry the dispatcher reads.
+fn step_pins(
+    formula: &cosmon_core::formula::Formula,
+) -> Vec<(String, Option<String>, Option<String>)> {
+    formula
+        .steps
+        .iter()
+        .map(|s| (s.id.clone(), s.adapter.clone(), s.model.clone()))
+        .collect()
+}
+
+/// Warn when a germinated node's model/adapter tiering will not survive the
+/// trip to dispatch (task-20260725-eb3b).
+///
+/// A molecule stores its formula by **id**; `cs tackle` resolves that id
+/// against the mission project's `.cosmon/formulas/`. A spore ships its
+/// recipes *in the bundle*, so unless they were copied into that registry the
+/// dispatcher resolves the id to nothing and every pin the spore declares is
+/// inert — observed on a 23-node run where the whole documented
+/// reasoning/build/mechanical tiering never applied and nothing said so.
+///
+/// Two distinct failures, both worth a sentence:
+///
+/// - **absent** — no file of that name in the registry;
+/// - **shadowed** — a file of that name exists but declares *different* pins,
+///   so dispatch honours the registry's recipe, not the bundle's.
+///
+/// Returns `None` when the formula pins nothing (there is nothing to lose) or
+/// when the registry copy agrees with the bundle. This is a warning and not a
+/// refusal on purpose: germinating without pins is a degraded run, not an
+/// invalid one, and the operator may be installing the formulas next.
+fn unreachable_pin_warning(formula: &cosmon_core::formula::Formula) -> Option<String> {
+    pin_warning_against_registry(formula, &cosmon_filestore::resolve_formulas_dir(None))
+}
+
+/// [`unreachable_pin_warning`] against an explicit registry directory — the
+/// whole decision, with the one process-global read (walk-up discovery)
+/// hoisted out so it can be exercised directly.
+fn pin_warning_against_registry(
+    formula: &cosmon_core::formula::Formula,
+    registry_dir: &Path,
+) -> Option<String> {
+    let bundle_pins = step_pins(formula);
+    if bundle_pins
+        .iter()
+        .all(|(_, adapter, model)| adapter.is_none() && model.is_none())
+    {
+        return None;
+    }
+
+    let registry_path = registry_dir.join(format!("{}.formula.toml", formula.name));
+    let remedy = format!(
+        "copy it to {} (or re-run from a project whose registry holds it)",
+        registry_path.display()
+    );
+
+    match std::fs::read_to_string(&registry_path) {
+        Err(_) => Some(format!(
+            "formula `{}` is not in the mission registry {}; the per-step \
+             adapter/model pins it declares will NOT apply at dispatch — every \
+             node will run on the adapter default. Remedy: {remedy}",
+            formula.name,
+            registry_dir.display(),
+        )),
+        Ok(text) => match cosmon_core::formula::Formula::parse(&text) {
+            Ok(registry_formula) if step_pins(&registry_formula) == bundle_pins => None,
+            Ok(_) => Some(format!(
+                "formula `{}` exists in the mission registry ({}) but declares \
+                 different per-step adapter/model pins than the bundle's copy; \
+                 dispatch honours the registry's recipe, not the spore's. \
+                 Remedy: {remedy}",
+                formula.name,
+                registry_path.display(),
+            )),
+            Err(err) => Some(format!(
+                "formula `{}` in the mission registry ({}) failed to parse \
+                 ({err}); the per-step adapter/model pins the bundle declares \
+                 will NOT apply at dispatch. Remedy: {remedy}",
+                formula.name,
+                registry_path.display(),
+            )),
+        },
+    }
+}
+
 /// Mint a per-run germination id: `germ-<YYYYMMDD>-<hex>`.
 ///
 /// The date segment makes a run human-sortable; the entropy suffix makes two
@@ -354,6 +441,10 @@ fn germinate(
     }
     let mut alias_to_id: BTreeMap<String, MoleculeId> = BTreeMap::new();
     let mut results = Vec::with_capacity(calls.len());
+    // Formula names already checked for reachable pins — a spore typically
+    // binds the same recipe on many nodes, and the operator needs the warning
+    // once, not twenty-three times.
+    let mut unpinnable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
 
     for call in calls {
         // Resolve this call's blocked_by aliases to already-germinated IDs.
@@ -371,6 +462,18 @@ fn germinate(
 
         let formula_path = manifest_dir.join(&call.formula);
         let formula = load_formula_at_path(&formula_path)?;
+        // A germinated molecule stores its formula **by id**, and `cs tackle`
+        // resolves that id against the mission project's `.cosmon/formulas/` —
+        // not against this spore directory (task-20260725-eb3b). If the
+        // bundle's formulas were never installed there, every per-step
+        // adapter/model pin the spore ships is unreachable at dispatch and the
+        // run falls back to the adapter default. Say so here, once per
+        // formula, while an operator is still watching the terminal.
+        if unpinnable.insert(formula.name.to_string()) {
+            if let Some(reason) = unreachable_pin_warning(&formula) {
+                eprintln!("warning: {reason}");
+            }
+        }
         let result = nucleate_for_spore(SporeNucleation {
             formula: &formula,
             variables: call.vars.clone().into_iter().collect(),
@@ -1205,6 +1308,91 @@ acceptance = "any evidence"
             dataset["spore:bundleFiles"],
             serde_json::json!(["spore.toml", "work.formula.toml"]),
             "ASTRA must record the coverage set for integrity audit"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Unreachable per-step pins (task-20260725-eb3b)
+    // -----------------------------------------------------------------
+
+    const PINNED: &str = r#"
+formula = "tiered"
+version = 1
+description = "A recipe that tiers its steps by model"
+id_prefix = "ti"
+
+[[steps]]
+id = "think"
+title = "Think"
+description = "Reasoning step."
+acceptance = "Done"
+model = "claude-opus-5"
+"#;
+
+    const UNPINNED: &str = r#"
+formula = "tiered"
+version = 1
+description = "Same recipe, no tiering"
+id_prefix = "ti"
+
+[[steps]]
+id = "think"
+title = "Think"
+description = "Reasoning step."
+acceptance = "Done"
+"#;
+
+    fn parse_formula(text: &str) -> cosmon_core::formula::Formula {
+        cosmon_core::formula::Formula::parse(text).unwrap()
+    }
+
+    /// The observed failure: the bundle tiers its nodes, the mission registry
+    /// has never heard of the recipe, and dispatch would run flat on the
+    /// adapter default without saying so.
+    #[test]
+    fn pins_absent_from_registry_are_reported_with_the_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let warning = pin_warning_against_registry(&parse_formula(PINNED), dir.path())
+            .expect("an absent recipe with pins must warn");
+        assert!(warning.contains("not in the mission registry"), "{warning}");
+        assert!(
+            warning.contains("tiered"),
+            "must name the recipe: {warning}"
+        );
+        assert!(
+            warning.contains("tiered.formula.toml"),
+            "must name the path to install to: {warning}"
+        );
+    }
+
+    /// A recipe that pins nothing loses nothing — warning here would be pure
+    /// noise on every ordinary spore.
+    #[test]
+    fn a_recipe_without_pins_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(pin_warning_against_registry(&parse_formula(UNPINNED), dir.path()).is_none());
+    }
+
+    /// Installed, byte-for-byte in agreement on its pins: nothing to say.
+    #[test]
+    fn a_registry_copy_with_the_same_pins_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiered.formula.toml"), PINNED).unwrap();
+        assert!(pin_warning_against_registry(&parse_formula(PINNED), dir.path()).is_none());
+    }
+
+    /// The subtler harm: a recipe of the same name *is* installed, so nothing
+    /// looks missing, but it declares different pins — dispatch honours the
+    /// registry's copy and the spore's tiering silently does not happen.
+    #[test]
+    fn a_shadowing_registry_copy_with_different_pins_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("tiered.formula.toml"), UNPINNED).unwrap();
+        let warning = pin_warning_against_registry(&parse_formula(PINNED), dir.path())
+            .expect("a shadowing copy with different pins must warn");
+        assert!(
+            warning.contains("different per-step adapter/model pins"),
+            "{warning}"
         );
     }
 }

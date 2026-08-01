@@ -463,7 +463,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     // 2. Load formula for context.
-    let formula = load_formula_for_molecule(&state_dir, &mol);
+    //
+    //    An id that does not resolve is *not* the same as a formula that pins
+    //    nothing (task-20260725-eb3b). The molecule stores its formula by id
+    //    and this resolves it against the mission project's
+    //    `.cosmon/formulas/` — so a spore whose own formulas were never
+    //    installed there loses every per-step adapter/model pin it declares.
+    //    That used to be silent: `Option::None`, then a `Default` fallback
+    //    whose reason read "no formula-step model pin", which is a sentence
+    //    about a formula that was never found. Keep the reason, say it once on
+    //    stderr, and carry it into the recorded selection sources below.
+    let formula_resolution = resolve_formula_for_molecule(&mol);
+    let formula_absence = formula_resolution.absence_reason(mol.formula_id.as_str());
+    if let Some(reason) = formula_absence.as_deref() {
+        eprintln!("warning: {reason}");
+    }
+    let formula = formula_resolution.into_formula();
 
     // Briefless-molecule guard (task-20260711-919a). Refuse to dispatch a
     // molecule whose formula declares required, default-free variables that
@@ -627,6 +642,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         global_adapters.as_ref(),
         &global_cfg_path,
     );
+    let selection_source = sharpen_adapter_fallback(selection_source, formula_absence.as_deref());
     // Compose the full dispatch registry: built-in Adapter names ∪ TOML
     // `[adapters]` extras. ADR-099 / TS-0 — `validate_adapter_name`
     // returns a [`ValidatedAdapterName`] whose only consumer is the
@@ -724,6 +740,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         global_adapters.as_ref(),
         &global_cfg_path,
     );
+    model_source = sharpen_model_fallback(model_source, formula_absence.as_deref());
 
     // 3a''-C4. Fail-closed strong-dispatch ceiling + safe-default guard
     //     (delib-20260704-b476 C4, carnot's safety property + kahneman's
@@ -3063,13 +3080,144 @@ fn try_inject_fleet_briefing(
 // Formula loading
 // ---------------------------------------------------------------------------
 
+/// What resolving a molecule's `formula_id` against the registry actually
+/// found (task-20260725-eb3b).
+///
+/// The distinction is load-bearing and used to be thrown away. A molecule
+/// carries its formula **by id**, and `cs tackle` resolves that id against the
+/// *mission project's* `.cosmon/formulas/` — not against the directory the
+/// polymer germinated from. When a spore ships its own formulas and they were
+/// never installed into that registry, the id resolves to nothing, every
+/// per-step `adapter` / `model` pin the spore declared is unreachable, and the
+/// run silently falls back to the adapter default. Collapsing that case into
+/// `None` made "the formula was never found" indistinguishable from "the
+/// formula deliberately pins nothing" — one is a broken dependency, the other
+/// is a design choice, and the operator was shown the same silence for both.
+///
+/// Observed twice on full-lane spore runs: 23 nodes ran flat on one model
+/// while the `model_selected` event reported `source = default` with a
+/// fallback reason that read "no formula-step model pin".
+enum FormulaResolution {
+    /// The registry held the formula and it parsed.
+    Loaded(Box<Formula>),
+    /// No file at `<formulas_dir>/<id>.formula.toml` — an unresolvable
+    /// reference, not an absent pin.
+    NotFound { path: PathBuf },
+    /// The file exists but could not be read (permissions, a broken symlink).
+    Unreadable { path: PathBuf, error: String },
+    /// The file exists and was read, but is not a valid formula.
+    Unparseable { path: PathBuf, error: String },
+}
+
+impl FormulaResolution {
+    /// The formula, if one was actually loaded.
+    fn into_formula(self) -> Option<Formula> {
+        match self {
+            Self::Loaded(f) => Some(*f),
+            _ => None,
+        }
+    }
+
+    /// Why the id failed to resolve, in one sentence naming the id and the
+    /// path that was searched — or `None` when the formula loaded fine.
+    ///
+    /// This is the sentence that replaces the misleading "no formula-step
+    /// pin" in the recorded `fallback_reason`, and that `cs tackle` prints on
+    /// stderr. Naming the searched path is the whole point: the remedy is to
+    /// install the formula *there*, and an operator who is not told where
+    /// cosmon looked cannot act on the warning.
+    fn absence_reason(&self, formula_id: &str) -> Option<String> {
+        match self {
+            Self::Loaded(_) => None,
+            Self::NotFound { path } => Some(format!(
+                "formula `{formula_id}` not found in the registry (looked for {}); \
+                 every per-step adapter/model pin it declares is unreachable",
+                path.display()
+            )),
+            Self::Unreadable { path, error } => Some(format!(
+                "formula `{formula_id}` could not be read from {} ({error}); \
+                 every per-step adapter/model pin it declares is unreachable",
+                path.display()
+            )),
+            Self::Unparseable { path, error } => Some(format!(
+                "formula `{formula_id}` at {} failed to parse ({error}); \
+                 every per-step adapter/model pin it declares is unreachable",
+                path.display()
+            )),
+        }
+    }
+}
+
+/// Resolve a molecule's `formula_id` against `.cosmon/formulas/`, keeping the
+/// reason on failure.
+///
+/// [`load_formula_for_molecule`] is the `Option` view of this, kept for the
+/// callers that only ask "is there a formula" and have nothing to say about
+/// why there is not.
+fn resolve_formula_for_molecule(mol: &MoleculeData) -> FormulaResolution {
+    let formulas_dir = cosmon_filestore::resolve_formulas_dir(None);
+    let path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id));
+
+    let toml_text = match fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return FormulaResolution::NotFound { path }
+        }
+        Err(err) => {
+            return FormulaResolution::Unreadable {
+                path,
+                error: err.to_string(),
+            }
+        }
+    };
+    match Formula::parse(&toml_text) {
+        Ok(formula) => FormulaResolution::Loaded(Box::new(formula)),
+        Err(err) => FormulaResolution::Unparseable {
+            path,
+            error: err.to_string(),
+        },
+    }
+}
+
 /// Try to load the formula for a molecule from .cosmon/formulas/.
 fn load_formula_for_molecule(_state_dir: &std::path::Path, mol: &MoleculeData) -> Option<Formula> {
-    let formulas_dir = cosmon_filestore::resolve_formulas_dir(None);
-    let formula_path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id));
+    resolve_formula_for_molecule(mol).into_formula()
+}
 
-    let toml_text = fs::read_to_string(&formula_path).ok()?;
-    Formula::parse(&toml_text).ok()
+/// Restate a `Default` adapter fallback in terms of the *real* cause when the
+/// molecule's formula id did not resolve (task-20260725-eb3b).
+///
+/// Only the `Default` variant is touched, and only when the formula failed to
+/// resolve: every other source came from a pin that actually fired, and a
+/// formula that loaded and simply declares no `adapter` is a genuine absence
+/// the existing wording already describes correctly.
+fn sharpen_adapter_fallback(
+    source: AdapterSelectionSource,
+    formula_absence: Option<&str>,
+) -> AdapterSelectionSource {
+    match (source, formula_absence) {
+        (AdapterSelectionSource::Default { fallback_reason }, Some(absence)) => {
+            AdapterSelectionSource::Default {
+                fallback_reason: format!("{absence}; {fallback_reason}"),
+            }
+        }
+        (other, _) => other,
+    }
+}
+
+/// The model sibling of [`sharpen_adapter_fallback`] — same rule, same reason.
+fn sharpen_model_fallback(
+    source: ModelSelectionSource,
+    formula_absence: Option<&str>,
+) -> ModelSelectionSource {
+    match (source, formula_absence) {
+        (ModelSelectionSource::Default { fallback_reason }, Some(absence)) => {
+            ModelSelectionSource::Default {
+                fallback_reason: format!("{absence}; {fallback_reason}"),
+            }
+        }
+        (other, _) => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12122,6 +12270,97 @@ mod tests {
 
         let resolved = resolve_molecule(&store, "idea-to-plan").unwrap();
         assert_eq!(resolved.id.as_str(), "task-20260407-abcd");
+    }
+
+    // -----------------------------------------------------------------
+    // Unresolvable formula id (task-20260725-eb3b)
+    // -----------------------------------------------------------------
+
+    /// The sentence an operator acts on: which id, and where cosmon looked.
+    #[test]
+    fn absence_reason_names_the_id_and_the_searched_path() {
+        let resolution = FormulaResolution::NotFound {
+            path: PathBuf::from("/g/.cosmon/formulas/task-work-reasoning.formula.toml"),
+        };
+        let reason = resolution
+            .absence_reason("task-work-reasoning")
+            .expect("a not-found id must carry a reason");
+        assert!(reason.contains("task-work-reasoning"), "{reason}");
+        assert!(reason.contains("/g/.cosmon/formulas"), "{reason}");
+        assert!(reason.contains("not found in the registry"), "{reason}");
+    }
+
+    /// A parse failure is a third case, and it is not "no pin" either.
+    #[test]
+    fn absence_reason_distinguishes_unparseable_from_missing() {
+        let reason = FormulaResolution::Unparseable {
+            path: PathBuf::from("/g/.cosmon/formulas/x.formula.toml"),
+            error: "expected `formula`".to_owned(),
+        }
+        .absence_reason("x")
+        .expect("an unparseable recipe must carry a reason");
+        assert!(reason.contains("failed to parse"), "{reason}");
+        assert!(reason.contains("expected `formula`"), "{reason}");
+    }
+
+    /// The sharpening is *conditional*: with no absence, the recorded reason
+    /// must come through byte-identical. A deliberate absence of pins is not
+    /// a broken reference and must not read like one.
+    #[test]
+    fn sharpen_is_a_no_op_without_an_absence() {
+        let source = ModelSelectionSource::Default {
+            fallback_reason: "no --model flag, no formula-step model pin".to_owned(),
+        };
+        let sharpened = sharpen_model_fallback(source.clone(), None);
+        assert_eq!(sharpened, source);
+    }
+
+    /// And it prefixes the real cause when there is one, keeping the original
+    /// chain description behind it — the operator wants both "why the floor
+    /// fired" and "what was actually broken".
+    #[test]
+    fn sharpen_prefixes_the_absence_onto_the_default_reason() {
+        let sharpened = sharpen_model_fallback(
+            ModelSelectionSource::Default {
+                fallback_reason: "no --model flag, no formula-step model pin".to_owned(),
+            },
+            Some("formula `t` not found in the registry"),
+        );
+        let ModelSelectionSource::Default { fallback_reason } = sharpened else {
+            panic!("must stay a Default");
+        };
+        assert!(fallback_reason.starts_with("formula `t` not found"));
+        assert!(fallback_reason.contains("no formula-step model pin"));
+    }
+
+    /// A pin that *did* fire is never rewritten — the absence only ever
+    /// explains a floor, and a `FormulaPin` source means the formula resolved.
+    #[test]
+    fn sharpen_leaves_a_real_pin_alone() {
+        let source = ModelSelectionSource::FormulaPin {
+            formula: "t".to_owned(),
+            step_id: "s".to_owned(),
+        };
+        assert_eq!(
+            sharpen_model_fallback(source.clone(), Some("formula `t` not found")),
+            source
+        );
+    }
+
+    /// The adapter axis carries the same rule.
+    #[test]
+    fn sharpen_adapter_prefixes_the_absence_onto_the_default_reason() {
+        let sharpened = sharpen_adapter_fallback(
+            AdapterSelectionSource::Default {
+                fallback_reason: "no --adapter flag".to_owned(),
+            },
+            Some("formula `t` not found in the registry"),
+        );
+        let AdapterSelectionSource::Default { fallback_reason } = sharpened else {
+            panic!("must stay a Default");
+        };
+        assert!(fallback_reason.contains("not found in the registry"));
+        assert!(fallback_reason.contains("no --adapter flag"));
     }
 
     #[test]
