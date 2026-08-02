@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show one provider session, named by its canonical selector
+
+Usage: cs sessions show [OPTIONS] <SELECTOR>
+
+Arguments:
+  <SELECTOR>  The canonical selector, `<provider>:<native-session-id>`
+
+Options:
+      --config <PATH>  Path to configuration file
+      --tail <N>       Print the last N normalised events (kinds and sizes — never content) [default: 0]
+      --no-read        Skip reading the log; show only what discovery already knows
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

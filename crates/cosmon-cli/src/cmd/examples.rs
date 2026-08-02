@@ -558,6 +558,45 @@ files. The seal is a BLAKE3 hash of the body between the frontmatter
 and footer — a trace, not a lock (architectural-invariants.md §8b).
 Promotion never mutates a sealed session — markers are sidecar-only.";
 
+pub const SESSIONS: &str = "EXAMPLES:
+  cs sessions discover                         # provider sessions in this repo
+  cs sessions discover --all --provider codex  # every Codex session on the host
+  cs sessions show claude:4940f28e --tail 5    # one session, named exactly
+  cs sessions attach --role copilot --follow claude-sid \\
+      --as codex:0198aabb --capability observe
+  cs sessions list --role primary              # who holds a seat
+  cs sessions peers                            # who is around me, and which way
+  cs sessions send --to claude-sid --message 'that evidence ref is circular'
+  cs sessions inbox                            # read and consume; --peek to look
+
+HAND-OVER:
+  cs sessions checkpoint publish --mission task-20260731-e4d0 \\
+      --include 'the cockpit' --exclude 'the probe' \\
+      --next 'merge-strategy:deny=do not merge before the doc gate' \\
+      --evidence 'merge-strategy=docs/adr/168.md'
+  cs sessions checkpoint list --mission task-20260731-e4d0
+  cs sessions drift claude-sid codex-sid --mission task-20260731-e4d0
+  cs sessions takeover show    --mission task-20260731-e4d0
+  cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
+  cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
+
+The canonical name of a session is `<provider>:<native-session-id>`, and
+nothing else ever breaks a tie: a title, a cwd and a modification time
+help you recognise a session, never choose one. A selector that matches
+zero or two sessions prints the candidates and refuses.
+
+Exit codes (`drift`, matching `cs diverge`):
+  0    AGREE — the compared positions match
+  1    FINDING — a decidable test fired, both sides cited
+  2    INCONCLUSIVE — not comparable; never rendered as agreement
+
+Authority is a lease with an epoch (ADR-168 §D6). A co-pilot may
+observe, message and checkpoint; only the operator grants the controls,
+and no quota reading transfers them.
+
+SEE ALSO: cs presence (the substrate), cs session (operator carnet),
+cs pilot (cognitive REPL), cs diverge.";
+
 pub const DAEMONS: &str = "IMAGE:
   cosmon-daemon-supervisor is the night watchman. It does not look at
   the clock. It looks at the dogs — processes that must always be

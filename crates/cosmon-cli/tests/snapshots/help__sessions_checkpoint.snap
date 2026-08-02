@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Publish and read hand-over checkpoints
+
+Usage: cs sessions checkpoint [OPTIONS] <COMMAND>
+
+Commands:
+  publish  Publish this pilot's hand-over record for a mission
+  list     List the checkpoints published for a mission
+  show     Show one checkpoint in full
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

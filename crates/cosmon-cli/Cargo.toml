@@ -53,6 +53,11 @@ cosmon-provider.workspace = true
 cosmon-agent-harness.workspace = true
 cosmon-ops-tools.workspace = true
 cosmon-pilot.workspace = true
+# `cs sessions` (mission co-pilotage M5) is the cockpit that composes M1's
+# provider-neutral session probe and M3's checkpoint/drift core. Both are
+# libraries with no CLI of their own — this is the crate that gives them one.
+cosmon-session-probe.workspace = true
+cosmon-pilot-checkpoint.workspace = true
 cosmon-process-witness.workspace = true
 # `cs pilot --remote` resolves a cosmon-remote profile + mints/loads a JWT,
 # then hands the (host, token) to the remote `cosmon-ops-tools` backend.

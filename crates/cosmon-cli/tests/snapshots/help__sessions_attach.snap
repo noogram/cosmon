@@ -1,0 +1,24 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Take a seat: publish this session's presence, role and `follows`
+
+Usage: cs sessions attach [OPTIONS]
+
+Options:
+      --config <PATH>             Path to configuration file
+      --role <ROLE>               Seat to take: `copilot` (default) or `primary`. A primary seat is checked against the mission's lease ledger and refused if it is not this session's to take [default: copilot]
+      --follow <SID_OR_SELECTOR>  The pilot this session is co-piloting — a cosmon session id, or a `<provider>:<native-session-id>` selector that a live pilot advertises
+  -v, --verbose                   Enable verbose output
+      --json                      Output in JSON format
+      --session <SID>             This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
+      --as <SELECTOR>             The provider session this pilot is driving, as a canonical selector. Equivalent to `--provider` + `--native-session-id`
+      --provider <NAME>           Provider half of this session's key, when not using `--as`
+      --native-session-id <ID>    Native id half of this session's key, when not using `--as`
+      --mission <MOLECULE_ID>     Mission this seat is about. Required for a primary seat
+      --epoch <N>                 The lease epoch this pilot believes it holds. Required for a primary seat: a claim that names no generation is not a claim
+      --capability <TOKEN>        A capability this pilot advertises. Repeatable
+      --headline <HEADLINE>       One line describing what this pilot is doing
+      --galaxy <GALAXY>           Galaxy label to record [default: cosmon]
+  -h, --help                      Print help

@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Read this session's envelopes, acknowledging what it consumed
+
+Usage: cs sessions inbox [OPTIONS]
+
+Options:
+      --config <PATH>       Path to configuration file
+      --session <SID>       Mailbox to read. Defaults to `$COSMON_SESSION_ID`
+      --peek                Show pending envelopes without acknowledging them
+  -v, --verbose             Enable verbose output
+      --all                 Include already-acknowledged envelopes
+      --json                Output in JSON format
+      --follow              Keep reading, printing each envelope as it arrives, until interrupted
+      --interval <SECONDS>  Seconds between polls under `--follow` [default: 2]
+  -h, --help                Print help

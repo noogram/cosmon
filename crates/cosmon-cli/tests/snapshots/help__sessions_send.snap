@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Send one traced message envelope to another pilot
+
+Usage: cs sessions send [OPTIONS] --to <SID_OR_SELECTOR> --message <TEXT>
+
+Options:
+      --config <PATH>         Path to configuration file
+      --to <SID_OR_SELECTOR>  Destination — a cosmon session id, or a selector a live pilot advertises
+      --message <TEXT>        The message. Stored content-addressed; the envelope carries its hash
+  -v, --verbose               Enable verbose output
+      --from <SID>            Sender session id. Defaults to `$COSMON_SESSION_ID`
+      --json                  Output in JSON format
+      --expires-in <SECONDS>  Seconds after which an unread envelope reads as `expired` rather than as a fresh instruction
+  -h, --help                  Print help

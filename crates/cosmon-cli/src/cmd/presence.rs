@@ -311,15 +311,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 }
 
-fn state_root(ctx: &Context) -> PathBuf {
+/// The cosmon state root these registries live under.
+///
+/// `pub(crate)` because `cs sessions` (M5) composes the same stores rather
+/// than re-deriving where they are. One writer of a path, many readers.
+pub(crate) fn state_root(ctx: &Context) -> PathBuf {
     ctx.config.clone().unwrap_or_else(super::default_state_dir)
 }
 
-fn store(ctx: &Context) -> PresenceStore {
+pub(crate) fn store(ctx: &Context) -> PresenceStore {
     PresenceStore::new(state_root(ctx))
 }
 
-fn mailbox(ctx: &Context) -> PilotMailbox {
+pub(crate) fn mailbox(ctx: &Context) -> PilotMailbox {
     PilotMailbox::new(state_root(ctx))
 }
 
@@ -328,7 +332,7 @@ fn mailbox(ctx: &Context) -> PilotMailbox {
 /// An unrecognised token is an **error**, not a fallback to `copilot`. A
 /// silent fallback would turn `--role primry` into a demotion the operator
 /// never sees; fail-closed means refusing the gesture, not guessing at it.
-fn parse_role(raw: &str) -> anyhow::Result<PilotRole> {
+pub(crate) fn parse_role(raw: &str) -> anyhow::Result<PilotRole> {
     match raw {
         "primary" => Ok(PilotRole::Primary),
         "copilot" => Ok(PilotRole::Copilot),
@@ -411,6 +415,43 @@ fn resolve_seat(
 }
 
 fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
+    let presence = ping(ctx, args)?;
+
+    if ctx.json {
+        let v = serde_json::to_value(&presence)?;
+        println!("{v}");
+    } else {
+        let selector = presence
+            .selector()
+            .map_or_else(String::new, |s| format!(" [{s}]"));
+        let follows = presence
+            .follows
+            .as_ref()
+            .map_or_else(String::new, |f| format!(" follows={}", f.as_str()));
+        println!(
+            "presence ping: {sid} in {galaxy} (pid={pid}) role={role}{selector}{follows}",
+            sid = presence.session_id.as_str(),
+            galaxy = presence.galaxy,
+            pid = presence.pid,
+            role = presence.role.as_str(),
+        );
+    }
+    Ok(())
+}
+
+/// Write this session's presence snapshot and return what actually landed.
+///
+/// The seat is resolved against the lease ledger *before* the write, so the
+/// returned [`Presence`] is the truth on disk and not the claim that was made
+/// — a caller rendering it cannot accidentally announce a primary the ledger
+/// refused. The demotion notice goes to stderr here rather than at a
+/// call-site, because every surface that pings owes the pilot that sentence.
+///
+/// # Errors
+///
+/// Propagates id, role and epoch parse failures, an explicitly-claimed primary
+/// seat the ledger refuses, and filesystem errors from the presence store.
+pub(crate) fn ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<Presence> {
     let session_id = resolve_or_derive_sid(args.session.as_deref())?;
     let now = Utc::now();
     let store = store(ctx);
@@ -495,27 +536,7 @@ fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
             sid = presence.session_id.as_str(),
         );
     }
-
-    if ctx.json {
-        let v = serde_json::to_value(&presence)?;
-        println!("{v}");
-    } else {
-        let selector = presence
-            .selector()
-            .map_or_else(String::new, |s| format!(" [{s}]"));
-        let follows = presence
-            .follows
-            .as_ref()
-            .map_or_else(String::new, |f| format!(" follows={}", f.as_str()));
-        println!(
-            "presence ping: {sid} in {galaxy} (pid={pid}) role={role}{selector}{follows}",
-            sid = presence.session_id.as_str(),
-            galaxy = presence.galaxy,
-            pid = presence.pid,
-            role = presence.role.as_str(),
-        );
-    }
-    Ok(())
+    Ok(presence)
 }
 
 fn run_ls(ctx: &Context, args: &LsArgs) -> anyhow::Result<()> {
@@ -662,35 +683,8 @@ fn clamp_seek(seek: usize, content: &str) -> usize {
 // ---------------------------------------------------------------------------
 
 fn run_send(ctx: &Context, args: &SendArgs) -> anyhow::Result<()> {
-    let to = SessionId::new(args.to.clone())?;
-    let from = match &args.from {
-        Some(s) => SessionId::new(s.clone())?,
-        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
-            anyhow::anyhow!("no sender — pass --from <SID> or export COSMON_SESSION_ID")
-        })?,
-    };
-
-    // The body is content-addressed, so the envelope stays one `jq`-readable
-    // line no matter how long a checkpoint gets (ADR-168 §D5).
-    let cas = FileCas::new(state_root(ctx).join("cas"));
-    let hash = cas.put(args.message.as_bytes())?;
-
-    let mailbox = mailbox(ctx);
-    let now = Utc::now();
-    let sequence = mailbox.next_sequence(&to)?;
-    let expires_at = args
-        .expires_in
-        .map(|secs| now + chrono::Duration::seconds(secs));
-    let message = PilotMessage::new(
-        from,
-        to.clone(),
-        sequence,
-        format!("cas/{}/{}", hash.prefix(), hash.as_str()),
-        hash.as_str(),
-        now,
-        expires_at,
-    );
-    let written = mailbox.deliver(&message)?;
+    let (message, written) = deliver(ctx, args)?;
+    let to = &message.to;
 
     if ctx.json {
         let out = serde_json::json!({
@@ -720,7 +714,69 @@ fn run_send(ctx: &Context, args: &SendArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
+/// Content-address the body, envelope it, and append it to the destination's
+/// mailbox. Returns the envelope and whether this call is the one that wrote
+/// it — a redelivery of an identical envelope is a no-op, which is what makes
+/// consumption idempotent (MESSAGE-TRACE).
+///
+/// # Errors
+///
+/// Propagates id parse failures, a missing sender identity, and filesystem
+/// errors from the CAS or the mailbox.
+pub(crate) fn deliver(ctx: &Context, args: &SendArgs) -> anyhow::Result<(PilotMessage, bool)> {
+    let to = SessionId::new(args.to.clone())?;
+    let from = match &args.from {
+        Some(s) => SessionId::new(s.clone())?,
+        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
+            anyhow::anyhow!("no sender — pass --from <SID> or export COSMON_SESSION_ID")
+        })?,
+    };
+
+    // The body is content-addressed, so the envelope stays one `jq`-readable
+    // line no matter how long a checkpoint gets (ADR-168 §D5).
+    let cas = FileCas::new(state_root(ctx).join("cas"));
+    let hash = cas.put(args.message.as_bytes())?;
+
+    let mailbox = mailbox(ctx);
+    let now = Utc::now();
+    let sequence = mailbox.next_sequence(&to)?;
+    let expires_at = args
+        .expires_in
+        .map(|secs| now + chrono::Duration::seconds(secs));
+    let message = PilotMessage::new(
+        from,
+        to.clone(),
+        sequence,
+        format!("cas/{}/{}", hash.prefix(), hash.as_str()),
+        hash.as_str(),
+        now,
+        expires_at,
+    );
+    let written = mailbox.deliver(&message)?;
+    Ok((message, written))
+}
+
+/// One envelope as a reader sees it: the mailbox entry and its body, when the
+/// body could be loaded from the CAS.
+pub(crate) type RenderedMessage = (cosmon_filestore::MailboxEntry, Option<String>);
+
+/// Read a session's mailbox and resolve every body, **without** acknowledging
+/// anything.
+///
+/// Reading and acknowledging are two calls on purpose: an ack claims the
+/// reader has the text, so it may only happen after the text has left the
+/// process. Every surface that consumes this channel owes the same ordering,
+/// and splitting the pair is what lets `cs sessions inbox` inherit it instead
+/// of re-deriving it (ADR-168 §D4, probe P3).
+///
+/// # Errors
+///
+/// Propagates a missing session identity and filesystem errors from the
+/// mailbox.
+pub(crate) fn collect_inbox(
+    ctx: &Context,
+    args: &InboxArgs,
+) -> anyhow::Result<(SessionId, Vec<RenderedMessage>)> {
     let sid = resolve_sid_for_poll(&PollArgs {
         session: args.session.clone(),
     })?;
@@ -736,15 +792,46 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
 
     // Read the bodies before acknowledging anything: an ack claims the reader
     // has the text, and a body that cannot be loaded means it does not.
-    let mut rendered: Vec<(&cosmon_filestore::MailboxEntry, Option<String>)> =
-        Vec::with_capacity(entries.len());
-    for e in &entries {
+    let mut rendered: Vec<RenderedMessage> = Vec::with_capacity(entries.len());
+    for e in entries {
         let body = cas
             .get(&ContentHash::new(e.message.payload_hash.clone())?)
             .ok()
             .and_then(|b| String::from_utf8(b).ok());
         rendered.push((e, body));
     }
+    Ok((sid, rendered))
+}
+
+/// Acknowledge every envelope whose body the caller has actually emitted.
+///
+/// An envelope whose payload could not be read is left pending: leaving it to
+/// be redelivered is the honest state, and at-least-once is the guarantee
+/// this channel makes.
+///
+/// # Errors
+///
+/// Propagates filesystem errors from the mailbox's ack ledger.
+pub(crate) fn ack_consumed(
+    ctx: &Context,
+    sid: &SessionId,
+    rendered: &[RenderedMessage],
+) -> anyhow::Result<()> {
+    let mailbox = mailbox(ctx);
+    let now = Utc::now();
+    for (e, body) in rendered {
+        if body.is_none() {
+            continue;
+        }
+        if e.read_at.is_none() {
+            mailbox.ack(sid, &e.message.id, now)?;
+        }
+    }
+    Ok(())
+}
+
+fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
+    let (sid, rendered) = collect_inbox(ctx, args)?;
 
     if ctx.json {
         let mut out = std::io::stdout().lock();
@@ -786,16 +873,7 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
     // ack entirely, which is how an operator looks without consuming.
     std::io::stdout().flush().ok();
     if !args.peek {
-        for (e, body) in &rendered {
-            if body.is_none() {
-                // An envelope whose body we could not read has not been
-                // consumed. Leaving it pending is the honest state.
-                continue;
-            }
-            if e.read_at.is_none() {
-                mailbox.ack(&sid, &e.message.id, now)?;
-            }
-        }
+        ack_consumed(ctx, &sid, &rendered)?;
     }
     Ok(())
 }
@@ -804,7 +882,7 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
 // The PRIMARY lease — authority, and its supervised transfer (M4)
 // ---------------------------------------------------------------------------
 
-fn leases(ctx: &Context) -> PilotLeaseStore {
+pub(crate) fn leases(ctx: &Context) -> PilotLeaseStore {
     PilotLeaseStore::new(state_root(ctx))
 }
 
@@ -910,27 +988,7 @@ fn run_lease_show(ctx: &Context, args: &LeaseShowArgs) -> anyhow::Result<()> {
 }
 
 fn run_lease_request(ctx: &Context, args: &LeaseRequestArgs) -> anyhow::Result<()> {
-    let requester = match &args.from {
-        Some(s) => SessionId::new(s.clone())?,
-        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
-            anyhow::anyhow!("no requester — pass --from <SID> or export COSMON_SESSION_ID")
-        })?,
-    };
-    let candidate = match &args.to {
-        Some(s) => SessionId::new(s.clone())?,
-        None => requester.clone(),
-    };
-    let store = leases(ctx);
-    let observed = store.current(&args.mission)?;
-    let request = LeaseRequest::new(
-        args.mission.clone(),
-        candidate,
-        requester,
-        observed.as_ref(),
-        Utc::now(),
-        args.reason.clone(),
-    );
-    let written = store.request(&request)?;
+    let (request, written) = request_lease(ctx, args)?;
 
     if ctx.json {
         let v = serde_json::json!({
@@ -955,7 +1013,72 @@ fn run_lease_request(ctx: &Context, args: &LeaseRequestArgs) -> anyhow::Result<(
     Ok(())
 }
 
+/// Record a pilot's ask for the controls. Returns the request and whether this
+/// call is the one that wrote it.
+///
+/// This confers no authority whatsoever, by construction: it appends to the
+/// requests file, and the authority ledger is a different file only an
+/// operator's grant appends to (ADR-168 §D5).
+///
+/// # Errors
+///
+/// Propagates id parse failures, a missing requester identity, and filesystem
+/// errors from the lease store.
+pub(crate) fn request_lease(
+    ctx: &Context,
+    args: &LeaseRequestArgs,
+) -> anyhow::Result<(LeaseRequest, bool)> {
+    let requester = match &args.from {
+        Some(s) => SessionId::new(s.clone())?,
+        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
+            anyhow::anyhow!("no requester — pass --from <SID> or export COSMON_SESSION_ID")
+        })?,
+    };
+    let candidate = match &args.to {
+        Some(s) => SessionId::new(s.clone())?,
+        None => requester.clone(),
+    };
+    let store = leases(ctx);
+    let observed = store.current(&args.mission)?;
+    let request = LeaseRequest::new(
+        args.mission.clone(),
+        candidate,
+        requester,
+        observed.as_ref(),
+        Utc::now(),
+        args.reason.clone(),
+    );
+    let written = store.request(&request)?;
+    Ok((request, written))
+}
+
 fn run_lease_grant(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<()> {
+    let lease = grant_lease(ctx, args)?;
+
+    if ctx.json {
+        println!("{}", serde_json::to_string(&lease)?);
+    } else {
+        println!(
+            "lease {mission}: {holder} is PRIMARY at epoch {epoch} — every earlier epoch \
+             is now refused",
+            mission = args.mission.as_str(),
+            holder = lease.holder_session_id.as_str(),
+            epoch = lease.epoch,
+        );
+    }
+    Ok(())
+}
+
+/// The operator gesture: seat a session as PRIMARY at the next epoch.
+///
+/// One append to the grants ledger, which is what makes a transfer atomic —
+/// there is no half-transferred state a crash could leave behind.
+///
+/// # Errors
+///
+/// Propagates an unknown request id, a grant naming neither a request nor a
+/// session, and filesystem errors from the lease store.
+pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<PilotLease> {
     let store = leases(ctx);
     let now = Utc::now();
 
@@ -985,7 +1108,7 @@ fn run_lease_grant(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<()> {
     let epoch = store.next_epoch(&args.mission)?;
     let mut lease = PilotLease::new(
         args.mission.clone(),
-        holder.clone(),
+        holder,
         epoch,
         args.granted_by
             .clone()
@@ -999,18 +1122,7 @@ fn run_lease_grant(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<()> {
         lease = lease.answering(r);
     }
     store.grant(&lease)?;
-
-    if ctx.json {
-        println!("{}", serde_json::to_string(&lease)?);
-    } else {
-        println!(
-            "lease {mission}: {holder} is PRIMARY at epoch {epoch} — every earlier epoch \
-             is now refused",
-            mission = args.mission.as_str(),
-            holder = holder.as_str(),
-        );
-    }
-    Ok(())
+    Ok(lease)
 }
 
 /// The guard, exposed as a verb. Exits 0 when the gesture may proceed and 1
@@ -1059,7 +1171,7 @@ fn run_lease_check(ctx: &Context, args: &LeaseCheckArgs) -> anyhow::Result<()> {
 /// Resolve a session id for `ping`: explicit `--session` wins, then
 /// `$COSMON_SESSION_ID`, then `$CLAUDE_SESSION_ID`, then a stable
 /// tty-hash fallback so two shells in different tabs get distinct ids.
-fn resolve_or_derive_sid(explicit: Option<&str>) -> anyhow::Result<SessionId> {
+pub(crate) fn resolve_or_derive_sid(explicit: Option<&str>) -> anyhow::Result<SessionId> {
     if let Some(s) = explicit {
         return Ok(SessionId::new(s)?);
     }
@@ -1077,7 +1189,7 @@ fn resolve_or_derive_sid(explicit: Option<&str>) -> anyhow::Result<SessionId> {
 /// Resolve a session id for `poll` — same precedence as `ping` but the
 /// tty-hash fallback is not used (poll is always driven by a hook that
 /// already knows the id).
-fn resolve_sid_for_poll(args: &PollArgs) -> anyhow::Result<SessionId> {
+pub(crate) fn resolve_sid_for_poll(args: &PollArgs) -> anyhow::Result<SessionId> {
     if let Some(s) = &args.session {
         return Ok(SessionId::new(s.clone())?);
     }
@@ -1177,7 +1289,7 @@ fn read_seek(path: &Path) -> usize {
         .unwrap_or(0)
 }
 
-fn format_age(now: DateTime<Utc>, heartbeat: DateTime<Utc>) -> String {
+pub(crate) fn format_age(now: DateTime<Utc>, heartbeat: DateTime<Utc>) -> String {
     let d = now - heartbeat;
     let secs = d.num_seconds();
     if secs < 60 {

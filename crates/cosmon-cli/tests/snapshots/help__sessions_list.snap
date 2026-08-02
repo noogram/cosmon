@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+List the cosmon pilots present in the registry
+
+Usage: cs sessions list [OPTIONS]
+
+Options:
+      --config <PATH>    Path to configuration file
+      --galaxy <GALAXY>  Filter to one galaxy
+      --role <ROLE>      Show only pilots in this seat (`primary` or `copilot`)
+  -v, --verbose          Enable verbose output
+      --follows <SID>    Show only pilots co-piloting this session
+      --json             Output in JSON format
+      --all              Include snapshots whose heartbeat has gone stale
+  -h, --help             Print help

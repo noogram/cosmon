@@ -1,0 +1,21 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
+
+Usage: cs sessions drift [OPTIONS] --mission <MOLECULE_ID> <SESSION_A> <SESSION_B>
+
+Arguments:
+  <SESSION_A>  The first session
+  <SESSION_B>  The second session
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  The mission both sides checkpointed
+      --checkpoint <latest>    Which checkpoint of each session to compare. Only `latest` is a selector; name an exact record with `--checkpoint-a` / `--checkpoint-b` [default: latest]
+  -v, --verbose                Enable verbose output
+      --checkpoint-a <ID>      Exact checkpoint id for side A
+      --json                   Output in JSON format
+      --checkpoint-b <ID>      Exact checkpoint id for side B
+  -h, --help                   Print help

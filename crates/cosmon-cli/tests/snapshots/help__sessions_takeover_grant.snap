@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Operator gesture: hand the controls over at the next epoch
+
+Usage: cs sessions takeover grant [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  Mission whose controls are being handed over
+      --request <REQUEST_ID>   Request being answered. The holder is taken from the request
+  -v, --verbose                Enable verbose output
+      --json                   Output in JSON format
+      --to <SID>               Session to seat, when granting without a request
+      --ttl <SECONDS>          Seconds after which the lease authorises nothing
+      --by <NAME>              Operator identity to record. Defaults to `$USER`
+  -h, --help                   Print help

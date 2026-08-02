@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Show one checkpoint in full
+
+Usage: cs sessions checkpoint show [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  The mission the checkpoint belongs to
+      --id <ID>                The checkpoint id. Omit to take the latest published by `--session`
+  -v, --verbose                Enable verbose output
+      --json                   Output in JSON format
+      --session <SID>          The publishing session, when selecting by recency rather than by id
+  -h, --help                   Print help
