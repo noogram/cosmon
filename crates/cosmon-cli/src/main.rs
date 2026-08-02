@@ -392,7 +392,7 @@ enum Command {
     #[command(after_help = cmd::examples::WHISPER)]
     Whisper(cmd::whisper::Args),
 
-    /// Presence — live-session registry (ping / ls / gc / poll)
+    /// Presence — live-session registry (ping / ls / gc / poll / send / inbox)
     #[command(after_help = cmd::examples::PRESENCE, hide = true)]
     Presence(cmd::presence::Args),
 

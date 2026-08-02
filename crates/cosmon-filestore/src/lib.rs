@@ -33,9 +33,11 @@
 
 pub mod cas;
 pub mod event;
+pub mod pilot_mailbox;
 pub mod presence_store;
 pub mod resolve;
 
+pub use pilot_mailbox::{MailboxEntry, MessageAck, PilotMailbox};
 pub use presence_store::PresenceStore;
 
 use std::collections::HashMap;
