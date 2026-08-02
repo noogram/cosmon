@@ -34,7 +34,7 @@ kill_switch = "{ks}"
 
 [[daemon]]
 name = "{name}"
-binary = "/bin/sh"
+binary = "sh"
 args = ["-c", "{script}"]
 throttle_seconds = 0
 enabled = true

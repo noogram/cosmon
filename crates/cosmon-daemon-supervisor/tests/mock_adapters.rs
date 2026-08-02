@@ -156,7 +156,7 @@ impl StatePort for MockStatePort {
 fn sample_spec(name: &str) -> DaemonSpec {
     DaemonSpec {
         name: name.into(),
-        binary: "/bin/true".into(),
+        binary: "true".into(),
         args: vec![],
         throttle_seconds: 5,
         env: BTreeMap::new(),

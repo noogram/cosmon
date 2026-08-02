@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use cosmon_daemon_supervisor::{ChildStatus, Supervisor};
 
-/// Two daemons: one with a definitely-missing binary, one with `/bin/sleep`.
+/// Two daemons: one with a definitely-missing binary, one with a PATH-resolved `sleep`.
 ///
 /// We pick `/no/such/binary/cosmon-supervisor-test` deliberately so the path
 /// can never be a partial match for something on the host PATH.
@@ -46,7 +46,7 @@ enabled = true
 
 [[daemon]]
 name = "healthy-sleeper"
-binary = "/bin/sleep"
+binary = "sleep"
 args = ["600"]
 throttle_seconds = 30
 enabled = true
