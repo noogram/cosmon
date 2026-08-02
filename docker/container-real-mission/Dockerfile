@@ -140,6 +140,17 @@ RUN curl -fsSL https://claude.ai/install.sh -o /tmp/claude-install.sh \
     && chmod -R a+rX /usr/local/bin \
     && claude --version
 
+# The mission directory the walkthrough works in, created here — at build
+# time, by root, once — rather than by a root `docker exec` the reader has to
+# remember at run time. Issue #32 measured what its absence costs: the guide
+# told the reader to open the shell with `-w /srv/mission` and then, once
+# inside, to `mkdir -p /srv/mission`. Neither can run first, and uid 10001
+# cannot write into a root-owned `/srv` at all, so a reader following the page
+# in order was stopped at both ends. Shipping the directory already owned by
+# the uid that will fill it is the same rule as ADR-165: the resource is
+# created under the identity that consumes it, and nothing is handed over.
+RUN mkdir -p /srv/mission && chown 10001:10001 /srv/mission
+
 WORKDIR /work
 
 COPY docker/container-real-mission/in-container-mission.sh \
