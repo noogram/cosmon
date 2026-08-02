@@ -82,7 +82,11 @@ pub struct Args {
     #[arg(long)]
     pub permission_mode: Option<String>,
 
-    /// Kill existing tmux session and respawn (instead of attaching).
+    /// Reclaim the molecule's tmux session and respawn (instead of
+    /// reporting the running one). Also thaws a frozen molecule: the
+    /// respawned worker is live, so the molecule reads `running` again.
+    /// A session left behind by a dead worker is reclaimed without this
+    /// flag — there is nothing there to protect.
     #[arg(long)]
     pub force: bool,
 
@@ -1341,7 +1345,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let wid = cosmon_core::id::WorkerId::new(&session_name)?;
 
     // Idempotency: if a session already exists, handle it.
-    let already_running = backend.is_alive(&wid).unwrap_or(false);
+    //
+    // Two different questions, and COSMON #35 §3 is what happens when only the
+    // first is asked. `is_alive` filters out a session whose pane has died,
+    // which is right for "is a worker running here?" and wrong for "is this
+    // name free?" — tmux keeps the nameplate, and `new-session` then refuses
+    // the respawn with `duplicate session`. The reporter's recovery deadlocked
+    // exactly there: patrol froze the molecule, `cs tackle --force` skipped
+    // the teardown because the dead session read as not-alive, and the spawn
+    // collided with the carcass patrol had left standing. Only an undocumented
+    // `tmux -L <socket> kill-session` — whose socket name the operator had to
+    // dig out of the process table — unblocked it.
+    let session_present = backend.session_exists(&session_name).unwrap_or(false);
+    let already_running = session_present && backend.is_alive(&wid).unwrap_or(false);
     if already_running && !args.force {
         report_existing_session(
             ctx,
@@ -1353,9 +1369,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if already_running {
-        let _ = backend.terminate(&wid);
-        std::thread::sleep(std::time::Duration::from_millis(300));
+    if session_present {
+        // Reclaim the seat. A live session is only torn down under `--force`
+        // (the branch above returned otherwise); a carcass is torn down
+        // unconditionally, because there is nothing left in it to protect and
+        // leaving it standing is the deadlock itself.
+        if !already_running {
+            eprintln!(
+                "cs tackle: reclaiming dead tmux session `{session_name}` \
+                 (no live pane behind it) before respawning {mol_id}."
+            );
+        }
+        reclaim_tmux_session(&backend, &session_name, &socket)?;
     }
 
     // Compute molecule state directory so the worker can access it without
@@ -4774,6 +4799,55 @@ fn install_session_hook(worktree_path: &Path, mol_id: &str) {
 // ---------------------------------------------------------------------------
 // Session helpers
 // ---------------------------------------------------------------------------
+
+/// How long to wait for tmux to actually release a session name after
+/// `kill-session` returns. Teardown is asynchronous on the server side; a
+/// respawn issued the same millisecond can still collide.
+const SESSION_RECLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Tear down the tmux session occupying `session_name` and wait until the
+/// name is genuinely free.
+///
+/// **Why this is a refusal and not a best-effort (COSMON #35 §3).** The old
+/// code killed the session, slept 300 ms, and spawned regardless. When the
+/// kill did not take, the operator got `tmux new-session failed: duplicate
+/// session` — a message naming neither the socket nor the remedy — and the
+/// documented recovery (`cs tackle --force`) could not be completed without
+/// an undocumented `tmux kill-session` on a socket they had to reverse out of
+/// the process table. Here the collision is either resolved or reported with
+/// both names in hand.
+fn reclaim_tmux_session(
+    backend: &TmuxBackend,
+    session_name: &str,
+    socket: &str,
+) -> anyhow::Result<()> {
+    use cosmon_core::transport::TransportBackend as _;
+
+    backend.terminate_session(session_name).map_err(|e| {
+        anyhow::anyhow!(
+            "cs tackle: could not tear down the existing tmux session \
+             `{session_name}` on socket `{socket}` ({e}). Free it with \
+             `tmux -L {socket} kill-session -t ={session_name}` and retry."
+        )
+    })?;
+
+    let deadline = std::time::Instant::now() + SESSION_RECLAIM_TIMEOUT;
+    loop {
+        if !backend.session_exists(session_name).unwrap_or(false) {
+            return Ok(());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(anyhow::anyhow!(
+                "cs tackle: tmux session `{session_name}` on socket `{socket}` \
+                 survived its teardown and still holds the name, so the respawn \
+                 would fail with `duplicate session`. It is most likely attached \
+                 elsewhere; detach it, or free it with \
+                 `tmux -L {socket} kill-session -t ={session_name}`, then retry."
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
 
 /// Report that a session already exists (idempotent success).
 fn report_existing_session(

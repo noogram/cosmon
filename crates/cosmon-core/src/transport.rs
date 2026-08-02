@@ -186,6 +186,49 @@ pub trait TransportBackend {
         id: &WorkerId,
         timeout: std::time::Duration,
     ) -> Result<bool, TransportError>;
+
+    /// Whether a session with this exact **name** is present on the backend,
+    /// regardless of whether anything is still running behind it.
+    ///
+    /// This is deliberately not [`is_alive`](Self::is_alive). Liveness answers
+    /// "is there a worker here?"; presence answers "is this name taken?" —
+    /// and only the second one predicts whether a spawn will collide. tmux
+    /// keeps a session listed after its wrapped process dies (a `pane_dead`
+    /// carcass under `remain-on-exit`), so the two verdicts disagree exactly
+    /// in the crash-recovery case: `is_alive` says *false*, the name is still
+    /// taken, and `new-session` fails with `duplicate session` (COSMON #35 §3).
+    /// A caller deciding whether to reclaim a seat must ask this one.
+    ///
+    /// The default implementation falls back to liveness, which is correct for
+    /// any backend that cannot hold a nameplate without a process behind it
+    /// (the in-memory mock, an in-process harness).
+    ///
+    /// # Errors
+    /// Returns [`TransportError::Io`] if the backend cannot be queried, or if
+    /// `session_name` is not a well-formed worker name.
+    fn session_exists(&self, session_name: &str) -> Result<bool, TransportError> {
+        let id = WorkerId::new(session_name).map_err(|e| TransportError::Io(e.to_string()))?;
+        self.is_alive(&id)
+    }
+
+    /// Tear down the session named `session_name`, live or not, and report
+    /// success when the name is free afterwards.
+    ///
+    /// The name-addressed sibling of [`terminate`](Self::terminate), and
+    /// **idempotent**: an already-absent session is `Ok(())`, not an error.
+    /// `terminate` resolves the target through the live-session listing, so it
+    /// cannot reach a dead-pane carcass — which is the one thing standing
+    /// between a crashed worker and its respawn.
+    ///
+    /// # Errors
+    /// Returns [`TransportError::Io`] if the teardown itself fails.
+    fn terminate_session(&self, session_name: &str) -> Result<(), TransportError> {
+        let id = WorkerId::new(session_name).map_err(|e| TransportError::Io(e.to_string()))?;
+        match self.terminate(&id) {
+            Err(TransportError::NotFound(_)) => Ok(()),
+            other => other,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

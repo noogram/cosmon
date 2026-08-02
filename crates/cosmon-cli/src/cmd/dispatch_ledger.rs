@@ -121,9 +121,17 @@ pub struct DispatchRecord<'a> {
 /// return the token that authorises the spawn.
 ///
 /// Performs, under the fleet lock, exactly what `cs tackle` used to perform
-/// after the spawn: flip `Pending`/`Queued` → `Running`, bind the process
-/// record, stamp the anti-preemption claim, save the molecule, and register
-/// the worker in `fleet.json` (which emits `WorkerSpawned`).
+/// after the spawn: flip `Pending`/`Queued`/`Frozen` → `Running`, bind the
+/// process record, stamp the anti-preemption claim, save the molecule, and
+/// register the worker in `fleet.json` (which emits `WorkerSpawned`).
+///
+/// `Frozen` is in that set because a recorded dispatch *is* a thaw (COSMON #35
+/// §4). Freezing is how patrol parks work whose worker died; the respawn that
+/// picks it back up leaves a live worker attached to a molecule that reads
+/// `frozen`, which `cs peek` renders as `◉ stuck` while the pane produces
+/// output. Liveness that is wrong in the reassuring direction (§1) and wrong
+/// in the alarming direction (§4) costs the same thing: an operator who cannot
+/// use recorded state to decide anything.
 ///
 /// The PID witness is deliberately absent here — a process id is not
 /// knowable before the process exists. [`stamp_pid_witness`] adds it after
@@ -160,7 +168,10 @@ pub fn commit_dispatch(
     let mol_id = mol.id.clone();
     let _g = store.lock_fleet()?;
     let mut updated = mol.clone();
-    if updated.status == MoleculeStatus::Pending || updated.status == MoleculeStatus::Queued {
+    if matches!(
+        updated.status,
+        MoleculeStatus::Pending | MoleculeStatus::Queued | MoleculeStatus::Frozen
+    ) {
         updated.status = MoleculeStatus::Running;
     }
     let process = cosmon_core::process::MoleculeProcess::new(
@@ -477,6 +488,32 @@ mod tests {
         // from this instant onwards.
         let fleet = store.load_fleet().expect("fleet");
         assert!(fleet.workers.contains_key(&worker));
+    }
+
+    /// COSMON #35 §4 — a re-dispatch thaws.
+    ///
+    /// The reporter recovered a crashed worker with `cs tackle --force`, the
+    /// new worker demonstrably ran (fresh persona responses landing on disk),
+    /// and the molecule went on reading `frozen` — which `cs peek` renders as
+    /// `◉ stuck`. Recording a dispatch and leaving the molecule parked is a
+    /// contradiction in state: the seat is occupied by a live worker.
+    #[test]
+    fn a_recorded_dispatch_thaws_a_frozen_molecule() {
+        let (dir, store, mut mol) = fixture();
+        mol.status = MoleculeStatus::Frozen;
+        store.save_molecule(&mol.id, &mol).expect("seed frozen");
+
+        let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+        let adapter = adapter();
+        commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))
+            .expect("commit must succeed");
+
+        assert_eq!(
+            store.load_molecule(&mol.id).expect("re-read").status,
+            MoleculeStatus::Running,
+            "a frozen molecule handed a live worker must read `running`, not \
+             `stuck`"
+        );
     }
 
     /// The other half of the contract: a spawn that never happened must

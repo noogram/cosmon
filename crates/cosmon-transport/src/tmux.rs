@@ -1206,6 +1206,45 @@ impl TransportBackend for TmuxBackend {
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(parse_pane_listing(&stdout))
     }
+
+    /// Ask tmux whether the **name** is taken, not whether work is happening
+    /// behind it.
+    ///
+    /// `has-session -t =<name>` (the `=` prefix forces an exact match rather
+    /// than tmux's default prefix/fnmatch lookup, so `deep-think-5a1b` never
+    /// answers for `deep-think-5a1bcd`) reports a session whose only pane has
+    /// died just as readily as a healthy one. That is precisely the gap
+    /// [`Self::list_sessions`] filters away on purpose, and precisely what a
+    /// spawn collides with: `new-session` refuses a duplicate name whatever
+    /// the pane's state. See [`TransportBackend::session_exists`] for why the
+    /// two questions must stay separate.
+    fn session_exists(&self, session_name: &str) -> Result<bool, TransportError> {
+        let output = Command::new("tmux")
+            .arg("-L")
+            .arg(&self.socket)
+            .args(["has-session", "-t", &format!("={session_name}")])
+            .output()
+            .map_err(|e| TransportError::Io(format!("failed to run tmux: {e}")))?;
+        // A non-zero exit is tmux's ordinary "no such session" (and "no server
+        // running", when nothing has ever been spawned on this socket). Both
+        // mean the name is free, which is the only thing the caller asked.
+        Ok(output.status.success())
+    }
+
+    /// Kill the session by name — carcass included — and stay quiet when it
+    /// was already gone.
+    ///
+    /// The recovery primitive. [`TransportBackend::terminate`] looks its
+    /// target up in the live listing and therefore returns `NotFound` for the
+    /// exact session that blocks a respawn; this one addresses tmux directly.
+    fn terminate_session(&self, session_name: &str) -> Result<(), TransportError> {
+        if !self.session_exists(session_name)? {
+            return Ok(());
+        }
+        self.tmux_cmd(&["kill-session", "-t", &format!("={session_name}")])
+            .map_err(|e| TransportError::Io(format!("kill-session failed: {e}")))?;
+        Ok(())
+    }
 }
 
 /// Parse `tmux list-panes -aF '#{session_name}|#{pane_dead}'` output into
@@ -1828,6 +1867,102 @@ mod tests {
 
         let _ = backend.terminate(&worker.id);
         cleanup(&sock);
+    }
+
+    /// COSMON #35 §3, reproduced at the layer where it is decided.
+    ///
+    /// The reporter's `kill -9` left a session tmux still lists and cosmon
+    /// still refuses to see: `remain-on-exit` (which every `cs tackle` turns
+    /// on, to arm the `pane-died` harvest witness) keeps the dead pane, and
+    /// `list_sessions` filters `pane_dead` panes on purpose — the surface-lie
+    /// fix for task-4046. So `is_alive` says *no worker here* while
+    /// `new-session` says *duplicate session*. Both are right; they answer
+    /// different questions, and the respawn path was asking the wrong one.
+    ///
+    /// Every step of the deadlock is asserted below, and then the way out.
+    #[test]
+    fn a_dead_pane_keeps_its_name_until_terminate_session_takes_it_back() {
+        let sock = "cosmon-test-carcass";
+        cleanup(sock);
+
+        let backend = TmuxBackend::new(sock);
+        let config = test_config(sock);
+        let worker = backend
+            .spawn(&sleep_agent("carcass-agent"), &config)
+            .expect("spawn failed");
+        backend
+            .install_pane_died_hook("carcass-agent", "true")
+            .expect("install hook failed");
+
+        // The kill -9, aimed exactly where the reporter aimed it: the process
+        // inside the pane, not the tmux server.
+        let pane_pid = backend
+            .tmux_cmd(&["list-panes", "-t", "carcass-agent", "-F", "#{pane_pid}"])
+            .expect("list-panes failed")
+            .trim()
+            .to_owned();
+        Command::new("kill")
+            .args(["-9", &pane_pid])
+            .status()
+            .expect("kill failed");
+        for _ in 0..40 {
+            if !backend.is_alive(&worker.id).unwrap_or(true) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
+        // 1. Liveness is honest: nothing is running here.
+        assert!(
+            !backend.is_alive(&worker.id).expect("is_alive failed"),
+            "a dead pane must not read as a live worker"
+        );
+        // 2. …and the name is nevertheless still taken.
+        assert!(
+            backend
+                .session_exists("carcass-agent")
+                .expect("has-session failed"),
+            "the carcass still holds its session name — this is the fact the \
+             respawn path used to be blind to"
+        );
+        // 3. Which is exactly why the respawn died on `duplicate session`.
+        let collision = backend.spawn_worker("carcass-agent", ".", "sleep 300");
+        assert!(
+            collision.is_err(),
+            "spawning over a carcass must fail — if this ever passes, the \
+             deadlock this test guards has moved, not disappeared"
+        );
+        // 4. And why `terminate` could not clear it: it resolves its target
+        //    through the live listing, which no longer contains the carcass.
+        assert!(
+            matches!(
+                backend.terminate(&worker.id),
+                Err(TransportError::NotFound(_))
+            ),
+            "terminate cannot reach a session it cannot see"
+        );
+
+        // The way out: name-addressed teardown, and the seat is free again.
+        backend
+            .terminate_session("carcass-agent")
+            .expect("terminate_session must free the name");
+        assert!(
+            !backend
+                .session_exists("carcass-agent")
+                .expect("has-session failed"),
+            "the name must be free after terminate_session"
+        );
+        backend
+            .spawn_worker("carcass-agent", ".", "sleep 300")
+            .expect("respawn must succeed once the name is free");
+
+        // Idempotent: a second teardown of an absent session is not an error.
+        backend.terminate_session("carcass-agent").expect("kill");
+        backend
+            .terminate_session("carcass-agent")
+            .expect("an already-absent session is Ok, not an error");
+
+        cleanup(sock);
     }
 
     #[test]

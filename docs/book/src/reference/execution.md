@@ -48,7 +48,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 * `--no-worktree` — Skip git worktree creation (use current directory)
 * `--dry-run` — Skip tmux session — print the prompt to stdout instead
 * `--permission-mode <PERMISSION_MODE>` — Permission mode for Claude (default: based on molecule kind)
-* `--force` — Kill existing tmux session and respawn (instead of attaching)
+* `--force` — Reclaim the molecule's tmux session and respawn (instead of reporting the running one). Also thaws a frozen molecule: the respawned worker is live, so the molecule reads `running` again. A session left behind by a dead worker is reclaimed without this flag — there is nothing there to protect
 * `--name <NAME>` — Override the tmux session name. ASCII alphanumerics and hyphens are kept; everything else is replaced with `-`. Max 50 chars. Default: `{slug}-{shortid}` derived from the molecule topic + id
 * `--bypass-seal` — Override the ADR-085 stress-test seal at dispatch (Layer 1).
 
