@@ -249,12 +249,21 @@ fn contract_digest_input(body: &str) -> String {
 /// The digest algorithms this gate can actually recompute, and therefore the
 /// only ones under which a `contract-hash` can be verified.
 ///
-/// Both are already workspace dependencies. An algorithm outside this list is
-/// refused rather than waved through ([`ContractHashVerdict::Unverifiable`]):
-/// an algorithm name the verifier cannot compute is an opaque label with extra
-/// syllables, and accepting it would reopen by the back door the exact hole
-/// this check closes.
-const SUPPORTED_CONTRACT_DIGESTS: [&str; 2] = ["blake3", "sha256"];
+/// An algorithm outside this list is refused rather than waved through
+/// ([`ContractHashVerdict::Unverifiable`]): an algorithm name the verifier
+/// cannot compute is an opaque label with extra syllables, and accepting it
+/// would reopen by the back door the exact hole this check closes.
+///
+/// The list is exactly as long as the live corpus makes it. Measured
+/// 2026-08-02 over the 29 live contracts, the 20 honest digests are 18
+/// `sha256` (7 of them bare hex), 1 `blake3` and **1 `blake2b-256`** — so
+/// each of the three is load-bearing, and dropping any one of them refuses a
+/// contract whose author computed it correctly. `blake2b-256` in particular
+/// was named in this change's own measurement as a verifying algorithm while
+/// being absent from this list, which refused that honest contract as
+/// unverifiable: the outage this gate is written to avoid, reintroduced by an
+/// omission one line wide.
+const SUPPORTED_CONTRACT_DIGESTS: [&str; 3] = ["blake3", "sha256", "blake2b-256"];
 
 /// Hex digest of `bytes` under `algorithm`, or `None` when the algorithm is
 /// not one of [`SUPPORTED_CONTRACT_DIGESTS`].
@@ -264,6 +273,13 @@ fn digest_with(algorithm: &str, bytes: &[u8]) -> Option<String> {
         "sha256" => {
             use sha2::{Digest, Sha256};
             Some(format!("{:x}", Sha256::digest(bytes)))
+        }
+        // BLAKE2b truncated to 256 bits — `blake2b-256` is what the one live
+        // contract using it declares, and `Blake2s256` is a different function
+        // that would silently disagree, so the width is pinned explicitly.
+        "blake2b-256" => {
+            use blake2::{digest::consts::U32, Blake2b, Digest};
+            Some(format!("{:x}", Blake2b::<U32>::digest(bytes)))
         }
         _ => None,
     }
@@ -5585,11 +5601,22 @@ mod tests {
             use sha2::{Digest, Sha256};
             format!("{:x}", Sha256::digest(format!("{body}\n").as_bytes()))
         };
+        // …and blake2b-256, which one live contract declares honestly. It is
+        // asserted here because leaving it out of the supported set is not a
+        // missing feature but a refusal of a correctly-computed digest.
+        let blake2b_hex = {
+            use blake2::{digest::consts::U32, Blake2b, Digest};
+            format!(
+                "{:x}",
+                Blake2b::<U32>::digest(format!("{body}\n").as_bytes())
+            )
+        };
         for shape in [
             format!("sha256:{sha_hex}"),
             sha_hex.clone(),
             // A compound prefix, as one live contract carries.
             format!("blake3-substitute:sha256:{sha_hex}"),
+            format!("blake2b-256:{blake2b_hex}"),
         ] {
             assert_eq!(
                 verify_contract_hash(&shape, body).refusal(),
@@ -5632,7 +5659,7 @@ mod tests {
         // REFUSED: an opaque label, and an algorithm nothing here can compute.
         // Both are unverifiable rather than forged — the reader is sent to
         // restate the hash, not to hunt for tampering.
-        for declared in ["contract-v1-stable", "blake2b-256:cafe"] {
+        for declared in ["contract-v1-stable", "md5:cafe"] {
             assert!(
                 matches!(
                     verify_contract_hash(declared, body),

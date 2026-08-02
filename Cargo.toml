@@ -169,6 +169,11 @@ serde_json = "1"
 # floor 1.10 for `Bytes::from_owner`.
 bytes = "1.10"
 sha2 = "0.10"
+# `blake2` is here for exactly one reason: a live `committee-posture.md`
+# declares an honest `blake2b-256:` digest of its own body, and a gate that
+# cannot recompute an algorithm refuses it (task-20260802-6129). Same
+# RustCrypto `digest` traits as `sha2`, so it adds no new tree.
+blake2 = "0.10"
 thiserror = "2"
 toml = "0.8"
 toml_edit = "0.22"

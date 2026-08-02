@@ -34,9 +34,13 @@ this stage.
   fabrications the old check could not see — one identical `blake3:7bf51880…`
   appears under three *different* contract bodies, and one names `sha256:` at
   32 hex characters, half a sha256's width. Verification is algorithm-agnostic
-  by declared prefix (`blake3` and `sha256`), because 19 of the 20 honest
-  hashes are not blake3 and a blake3-only check would have been the real
-  outage. Measured after the change: **zero** live rosters are refused.
+  by declared prefix (`blake3`, `sha256`, `blake2b-256`), because 19 of the 20
+  honest hashes are not blake3 and a blake3-only check would have been the real
+  outage — and each of the three is load-bearing: the corpus's 20 honest
+  digests are 18 sha256 (7 of them bare hex), 1 blake3 and 1 blake2b-256, so
+  dropping any one algorithm refuses a contract whose author computed it
+  correctly. Re-measured over the same 29 after the change: exactly the 9
+  fabrications are refused and all 20 honest digests verify.
   Conveners compute the hash with `shasum -a 256 body.md` or
   `cosmon_core::committee::committee_contract_hash`; a stable label is no
   longer accepted.
