@@ -177,6 +177,10 @@ fn phantom_running_molecule_is_reaped_and_dag_drains() {
         .run(&shutdown)
         .expect("resident runtime loop reaps the phantom and drains");
 
+    if summary.exit != ExitReason::Drained {
+        common::dump_trace(&trace_path, &summary);
+    }
+
     assert_eq!(
         summary.exit,
         ExitReason::Drained,

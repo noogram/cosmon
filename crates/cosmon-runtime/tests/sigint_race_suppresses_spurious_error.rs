@@ -115,6 +115,10 @@ fn signal_killed_ensemble_yields_clean_shutdown_trace() {
         .run(&shutdown)
         .expect("loop returns cleanly on signal-killed ensemble");
 
+    if summary.exit != ExitReason::Shutdown {
+        common::dump_trace(&trace_path, &summary);
+    }
+
     assert_eq!(
         summary.exit,
         ExitReason::Shutdown,
@@ -221,6 +225,10 @@ fn signal_killed_done_subprocess_yields_clean_shutdown_trace() {
     let summary = runtime
         .run(&shutdown)
         .expect("loop returns cleanly on signal-killed done");
+
+    if summary.exit != ExitReason::Shutdown {
+        common::dump_trace(&trace_path, &summary);
+    }
 
     assert_eq!(
         summary.exit,
