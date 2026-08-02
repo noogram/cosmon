@@ -84,6 +84,13 @@ notify.workspace = true
 # descendant that inherited the capture pipe cannot hold it open and hang the
 # gate past its wall-clock budget (done.rs `run_bounded`/`run_bounded_capture`).
 nix.workspace = true
+# `libc::dup2` is what mutes the briefing-receipt hook's stdout structurally,
+# before any other statement runs (`briefing_receipt_hook`). Rust's std has no
+# way to replace a file descriptor, and this guard cannot be a convention: a
+# `UserPromptSubmit` hook's stdout is *injected into the model's context*, so a
+# single stray line becomes unattributed instructions in every briefing the
+# fleet dispatches (measured 3/3 in `experiments/briefing-receipt-hook`).
+libc.workspace = true
 rusqlite.workspace = true
 cosmon-transport.workspace = true
 ctrlc.workspace = true

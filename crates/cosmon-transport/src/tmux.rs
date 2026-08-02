@@ -25,6 +25,7 @@
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::briefing_receipt;
 use cosmon_core::id::WorkerId;
 use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
 use cosmon_core::transport::{
@@ -171,30 +172,67 @@ fn submit_retry_budget(input: &str) -> u32 {
         .min(SUBMIT_RETRY_BUDGET_MAX)
 }
 
-/// Pure submit-loop driver: keep "pressing Enter" until the input zone reads
-/// clear or `budget` cycles are spent, returning `true` iff the input cleared.
+/// The live world [`briefing_receipt::await_submit_evidence`] drives on the
+/// production submit path: a real tmux pane to capture, a real carriage return
+/// to send, and — when the worker was spawned with the settings overlay — a real
+/// receipt file to poll.
 ///
-/// Extracted from [`TmuxBackend::send_input`] so the multi-block convergence
-/// is unit-testable without a live tmux server or Claude TUI: tests inject a
-/// `poll_pending` that reports the paste pending for the first few polls (the
-/// swallowed Enters) then clear, and assert the loop wins within the
-/// auto-scaled budget. In production `poll_pending` sleeps then captures the
-/// pane and `press_enter` re-sends the keypress — both best-effort, so a
-/// capture failure ends the loop rather than escalating a delivered paste into
-/// an error. A final poll after the last Enter lets the budget's last attempt
-/// count.
-fn drive_submit(
-    budget: u32,
-    mut poll_pending: impl FnMut() -> bool,
-    mut press_enter: impl FnMut(),
-) -> bool {
-    for _ in 0..budget {
-        if !poll_pending() {
-            return true;
-        }
-        press_enter();
+/// Separated from the loop for the reason the loop was separated from
+/// [`TmuxBackend::send_input`] in the first place: the convergence is then
+/// unit-testable without a live tmux server or Claude TUI. Every method here is
+/// best-effort, so a capture failure reports [`ComposerState::Unobservable`]
+/// rather than escalating a delivered paste into an error.
+struct TmuxSubmitEnv<'a> {
+    backend: &'a TmuxBackend,
+    session_name: &'a str,
+    input: &'a str,
+    /// `None` on every worker spawned without the receipt hook — every
+    /// pre-existing session, and every adapter but Claude Code. The loop then
+    /// waits on the composer alone, exactly as it did before the receipt
+    /// existed.
+    receipt: Option<&'a (
+        briefing_receipt::ReceiptStation,
+        briefing_receipt::ReceiptNonce,
+    )>,
+    t0: std::time::Instant,
+    /// Composer captures spent, for the `send_input.settled` dispatch stage.
+    cycles: u32,
+    /// The last composer reading, for the same.
+    last_seen: ComposerState,
+}
+
+impl briefing_receipt::SubmitEnv for TmuxSubmitEnv<'_> {
+    fn press_submit(&mut self) {
+        let _ = self.backend.press_submit(self.session_name);
     }
-    !poll_pending()
+
+    fn composer_pending(&mut self) -> Option<bool> {
+        self.cycles = self.cycles.saturating_add(1);
+        let state = self.backend.composer_state(self.session_name, self.input);
+        self.last_seen = state;
+        match state {
+            ComposerState::Pending => Some(true),
+            ComposerState::Clear => Some(false),
+            // "I could not look" is not "the composer is empty". Handing the
+            // loop a `false` here is the conflation `ComposerState` exists to
+            // prevent — it would end the pressing on a capture error and then
+            // report the result as a delivery.
+            ComposerState::Unobservable => None,
+        }
+    }
+
+    fn ack_present(&mut self) -> bool {
+        self.receipt
+            .is_some_and(|(station, nonce)| station.read_ack(nonce).is_some())
+    }
+
+    fn elapsed_ms(&mut self) -> u64 {
+        u64::try_from(self.t0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    fn sleep(&mut self, d: std::time::Duration) {
+        std::thread::sleep(d);
+    }
 }
 
 /// What a look at a worker's composer established about a briefing we sent.
@@ -944,6 +982,31 @@ impl TransportBackend for TmuxBackend {
             return Ok(());
         }
 
+        // Stamp this dispatch's receipt nonce *before* a single byte is pasted.
+        //
+        // Ordering is the guard. The hook keys the receipt it writes to whatever
+        // nonce is stamped at the instant the prompt is submitted, so a nonce
+        // published after the paste could be answered by a receipt for a prompt
+        // that was already in flight. Stamping first makes the window empty in
+        // the direction that matters: a submission that predates our stamp is
+        // written as `ack-nokey.json` and answers no dispatch.
+        //
+        // Best-effort throughout. A worker spawned without the settings overlay
+        // — every pre-existing session, and every adapter but Claude Code —
+        // simply never has a receipt to read, and the loop below falls back to
+        // the composer with the reason recorded. A receipt that cannot be set up
+        // must never stop a briefing being sent.
+        let receipt =
+            briefing_receipt::ReceiptStation::for_worker(&briefing_receipt::receipt_root(), id);
+        let receipt = receipt
+            .ensure()
+            .ok()
+            .and_then(|()| {
+                let nonce = briefing_receipt::ReceiptNonce::mint();
+                receipt.stamp(&nonce).ok().map(|()| nonce)
+            })
+            .map(|nonce| (receipt, nonce));
+
         // load-buffer + paste-buffer handles arbitrarily long input that
         // `send-keys` would silently truncate. The RAII TmuxBuffer handle
         // ensures the buffer name is per-call unique and the paste target
@@ -1029,22 +1092,37 @@ impl TransportBackend for TmuxBackend {
         // `confirm_briefing_submitted` both wait for "the composer no longer
         // holds what we pasted". The cycle count and exit reason are what let a
         // dispatch profile say which of the two paid, instead of inferring it.
+        //
+        // The loop itself lives in `crate::briefing_receipt`, because it now
+        // waits on two signals rather than one: the composer reading above, and
+        // — when the worker was spawned with the receipt hook installed — the
+        // `UserPromptSubmit` receipt Claude Code writes for this dispatch's
+        // nonce. The receipt is an **additional, earlier** signal and never a
+        // replacement: the composer read observed a submit in 15/15 measured
+        // production-shape trials while the receipt failed to arrive in 6 % of
+        // dispatches where it was expected. See that module for the eight
+        // findings this shape is built on.
         let submit_t0 = std::time::Instant::now();
-        let mut cycles: u32 = 0;
-        let mut last_seen = ComposerState::Unobservable;
-        let cleared = drive_submit(
-            budget,
-            || {
-                cycles = cycles.saturating_add(1);
-                std::thread::sleep(std::time::Duration::from_millis(SUBMIT_POLL_INTERVAL_MS));
-                let state = self.composer_state(&session_name, input);
-                last_seen = state;
-                state.is_pending()
-            },
-            || {
-                let _ = self.press_submit(&session_name);
+        let mut env = TmuxSubmitEnv {
+            backend: self,
+            session_name: &session_name,
+            input,
+            receipt: receipt.as_ref(),
+            t0: submit_t0,
+            cycles: 0,
+            last_seen: ComposerState::Unobservable,
+        };
+        let outcome = briefing_receipt::await_submit_evidence(
+            &mut env,
+            &briefing_receipt::AwaitConfig {
+                deadline_ms: briefing_receipt::ACK_DEADLINE_MS,
+                retry_interval_ms: SUBMIT_POLL_INTERVAL_MS,
+                poll_interval_ms: briefing_receipt::ACK_POLL_INTERVAL_MS,
+                press_budget: budget,
             },
         );
+        let cycles = env.cycles;
+        let last_seen = env.last_seen;
         tracing::info!(
             target: "cosmon::dispatch",
             phase = "send_input.settled",
@@ -1052,19 +1130,37 @@ impl TransportBackend for TmuxBackend {
             polls = cycles,
             budget,
             observed = ?last_seen,
-            reason = if cleared { "composer-clear" } else { "budget-exhausted" },
+            evidence = outcome.evidence_str(),
+            fallback_reason = outcome.fallback_reason.map(briefing_receipt::FallbackReason::as_str),
+            submits = outcome.submits_sent,
+            reason = match outcome.evidence {
+                briefing_receipt::SubmitEvidence::EventAck => "event-ack",
+                briefing_receipt::SubmitEvidence::ComposerCleared => "composer-clear",
+                briefing_receipt::SubmitEvidence::Unobserved => "budget-exhausted",
+            },
             "dispatch stage"
         );
+
+        // One file per dispatch, and a worker takes hundreds. Claim this
+        // dispatch's receipt and sweep whatever earlier dispatches left behind
+        // — including the `ack-nokey.json` an operator's own prompt writes.
+        if let Some((station, nonce)) = receipt.as_ref() {
+            station.consume(nonce);
+            station.prune(std::time::Duration::from_secs(
+                briefing_receipt::RECEIPT_MAX_AGE_SECS,
+            ));
+        }
 
         // Observability (review task-20260711-a7a5, H2). Without this the
         // budget-exhaustion path was silent: a chronically-failing submit only
         // became visible once the patrol noticed the worker idling. Emit a
         // warning so a stuck submission is visible to patrol operators before
         // its next propulsion pass.
-        if !cleared {
+        if !outcome.evidence.submitted() {
             tracing::warn!(
                 session = %session_name,
                 budget,
+                fallback_reason = outcome.fallback_reason.map(briefing_receipt::FallbackReason::as_str),
                 "send_input submit budget exhausted; input may be unsubmitted, relying on patrol backstop"
             );
         }
@@ -1552,59 +1648,116 @@ mod tests {
         assert_eq!(submit_retry_budget(&huge), SUBMIT_RETRY_BUDGET_MAX);
     }
 
+    /// A scripted pane, so the submit loop's convergence is exercised against
+    /// the *real* composer classifier without a live tmux server or Claude TUI.
+    ///
+    /// Replaces the two `drive_submit` unit tests the receipt-aware loop
+    /// subsumed. What they pinned is what these pin: the auto-scaled budget must
+    /// be large enough to outlast a multi-block paste's swallowed Enters, and a
+    /// paste that never registers must terminate rather than hang.
+    struct ScriptedPane<'a> {
+        prompt: &'a str,
+        /// Panes to serve, one per composer capture; the last repeats.
+        panes: Vec<&'a str>,
+        captures: u32,
+        enters: u32,
+        now_ms: u64,
+    }
+
+    impl briefing_receipt::SubmitEnv for ScriptedPane<'_> {
+        fn press_submit(&mut self) {
+            self.enters += 1;
+        }
+        fn composer_pending(&mut self) -> Option<bool> {
+            let idx = usize::try_from(self.captures).unwrap_or(usize::MAX);
+            self.captures += 1;
+            let pane = self.panes[idx.min(self.panes.len() - 1)];
+            Some(composer_indicates_pending(pane, self.prompt))
+        }
+        fn ack_present(&mut self) -> bool {
+            // No receipt hook installed — the pre-existing world, and the one
+            // these two properties were originally measured in.
+            false
+        }
+        fn elapsed_ms(&mut self) -> u64 {
+            self.now_ms
+        }
+        fn sleep(&mut self, d: std::time::Duration) {
+            self.now_ms += u64::try_from(d.as_millis()).unwrap_or(u64::MAX);
+        }
+    }
+
+    fn scripted_cfg(budget: u32) -> briefing_receipt::AwaitConfig {
+        briefing_receipt::AwaitConfig {
+            deadline_ms: briefing_receipt::ACK_DEADLINE_MS,
+            retry_interval_ms: SUBMIT_POLL_INTERVAL_MS,
+            poll_interval_ms: briefing_receipt::ACK_POLL_INTERVAL_MS,
+            press_budget: budget,
+        }
+    }
+
     #[test]
-    fn drive_submit_converges_on_multiblock_after_swallowed_enters() {
+    fn submit_loop_converges_on_multiblock_after_swallowed_enters() {
         // The core fix, simulated end-to-end without a live TUI: a 5-block
         // large paste whose first four Enters are swallowed while the TUI
         // settles, then the input zone clears. With the auto-scaled budget the
         // loop keeps re-Entering long enough to win.
         let big_prompt = "brief line\n".repeat(84) + "final line of the brief";
         let budget = submit_retry_budget(&big_prompt);
-
         let cleared_pane = " ⏺ Working...\n ❯";
-        let mut polls = 0u32;
-        let mut enters = 0u32;
-        let cleared = drive_submit(
-            budget,
-            || {
-                polls += 1;
-                // Pending for the first four polls (Enters swallowed), then
-                // the pane clears.
-                let pane = if polls <= 4 {
-                    FIVE_BLOCK_PANE
-                } else {
-                    cleared_pane
-                };
-                composer_indicates_pending(pane, &big_prompt)
-            },
-            || enters += 1,
-        );
 
-        assert!(
-            cleared,
-            "input zone must clear within the auto-scaled budget"
+        let mut pane = ScriptedPane {
+            prompt: &big_prompt,
+            panes: vec![
+                FIVE_BLOCK_PANE,
+                FIVE_BLOCK_PANE,
+                FIVE_BLOCK_PANE,
+                FIVE_BLOCK_PANE,
+                cleared_pane,
+            ],
+            captures: 0,
+            enters: 0,
+            now_ms: 0,
+        };
+        let outcome = briefing_receipt::await_submit_evidence(&mut pane, &scripted_cfg(budget));
+
+        assert_eq!(
+            outcome.evidence,
+            briefing_receipt::SubmitEvidence::ComposerCleared,
+            "the input zone must clear within the auto-scaled budget"
         );
         assert_eq!(
-            enters, 4,
+            pane.enters, 4,
             "exactly the four swallowed Enters get re-sent before clearance"
         );
     }
 
     #[test]
-    fn drive_submit_gives_up_when_input_never_clears() {
+    fn submit_loop_gives_up_when_input_never_clears() {
         // If the paste never registers, the loop must terminate after the
         // budget is spent rather than hang — the propulsion nudge is the
         // backstop. It re-Enters once per budgeted cycle.
         let big_prompt = "x\n".repeat(60);
         let budget = submit_retry_budget(&big_prompt);
-        let mut enters = 0u32;
-        let cleared = drive_submit(
-            budget,
-            || composer_indicates_pending(FIVE_BLOCK_PANE, &big_prompt),
-            || enters += 1,
+        let mut pane = ScriptedPane {
+            prompt: &big_prompt,
+            panes: vec![FIVE_BLOCK_PANE],
+            captures: 0,
+            enters: 0,
+            now_ms: 0,
+        };
+        let outcome = briefing_receipt::await_submit_evidence(&mut pane, &scripted_cfg(budget));
+
+        assert_eq!(
+            outcome.evidence,
+            briefing_receipt::SubmitEvidence::Unobserved,
+            "a never-clearing input must not be reported as submitted"
         );
-        assert!(!cleared, "a never-clearing input must report not-cleared");
-        assert_eq!(enters, budget, "every budgeted cycle re-sends Enter");
+        assert_eq!(
+            outcome.fallback_reason,
+            Some(briefing_receipt::FallbackReason::AckAbsentComposerPending)
+        );
+        assert_eq!(pane.enters, budget, "every budgeted cycle re-sends Enter");
     }
 
     fn test_config(socket: &str) -> RuntimeConfig {

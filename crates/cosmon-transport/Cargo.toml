@@ -32,6 +32,10 @@ cosmon-core = { workspace = true, features = ["test-harness"] }
 # exposes `unistd::Uid`; the workspace pin already enables it.
 nix.workspace = true
 cosmon-state.workspace = true
+# `rand` mints the per-dispatch briefing-receipt nonce (`briefing_receipt`).
+# The nonce keys one dispatch to its receipt; it is not a secret, but it must
+# not collide across the dispatches a single worker takes in one session.
+rand.workspace = true
 serde.workspace = true
 # `serde_json` reads and rewrites Claude Code's own `.claude.json` config from
 # `claude_trust`: the two startup-consent flags an unattended worker cannot

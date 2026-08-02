@@ -31,6 +31,9 @@ exactly once.
 - [watchdog.md](watchdog.md) — propulsion and liveness probes.
 - [guides/nudge-channels.md](guides/nudge-channels.md) — every path that speaks
   unbidden into a live worker, and the single judge they all obey.
+- [guides/briefing-receipt.md](guides/briefing-receipt.md) — how cosmon knows a
+  briefing was submitted: the `UserPromptSubmit` receipt, the composer read it
+  augments but never replaces, and what a receipt does *not* prove.
 - [spark-capture.md](spark-capture.md) — spark discipline (ties to the P_external axiom).
 
 ## Command references (per-feature deep dives)
