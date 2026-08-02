@@ -162,6 +162,15 @@ crash clause hold by construction rather than by care: a process killed
 between the two has appended to the first file and not the second, and a
 transfer is one append, so there is no half-transfer state to recover from.
 
+M5 (`task-20260731-e4d0`) added **no record at all**, which is the claim it
+was supposed to be able to make: `cs sessions` is a cockpit over the five
+registries above and writes nothing they do not already own. It reaches them
+through data-level entry points on `cs presence` rather than through a second
+copy of the ordering rules — one writer per file, one place where an ack lands
+after the text has left the process, one place where a seat is checked against
+the ledger before it is written. `cs presence`, `cs session` and `cs pilot`
+keep their bytes; the plural verb is the third thing D3.5 said it would be.
+
 M3 records `lease_epoch` as a bare `u64` and M4's `LeaseEpoch` serialises
 transparently as one, so the two agree on the wire without
 `cosmon-pilot-checkpoint` taking a dependency on `cosmon-core` it does not
