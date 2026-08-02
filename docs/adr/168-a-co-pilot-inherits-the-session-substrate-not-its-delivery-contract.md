@@ -142,10 +142,31 @@ keeps its offset.
 
 Additive to what exists. `PilotPresence` and `PilotMessage` landed in M2
 (`task-20260731-0c2d`) as `cosmon_core::presence::Presence`'s six new fields
-and `cosmon_core::pilot_message::PilotMessage`; `PilotLease`,
-`PilotCheckpoint` and `DriftFinding` remain M3/M4 work. `PilotPresence` is the existing `Presence` struct plus
-six fields; the other four records are new files under `.cosmon/state/`, each
-one line of JSON, each readable with `cat` and `jq`.
+and `cosmon_core::pilot_message::PilotMessage`; `PilotCheckpoint` and
+`DriftFinding` landed in M3 as the `cosmon-pilot-checkpoint` crate; `PilotLease`
+landed in M4 (`task-20260731-9cf4`) as `cosmon_core::pilot_lease::PilotLease`,
+with `LeaseEpoch`, `LeaseRequest` and the `authorize` guard beside it and
+`cosmon_filestore::PilotLeaseStore` behind it. `PilotPresence` is the existing
+`Presence` struct plus six fields — eight after M4 added `mission` and
+`lease_epoch`, which are the two halves of the claim the guard checks; the
+other four records are new files under `.cosmon/state/`, each one line of
+JSON, each readable with `cat` and `jq`.
+
+M4 added one record the sketch below does not name: `LeaseRequest`. The
+schema has `PilotLease` and no way to ask for one, and D6 requires that a
+pilot may *request* while only an operator grants. Those are two writers, so
+they are two records in two files — `pilot-lease/<mission>.requests.jsonl`
+written by pilots and `pilot-lease/<mission>.grants.jsonl` written by the
+operator. Keeping the ask out of the authority ledger is what makes the M4
+crash clause hold by construction rather than by care: a process killed
+between the two has appended to the first file and not the second, and a
+transfer is one append, so there is no half-transfer state to recover from.
+
+M3 records `lease_epoch` as a bare `u64` and M4's `LeaseEpoch` serialises
+transparently as one, so the two agree on the wire without
+`cosmon-pilot-checkpoint` taking a dependency on `cosmon-core` it does not
+otherwise need. The guard is deliberately *not* wired to checkpoint
+publication: D6 lists checkpointing among what a co-pilot may do.
 
 ```text
 ProviderSessionRef {
@@ -164,7 +185,11 @@ PilotPresence  = Presence + { provider, native_session_id, role, follows,
                  role ∈ { PRIMARY, COPILOT }
 
 PilotLease     { mission_id, holder_session_id, epoch, granted_by,
-                 granted_at, expires_at }
+                 granted_at, expires_at, request_id? }
+
+LeaseRequest   { id, mission_id, candidate_session_id, observed_holder?,
+                 observed_epoch?, requested_by, requested_at, reason }
+                 # added in M4 — the ask D6 requires and the sketch omitted
 
 PilotCheckpoint{ id, mission_id, session_id, lease_epoch, scope,
                  current_hypotheses, evidence_refs, completed_actions,
@@ -204,6 +229,30 @@ the epoch it believed it held.**
 The `hold:pilot` tag as it stands has no holder and no epoch — it is a boolean.
 It stays a boolean. The lease is a separate record; M4 wires the guard, and the
 guard is what refuses, not the tag.
+
+**What M4 wired the guard to, and why that gesture.** The model's rights are
+unchanged and `cs done` is no more autonomous than it was: the guard went on
+`cs presence ping --role primary`, the one existing gesture that *claims* the
+authority the lease grants. Before M4 that flag was a self-declaration anyone
+could write, so two sessions could both render as PRIMARY in a directory scan
+and falsifier 2 was reachable without a single line of new code. It is now
+checked against the ledger before the snapshot is written — refused before it
+takes effect, per the third bullet above — and the claim itself is recorded on
+the snapshot as `mission` + `lease_epoch`, so a stale primary is *readable*
+rather than merely wrong.
+
+Two consequences the implementation had to choose, and did:
+
+- An explicit `--role primary` the ledger refuses is an **error** that writes
+  nothing. A gesture is refused as a gesture.
+- A *carried-forward* primary — the hook's bare heartbeat, every ~30 s, with
+  no flags — that the ledger refuses is **demoted** and the heartbeat still
+  lands. Failing it would blind the fleet to a session that is very much
+  alive, which trades a split-brain for a false death. The demotion is
+  announced on stderr, so it is visible without being fatal.
+
+That second rule is why the former primary loses the seat without anybody
+having to tell it: its own next heartbeat reads the ledger and steps down.
 
 ## Falsifiers
 

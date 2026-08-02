@@ -9,7 +9,7 @@
 //! headline — plus a `<sid>.log` / `<sid>.seek` pair carrying the
 //! whisper pull channel.
 //!
-//! Six subcommands ship together:
+//! Seven subcommands ship together:
 //!
 //! - `ping` — upsert this session's snapshot (C-PRESENCE-CORE).
 //! - `ls` — scan the directory and render live peers.
@@ -17,8 +17,18 @@
 //! - `poll` — pull new whisper log lines since the last read.
 //! - `send` — deliver one traced envelope to a peer's mailbox (M2).
 //! - `inbox` — read and acknowledge this session's pending envelopes (M2).
+//! - `lease` — inspect, request and grant the PRIMARY lease (M4).
 //!
-//! Composition: all six share a single `PresenceStore` pointed at
+//! # The seat is a claim; the lease is the fact
+//!
+//! `ping --role primary` used to be a self-declaration anyone could make. It
+//! is now checked against the mission's lease ledger before the snapshot is
+//! written, so the registry cannot show two primaries even for an instant
+//! (ADR-168 §D6). A pilot whose lease has been transferred away is demoted by
+//! its own next heartbeat rather than failing it — the session is still alive,
+//! and a heartbeat that errored would blind the fleet to that fact.
+//!
+//! Composition: the first six share a single `PresenceStore` pointed at
 //! `<state_root>/presence/`. Layout is stable — writers
 //! (`cs whisper --to-session`) and readers (`cs presence poll`) can
 //! share the same path helpers.
@@ -42,10 +52,13 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use cosmon_core::cas::{CasStore, ContentHash};
 use cosmon_core::id::{MoleculeId, SessionId};
+use cosmon_core::pilot_lease::{
+    LeaseDecision, LeaseEpoch, LeaseRequest, PilotLease, RefusalReason, RequestId,
+};
 use cosmon_core::pilot_message::PilotMessage;
 use cosmon_core::presence::{PilotRole, Presence};
 use cosmon_filestore::cas::FileCas;
-use cosmon_filestore::{PilotMailbox, PresenceStore};
+use cosmon_filestore::{PilotLeaseStore, PilotMailbox, PresenceStore};
 
 use super::Context;
 
@@ -78,6 +91,93 @@ pub enum Sub {
     Send(SendArgs),
     /// Read this session's pending message envelopes and acknowledge them.
     Inbox(InboxArgs),
+    /// Inspect, request and grant the PRIMARY lease on a mission.
+    #[command(subcommand)]
+    Lease(LeaseSub),
+}
+
+/// `cs presence lease <sub>` — the authority surface of ADR-168 §D6.
+///
+/// Four verbs and deliberately no fifth. There is no `takeover`, no `steal`
+/// and no `auto`: a transfer is `request` (a pilot asks, and gains nothing)
+/// followed by `grant` (the operator decides). Quota-triggered takeover is
+/// refused by the ADR, and the way to keep it refused is for the code to have
+/// nowhere to put it.
+#[derive(clap::Subcommand)]
+pub enum LeaseSub {
+    /// Show who holds a mission's controls, at which epoch, and what has been
+    /// asked.
+    Show(LeaseShowArgs),
+    /// Ask for the controls. Writes a request and confers no authority.
+    Request(LeaseRequestArgs),
+    /// Operator gesture: hand the controls to a session at the next epoch.
+    Grant(LeaseGrantArgs),
+    /// Ask the guard whether a session may pilot, and exit 0 or 1 accordingly.
+    Check(LeaseCheckArgs),
+}
+
+/// Arguments for `cs presence lease show`.
+#[derive(clap::Args)]
+pub struct LeaseShowArgs {
+    /// Mission whose lease to inspect.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: MoleculeId,
+    /// Print every grant ever recorded, oldest first, instead of only the head.
+    #[arg(long)]
+    pub history: bool,
+}
+
+/// Arguments for `cs presence lease request`.
+#[derive(clap::Args)]
+pub struct LeaseRequestArgs {
+    /// Mission the controls are being asked for.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: MoleculeId,
+    /// Session that would become PRIMARY. Defaults to the requester.
+    #[arg(long, value_name = "SID")]
+    pub to: Option<String>,
+    /// Session doing the asking. Defaults to `$COSMON_SESSION_ID`.
+    #[arg(long, value_name = "SID")]
+    pub from: Option<String>,
+    /// One line the operator reads before deciding.
+    #[arg(long, value_name = "TEXT", default_value = "")]
+    pub reason: String,
+}
+
+/// Arguments for `cs presence lease grant`.
+#[derive(clap::Args)]
+pub struct LeaseGrantArgs {
+    /// Mission whose controls are being handed over.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: MoleculeId,
+    /// Request being answered. The holder is taken from the request.
+    #[arg(long, value_name = "REQUEST_ID")]
+    pub request: Option<String>,
+    /// Session to seat, when granting without a request.
+    #[arg(long, value_name = "SID")]
+    pub to: Option<String>,
+    /// Seconds after which the lease authorises nothing. Omitted means it
+    /// holds until the next grant supersedes it.
+    #[arg(long = "ttl", value_name = "SECONDS")]
+    pub ttl: Option<i64>,
+    /// Operator identity to record. Defaults to `$USER`.
+    #[arg(long = "by", value_name = "NAME")]
+    pub granted_by: Option<String>,
+}
+
+/// Arguments for `cs presence lease check`.
+#[derive(clap::Args)]
+pub struct LeaseCheckArgs {
+    /// Mission the gesture would touch.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: MoleculeId,
+    /// Session issuing the gesture. Defaults to `$COSMON_SESSION_ID`.
+    #[arg(long, value_name = "SID")]
+    pub session: Option<String>,
+    /// The epoch the caller believes it holds. Omitting it is itself a
+    /// refusal — a gesture must name the generation it was written against.
+    #[arg(long, value_name = "N")]
+    pub epoch: Option<u64>,
 }
 
 /// Arguments for `cs presence ping`.
@@ -119,6 +219,15 @@ pub struct PingArgs {
     /// Most recent checkpoint published by this pilot.
     #[arg(long, value_name = "CHECKPOINT_ID")]
     pub checkpoint: Option<String>,
+    /// Mission this pilot's seat is about. Required to take the `primary`
+    /// seat, because authority is per-mission.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: Option<MoleculeId>,
+    /// The lease epoch this pilot believes it holds. Required to take the
+    /// `primary` seat: the guard checks a claim, and a claim that names no
+    /// epoch is not one.
+    #[arg(long, value_name = "N")]
+    pub epoch: Option<u64>,
 }
 
 /// Arguments for `cs presence ls`.
@@ -198,6 +307,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Poll(a) => run_poll(ctx, a),
         Sub::Send(a) => run_send(ctx, a),
         Sub::Inbox(a) => run_inbox(ctx, a),
+        Sub::Lease(a) => run_lease(ctx, a),
     }
 }
 
@@ -228,6 +338,78 @@ fn parse_role(raw: &str) -> anyhow::Result<PilotRole> {
     }
 }
 
+/// The seat a ping will actually write, after the guard has had its say.
+struct Seat {
+    /// The role that goes on disk — never a primary the ledger would refuse.
+    role: PilotRole,
+    /// Mission the seat is about, carried forward when the ping omits it.
+    mission: Option<MoleculeId>,
+    /// Epoch claimed on that mission. Cleared when the claim was refused, so
+    /// the snapshot does not advertise a generation it does not hold.
+    lease_epoch: Option<LeaseEpoch>,
+    /// Why the primary claim was refused, when it was.
+    refusal: Option<String>,
+}
+
+/// Decide the seat for this ping: what the operator asked for, what the last
+/// ping left behind, and what the lease ledger actually permits.
+///
+/// The whole point of doing this before the write is ADR-168 §D6 — a refused
+/// gesture is refused *before* it takes effect. A presence file that said
+/// `primary` and was corrected afterwards would have been true for a moment,
+/// and a peer scanning during that moment would have read a second primary.
+fn resolve_seat(
+    ctx: &Context,
+    args: &PingArgs,
+    session_id: &SessionId,
+    prior: Option<&Presence>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Seat> {
+    let claimed_role = match &args.role {
+        Some(raw) => parse_role(raw)?,
+        None => prior.map_or_else(PilotRole::default, |p| p.role),
+    };
+    let mission = args
+        .mission
+        .clone()
+        .or_else(|| prior.and_then(|p| p.mission.clone()));
+    let lease_epoch = match args.epoch {
+        Some(raw) => Some(LeaseEpoch::new(raw)?),
+        None => prior.and_then(|p| p.lease_epoch),
+    };
+
+    let refusal = if claimed_role.is_primary() {
+        primary_claim_refusal(ctx, session_id, mission.as_ref(), lease_epoch, now)?
+    } else {
+        None
+    };
+    let Some(why) = refusal else {
+        return Ok(Seat {
+            role: claimed_role,
+            mission,
+            lease_epoch,
+            refusal: None,
+        });
+    };
+
+    // An explicit `--role primary` is a gesture, and a refused gesture fails.
+    // A *carried-forward* primary is a heartbeat, and failing a heartbeat
+    // would blind the fleet to a session that is very much alive — so it is
+    // demoted, visibly, and the ping still lands.
+    if args.role.is_some() {
+        return Err(anyhow::anyhow!(
+            "refusing the primary seat for {sid}: {why}",
+            sid = session_id.as_str(),
+        ));
+    }
+    Ok(Seat {
+        role: PilotRole::Copilot,
+        mission,
+        lease_epoch: None,
+        refusal: Some(why),
+    })
+}
+
 fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
     let session_id = resolve_or_derive_sid(args.session.as_deref())?;
     let now = Utc::now();
@@ -247,10 +429,13 @@ fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
         arg.clone().or_else(|| prior.cloned())
     };
 
-    let role = match &args.role {
-        Some(raw) => parse_role(raw)?,
-        None => prior.as_ref().map_or_else(PilotRole::default, |p| p.role),
-    };
+    let seat = resolve_seat(ctx, args, &session_id, prior.as_ref(), now)?;
+    let Seat {
+        role,
+        mission,
+        lease_epoch,
+        refusal,
+    } = seat;
     let follows = match &args.follows {
         Some(raw) => Some(SessionId::new(raw.clone())?),
         None => prior.as_ref().and_then(|p| p.follows.clone()),
@@ -289,6 +474,8 @@ fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
             &args.checkpoint,
             prior.as_ref().and_then(|p| p.checkpoint_id.as_ref()),
         ),
+        mission,
+        lease_epoch,
         ..Presence::new(
             session_id.clone(),
             args.galaxy.clone(),
@@ -298,6 +485,16 @@ fn run_ping(ctx: &Context, args: &PingArgs) -> anyhow::Result<()> {
         )
     };
     store.upsert(&presence)?;
+
+    if let Some(why) = &refusal {
+        // Not an error — the heartbeat succeeded. But a pilot that believed it
+        // was flying has to be told it is not, on stderr so a `--json` consumer
+        // still parses one object on stdout.
+        eprintln!(
+            "presence ping: demoted {sid} to copilot — {why}",
+            sid = presence.session_id.as_str(),
+        );
+    }
 
     if ctx.json {
         let v = serde_json::to_value(&presence)?;
@@ -601,6 +798,258 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// The PRIMARY lease — authority, and its supervised transfer (M4)
+// ---------------------------------------------------------------------------
+
+fn leases(ctx: &Context) -> PilotLeaseStore {
+    PilotLeaseStore::new(state_root(ctx))
+}
+
+/// Why `session`'s claim to the primary seat on `mission` at `epoch` would be
+/// refused — `None` when it holds up.
+///
+/// A claim missing either half is refused here rather than passed to the
+/// guard, because the guard answers "may this session act on this mission",
+/// and a claim with no mission has not asked a question it could answer.
+fn primary_claim_refusal(
+    ctx: &Context,
+    session: &SessionId,
+    mission: Option<&MoleculeId>,
+    epoch: Option<LeaseEpoch>,
+    now: DateTime<Utc>,
+) -> anyhow::Result<Option<String>> {
+    let Some(mission) = mission else {
+        return Ok(Some(
+            "the primary seat needs --mission: authority is per-mission, and a \
+             seat that names none backs nothing"
+                .to_owned(),
+        ));
+    };
+    let decision = leases(ctx).authorize(mission, now, session, epoch)?;
+    Ok(decision.refusal().map(RefusalReason::explain))
+}
+
+fn run_lease(ctx: &Context, sub: &LeaseSub) -> anyhow::Result<()> {
+    match sub {
+        LeaseSub::Show(a) => run_lease_show(ctx, a),
+        LeaseSub::Request(a) => run_lease_request(ctx, a),
+        LeaseSub::Grant(a) => run_lease_grant(ctx, a),
+        LeaseSub::Check(a) => run_lease_check(ctx, a),
+    }
+}
+
+fn run_lease_show(ctx: &Context, args: &LeaseShowArgs) -> anyhow::Result<()> {
+    let store = leases(ctx);
+    let now = Utc::now();
+    let current = store.current(&args.mission)?;
+    let pending = store.unanswered_requests(&args.mission)?;
+
+    if ctx.json {
+        let v = serde_json::json!({
+            "mission": args.mission.as_str(),
+            "lease": current,
+            "valid_now": current.as_ref().is_some_and(|l| l.is_valid_at(now)),
+            "next_epoch": store.next_epoch(&args.mission)?,
+            "unanswered_requests": pending,
+            "history": if args.history { Some(store.grants(&args.mission)?) } else { None },
+        });
+        println!("{v}");
+        return Ok(());
+    }
+
+    match &current {
+        None => println!(
+            "lease {mission}: none — nobody is PRIMARY, so nobody may pilot",
+            mission = args.mission.as_str(),
+        ),
+        Some(l) => println!(
+            "lease {mission}: {holder} at epoch {epoch}{validity} — granted by {by} at {at}",
+            mission = args.mission.as_str(),
+            holder = l.holder_session_id.as_str(),
+            epoch = l.epoch,
+            validity = if l.is_valid_at(now) {
+                String::new()
+            } else {
+                " (EXPIRED)".to_owned()
+            },
+            by = l.granted_by,
+            at = l.granted_at,
+        ),
+    }
+    if pending.is_empty() {
+        println!("  (no unanswered requests)");
+    } else {
+        for r in &pending {
+            println!(
+                "  request {id}: {who} asks for the controls{reason}",
+                id = r.id,
+                who = r.candidate_session_id.as_str(),
+                reason = if r.reason.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", r.reason)
+                },
+            );
+        }
+    }
+    if args.history {
+        for l in store.grants(&args.mission)? {
+            println!(
+                "  epoch {epoch}: {holder} (by {by} at {at})",
+                epoch = l.epoch,
+                holder = l.holder_session_id.as_str(),
+                by = l.granted_by,
+                at = l.granted_at,
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_lease_request(ctx: &Context, args: &LeaseRequestArgs) -> anyhow::Result<()> {
+    let requester = match &args.from {
+        Some(s) => SessionId::new(s.clone())?,
+        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
+            anyhow::anyhow!("no requester — pass --from <SID> or export COSMON_SESSION_ID")
+        })?,
+    };
+    let candidate = match &args.to {
+        Some(s) => SessionId::new(s.clone())?,
+        None => requester.clone(),
+    };
+    let store = leases(ctx);
+    let observed = store.current(&args.mission)?;
+    let request = LeaseRequest::new(
+        args.mission.clone(),
+        candidate,
+        requester,
+        observed.as_ref(),
+        Utc::now(),
+        args.reason.clone(),
+    );
+    let written = store.request(&request)?;
+
+    if ctx.json {
+        let v = serde_json::json!({
+            "request": request,
+            "recorded": written,
+            "authority_changed": false,
+        });
+        println!("{v}");
+    } else if written {
+        println!(
+            "lease request {id} recorded — it confers nothing until an operator runs \
+             `cs presence lease grant --mission {mission} --request {id}`",
+            id = request.id,
+            mission = args.mission.as_str(),
+        );
+    } else {
+        println!(
+            "lease request {id} was already recorded — asking twice is asking once",
+            id = request.id,
+        );
+    }
+    Ok(())
+}
+
+fn run_lease_grant(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<()> {
+    let store = leases(ctx);
+    let now = Utc::now();
+
+    // The holder comes from the request when there is one, so the operator
+    // grants *what was asked for* rather than retyping it beside the id.
+    let (holder, answered) = match (&args.request, &args.to) {
+        (Some(raw), _) => {
+            let id = RequestId::new(raw.clone())?;
+            let found = store.find_request(&args.mission, &id)?.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no request {id} on mission {mission} — `cs presence lease show \
+                     --mission {mission}` lists the ones there are",
+                    mission = args.mission.as_str(),
+                )
+            })?;
+            (found.candidate_session_id.clone(), Some(found))
+        }
+        (None, Some(sid)) => (SessionId::new(sid.clone())?, None),
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "nothing to grant — pass --request <REQUEST_ID> to answer an ask, \
+                 or --to <SID> to seat a session directly"
+            ))
+        }
+    };
+
+    let epoch = store.next_epoch(&args.mission)?;
+    let mut lease = PilotLease::new(
+        args.mission.clone(),
+        holder.clone(),
+        epoch,
+        args.granted_by
+            .clone()
+            .or_else(|| std::env::var("USER").ok())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "unknown-operator".to_owned()),
+        now,
+        args.ttl.map(|secs| now + chrono::Duration::seconds(secs)),
+    );
+    if let Some(r) = &answered {
+        lease = lease.answering(r);
+    }
+    store.grant(&lease)?;
+
+    if ctx.json {
+        println!("{}", serde_json::to_string(&lease)?);
+    } else {
+        println!(
+            "lease {mission}: {holder} is PRIMARY at epoch {epoch} — every earlier epoch \
+             is now refused",
+            mission = args.mission.as_str(),
+            holder = holder.as_str(),
+        );
+    }
+    Ok(())
+}
+
+/// The guard, exposed as a verb. Exits 0 when the gesture may proceed and 1
+/// when it may not — so a shell script and the Rust call-site enforce the same
+/// rule instead of two rules that agree today.
+fn run_lease_check(ctx: &Context, args: &LeaseCheckArgs) -> anyhow::Result<()> {
+    let session = match &args.session {
+        Some(s) => SessionId::new(s.clone())?,
+        None => resolve_sid_for_poll(&PollArgs { session: None }).map_err(|_| {
+            anyhow::anyhow!("no session — pass --session <SID> or export COSMON_SESSION_ID")
+        })?,
+    };
+    let epoch = match args.epoch {
+        Some(raw) => Some(LeaseEpoch::new(raw)?),
+        None => None,
+    };
+    let decision = leases(ctx).authorize(&args.mission, Utc::now(), &session, epoch)?;
+
+    if ctx.json {
+        println!("{}", serde_json::to_string(&decision)?);
+    } else {
+        match &decision {
+            LeaseDecision::Granted { epoch } => println!(
+                "granted: {sid} holds {mission} at epoch {epoch}",
+                sid = session.as_str(),
+                mission = args.mission.as_str(),
+            ),
+            LeaseDecision::Refused(reason) => println!(
+                "refused: {sid} may not pilot {mission} — {why}",
+                sid = session.as_str(),
+                mission = args.mission.as_str(),
+                why = reason.explain(),
+            ),
+        }
+    }
+    std::io::stdout().flush().ok();
+    // Same shape as `cs diverge`: a decidable answer is a successful run with
+    // a non-zero exit code, not an error.
+    std::process::exit(i32::from(!decision.is_granted()));
 }
 
 // ---------------------------------------------------------------------------
@@ -967,6 +1416,17 @@ mod tests {
         run_ping(ctx, &args).unwrap();
     }
 
+    /// Grant `sid` the lease and return the flags a `primary` ping now needs.
+    ///
+    /// M4 made the primary seat lease-backed: `--role primary` is a claim the
+    /// guard checks, so a test that wants a primary has to say who granted it.
+    /// These M2 tests are about presence, not authority — the helper keeps
+    /// their subject unchanged.
+    fn seated_as_primary(ctx: &Context, sid: &str) -> (Option<MoleculeId>, Option<u64>) {
+        let epoch = grant_to(ctx, sid);
+        (Some(mission()), Some(epoch.get()))
+    }
+
     /// The acceptance clause, in one test: Claude sees Codex and Codex sees
     /// Claude, each knowing which seat the other holds and who is following
     /// whom — from a directory scan, with no broker anywhere.
@@ -975,6 +1435,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let ctx = ctx_for(dir.path());
 
+        let (mission, epoch) = seated_as_primary(&ctx, "claude-sid");
         ping(
             &ctx,
             PingArgs {
@@ -983,6 +1444,8 @@ mod tests {
                 provider: Some("claude".to_owned()),
                 native_session_id: Some("4940f28e".to_owned()),
                 role: Some("primary".to_owned()),
+                mission,
+                epoch,
                 capabilities: vec!["observe".to_owned(), "mutate".to_owned()],
                 ..PingArgs::default()
             },
@@ -1031,6 +1494,7 @@ mod tests {
     fn a_bare_heartbeat_does_not_erase_the_seat_it_found() {
         let dir = tempdir().unwrap();
         let ctx = ctx_for(dir.path());
+        let (mission, epoch) = seated_as_primary(&ctx, "pilot");
         ping(
             &ctx,
             PingArgs {
@@ -1038,6 +1502,8 @@ mod tests {
                 role: Some("primary".to_owned()),
                 provider: Some("claude".to_owned()),
                 native_session_id: Some("abc".to_owned()),
+                mission,
+                epoch,
                 capabilities: vec!["mutate".to_owned()],
                 ..PingArgs::default()
             },
@@ -1083,11 +1549,14 @@ mod tests {
     fn ls_filters_on_role_and_on_the_follows_relation() {
         let dir = tempdir().unwrap();
         let ctx = ctx_for(dir.path());
+        let (mission, epoch) = seated_as_primary(&ctx, "primary-sid");
         ping(
             &ctx,
             PingArgs {
                 session: Some("primary-sid".to_owned()),
                 role: Some("primary".to_owned()),
+                mission,
+                epoch,
                 ..PingArgs::default()
             },
         );
@@ -1431,5 +1900,373 @@ mod tests {
             },
         )
         .unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // The PRIMARY lease, at the operator surface (M4)
+    // -----------------------------------------------------------------------
+
+    fn mission() -> MoleculeId {
+        MoleculeId::new("task-20260731-9cf4").unwrap()
+    }
+
+    fn grant_to(ctx: &Context, sid: &str) -> LeaseEpoch {
+        run_lease_grant(
+            ctx,
+            &LeaseGrantArgs {
+                mission: mission(),
+                request: None,
+                to: Some(sid.to_owned()),
+                ttl: None,
+                granted_by: Some("test-operator".to_owned()),
+            },
+        )
+        .unwrap();
+        leases(ctx).current(&mission()).unwrap().unwrap().epoch
+    }
+
+    fn ping_primary(ctx: &Context, sid: &str, epoch: Option<u64>) -> anyhow::Result<()> {
+        run_ping(
+            ctx,
+            &PingArgs {
+                session: Some(sid.to_owned()),
+                galaxy: "cosmon".to_owned(),
+                role: Some("primary".to_owned()),
+                mission: Some(mission()),
+                epoch,
+                ..PingArgs::default()
+            },
+        )
+    }
+
+    fn seat_of(dir: &Path, sid: &str) -> PilotRole {
+        PresenceStore::new(dir)
+            .scan()
+            .unwrap()
+            .into_iter()
+            .find(|p| p.session_id.as_str() == sid)
+            .expect("session has a snapshot")
+            .role
+    }
+
+    // FAIL-CLOSED-AUTHORITY at the surface: before any grant, nobody may take
+    // the primary seat, however confidently they ask.
+    #[test]
+    fn the_primary_seat_is_refused_before_any_grant() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let err = ping_primary(&ctx, "claude-sid", Some(1)).unwrap_err();
+        assert!(err.to_string().contains("no lease"), "{err}");
+        // And nothing was written — refused before it takes effect.
+        assert!(PresenceStore::new(dir.path()).scan().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_granted_holder_may_take_the_seat_and_a_peer_may_not() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let epoch = grant_to(&ctx, "claude-sid");
+
+        ping_primary(&ctx, "claude-sid", Some(epoch.get())).unwrap();
+        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Primary);
+
+        // PRIMARY-UNIQUE: the concurrent attempt is refused, and leaves no
+        // second primary behind.
+        let err = ping_primary(&ctx, "codex-sid", Some(epoch.get())).unwrap_err();
+        assert!(err.to_string().contains("held by claude-sid"), "{err}");
+        let primaries = PresenceStore::new(dir.path())
+            .scan()
+            .unwrap()
+            .into_iter()
+            .filter(|p| p.role.is_primary())
+            .count();
+        assert_eq!(primaries, 1, "exactly one primary, always");
+    }
+
+    // The M4 acceptance clause "ancien primaire refusé après transfert",
+    // observed through the surface a pilot actually uses.
+    #[test]
+    fn the_former_primary_is_demoted_by_its_own_next_heartbeat() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let first = grant_to(&ctx, "claude-sid");
+        ping_primary(&ctx, "claude-sid", Some(first.get())).unwrap();
+        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Primary);
+
+        // The operator transfers the controls.
+        let second = grant_to(&ctx, "codex-sid");
+        assert_eq!(second, first.next());
+
+        // A bare heartbeat from the old primary — no flags, the hook's ping.
+        // It must not fail (the session is alive) and it must not keep the
+        // seat (the session is not PRIMARY any more).
+        run_ping(
+            &ctx,
+            &PingArgs {
+                session: Some("claude-sid".to_owned()),
+                galaxy: "cosmon".to_owned(),
+                ..PingArgs::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Copilot);
+
+        // An explicit re-claim at the epoch it used to hold is a refusal.
+        let err = ping_primary(&ctx, "claude-sid", Some(first.get())).unwrap_err();
+        assert!(err.to_string().contains("held by codex-sid"), "{err}");
+    }
+
+    #[test]
+    fn a_primary_claim_must_name_a_mission_and_an_epoch() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        grant_to(&ctx, "claude-sid");
+
+        let err = run_ping(
+            &ctx,
+            &PingArgs {
+                session: Some("claude-sid".to_owned()),
+                galaxy: "cosmon".to_owned(),
+                role: Some("primary".to_owned()),
+                ..PingArgs::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("needs --mission"), "{err}");
+
+        let err = ping_primary(&ctx, "claude-sid", None).unwrap_err();
+        assert!(err.to_string().contains("no epoch presented"), "{err}");
+    }
+
+    // "crash entre request et grant sans changement d'autorité" — through the
+    // verbs, not the store.
+    #[test]
+    fn a_request_moves_no_authority() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let epoch = grant_to(&ctx, "claude-sid");
+
+        run_lease_request(
+            &ctx,
+            &LeaseRequestArgs {
+                mission: mission(),
+                to: Some("codex-sid".to_owned()),
+                from: Some("codex-sid".to_owned()),
+                reason: "claude is near its window limit".to_owned(),
+            },
+        )
+        .unwrap();
+
+        // …and the process dies here. The holder has not moved.
+        let cur = leases(&ctx).current(&mission()).unwrap().unwrap();
+        assert_eq!(cur.holder_session_id.as_str(), "claude-sid");
+        assert_eq!(cur.epoch, epoch);
+        // The candidate still cannot take the seat.
+        assert!(ping_primary(&ctx, "codex-sid", Some(epoch.get())).is_err());
+    }
+
+    #[test]
+    fn granting_a_request_seats_the_session_it_named() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        grant_to(&ctx, "claude-sid");
+        run_lease_request(
+            &ctx,
+            &LeaseRequestArgs {
+                mission: mission(),
+                to: Some("codex-sid".to_owned()),
+                from: Some("codex-sid".to_owned()),
+                reason: String::new(),
+            },
+        )
+        .unwrap();
+
+        let store = leases(&ctx);
+        let pending = store.unanswered_requests(&mission()).unwrap();
+        assert_eq!(pending.len(), 1);
+
+        run_lease_grant(
+            &ctx,
+            &LeaseGrantArgs {
+                mission: mission(),
+                request: Some(pending[0].id.as_str().to_owned()),
+                to: None,
+                ttl: None,
+                granted_by: Some("test-operator".to_owned()),
+            },
+        )
+        .unwrap();
+
+        let cur = store.current(&mission()).unwrap().unwrap();
+        assert_eq!(cur.holder_session_id.as_str(), "codex-sid");
+        assert_eq!(cur.request_id.as_ref(), Some(&pending[0].id));
+        assert!(store.unanswered_requests(&mission()).unwrap().is_empty());
+        ping_primary(&ctx, "codex-sid", Some(cur.epoch.get())).unwrap();
+        assert_eq!(seat_of(dir.path(), "codex-sid"), PilotRole::Primary);
+    }
+
+    #[test]
+    fn granting_an_unknown_request_is_refused_and_writes_nothing() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let err = run_lease_grant(
+            &ctx,
+            &LeaseGrantArgs {
+                mission: mission(),
+                request: Some("req-000000000000".to_owned()),
+                to: None,
+                ttl: None,
+                granted_by: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no request"), "{err}");
+        assert!(leases(&ctx).current(&mission()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_grant_with_neither_a_request_nor_a_session_says_so() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let err = run_lease_grant(
+            &ctx,
+            &LeaseGrantArgs {
+                mission: mission(),
+                request: None,
+                to: None,
+                ttl: None,
+                granted_by: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("nothing to grant"), "{err}");
+    }
+
+    // The acceptance clause on inspectable state and recovery: the ledger on
+    // disk is enough to reconstruct who is PRIMARY, with `cat` and `jq`.
+    #[test]
+    fn the_authority_history_is_readable_on_disk() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        grant_to(&ctx, "claude-sid");
+        grant_to(&ctx, "codex-sid");
+
+        let path = leases(&ctx).grants_path(&mission());
+        let text = fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "one line per grant, oldest first");
+        for line in &lines {
+            let v: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(v["mission_id"], "task-20260731-9cf4");
+            assert!(v["epoch"].is_number(), "epoch reads as a number in jq");
+        }
+        assert_eq!(lines[0].contains("claude-sid"), true);
+        assert_eq!(lines[1].contains("codex-sid"), true);
+
+        // A reader with no memory recomputes the same head.
+        let fresh = PilotLeaseStore::new(dir.path());
+        assert_eq!(
+            fresh
+                .current(&mission())
+                .unwrap()
+                .unwrap()
+                .holder_session_id
+                .as_str(),
+            "codex-sid",
+        );
+    }
+
+    // A lease is per-mission: holding one does not seat you on another.
+    #[test]
+    fn authority_on_one_mission_is_not_authority_on_another() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let epoch = grant_to(&ctx, "claude-sid");
+        let other = MoleculeId::new("task-20260731-0c2d").unwrap();
+        let err = run_ping(
+            &ctx,
+            &PingArgs {
+                session: Some("claude-sid".to_owned()),
+                galaxy: "cosmon".to_owned(),
+                role: Some("primary".to_owned()),
+                mission: Some(other),
+                epoch: Some(epoch.get()),
+                ..PingArgs::default()
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("no lease"), "{err}");
+    }
+
+    #[test]
+    fn an_expired_lease_stops_seating_its_holder() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        run_lease_grant(
+            &ctx,
+            &LeaseGrantArgs {
+                mission: mission(),
+                request: None,
+                to: Some("claude-sid".to_owned()),
+                // Already over by the time the guard reads it.
+                ttl: Some(-1),
+                granted_by: Some("test-operator".to_owned()),
+            },
+        )
+        .unwrap();
+        let err = ping_primary(&ctx, "claude-sid", Some(1)).unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+    }
+
+    #[test]
+    fn show_runs_on_a_mission_with_and_without_a_lease() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        let args = LeaseShowArgs {
+            mission: mission(),
+            history: true,
+        };
+        run_lease_show(&ctx, &args).unwrap();
+        grant_to(&ctx, "claude-sid");
+        run_lease_show(&ctx, &args).unwrap();
+    }
+
+    // The mailbox and the lease are different files with different jobs: a
+    // message never moves authority, and a grant never delivers a message.
+    #[test]
+    fn the_lease_and_the_mailbox_do_not_touch() {
+        let dir = tempdir().unwrap();
+        let ctx = ctx_for(dir.path());
+        grant_to(&ctx, "claude-sid");
+        run_send(
+            &ctx,
+            &SendArgs {
+                to: "claude-sid".to_owned(),
+                from: Some("codex-sid".to_owned()),
+                message: "give me the controls".to_owned(),
+                expires_in: None,
+            },
+        )
+        .unwrap();
+
+        // The message is in the inbox; the ledger has exactly one grant and
+        // the holder is unchanged.
+        let mb = PilotMailbox::new(dir.path());
+        assert_eq!(
+            mb.pending(&SessionId::new("claude-sid").unwrap(), Utc::now())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(leases(&ctx).grants(&mission()).unwrap().len(), 1);
+        assert_eq!(
+            leases(&ctx)
+                .current(&mission())
+                .unwrap()
+                .unwrap()
+                .holder_session_id
+                .as_str(),
+            "claude-sid",
+        );
     }
 }
