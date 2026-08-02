@@ -1,4 +1,9 @@
 /target/
+# Cross-compile scratch: `CARGO_TARGET_DIR=/work/target-alpine` when the musl
+# repro runs `cargo test` inside rust:1.97-alpine over a bind-mounted worktree.
+# Untracked by name because an automated step-commit does `git add -A` and will
+# otherwise sweep several thousand build artifacts onto the branch.
+/target-alpine/
 *.swp
 *.swo
 .DS_Store
