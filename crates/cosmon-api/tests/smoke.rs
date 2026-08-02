@@ -16,28 +16,27 @@ use cosmon_api::{router, AppState};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 
+/// Locate the `cs` binary this crate shells out to.
+///
+/// `cs` belongs to `cosmon-cli`, a sibling workspace member, so cargo hands
+/// us no `CARGO_BIN_EXE_cs`. It is however already on disk under the whole
+/// verification gate — `cargo test --workspace` builds every member's bin
+/// targets before running any test — so the nested `cargo build` below is a
+/// fallback for a standalone `cargo test -p cosmon-api`, never a cost paid
+/// by the gate.
+///
+/// The profile directory is derived from **our own** executable
+/// (`<target>/<profile>/deps/smoke-<hash>`) rather than guessed from
+/// `CARGO_MANIFEST_DIR`: that is the one anchor that stays correct under an
+/// isolated `CARGO_TARGET_DIR`, and it picks up `release` without a second
+/// hard-coded `debug`.
 fn cs_bin() -> PathBuf {
-    // The `cs` binary this crate shells out to lives alongside the
-    // `cosmon-cli` integration tests. `cargo test -p cosmon-api`
-    // guarantees it has been built under `target/debug/` by the time
-    // the test runs because `cs-api` depends transitively on no build
-    // script that rebuilds it; we rebuild it here just in case.
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            // Walk up from CARGO_MANIFEST_DIR until we find `target/`.
-            let mut dir: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-            loop {
-                let cand = dir.join("target");
-                if cand.exists() {
-                    return cand;
-                }
-                if !dir.pop() {
-                    return PathBuf::from("target");
-                }
-            }
-        });
-    let candidate = target_dir.join("debug").join("cs");
+    let exe = std::env::current_exe().expect("current_exe");
+    let profile_dir = exe
+        .parent() // <target>/<profile>/deps
+        .and_then(std::path::Path::parent) // <target>/<profile>
+        .expect("test binary lives under <target>/<profile>/deps");
+    let candidate = profile_dir.join("cs");
     if !candidate.exists() {
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "cosmon-cli", "--bin", "cs"])
