@@ -554,6 +554,19 @@ fn install_tracing(verbose: bool) {
 
 #[allow(clippy::too_many_lines)]
 fn main() {
+    // FIRST STATEMENT, and it has to be. This process may be a Claude Code
+    // `UserPromptSubmit` hook rather than an operator running `cs`, in which
+    // case two things must happen before anything else does: file descriptor 1
+    // is replaced with `/dev/null` (a hook's stdout is injected into the model's
+    // context — a stray line is an unattributed instruction in every briefing
+    // the fleet dispatches), and the ordinary `cs` startup below is skipped
+    // entirely. The hook fires on every prompt a worker submits; it must not
+    // install tracing, walk up to a galaxy, or write an `operator.present`
+    // event on the operator's behalf.
+    if let Some(code) = cosmon_cli::briefing_receipt_hook::intercept() {
+        std::process::exit(code);
+    }
+
     let cli = Cli::parse();
 
     // Before any dispatch: from here on a `tracing::warn!` reaches the operator

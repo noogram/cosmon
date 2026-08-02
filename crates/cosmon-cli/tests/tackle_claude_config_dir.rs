@@ -31,6 +31,7 @@ fn absent_cb_and_env_yields_byte_identical_legacy_command() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || None,
         |_| None,
     );
@@ -59,6 +60,7 @@ fn cb_next_success_derives_config_dir_from_email() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || Some("user-b@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -82,6 +84,7 @@ fn cb_next_takes_precedence_over_env_var() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || Some("operator@example.org".to_owned()),
         |k| match k {
             "HOME" => Some("/Users/you".to_owned()),
@@ -104,6 +107,7 @@ fn env_fallback_when_cb_fails() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| value.to_owned()),
     );
@@ -132,6 +136,7 @@ fn empty_claude_config_dir_is_treated_as_absent() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(String::new),
     );
@@ -148,6 +153,7 @@ fn path_with_spaces_is_shell_quoted() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/Foo Bar/.claude".to_owned()),
     );
@@ -164,6 +170,7 @@ fn path_with_embedded_quote_is_posix_escaped() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || None,
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/Users/it's/me".to_owned()),
     );
@@ -180,6 +187,7 @@ fn cb_next_whitespace_only_falls_through() {
         "bypassPermissions",
         &[],
         &RootSpawnDecision::SpawnAsIs,
+        None,
         || Some("  \n".to_owned()),
         |k| (k == "CLAUDE_CONFIG_DIR").then(|| "/fallback".to_owned()),
     );

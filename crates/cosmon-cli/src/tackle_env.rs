@@ -354,6 +354,7 @@ pub fn build_claude_command<C, F>(
     perm_mode: &str,
     writable_roots: &[std::path::PathBuf],
     decision: &RootSpawnDecision,
+    receipt_overlay: Option<&std::path::Path>,
     cb_runner: C,
     env_lookup: F,
 ) -> String
@@ -432,9 +433,22 @@ where
     // shell metacharacter stops being an injection surface.
     let mol_dir_q = shell_quote(mol_dir_str);
     let parent_id_q = shell_quote(parent_id_str);
+    // Briefing-receipt overlay (`--settings`). Additive and file-scoped: the
+    // file is a new 0600 file cosmon owns, registering one `UserPromptSubmit`
+    // hook so the worker's Claude Code can *sign* a receipt for each briefing
+    // instead of cosmon inferring the submit from pixels. An operator hook
+    // already on the same event keeps working — the mechanism was measured
+    // against exactly that case. `None` (overlay could not be minted, or the
+    // caller does not want one) leaves the command byte-identical to the
+    // pre-receipt shape, which is what keeps a receipt from ever being able to
+    // stop a worker spawning.
+    let settings = receipt_overlay.map_or_else(String::new, |path| {
+        format!(" --settings {}", shell_quote(&path.to_string_lossy()))
+    });
     format!(
         "{prefix}COSMON_MOL_DIR={mol_dir_q} COSMON_PARENT_MOL_ID={parent_id_q} \
-         {demote}{claude_bin} --permission-mode {perm_mode}{grants} {disallowed}2> {worker_stderr}"
+         {demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings} \
+         {disallowed}2> {worker_stderr}"
     )
 }
 

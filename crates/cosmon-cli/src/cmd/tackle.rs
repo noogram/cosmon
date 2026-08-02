@@ -5225,6 +5225,35 @@ pub(super) fn finalize_inprocess_molecule(
     super::complete::complete_one(store, state_dir, mol_id, &reason).map(|_| ())
 }
 
+/// Mint this worker's briefing-receipt station and the `claude --settings`
+/// overlay that registers the `UserPromptSubmit` hook on it.
+///
+/// Returns the overlay path, or `None` when anything at all went wrong. There
+/// is no error branch on purpose: a receipt is an *extra* signal on the submit
+/// path (`cosmon_transport::briefing_receipt`), and a mechanism that could fail
+/// a spawn would be strictly worse than the composer read it augments.
+///
+/// The hook command names the running `cs` by absolute path — the binary that
+/// is already built and is already dispatching this worker. That is the shape
+/// the measurement recommends: not an interpreter, and above all not through a
+/// version-manager shim, whose startup cost was 368 ms median and over a second
+/// at the tail before a single line of the hook ran.
+fn mint_briefing_receipt_overlay(wid: &cosmon_core::id::WorkerId) -> Option<std::path::PathBuf> {
+    use cosmon_transport::briefing_receipt as receipt;
+
+    let cs_bin = std::env::current_exe().ok()?;
+    let station = receipt::ReceiptStation::for_worker(&receipt::receipt_root(), wid);
+    station.ensure().ok()?;
+    // A fresh worker inherits no receipts. Sweeping here rather than only on
+    // the send path means a re-tackled worker name starts clean even if its
+    // predecessor died mid-dispatch.
+    station.prune(std::time::Duration::from_secs(0));
+
+    let overlay = station.dir().join("settings.json");
+    receipt::write_settings_overlay(&overlay, &cs_bin, &station).ok()?;
+    Some(overlay)
+}
+
 /// Claude branch of [`spawn_and_prompt`] — the historical path.
 // Composes two COSMON-DEV #20 fixes (root-spawn demotion + the out-of-worktree
 // writable-dir grant), which together push this one line over the pedantic cap.
@@ -5557,6 +5586,22 @@ fn spawn_claude_and_prompt(
     // and is the one pre-spawn cost that is not cosmon's arithmetic.
     stage("preflight.model_resolved");
 
+    // Briefing receipt (task-20260801-8620, measured in
+    // `experiments/briefing-receipt-hook/RESULTS.md`). Mint the worker's
+    // receipt station and the `--settings` overlay that registers the
+    // `UserPromptSubmit` hook, so each briefing this worker is sent can be
+    // *signed* by Claude Code instead of inferred from its composer.
+    //
+    // Entirely best-effort, and deliberately so. The hook is an extra signal on
+    // top of the composer read, never a replacement for it — the composer
+    // observed a submit in 15/15 measured production-shape trials while the
+    // receipt failed to arrive in 6 % of dispatches where it was expected. A
+    // worker that spawns without the overlay keeps the pre-receipt behaviour
+    // exactly, so nothing here may be allowed to fail a spawn: a missing
+    // `current_exe`, an unwritable temp dir, anything, and we simply pass
+    // `None`.
+    let receipt_overlay = mint_briefing_receipt_overlay(wid);
+
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
         parent_id_str,
@@ -5568,6 +5613,7 @@ fn spawn_claude_and_prompt(
         // string, where a caller-influenced env value could divert it and
         // leave the real worker running as uid 0 (task-20260723-778a A1).
         &root_decision,
+        receipt_overlay.as_deref(),
         // The account was already resolved above; do not call `cb next`
         // a second time (it would double-advance the balancer).
         || None,
