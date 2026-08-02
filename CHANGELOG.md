@@ -17,6 +17,30 @@ this stage.
 > git log and in [`docs/lore/CHRONICLES.md`](docs/lore/CHRONICLES.md). This
 > file starts its curated, public-facing record at the first tagged release.
 
+## [Unreleased]
+
+### Fixed
+
+- **A committee seat's `contract-hash` is now verified against the contract
+  body, instead of being taken on the convener's word.** The hash was compared
+  against the roster's own copy of itself and never against the prose it claims
+  to address, so a digest-shaped string that digests nothing passed every
+  check. The omission was licensed by a written justification — that live
+  rosters carry opaque labels, so verifying "would refuse every committee
+  convened to date — an outage, not a control." Measured across the 29 live
+  contracts under the normalisation the parser itself computes, that
+  justification was false in both claims: none of the 29 is an opaque label
+  (all are digest-shaped), and 20 already verify. The 9 that do not are
+  fabrications the old check could not see — one identical `blake3:7bf51880…`
+  appears under three *different* contract bodies, and one names `sha256:` at
+  32 hex characters, half a sha256's width. Verification is algorithm-agnostic
+  by declared prefix (`blake3` and `sha256`), because 19 of the 20 honest
+  hashes are not blake3 and a blake3-only check would have been the real
+  outage. Measured after the change: **zero** live rosters are refused.
+  Conveners compute the hash with `shasum -a 256 body.md` or
+  `cosmon_core::committee::committee_contract_hash`; a stable label is no
+  longer accepted.
+
 ## [0.5.0] — 2026-07-31
 
 ### Fixed
