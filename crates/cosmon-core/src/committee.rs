@@ -228,6 +228,312 @@ pub fn parse_committee_posture(text: &str) -> Option<PostureContract> {
     })
 }
 
+/// The exact bytes a `contract-hash` is a digest **of**.
+///
+/// [`render_committee_posture`] writes the contract prose as `{body}\n` and
+/// [`parse_committee_posture`] hands it back trimmed, so the one byte string
+/// both halves can agree on is the trimmed prose with a single trailing
+/// newline. Naming it here, once, is what makes "the hash is the body's digest"
+/// a decidable statement rather than a question of whose whitespace survived.
+///
+/// Measured 2026-08-01 across the 29 live `committee-posture.md` files in the
+/// default fleet: 20 verify under this normalisation, and none verifies under
+/// any of the five others tried (the post-rule text raw, untrimmed,
+/// left-stripped, the whole file, or header-plus-body) crossed with six digest
+/// algorithms. The convention was already in the corpus; this only writes it
+/// down.
+fn contract_digest_input(body: &str) -> String {
+    format!("{}\n", body.trim())
+}
+
+/// The digest algorithms this gate can actually recompute, and therefore the
+/// only ones under which a `contract-hash` can be verified.
+///
+/// An algorithm outside this list is refused rather than waved through
+/// ([`ContractHashVerdict::Unverifiable`]): an algorithm name the verifier
+/// cannot compute is an opaque label with extra syllables, and accepting it
+/// would reopen by the back door the exact hole this check closes.
+///
+/// The list is exactly as long as the live corpus makes it. Measured
+/// 2026-08-02 over the 29 live contracts, the 20 honest digests are 18
+/// `sha256` (7 of them bare hex), 1 `blake3` and **1 `blake2b-256`** — so
+/// each of the three is load-bearing, and dropping any one of them refuses a
+/// contract whose author computed it correctly. `blake2b-256` in particular
+/// was named in this change's own measurement as a verifying algorithm while
+/// being absent from this list, which refused that honest contract as
+/// unverifiable: the outage this gate is written to avoid, reintroduced by an
+/// omission one line wide.
+const SUPPORTED_CONTRACT_DIGESTS: [&str; 3] = ["blake3", "sha256", "blake2b-256"];
+
+/// Hex digest of `bytes` under `algorithm`, or `None` when the algorithm is
+/// not one of [`SUPPORTED_CONTRACT_DIGESTS`].
+fn digest_with(algorithm: &str, bytes: &[u8]) -> Option<String> {
+    match algorithm {
+        "blake3" => Some(cosmon_hash::Hash::of_bytes(bytes).to_hex()),
+        "sha256" => {
+            use sha2::{Digest, Sha256};
+            Some(format!("{:x}", Sha256::digest(bytes)))
+        }
+        // BLAKE2b truncated to 256 bits — `blake2b-256` is what the one live
+        // contract using it declares, and `Blake2s256` is a different function
+        // that would silently disagree, so the width is pinned explicitly.
+        "blake2b-256" => {
+            use blake2::{digest::consts::U32, Blake2b, Digest};
+            Some(format!("{:x}", Blake2b::<U32>::digest(bytes)))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `s` is a 64-character lowercase hex string — the width of every
+/// digest in [`SUPPORTED_CONTRACT_DIGESTS`].
+fn is_hex64(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The canonical `contract-hash` for a contract body: what a convener must
+/// write into `roster.json` and into the rendered
+/// [`COMMITTEE_POSTURE_FILE`] for the seat to be admitted.
+///
+/// # Why this function has to exist for the check to be a control
+///
+/// Requiring a digest to verify without publishing the way to compute one
+/// would refuse every future convene as well as the forged ones — a gate that
+/// nobody can pass is the outage a control is supposed to prevent. This is the
+/// counterweight: the hash a convener needs is computed, not guessed.
+///
+/// # Computing it without Rust
+///
+/// No `cs` verb authors a `committee-posture.md`; a convener writes it, so the
+/// hash has to be reachable from a shell. Because the digested bytes are just
+/// the contract prose with a single trailing newline, a body file that ends in
+/// exactly one newline hashes directly — and `sha256` is a supported algorithm
+/// precisely so this works with no extra tooling:
+///
+/// ```text
+/// shasum -a 256 body.md      # → sha256:<that hex>
+/// b3sum body.md              # → blake3:<that hex>
+/// ```
+///
+/// Verified 2026-08-01 against a live contract: `shasum -a 256` over the
+/// extracted body reproduces the `sha256:` hash that file declares, byte for
+/// byte.
+///
+/// ```
+/// use cosmon_core::committee::{committee_contract_hash, verify_contract_hash,
+///                              ContractHashVerdict};
+///
+/// let body = "Audit the artefacts. The generator's confidence is not evidence.";
+/// let hash = committee_contract_hash(body);
+/// assert!(hash.starts_with("blake3:"));
+/// assert!(matches!(
+///     verify_contract_hash(&hash, body),
+///     ContractHashVerdict::Verified { .. }
+/// ));
+/// ```
+#[must_use]
+pub fn committee_contract_hash(body: &str) -> String {
+    let hex = cosmon_hash::Hash::of_bytes(contract_digest_input(body).as_bytes()).to_hex();
+    format!("blake3:{hex}")
+}
+
+/// What [`verify_contract_hash`] found when it recomputed a declared
+/// `contract-hash` over the body that sits beneath it.
+///
+/// The three outcomes are kept apart because the refusals mean different
+/// things to whoever reads them: a *forged* hash is a claim about the body
+/// that the body contradicts, while an *unverifiable* one is a hash that names
+/// something this gate cannot compute. Collapsing them would send a reader
+/// hunting for tampering when the actual fix is to restate the hash under a
+/// supported algorithm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContractHashVerdict {
+    /// The declared hash is the digest of the body, under a named algorithm.
+    Verified {
+        /// The algorithm that reproduced it — `blake3` or `sha256`, the two
+        /// this gate can recompute.
+        algorithm: &'static str,
+    },
+    /// The declared hash is digest-shaped and is **not** the body's digest.
+    Forged {
+        /// Reader-facing detail: what was declared, what the body actually
+        /// digests to, and under which algorithm.
+        detail: String,
+    },
+    /// The declared hash cannot be checked at all — it names no algorithm this
+    /// gate can compute, or it is not digest-shaped in the first place.
+    Unverifiable {
+        /// Reader-facing detail naming what was declared and what is required.
+        detail: String,
+    },
+}
+
+impl ContractHashVerdict {
+    /// The refusal line, or `None` when the digest verified.
+    #[must_use]
+    pub fn refusal(&self) -> Option<&str> {
+        match self {
+            Self::Verified { .. } => None,
+            Self::Forged { detail } | Self::Unverifiable { detail } => Some(detail),
+        }
+    }
+}
+
+/// Recompute a declared `contract-hash` over the contract body it sits above,
+/// and say whether it is that body's digest.
+///
+/// # The hole this closes, and the false sentence that held it open
+///
+/// This field used to be a **self-attested label**: the witness compared the
+/// seat's file against the convener's roster and never asked whether the hash
+/// content-addressed anything. The stated reason was that live rosters carry
+/// an opaque label whose digest is not the body's, so requiring verification
+/// "would refuse every committee convened to date — an outage, not a control."
+///
+/// That sentence was measured on 2026-08-01 against the 29 live
+/// `committee-posture.md` files in the default fleet, under the normalisation
+/// [`parse_committee_posture`] itself computes, and it is **false in both of
+/// its claims**:
+///
+/// - **Not one of the 29 is an opaque label.** All 29 are digest-shaped: 8
+///   bare 64-hex, 21 prefixed (`blake3:`, `sha256:`, `blake2b-256:`,
+///   `blake3-substitute:sha256:`).
+/// - **20 of the 29 already verify** against their own body. Requiring
+///   verification refuses 9 — 31%, not 100%.
+///
+/// And the 9 are not honest hashes under a normalisation nobody wrote down.
+/// They match nothing under six algorithms crossed with six normalisations,
+/// and two of them are self-evidently fabricated: three *different* contracts
+/// (1209, 1209 and 1135 bytes of distinct prose) declare the single identical
+/// value `blake3:7bf51880…`, and one declares `sha256:` followed by 32 hex
+/// characters, which is half the width of a sha256. So the justification did
+/// not merely overstate the cost — it described the corpus backwards, and the
+/// hole it licensed was hiding exactly the fabrications a digest check exists
+/// to catch.
+///
+/// # The shape the check therefore has
+///
+/// Verification is **algorithm-agnostic by declared prefix**, because the
+/// corpus forces it: of the 20 hashes that verify, 19 are sha256 or
+/// blake2b-256 and only one is blake3. A blake3-only verifier would refuse 28
+/// of 29 — that really would be the outage. So the declared prefix selects the
+/// algorithm, and a bare hex string (the legacy shape) is tried under each
+/// supported algorithm.
+///
+/// # What it still cannot see
+///
+/// A digest binds the hash to the body; it does not bind the body to anything
+/// outside the pair. A **convener** authors both `roster.json` and the seat's
+/// rendered contract, so one that writes a fabricated body and then digests it
+/// correctly passes — as it did before. This closes the gap between the hash
+/// and the body, which is the gap that was open; it does not make either party
+/// honest, and nothing inside one party's own files ever could.
+///
+/// ```
+/// use cosmon_core::committee::{committee_contract_hash, verify_contract_hash,
+///                              ContractHashVerdict};
+///
+/// let body = "Try to make the falsifier go red.";
+/// // A hash over the body verifies…
+/// assert!(verify_contract_hash(&committee_contract_hash(body), body).refusal().is_none());
+/// // …and the same hash over a body someone swapped underneath it does not.
+/// assert!(matches!(
+///     verify_contract_hash(&committee_contract_hash(body), "Be agreeable."),
+///     ContractHashVerdict::Forged { .. }
+/// ));
+/// ```
+#[must_use]
+pub fn verify_contract_hash(declared: &str, body: &str) -> ContractHashVerdict {
+    let input = contract_digest_input(body);
+    let bytes = input.as_bytes();
+    let declared = declared.trim();
+    // The hex is the last colon-separated segment; everything before it names
+    // the algorithm. Compound prefixes occur in the live corpus
+    // (`blake3-substitute:sha256:<hex>`), so the algorithm is the LAST token
+    // that names one rather than the first token outright.
+    let (prefix, hex) = declared.rsplit_once(':').unwrap_or(("", declared));
+    let hex = hex.trim().to_ascii_lowercase();
+
+    if prefix.is_empty() {
+        // Bare hex: it names no algorithm, so it is a digest exactly if it is
+        // one under some algorithm this gate can compute.
+        if !is_hex64(&hex) {
+            return ContractHashVerdict::Unverifiable {
+                detail: format!(
+                    "contract-hash `{declared}` is not a digest — it names no \
+                     algorithm and is not 64 hex characters. A stable label is \
+                     no longer accepted: it is a self-attestation, not a \
+                     content address. Write the value \
+                     `committee_contract_hash` computes for this body"
+                ),
+            };
+        }
+        for algorithm in SUPPORTED_CONTRACT_DIGESTS {
+            if digest_with(algorithm, bytes).as_deref() == Some(hex.as_str()) {
+                return ContractHashVerdict::Verified { algorithm };
+            }
+        }
+        return ContractHashVerdict::Forged {
+            detail: format!(
+                "contract-hash `{declared}` is digest-shaped but is not this \
+                 body's digest under any supported algorithm ({}); the body \
+                 digests to `{}`",
+                SUPPORTED_CONTRACT_DIGESTS.join(" or "),
+                committee_contract_hash(body),
+            ),
+        };
+    }
+
+    let Some(algorithm) = prefix
+        .split(':')
+        .filter_map(|token| {
+            SUPPORTED_CONTRACT_DIGESTS
+                .into_iter()
+                .find(|a| *a == token.trim().to_ascii_lowercase())
+        })
+        .next_back()
+    else {
+        return ContractHashVerdict::Unverifiable {
+            detail: format!(
+                "contract-hash `{declared}` names no algorithm this gate can \
+                 recompute (supported: {}), so its digest cannot be checked. \
+                 An algorithm name that nothing verifies is an opaque label \
+                 with extra syllables — restate the hash as \
+                 `{}`",
+                SUPPORTED_CONTRACT_DIGESTS.join(", "),
+                committee_contract_hash(body),
+            ),
+        };
+    };
+
+    if !is_hex64(&hex) {
+        return ContractHashVerdict::Forged {
+            detail: format!(
+                "contract-hash `{declared}` names {algorithm} but carries {} \
+                 hex characters; a {algorithm} digest is 64. It cannot be a \
+                 digest of anything, whatever body sits beneath it — the body \
+                 digests to `{}`",
+                hex.len(),
+                committee_contract_hash(body),
+            ),
+        };
+    }
+
+    if digest_with(algorithm, bytes).as_deref() == Some(hex.as_str()) {
+        ContractHashVerdict::Verified { algorithm }
+    } else {
+        ContractHashVerdict::Forged {
+            detail: format!(
+                "contract-hash `{declared}` is NOT the {algorithm} digest of \
+                 the contract body beneath it — that body digests to `{}:{}`. \
+                 The hash is a claim about the body and the body refutes it",
+                algorithm,
+                digest_with(algorithm, bytes).unwrap_or_default(),
+            ),
+        }
+    }
+}
+
 /// The two delivery facts observed in ONE seat's own molecule directory, as
 /// [`RosterSpec::with_observed_delivery`] asks its injected port for them.
 ///
@@ -349,8 +655,15 @@ pub struct AdversarialBriefing {
     /// Contract schema version — must match [`ADVERSARIAL_BRIEFING_VERSION`] to
     /// be recognised by the current policy.
     pub version: u32,
-    /// Content hash (`blake3:<hex>` or a stable label) of the injected contract
-    /// text, so an audit can confirm *which* contract was delivered.
+    /// Content hash of the injected contract text, so an audit can confirm
+    /// *which* contract was delivered — and, since it is now recomputed rather
+    /// than taken on the convener's word, that the named contract is the one
+    /// actually beneath it.
+    ///
+    /// Write the value [`committee_contract_hash`] computes. A stable label is
+    /// no longer accepted: it made this field a self-attestation wearing a
+    /// checksum. The verifier reads the algorithm from the prefix and also
+    /// accepts the legacy bare-64-hex shape; see [`verify_contract_hash`].
     pub contract_hash: String,
     /// Whether the contract was **actually injected** into the seat's briefing.
     /// `false` means "declared but not delivered" — the persona witness fails.
@@ -2138,12 +2451,17 @@ impl RosterSpec {
     ///   convener that renders a fabricated body under a self-consistent header
     ///   still passes. This check cannot see that, and nothing inside one
     ///   party's own two files ever could.
-    /// - **Still not checked: that the hash content-addresses the body.** The
-    ///   field is documented as "`blake3:<hex>` **or a stable label**", and
-    ///   live rosters use an opaque label whose digest is not the body's, so
-    ///   requiring the digest to verify would refuse every committee convened
-    ///   to date — an outage, not a control. Closing it means changing what the
-    ///   convening step is required to write, not tightening this comparison.
+    /// - **Now checked: that the hash content-addresses the body.** This was
+    ///   the last self-attested leg — the hash was compared against the
+    ///   roster's copy of itself and never against the prose it claims to
+    ///   address. It is now recomputed ([`verify_contract_hash`]), so a seat
+    ///   whose declared digest is not its body's digest is refused. The
+    ///   justification that previously licensed the omission asserted that
+    ///   verification "would refuse every committee convened to date"; measured
+    ///   on 2026-08-01 across the 29 live contracts, 20 already verify and the
+    ///   9 that do not are digest-shaped fabrications, including one value
+    ///   shared verbatim by three different contracts. See
+    ///   [`verify_contract_hash`] for the full measurement.
     ///
     /// # `None` is not a pass
     ///
@@ -2206,7 +2524,20 @@ impl RosterSpec {
                     if found.version == claimed.version
                         && found.contract_hash == claimed.contract_hash =>
                 {
-                    None
+                    // The header matching the roster is an agreement between
+                    // two parties. Whether the hash addresses the prose
+                    // beneath it is a property of ONE file, and no amount of
+                    // agreement between the two could establish it — which is
+                    // why it is asked separately, and last.
+                    verify_contract_hash(&found.contract_hash, &found.body)
+                        .refusal()
+                        .map(|refusal| {
+                            format!(
+                                "`{COMMITTEE_POSTURE_FILE}` declares the contract \
+                                 the roster declares, but that contract-hash does \
+                                 not hold up: {refusal}"
+                            )
+                        })
                 }
                 Some(found) => Some(format!(
                     "`{COMMITTEE_POSTURE_FILE}` is NOT the contract this seat was \
@@ -2793,10 +3124,18 @@ mod tests {
         endpoint_at(provider, "", family)
     }
 
+    /// The contract prose every delivery fixture below is built over.
+    ///
+    /// It is a named constant rather than a literal at each site because the
+    /// hash and the body are now bound to each other: a fixture that means
+    /// "delivered" must declare the digest of *this* text, and a fixture that
+    /// means "forged" is exactly one that does not.
+    const CONTRACT_BODY: &str = "Audit the artefacts. The generator's confidence is not evidence.";
+
     fn briefing() -> AdversarialBriefing {
         AdversarialBriefing {
             version: ADVERSARIAL_BRIEFING_VERSION,
-            contract_hash: "blake3:deadbeef".into(),
+            contract_hash: committee_contract_hash(CONTRACT_BODY),
             injected: true,
         }
     }
@@ -2815,9 +3154,7 @@ mod tests {
             posture: Some(PostureContract {
                 version: claimed.version,
                 contract_hash: claimed.contract_hash,
-                body: "Audit the artefacts. The generator's confidence is not \
-                       evidence."
-                    .into(),
+                body: CONTRACT_BODY.into(),
             }),
             pointer: true,
         }
@@ -5218,6 +5555,208 @@ mod tests {
         }
     }
 
+    /// **The digest falsifier, in both directions.**
+    ///
+    /// A gate proven only to fail is indistinguishable from an outage — which
+    /// is precisely the fear the removed justification appealed to — so the
+    /// passing direction is asserted here beside the refusing one, on the same
+    /// body.
+    #[test]
+    fn a_contract_hash_must_be_the_digest_of_the_body_beneath_it() {
+        let body = "Try to make the falsifier — or a sharper one — go red.";
+
+        // PASSES: the hash a convener is told to write verifies.
+        let honest = committee_contract_hash(body);
+        assert!(
+            matches!(
+                verify_contract_hash(&honest, body),
+                ContractHashVerdict::Verified {
+                    algorithm: "blake3"
+                }
+            ),
+            "the hash `committee_contract_hash` computes must verify, or no \
+             convener can ever pass this gate; got {:?}",
+            verify_contract_hash(&honest, body),
+        );
+        // …and it verifies through the render/parse round trip, which is the
+        // path the witness actually reads — a digest that only holds over the
+        // in-memory string would be measuring the property next to the one
+        // that matters.
+        let parsed = parse_committee_posture(&render_committee_posture(
+            ADVERSARIAL_BRIEFING_VERSION,
+            &honest,
+            body,
+        ))
+        .expect("a rendered contract must read back");
+        assert_eq!(
+            verify_contract_hash(&parsed.contract_hash, &parsed.body).refusal(),
+            None,
+            "the digest must survive the round trip the gate reads through"
+        );
+
+        // PASSES: sha256, and the legacy bare-hex shape. Both are the live
+        // corpus's dominant forms — 19 of the 20 hashes that verify are not
+        // blake3 — so a blake3-only verifier would be the outage.
+        let sha_hex = {
+            use sha2::{Digest, Sha256};
+            format!("{:x}", Sha256::digest(format!("{body}\n").as_bytes()))
+        };
+        // …and blake2b-256, which one live contract declares honestly. It is
+        // asserted here because leaving it out of the supported set is not a
+        // missing feature but a refusal of a correctly-computed digest.
+        let blake2b_hex = {
+            use blake2::{digest::consts::U32, Blake2b, Digest};
+            format!(
+                "{:x}",
+                Blake2b::<U32>::digest(format!("{body}\n").as_bytes())
+            )
+        };
+        for shape in [
+            format!("sha256:{sha_hex}"),
+            sha_hex.clone(),
+            // A compound prefix, as one live contract carries.
+            format!("blake3-substitute:sha256:{sha_hex}"),
+            format!("blake2b-256:{blake2b_hex}"),
+        ] {
+            assert_eq!(
+                verify_contract_hash(&shape, body).refusal(),
+                None,
+                "a real digest under a supported algorithm must verify: {shape}"
+            );
+        }
+
+        // REFUSED: the body swapped underneath an honest hash.
+        assert!(
+            matches!(
+                verify_contract_hash(&honest, "Be agreeable."),
+                ContractHashVerdict::Forged { .. }
+            ),
+            "a hash that does not address the prose beneath it is forged"
+        );
+
+        // REFUSED: the two shapes the live corpus actually contains — a
+        // digest-shaped value that digests nothing (three different contracts
+        // shared one such blake3 value), and an algorithm named at the wrong
+        // width (`sha256:` + 32 hex, half a sha256).
+        for (declared, expectation) in [
+            (
+                "blake3:7bf518807da36fb368daf21b6bfcbf26979bd717e06a4ad7d7a7add03d21a1d6",
+                "is NOT the blake3 digest",
+            ),
+            ("sha256:5bfb76111c0eeb33a932dd75108e87a4", "64"),
+        ] {
+            let verdict = verify_contract_hash(declared, body);
+            assert!(
+                matches!(verdict, ContractHashVerdict::Forged { .. }),
+                "{declared} must be refused as forged; got {verdict:?}"
+            );
+            assert!(
+                verdict.refusal().is_some_and(|r| r.contains(expectation)),
+                "the refusal must say WHY; got {verdict:?}"
+            );
+        }
+
+        // REFUSED: an opaque label, and an algorithm nothing here can compute.
+        // Both are unverifiable rather than forged — the reader is sent to
+        // restate the hash, not to hunt for tampering.
+        for declared in ["contract-v1-stable", "md5:cafe"] {
+            assert!(
+                matches!(
+                    verify_contract_hash(declared, body),
+                    ContractHashVerdict::Unverifiable { .. }
+                ),
+                "`{declared}` cannot be checked and must not be waved through"
+            );
+        }
+    }
+
+    /// The digest leg is load-bearing on the witness, not merely computed:
+    /// a seat whose file and roster agree on a forged hash still fails
+    /// delivery.
+    ///
+    /// This is the direction that matters, because agreement between the two
+    /// parties is exactly what the old check measured — and it is what a
+    /// convener authoring both artefacts gets for free.
+    #[test]
+    fn a_forged_contract_hash_fails_delivery_even_when_roster_and_file_agree() {
+        let spec = roster(
+            declaring(
+                "gen",
+                SeatRole::Generator,
+                "author",
+                "anthropic",
+                ANTHROPIC,
+                "anthropic",
+            ),
+            declaring(
+                "ref",
+                SeatRole::Refuter,
+                "skeptic",
+                "openai",
+                OPENAI,
+                "openai",
+            ),
+        );
+
+        // Counterweight first: the honest fixture passes the whole witness, so
+        // a refusal below cannot be the gate refusing everything.
+        let (honest, quiet) = spec.with_observed_delivery(|_| Some(delivered()));
+        assert!(
+            quiet.is_empty()
+                && honest.refuters.iter().all(|s| s
+                    .persona
+                    .briefing
+                    .as_ref()
+                    .is_some_and(|b| b.injected)),
+            "an honest delivery must still pass; got {quiet:?}"
+        );
+
+        // Now the same delivery with a hash the roster and the file BOTH
+        // declare and the body does not support. Only the refuter's roster
+        // entry moves, so the generator stays honest and any refusal below is
+        // attributable to the seat under test.
+        let forged_hash = committee_contract_hash("a contract nobody was seated under");
+        let mut forged_spec = spec.clone();
+        forged_spec.refuters[0].persona.briefing = Some(AdversarialBriefing {
+            version: ADVERSARIAL_BRIEFING_VERSION,
+            contract_hash: forged_hash.clone(),
+            injected: true,
+        });
+        let forged_file = ObservedDelivery {
+            posture_file_exists: true,
+            posture: Some(PostureContract {
+                version: ADVERSARIAL_BRIEFING_VERSION,
+                // The file declares exactly what the roster declares — the
+                // comparison the old witness made passes — over a body that
+                // digest does not address.
+                contract_hash: forged_hash.clone(),
+                body: CONTRACT_BODY.into(),
+            }),
+            pointer: true,
+        };
+        let (observed, said) = forged_spec.with_observed_delivery(|id| {
+            Some(if id == "ref" {
+                forged_file.clone()
+            } else {
+                delivered()
+            })
+        });
+        assert!(
+            said.iter()
+                .any(|m| m.contains("'ref'") && m.contains("contract-hash")),
+            "a forged digest must be refused by name even though the file and \
+             the roster agree; got {said:?}"
+        );
+        assert!(
+            observed.refuters.iter().all(|s| s
+                .persona
+                .briefing
+                .as_ref()
+                .is_some_and(|b| !b.injected)),
+            "the digest leg must be load-bearing on `injected`, not advisory"
+        );
+    }
+
     /// **The content falsifier.** Delivery used to be `file.exists()`, so a
     /// seat whose entire contract was `# posture\n` was certified as having
     /// received one — the gate passing while the constrained party says
@@ -5292,7 +5831,7 @@ mod tests {
         assert!(
             said.iter().any(|m| m.contains("'ref'")
                 && m.contains("blake3:some-other-contract")
-                && m.contains("blake3:deadbeef")),
+                && m.contains(&committee_contract_hash(CONTRACT_BODY))),
             "the refusal must name both the file's contract and the roster's; \
              got {said:?}"
         );
