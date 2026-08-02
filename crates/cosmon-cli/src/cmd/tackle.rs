@@ -5299,33 +5299,119 @@ pub(super) fn finalize_inprocess_molecule(
     super::complete::complete_one(store, state_dir, mol_id, &reason).map(|_| ())
 }
 
+/// What the receipt-overlay mint did, in one word the dispatch trace carries.
+///
+/// # Why an outcome and not an `Option`
+///
+/// The mint is best-effort by design, and it used to *also* be silent: a spawn
+/// that failed to install the hook was byte-identical, in every recorded trace,
+/// to a spawn that installed it. That made the receipt's own absence
+/// undiagnosable downstream — "no receipt arrived" could equally mean the
+/// prompt was never accepted or the hook was never there to sign it, and
+/// nothing on the dispatch path could tell an operator which. Naming the two
+/// states is what lets the trace answer that question; the `Option` shape
+/// could not, because it discards the reason on the way out.
+#[derive(Debug)]
+enum ReceiptOverlay {
+    /// The overlay exists at this path and will be passed to `claude --settings`.
+    Installed(std::path::PathBuf),
+    /// No overlay; the spawn proceeds without a hook. The string is a fixed
+    /// diagnostic label, never an operator path or a captured error string.
+    Unavailable(&'static str),
+}
+
+impl ReceiptOverlay {
+    /// The value logged as `receipt_overlay=` on the dispatch trace.
+    fn status(&self) -> &'static str {
+        match *self {
+            Self::Installed(_) => "installed",
+            Self::Unavailable(_) => "unavailable",
+        }
+    }
+
+    /// The overlay to hand the spawn, or `None` when there is none to hand.
+    fn path(&self) -> Option<&std::path::Path> {
+        match *self {
+            Self::Installed(ref p) => Some(p.as_path()),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
 /// Mint this worker's briefing-receipt station and the `claude --settings`
 /// overlay that registers the `UserPromptSubmit` hook on it.
 ///
-/// Returns the overlay path, or `None` when anything at all went wrong. There
-/// is no error branch on purpose: a receipt is an *extra* signal on the submit
-/// path (`cosmon_transport::briefing_receipt`), and a mechanism that could fail
-/// a spawn would be strictly worse than the composer read it augments.
+/// Never fails a spawn: every error branch returns
+/// [`ReceiptOverlay::Unavailable`], which the caller turns into "spawn without
+/// an overlay" — exactly the pre-receipt behaviour. A receipt is an *extra*
+/// signal on the submit path (`cosmon_transport::briefing_receipt`), and a
+/// mechanism that could fail a spawn would be strictly worse than the composer
+/// read it augments.
+///
+/// It is, however, no longer *silent*: both outcomes are journalled on the
+/// `cosmon::dispatch` target before returning, so an operator reading a
+/// dispatch can tell a missing hook from a missing prompt. `unavailable` is a
+/// `warn!` rather than an `info!` on purpose — the CLI subscriber's default
+/// floor is `warn`, so the branch that degrades the dispatch is the branch that
+/// is visible without anyone having set `RUST_LOG` first.
 ///
 /// The hook command names the running `cs` by absolute path — the binary that
 /// is already built and is already dispatching this worker. That is the shape
 /// the measurement recommends: not an interpreter, and above all not through a
 /// version-manager shim, whose startup cost was 368 ms median and over a second
 /// at the tail before a single line of the hook ran.
-fn mint_briefing_receipt_overlay(wid: &cosmon_core::id::WorkerId) -> Option<std::path::PathBuf> {
+fn mint_briefing_receipt_overlay(wid: &cosmon_core::id::WorkerId) -> ReceiptOverlay {
+    mint_briefing_receipt_overlay_in(&cosmon_transport::briefing_receipt::receipt_root(), wid)
+}
+
+/// [`mint_briefing_receipt_overlay`] against an explicit receipt root.
+///
+/// The root is a parameter for one reason: it is the seam a test uses to make
+/// the mint genuinely fail (an unwritable root) without touching process-wide
+/// environment, which is shared state no parallel test may mutate safely.
+fn mint_briefing_receipt_overlay_in(
+    root: &std::path::Path,
+    wid: &cosmon_core::id::WorkerId,
+) -> ReceiptOverlay {
     use cosmon_transport::briefing_receipt as receipt;
 
-    let cs_bin = std::env::current_exe().ok()?;
-    let station = receipt::ReceiptStation::for_worker(&receipt::receipt_root(), wid);
-    station.ensure().ok()?;
-    // A fresh worker inherits no receipts. Sweeping here rather than only on
-    // the send path means a re-tackled worker name starts clean even if its
-    // predecessor died mid-dispatch.
-    station.prune(std::time::Duration::from_secs(0));
+    let outcome = (|| {
+        let Ok(cs_bin) = std::env::current_exe() else {
+            return ReceiptOverlay::Unavailable("current_exe");
+        };
+        let station = receipt::ReceiptStation::for_worker(root, wid);
+        if station.ensure().is_err() {
+            return ReceiptOverlay::Unavailable("station_dir");
+        }
+        // A fresh worker inherits no receipts. Sweeping here rather than only
+        // on the send path means a re-tackled worker name starts clean even if
+        // its predecessor died mid-dispatch.
+        station.prune(std::time::Duration::from_secs(0));
 
-    let overlay = station.dir().join("settings.json");
-    receipt::write_settings_overlay(&overlay, &cs_bin, &station).ok()?;
-    Some(overlay)
+        let overlay = station.dir().join("settings.json");
+        if receipt::write_settings_overlay(&overlay, &cs_bin, &station).is_err() {
+            return ReceiptOverlay::Unavailable("overlay_write");
+        }
+        ReceiptOverlay::Installed(overlay)
+    })();
+
+    match outcome {
+        ReceiptOverlay::Installed(_) => tracing::info!(
+            target: "cosmon::dispatch",
+            phase = "receipt.overlay",
+            receipt_overlay = outcome.status(),
+            "briefing receipt hook registered for this worker"
+        ),
+        ReceiptOverlay::Unavailable(reason) => tracing::warn!(
+            target: "cosmon::dispatch",
+            phase = "receipt.overlay",
+            receipt_overlay = outcome.status(),
+            reason,
+            "briefing receipt hook not installed; this dispatch cannot be \
+             acknowledged and a missing receipt proves nothing about the prompt"
+        ),
+    }
+    outcome
 }
 
 /// Claude branch of [`spawn_and_prompt`] — the historical path.
@@ -5674,7 +5760,13 @@ fn spawn_claude_and_prompt(
     // exactly, so nothing here may be allowed to fail a spawn: a missing
     // `current_exe`, an unwritable temp dir, anything, and we simply pass
     // `None`.
-    let receipt_overlay = mint_briefing_receipt_overlay(wid);
+    //
+    // Best-effort, but not silent: the mint journals
+    // `receipt_overlay=installed|unavailable` on `cosmon::dispatch` before it
+    // returns, so the absence of a receipt later can be attributed to a hook
+    // that was never installed rather than to a prompt that was never accepted.
+    let receipt_mint = mint_briefing_receipt_overlay(wid);
+    let receipt_overlay = receipt_mint.path();
 
     let claude_cmd = cosmon_cli::tackle_env::build_claude_command(
         &mol_dir_str,
@@ -5687,7 +5779,7 @@ fn spawn_claude_and_prompt(
         // string, where a caller-influenced env value could divert it and
         // leave the real worker running as uid 0 (task-20260723-778a A1).
         &root_decision,
-        receipt_overlay.as_deref(),
+        receipt_overlay,
         // The account was already resolved above; do not call `cb next`
         // a second time (it would double-advance the balancer).
         || None,
@@ -14446,5 +14538,141 @@ prompt = "Custom fleet prompt."
         assert!(!spawn_no_teardown(
             |k| (k == "COSMON_SPAWN_NO_TEARDOWN").then(String::new)
         ));
+    }
+    // ── task-20260802-a197: the receipt overlay must not fail silently ──
+    //
+    // Before this, `mint_briefing_receipt_overlay` returned a bare `Option` and
+    // wrote nothing anywhere when it returned `None`. The consequence was not
+    // the missing hook — that is a deliberate, measured degradation — but that
+    // the missing hook left no trace at all. Downstream, "no receipt arrived"
+    // then had two indistinguishable causes: the prompt was never accepted, or
+    // the hook was never installed to acknowledge it. These tests hold the
+    // distinction: the mint journals which of the two happened, and it still
+    // never fails the dispatch.
+
+    /// Run `f` with a thread-local subscriber and return its rendered output.
+    ///
+    /// Thread-local (`with_default`), not global: the test binary runs these
+    /// concurrently with everything else in this module, and a global
+    /// subscriber is process-wide state that the other tests would inherit.
+    fn capture_trace<T>(f: impl FnOnce() -> T) -> (T, String) {
+        #[derive(Clone)]
+        struct Sink(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Sink {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .map_err(|_| std::io::Error::other("trace sink poisoned"))?
+                    .extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Self;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(Sink(std::sync::Arc::clone(&buf)))
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let text = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        (out, text)
+    }
+
+    /// A receipt root the mint cannot possibly use: the station's parent is a
+    /// regular file, so `create_dir_all` fails for a reason that is identical
+    /// on every host and needs neither root nor a permission trick.
+    fn unusable_receipt_root(tmp: &TempDir) -> std::path::PathBuf {
+        let occupied = tmp.path().join("root-is-a-file");
+        std::fs::write(&occupied, b"not a directory").unwrap();
+        occupied
+    }
+
+    /// The red test. With the overlay unavailable, the dispatch must continue
+    /// *and* say so — on the same target as every other dispatch stage, at a
+    /// level the CLI's default `warn` floor lets through without `RUST_LOG`.
+    #[test]
+    fn unavailable_overlay_is_journalled_and_never_fails_the_dispatch() {
+        let tmp = TempDir::new().unwrap();
+        let root = unusable_receipt_root(&tmp);
+        let wid = WorkerId::new("receipt-overlay-unavailable").unwrap();
+
+        let (outcome, trace) = capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid));
+
+        assert_eq!(
+            outcome.status(),
+            "unavailable",
+            "an unwritable receipt root must be reported as unavailable"
+        );
+        assert!(
+            outcome.path().is_none(),
+            "the spawn must proceed with no overlay, exactly as before receipts existed"
+        );
+        assert!(
+            trace.contains("receipt_overlay=\"unavailable\""),
+            "the failed mint must be journalled as receipt_overlay=unavailable; \
+             a silent failure is the defect this test exists for.\ntrace:\n{trace}"
+        );
+        assert!(
+            trace.contains("WARN"),
+            "unavailable must clear the CLI's default warn floor, or it is \
+             invisible to the operator who needs it.\ntrace:\n{trace}"
+        );
+    }
+
+    /// The other half of the pair: a mint that succeeds is also on the record,
+    /// so a trace with no `receipt.overlay` line at all means the code never
+    /// ran — not that the hook is fine.
+    #[test]
+    fn installed_overlay_is_journalled_with_its_path() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().join("receipts");
+        let wid = WorkerId::new("receipt-overlay-installed").unwrap();
+
+        let (outcome, trace) = capture_trace(|| mint_briefing_receipt_overlay_in(&root, &wid));
+
+        assert_eq!(outcome.status(), "installed");
+        let overlay = outcome.path().expect("installed carries its overlay path");
+        assert!(overlay.is_file(), "the overlay must exist on disk");
+        assert!(
+            trace.contains("receipt_overlay=\"installed\""),
+            "the successful mint must be journalled too.\ntrace:\n{trace}"
+        );
+    }
+
+    /// Both branches must sit on `cosmon::dispatch`, which is what makes them
+    /// readable next to the latency stages with one `RUST_LOG` selector rather
+    /// than a second one nobody knows to set.
+    #[test]
+    fn both_outcomes_share_the_dispatch_target() {
+        let tmp = TempDir::new().unwrap();
+        let wid = WorkerId::new("receipt-overlay-target").unwrap();
+
+        let bad = unusable_receipt_root(&tmp);
+        let (_, failed) = capture_trace(|| mint_briefing_receipt_overlay_in(&bad, &wid));
+        let (_, ok) =
+            capture_trace(|| mint_briefing_receipt_overlay_in(&tmp.path().join("receipts"), &wid));
+
+        for trace in [&failed, &ok] {
+            assert!(
+                trace.contains("cosmon::dispatch"),
+                "receipt journalling belongs on the dispatch target.\ntrace:\n{trace}"
+            );
+            assert!(
+                trace.contains("phase=\"receipt.overlay\""),
+                "the stage must be named like every other dispatch phase.\ntrace:\n{trace}"
+            );
+        }
     }
 }
