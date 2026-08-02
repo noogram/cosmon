@@ -203,6 +203,10 @@ fn config_drift_between_launch_and_dispatch_halts_fail_closed() {
 
     let summary = runtime.run(&shutdown).expect("loop returns a summary");
 
+    if summary.exit != ExitReason::ConfigDrift {
+        common::dump_trace(&trace_path, &summary);
+    }
+
     // The whole point: it halted, it did not drain or dispatch.
     assert_eq!(
         summary.exit,
@@ -290,9 +294,14 @@ fn binary_reinstall_does_not_trip_the_seal() {
 
     let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
     let mut runtime = RuntimeLoop::new(config, scheduler);
+    let trace_path = runtime.trace_path().to_path_buf();
     let shutdown = Arc::new(AtomicBool::new(false));
 
     let summary = runtime.run(&shutdown).expect("loop returns a summary");
+
+    if summary.exit != ExitReason::Drained {
+        common::dump_trace(&trace_path, &summary);
+    }
 
     // The molecule drained — the reinstall did NOT masquerade as drift.
     assert_eq!(

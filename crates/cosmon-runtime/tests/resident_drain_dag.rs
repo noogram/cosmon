@@ -173,6 +173,10 @@ fn three_molecule_dag_drains_under_resident_runtime() {
         .run(&shutdown)
         .expect("resident runtime loop drains cleanly");
 
+    if summary.exit != ExitReason::Drained {
+        common::dump_trace(&trace_path, &summary);
+    }
+
     assert_eq!(
         summary.exit,
         ExitReason::Drained,

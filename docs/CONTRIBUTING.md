@@ -9,6 +9,30 @@ cargo clippy --workspace -- -D warnings  # Lint
 cargo fmt --all -- --check  # Format
 ```
 
+### What the test suite needs on PATH
+
+`cargo` is not the whole toolchain. Parts of the suite drive real processes,
+so they need real programs, and a slim base image (Alpine, a distroless
+builder, a minimal CI runner) ships none of them:
+
+| Program   | Who needs it | Alpine | Debian/Ubuntu |
+|-----------|--------------|--------|---------------|
+| `bash`    | transport and worker-door tests spawn `bash` panes | `apk add bash` | preinstalled |
+| `tmux`    | the tmux transport tests | `apk add tmux` | `apt-get install -y tmux` |
+| `python3` | the `cosmon-runtime` resident tests, whose stub `cs` is a Python script | `apk add python3` | preinstalled |
+| `ps`      | process-witness liveness checks | `apk add procps-ng` | preinstalled |
+
+Do not run the suite as **root**: several tests assert the CLI's root-refusal
+paths, and uid 0 trips them by design. Use an ordinary uid (`adduser -D -u
+10001 tester`).
+
+A missing program is an environment gap, not a defect — but it used to read
+like one. Issue #37 is the cautionary case: without `python3` the resident
+tests did not fail, they *waited*, six of them burning 60 s each before
+reporting `Deadline`, which names the symptom and not the missing package.
+They now fail immediately and say what to install. `$COSMON_TEST_PYTHON`
+overrides the interpreter they resolve.
+
 ## Quality Rules
 
 Every PR must satisfy these rules. They are enforced by CI and code review.
