@@ -1242,6 +1242,14 @@ mod tests {
     /// The no-write half is asserted by ownership rather than by a spy: the
     /// repair's whole job is to change owners, so an unchanged owner is proof
     /// the repair did not run. A spy could be wired past; `stat(2)` cannot.
+    ///
+    /// The demote target is therefore chosen *relative to the uid running the
+    /// test*, not pinned to [`CONVENTIONAL_WORKER_UID`]. Pinning it made the
+    /// fixture assume the tester is never uid 10001 — which is precisely the
+    /// uid cosmon's own container guide tells an operator to run as, so the
+    /// suite failed in the environment it documents (COSMON-DEV #38). What the
+    /// refusal is about is that the target is a *non-root* uid at all; which
+    /// non-root uid it is carries no meaning here.
     #[test]
     fn a_root_dispatch_refuses_without_touching_the_filesystem() {
         let tmp = TempDir::new().unwrap();
@@ -1249,15 +1257,22 @@ mod tests {
         let worktree = tmp.path().join("wt");
         std::fs::create_dir_all(&worktree).unwrap();
         let owner_before = std::fs::metadata(&worktree).unwrap().uid();
+        // Any non-zero uid other than the fixture's owner exercises the same
+        // arm; `+ 1` is simply the nearest one that is never the owner.
+        let target = if owner_before == CONVENTIONAL_WORKER_UID {
+            CONVENTIONAL_WORKER_UID + 1
+        } else {
+            CONVENTIONAL_WORKER_UID
+        };
         assert_ne!(
-            owner_before, CONVENTIONAL_WORKER_UID,
+            owner_before, target,
             "the fixture must not already be owned by the demote target, or \
              `stat` cannot tell a skipped repair from a no-op one",
         );
 
         let decision = provision_and_decide_root_spawn(
             0,
-            Some(CONVENTIONAL_WORKER_UID),
+            Some(target),
             &DemoteResources {
                 worktree: worktree.clone(),
                 ..DemoteResources::default()
@@ -1267,9 +1282,7 @@ mod tests {
         assert_eq!(
             decision,
             RootSpawnDecision::Refuse {
-                reason: RootRefusalReason::DemoteSharesRepositoryStorage {
-                    uid: CONVENTIONAL_WORKER_UID,
-                },
+                reason: RootRefusalReason::DemoteSharesRepositoryStorage { uid: target },
             },
             "a root dispatcher must not be handed a demotion it can only make \
              work by giving away the repository's shared objects and refs",
