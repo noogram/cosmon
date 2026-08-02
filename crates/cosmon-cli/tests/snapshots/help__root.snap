@@ -231,6 +231,7 @@ Commands:
   reconcile       Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
   scheduler       Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
   session         Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+  sessions        Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
   daemons         Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
   status          Project pulse — quick DAG overview like git status
   tackle          Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)

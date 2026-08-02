@@ -1,0 +1,26 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Publish this pilot's hand-over record for a mission
+
+Usage: cs sessions checkpoint publish [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>                  Path to configuration file
+      --mission <MOLECULE_ID>          The mission being flown
+      --session <SID>                  Publishing session. Defaults to `$COSMON_SESSION_ID`
+  -v, --verbose                        Enable verbose output
+      --epoch <N>                      The authority epoch the publisher believes it is under. Defaults to the epoch on its own presence snapshot, then to 0
+      --json                           Output in JSON format
+      --id <ID>                        Identifier for this checkpoint. Defaults to a timestamped id
+      --include <TEXT>                 Something this mission covers. Repeatable
+      --exclude <TEXT>                 Something this mission explicitly does not cover. Repeatable
+      --hypothesis <CLAIM>             A position currently held, as `SUBJECT[:affirm|deny]=STATEMENT`. Repeatable
+      --next <CLAIM>                   An intended next move, in the same `SUBJECT[:STANCE]=STATEMENT` form. Repeatable — this is the list a co-pilot's contradiction is found in
+      --done <TEXT>                    Something already done, in the pilot's words. Repeatable
+      --risk <TEXT>                    A known risk. Repeatable
+      --question <TEXT>                A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
+      --evidence <SUBJECT=LOCATOR>     Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
+      --checkpoint-evidence <LOCATOR>  Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+  -h, --help                           Print help

@@ -306,6 +306,349 @@ Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/se
 
 
 
+## `cs sessions`
+
+Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
+
+**Usage:** `cs sessions <COMMAND>`
+
+EXAMPLES:
+  cs sessions discover                         # provider sessions in this repo
+  cs sessions discover --all --provider codex  # every Codex session on the host
+  cs sessions show claude:4940f28e --tail 5    # one session, named exactly
+  cs sessions attach --role copilot --follow claude-sid \
+      --as codex:0198aabb --capability observe
+  cs sessions list --role primary              # who holds a seat
+  cs sessions peers                            # who is around me, and which way
+  cs sessions send --to claude-sid --message 'that evidence ref is circular'
+  cs sessions inbox                            # read and consume; --peek to look
+
+HAND-OVER:
+  cs sessions checkpoint publish --mission task-20260731-e4d0 \
+      --include 'the cockpit' --exclude 'the probe' \
+      --next 'merge-strategy:deny=do not merge before the doc gate' \
+      --evidence 'merge-strategy=docs/adr/168.md'
+  cs sessions checkpoint list --mission task-20260731-e4d0
+  cs sessions drift claude-sid codex-sid --mission task-20260731-e4d0
+  cs sessions takeover show    --mission task-20260731-e4d0
+  cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
+  cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
+
+The canonical name of a session is `<provider>:<native-session-id>`, and
+nothing else ever breaks a tie: a title, a cwd and a modification time
+help you recognise a session, never choose one. A selector that matches
+zero or two sessions prints the candidates and refuses.
+
+Exit codes (`drift`, matching `cs diverge`):
+  0    AGREE — the compared positions match
+  1    FINDING — a decidable test fired, both sides cited
+  2    INCONCLUSIVE — not comparable; never rendered as agreement
+
+Authority is a lease with an epoch (ADR-168 §D6). A co-pilot may
+observe, message and checkpoint; only the operator grants the controls,
+and no quota reading transfers them.
+
+SEE ALSO: cs presence (the substrate), cs session (operator carnet),
+cs pilot (cognitive REPL), cs diverge.
+
+###### **Subcommands:**
+
+* `discover` — Enumerate the provider sessions visible on this host
+* `list` — List the cosmon pilots present in the registry
+* `show` — Show one provider session, named by its canonical selector
+* `attach` — Take a seat: publish this session's presence, role and `follows`
+* `peers` — Show the pilots around this session and how they relate to it
+* `send` — Send one traced message envelope to another pilot
+* `inbox` — Read this session's envelopes, acknowledging what it consumed
+* `checkpoint` — Publish and read hand-over checkpoints
+* `drift` — Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
+* `takeover` — The PRIMARY lease: who may fly, who asked, who granted
+
+
+
+## `cs sessions discover`
+
+Enumerate the provider sessions visible on this host
+
+**Usage:** `cs sessions discover [OPTIONS]`
+
+###### **Options:**
+
+* `--repo <PATH>` — Repository whose sessions to show. Defaults to the repository the current directory is in. Resolved to an exact checkout — a worktree is never its canonical checkout (REPO-EXACT)
+* `--cwd <PATH>` — Show sessions whose recorded working directory is exactly this path
+* `--all` — Show every session every adapter can see, from any repository
+* `--provider <NAME>` — Restrict to one provider (`claude`, `codex`, …)
+
+
+
+## `cs sessions list`
+
+List the cosmon pilots present in the registry
+
+**Usage:** `cs sessions list [OPTIONS]`
+
+###### **Options:**
+
+* `--galaxy <GALAXY>` — Filter to one galaxy
+* `--role <ROLE>` — Show only pilots in this seat (`primary` or `copilot`)
+* `--follows <SID>` — Show only pilots co-piloting this session
+* `--all` — Include snapshots whose heartbeat has gone stale
+
+
+
+## `cs sessions show`
+
+Show one provider session, named by its canonical selector
+
+**Usage:** `cs sessions show [OPTIONS] <SELECTOR>`
+
+###### **Arguments:**
+
+* `<SELECTOR>` — The canonical selector, `<provider>:<native-session-id>`
+
+###### **Options:**
+
+* `--tail <N>` — Print the last N normalised events (kinds and sizes — never content)
+
+  Default value: `0`
+* `--no-read` — Skip reading the log; show only what discovery already knows
+
+
+
+## `cs sessions attach`
+
+Take a seat: publish this session's presence, role and `follows`
+
+**Usage:** `cs sessions attach [OPTIONS]`
+
+###### **Options:**
+
+* `--role <ROLE>` — Seat to take: `copilot` (default) or `primary`. A primary seat is checked against the mission's lease ledger and refused if it is not this session's to take
+
+  Default value: `copilot`
+* `--follow <SID_OR_SELECTOR>` — The pilot this session is co-piloting — a cosmon session id, or a `<provider>:<native-session-id>` selector that a live pilot advertises
+* `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
+* `--as <SELECTOR>` — The provider session this pilot is driving, as a canonical selector. Equivalent to `--provider` + `--native-session-id`
+* `--provider <NAME>` — Provider half of this session's key, when not using `--as`
+* `--native-session-id <ID>` — Native id half of this session's key, when not using `--as`
+* `--mission <MOLECULE_ID>` — Mission this seat is about. Required for a primary seat
+* `--epoch <N>` — The lease epoch this pilot believes it holds. Required for a primary seat: a claim that names no generation is not a claim
+* `--capability <TOKEN>` — A capability this pilot advertises. Repeatable
+* `--headline <HEADLINE>` — One line describing what this pilot is doing
+* `--galaxy <GALAXY>` — Galaxy label to record
+
+  Default value: `cosmon`
+
+
+
+## `cs sessions peers`
+
+Show the pilots around this session and how they relate to it
+
+**Usage:** `cs sessions peers [OPTIONS]`
+
+###### **Options:**
+
+* `--session <SID>` — The session whose neighbourhood to show. Defaults to `$COSMON_SESSION_ID`
+* `--all` — Include snapshots whose heartbeat has gone stale
+
+
+
+## `cs sessions send`
+
+Send one traced message envelope to another pilot
+
+**Usage:** `cs sessions send [OPTIONS] --to <SID_OR_SELECTOR> --message <TEXT>`
+
+###### **Options:**
+
+* `--to <SID_OR_SELECTOR>` — Destination — a cosmon session id, or a selector a live pilot advertises
+* `--message <TEXT>` — The message. Stored content-addressed; the envelope carries its hash
+* `--from <SID>` — Sender session id. Defaults to `$COSMON_SESSION_ID`
+* `--expires-in <SECONDS>` — Seconds after which an unread envelope reads as `expired` rather than as a fresh instruction
+
+
+
+## `cs sessions inbox`
+
+Read this session's envelopes, acknowledging what it consumed
+
+**Usage:** `cs sessions inbox [OPTIONS]`
+
+###### **Options:**
+
+* `--session <SID>` — Mailbox to read. Defaults to `$COSMON_SESSION_ID`
+* `--peek` — Show pending envelopes without acknowledging them
+* `--all` — Include already-acknowledged envelopes
+* `--follow` — Keep reading, printing each envelope as it arrives, until interrupted
+* `--interval <SECONDS>` — Seconds between polls under `--follow`
+
+  Default value: `2`
+
+
+
+## `cs sessions checkpoint`
+
+Publish and read hand-over checkpoints
+
+**Usage:** `cs sessions checkpoint <COMMAND>`
+
+###### **Subcommands:**
+
+* `publish` — Publish this pilot's hand-over record for a mission
+* `list` — List the checkpoints published for a mission
+* `show` — Show one checkpoint in full
+
+
+
+## `cs sessions checkpoint publish`
+
+Publish this pilot's hand-over record for a mission
+
+**Usage:** `cs sessions checkpoint publish [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — The mission being flown
+* `--session <SID>` — Publishing session. Defaults to `$COSMON_SESSION_ID`
+* `--epoch <N>` — The authority epoch the publisher believes it is under. Defaults to the epoch on its own presence snapshot, then to 0
+* `--id <ID>` — Identifier for this checkpoint. Defaults to a timestamped id
+* `--include <TEXT>` — Something this mission covers. Repeatable
+* `--exclude <TEXT>` — Something this mission explicitly does not cover. Repeatable
+* `--hypothesis <CLAIM>` — A position currently held, as `SUBJECT[:affirm|deny]=STATEMENT`. Repeatable
+* `--next <CLAIM>` — An intended next move, in the same `SUBJECT[:STANCE]=STATEMENT` form. Repeatable — this is the list a co-pilot's contradiction is found in
+* `--done <TEXT>` — Something already done, in the pilot's words. Repeatable
+* `--risk <TEXT>` — A known risk. Repeatable
+* `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
+* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
+* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+
+
+
+## `cs sessions checkpoint list`
+
+List the checkpoints published for a mission
+
+**Usage:** `cs sessions checkpoint list [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — The mission whose checkpoints to list
+* `--session <SID>` — Show only what this session published
+
+
+
+## `cs sessions checkpoint show`
+
+Show one checkpoint in full
+
+**Usage:** `cs sessions checkpoint show [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — The mission the checkpoint belongs to
+* `--id <ID>` — The checkpoint id. Omit to take the latest published by `--session`
+* `--session <SID>` — The publishing session, when selecting by recency rather than by id
+
+
+
+## `cs sessions drift`
+
+Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
+
+**Usage:** `cs sessions drift [OPTIONS] --mission <MOLECULE_ID> <SESSION_A> <SESSION_B>`
+
+###### **Arguments:**
+
+* `<SESSION_A>` — The first session
+* `<SESSION_B>` — The second session
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — The mission both sides checkpointed
+* `--checkpoint <latest>` — Which checkpoint of each session to compare. Only `latest` is a selector; name an exact record with `--checkpoint-a` / `--checkpoint-b`
+
+  Default value: `latest`
+* `--checkpoint-a <ID>` — Exact checkpoint id for side A
+* `--checkpoint-b <ID>` — Exact checkpoint id for side B
+
+
+
+## `cs sessions takeover`
+
+The PRIMARY lease: who may fly, who asked, who granted
+
+**Usage:** `cs sessions takeover <COMMAND>`
+
+###### **Subcommands:**
+
+* `show` — Who holds the controls, at which epoch, and what has been asked
+* `request` — Ask for the controls. Writes a request and confers nothing
+* `grant` — Operator gesture: hand the controls over at the next epoch
+* `check` — Ask the guard whether a session may pilot. Exits 0 or 1
+
+
+
+## `cs sessions takeover show`
+
+Who holds the controls, at which epoch, and what has been asked
+
+**Usage:** `cs sessions takeover show [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — Mission whose lease to inspect
+* `--history` — Print every grant ever recorded instead of only the head
+
+
+
+## `cs sessions takeover request`
+
+Ask for the controls. Writes a request and confers nothing
+
+**Usage:** `cs sessions takeover request [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — Mission the controls are being asked for
+* `--to <SID>` — Session that would become PRIMARY. Defaults to the requester
+* `--from <SID>` — Session doing the asking. Defaults to `$COSMON_SESSION_ID`
+* `--reason <TEXT>` — One line the operator reads before deciding
+
+  Default value: ``
+
+
+
+## `cs sessions takeover grant`
+
+Operator gesture: hand the controls over at the next epoch
+
+**Usage:** `cs sessions takeover grant [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — Mission whose controls are being handed over
+* `--request <REQUEST_ID>` — Request being answered. The holder is taken from the request
+* `--to <SID>` — Session to seat, when granting without a request
+* `--ttl <SECONDS>` — Seconds after which the lease authorises nothing
+* `--by <NAME>` — Operator identity to record. Defaults to `$USER`
+
+
+
+## `cs sessions takeover check`
+
+Ask the guard whether a session may pilot. Exits 0 or 1
+
+**Usage:** `cs sessions takeover check [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — Mission the gesture would touch
+* `--session <SID>` — Session issuing the gesture. Defaults to `$COSMON_SESSION_ID`
+* `--epoch <N>` — The epoch the caller believes it holds. Omitting it is itself a refusal
+
+
+
 ## `cs inbox`
 
 Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)

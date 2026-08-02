@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Ask for the controls. Writes a request and confers nothing
+
+Usage: cs sessions takeover request [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  Mission the controls are being asked for
+      --to <SID>               Session that would become PRIMARY. Defaults to the requester
+  -v, --verbose                Enable verbose output
+      --from <SID>             Session doing the asking. Defaults to `$COSMON_SESSION_ID`
+      --json                   Output in JSON format
+      --reason <TEXT>          One line the operator reads before deciding [default: ""]
+  -h, --help                   Print help

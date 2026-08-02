@@ -226,6 +226,10 @@ enum Command {
     #[command(after_help = cmd::examples::SESSION)]
     Session(cmd::session::Args),
 
+    /// Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
+    #[command(after_help = cmd::examples::SESSIONS)]
+    Sessions(cmd::sessions::Args),
+
     /// Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
     #[command(after_help = cmd::examples::DAEMONS)]
     Daemons(cmd::daemons::Args),
@@ -669,6 +673,7 @@ fn main() {
         Command::Security(args) => cmd::security::run(&ctx, &args),
         Command::Sensorium(args) => cmd::sensorium::run(&ctx, &args),
         Command::Session(args) => cmd::session::run(&ctx, &args),
+        Command::Sessions(args) => cmd::sessions::run(&ctx, &args),
         Command::Daemons(args) => cmd::daemons::run(&ctx, &args),
         Command::Status(args) => cmd::status::run(&ctx, &args),
         Command::Tackle(args) => cmd::tackle::run(&ctx, &args),

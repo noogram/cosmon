@@ -56,6 +56,24 @@ session end
 session promote
 session route
 session review
+sessions
+sessions discover
+sessions list
+sessions show
+sessions attach
+sessions peers
+sessions send
+sessions inbox
+sessions checkpoint
+sessions checkpoint publish
+sessions checkpoint list
+sessions checkpoint show
+sessions drift
+sessions takeover
+sessions takeover show
+sessions takeover request
+sessions takeover grant
+sessions takeover check
 daemons
 daemons list
 daemons status

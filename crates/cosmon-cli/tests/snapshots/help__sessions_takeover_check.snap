@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Ask the guard whether a session may pilot. Exits 0 or 1
+
+Usage: cs sessions takeover check [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  Mission the gesture would touch
+      --session <SID>          Session issuing the gesture. Defaults to `$COSMON_SESSION_ID`
+  -v, --verbose                Enable verbose output
+      --epoch <N>              The epoch the caller believes it holds. Omitting it is itself a refusal
+      --json                   Output in JSON format
+  -h, --help                   Print help

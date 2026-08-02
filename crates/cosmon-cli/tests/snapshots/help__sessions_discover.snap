@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Enumerate the provider sessions visible on this host
+
+Usage: cs sessions discover [OPTIONS]
+
+Options:
+      --config <PATH>    Path to configuration file
+      --repo <PATH>      Repository whose sessions to show. Defaults to the repository the current directory is in. Resolved to an exact checkout — a worktree is never its canonical checkout (REPO-EXACT)
+      --cwd <PATH>       Show sessions whose recorded working directory is exactly this path
+  -v, --verbose          Enable verbose output
+      --all              Show every session every adapter can see, from any repository
+      --json             Output in JSON format
+      --provider <NAME>  Restrict to one provider (`claude`, `codex`, …)
+  -h, --help             Print help

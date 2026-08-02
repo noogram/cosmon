@@ -281,6 +281,12 @@ class = "out_of_scope"
 reason = "operator carnet — local append-only journal."
 
 [[verb_absent_from_thin]]
+verb = "sessions"
+class = "operator_only"
+adr_ref = "ADR-168 §D6; ADR-080 §5.1"
+reason = "co-pilotage cockpit (mission M5). Reads provider session logs under $HOME and writes the presence/mailbox/checkpoint/lease registries of pilots on one host; `takeover grant` is the operator gesture ADR-168 refuses to automate. A remote principal has no session to observe and no seat to take."
+
+[[verb_absent_from_thin]]
 verb = "daemons"
 class = "out_of_scope"
 reason = "daemons.toml supervisor view — operator informational."

@@ -1,0 +1,19 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+The PRIMARY lease: who may fly, who asked, who granted
+
+Usage: cs sessions takeover [OPTIONS] <COMMAND>
+
+Commands:
+  show     Who holds the controls, at which epoch, and what has been asked
+  request  Ask for the controls. Writes a request and confers nothing
+  grant    Operator gesture: hand the controls over at the next epoch
+  check    Ask the guard whether a session may pilot. Exits 0 or 1
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
