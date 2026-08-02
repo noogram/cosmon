@@ -49,7 +49,9 @@ fn filter_baseline(events: Vec<WatchEvent>, phase_filter: PhaseFilter) -> Vec<Wa
     events
         .into_iter()
         .filter(|ev| match ev {
-            WatchEvent::MoleculeAdded { view, .. } => phase_filter.matches_status(view.status),
+            WatchEvent::MoleculeAdded { view, .. } => {
+                phase_filter.matches_molecule(view.status, view.archived)
+            }
             _ => true,
         })
         .collect()
@@ -71,6 +73,23 @@ const fn phase_bit(phase: Phase) -> u8 {
         Phase::Done => 1 << 5,
     }
 }
+
+/// The bit reserved for the **harvest queue** — the strict subset of
+/// [`Phase::Done`] that is `Completed` on disk and not yet archived.
+///
+/// It rides in the same mask as the phases, one bit above them, rather
+/// than in a second field. The set semantics then come out for free:
+/// `--phase harvestable --phase done` is a union that already contains
+/// the harvest queue, and no ordering of the flags can produce a
+/// different answer — the property [`PhaseFilter::from_phase_args`]
+/// promises.
+///
+/// It is *not* a [`Phase`], and deliberately so. A phase is a total
+/// function of [`MoleculeStatus`]; harvestability is a function of
+/// `(status, archived)`, and promoting it to the codomain of
+/// [`MoleculeStatus::phase`] would force that function to read a field the
+/// status does not carry. See [`PhaseFilter::matches_molecule`].
+const HARVESTABLE_BIT: u8 = 1 << 6;
 
 /// Which [`Phase`]s the molecule table surfaces — a set, nothing more.
 ///
@@ -147,12 +166,48 @@ impl PhaseFilter {
             .with(Phase::Parked)
     }
 
+    /// The **harvest queue**: molecules whose work is finished and that are
+    /// waiting for a `cs done` — `Completed` on disk, not yet archived.
+    ///
+    /// This is where the operator's next gesture lives after a batch of
+    /// workers finishes, and it is the one slice `--phase done` could not
+    /// express: `done` is the whole [`Phase::Done`] set, which welds the
+    /// molecules still owed a harvest to the 900-odd already finalized ones.
+    /// A view that cannot separate *act on this* from *ignore this* is not
+    /// a view of the operator's queue.
+    #[must_use]
+    pub const fn harvestable() -> Self {
+        Self {
+            mask: HARVESTABLE_BIT,
+        }
+    }
+
+    /// Drop the harvest-queue bit when [`Phase::Done`] is already in the
+    /// set — the refinement adds nothing to a set that contains everything
+    /// it refines.
+    ///
+    /// Without this, `--phase done --phase harvestable` and `--phase done`
+    /// would be two different values denoting one set, and everything that
+    /// compares filters by value ([`Self::label`], the `--all` fast path in
+    /// `run_json`, the TUI's cycle detection) would disagree with the set
+    /// semantics it is built on.
+    const fn normalized(self) -> Self {
+        if self.mask & phase_bit(Phase::Done) != 0 {
+            Self {
+                mask: self.mask & !HARVESTABLE_BIT,
+            }
+        } else {
+            self
+        }
+    }
+
     /// This set plus `phase`.
     #[must_use]
     pub const fn with(self, phase: Phase) -> Self {
         Self {
             mask: self.mask | phase_bit(phase),
         }
+        .normalized()
     }
 
     /// This set unioned with `other`.
@@ -161,6 +216,7 @@ impl PhaseFilter {
         Self {
             mask: self.mask | other.mask,
         }
+        .normalized()
     }
 
     /// Is `phase` in the set?
@@ -187,8 +243,9 @@ impl PhaseFilter {
             .fold(Self::none(), |acc, sel| acc.union(sel.to_filter()))
     }
 
-    /// Match a molecule status name — the lowercase `Display` label, e.g.
-    /// `"running"`, `"starved"`, `"completed"`.
+    /// Match a molecule status **name** — the lowercase `Display` label,
+    /// e.g. `"running"`, `"starved"`, `"completed"` — paired with the
+    /// molecule's archive flag.
     ///
     /// A label this binary cannot parse is surfaced, never hidden. Refusing
     /// to render a status we do not understand would be the worst failure
@@ -196,20 +253,43 @@ impl PhaseFilter {
     /// notice — into a *substitution*, which propagates as confident data
     /// and cannot be detected downstream at all.
     #[must_use]
-    pub fn matches(self, status: &str) -> bool {
+    pub fn matches_label(self, status: &str, archived: bool) -> bool {
         status
             .parse::<MoleculeStatus>()
-            .map_or(true, |s| self.matches_status(s))
+            .map_or(true, |s| self.matches_molecule(s, archived))
     }
 
-    /// Match a typed [`MoleculeStatus`] by its [`Phase`].
+    /// Match a molecule by its typed [`MoleculeStatus`] **and** whether it
+    /// has been archived.
     ///
-    /// This is the only classification, and it lives in the core beside the
-    /// status enum. `cs peek` used to hand-write five of these, each with a
-    /// `_ =>` arm, each free to disagree — and all five did.
+    /// The [`Phase`] classification is the only one, and it lives in the
+    /// core beside the status enum — `cs peek` used to hand-write five of
+    /// these, each with a `_ =>` arm, each free to disagree, and all five
+    /// did.
+    ///
+    /// The archive flag is the second argument because it is the one thing
+    /// the phase cannot say: it separates the two states `Completed` folds
+    /// together — awaiting `cs done`, and finalized. Making it a parameter
+    /// rather than a second classification keeps [`MoleculeStatus::phase`]
+    /// the sole classifier; a caller must *hold* the fact to filter on it,
+    /// which is why every call site here reads it off the molecule.
     #[must_use]
-    pub fn matches_status(self, status: MoleculeStatus) -> bool {
-        self.contains(status.phase())
+    pub fn matches_molecule(self, status: MoleculeStatus, archived: bool) -> bool {
+        if self.contains(status.phase()) {
+            return true;
+        }
+        self.mask & HARVESTABLE_BIT != 0 && status == MoleculeStatus::Completed && !archived
+    }
+
+    /// Is this molecule in the harvest queue — finished, and not yet
+    /// finalized by `cs done`?
+    ///
+    /// The definition lives here, beside the filter that selects on it, so
+    /// the renderer's heartbeat tier and `--phase harvestable` cannot drift
+    /// into two answers for one molecule.
+    #[must_use]
+    pub const fn is_harvestable(status: MoleculeStatus, archived: bool) -> bool {
+        matches!(status, MoleculeStatus::Completed) && !archived
     }
 
     /// One-line label for the TUI status bar: `"unfinished"`, `"all"`, or
@@ -225,21 +305,37 @@ impl PhaseFilter {
         if self == Self::none() {
             return "(empty)".to_owned();
         }
-        Phase::ALL
+        if self == Self::harvestable() {
+            return "harvestable".to_owned();
+        }
+        let mut parts: Vec<&str> = Phase::ALL
             .iter()
             .filter(|p| self.contains(**p))
             .map(|p| p.as_str())
-            .collect::<Vec<_>>()
-            .join(" + ")
+            .collect();
+        // After `normalized`, this bit can only be set when `done` is
+        // absent, so it never duplicates a phase already named above.
+        if self.mask & HARVESTABLE_BIT != 0 {
+            parts.push("harvestable");
+        }
+        parts.join(" + ")
     }
 }
 
 /// A single `--phase` value.
 ///
-/// Six of these are the [`Phase`] variants themselves; the other two name
-/// the sets an operator actually asks for by hand. Every value here selects
-/// on **one axis** — which molecules, never which projects — so no value of
-/// this enum can silently widen the perimeter.
+/// Six of these are the [`Phase`] variants themselves; the other three name
+/// the sets an operator actually asks for by hand — the default
+/// (`unfinished`), everything (`all`), and the harvest queue
+/// (`harvestable`). Every value here selects on **one axis** — which
+/// molecules, never which projects — so no value of this enum can silently
+/// widen the perimeter.
+///
+/// `harvestable` is the one value that is not a union of phases: it is the
+/// *refinement* of `done` by the archive flag. It earns a place on this
+/// axis because it answers the same question the others do — which
+/// molecules — and because the set it names is the operator's queue, which
+/// no union of phases could express.
 ///
 /// `unfinished` is spellable even though it is the default: a flag whose
 /// only way to say "the default" is to be absent cannot be composed. Once
@@ -258,8 +354,11 @@ pub enum PhaseSelector {
     Parked,
     /// Collapsed.
     Failed,
-    /// Completed.
+    /// Completed — the whole archive, harvested or not.
     Done,
+    /// The harvest queue: completed and **not yet** archived, i.e. still
+    /// owed a `cs done`. A strict subset of `done`.
+    Harvestable,
     /// Every phase whose story is not over — the default view.
     Unfinished,
     /// Every phase, archive included. All of this axis, and only this axis:
@@ -278,6 +377,7 @@ impl PhaseSelector {
             Self::Parked => PhaseFilter::none().with(Phase::Parked),
             Self::Failed => PhaseFilter::none().with(Phase::Failed),
             Self::Done => PhaseFilter::none().with(Phase::Done),
+            Self::Harvestable => PhaseFilter::harvestable(),
             Self::Unfinished => PhaseFilter::unfinished(),
             Self::All => PhaseFilter::all(),
         }
@@ -343,7 +443,9 @@ pub struct Args {
     /// comma-separated; the values union. Says nothing about the
     /// perimeter. Defaults to `unfinished` — every molecule whose story is
     /// not over. `--phase unfinished,done,failed` is what `--past` used to
-    /// mean. In TUI mode the `A` key cycles this at runtime.
+    /// mean; `--phase harvestable` is the harvest queue — finished work
+    /// still owed a `cs done`. In TUI mode the `A` key cycles this at
+    /// runtime.
     #[arg(long, value_enum, value_delimiter = ',')]
     pub phase: Vec<PhaseSelector>,
 
@@ -593,7 +695,24 @@ struct PeekMoleculeJson {
     /// unrecognized status into `"pending"` through a `_ =>` arm, would
     /// publish a fabricated fact rather than fall back.
     status: MoleculeStatus,
+    /// Whether `cs done` has finalized the molecule.
+    ///
+    /// Ships under the same rule as the rest of this schema — settled, and
+    /// not reconstructible by the consumer. `status` alone cannot answer
+    /// *"what is left to harvest?"*: `completed` covers both the molecule
+    /// still owed a `cs done` and the one already archived, and those call
+    /// for opposite gestures. `(status, archived)` is what
+    /// `--phase harvestable` selects on, so publishing it is what lets a
+    /// patrol re-derive the same slice rather than trust the filter label.
+    ///
+    /// This is a *fact on disk* (`state.json`'s `archived`), not a
+    /// classification — the one kind of field this schema admits.
+    archived: bool,
     /// Liveness tier, identical to the one the TUI renders.
+    ///
+    /// `harvestable` is the one value that is not a clock reading: it means
+    /// the molecule is finished and waiting for `cs done`, which a lingering
+    /// tmux session would otherwise report as `active`.
     heartbeat: cosmon_observability::HeartbeatTier,
     /// Timestamp `heartbeat` was classified from — the max of the tmux
     /// session clock and the molecule's `updated_at`. Rides along because
@@ -737,6 +856,7 @@ fn snapshot_to_json(
                 id: row.mol_id.clone(),
                 project: row.project.clone(),
                 status: mol.status,
+                archived: mol.archived,
                 heartbeat: row.heartbeat,
                 last_activity: row.last_activity,
                 updated_at: mol.updated_at,
@@ -1229,6 +1349,7 @@ mod tests {
         WatchEvent::MoleculeAdded {
             id: MoleculeId::new(id).unwrap(),
             view: crate::event_log::MoleculeView {
+                archived: false,
                 status,
                 assigned_worker: None,
                 current_step: 0,
@@ -1317,7 +1438,7 @@ mod tests {
         let f = PhaseFilter::default();
         for s in EVERY_STATUS {
             assert_eq!(
-                f.matches_status(s),
+                f.matches_molecule(s, false),
                 !s.is_terminal(),
                 "the default disagrees with core's is_terminal() on {s}",
             );
@@ -1329,19 +1450,19 @@ mod tests {
         // The regression that started the deliberation. `Starved` is alive
         // (ADR-062) and every peek classification used to file it with the
         // archive, where it was one row in 918 and invisible by default.
-        assert!(PhaseFilter::default().matches_status(MoleculeStatus::Starved));
+        assert!(PhaseFilter::default().matches_molecule(MoleculeStatus::Starved, false));
     }
 
     #[test]
     fn default_surfaces_frozen_which_no_other_instrument_reports() {
-        assert!(PhaseFilter::default().matches_status(MoleculeStatus::Frozen));
+        assert!(PhaseFilter::default().matches_molecule(MoleculeStatus::Frozen, false));
     }
 
     #[test]
     fn default_hides_the_archive_and_only_the_archive() {
         let f = PhaseFilter::default();
-        assert!(!f.matches_status(MoleculeStatus::Completed));
-        assert!(!f.matches_status(MoleculeStatus::Collapsed));
+        assert!(!f.matches_molecule(MoleculeStatus::Completed, false));
+        assert!(!f.matches_molecule(MoleculeStatus::Collapsed, false));
     }
 
     #[test]
@@ -1374,7 +1495,7 @@ mod tests {
         ]);
         for s in EVERY_STATUS {
             assert!(
-                f.matches_status(s),
+                f.matches_molecule(s, false),
                 "the archive selectors must never drop {s}"
             );
         }
@@ -1477,7 +1598,7 @@ mod tests {
     fn phase_all_selector_means_all_literally() {
         let f = PhaseFilter::from_phase_args(&[PhaseSelector::All]);
         for s in EVERY_STATUS {
-            assert!(f.matches_status(s), "--phase all must accept {s}");
+            assert!(f.matches_molecule(s, false), "--phase all must accept {s}");
         }
         assert_eq!(f, PhaseFilter::all());
         for p in Phase::ALL {
@@ -1490,26 +1611,32 @@ mod tests {
         // An erasure the operator can see beats a substitution they cannot.
         // A status string this binary does not understand is exactly when
         // an observer must not have opinions.
-        assert!(PhaseFilter::none().matches("a-status-from-the-future"));
-        assert!(PhaseFilter::default().matches("a-status-from-the-future"));
+        assert!(PhaseFilter::none().matches_label("a-status-from-the-future", false));
+        assert!(PhaseFilter::default().matches_label("a-status-from-the-future", false));
+        assert!(PhaseFilter::harvestable().matches_label("a-status-from-the-future", false));
     }
 
     #[test]
-    fn matches_string_agrees_with_matches_status() {
-        // `matches` parses and delegates; this holds the two entry points
-        // to one answer so the string path can never drift into a sixth
-        // private classification.
+    fn matches_string_agrees_with_matches_molecule() {
+        // `matches_label` parses and delegates; this holds the two entry
+        // points to one answer so the string path can never drift into a
+        // sixth private classification. Both values of `archived` are
+        // exercised — the refinement is exactly where the two paths could
+        // diverge.
         for f in [
             PhaseFilter::default(),
             PhaseFilter::all(),
+            PhaseFilter::harvestable(),
             PhaseFilter::from_phase_args(&[PhaseSelector::Failed, PhaseSelector::Done]),
         ] {
             for s in EVERY_STATUS {
-                assert_eq!(
-                    f.matches(&s.to_string()),
-                    f.matches_status(s),
-                    "string and typed paths disagree on {s}",
-                );
+                for archived in [false, true] {
+                    assert_eq!(
+                        f.matches_label(&s.to_string(), archived),
+                        f.matches_molecule(s, archived),
+                        "string and typed paths disagree on {s} (archived={archived})",
+                    );
+                }
             }
         }
     }
@@ -1541,10 +1668,23 @@ mod tests {
     /// production code contradicts, and the `project` assertions below would
     /// pin a value that can never occur.
     fn json_push(snap: &mut FleetSnapshot, id: &str, status: MoleculeStatus, with_session: bool) {
+        json_push_archived(snap, id, status, with_session, false);
+    }
+
+    /// [`json_push`], with the archive flag spelled out — the second half of
+    /// what the harvest queue selects on.
+    fn json_push_archived(
+        snap: &mut FleetSnapshot,
+        id: &str,
+        status: MoleculeStatus,
+        with_session: bool,
+        archived: bool,
+    ) {
         use cosmon_observability::molecule::Molecule as ObsMolecule;
         use cosmon_observability::session::Session;
 
         snap.insert_molecule(ObsMolecule {
+            archived,
             id: id.into(),
             title: "t".into(),
             kind: "task".into(),
@@ -1622,6 +1762,7 @@ mod tests {
         assert_eq!(
             keys,
             [
+                "archived",
                 "heartbeat",
                 "id",
                 "last_activity",
@@ -1630,6 +1771,196 @@ mod tests {
                 "updated_at"
             ],
             "the peek --json schema changed; a new key is a forever contract",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The harvest queue (`--phase harvestable`, issue #19).
+    // -----------------------------------------------------------------
+
+    /// A fleet holding one molecule of each of the three states the harvest
+    /// queue has to tell apart:
+    ///
+    /// - `task-…-0001` — running, i.e. `unfinished`;
+    /// - `task-…-0002` — completed and **not** archived, the harvest queue;
+    /// - `task-…-0003` — completed and archived, i.e. finalized `done`.
+    ///
+    /// Only the middle one is owed a `cs done`.
+    fn harvest_fixture() -> FleetSnapshot {
+        let mut snap = FleetSnapshot::new();
+        json_push_archived(
+            &mut snap,
+            "task-20260731-0001",
+            MoleculeStatus::Running,
+            false,
+            false,
+        );
+        json_push_archived(
+            &mut snap,
+            "task-20260731-0002",
+            MoleculeStatus::Completed,
+            false,
+            false,
+        );
+        json_push_archived(
+            &mut snap,
+            "task-20260731-0003",
+            MoleculeStatus::Completed,
+            false,
+            true,
+        );
+        snap
+    }
+
+    /// The molecule ids a filter leaves standing, sorted.
+    fn ids_after(filter: PhaseFilter) -> Vec<String> {
+        let mut snap = harvest_fixture();
+        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, filter);
+        let mut ids: Vec<String> = snap.molecules().map(|m| m.id.to_string()).collect();
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn harvestable_selects_exactly_the_completed_and_unarchived() {
+        // The acceptance criterion of issue #19, stated as one assertion:
+        // the harvest queue is neither `unfinished` nor `done`, and no
+        // union of phases could have named it — `completed` covers both
+        // the molecule still owed a `cs done` and the one already
+        // finalized, and those call for opposite gestures.
+        assert_eq!(
+            ids_after(PhaseFilter::harvestable()),
+            ["task-20260731-0002"]
+        );
+    }
+
+    #[test]
+    fn the_three_slices_are_the_three_states_and_nothing_leaks() {
+        // Each filter against the same fleet, so a change that widens one
+        // slice has to narrow another visibly rather than quietly overlap.
+        assert_eq!(ids_after(PhaseFilter::unfinished()), ["task-20260731-0001"]);
+        assert_eq!(
+            ids_after(PhaseFilter::none().with(Phase::Done)),
+            ["task-20260731-0002", "task-20260731-0003"],
+            "--phase done is the whole archive, harvested or not",
+        );
+        assert_eq!(
+            ids_after(PhaseFilter::all()),
+            [
+                "task-20260731-0001",
+                "task-20260731-0002",
+                "task-20260731-0003"
+            ],
+        );
+    }
+
+    #[test]
+    fn harvestable_is_a_subset_of_done_so_the_union_is_done() {
+        // `harvestable` refines `done`; a set that already contains
+        // everything the refinement selects must not change when unioned
+        // with it, and must not grow a second name for one set.
+        let done = PhaseFilter::from_phase_args(&[PhaseSelector::Done]);
+        let both = PhaseFilter::from_phase_args(&[PhaseSelector::Done, PhaseSelector::Harvestable]);
+        assert_eq!(both, done);
+        assert_eq!(both.label(), "done");
+        // Order cannot matter, same as every other pair of selectors.
+        assert_eq!(
+            PhaseFilter::from_phase_args(&[PhaseSelector::Harvestable, PhaseSelector::Done]),
+            done
+        );
+    }
+
+    #[test]
+    fn harvestable_composes_with_the_default_without_widening_it() {
+        let f =
+            PhaseFilter::from_phase_args(&[PhaseSelector::Unfinished, PhaseSelector::Harvestable]);
+        assert_eq!(
+            ids_after(f),
+            ["task-20260731-0001", "task-20260731-0002"],
+            "the default plus the harvest queue must still exclude the archive",
+        );
+        assert_eq!(f.label(), "live + waiting + blocked + parked + harvestable");
+    }
+
+    #[test]
+    fn json_exposes_the_harvest_queue_as_the_same_slice() {
+        // The machine channel and the screen must not disagree about what
+        // is left to harvest: a patrol that polls `--json` is the consumer
+        // this slice exists for.
+        let mut snap = harvest_fixture();
+        let filter = PhaseFilter::harvestable();
+        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, filter);
+        let v = serde_json::to_value(snapshot_to_json(&snap, filter)).unwrap();
+        assert_eq!(v["filter"], "harvestable");
+        assert_eq!(v["molecules"].as_array().unwrap().len(), 1);
+        assert_eq!(v["molecules"][0]["id"], "task-20260731-0002");
+        assert_eq!(v["molecules"][0]["status"], "completed");
+        assert_eq!(v["molecules"][0]["archived"], false);
+    }
+
+    #[test]
+    fn json_publishes_archived_so_the_queue_is_re_derivable() {
+        // `status` alone cannot separate the two — publishing the filter
+        // label would ask the consumer to trust us instead of checking.
+        let mut snap = harvest_fixture();
+        let filter = PhaseFilter::all();
+        let v = serde_json::to_value(snapshot_to_json(&snap, filter)).unwrap();
+        let rows = v["molecules"].as_array().unwrap();
+        assert_eq!(rows[1]["archived"], false);
+        assert_eq!(rows[2]["archived"], true);
+        // And the projection carries it through the filter unchanged.
+        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, PhaseFilter::harvestable());
+        assert_eq!(snap.molecules().count(), 1);
+    }
+
+    #[test]
+    fn a_lingering_session_does_not_make_a_finished_molecule_look_active() {
+        // The aggravating half of issue #19. The tmux session outlives the
+        // worker and keeps bumping `#{session_activity}`, so the clock
+        // says "active" about a molecule where nothing is running. An
+        // operator reading 🟢 never harvests it.
+        let mut snap = FleetSnapshot::new();
+        json_push_archived(
+            &mut snap,
+            "task-20260731-0002",
+            MoleculeStatus::Completed,
+            true, // live session, last activity = now
+            false,
+        );
+        let rows = super::super::peek_tui::snapshot_to_rows(&snap);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].heartbeat,
+            cosmon_observability::HeartbeatTier::Harvestable,
+            "a completed, unarchived molecule reads as harvestable, never as a liveness tier",
+        );
+        assert_ne!(
+            rows[0].heartbeat,
+            cosmon_observability::HeartbeatTier::Active
+        );
+        // And it is still selected by the filter the operator will type.
+        super::super::peek_tui::filter_snapshot_by_phase(&mut snap, PhaseFilter::harvestable());
+        assert_eq!(snap.molecules().count(), 1);
+    }
+
+    #[test]
+    fn an_archived_molecule_keeps_its_liveness_reading() {
+        // The override is scoped to the harvest queue: once `cs done` has
+        // finalized the molecule it is ordinary archive, and inventing a
+        // "harvestable" reading for it would put finalized work back in the
+        // operator's queue.
+        let mut snap = FleetSnapshot::new();
+        json_push_archived(
+            &mut snap,
+            "task-20260731-0003",
+            MoleculeStatus::Completed,
+            true,
+            true,
+        );
+        let rows = super::super::peek_tui::snapshot_to_rows(&snap);
+        assert_ne!(
+            rows[0].heartbeat,
+            cosmon_observability::HeartbeatTier::Harvestable
         );
     }
 

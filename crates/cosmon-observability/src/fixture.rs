@@ -56,6 +56,7 @@ pub fn canonical_snapshot() -> FleetSnapshot {
         project_root: "/proj/alpha".into(),
         session: Some("cosmon-alpha".into()),
         updated_at: t,
+        archived: false,
     });
     s.insert_molecule(Molecule {
         id: "mol-beta".into(),
@@ -65,6 +66,7 @@ pub fn canonical_snapshot() -> FleetSnapshot {
         project_root: "/proj/beta".into(),
         session: Some("cosmon-beta".into()),
         updated_at: t,
+        archived: false,
     });
 
     s.insert_worker(Worker {

@@ -100,6 +100,9 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
                 archive is hidden by default; press A\n                                   \
                 to cycle or pass --phase)\n  \
              cs peek --phase done,failed     + the archive (completed + collapsed)\n  \
+             cs peek --phase harvestable     the harvest queue — finished work still\n                                  \
+               owed a 'cs done' (completed, not yet\n                                   \
+                archived)\n  \
              cs peek --all-galaxies          same phases, every project\n  \
              cs peek --all                   sugar for --all-galaxies --phase all:\n                                  \
                everything, every project, archive\n                                  \
@@ -224,7 +227,9 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              the daily signal; the frozen, starved and pending rows are the \
              signal, and no other instrument reports them. One flag per axis \
              widens the slice: '--phase' selects the phases ('--phase \
-             done,failed' adds the archive), '--all-galaxies' selects the \
+             done,failed' adds the archive, '--phase harvestable' narrows to \
+             the harvest queue — completed and not yet archived, i.e. still \
+             owed a 'cs done'), '--all-galaxies' selects the \
              projects, and neither touches the other's axis. '--all' is sugar \
              for '--all-galaxies --phase all' and is the only flag that speaks \
              to both. The interactive 'A' key \

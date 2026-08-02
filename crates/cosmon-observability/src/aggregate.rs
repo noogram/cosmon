@@ -190,6 +190,7 @@ mod tests {
             project_root: "/proj/a".into(),
             session: Some("cosmon-mol-1".into()),
             updated_at: Utc::now(),
+            archived: false,
         });
         s.insert_worker(Worker {
             id: "w-1".into(),

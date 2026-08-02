@@ -13,6 +13,8 @@ Peek — canonical fleet observation command (TUI default; `--no-tui` for plaint
 EXAMPLES:
   cs peek                         # TUI over the current .cosmon/
   cs peek --phase done,failed     # + the archive; project scope unchanged
+  cs peek --phase harvestable     # the harvest queue: finished work still
+                                  #   owed a `cs done` (completed, unarchived)
   cs peek --all-galaxies          # same phases, every .cosmon/ + tmux socket
   cs peek --all                   # sugar for --all-galaxies --phase all
   cs peek --no-tui                # plaintext event stream
@@ -39,7 +41,7 @@ briefing/log/events/synthesis/responses/notes/git tabs.
 * `--no-tmux` — Disable tmux propulsion. State is still read and diffed, but no nudges are sent
 * `--all` — Sugar for `--all-galaxies --phase all`, and exactly that. Both axes at their widest: every project AND every phase, archive included. `--all` means all, literally; it never narrows. Conflicts with the two flags it expands to — sugar and its expansion are one way of saying one thing, not two ways of saying it twice. See `docs/guides/peek-temporalities.md`
 * `--all-galaxies` — Perimeter axis: scan every project under `$COSMON_CLUSTER_ROOT` instead of the current one. Opt-in — cross-project reach is never implicit. Says nothing about which phases you see. Same spelling as `cs tail --all-galaxies`: one word, one meaning, across the binary. In TUI mode the `a` key toggles this at runtime
-* `--phase <PHASE>` — Temporality axis: which phases to surface. Repeatable and comma-separated; the values union. Says nothing about the perimeter. Defaults to `unfinished` — every molecule whose story is not over. `--phase unfinished,done,failed` is what `--past` used to mean. In TUI mode the `A` key cycles this at runtime
+* `--phase <PHASE>` — Temporality axis: which phases to surface. Repeatable and comma-separated; the values union. Says nothing about the perimeter. Defaults to `unfinished` — every molecule whose story is not over. `--phase unfinished,done,failed` is what `--past` used to mean; `--phase harvestable` is the harvest queue — finished work still owed a `cs done`. In TUI mode the `A` key cycles this at runtime
 
   Possible values:
   - `live`:
@@ -53,7 +55,9 @@ briefing/log/events/synthesis/responses/notes/git tabs.
   - `failed`:
     Collapsed
   - `done`:
-    Completed
+    Completed — the whole archive, harvested or not
+  - `harvestable`:
+    The harvest queue: completed and **not yet** archived, i.e. still owed a `cs done`. A strict subset of `done`
   - `unfinished`:
     Every phase whose story is not over — the default view
   - `all`:

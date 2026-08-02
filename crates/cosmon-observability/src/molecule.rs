@@ -60,6 +60,21 @@ pub struct Molecule {
     pub session: Option<String>,
     /// Last observed update timestamp.
     pub updated_at: DateTime<Utc>,
+    /// Whether the molecule has been finalized by `cs done` — its artifacts
+    /// copied into the tracked archive and its branch torn down.
+    ///
+    /// Carried here because `status` alone cannot answer the operator's
+    /// most frequent post-batch question, *"what is left to harvest?"*.
+    /// `Completed` covers two states that call for opposite gestures: work
+    /// finished and awaiting `cs done` (act on it), and finalized (ignore
+    /// it). The projection would otherwise force every consumer to re-read
+    /// `state.json` to tell them apart.
+    ///
+    /// `#[serde(default)]` so a snapshot serialized before this field
+    /// existed deserializes as un-archived — the same convention
+    /// `MoleculeData::archived` uses on disk.
+    #[serde(default)]
+    pub archived: bool,
 }
 
 #[cfg(test)]

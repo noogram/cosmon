@@ -224,6 +224,14 @@ pub(crate) struct RowView {
     pub(crate) project: String,
     pub(crate) role: String,
     pub(crate) status: String,
+    /// Whether `cs done` has finalized the molecule behind this row.
+    ///
+    /// Carried beside `status` because the two together are what
+    /// [`PhaseFilter::matches_molecule`](super::peek::PhaseFilter::matches_molecule)
+    /// filters on: `completed` alone cannot tell the harvest queue from
+    /// the archive. `false` for a row with no molecule behind it (a bare
+    /// tmux session) — there is nothing to have archived.
+    pub(crate) archived: bool,
     pub(crate) step: String,
     /// Wall-clock of the molecule's last state write (`MoleculeData::updated_at`).
     ///
@@ -1012,6 +1020,9 @@ fn molecule_health_for_row(r: &RowView) -> MoleculeHealth {
         }
         HeartbeatTier::Stalled => EffectiveStatus::Suspect,
         HeartbeatTier::Orphaned => EffectiveStatus::Diverged,
+        // The worker finished; a lingering session is not a health
+        // signal either way, and the molecule is `completed` on disk.
+        HeartbeatTier::Harvestable => EffectiveStatus::Healthy,
     });
 
     molecule_health(core_status, worker.as_ref())
@@ -1824,7 +1835,7 @@ impl App {
             .iter()
             .enumerate()
             .filter(|(_, r)| {
-                if !self.phase_filter.matches(&r.status) {
+                if !self.phase_filter.matches_label(&r.status, r.archived) {
                     return false;
                 }
                 if let Some(tag) = &cfg.tag {
@@ -3932,6 +3943,7 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
         HeartbeatTier::Idle => "idle",
         HeartbeatTier::Quiet | HeartbeatTier::Stalled => "quiet",
         HeartbeatTier::Orphaned => "orphaned",
+        HeartbeatTier::Harvestable => "harvestable",
     };
     let hb_val = if let Some(la) = r.last_activity {
         let ago = Utc::now().signed_duration_since(la).num_seconds();
@@ -3953,6 +3965,7 @@ fn expanded_detail_lines(r: &RowView) -> Vec<Line<'static>> {
                         Style::default().fg(Color::Gray)
                     }
                     HeartbeatTier::Orphaned => dim_style,
+                    HeartbeatTier::Harvestable => Style::default().fg(Color::Cyan),
                 },
             ),
         ])
@@ -3977,6 +3990,7 @@ fn heartbeat_style(tier: HeartbeatTier) -> Style {
         HeartbeatTier::Orphaned => Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::DIM),
+        HeartbeatTier::Harvestable => Style::default().fg(Color::Cyan),
     }
 }
 
@@ -4232,7 +4246,9 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
         if by_mol.contains_key(&id) {
             continue;
         }
-        let heartbeat = if m.status == MoleculeStatus::Running {
+        let heartbeat = if super::peek::PhaseFilter::is_harvestable(m.status, m.archived) {
+            HeartbeatTier::Harvestable
+        } else if m.status == MoleculeStatus::Running {
             HeartbeatTier::Orphaned
         } else {
             HeartbeatTier::Stalled
@@ -4246,6 +4262,7 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 project: m.project_root.clone(),
                 role: "-".into(),
                 status: m.status.to_string(),
+                archived: m.archived,
                 step: "-".into(),
                 updated_at: Some(m.updated_at),
                 energy_in: 0,
@@ -4391,7 +4408,19 @@ fn row_view_from(
         (Some(a), None) => Some(a),
         (None, b) => b,
     };
-    let heartbeat = HeartbeatTier::classify(last_activity, now);
+    // A completed-but-unharvested molecule is not a liveness question, and
+    // the clock above answers it wrongly: a post-completion tmux session
+    // nobody tore down keeps bumping `#{session_activity}`, so the row
+    // renders 🟢 active on work that has already finished. The operator
+    // then reads a molecule owed a `cs done` as one still in flight — and
+    // never harvests it. See issue #19.
+    let archived = mol.is_some_and(|m| m.archived);
+    let heartbeat =
+        if mol.is_some_and(|m| super::peek::PhaseFilter::is_harvestable(m.status, m.archived)) {
+            HeartbeatTier::Harvestable
+        } else {
+            HeartbeatTier::classify(last_activity, now)
+        };
     let session_slug = mol.and_then(|m| m.session.clone());
     RowView {
         mol_id,
@@ -4399,6 +4428,7 @@ fn row_view_from(
         project,
         role,
         status,
+        archived,
         step: "-".into(),
         updated_at,
         energy_in: energy.input_tokens,
@@ -4757,6 +4787,7 @@ fn populate_snapshot(
             project_root: project_label.to_owned(),
             session: m.session_name.clone(),
             updated_at: m.updated_at,
+            archived: m.archived,
         });
     }
 
@@ -4858,7 +4889,7 @@ pub(crate) fn filter_snapshot_by_phase(
     snap: &mut FleetSnapshot,
     phase_filter: super::peek::PhaseFilter,
 ) {
-    snap.retain_molecules(|m| phase_filter.matches_status(m.status));
+    snap.retain_molecules(|m| phase_filter.matches_molecule(m.status, m.archived));
 }
 
 /// Enumerate every tmux socket available to the current user.
@@ -5155,6 +5186,7 @@ mod tests {
             last_activity: Some(now),
         };
         let molecule = Molecule {
+            archived: false,
             id: cosmon_observability::MoleculeId("task-x".into()),
             title: "t".into(),
             kind: "task".into(),
@@ -5187,6 +5219,7 @@ mod tests {
             last_activity: Some(stale_tmux),
         };
         let molecule = Molecule {
+            archived: false,
             id: cosmon_observability::MoleculeId("task-y".into()),
             title: "t".into(),
             kind: "task".into(),
@@ -5434,6 +5467,7 @@ mod tests {
 
     fn row_with(status: &str, hb: HeartbeatTier) -> RowView {
         RowView {
+            archived: false,
             mol_id: "x".into(),
             session_slug: None,
             project: String::new(),
@@ -6131,6 +6165,7 @@ mod tests {
         for i in 0..17 {
             let mol_id = format!("task-2026041{i:02}-abcd");
             snap.insert_molecule(Molecule {
+                archived: false,
                 id: cosmon_observability::MoleculeId(mol_id.clone()),
                 title: mol_id.clone(),
                 kind: "task".into(),

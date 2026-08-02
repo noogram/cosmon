@@ -37,14 +37,32 @@ pub struct Session {
 ///
 /// The `Serialize`/`Deserialize` impls make this a **machine contract**:
 /// `cs peek --json` publishes the tier as its `snake_case` name. That is
-/// admissible only because the tier is settled — five variants, fixed
-/// thresholds, `Ord` already load-bearing — and it is not the object under
-/// redesign. A consumer re-deriving the tier from `last_activity` alone
-/// would re-derive it wrongly, because [`classify`](Self::classify) is fed
-/// the max of the tmux and molecule clocks, not the tmux clock alone.
+/// admissible only because the tier is settled — a fixed set of variants,
+/// fixed thresholds, `Ord` already load-bearing — and it is not the object
+/// under redesign. A consumer re-deriving the tier from `last_activity`
+/// alone would re-derive it wrongly, because [`classify`](Self::classify)
+/// is fed the max of the tmux and molecule clocks, not the tmux clock
+/// alone — and because [`Harvestable`](Self::Harvestable) is not derived
+/// from a clock at all.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HeartbeatTier {
+    /// The work is finished and the molecule is waiting for `cs done` —
+    /// `Completed` on disk and not yet archived.
+    ///
+    /// Not a liveness reading, and deliberately not derived from one: a
+    /// post-completion tmux session that nobody has torn down keeps
+    /// bumping `#{session_activity}`, so classifying it by the clock
+    /// renders 🟢 *active* on a molecule where nothing is running. That is
+    /// the one reading an operator cannot recover from — a finished
+    /// molecule that looks like work in flight is never harvested.
+    ///
+    /// Sorts lowest because it competes for no liveness attention: the
+    /// operator reaches these rows through `cs peek --phase harvestable`,
+    /// which selects exactly this set, not by scanning the activity sort.
+    /// Peer of [`Orphaned`](Self::Orphaned), which is likewise an operator
+    /// gesture wearing a liveness tier's clothes.
+    Harvestable,
     /// The molecule is marked running in state, but no live tmux session
     /// exists. The worker is gone; this row needs `cs done` or `cs purge`.
     Orphaned,
@@ -71,11 +89,17 @@ impl HeartbeatTier {
         Self::Quiet,
         Self::Stalled,
         Self::Orphaned,
+        Self::Harvestable,
     ];
 
     /// Classify a session by its last-activity timestamp, given `now` as the
     /// current time. Returns [`HeartbeatTier::Stalled`] if no activity has
     /// ever been observed on a live session.
+    ///
+    /// Never returns [`Harvestable`](Self::Harvestable): that tier is a fact
+    /// about the *molecule* (completed and unarchived), not about a clock,
+    /// so it is applied by the caller that holds the molecule — see
+    /// `cs peek`'s `snapshot_to_rows`.
     #[must_use]
     pub fn classify(last_activity: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Self {
         let Some(ts) = last_activity else {
@@ -109,6 +133,7 @@ impl HeartbeatTier {
             Self::Idle => "🟡",
             Self::Quiet | Self::Stalled => "⚪",
             Self::Orphaned => "💀",
+            Self::Harvestable => "🌾",
         }
     }
 
@@ -121,6 +146,7 @@ impl HeartbeatTier {
             Self::Quiet => "quiet",
             Self::Stalled => "stalled",
             Self::Orphaned => "orphaned",
+            Self::Harvestable => "harvestable",
         }
     }
 }

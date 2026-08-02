@@ -75,6 +75,12 @@ pub(crate) struct WorkerView {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MoleculeView {
     pub status: MoleculeStatus,
+    /// Whether `cs done` has finalized the molecule. Tracked here only so
+    /// the baseline `--phase` filter can tell the harvest queue
+    /// (`completed` and not archived) from the archive; it is deliberately
+    /// **not** diffed into an event, because archiving is `cs done`'s own
+    /// transition and already has a line in the log.
+    pub archived: bool,
     pub assigned_worker: Option<WorkerId>,
     pub current_step: usize,
     pub total_steps: usize,
@@ -109,6 +115,7 @@ pub(crate) fn build_snapshot(fleet: &Fleet, molecules: &[MoleculeData]) -> Snaps
                 m.id.clone(),
                 MoleculeView {
                     status: m.status,
+                    archived: m.archived,
                     assigned_worker: m.assigned_worker.clone(),
                     current_step: m.current_step,
                     total_steps: m.total_steps,
@@ -851,6 +858,7 @@ mod tests {
         let ev = WatchEvent::MoleculeAdded {
             id: MoleculeId::new("task-20260409-aaaa").unwrap(),
             view: MoleculeView {
+                archived: false,
                 status: MoleculeStatus::Running,
                 assigned_worker: Some(WorkerId::new("quartz").unwrap()),
                 current_step: 1,
@@ -877,6 +885,7 @@ mod tests {
         let ev = WatchEvent::MoleculeAdded {
             id: MoleculeId::new("task-20260409-bbbb").unwrap(),
             view: MoleculeView {
+                archived: false,
                 status: MoleculeStatus::Pending,
                 assigned_worker: None,
                 current_step: 0,

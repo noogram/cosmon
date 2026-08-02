@@ -116,6 +116,7 @@ mod tests {
 
     fn test_row() -> RowView {
         RowView {
+            archived: false,
             mol_id: "task-aaaa".into(),
             session_slug: None,
             project: "p".into(),
