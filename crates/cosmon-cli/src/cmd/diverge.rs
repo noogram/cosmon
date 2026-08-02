@@ -22,8 +22,11 @@
 //! A session argument may be:
 //!
 //! 1. A **session id** resolved against the canonical presence registry at
-//!    `<state>/presence/<sid>/presence.json` (schema: `cwd`, `galaxy`,
-//!    `current_molecule`, …). This is the path C-PRESENCE-CORE publishes.
+//!    `<state>/presence/<sid>.json` — the path [`PresenceStore`] actually
+//!    writes, decoded through it rather than hand-joined here. Until M2 this
+//!    reader looked for `<state>/presence/<sid>/presence.json`, a directory
+//!    layout nothing has ever published (ADR-168 §D4, P1): every session id
+//!    fell through to the filesystem branch and was reported unresolvable.
 //! 2. A **filesystem path** to a galaxy root (a directory that contains a
 //!    `.cosmon/` subdirectory). Used for ad-hoc checks between worktrees
 //!    before the presence registry is populated.
@@ -44,9 +47,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use colored::Colorize;
-use cosmon_core::id::MoleculeId;
+use cosmon_core::id::{MoleculeId, SessionId};
+use cosmon_core::presence::Presence;
+use cosmon_filestore::PresenceStore;
 use cosmon_state::MoleculeData;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::Context;
 
@@ -90,25 +95,6 @@ impl Agreement {
             Self::Inconclusive => 2,
         }
     }
-}
-
-/// Minimal schema of the presence record that this command reads.
-///
-/// Mirrors the shape C-PRESENCE-CORE will publish at
-/// `.cosmon/state/presence/<sid>/presence.json`. Unknown fields are
-/// tolerated so later additions don't break this reader. Defined here
-/// (rather than imported from `cosmon-state`) because the presence crate
-/// lands in a sibling task and this command must not block on it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Presence {
-    /// Working directory (absolute path) of the session — used both as
-    /// the git-HEAD probe target and (when it contains a `.cosmon/`) as
-    /// the state-dir source for the session's molecule views.
-    cwd: PathBuf,
-    /// Optional hint: the molecule this session is currently working on.
-    /// Consumed by `cs patrol --livelock` when building the wait graph.
-    #[serde(default)]
-    current_molecule: Option<String>,
 }
 
 /// Fully resolved view of a session — the triple `(state_dir, cwd, hint)`.
@@ -463,20 +449,20 @@ fn print_human(r: &DivergeReport) {
 // ---------------------------------------------------------------------------
 
 fn resolve_session(ctx: &Context, s: &str) -> anyhow::Result<Session> {
-    // 1. Try the canonical presence registry.
+    // 1. Try the canonical presence registry — through the store that owns
+    //    the layout, so this reader cannot drift from the writer again.
     let self_state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
-    let presence_path = self_state_dir
-        .join("presence")
-        .join(s)
-        .join("presence.json");
-    if presence_path.exists() {
-        let bytes = std::fs::read(&presence_path)?;
-        let presence: Presence = serde_json::from_slice(&bytes)?;
-        return Ok(Session {
-            label: s.to_owned(),
-            state_dir: presence.cwd.join(".cosmon").join("state"),
-            cwd: presence.cwd,
-        });
+    if let Ok(sid) = SessionId::new(s) {
+        let presence_path = PresenceStore::new(&self_state_dir).snapshot_path(&sid);
+        if presence_path.exists() {
+            let bytes = std::fs::read(&presence_path)?;
+            let presence: Presence = serde_json::from_slice(&bytes)?;
+            return Ok(Session {
+                label: s.to_owned(),
+                state_dir: presence.cwd.join(".cosmon").join("state"),
+                cwd: presence.cwd,
+            });
+        }
     }
 
     // 2. Fall back to filesystem-path resolution.
@@ -768,5 +754,53 @@ mod tests {
                 clause.detail
             );
         }
+    }
+
+    // ADR-168 §D4, P1. `PresenceStore` writes `presence/<sid>.json`; this
+    // reader looked under `presence/<sid>/presence.json`. Nothing has ever
+    // written that directory, so *every* session id fell through to the
+    // filesystem branch and came back "not a known presence id" — a broken
+    // link that no test failed on because nothing yet depended on it.
+    #[test]
+    fn a_session_id_resolves_against_the_file_the_store_actually_writes() {
+        use cosmon_core::presence::Presence;
+        use cosmon_filestore::PresenceStore;
+
+        let state = TempDir::new().unwrap();
+        let galaxy = TempDir::new().unwrap();
+        std::fs::create_dir_all(galaxy.path().join(".cosmon").join("state")).unwrap();
+
+        PresenceStore::new(state.path())
+            .upsert(&Presence::new(
+                SessionId::new("pilot-sid").unwrap(),
+                "cosmon",
+                galaxy.path(),
+                std::process::id(),
+                chrono::Utc::now(),
+            ))
+            .unwrap();
+
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state.path().to_path_buf()),
+        };
+        let resolved = resolve_session(&ctx, "pilot-sid").expect("the id must resolve");
+        assert_eq!(resolved.cwd, galaxy.path());
+        assert_eq!(
+            resolved.state_dir,
+            galaxy.path().join(".cosmon").join("state"),
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_id_still_fails_to_resolve() {
+        let state = TempDir::new().unwrap();
+        let ctx = Context {
+            verbose: false,
+            json: false,
+            config: Some(state.path().to_path_buf()),
+        };
+        assert!(resolve_session(&ctx, "no-such-session").is_err());
     }
 }

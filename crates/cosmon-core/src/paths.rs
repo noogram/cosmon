@@ -103,6 +103,12 @@ pub enum CosmonPathKind {
     PresenceLog,
     /// `presence/<session>.seek` — whisper read-offset pointer for a session.
     PresenceSeek,
+    /// `presence/<session>.inbox.jsonl` — pilot-message envelopes delivered to
+    /// a session (mission co-pilotage M2).
+    PresenceInbox,
+    /// `presence/<session>.inbox.ack.jsonl` — acknowledgements of those
+    /// envelopes, keyed by message id rather than by byte offset.
+    PresenceInboxAck,
     /// `cas/<prefix>/<hash>` — content-addressed blob (response hashes, etc.).
     Cas,
     /// `archive/<YYYY>/<MM>/<mol>/` — durable terminal-transition snapshot
@@ -154,6 +160,8 @@ impl CosmonPathKind {
             Self::PresenceSnapshot => "presence/<session>.json",
             Self::PresenceLog => "presence/<session>.log",
             Self::PresenceSeek => "presence/<session>.seek",
+            Self::PresenceInbox => "presence/<session>.inbox.jsonl",
+            Self::PresenceInboxAck => "presence/<session>.inbox.ack.jsonl",
             Self::Cas => "cas/<prefix>/<hash>",
             Self::ArchiveMolecule => "archive/<YYYY>/<MM>/<mol>/",
             Self::ArchiveFleetEvents => "archive/events/events-<YYYY-MM>.jsonl",
@@ -183,6 +191,7 @@ impl CosmonPathKind {
             Self::PresenceSnapshot | Self::PresenceLog | Self::PresenceSeek => {
                 "cosmon-filestore::PresenceStore"
             }
+            Self::PresenceInbox | Self::PresenceInboxAck => "cosmon-filestore::PilotMailbox",
             Self::Cas => "cosmon-filestore::cas",
             Self::ArchiveMolecule | Self::ArchiveFleetEvents | Self::ArchiveSchemaVersion => {
                 "cosmon-state::archive"
@@ -205,6 +214,8 @@ impl CosmonPathKind {
             Self::PresenceSnapshot => "presence registry snapshot for a session",
             Self::PresenceLog => "directed-whisper pull channel for a session",
             Self::PresenceSeek => "whisper read-offset pointer for a session",
+            Self::PresenceInbox => "pilot-message envelopes delivered to a session",
+            Self::PresenceInboxAck => "acknowledgements of a session's pilot messages",
             Self::Cas => "content-addressed blob (response hashes, attachments)",
             Self::ArchiveMolecule => "durable terminal-transition snapshot (ADR-030)",
             Self::ArchiveFleetEvents => "fleet-level archived transition stream (ADR-030)",
@@ -288,6 +299,16 @@ pub enum CosmonPath<'a> {
         /// Session id.
         session: &'a SessionId,
     },
+    /// See [`CosmonPathKind::PresenceInbox`].
+    PresenceInbox {
+        /// Session id.
+        session: &'a SessionId,
+    },
+    /// See [`CosmonPathKind::PresenceInboxAck`].
+    PresenceInboxAck {
+        /// Session id.
+        session: &'a SessionId,
+    },
     /// See [`CosmonPathKind::Cas`].
     Cas {
         /// Content hash of the blob.
@@ -333,6 +354,8 @@ impl CosmonPath<'_> {
             Self::PresenceSnapshot { .. } => CosmonPathKind::PresenceSnapshot,
             Self::PresenceLog { .. } => CosmonPathKind::PresenceLog,
             Self::PresenceSeek { .. } => CosmonPathKind::PresenceSeek,
+            Self::PresenceInbox { .. } => CosmonPathKind::PresenceInbox,
+            Self::PresenceInboxAck { .. } => CosmonPathKind::PresenceInboxAck,
             Self::Cas { .. } => CosmonPathKind::Cas,
             Self::ArchiveMolecule { .. } => CosmonPathKind::ArchiveMolecule,
             Self::ArchiveFleetEvents { .. } => CosmonPathKind::ArchiveFleetEvents,
@@ -375,6 +398,12 @@ impl CosmonPath<'_> {
             }
             Self::PresenceSeek { session } => {
                 PathBuf::from("presence").join(format!("{}.seek", session.as_str()))
+            }
+            Self::PresenceInbox { session } => {
+                PathBuf::from("presence").join(format!("{}.inbox.jsonl", session.as_str()))
+            }
+            Self::PresenceInboxAck { session } => {
+                PathBuf::from("presence").join(format!("{}.inbox.ack.jsonl", session.as_str()))
             }
             Self::Cas { hash } => PathBuf::from("cas").join(hash.prefix()).join(hash.as_str()),
             Self::ArchiveMolecule { year, month, id } => PathBuf::from("archive")
@@ -430,6 +459,8 @@ mod tests {
             CosmonPathKind::PresenceSnapshot => CosmonPath::PresenceSnapshot { session: session() },
             CosmonPathKind::PresenceLog => CosmonPath::PresenceLog { session: session() },
             CosmonPathKind::PresenceSeek => CosmonPath::PresenceSeek { session: session() },
+            CosmonPathKind::PresenceInbox => CosmonPath::PresenceInbox { session: session() },
+            CosmonPathKind::PresenceInboxAck => CosmonPath::PresenceInboxAck { session: session() },
             CosmonPathKind::Cas => CosmonPath::Cas { hash: hash() },
             CosmonPathKind::ArchiveMolecule => CosmonPath::ArchiveMolecule {
                 year: 2026,
@@ -516,6 +547,8 @@ mod tests {
             "presence/<session>.json",
             "presence/<session>.log",
             "presence/<session>.seek",
+            "presence/<session>.inbox.jsonl",
+            "presence/<session>.inbox.ack.jsonl",
             "cas/<prefix>/<hash>",
             "archive/<YYYY>/<MM>/<mol>/",
             "archive/events/events-<YYYY-MM>.jsonl",

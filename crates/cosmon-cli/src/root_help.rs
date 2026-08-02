@@ -184,7 +184,11 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              session (galaxy \"headline\"). Stale entries (heartbeat > 3 min) render \
              greyed; files without a heartbeat are dropped. The strip is a read-only \
              wheat-paste over the presence registry owned by C-PRESENCE-CORE ('cs \
-             presence ping|ls|gc').\n\n\
+             presence ping|ls|gc|poll|send|inbox'). 'send' and 'inbox' are the \
+             traced pilot-to-pilot mailbox of ADR-168: 'send' writes one message \
+             envelope into a peer session's inbox, 'inbox' reads the pending ones \
+             and acknowledges them by id, so a reader that dies before acking sees \
+             the message again and one that dies after does not.\n\n\
              cs peek — ensemble tab ('E' key). Hot-swaps the molecule table for a \
              fleet-wide events view, newest-first. Columns: ts | mol_id | kind | \
              summary. 'j/k' scrolls; Enter closes the tab and zooms on the selected \
