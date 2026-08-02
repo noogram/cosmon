@@ -37,7 +37,7 @@ kill_switch = "{ks}"
 
 [[daemon]]
 name = "stuck-after-restart"
-binary = "/bin/sleep"
+binary = "sleep"
 args = ["600"]
 throttle_seconds = 30
 enabled = true

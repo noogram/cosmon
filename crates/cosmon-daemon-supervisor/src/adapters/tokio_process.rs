@@ -213,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn spawn_true_exits_cleanly() {
         let mut port = TokioProcessPort::new();
-        let spawned = port.spawn(&spec_for("/usr/bin/true", &[])).expect("spawn");
+        let spawned = port.spawn(&spec_for("true", &[])).expect("spawn");
         assert!(spawned.pid > 0);
 
         // The child may exit before the first reap; poll up to 2s.
@@ -226,7 +226,7 @@ mod tests {
                 other => panic!("unexpected outcome: {other:?}"),
             }
         }
-        panic!("/usr/bin/true never exited");
+        panic!("`true` never exited");
     }
 
     #[tokio::test]
@@ -234,7 +234,7 @@ mod tests {
         // `sleep 60` would outlast the test; we SIGTERM it immediately.
         let mut port = TokioProcessPort::new();
         let spawned = port
-            .spawn(&spec_for("/bin/sleep", &["60"]))
+            .spawn(&spec_for("sleep", &["60"]))
             .expect("spawn sleep");
         let pid = spawned.pid;
 
@@ -261,7 +261,7 @@ mod tests {
         // by `tests/signal_cascade.rs` which uses the full supervisor
         // path with a real grace window.
         let mut port = TokioProcessPort::new();
-        let spec = spec_for("/bin/sleep", &["60"]);
+        let spec = spec_for("sleep", &["60"]);
         let spawned = port.spawn(&spec).expect("spawn sleep");
         let pid = spawned.pid;
 
@@ -304,7 +304,7 @@ mod tests {
     async fn log_redirection_writes_to_file() {
         let tmp = tempfile::tempdir().unwrap();
         let log = tmp.path().join("out.log");
-        let mut spec = spec_for("/bin/sh", &["-c", "echo hello-from-child"]);
+        let mut spec = spec_for("sh", &["-c", "echo hello-from-child"]);
         spec.log_stdout = Some(log.to_string_lossy().into_owned());
 
         let mut port = TokioProcessPort::new();
