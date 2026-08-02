@@ -22,6 +22,31 @@ cs --version
 It detects your platform, downloads the matching tarball, and **fails closed**
 if the sha256 does not match the published `SHA256SUMS`.
 
+The installer itself is attached below as `cosmon-install-<version>.sh`, signed
+and Rekor-anchored like the binaries. Piping it into `sh` consumes it before
+that signature can be checked, so if you want the signature to actually do work
+— shared machine, CI, first install — take the verify-then-run form instead:
+
+```bash
+ver=<version>          # the release version, without the leading v
+base="https://github.com/noogram/cosmon/releases/download/v${ver}"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh.sig"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh.pem"
+
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/.*/cosmon/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --signature  "cosmon-install-${ver}.sh.sig" \
+  --certificate "cosmon-install-${ver}.sh.pem" \
+  "cosmon-install-${ver}.sh" \
+  && sh "cosmon-install-${ver}.sh"
+```
+
+The `&&` is load-bearing: `cosign verify-blob` exits non-zero on anything it
+cannot tie back to `release.yml` at a cosmon tag, and that exit status is what
+stops the script from running.
+
 **Homebrew** (macOS + Linuxbrew):
 
 ```bash

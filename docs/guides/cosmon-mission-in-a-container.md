@@ -22,13 +22,21 @@ engine described in the next section. That is not a formality — a previous
 version of this harness printed an instruction (`docker start -ai`) that was
 plausible, committed, and wrong, because nobody executed it.
 
+That is also not a permanent guarantee, and issue #32 is the proof: a reader who
+followed Steps 4 and 5 literally, on a freshly built image, could not run
+either. Steps 1 through 6 were re-run end to end on 2026-08-02 against a rebuilt
+image (`cs 0.5.0`, git 2.39.5, Colima), and the console blocks below are that
+run.
+
 Two things on this page were **not** re-run while writing it, and they are
 flagged again where they appear:
 
 - **The live worker itself.** Doing that requires putting a real credential in
-  a container, and the session that wrote this page is not allowed to touch
-  one. What is written about the live dispatch comes from the external tester's
-  own measurement on issue #20, quoted where it is used.
+  a container, and the sessions that write this page are not allowed to touch
+  one. What is written about the live dispatch and the harvest comes from the
+  external tester's own measurements on issues #20 and #32, quoted where it is
+  used. Steps 6 and 8 have both been run there, end to end, on the signed
+  `v0.5.0` binary.
 - **The glyph half of the locale problem.** The locale *state* below was
   measured here; the rendering differential it causes was measured on
   2026-07-27 and lives in `crates/cosmon-transport/src/locale.rs`.
@@ -164,11 +172,15 @@ It compiles `cs` in release mode, so the first build takes a few minutes.
 ```console
 $ docker run --rm --entrypoint sh cosmon-tutorial-02dc:local -c \
     'cs --version; claude --version; git --version; tmux -V'
-cs 0.3.0
+cs 0.5.0
 2.1.220 (Claude Code)
 git version 2.39.5
 tmux 3.3a
 ```
+
+Note `git version 2.39.5` — Debian's git, and old enough that `git init` still
+names the first branch `master`. That is not a detail; it is why Step 5 passes
+`-b main`.
 
 ## Step 2 — one container, and a name nobody else will claim
 
@@ -195,6 +207,29 @@ The container is a room you keep unlocked, not a command you keep re-running.
 
 `--init` gives it a real pid 1, which matters because tmux and `claude` leave
 children behind that somebody has to reap.
+
+The image already carries `/srv/mission`, owned by uid 10001 — the directory
+every later step works in. Confirm it, because everything from Step 4 on assumes
+it:
+
+```console
+$ docker exec cosmon-tutorial-02dc stat -c "%u:%g %n" /srv/mission
+10001:10001 /srv/mission
+```
+
+If you get *no such file or directory*, you are on an image built before
+2026-08-02 — issue #32, where a reader was told to open the shell with
+`-w /srv/mission` and then, once inside, to create it. Neither can run first,
+and uid 10001 cannot write into a root-owned `/srv` either. Either rebuild
+Step 1's image, or create the directory once, now, as root:
+
+```sh
+docker exec -u 0 cosmon-tutorial-02dc \
+  sh -c 'mkdir -p /srv/mission && chown 10001:10001 /srv/mission'
+```
+
+That is the one root gesture left on this page, and it is a property of the
+image rather than of cosmon: a rebuilt image needs none of it.
 
 > **Do not use `docker start` to run a second thing.** It is the obvious-looking
 > move and it does not do what it looks like. `docker start` replays the
@@ -453,8 +488,8 @@ You are uid 10001, so everything below is born owned by the identity that will
 use it. There is no ownership step because there is no second identity.
 
 ```sh
-mkdir -p /srv/mission && cd /srv/mission
-git init -q
+cd /srv/mission              # created by the image, owned by you — see Step 2
+git init -q -b main          # -b main is load-bearing; see just below
 git config user.name  "container pilot"
 git config user.email "pilot@cosmon.invalid"
 git commit -q --allow-empty -m "empty base commit"
@@ -476,7 +511,7 @@ cosmon-worker:cosmon-worker /srv/mission/.cosmon
 
 ```text
 opt-in-share: stdin non-tty — question non posable ici, refus par défaut
-enregistré (/root/.config/cosmon/consent.toml). Pour décider explicitement :
+enregistré (/home/cosmon-worker/.config/cosmon/consent.toml). Pour décider explicitement :
 `cs opt-in-share --accept` ou `--decline`.
 ```
 
@@ -486,6 +521,35 @@ and nothing is shared. If you want to answer for real, run `cs opt-in-share`
 with `--accept` or `--decline`. Until 2026-07-27 this question was posed into a
 pipe nobody reads and stalled the dispatch for its full timeout; it now refuses
 by default instead, which is why you get a line instead of a hang.
+
+### Why `git init -b main`, and what Step 8 does without it
+
+Debian's git is 2.39, and a bare `git init` there still names the first branch
+`master`. Cosmon's base branch, with nothing else configured, resolves to
+`main`. The mission runs perfectly well on the mismatch; it is the harvest that
+stops, at the very end, after the work is done:
+
+```text
+❌ MERGE FAILED — not merged, branch preserved
+  teardown aborted: HEAD is on `master` but the base branch resolved to `main`
+  (from cosmon's built-in default — nothing else named a branch).
+
+  `cs done` would silently merge feat/… into `master` instead of `main` (git
+  merges into the current HEAD, not into a branch by name). The work would be
+  reported as `merged` but `main` would never move — the failure mode
+  chronicled by task-20260509-94f0 (mode B).
+```
+
+That refusal is correct and worth reading twice: git merges into whatever HEAD
+points at, not into a branch by name, so the merge would have *succeeded* and
+been reported as merged while `main` never moved. Cosmon refuses rather than
+report that. The guide's job is to not walk you into it — hence `-b main` at
+`git init`. `git config --global init.defaultBranch main` does the same thing
+for every repository you create in the container.
+
+Until 2026-08-02 this page's Step 5 omitted it while its own transcripts showed
+`main`, which is the classic shape of a working environment hiding a step:
+the author's git was already configured, the reader's was not (issue #32).
 
 ### The `safe.directory` step you no longer need
 
@@ -543,12 +607,13 @@ Then, for real:
 cs tackle task-20260727-5909 --adapter claude
 ```
 
-> **Not verified on this page.** The session that wrote this cannot hold a
-> credential, so this exact line was run only as far as the credential
-> refusal quoted in step 3. What is on the other side of it comes from the
-> external tester's measurement on issue #20 (step 3), where two consecutive
-> dispatches from a virgin config directory each produced a live worker and a
-> committed artifact.
+> **Not verified on this page — verified off it.** The sessions that write this
+> cannot hold a credential, so this exact line was run here only as far as the
+> credential refusal quoted in step 3. What is on the other side of it comes
+> from the external tester: issue #20, where two consecutive dispatches from a
+> virgin config directory each produced a live worker and a committed artifact,
+> and issue #32, where the same dispatch ran to a completed `cs done` on the
+> signed `v0.5.0` binary (quoted in [step 8](#step-8--harvest)).
 
 `cs tackle` prints its tmux socket and session name on the way out. Keep them —
 that is your window into the worker.
@@ -677,11 +742,31 @@ back and tears the worktree down:
 cs done task-20260727-5909
 ```
 
-> **Not verified on this page**, for the same reason as step 6: no live worker
-> ever completed here. The git-plumbing ownership that this step depends on was
-> repaired on 2026-07-27 (`482fe47`), after the tester found that a demoted
-> worker could write its worktree but not the parent repository's
-> `.git/worktrees/<molecule>` that a linked worktree commits through.
+**Verified since 2026-08-02, off this bench.** It was open for a while — no live
+worker had ever completed here, because completing one means putting a real
+credential in a container and the sessions that write this page are not allowed
+to touch one. The external tester closed it on the signed `v0.5.0` binary
+(issue #32), running this page's own steps:
+
+```text
+✅ done
+  • merged
+  • post_merge_compile_gate: nothing to verify
+  • killed_session • purged_worker • removed_worktree • deleted_branch
+
+trunk: 6401dcc Merge branch 'feat/task-20260801-0947'
+       4fe03c8 Add README.md with one-line usage example
+cs verify: PASS
+```
+
+Then three concurrent dispatches from the same galaxy: three worktrees with no
+cross-contamination, three `cs done` merges into the same trunk, all three files
+on trunk and zero worktrees left.
+
+The git-plumbing ownership this step depends on was repaired on 2026-07-27
+(`482fe47`), after the tester found that a demoted worker could write its
+worktree but not the parent repository's `.git/worktrees/<molecule>` that a
+linked worktree commits through.
 
 ## Teardown
 

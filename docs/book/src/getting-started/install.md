@@ -31,6 +31,43 @@ You should see the command groups (lifecycle, fleet, execution, …). If the she
 cannot find `cs`, the installer printed the `export PATH=…` line you need — add
 it to your shell profile and re-open the terminal.
 
+### The same route, verifying the installer first
+
+The installer **is** signed — every release publishes it as
+`cosmon-install-<version>.sh` with a `.sig` and a `.pem` beside it, keyless and
+Rekor-anchored like the binaries. But piping it into `sh` consumes it before
+anything could check that signature, so on the one-liner above the signature
+does no work. Reported by an external reader on issue #32, and correct: the
+bytes served at that URL are byte-identical to the signed asset today, which is
+exactly the property an attacker at the CDN or in the TLS path would change.
+
+The convenience route stays. If you would rather check before you run — on a
+shared machine, in CI, or the first time you install cosmon anywhere — download
+the versioned asset, verify it, then run it:
+
+```sh
+ver=0.5.0                                   # the release you want
+base="https://github.com/noogram/cosmon/releases/download/v${ver}"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh.sig"
+curl -fsSLO "${base}/cosmon-install-${ver}.sh.pem"
+
+cosign verify-blob \
+  --certificate-identity-regexp 'https://github.com/.*/cosmon/.github/workflows/release.yml@.*' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --signature  "cosmon-install-${ver}.sh.sig" \
+  --certificate "cosmon-install-${ver}.sh.pem" \
+  "cosmon-install-${ver}.sh" \
+  && sh "cosmon-install-${ver}.sh"
+```
+
+`cosign verify-blob` exits non-zero on anything it cannot tie back to
+`release.yml` at a cosmon tag, and the `&&` is what makes that exit status
+refuse to run the script. Everything after that is the same installer doing the
+same sha256 check on the same tarballs — you have only moved the trust boundary
+from *the endpoint served me these bytes* to *this workflow, at this tag,
+produced them*.
+
 ### What that one line actually does
 
 Piping a script from the internet into your shell deserves an explanation, so
