@@ -25,22 +25,16 @@ use std::time::Duration;
 use cosmon_api::instrumentation::{read_ndjson, EngineCallEntered, InvocationMode};
 use cosmon_api::{router, AppState};
 
+/// Locate the `cs` binary, anchored on our own executable — see the twin in
+/// `tests/smoke.rs` for why `CARGO_MANIFEST_DIR` is the wrong anchor under an
+/// isolated `CARGO_TARGET_DIR`.
 fn cs_bin() -> PathBuf {
-    let target_dir = std::env::var("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| {
-            let mut dir: PathBuf = env!("CARGO_MANIFEST_DIR").into();
-            loop {
-                let cand = dir.join("target");
-                if cand.exists() {
-                    return cand;
-                }
-                if !dir.pop() {
-                    return PathBuf::from("target");
-                }
-            }
-        });
-    let candidate = target_dir.join("debug").join("cs");
+    let exe = std::env::current_exe().expect("current_exe");
+    let profile_dir = exe
+        .parent()
+        .and_then(Path::parent)
+        .expect("test binary lives under <target>/<profile>/deps");
+    let candidate = profile_dir.join("cs");
     if !candidate.exists() {
         let status = Command::new(env!("CARGO"))
             .args(["build", "-p", "cosmon-cli", "--bin", "cs"])

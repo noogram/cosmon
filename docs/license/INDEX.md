@@ -37,11 +37,11 @@ added without a curated row in `scripts/license-rationales.tsv`.
 <!-- BEGIN LICENSE TABLE -->
 ## Per-crate partition (machine-generated — do not edit by hand)
 
-_Last generated: 2026-07-17, 44 crates._
+_Last generated: 2026-08-02, 46 crates._
 
 _Run `bash scripts/license-table.sh --write` to refresh._
 
-### Core (AGPL-3.0-only) — 37 crates
+### Core (AGPL-3.0-only) — 38 crates
 
 | Crate | Tier | Licence | Rationale |
 |-------|------|---------|-----------|
@@ -66,6 +66,7 @@ _Run `bash scripts/license-table.sh --write` to refresh._
 | `cosmon-observability` | core | AGPL-3.0-only | observability — layer ⑥ (delib-ca76) |
 | `cosmon-oidc-testkit` | core | AGPL-3.0-only | OIDC test kit binary |
 | `cosmon-ops-tools` | core | AGPL-3.0-only | ops tools — layer ③ product harness (delib-ca76) |
+| `cosmon-pilot-checkpoint` | core | AGPL-3.0-only | PilotCheckpoint publication + tri-valued drift comparison (mission co-pilotage M3) — code-links core/state |
 | `cosmon-pilot` | core | AGPL-3.0-only | pilot UX — layer ⑥ cockpit (delib-ca76) |
 | `cosmon-process-witness` | core | AGPL-3.0-only | process-identity witness for adapters — same kernel tier as the adapters it guards |
 | `cosmon-provider` | core | AGPL-3.0-only | provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76) |
@@ -83,13 +84,14 @@ _Run `bash scripts/license-table.sh --write` to refresh._
 | `cosmon-verify` | core | AGPL-3.0-only | verification — layer ③ product harness (delib-ca76) |
 | `cosmon` | core | AGPL-3.0-only | name-reservation crate (publish=true) — ships product metadata, AGPL |
 
-### Frontier (Apache-2.0) — 7 crates
+### Frontier (Apache-2.0) — 8 crates
 
 | Crate | Tier | Licence | Rationale |
 |-------|------|---------|-----------|
 | `apps-transport-http` | frontier | Apache-2.0 | HTTP-on-Tailscale transport — vendored sibling-galaxy lib, Apache ⑦ |
 | `claudion` | frontier | Apache-2.0 | session-energy probe lib (vendored in-tree) |
 | `cosmon-client` | frontier | Apache-2.0 | client SDK |
+| `cosmon-session-probe` | frontier | Apache-2.0 | generic session-probe port + Claude/Codex adapters (mission co-pilotage M1, ADR-168) — open-extensibility seam for third-party providers, same posture as almanac-materialize |
 | `cosmon-thin-cli` | frontier | Apache-2.0 | thin CLI lib |
 | `cosmon-thin-macro` | frontier | Apache-2.0 | thin proc-macro |
 | `neurion-core` | frontier | Apache-2.0 | neurion core lib |

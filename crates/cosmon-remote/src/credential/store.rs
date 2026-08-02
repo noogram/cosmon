@@ -583,7 +583,11 @@ fn backend_override() -> Result<Option<BackendKind>> {
 /// This narrow seam keeps the musl safety rule testable: a `keyring` override
 /// must not select the keyring crate's non-persistent mock backend when this
 /// target did not compile a native keyring implementation.
-fn resolve_backend_kind(
+///
+/// `pub(super)` so the `credential` module's musl-only unit test can call it:
+/// that test is `cfg`-ed out on every other target, so a private seam here
+/// compiles everywhere except the one target the test exists to protect.
+pub(super) fn resolve_backend_kind(
     backend_override: Option<BackendKind>,
     keyring_available: bool,
     native_keyring_supported: bool,
@@ -613,7 +617,7 @@ fn resolve_backend_kind(
     target_os = "windows",
     all(target_os = "linux", not(target_env = "musl"))
 ))]
-fn native_keyring_backend_supported() -> bool {
+pub(super) fn native_keyring_backend_supported() -> bool {
     true
 }
 
@@ -623,7 +627,7 @@ fn native_keyring_backend_supported() -> bool {
     target_os = "windows",
     all(target_os = "linux", not(target_env = "musl"))
 )))]
-fn native_keyring_backend_supported() -> bool {
+pub(super) fn native_keyring_backend_supported() -> bool {
     false
 }
 

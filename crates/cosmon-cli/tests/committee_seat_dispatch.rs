@@ -27,6 +27,13 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+/// The contract prose every fixture here renders.
+///
+/// Its hash is computed from this text rather than typed: the fixtures used to
+/// declare `blake3:test`, a digest-shaped string that digests nothing, which is
+/// the exact shape the contract-hash check now refuses in the field.
+const POSTURE_BODY: &str = "Audit the artefacts. The generator's confidence is not evidence.";
+
 fn cosmon_bin() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
     // Hermetic resolution chains: strip the operator's session hammers, or
@@ -155,8 +162,8 @@ fn tackle_delivers_the_committee_posture_pointer_on_the_first_step() {
     let mol_dir = molecule_dir(&state_dir, &mol_id);
     let posture = cosmon_core::committee::render_committee_posture(
         cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-        "blake3:test",
-        "Audit the artefacts. The generator's confidence is not evidence.",
+        &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+        POSTURE_BODY,
     );
     fs::write(
         mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
@@ -191,7 +198,7 @@ fn tackle_delivers_the_committee_posture_pointer_on_the_first_step() {
     // And the two-fact test the persona witness actually runs must now pass.
     let briefing = cosmon_core::committee::AdversarialBriefing::from_durable_injection(
         cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-        "blake3:test",
+        cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
         mol_dir
             .join(cosmon_core::committee::COMMITTEE_POSTURE_FILE)
             .exists(),
@@ -219,8 +226,8 @@ fn tackle_does_not_author_the_posture_file_it_points_at() {
     let posture_path = mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE);
     let posture = cosmon_core::committee::render_committee_posture(
         cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-        "blake3:test",
-        "Audit the artefacts. The generator's confidence is not evidence.",
+        &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+        POSTURE_BODY,
     );
     fs::write(&posture_path, posture).expect("write posture");
 
@@ -310,8 +317,8 @@ fn complete_preserves_the_committee_posture_pointer() {
     let mol_dir = molecule_dir(&state_dir, &mol_id);
     let posture = cosmon_core::committee::render_committee_posture(
         cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-        "blake3:test",
-        "Audit the artefacts. The generator's confidence is not evidence.",
+        &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+        POSTURE_BODY,
     );
     fs::write(
         mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
@@ -353,7 +360,7 @@ fn complete_preserves_the_committee_posture_pointer() {
     // on the TERMINAL record, which is the record that gets audited.
     let briefing = cosmon_core::committee::AdversarialBriefing::from_durable_injection(
         cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-        "blake3:test",
+        cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
         mol_dir
             .join(cosmon_core::committee::COMMITTEE_POSTURE_FILE)
             .exists(),
@@ -420,8 +427,8 @@ fn complete_does_not_author_the_posture_file_it_points_at() {
         &posture_path,
         cosmon_core::committee::render_committee_posture(
             cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
-            "blake3:test",
-            "Audit the artefacts. The generator's confidence is not evidence.",
+            &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+            POSTURE_BODY,
         ),
     )
     .expect("write posture");

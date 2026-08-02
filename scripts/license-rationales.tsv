@@ -49,6 +49,7 @@ cosmon-observability	core	AGPL-3.0-only	observability — layer ⑥ (delib-ca76)
 cosmon-oidc-testkit	core	AGPL-3.0-only	OIDC test kit binary
 cosmon-ops-tools	core	AGPL-3.0-only	ops tools — layer ③ product harness (delib-ca76)
 cosmon-pilot	core	AGPL-3.0-only	pilot UX — layer ⑥ cockpit (delib-ca76)
+cosmon-pilot-checkpoint	core	AGPL-3.0-only	PilotCheckpoint publication + tri-valued drift comparison (mission co-pilotage M3) — code-links core/state
 cosmon-process-witness	core	AGPL-3.0-only	process-identity witness for adapters — same kernel tier as the adapters it guards
 cosmon-provider	core	AGPL-3.0-only	provider trait — layer ④ engine; closes the --features llama SPDX lie (delib-ca76)
 cosmon-registry	core	AGPL-3.0-only	registry — code-links AGPL core (delib-ca76)
@@ -58,6 +59,7 @@ cosmon-runtime	core	AGPL-3.0-only	resident runtime
 cosmon-saas	core	AGPL-3.0-only	SaaS endpoint
 cosmon-scenario	core	AGPL-3.0-only	scenario runner
 cosmon-scheduler	core	AGPL-3.0-only	scheduler engine
+cosmon-session-probe	frontier	Apache-2.0	generic session-probe port + Claude/Codex adapters (mission co-pilotage M1, ADR-168) — open-extensibility seam for third-party providers, same posture as almanac-materialize
 cosmon-state	core	AGPL-3.0-only	state store trait — crash-recovery wedge, layer ② (delib-ca76)
 cosmon-style	core	AGPL-3.0-only	UI primitives — layer ⑥ cockpit (delib-ca76)
 cosmon-surface	core	AGPL-3.0-only	surface projection — layer ② (delib-ca76)

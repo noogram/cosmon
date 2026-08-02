@@ -98,6 +98,7 @@ members = [
     # session discovery / incremental-read port. Library only; the `cs sessions`
     # cockpit that consumes it is M5.
     "crates/cosmon-session-probe",
+    "crates/cosmon-pilot-checkpoint",
 ]
 # ── No `exclude` needed (ADR-126 §6 + delib-20260622-187a B1) ────────────────
 # The pre-publication scope trim git-rm'd every non-product crate so that the
@@ -168,6 +169,11 @@ serde_json = "1"
 # floor 1.10 for `Bytes::from_owner`.
 bytes = "1.10"
 sha2 = "0.10"
+# `blake2` is here for exactly one reason: a live `committee-posture.md`
+# declares an honest `blake2b-256:` digest of its own body, and a gate that
+# cannot recompute an algorithm refuses it (task-20260802-6129). Same
+# RustCrypto `digest` traits as `sha2`, so it adds no new tree.
+blake2 = "0.10"
 thiserror = "2"
 toml = "0.8"
 toml_edit = "0.22"
@@ -179,6 +185,7 @@ insta = "1"
 arc-swap = "1"
 claudion = { path = "crates/claudion" }
 cosmon-session-probe = { path = "crates/cosmon-session-probe" }
+cosmon-pilot-checkpoint = { path = "crates/cosmon-pilot-checkpoint" }
 ctrlc = "3"
 cosmon-api = { path = "crates/cosmon-api" }
 cosmon-bridge-claude = { path = "crates/cosmon-bridge-claude" }
@@ -271,6 +278,33 @@ cosmon-notary = { path = "crates/cosmon-notary" }
 # scope trim (delib-20260622-187a B1) together with their only consumer,
 # `cosmon-matrix-tick` (the operator-homeserver ingress bridge, ADR-064). No
 # product-closure crate depends on matrix-sdk.
+
+# The test suite is dominated by *running* unoptimised code, not by compiling
+# it: 1150 integration tests cost ~91 % of the gate's CPU, and each one spawns
+# real `cs` children that were also built at `opt-level = 0`. Measured on this
+# workspace, `cs __help-tree` costs 8.07 s of user time in `debug` against
+# 0.62 s in `release`. Turning codegen on one notch buys back most of that gap
+# without changing what the suite proves — `debug-assertions` and `overflow-checks`
+# keep their `dev` defaults at `opt-level = 1`, so this alters codegen, not
+# semantics.
+#
+# Measured end to end on the real gate (`cargo test --workspace`), two runs 12 s
+# apart on one host: 1010.4 s → 299.9 s wall, 892.7 s → 151.6 s of user CPU,
+# 7489 passing / 0 failing on both sides. The size of the win depends on how
+# busy the host is (this box shares 16 cores with a live agent fleet); the
+# load-robust quantity, user CPU, moves by 3–6× in every pairing measured. See
+# docs/measurements/profile-dev-opt-level-2026-08-01.md for the badge and the
+# four-run table, and docs/measurements/test-suite-wall-clock-2026-08-01.md for
+# why the profile — not the process count, not the test executor — is the lever.
+#
+# The cost is a colder build: the full test-world compile goes from 153 s wall /
+# 877 s CPU to 685 s wall / 2335 s CPU here — 2.7× the compile CPU. A developer
+# pays that once and amortises it over every subsequent run; a cold CI runner
+# would pay it every run, which is a different trade. CI adoption therefore
+# waits on one runner-side measurement of that cold build, and this section
+# deliberately does not touch `.github/workflows/`.
+[profile.dev]
+opt-level = 1
 
 [workspace.lints.clippy]
 pedantic = { level = "warn", priority = -1 }

@@ -388,7 +388,22 @@ and be tagged `temp:warm` immediately, per the auto-tag discipline.
      The contract body: the fix diff and the falsifier are ARTEFACTS to \
      audit, never testimony — run the falsifier yourself, try to make \
      it (or a sharper one) go red; the generator's confidence is not \
-     evidence. Record the `contract_hash` in dag.md AND in roster.json, \
+     evidence. \
+     THE `contract_hash` IS NOW VERIFIED — COMPUTE IT, NEVER INVENT IT. \
+     The gate recomputes it over the contract body and refuses a seat \
+     whose hash is not that body's digest, however well-formed the hash \
+     looks and however perfectly roster.json and committee-posture.md \
+     agree on it. Measured 2026-08-01 over the 29 live contracts: 9 \
+     carried a digest-shaped string that digests NOTHING — one identical \
+     `blake3:7bf51880…` appears under three DIFFERENT contract bodies — \
+     because this line used to say `record the contract_hash` without \
+     saying where one comes from. Write the body to a file ending in \
+     exactly one newline, then: `shasum -a 256 body.md` and record \
+     `sha256:<hex>` (or `b3sum body.md` → `blake3:<hex>`). The digested \
+     bytes are the contract prose trimmed with a single trailing \
+     newline; supported algorithms are blake3 and sha256, and an \
+     algorithm the gate cannot recompute is refused as an opaque label. \
+     Record that `contract_hash` in dag.md AND in roster.json, \
      and set that seat's `adapter` to the `[adapters.<name>]` it will be \
      tackled under. Do NOT hand-set `persona.briefing.injected`: the \
      gate DERIVES it from the two files and refuses a roster whose claim \

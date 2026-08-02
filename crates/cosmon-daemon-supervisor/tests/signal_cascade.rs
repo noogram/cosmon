@@ -2,10 +2,9 @@
 
 //! Integration test: signal cascade (SIGTERM → SIGKILL grace).
 //!
-//! Spawns a real child that installs `signal.SIG_IGN` for SIGTERM via
-//! Python so the signal is unambiguously ignored (far more reliable than
-//! `trap '' TERM` in `/bin/sh`, whose behavior varies across macOS bash
-//! and Linux dash). Runs the supervisor's `shutdown()` path and asserts:
+//! Spawns a real child that sets SIGTERM to `SIG_IGN` via the POSIX shell
+//! builtin `trap '' TERM`, so the signal is unambiguously ignored. Runs the
+//! supervisor's `shutdown()` path and asserts:
 //!
 //! 1. The child receives SIGTERM and keeps running (because it ignores it).
 //! 2. After the grace window elapses, the supervisor escalates to SIGKILL
@@ -18,71 +17,30 @@ use std::time::Duration;
 use cosmon_daemon_supervisor::adapters::tokio_process::pid_is_alive;
 use cosmon_daemon_supervisor::{ChildStatus, Supervisor};
 
-fn which(bin: &str) -> Option<std::path::PathBuf> {
-    std::env::var_os("PATH")?
-        .to_string_lossy()
-        .split(':')
-        .map(|p| std::path::PathBuf::from(p).join(bin))
-        .find(|p| p.exists())
-}
-
-/// Resolve a fast, concrete `python3` interpreter, **bypassing any pyenv
-/// shim** on `PATH`.
+/// The SIGTERM-ignoring child, as a POSIX shell one-liner.
 ///
-/// The grace-escalation contract this test asserts has a hidden race against
-/// interpreter startup: the child must reach `signal.signal(SIGTERM, SIG_IGN)`
-/// *before* the supervisor's `shutdown()` delivers SIGTERM (the test waits
-/// only ~300 ms first). A bare `which("python3")` resolves to
-/// `~/.pyenv/shims/python3`, whose `pyenv exec` version-resolution adds 2–5 s
-/// of startup during which the shim — not yet the real interpreter — still
-/// runs the *default* SIGTERM disposition. SIGTERM then kills it instantly,
-/// `shutdown()` returns in ~50 ms, and the `>= 4 s` escalation assertion
-/// fails deterministically on any pyenv machine (it passes on CI where
-/// `python3` is `/usr/bin/python3`). Resolving the shim to its underlying
-/// interpreter closes the race. Same root cause as the cosmon-runtime
-/// resident-loop stubs: a pyenv shim that delays the real interpreter.
+/// `trap '' TERM` sets the *disposition* to `SIG_IGN` — not a handler whose
+/// execution a shell may defer until the current foreground command returns
+/// — so the shell and everything it forks genuinely ignore SIGTERM. `$1` is
+/// a readiness sentinel the test waits on: the file appears only once the
+/// trap is installed, which is what makes the escalation assertion below a
+/// statement about the supervisor rather than about child startup latency.
 ///
-/// Resolution order (first hit wins): `$COSMON_TEST_PYTHON`, then
-/// `pyenv which python3` (unwraps a shim), then well-known absolute
-/// interpreters, then the original `PATH` walk as a last resort.
-fn python_bin() -> std::path::PathBuf {
-    if let Some(p) = std::env::var_os("COSMON_TEST_PYTHON") {
-        let p = std::path::PathBuf::from(p);
-        if p.exists() {
-            return p;
-        }
-    }
-    if let Ok(out) = std::process::Command::new("pyenv")
-        .args(["which", "python3"])
-        .output()
-    {
-        if out.status.success() {
-            let p =
-                std::path::PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
-            if p.exists() {
-                return p;
-            }
-        }
-    }
-    for cand in [
-        "/usr/bin/python3",
-        "/opt/homebrew/bin/python3",
-        "/usr/local/bin/python3",
-    ] {
-        let p = std::path::PathBuf::from(cand);
-        if p.exists() {
-            return p;
-        }
-    }
-    which("python3")
-        .or_else(|| which("python"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/usr/bin/python3"))
-}
+/// The busy-wait is a loop of one-second sleeps rather than one long sleep
+/// on purpose: when the supervisor finally escalates to SIGKILL it reaps the
+/// shell, and any `sleep` grandchild is orphaned for whatever remains of its
+/// own timeout. One second of orphan is cheap; ten minutes is a leak.
+///
+/// This replaced a Python stub, which cost a whole interpreter on `PATH` (a
+/// pyenv shim's 2–5 s startup used to race the 300 ms pre-shutdown wait, and
+/// a BusyBox image has no interpreter at all). `sh` is the one program POSIX
+/// guarantees, and it starts in single-digit milliseconds.
+const SIGTERM_IGNORING_CHILD: &str = "trap '' TERM; : > \"$1\"; while : ; do sleep 1; done";
 
 fn write_config(
     dir: &std::path::Path,
     name: &str,
-    binary: &std::path::Path,
+    binary: &str,
     args: &[&str],
 ) -> std::path::PathBuf {
     let args_toml = args
@@ -108,7 +66,7 @@ enabled = true
         log = dir.join("supervisor.log").display(),
         ks = dir.join("kill.lock").display(),
         name = name,
-        binary = binary.display(),
+        binary = binary,
     );
     let path = dir.join("daemons.toml");
     fs::write(&path, cfg).unwrap();
@@ -118,24 +76,24 @@ enabled = true
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_escalates_sigterm_ignore_to_sigkill() {
     let tmp = tempfile::tempdir().unwrap();
-    let py = python_bin();
-    if !py.exists() {
-        eprintln!("skipping: no python3 available");
-        return;
-    }
-    // The child installs SIG_IGN for SIGTERM, then *touches a readiness
-    // sentinel* (`argv[1]`) so the test can wait for the handler to be in
-    // place — not merely for the pid to exist. A fixed sleep here is racy:
-    // under heavy parallel load (the whole `cargo test --workspace` run)
-    // python's interpreter startup can exceed any constant we pick. If
-    // SIGTERM is delivered before `signal.signal(...)` executes, the child
-    // dies with the *default* disposition, `shutdown()` legitimately
+    // The child ignores SIGTERM, then *touches a readiness sentinel* (`$1`)
+    // so the test can wait for the trap to be in place — not merely for the
+    // pid to exist. A fixed sleep here is racy: under heavy parallel load
+    // (the whole `cargo test --workspace` run) child startup can exceed any
+    // constant we pick. If SIGTERM is delivered before `trap` executes, the
+    // child dies with the *default* disposition, `shutdown()` legitimately
     // returns fast, and the `elapsed >= 4s` assertion flakes — exactly the
     // ~54ms false failure this test was misdiagnosing as a supervisor bug.
     let ready = tmp.path().join("stubborn.ready");
     let ready_arg = ready.to_string_lossy().into_owned();
-    let script = "import signal,sys,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);open(sys.argv[1],'w').close();time.sleep(600)";
-    let config_path = write_config(tmp.path(), "stubborn", &py, &["-c", script, &ready_arg]);
+    // `sh -c <script> <argv0> <argv1>`: the first operand after the script
+    // becomes `$0`, so a filler is needed for the sentinel to land in `$1`.
+    let config_path = write_config(
+        tmp.path(),
+        "stubborn",
+        "sh",
+        &["-c", SIGTERM_IGNORING_CHILD, "stubborn-child", &ready_arg],
+    );
 
     let mut supervisor = Supervisor::new(
         config_path,
@@ -208,9 +166,10 @@ async fn shutdown_escalates_sigterm_ignore_to_sigkill() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_polite_child_terminates_before_grace() {
     let tmp = tempfile::tempdir().unwrap();
-    // Default SIGTERM behavior (exit fast) — /bin/sleep honors SIGTERM.
-    let sleep_bin = std::path::PathBuf::from("/bin/sleep");
-    let config_path = write_config(tmp.path(), "polite", &sleep_bin, &["600"]);
+    // Default SIGTERM behavior (exit fast) — `sleep` honors SIGTERM. The
+    // binary is named, not pathed: BusyBox ships it at `/bin/sleep`, GNU
+    // coreutils at `/usr/bin/sleep`, and the spawn port resolves via PATH.
+    let config_path = write_config(tmp.path(), "polite", "sleep", &["600"]);
 
     let mut supervisor = Supervisor::new(
         config_path,
