@@ -702,9 +702,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &state_dir,
         &fleet,
         &molecules,
-        &scan_result.needs_respawn,
-        &respawned,
+        RespawnOutcome {
+            needs_respawn: &scan_result.needs_respawn,
+            respawned: &respawned,
+        },
         args.auto_collapse,
+        backend.as_ref().map(|b| b as &dyn TransportBackend),
     )?;
 
     // Harvest sweep: close the loop on Completed-but-unmerged molecules.
@@ -1268,6 +1271,19 @@ fn print_harvest_report(report: &HarvestSweepReport) {
     }
 }
 
+/// This run's respawn attempt, as `auto_freeze_orphans` needs to read it.
+///
+/// The two lists are only meaningful together — "was it supposed to come back"
+/// and "did it" — and a molecule is orphaned precisely when the first holds and
+/// the second does not.
+#[derive(Clone, Copy)]
+pub(crate) struct RespawnOutcome<'a> {
+    /// Workers this patrol run found dead and intended to bring back.
+    pub needs_respawn: &'a [WorkerId],
+    /// Of those, the ones that actually came back.
+    pub respawned: &'a [WorkerId],
+}
+
 /// Auto-transition orphaned molecules to `Frozen` (default) or `Collapsed`
 /// (aggressive mode via `--auto-collapse`). Returns the list of molecule
 /// IDs that were actually transitioned.
@@ -1276,15 +1292,31 @@ fn print_harvest_report(report: &HarvestSweepReport) {
 /// assigned worker either (a) has `desired=Stopped` or is missing, or (b)
 /// needed respawn this run but did not successfully come back. Respawned
 /// workers are excluded — their molecules correctly stay Running.
-fn auto_freeze_orphans(
+///
+/// # The session goes with the molecule (COSMON #35 §3)
+///
+/// Transitioning the molecule is only half of parking the work. The dead
+/// worker's tmux session survives its process — a `pane_dead` carcass, or a
+/// wrapper shell that outlived the agent — and it holds the *name* the
+/// respawn needs. The reporter's recovery deadlocked on exactly that:
+/// `FREEZE` moved the molecule, left the session standing, and the documented
+/// `cs tackle --force` then died on `duplicate session`. A freeze that does
+/// not release the seat has not finished freezing; `backend` is what lets it.
+/// `None` (patrol run with `--no-tmux`) simply skips the teardown — the
+/// molecule transition is still the point.
+pub(crate) fn auto_freeze_orphans(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
     fleet: &Fleet,
     molecules: &[MoleculeData],
-    needs_respawn: &[WorkerId],
-    respawned: &[WorkerId],
+    respawn: RespawnOutcome<'_>,
     auto_collapse: bool,
+    backend: Option<&dyn TransportBackend>,
 ) -> anyhow::Result<Vec<MoleculeId>> {
+    let RespawnOutcome {
+        needs_respawn,
+        respawned,
+    } = respawn;
     let target_status = if auto_collapse {
         MoleculeStatus::Collapsed
     } else {
@@ -1331,6 +1363,16 @@ fn auto_freeze_orphans(
             mol.collapsed_step = Some(mol.current_step);
         }
         store.save_molecule(&mol.id, &mol)?;
+
+        // Release the seat with the work. Best-effort by construction: the
+        // molecule transition is the durable half and must not be undone by a
+        // tmux that refuses to answer. `terminate_session` is name-addressed
+        // and idempotent, so it reaches the dead-pane carcass that
+        // `terminate` cannot resolve — and says nothing when the session is
+        // already gone.
+        if let (Some(be), Some(session)) = (backend, mol.tmux_session()) {
+            let _ = be.terminate_session(session);
+        }
 
         let legacy_event = if target_status == MoleculeStatus::Frozen {
             cosmon_core::event::Event::MoleculeFrozen {
@@ -4957,15 +4999,75 @@ mod tests {
             tmp.path(),
             &fleet,
             std::slice::from_ref(&mol),
-            &[],
-            &[],
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
             false,
+            None,
         )
         .unwrap();
 
         assert_eq!(transitioned.len(), 1);
         let stored = store.load_molecule(&mol.id).unwrap();
         assert_eq!(stored.status, MoleculeStatus::Frozen);
+    }
+
+    /// COSMON #35 §3 — freezing an orphan must also release its tmux session.
+    ///
+    /// The reporter's deadlock: patrol froze the molecule, left the dead
+    /// worker's session standing, and the documented recovery
+    /// (`cs tackle --force`) then failed with `duplicate session` until an
+    /// undocumented `tmux kill-session` was typed by hand. A freeze that
+    /// parks the work but keeps the seat has not finished the job, so the
+    /// teardown is asserted here rather than left to the operator.
+    #[test]
+    fn auto_freeze_orphans_tears_down_the_orphaned_session() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("ghost-sess-w", DesiredState::Stopped);
+        fleet.workers.insert(wid, w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mut mol = make_molecule(
+            "cs-20260802-orp6",
+            MoleculeStatus::Running,
+            Some("ghost-sess-w"),
+        );
+        mol.session_name = Some("ghost-sess-w".to_owned());
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        // A backend that still holds the session — the carcass the respawn
+        // would collide with.
+        let backend = mock_with_worker("ghost-sess-w", "");
+
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
+            false,
+            Some(&backend as &dyn TransportBackend),
+        )
+        .unwrap();
+
+        assert_eq!(transitioned.len(), 1);
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Frozen
+        );
+        assert!(
+            !backend
+                .is_alive(&WorkerId::new("ghost-sess-w").unwrap())
+                .unwrap(),
+            "the frozen molecule's session must be gone — a session left \
+             standing is what makes `cs tackle --force` fail with \
+             `duplicate session`"
+        );
     }
 
     #[test]
@@ -4984,9 +5086,12 @@ mod tests {
             tmp.path(),
             &fleet,
             std::slice::from_ref(&mol),
-            &[],
-            &[],
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
             true, // auto_collapse
+            None,
         )
         .unwrap();
 
@@ -5018,9 +5123,12 @@ mod tests {
             tmp.path(),
             &fleet,
             std::slice::from_ref(&mol),
-            std::slice::from_ref(&wid), // needs_respawn
-            std::slice::from_ref(&wid), // respawned (success)
+            RespawnOutcome {
+                needs_respawn: std::slice::from_ref(&wid),
+                respawned: std::slice::from_ref(&wid),
+            },
             false,
+            None,
         )
         .unwrap();
 
@@ -5050,9 +5158,12 @@ mod tests {
             tmp.path(),
             &fleet,
             std::slice::from_ref(&mol),
-            &[wid], // needs_respawn
-            &[],    // respawn list empty → failed or --respawn not passed
+            RespawnOutcome {
+                needs_respawn: &[wid],
+                respawned: &[], // empty → respawn failed, or --respawn absent
+            },
             false,
+            None,
         )
         .unwrap();
 
@@ -5083,9 +5194,12 @@ mod tests {
             tmp.path(),
             &fleet,
             std::slice::from_ref(&mol),
-            &[],
-            &[],
+            RespawnOutcome {
+                needs_respawn: &[],
+                respawned: &[],
+            },
             false,
+            None,
         )
         .unwrap();
 

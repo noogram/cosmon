@@ -795,11 +795,42 @@ What is **untested**, by anyone, so far:
 - a mission running for hours rather than minutes;
 - step transitions (`cs evolve`) accumulating over a long run;
 - what quota draw looks like across a long mission;
-- a worker dying mid-mission and being resumed;
 - `cs done` closing the loop on a real long mission in a container.
 
 If your plan depends on any of those, you are the first one there. Measure it,
 and if it breaks, that is a finding worth filing rather than a mistake you made.
+
+### A worker dying mid-mission, and being resumed
+
+This one *was* on the list, and someone went and measured it
+([COSMON #35](https://github.com/noogram/cosmon/issues/35), `v0.5.0`, `kill -9`
+on the worker's `claude` process). What that measurement found is now fixed, so
+here is the shape you should expect.
+
+The work itself survives the crash. The molecule's `frame.md` and its
+`responses/` are on disk, not in the pane, and the respawned worker **resumes**
+on top of them rather than starting over.
+
+Recovery is two commands, and neither of them is `tmux`:
+
+```sh
+cs patrol                                   # parks the orphan, frees its seat
+cs tackle <molecule> --adapter claude --force
+```
+
+`cs patrol` is optional. Every dispatch already leaves a `cs realized-watch`
+process behind it, and that process now notices a session that has gone: within
+a couple of seconds of the crash the molecule stops reading `running` and its
+worker stops reading `active`. Running `cs patrol` yourself just makes it
+immediate.
+
+`--force` reclaims the molecule's tmux session — including the dead-pane carcass
+a crash leaves behind — and thaws the molecule, so the respawned worker and the
+recorded state agree with each other. You do not need `tmux kill-session`, and
+you do not need to find the socket name.
+
+What is still untested here: recovery on a mission that has run for hours, and
+a crash that takes the tmux *server* rather than one pane.
 
 ## Being honest about the door
 

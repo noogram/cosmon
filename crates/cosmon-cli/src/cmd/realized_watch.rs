@@ -32,8 +32,10 @@ use std::time::{Duration, Instant};
 
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
+use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
 use cosmon_state::StateStore as _;
+use cosmon_transport::TmuxBackend;
 
 use super::Context;
 
@@ -81,6 +83,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mol_id =
         MoleculeId::new(&args.molecule).map_err(|e| anyhow::anyhow!("invalid molecule id: {e}"))?;
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
+    // The liveness axis (COSMON #35 §1/§2). `cs patrol` already diagnoses a
+    // dead worker correctly, but nothing runs `cs patrol`: a plain `cs tackle`
+    // dispatch — the shape the container guide teaches — has no supervisor
+    // behind it, so a worker that dies reads `active` until a human happens to
+    // type the command. This watcher is the one process every dispatch already
+    // leaves running, which makes it the place where the diagnosis costs
+    // nothing extra.
+    let backend = TmuxBackend::new(super::tmux_socket_name(ctx));
     watch_realized(
         &state_dir,
         &mol_id,
@@ -91,6 +101,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .as_deref()
             .map(crate::energy_probe::claude_projects_dir_under)
             .as_deref(),
+        Some(&backend),
     );
     Ok(())
 }
@@ -105,6 +116,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 /// capture after the molecule leaves the live set covers turns written
 /// between the last tick and the worker's exit — including a crash, where the
 /// session log outlives the pane.
+/// `backend`, when supplied, arms the second job this loop does: notice that
+/// the worker's session is gone and park the molecule, so a crashed dispatch
+/// stops reading `active` with nothing behind it. See [`SessionSentinel`].
 pub fn watch_realized(
     state_dir: &Path,
     mol_id: &MoleculeId,
@@ -112,6 +126,7 @@ pub fn watch_realized(
     interval: Duration,
     timeout: Duration,
     claude_projects_root: Option<&Path>,
+    backend: Option<&dyn TransportBackend>,
 ) {
     let store = FileStore::new(state_dir);
     let deadline = Instant::now() + timeout;
@@ -119,10 +134,18 @@ pub fn watch_realized(
     // The broken-seam diagnostic fires at most once per watch (and, thanks to
     // the emitter's scoped dedup, at most once per dispatch across watchers).
     let mut reported_missing_root = false;
+    let mut sentinel = backend.map(SessionSentinel::new);
     while Instant::now() < deadline && molecule_is_live(&store, mol_id) {
         crate::energy_probe::capture_realized_from_cwd_under(state_dir, mol_id, cwd, root);
         if !reported_missing_root {
             reported_missing_root = report_missing_session_log_root(state_dir, mol_id, root);
+        }
+        if let Some(s) = sentinel.as_mut() {
+            if s.tick(&store, state_dir, mol_id) {
+                // The molecule is parked and the loop's liveness predicate is
+                // now false; fall through to the final capture below.
+                break;
+            }
         }
         std::thread::sleep(interval);
     }
@@ -186,6 +209,156 @@ fn report_missing_session_log_root(
     true
 }
 
+/// Watches the dispatch's tmux session and parks the molecule when it goes.
+///
+/// # Why the backstop lives here (COSMON #35 §1 and §2)
+///
+/// `cs patrol` already gets the diagnosis right — it reports the stale worker
+/// and auto-freezes the orphaned molecule. What it lacks is anyone to run it.
+/// `cs tackle` starts no supervisor, and `cs run --resident` is not what the
+/// container guide teaches, so on the plain dispatch path a `kill -9`'d worker
+/// leaves a molecule reading `active` with zero processes behind it —
+/// indefinitely, and invisibly, holding a fleet slot. The remediation is
+/// patrol's own ([`crate::cmd::patrol::auto_freeze_orphans`], called below):
+/// this type only supplies the missing *occasion* to run it, on a process the
+/// dispatch already pays for.
+///
+/// # Two latches, because a false freeze costs work
+///
+/// * **`seen`** — the sentinel does nothing until it has observed the session
+///   present at least once. A watcher that raced its own spawn would otherwise
+///   read "no session" before there was one and park a molecule that was
+///   starting normally.
+/// * **`dead_ticks`** — a single absent reading is not a death certificate
+///   (the tmux server can be momentarily unreachable). Two consecutive ones
+///   are, which mirrors the `Unresponsive` → `Stale` escalation patrol already
+///   uses and costs one extra tick of latency.
+///
+/// Both latches fail in the same safe direction: at worst the molecule is
+/// parked one tick later, or not at all, and `cs patrol` remains the operator's
+/// hammer. Never the other direction — a live worker must not be frozen out
+/// from under itself.
+struct SessionSentinel<'a> {
+    backend: &'a dyn TransportBackend,
+    seen: bool,
+    dead_ticks: u8,
+}
+
+/// Consecutive absent readings required before the session counts as gone.
+const DEAD_TICKS_TO_PARK: u8 = 2;
+
+impl<'a> SessionSentinel<'a> {
+    fn new(backend: &'a dyn TransportBackend) -> Self {
+        Self {
+            backend,
+            seen: false,
+            dead_ticks: 0,
+        }
+    }
+
+    /// Probe once. Returns `true` when this tick parked the molecule.
+    fn tick(&mut self, store: &FileStore, state_dir: &Path, mol_id: &MoleculeId) -> bool {
+        let Ok(mol) = store.load_molecule(mol_id) else {
+            return false;
+        };
+        // Only a molecule this watcher can speak for: it must still be live,
+        // and it must actually own a session. A Direct-API dispatch (no tmux)
+        // has nothing here to probe and is left entirely alone.
+        if !matches!(mol.status, MoleculeStatus::Queued | MoleculeStatus::Running) {
+            return false;
+        }
+        let Some(session) = mol.tmux_session() else {
+            return false;
+        };
+
+        // Presence, not liveness: `session_exists` also sees the `pane_dead`
+        // carcass, and a carcass is not a working agent — but it is also not
+        // the shape this sentinel is for. Treating it as present here is
+        // deliberate: `cs tackle --force` now reclaims it (COSMON #35 §3), and
+        // freezing on a carcass would race that reclaim.
+        match self.backend.session_exists(session) {
+            Ok(true) => {
+                self.seen = true;
+                self.dead_ticks = 0;
+                false
+            }
+            Ok(false) if self.seen => {
+                self.dead_ticks = self.dead_ticks.saturating_add(1);
+                if self.dead_ticks < DEAD_TICKS_TO_PARK {
+                    return false;
+                }
+                park_dead_dispatch(store, state_dir, mol_id, self.backend)
+            }
+            // Never seen alive, or the probe itself failed — no verdict.
+            _ => false,
+        }
+    }
+}
+
+/// Record the death: mark the worker `Stale`/`Stopped`, then hand the molecule
+/// to patrol's own orphan transition.
+///
+/// Both halves matter, and they fix the two directions of the same lie. The
+/// fleet write is what stops `cs peek` printing `status: active` for a corpse;
+/// the freeze is what stops the molecule holding a slot as `running`. Calling
+/// [`crate::cmd::patrol::auto_freeze_orphans`] rather than re-implementing the
+/// transition is the point — one definition of "an orphan is parked like
+/// this", reached from two occasions.
+///
+/// Returns `true` when the molecule was actually transitioned.
+fn park_dead_dispatch(
+    store: &FileStore,
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    backend: &dyn TransportBackend,
+) -> bool {
+    let Ok(mol) = store.load_molecule(mol_id) else {
+        return false;
+    };
+    let Some(worker) = mol.worker().cloned() else {
+        return false;
+    };
+
+    // Mark the worker dead first. `auto_freeze_orphans` reads its verdict off
+    // the fleet (`desired == Stopped`), so this write is not cosmetic — it is
+    // the input to the transition below.
+    if let Ok(_guard) = store.lock_fleet() {
+        if let Ok(mut fleet) = store.load_fleet() {
+            if let Some(w) = fleet.workers.get_mut(&worker) {
+                w.desired = cosmon_core::worker::DesiredState::Stopped;
+                w.status = cosmon_core::worker::WorkerStatus::Stale;
+                w.updated_at = chrono::Utc::now();
+                let _ = store.save_fleet(&fleet);
+            }
+        }
+    }
+    let _ = cosmon_state::event_log::emit_one(
+        cosmon_state::event_log::resolve_events_log_path(state_dir),
+        cosmon_core::event_v2::EventV2::WorkerKilled {
+            worker_id: worker,
+            reason: "session gone — parked by the dispatch watcher".to_owned(),
+        },
+        None,
+    );
+
+    let Ok(fleet) = store.load_fleet() else {
+        return false;
+    };
+    crate::cmd::patrol::auto_freeze_orphans(
+        store,
+        state_dir,
+        &fleet,
+        std::slice::from_ref(&mol),
+        crate::cmd::patrol::RespawnOutcome {
+            needs_respawn: &[],
+            respawned: &[],
+        },
+        false,
+        Some(backend),
+    )
+    .is_ok_and(|transitioned| !transitioned.is_empty())
+}
+
 /// Whether the molecule still counts as a live run worth ticking on. A
 /// missing/unreadable molecule (harvested, archived) ends the watch.
 fn molecule_is_live(store: &FileStore, mol_id: &MoleculeId) -> bool {
@@ -246,6 +419,7 @@ mod tests {
                     Duration::from_millis(5),
                     Duration::from_secs(30),
                     Some(&absent),
+                    None,
                 )
             })
         };
@@ -346,6 +520,7 @@ mod tests {
             // final sweep — enough to prove the quiet path stays quiet.
             Duration::from_secs(0),
             Some(&projects),
+            None,
         );
 
         let log = cosmon_state::event_log::resolve_events_log_path(&state_dir);
@@ -400,6 +575,7 @@ mod tests {
                     &wt,
                     Duration::from_millis(5),
                     Duration::from_secs(30),
+                    None,
                     None,
                 )
             })
@@ -465,5 +641,117 @@ mod tests {
             Some(h) => std::env::set_var("HOME", h),
             None => std::env::remove_var("HOME"),
         }
+    }
+    /// COSMON #35 §1 + §2 — a dead worker must stop reading `active`, without
+    /// waiting for a human to type `cs patrol`.
+    ///
+    /// The reporter `kill -9`'d a worker and sampled every twenty seconds:
+    /// `molecule=running, claude_procs=0`, three times over, and `cs peek`
+    /// showing `worker … status: active`. `cs patrol` diagnosed it perfectly
+    /// — when run by hand. Nothing ran it. This asserts the sentinel closes
+    /// that loop from the one process a plain `cs tackle` already leaves
+    /// behind: session gone ⇒ molecule parked, worker no longer claiming to
+    /// be alive.
+    #[test]
+    fn the_sentinel_parks_a_molecule_whose_session_has_gone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let mol = MoleculeId::new("task-20260802-5a1b").unwrap();
+        let store = seed_running_molecule(&state_dir, &mol);
+
+        // Bind the dispatch: worker `worker-1` owning session `worker-1`.
+        let worker = cosmon_core::id::WorkerId::new("worker-1").unwrap();
+        let mut data = store.load_molecule(&mol).unwrap();
+        data.bind_process(cosmon_core::process::MoleculeProcess::new(
+            worker.clone(),
+            "worker-1".to_owned(),
+        ));
+        store.save_molecule(&mol, &data).unwrap();
+
+        let mut fleet = cosmon_state::Fleet::default();
+        let mut wdata = cosmon_state::WorkerData::new(
+            worker.clone(),
+            cosmon_core::id::AgentId::new("worker-1").unwrap(),
+            cosmon_core::agent::AgentRole::Implementation,
+            cosmon_core::clearance::Clearance::Write,
+            cosmon_core::worker::WorkerStatus::Active,
+        );
+        wdata.desired = cosmon_core::worker::DesiredState::Running;
+        wdata.current_molecule = Some(mol.clone());
+        fleet.workers.insert(worker.clone(), wdata);
+        store.save_fleet(&fleet).unwrap();
+
+        let backend = cosmon_transport::MockBackend::new();
+        backend
+            .spawn(
+                &cosmon_core::transport::AgentDefinition {
+                    id: cosmon_core::id::AgentId::new("worker-1").unwrap(),
+                    role: cosmon_core::agent::AgentRole::Implementation,
+                    command: "claude".to_owned(),
+                    args: Vec::new(),
+                },
+                &cosmon_core::transport::RuntimeConfig::default(),
+            )
+            .unwrap();
+
+        let mut sentinel = SessionSentinel::new(&backend);
+        assert!(
+            !sentinel.tick(&store, &state_dir, &mol),
+            "a live session must never be parked"
+        );
+
+        // The kill -9: the session goes, the molecule does not know yet.
+        backend.terminate(&worker).unwrap();
+        assert!(
+            !sentinel.tick(&store, &state_dir, &mol),
+            "one absent reading is not a death certificate"
+        );
+        assert!(
+            sentinel.tick(&store, &state_dir, &mol),
+            "two consecutive absent readings must park the molecule"
+        );
+
+        assert_eq!(
+            store.load_molecule(&mol).unwrap().status,
+            MoleculeStatus::Frozen,
+            "the orphaned molecule must stop holding a slot as `running`"
+        );
+        assert_ne!(
+            store.load_fleet().unwrap().workers[&worker].desired,
+            cosmon_core::worker::DesiredState::Running,
+            "and the corpse must stop reading `active` to `cs peek`"
+        );
+    }
+
+    /// The sentinel must never act on a session it has not first seen alive:
+    /// a watcher that races its own dispatch would otherwise park a molecule
+    /// that is merely starting.
+    #[test]
+    fn the_sentinel_never_parks_a_session_it_never_saw() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let state_dir = tmp.path().join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let mol = MoleculeId::new("task-20260802-5a1c").unwrap();
+        let store = seed_running_molecule(&state_dir, &mol);
+        let worker = cosmon_core::id::WorkerId::new("worker-1").unwrap();
+        let mut data = store.load_molecule(&mol).unwrap();
+        data.bind_process(cosmon_core::process::MoleculeProcess::new(
+            worker,
+            "worker-1".to_owned(),
+        ));
+        store.save_molecule(&mol, &data).unwrap();
+
+        // Empty backend: the session has never existed as far as this watcher
+        // can tell.
+        let backend = cosmon_transport::MockBackend::new();
+        let mut sentinel = SessionSentinel::new(&backend);
+        for _ in 0..5 {
+            assert!(!sentinel.tick(&store, &state_dir, &mol));
+        }
+        assert_eq!(
+            store.load_molecule(&mol).unwrap().status,
+            MoleculeStatus::Running
+        );
     }
 }
