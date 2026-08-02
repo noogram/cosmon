@@ -29,6 +29,7 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::id::{MoleculeId, SessionId};
+use crate::pilot_lease::LeaseEpoch;
 
 /// Which seat a pilot session occupies on a mission (ADR-168 §D6).
 ///
@@ -172,6 +173,19 @@ pub struct Presence {
     /// the transcript (CHECKPOINT-NOT-SCROLLBACK).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_id: Option<String>,
+    /// The mission this pilot's seat is about. `role: Primary` is a claim of
+    /// authority, and authority is per-mission (ADR-168 §D6) — a seat with no
+    /// mission names no lease and therefore backs nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission: Option<MoleculeId>,
+    /// The lease epoch this pilot believes it holds on [`Self::mission`].
+    ///
+    /// Recorded rather than looked up, because "the epoch I believe I hold" is
+    /// exactly the claim the guard checks. A snapshot that reports `primary`
+    /// at an epoch the ledger has moved past is a *readable* stale primary,
+    /// which is what makes the refusal after a transfer diagnosable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lease_epoch: Option<LeaseEpoch>,
 }
 
 impl Presence {
@@ -207,6 +221,8 @@ impl Presence {
             follows: None,
             capabilities: Vec::new(),
             checkpoint_id: None,
+            mission: None,
+            lease_epoch: None,
         }
     }
 
@@ -220,6 +236,24 @@ impl Presence {
     pub fn selector(&self) -> Option<String> {
         match (&self.provider, &self.native_session_id) {
             (Some(p), Some(n)) => Some(format!("{p}:{n}")),
+            _ => None,
+        }
+    }
+
+    /// The authority this snapshot claims: the mission it names and the epoch
+    /// it believes it holds there.
+    ///
+    /// `None` unless the seat is [`PilotRole::Primary`] **and** both halves
+    /// are present. A co-pilot claims nothing by definition, and a primary
+    /// that names no mission or no epoch has made a claim the guard cannot
+    /// check — which fails closed to "no claim", never to "trusted claim".
+    #[must_use]
+    pub fn claimed_authority(&self) -> Option<(&MoleculeId, LeaseEpoch)> {
+        if !self.role.is_primary() {
+            return None;
+        }
+        match (&self.mission, self.lease_epoch) {
+            (Some(m), Some(e)) => Some((m, e)),
             _ => None,
         }
     }
@@ -337,6 +371,34 @@ mod tests {
         assert_eq!(p.selector(), None, "half a key addresses nothing");
         p.native_session_id = Some("4940f28e".to_owned());
         assert_eq!(p.selector().as_deref(), Some("claude:4940f28e"));
+    }
+
+    // A snapshot written before M4 names no mission and no epoch. It must not
+    // therefore be trusted as an authority: half a claim is no claim.
+    #[test]
+    fn a_primary_seat_without_a_mission_and_epoch_claims_nothing() {
+        let now = fixed_now();
+        let mut p = sample(now);
+        p.role = PilotRole::Primary;
+        assert_eq!(p.claimed_authority(), None, "no mission, no epoch");
+
+        p.mission = Some(MoleculeId::new("task-20260731-9cf4").unwrap());
+        assert_eq!(p.claimed_authority(), None, "a mission without an epoch");
+
+        p.lease_epoch = Some(LeaseEpoch::first());
+        let (mission, epoch) = p.claimed_authority().unwrap();
+        assert_eq!(mission.as_str(), "task-20260731-9cf4");
+        assert_eq!(epoch, LeaseEpoch::first());
+    }
+
+    #[test]
+    fn a_copilot_claims_nothing_however_it_is_filled_in() {
+        let now = fixed_now();
+        let mut p = sample(now);
+        p.role = PilotRole::Copilot;
+        p.mission = Some(MoleculeId::new("task-20260731-9cf4").unwrap());
+        p.lease_epoch = Some(LeaseEpoch::first());
+        assert_eq!(p.claimed_authority(), None);
     }
 
     #[test]

@@ -109,6 +109,12 @@ pub enum CosmonPathKind {
     /// `presence/<session>.inbox.ack.jsonl` — acknowledgements of those
     /// envelopes, keyed by message id rather than by byte offset.
     PresenceInboxAck,
+    /// `pilot-lease/<mission>.requests.jsonl` — takeover asks, written by
+    /// pilots (mission co-pilotage M4).
+    PilotLeaseRequests,
+    /// `pilot-lease/<mission>.grants.jsonl` — the authority ledger, written by
+    /// the operator and by nobody else.
+    PilotLeaseGrants,
     /// `cas/<prefix>/<hash>` — content-addressed blob (response hashes, etc.).
     Cas,
     /// `archive/<YYYY>/<MM>/<mol>/` — durable terminal-transition snapshot
@@ -162,6 +168,8 @@ impl CosmonPathKind {
             Self::PresenceSeek => "presence/<session>.seek",
             Self::PresenceInbox => "presence/<session>.inbox.jsonl",
             Self::PresenceInboxAck => "presence/<session>.inbox.ack.jsonl",
+            Self::PilotLeaseRequests => "pilot-lease/<mission>.requests.jsonl",
+            Self::PilotLeaseGrants => "pilot-lease/<mission>.grants.jsonl",
             Self::Cas => "cas/<prefix>/<hash>",
             Self::ArchiveMolecule => "archive/<YYYY>/<MM>/<mol>/",
             Self::ArchiveFleetEvents => "archive/events/events-<YYYY-MM>.jsonl",
@@ -192,6 +200,9 @@ impl CosmonPathKind {
                 "cosmon-filestore::PresenceStore"
             }
             Self::PresenceInbox | Self::PresenceInboxAck => "cosmon-filestore::PilotMailbox",
+            Self::PilotLeaseRequests | Self::PilotLeaseGrants => {
+                "cosmon-filestore::PilotLeaseStore"
+            }
             Self::Cas => "cosmon-filestore::cas",
             Self::ArchiveMolecule | Self::ArchiveFleetEvents | Self::ArchiveSchemaVersion => {
                 "cosmon-state::archive"
@@ -216,6 +227,8 @@ impl CosmonPathKind {
             Self::PresenceSeek => "whisper read-offset pointer for a session",
             Self::PresenceInbox => "pilot-message envelopes delivered to a session",
             Self::PresenceInboxAck => "acknowledgements of a session's pilot messages",
+            Self::PilotLeaseRequests => "takeover requests on a mission (no authority)",
+            Self::PilotLeaseGrants => "operator-granted PRIMARY lease ledger for a mission",
             Self::Cas => "content-addressed blob (response hashes, attachments)",
             Self::ArchiveMolecule => "durable terminal-transition snapshot (ADR-030)",
             Self::ArchiveFleetEvents => "fleet-level archived transition stream (ADR-030)",
@@ -309,6 +322,16 @@ pub enum CosmonPath<'a> {
         /// Session id.
         session: &'a SessionId,
     },
+    /// See [`CosmonPathKind::PilotLeaseRequests`].
+    PilotLeaseRequests {
+        /// Mission the requests are about.
+        mission: &'a MoleculeId,
+    },
+    /// See [`CosmonPathKind::PilotLeaseGrants`].
+    PilotLeaseGrants {
+        /// Mission the grants are about.
+        mission: &'a MoleculeId,
+    },
     /// See [`CosmonPathKind::Cas`].
     Cas {
         /// Content hash of the blob.
@@ -356,6 +379,8 @@ impl CosmonPath<'_> {
             Self::PresenceSeek { .. } => CosmonPathKind::PresenceSeek,
             Self::PresenceInbox { .. } => CosmonPathKind::PresenceInbox,
             Self::PresenceInboxAck { .. } => CosmonPathKind::PresenceInboxAck,
+            Self::PilotLeaseRequests { .. } => CosmonPathKind::PilotLeaseRequests,
+            Self::PilotLeaseGrants { .. } => CosmonPathKind::PilotLeaseGrants,
             Self::Cas { .. } => CosmonPathKind::Cas,
             Self::ArchiveMolecule { .. } => CosmonPathKind::ArchiveMolecule,
             Self::ArchiveFleetEvents { .. } => CosmonPathKind::ArchiveFleetEvents,
@@ -404,6 +429,12 @@ impl CosmonPath<'_> {
             }
             Self::PresenceInboxAck { session } => {
                 PathBuf::from("presence").join(format!("{}.inbox.ack.jsonl", session.as_str()))
+            }
+            Self::PilotLeaseRequests { mission } => {
+                PathBuf::from("pilot-lease").join(format!("{}.requests.jsonl", mission.as_str()))
+            }
+            Self::PilotLeaseGrants { mission } => {
+                PathBuf::from("pilot-lease").join(format!("{}.grants.jsonl", mission.as_str()))
             }
             Self::Cas { hash } => PathBuf::from("cas").join(hash.prefix()).join(hash.as_str()),
             Self::ArchiveMolecule { year, month, id } => PathBuf::from("archive")
@@ -461,6 +492,8 @@ mod tests {
             CosmonPathKind::PresenceSeek => CosmonPath::PresenceSeek { session: session() },
             CosmonPathKind::PresenceInbox => CosmonPath::PresenceInbox { session: session() },
             CosmonPathKind::PresenceInboxAck => CosmonPath::PresenceInboxAck { session: session() },
+            CosmonPathKind::PilotLeaseRequests => CosmonPath::PilotLeaseRequests { mission: mol() },
+            CosmonPathKind::PilotLeaseGrants => CosmonPath::PilotLeaseGrants { mission: mol() },
             CosmonPathKind::Cas => CosmonPath::Cas { hash: hash() },
             CosmonPathKind::ArchiveMolecule => CosmonPath::ArchiveMolecule {
                 year: 2026,
@@ -549,6 +582,8 @@ mod tests {
             "presence/<session>.seek",
             "presence/<session>.inbox.jsonl",
             "presence/<session>.inbox.ack.jsonl",
+            "pilot-lease/<mission>.requests.jsonl",
+            "pilot-lease/<mission>.grants.jsonl",
             "cas/<prefix>/<hash>",
             "archive/<YYYY>/<MM>/<mol>/",
             "archive/events/events-<YYYY-MM>.jsonl",

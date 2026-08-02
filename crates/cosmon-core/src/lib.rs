@@ -211,6 +211,8 @@ pub mod paths;
 #[doc(hidden)]
 pub mod patrol;
 #[doc(hidden)]
+pub mod pilot_lease;
+#[doc(hidden)]
 pub mod pilot_message;
 #[doc(hidden)]
 pub mod pope;
