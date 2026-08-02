@@ -30,49 +30,62 @@ use std::time::{Duration, Instant};
 
 static BUILD_ONCE: Once = Once::new();
 
-/// Build the `trunk_lock_holder` example binary (once per test run).
-/// `cargo test` does not auto-build examples, so we do it ourselves.
-fn ensure_helper_built() {
-    BUILD_ONCE.call_once(|| {
-        let status = Command::new(env!("CARGO"))
-            .args([
-                "build",
-                "--example",
-                "trunk_lock_holder",
-                "-p",
-                "cosmon-filestore",
-            ])
-            .status()
-            .expect("failed to run cargo build");
-        assert!(
-            status.success(),
-            "cargo build --example trunk_lock_holder failed"
-        );
-    });
-}
-
-/// Locate the `trunk_lock_holder` example binary, building it first if
-/// needed. `cargo test` does not auto-build examples; `ensure_helper_built`
-/// handles that. The path is computed from `target/debug/examples/` using
-/// `CARGO_MANIFEST_DIR` as the anchor.
+/// Locate the `trunk_lock_holder` example binary.
+///
+/// Two things this function is careful about, both measured rather than
+/// assumed.
+///
+/// **The build is a fallback, not the normal path.** A package-wide
+/// `cargo test -p cosmon-filestore` — and therefore the `cargo test
+/// --workspace` verification gate — already builds every example target of
+/// the package under test, so the helper is on disk before this test binary
+/// runs and the `cargo build` below never fires. It does fire under a
+/// target-scoped `cargo test --test trunk_lock_concurrent`, which builds
+/// only the named test and no examples. The previous version of this
+/// function ran that nested build unconditionally, on every invocation,
+/// paying a second dependency resolve for a binary that already existed.
+///
+/// **The path is derived from our own executable**, not from
+/// `CARGO_MANIFEST_DIR`: the test binary lives at
+/// `<target>/<profile>/deps/trunk_lock_concurrent-<hash>`, so the sibling
+/// `examples/` directory is two levels up. That is the one anchor that stays
+/// correct under an isolated `CARGO_TARGET_DIR`; the old manifest-relative
+/// `<workspace>/target/<profile>/...` guess resolved to a directory cargo had
+/// never written to, and both cross-process tests failed with `NotFound` for
+/// anyone building outside the default target dir.
 fn helper_bin() -> PathBuf {
-    ensure_helper_built();
-
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_root = Path::new(manifest_dir)
-        .ancestors()
-        .nth(2)
-        .expect("workspace root");
-    let profile = if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    };
-    workspace_root
-        .join("target")
-        .join(profile)
-        .join("examples")
-        .join("trunk_lock_holder")
+    let exe = std::env::current_exe().expect("current_exe");
+    let profile_dir: &Path = exe
+        .parent() // <target>/<profile>/deps
+        .and_then(Path::parent) // <target>/<profile>
+        .expect("test binary lives under <target>/<profile>/deps");
+    let helper = profile_dir.join("examples").join("trunk_lock_holder");
+    if !helper.exists() {
+        // `Once` so three concurrent tests do not queue three cargo runs
+        // behind cargo's own build lock.
+        BUILD_ONCE.call_once(|| {
+            let status = Command::new(env!("CARGO"))
+                .args([
+                    "build",
+                    "-p",
+                    "cosmon-filestore",
+                    "--example",
+                    "trunk_lock_holder",
+                ])
+                .status()
+                .expect("failed to run cargo build");
+            assert!(
+                status.success(),
+                "cargo build --example trunk_lock_holder failed"
+            );
+        });
+    }
+    assert!(
+        helper.exists(),
+        "example helper {} is still missing after the fallback build",
+        helper.display()
+    );
+    helper
 }
 
 /// Spawn the helper holding the lock and return its (child, `acquired_at`)
