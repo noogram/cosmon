@@ -64,6 +64,15 @@ use cosmon_core::id::WorkerId;
 /// deadline only bounds the pathological case where *neither* does.
 pub const ACK_DEADLINE_MS: u64 = 12_000;
 
+/// The floor the deadline may never go back below, enforced at compile time.
+///
+/// 8 s was *already marginal* in the measurement: one busy trial in five drained
+/// at 8.1 s and was demoted to composer evidence by the deadline rather than by
+/// anything going wrong. Shrinking [`ACK_DEADLINE_MS`] under this manufactures
+/// fallbacks on exactly the workers that are busiest, so the guard is a
+/// compile error rather than a test — there is no run in which it should pass.
+const _: () = assert!(ACK_DEADLINE_MS >= 8_000);
+
 /// Interval between receipt polls.
 ///
 /// Two orders of magnitude cheaper than the composer poll it runs alongside: a
@@ -856,18 +865,6 @@ mod tests {
         );
         assert_eq!(out.submits_sent, 1, "only the caller's own first press");
         assert!(script.presses.is_empty());
-    }
-
-    /// The deadline is what bounds a pane that never answers, and it is
-    /// generous on purpose (a busy receipt arrives 5–6 s in, one at 8.1 s).
-    #[test]
-    fn the_deadline_is_generous_enough_for_a_queued_prompt() {
-        assert!(
-            ACK_DEADLINE_MS >= 8_000,
-            "8 s was already marginal in the measurement: one busy trial in five \
-             drained at 8.1 s and was demoted by the deadline rather than by \
-             anything going wrong"
-        );
     }
 
     /// A never-clearing composer spends the press budget and stops, rather than
