@@ -492,6 +492,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -529,6 +530,7 @@ mod tests {
             "acceptEdits",
             std::slice::from_ref(&state),
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -557,6 +559,7 @@ mod tests {
                 mode,
                 std::slice::from_ref(&state),
                 &RootSpawnDecision::SpawnAsIs,
+                None,
                 cb_absent,
                 |_| None,
             );
@@ -579,6 +582,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -600,6 +604,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -630,6 +635,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -652,6 +658,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -683,6 +690,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &decision,
+            None,
             cb_absent,
             |_| None,
         );
@@ -718,6 +726,7 @@ mod tests {
                 "bypassPermissions",
                 &[],
                 decision,
+                None,
                 cb_absent,
                 |_| None,
             )
@@ -747,6 +756,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -779,6 +789,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -799,6 +810,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -823,6 +835,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -844,6 +857,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -867,6 +881,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             || Some("user-b@example.org".to_owned()),
             |k| match k {
                 "HOME" => Some("/Users/you".to_owned()),
@@ -889,6 +904,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             || None, // cb failed
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -910,6 +926,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             || Some("  \n".to_owned()), // whitespace-only
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -931,6 +948,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -952,6 +970,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -973,6 +992,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             || Some("user+tag@example.com".to_owned()),
             |k| {
                 if k == "HOME" {
@@ -997,6 +1017,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -1034,6 +1055,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1060,6 +1082,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -1075,6 +1098,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1119,6 +1143,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |k| (k == "CB_DEPTH").then(|| "2".to_owned()),
         );
@@ -1134,6 +1159,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -1149,6 +1175,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &RootSpawnDecision::SpawnAsIs,
+            None,
             cb_absent,
             |_| None,
         );
@@ -1243,6 +1270,7 @@ mod tests {
                 "bypassPermissions",
                 &[],
                 &decision,
+                None,
                 cb_absent,
                 |k| (k == var).then(|| hostile.clone()),
             );
@@ -1284,6 +1312,7 @@ mod tests {
             "bypassPermissions",
             &[],
             &decision,
+            None,
             cb_absent,
             |_| None,
         );

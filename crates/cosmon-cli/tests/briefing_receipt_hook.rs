@@ -136,11 +136,11 @@ fn the_hook_persists_no_briefing_content() {
     station.stamp(&ReceiptNonce::mint()).expect("stamp");
 
     let secret = "CONFIDENTIAL-BRIEFING-BODY";
-    let transcript = "/home/operator/.claude/projects/x/session.jsonl";
+    let transcript = "/home/op/.claude/projects/x/session.jsonl";
     let (_stdout, _stderr, code) = run_hook(
         &station,
         &format!(
-            r#"{{"session_id":"s","prompt":"{secret}","cwd":"/home/operator/galaxy",
+            r#"{{"session_id":"s","prompt":"{secret}","cwd":"/home/op/galaxy",
                  "transcript_path":"{transcript}"}}"#
         ),
     );
@@ -150,7 +150,7 @@ fn the_hook_persists_no_briefing_content() {
         let body = std::fs::read_to_string(entry.path()).unwrap_or_default();
         assert!(!body.contains(secret), "briefing leaked into {entry:?}");
         assert!(
-            !body.contains("/home/operator"),
+            !body.contains("/home/op"),
             "path leaked into {entry:?}"
         );
     }
