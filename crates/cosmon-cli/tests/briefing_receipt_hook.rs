@@ -149,10 +149,7 @@ fn the_hook_persists_no_briefing_content() {
     for entry in std::fs::read_dir(tmp.path()).expect("read_dir").flatten() {
         let body = std::fs::read_to_string(entry.path()).unwrap_or_default();
         assert!(!body.contains(secret), "briefing leaked into {entry:?}");
-        assert!(
-            !body.contains("/home/op"),
-            "path leaked into {entry:?}"
-        );
+        assert!(!body.contains("/home/op"), "path leaked into {entry:?}");
     }
 }
 
