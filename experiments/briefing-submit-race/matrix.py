@@ -61,6 +61,10 @@ STRIP_ENV = [
 
 COMPOSER_GLYPHS = ("❯", "›", "> ")
 PASTED_PLACEHOLDER = "Pasted text"
+# Claude Code >= 2.1.220 seeds the empty composer with a rotating hint
+# (`❯ Try "fix lint errors"...`). An empty composer is therefore no longer a
+# bare glyph, and a readiness gate demanding one waits out its timeout forever.
+COMPOSER_PLACEHOLDER_PREFIX = 'Try "'
 
 
 class Tmux:
@@ -174,16 +178,33 @@ def cr_after_paste(stream: str, chunks) -> dict:
     return out
 
 
+def composer_line_is_idle(line: str) -> bool:
+    """Is this composer line an *empty* composer?
+
+    Two renderings mean empty, and only these two: a bare glyph, and a glyph
+    followed by the rotating placeholder hint the TUI draws when there is
+    nothing to submit. Anything else after the glyph is real text a user (or a
+    paste) put there, which is exactly the state readiness must keep rejecting.
+    """
+    text = line.strip()
+    for glyph in COMPOSER_GLYPHS:
+        marker = glyph.strip()
+        if not text.startswith(marker):
+            continue
+        rest = text[len(marker) :].strip()
+        return not rest or rest.startswith(COMPOSER_PLACEHOLDER_PREFIX)
+    return False
+
+
 def wait_ready(tm: Tmux, session: str, timeout_s: float) -> bool:
     """Composer rendered and empty — the state production waits for."""
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         pane = tm.run(["capture-pane", "-t", session, "-p"]).stdout
         region = composer_region(pane)
-        if region and any(
-            line.strip() in {g.strip() for g in COMPOSER_GLYPHS} for line in region[:1]
-        ):
-            # A composer glyph on an otherwise empty line: ready and idle.
+        if region and composer_line_is_idle(region[0]):
+            # A composer glyph with nothing but the placeholder after it:
+            # ready and idle.
             time.sleep(0.4)
             return True
         time.sleep(0.5)

@@ -29,6 +29,14 @@ on a private tmux socket (`--socket`, `cosmon-test-` prefix by convention) that
 is killed on every exit path including a signal; the fleet socket is never
 touched.
 
+Readiness is "the composer is drawn and empty", and *empty* is a rendering the
+TUI is free to change: since Claude Code 2.1.220 an idle composer carries a
+rotating hint (`❯ Try "fix lint errors"...`), so a gate demanding a bare glyph
+times out on every trial and reports `composer never rendered` on a machine
+where nothing is wrong. The gate therefore accepts a glyph alone or a glyph
+followed by that placeholder, and still rejects a glyph followed by anything
+else — which is the pending briefing it exists to catch.
+
 Each trial presses submit **exactly once**. That is the point: the production
 retry loop is what makes the phenomenon invisible, so a harness that retried
 would measure the loop instead of the race.
