@@ -240,9 +240,13 @@ git grep -n 'base_url' <tree> -- crates/cosmon-core/src/committee.rs | grep -v '
 **What is true.** Measured by the round-2 driver on that exact tree
 (`91b40780`): **325 suites** / 7349 passed / 0 failed. The `passed` figure
 matches to the digit; only the suite figure differs, by exactly 13 — which is
-the number of test *names* in this workspace beginning with `result_`
-(`result_requires_jwt`, `result_404_when_molecule_absent`, …). A count anchored
-on `grep -c '^test result'` swallows each of them as if it were a suite.
+the number of test output lines beginning with `test result_`
+(`result_requires_jwt`, `result_404_when_molecule_absent`, …). There are 14
+test names whose function identifier begins with `result_`; the fourteenth,
+`result_status_hints_carry_the_exact_next_command`, prints with its module
+prefix as `test hints::tests::result_status_hints_carry_the_exact_next_command`
+and therefore escapes the loose prefix match. A count anchored on
+`grep -c '^test result'` swallows the other 13 as if each were a suite.
 
 **Why it is a finding and not a nit.** The suite count is the one number this
 loop watches, and it watches it for **falling**: a suite that stops being built
