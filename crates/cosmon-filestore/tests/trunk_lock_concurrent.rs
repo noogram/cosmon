@@ -25,25 +25,32 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Once;
 use std::time::{Duration, Instant};
 
-static BUILD_ONCE: Once = Once::new();
+/// Env var that names a prebuilt `trunk_lock_holder` helper explicitly.
+const HELPER_BIN_ENV: &str = "COSMON_TEST_TRUNK_LOCK_HOLDER_BIN";
 
-/// Locate the `trunk_lock_holder` example binary.
+/// Locate the *prebuilt* `trunk_lock_holder` example binary.
 ///
-/// Two things this function is careful about, both measured rather than
-/// assumed.
+/// **Resolution is explicit and never builds.** The previous version of this
+/// function shelled out to `cargo build --example trunk_lock_holder` when the
+/// helper was missing, guarded by a `Once` so the three tests in this file
+/// would not queue three cargo runs behind cargo's build lock. That `Once`
+/// only covers this process: under a parallel runner several test *targets*
+/// can miss their artifact simultaneously, and each nested cargo then blocks
+/// on a lock the outer `cargo test` may still hold. The observable symptom is
+/// not a slow test but a test that never returns — and when it does return,
+/// the artifact was written while a sibling was already executing it. A build
+/// whose timing is decided by the runner's scheduling does not belong inside
+/// a test.
 ///
-/// **The build is a fallback, not the normal path.** A package-wide
-/// `cargo test -p cosmon-filestore` — and therefore the `cargo test
-/// --workspace` verification gate — already builds every example target of
-/// the package under test, so the helper is on disk before this test binary
-/// runs and the `cargo build` below never fires. It does fire under a
-/// target-scoped `cargo test --test trunk_lock_concurrent`, which builds
-/// only the named test and no examples. The previous version of this
-/// function ran that nested build unconditionally, on every invocation,
-/// paying a second dependency resolve for a binary that already existed.
+/// So the helper must exist before the test runs. It does under any
+/// package-wide invocation — `cargo test -p cosmon-filestore`, and therefore
+/// the `cargo test --workspace` verification gate, builds every example
+/// target of the package under test. It does *not* under a target-scoped
+/// `cargo test --test trunk_lock_concurrent`, which builds only the named
+/// test; that case now reads as a named missing prerequisite instead of
+/// silently growing a build step.
 ///
 /// **The path is derived from our own executable**, not from
 /// `CARGO_MANIFEST_DIR`: the test binary lives at
@@ -54,38 +61,107 @@ static BUILD_ONCE: Once = Once::new();
 /// never written to, and both cross-process tests failed with `NotFound` for
 /// anyone building outside the default target dir.
 fn helper_bin() -> PathBuf {
+    match try_helper_bin() {
+        Ok(path) => path,
+        Err(msg) => panic!("{msg}"),
+    }
+}
+
+/// [`helper_bin`] as a `Result`, so the resolution rule itself is testable.
+fn try_helper_bin() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().expect("current_exe");
     let profile_dir: &Path = exe
         .parent() // <target>/<profile>/deps
         .and_then(Path::parent) // <target>/<profile>
         .expect("test binary lives under <target>/<profile>/deps");
-    let helper = profile_dir.join("examples").join("trunk_lock_holder");
-    if !helper.exists() {
-        // `Once` so three concurrent tests do not queue three cargo runs
-        // behind cargo's own build lock.
-        BUILD_ONCE.call_once(|| {
-            let status = Command::new(env!("CARGO"))
-                .args([
-                    "build",
-                    "-p",
-                    "cosmon-filestore",
-                    "--example",
-                    "trunk_lock_holder",
-                ])
-                .status()
-                .expect("failed to run cargo build");
-            assert!(
-                status.success(),
-                "cargo build --example trunk_lock_holder failed"
-            );
-        });
+    let candidate = profile_dir.join("examples").join("trunk_lock_holder");
+    resolve_prebuilt(
+        HELPER_BIN_ENV,
+        std::env::var_os(HELPER_BIN_ENV).map(PathBuf::from),
+        &candidate,
+        "trunk_lock_holder",
+    )
+}
+
+/// Env override first, then the profile-directory candidate, then a clear
+/// error. An override pointing at a nonexistent path is an error rather than
+/// a silent fallback: a typo in a CI variable must not degrade into
+/// "test something else".
+///
+/// The override arrives as a parameter rather than being read here, so the
+/// rule is exercisable without mutating the process environment — which in a
+/// multi-threaded test binary that also spawns subprocesses is not a safe
+/// thing to do.
+fn resolve_prebuilt(
+    env_var: &str,
+    override_path: Option<PathBuf>,
+    candidate: &Path,
+    artifact: &str,
+) -> Result<PathBuf, String> {
+    if let Some(from_env) = override_path {
+        if from_env.is_file() {
+            return Ok(from_env);
+        }
+        return Err(format!(
+            "{env_var} is set to `{}`, but no file exists there. \
+             Point it at a prebuilt `{artifact}` binary, or unset it to use \
+             the profile directory.",
+            from_env.display(),
+        ));
     }
+    if candidate.is_file() {
+        return Ok(candidate.to_path_buf());
+    }
+    Err(format!(
+        "prebuilt `{artifact}` example not found at `{}`. \
+         This test never builds it implicitly — a nested `cargo build` races \
+         the parallel test runner. Build it first with \
+         `cargo build -p cosmon-filestore --example {artifact}`, run the whole \
+         gate (`cargo test --workspace`), or set {env_var} to an existing \
+         binary.",
+        candidate.display(),
+    ))
+}
+
+/// The resolver reports a missing prerequisite; it does not build one.
+///
+/// This is the property the nested `cargo build` used to violate. A
+/// candidate path that cannot exist forces the error branch, and the message
+/// must name both remedies — the build command and the override env var — so
+/// an operator reading a CI log knows what to do without reading this file.
+#[test]
+fn missing_helper_is_a_named_prerequisite_not_a_build() {
+    let bogus = Path::new("/nonexistent/cosmon/trunk_lock_holder");
+    let err = resolve_prebuilt(HELPER_BIN_ENV, None, bogus, "trunk_lock_holder")
+        .expect_err("a nonexistent candidate must not resolve");
     assert!(
-        helper.exists(),
-        "example helper {} is still missing after the fallback build",
-        helper.display()
+        err.contains("cargo build -p cosmon-filestore --example trunk_lock_holder"),
+        "error must name the build command; got: {err}"
     );
-    helper
+    assert!(
+        err.contains(HELPER_BIN_ENV),
+        "error must name the override env var; got: {err}"
+    );
+}
+
+/// An override pointing at nothing is an error, not a quiet fallback.
+///
+/// A typo in a CI variable must fail loudly rather than resolve to some
+/// other artifact under the profile directory — otherwise the run reports on
+/// a binary nobody asked it to test.
+#[test]
+fn override_pointing_at_nothing_does_not_fall_back() {
+    let err = resolve_prebuilt(
+        HELPER_BIN_ENV,
+        Some(PathBuf::from("/nonexistent/cosmon/override")),
+        Path::new("/nonexistent/cosmon/candidate"),
+        "trunk_lock_holder",
+    )
+    .expect_err("a dangling override must not resolve");
+    assert!(
+        err.contains("/nonexistent/cosmon/override"),
+        "error must quote the override path it rejected; got: {err}"
+    );
 }
 
 /// Spawn the helper holding the lock and return its (child, `acquired_at`)
