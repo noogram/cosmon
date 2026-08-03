@@ -721,7 +721,7 @@ fn run_discover(ctx: &Context, args: &DiscoverArgs) -> anyhow::Result<()> {
         println!("(no provider sessions match)");
         return Ok(());
     }
-    println!("{:<48}  {:<10}  {:<8}  CWD", "SELECTOR", "LAST", "REPO",);
+    println!("{:<48}  {:<10}  {:<8}  CWD", "SELECTOR", "LAST", "REPO");
     let now = Utc::now();
     for s in &rows {
         println!(
