@@ -570,7 +570,30 @@ fn load_spore(reference: &Path) -> anyhow::Result<(Spore, PathBuf)> {
     let dir = manifest
         .parent()
         .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    Ok((spore, dir))
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("failed to resolve the current directory: {e}"))?;
+    Ok((spore, anchor_manifest_dir(dir, &cwd)))
+}
+
+/// Anchor a manifest directory to an absolute path so downstream containment
+/// checks compare like with like.
+///
+/// A RELATIVE reference (`cs spore run spore-starter.toml` from inside the
+/// spore directory) yields a manifest parent of `""` or `.`, and the lexical
+/// [`forbidden_gate_output`](cosmon_core::spore::forbidden_gate_output) guard
+/// compares that against ABSOLUTE run-home paths: an un-anchored dir either
+/// matches everything (empty prefix) or nothing, both wrong. Anchoring is
+/// lexical (`cwd.join`), not `canonicalize`: symlinks are the province of the
+/// real-containment provisioning step, and resolving them here would make the
+/// reported spore dir differ from what the operator typed.
+fn anchor_manifest_dir(dir: PathBuf, cwd: &Path) -> PathBuf {
+    if dir.as_os_str().is_empty() || dir == Path::new(".") {
+        cwd.to_path_buf()
+    } else if dir.is_absolute() {
+        dir
+    } else {
+        cwd.join(dir)
+    }
 }
 
 /// Coerce raw `--var key=value` strings into the declared `ParamSchema`
@@ -1137,6 +1160,29 @@ acceptance = "any evidence"
         let (spore, manifest_dir) = load_spore(dir.path()).unwrap();
         assert_eq!(spore.name, "demo");
         assert_eq!(manifest_dir, dir.path());
+    }
+
+    /// Over-refusal task-20260724-07bc: a relative spore reference from inside
+    /// the spore directory produced a manifest dir of `""`/`.`, which the
+    /// lexical containment guard treats as a prefix of EVERY path — refusing
+    /// every germination. The dir must leave `load_spore` anchored to the cwd.
+    #[test]
+    fn anchor_manifest_dir_resolves_relative_references_against_the_cwd() {
+        let cwd = Path::new("/repo/spores/cosmon-dev");
+        // `cs spore run spore-starter.toml` — a bare filename's parent is "".
+        assert_eq!(anchor_manifest_dir(PathBuf::from(""), cwd), cwd);
+        // `cs spore run ./spore-starter.toml` — the parent is ".".
+        assert_eq!(anchor_manifest_dir(PathBuf::from("."), cwd), cwd);
+        // A relative subdirectory reference anchors under the cwd.
+        assert_eq!(
+            anchor_manifest_dir(PathBuf::from("nested"), cwd),
+            Path::new("/repo/spores/cosmon-dev/nested")
+        );
+        // An absolute reference is already anchored and passes through.
+        assert_eq!(
+            anchor_manifest_dir(PathBuf::from("/abs/spores/x"), cwd),
+            Path::new("/abs/spores/x")
+        );
     }
 
     #[test]

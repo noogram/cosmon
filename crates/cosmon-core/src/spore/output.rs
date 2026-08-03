@@ -292,6 +292,14 @@ pub enum ForbiddenOutput {
 /// relative or `..`-laden paths should normalize against a known root first; the
 /// documented anti-patterns are absolute writes the worker chose, which compare
 /// cleanly.
+///
+/// A `spore_definition_dir` that normalizes to the **empty path** (a bare
+/// manifest filename's parent, or `.`) carries no containment information: every
+/// path trivially `starts_with("")`, which would turn the guard into a refusal
+/// of *everything* — the over-refusal observed when `cs spore run` was given a
+/// relative reference from inside the spore directory (task-20260724-07bc). An
+/// empty prefix therefore never matches; the caller owes the guard an anchored
+/// directory to get real spore-tree protection.
 #[must_use]
 pub fn forbidden_gate_output(
     path: &Path,
@@ -303,7 +311,9 @@ pub fn forbidden_gate_output(
     let repo_root = lexically_normalize(repo_root);
 
     // Anything at or under the spore definition tree is the primary violation.
-    if path.starts_with(&spore_dir) {
+    // An EMPTY spore dir is a prefix of every path and would refuse everything;
+    // it states nothing about the spore tree, so it matches nothing.
+    if !spore_dir.as_os_str().is_empty() && path.starts_with(&spore_dir) {
         return Some(ForbiddenOutput::InsideSporeDefinition);
     }
 
@@ -505,6 +515,32 @@ type = "feeds"
             .unwrap()
             .join("verdict.json");
         assert_eq!(forbidden_gate_output(&good, spore_dir, repo), None);
+    }
+
+    /// Over-refusal task-20260724-07bc, frozen as a regression: a RELATIVE
+    /// spore reference (`cs spore run spore-starter.toml` from inside the spore
+    /// directory) hands the guard a spore dir that normalizes to the EMPTY
+    /// path — the parent of a bare filename, or `.`. Every path starts with the
+    /// empty path, so the guard flagged the (legitimate) run home as
+    /// `InsideSporeDefinition` and refused every germination. An empty spore
+    /// dir carries no containment information and must match nothing.
+    #[test]
+    fn empty_spore_dir_from_a_relative_reference_is_not_a_false_positive() {
+        let repo = Path::new("/repo");
+        let run_home =
+            Path::new("/repo/.cosmon/state/spore-runs/germ-20260724-07bc/decompose/verdict.json");
+        for spore_dir in [Path::new(""), Path::new("."), Path::new("./.")] {
+            assert_eq!(
+                forbidden_gate_output(run_home, spore_dir, repo),
+                None,
+                "spore dir {spore_dir:?} normalizes empty and must not refuse the run home"
+            );
+        }
+        // The repo-root anti-pattern is still caught with an empty spore dir.
+        assert_eq!(
+            forbidden_gate_output(Path::new("/repo/reproduction.md"), Path::new(""), repo),
+            Some(ForbiddenOutput::RepoRoot),
+        );
     }
 
     /// Review finding F6, frozen as a red-first regression.
