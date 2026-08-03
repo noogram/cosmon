@@ -1105,12 +1105,13 @@ fn inspect_absolute_door(
 ///    That last property is asserted rather than asserted-about:
 ///    `tackle_does_not_author_the_posture_file_it_points_at` and
 ///    `complete_does_not_author_the_posture_file_it_points_at` in
-///    `tests/committee_seat_dispatch.rs` each write the file, run their verb,
-///    assert the pointer landed, delete the file, run the verb again, and check
-///    that nothing brings it back. Note the asymmetry with witness (2)'s own
-///    delivery leg, which no longer accepts mere presence: SCOPE is decided by
-///    the file being there at all (a stub still makes a molecule answerable),
-///    while DELIVERY is decided by
+///    `tests/committee_seat_dispatch.rs` both write the file and use `tackle` to
+///    land the pointer before deleting it. The tackle-side test then runs
+///    `tackle` again; the complete-side test runs `complete` once. Each checks
+///    that its final verb does not bring the file back. Note the asymmetry with
+///    witness (2)'s own delivery leg, which no longer accepts mere presence:
+///    SCOPE is decided by the file being there at all (a stub still makes a
+///    molecule answerable), while DELIVERY is decided by
 ///    [`RosterSpec::with_observed_delivery`](cosmon_core::committee::RosterSpec::with_observed_delivery)
 ///    reading the contract and matching it against the roster's declaration. A
 ///    stub therefore puts a molecule in scope and fails its witness, which is
