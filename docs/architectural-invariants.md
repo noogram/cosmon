@@ -14,6 +14,73 @@ the proposal loses.
 
 ---
 
+## Start here — ten checks for a typical PR
+
+This is the contributor-sized entry point. Start here for an ordinary PR;
+follow a link only when the check applies. You do not need to read this file
+end to end; the linked sections remain authoritative for the checks they
+explain. Sections marked *proposed* describe future contracts; they are not
+current merge requirements.
+
+1. **Keep the domain core free of I/O.** If the PR touches domain logic, its
+   tests must be able to construct and exercise that logic without a
+   filesystem, process, transport, or network. Put those effects behind an
+   injected port. See [§1](#1-the-two-layer-model) and
+   [ADR-082](adr/082-architecture-baseline.md).
+
+2. **Make invalid states unrepresentable.** Use newtypes for identifiers and
+   typestate or exhaustive enums for lifecycle transitions. Add a readable
+   test that demonstrates the allowed transition; do not pass identifiers as
+   interchangeable strings.
+
+3. **Give each command one job.** Compare the change with the command table in
+   [§3](#3-command-perimeters). Extend an existing command when its perimeter
+   already covers the behavior. A transactional command must exit after one
+   decision; a persistent control loop belongs to the resident runtime.
+
+4. **Prove retries are safe.** Run the changed operation twice against
+   disposable state. The second run must be a no-op or produce the same state;
+   otherwise require an explicit retry flag and test that refusal. See
+   [§5](#5-the-coherence-checklist), questions 1–2.
+
+5. **Keep writes and observations separate.** A command that changes state
+   must not also return a post-write coupling report. Perform the write, then
+   use a separate read invocation such as `cs observe`. See
+   [§3b](#3b-the-write-read-asymmetry).
+
+6. **Preserve recovery from disk alone.** Stop and reconstruct any changed
+   policy or runtime component using only the state store; its next result
+   must match an uninterrupted run. Never make process memory the only copy of
+   required state. See [§7c](#7c-the-markov-property-the-real-invariant-on-disk).
+
+7. **Respect the worker boundary.** State whether the command is callable by a
+   worker or by a human after the worker exits. Worker commands must work via
+   `cs` walk-up discovery from a worktree, must not require MCP, and must not
+   destroy their own worktree or session. See [§3e](#3e-cli-over-mcp-for-workers).
+
+8. **Keep DAG work ordered and bounded.** A dependent may dispatch only after
+   its predecessor is merged, and traversal must leave unrelated, historical,
+   and completed molecules untouched. Test both the blocked predecessor and an
+   out-of-scope molecule. See [§3d](#3d-merge-before-dispatch) and §5.11.
+
+9. **Provide the reverse operation.** If the change creates a file, session,
+   branch, registration, or lifecycle state, name its teardown counterpart and
+   test the create/undo round trip. If the asymmetry is intentional, explain
+   it in the PR. See §5.5.
+
+10. **Close the contract in the same PR.** Add executable tests, document every
+    public item, preserve the physics vocabulary, and run `just gates`. If the
+    PR changes a persisted molecule field, mutation, or read-coupling, update
+    `docs/specs/CosmonRun.tla` in the same commit or record why it is
+    out-of-band in `docs/lore/logicien-register.md`. See §5.13.
+
+For command or cross-cutting changes, copy the concrete checks in the
+[PR template](../.github/pull_request_template.md) into the PR and mark every
+applicable line. A skipped line needs a short reason; “not applicable” is a
+claim reviewers must be able to verify from the diff.
+
+---
+
 ## Status legend — ratified vs proposed (read this first)
 
 This document mixes two classes of section, and the distinction is

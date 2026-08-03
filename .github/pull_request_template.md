@@ -13,29 +13,24 @@ in the description or link to an ADR / molecule / chronicle.
 
 ## Coherence checklist
 
-See `docs/architectural-invariants.md` §5. Check every box that
-applies, or justify the skip in the description.
+Start with the [ten-check summary](https://github.com/noogram/cosmon/blob/main/docs/architectural-invariants.md#start-here--ten-checks-for-a-typical-pr),
+then use §5 for details. Check each applicable line. For every unchecked line,
+write `N/A — <reason>` so a reviewer can verify why it does not apply.
 
-- [ ] **Stateless / Idempotent / Regime-aware** — no daemon in Layer A,
-  twice = once, the right regime(s) noted.
-- [ ] **Single perimeter** — no overlap with an existing command's role.
-- [ ] **Symmetric undo** — creation has a matching teardown.
-- [ ] **Runtime-compatible** — still makes sense when the resident
-  runtime owns L3.
-- [ ] **Worker/human boundary respected** — worker-callable code does
-  not self-destroy; human-only commands assume the worker is done.
-- [ ] **Write-read asymmetry preserved** — no command both writes state
-  and returns a coupling report in the same invocation.
-- [ ] **Merge-before-dispatch respected** — predecessor's branch merged
-  before dependent is dispatched.
-- [ ] **CLI-first for workers** — walk-up discovery, not MCP.
-- [ ] **Scope-bounded / Self-similar** — traversal stays inside the
-  intended subgraph; the capability composes at adjacent levels.
-- [ ] **AC (Alphabet Closure).** If this PR adds a persisted field,
-  mutating action, or read-coupling on molecule state, the spec edit
-  landed in the same commit, OR the field is documented as out-of-band
-  in `docs/lore/logicien-register.md`.
+- [ ] I ran the changed command once and verified that the command itself exited without leaving a control loop running in Layer A.
+- [ ] I ran the same operation twice against disposable state and verified that the second run was a no-op or produced the same state; otherwise I tested the explicit retry guard.
+- [ ] I named the affected regime(s)—Inert, Propelled, or Autonomous—and tested or explained behavior at each boundary the change crosses.
+- [ ] I compared the behavior with the command-perimeter table in §3 and verified that no existing command already owns it.
+- [ ] I named the teardown counterpart for every file, session, branch, registration, or state this change creates and tested the create/undo round trip.
+- [ ] I verified that the behavior still works when the resident runtime invokes the transactional core, or documented and tested the intentional regime restriction.
+- [ ] I identified the command as worker-callable or human-only and verified that a worker-callable path cannot destroy its own worktree or session.
+- [ ] I verified that no invocation both mutates state and returns a post-write coupling report; the report comes from a separate read invocation.
+- [ ] I tested that dependent work cannot dispatch before its predecessor branch is merged.
+- [ ] I ran every worker-callable path through `cs` from inside a nested worktree and verified that it uses walk-up discovery without MCP.
+- [ ] I tested traversal with an unrelated or completed molecule present and verified that the out-of-scope molecule was unchanged.
+- [ ] I exercised the capability at the adjacent applicable level—molecule, polymer, or fleet—or explained why no adjacent level exists.
+- [ ] I checked the diff for persisted molecule fields, state mutations, and read-couplings; each is represented in `docs/specs/CosmonRun.tla` in this commit or documented as out-of-band in `docs/lore/logicien-register.md`.
 
 ## Test plan
 
-<!-- Gates you ran (cargo check/test/clippy/fmt) + anything extra. -->
+<!-- Include `just gates` and any focused or behavior-specific checks. -->

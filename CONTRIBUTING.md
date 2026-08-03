@@ -18,9 +18,11 @@ Two design documents govern every change:
   newtype, zero-I/O core, physics vocabulary).
 - **[docs/architectural-invariants.md](docs/architectural-invariants.md)** —
   the operational discipline that preserves the system's structural
-  mechanisms. Run the coherence checklist there before adding or renaming a
-  command. *If the code contradicts the thesis or the invariants, the thesis
-  wins — file an issue, do not backdoor the change.*
+  mechanisms. Begin with its
+  **[ten checks for a typical PR](docs/architectural-invariants.md#start-here--ten-checks-for-a-typical-pr)**;
+  use the full reference when a check points deeper. *If the code contradicts
+  the thesis or the invariants, the thesis wins — file an issue, do not
+  backdoor the change.*
 
 For the operator mental model (lifecycle, DAG, tags, monitoring), read
 [docs/handbook.md](docs/handbook.md) or run `cs help guide`.

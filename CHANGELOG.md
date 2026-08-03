@@ -50,6 +50,13 @@ this stage.
 
 ### Documentation
 
+- **The external-contributor architecture path now starts with ten concrete
+  checks instead of a 3,700-line prerequisite.** The full invariant catalogue
+  remains authoritative, but its new front page routes a typical PR only to
+  the sections it needs. The PR template expands its compressed coherence
+  jargon into one self-verifiable test per checkbox, with an explicit reason
+  required for every non-applicable line.
+
 - **The ten-minute quickstart now says to `ollama pull qwen3:8b`, not just
   `ollama serve`** — the remaining docs item of noogram/cosmon #4. A daemon
   with nothing pulled answers, so the setup looks healthy and the dispatch
