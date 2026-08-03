@@ -55,12 +55,32 @@
 //! for: the submit keystroke to reach the pane`. The group kill really does
 //! reach an undetached backstop, and the green above is therefore about
 //! survival and not about the assertions being unfalsifiable.
+//!
+//! # The rig owns itself (COSMON, 2026-07-31)
+//!
+//! Every external thing this file creates — the tmux server, the arming caller,
+//! the group bystander, the deliberately-orphaned backstop — is held by a value
+//! from [`rig_guard`] and released in `Drop`. It used to be released by
+//! statements at the end of each test, which is a teardown that runs only when
+//! nothing fails: the timeouts above are `panic!`s, and a panic walks straight
+//! past a trailing `kill-server`. During the 2026-07-31 incident that meant one
+//! leaked tmux server and one leaked detached backstop *per run*.
+//!
+//! [`a_panicking_rig_leaves_no_orphaned_process`] and
+//! [`a_panicking_rig_leaves_no_tmux_session`] are the proof that the new
+//! arrangement holds: each builds a rig, panics on purpose, catches the unwind,
+//! and then looks for the wreckage.
 
 #![cfg(unix)]
 
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
+
+mod rig_guard;
+
+use rig_guard::{ChildGuard, DetachedByArgv, TmuxServer};
 
 /// Upper bound on any single wait here. Generous enough for a loaded runner,
 /// short enough that a genuine hang fails the job instead of stalling it.
@@ -71,6 +91,12 @@ const PATIENCE: Duration = Duration::from_secs(60);
 /// and a fast poll keeps the whole file to a couple of seconds.
 const INTERVAL_MS: u64 = 200;
 
+/// How long teardown gets to become observable.
+///
+/// Short on purpose: `Drop` has already returned by the time this is spent, so
+/// anything still standing is not slow, it is left behind.
+const TEARDOWN_PATIENCE: Duration = Duration::from_secs(10);
+
 /// Is tmux usable here? The rig needs a real terminal multiplexer — there is no
 /// honest way to fake "a pane that swallowed a keystroke". A bare container
 /// without tmux reports the skip rather than a green it did not earn.
@@ -79,15 +105,6 @@ fn tmux_available() -> bool {
         .arg("-V")
         .output()
         .is_ok_and(|o| o.status.success())
-}
-
-fn tmux(socket: &str, args: &[&str]) -> std::process::Output {
-    Command::new("tmux")
-        .arg("-L")
-        .arg(socket)
-        .args(args)
-        .output()
-        .expect("tmux must be runnable")
 }
 
 /// Wait for `cond`, or fail with `what` once [`PATIENCE`] is spent.
@@ -130,10 +147,15 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
          : > {marker}; printf '\\033[2J\\033[Hdone\\n'; sleep 300",
         marker = marker.display()
     );
-    let out = tmux(
-        &socket,
-        &["new-session", "-d", "-s", &worker, "sh", "-c", &pane_script],
-    );
+    // Guards first, rig second — and the detached-process guard declared *after*
+    // the tmux guard, so it drops *before* it. That order matters: it means an
+    // orphaned backstop is killed while its tmux session is still up, rather
+    // than being allowed to notice the session vanished and exit on its own.
+    // A teardown that only works because the subject cooperates is not one.
+    let server = TmuxServer::new(&socket);
+    let _detached = DetachedByArgv::watching(state_dir.to_string_lossy().into_owned());
+
+    let out = server.run(&["new-session", "-d", "-s", &worker, "sh", "-c", &pane_script]);
     assert!(
         out.status.success(),
         "tmux new-session failed: {}",
@@ -180,7 +202,7 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
         use std::os::unix::process::CommandExt as _;
         caller.process_group(0);
     }
-    let mut caller = caller.spawn().expect("spawn the arming caller");
+    let mut caller = ChildGuard::new(caller.spawn().expect("spawn the arming caller"));
     let caller_pgid = caller.id();
 
     // A live occupant of the caller's group, so the SIGKILL below has something
@@ -207,7 +229,7 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
         // Join the caller's group rather than leading one: `setpgid(0, pgid)`.
         bystander.process_group(caller_pgid as i32);
     }
-    let mut bystander = bystander.spawn().expect("spawn the group bystander");
+    let mut bystander = ChildGuard::new(bystander.spawn().expect("spawn the group bystander"));
 
     // Wait for the caller to finish arming — WITHOUT reaping it.
     //
@@ -325,7 +347,9 @@ fn the_backstop_keeps_pressing_after_its_caller_is_killed() {
         "a signed receipt must leave no pending record behind"
     );
 
-    let _ = tmux(&socket, &["kill-server"]);
+    // No teardown statement here on purpose. `server`, `_detached`, `caller` and
+    // `bystander` are dropped by leaving this scope, which happens on the
+    // failing paths above too.
 }
 
 /// The other half of the contract: a backstop that runs out of patience leaves
@@ -355,10 +379,8 @@ fn a_backstop_that_gives_up_leaves_an_annotated_record() {
     // Never reads, so the needle stays on screen no matter how many Enters
     // arrive — a composer too busy to accept the submit, forever.
     let pane_script = format!("printf '\\342\\235\\257 {needle}'; sleep 300");
-    let out = tmux(
-        &socket,
-        &["new-session", "-d", "-s", &worker, "sh", "-c", &pane_script],
-    );
+    let server = TmuxServer::new(&socket);
+    let out = server.run(&["new-session", "-d", "-s", &worker, "sh", "-c", &pane_script]);
     assert!(
         out.status.success(),
         "tmux new-session failed: {}",
@@ -403,6 +425,237 @@ fn a_backstop_that_gives_up_leaves_an_annotated_record() {
         "the durable pass must press repeatedly, not once: {:?}",
         back.backstop_nudges
     );
+}
 
-    let _ = tmux(&socket, &["kill-server"]);
+// ─────────────────── the teardown contract, proved by panic ───────────────────
+//
+// The two tests above tear down through `Drop` rather than through trailing
+// statements, and the whole value of that change lives on the path where they
+// *fail*. Nothing in a green run of either exercises it — a passing test reaches
+// its trailing statements just fine, which is exactly why the leak survived so
+// long unnoticed.
+//
+// So the two tests below take that path deliberately: each builds one kind of
+// external resource, panics on purpose, catches the unwind, and then looks for
+// the wreckage.
+//
+// They are two tests and not one because the two claims are only separately
+// falsifiable. A single test holding both guards passes even with the
+// process-killing `Drop` gutted: the guards drop in sequence, the tmux server
+// goes down, and the backstop — which stops the moment its session is gone —
+// exits on its own a poll later. Measured, 2026-07-31: gutting
+// `DetachedByArgv::drop` left that combined test green. Splitting the claims is
+// what restores its teeth, because the orphan test below never takes its session
+// down at all.
+
+/// Run `body`, expecting it to panic.
+///
+/// The panic hook is deliberately left alone. Silencing the deliberate panic
+/// with `take_hook`/`set_hook` is the obvious move and is wrong here: the hook
+/// is process-global, these tests run concurrently with the rest of the binary,
+/// and two overlapping take/restore pairs can leave the *no-op* hook installed
+/// permanently — which would swallow the diagnostics of a genuinely failing
+/// test. Nothing is gained by paying that: the harness already discards a
+/// passing test's captured output, so the banner is only ever printed for a run
+/// that failed and wants explaining anyway.
+fn expect_panic(what: &str, body: impl FnOnce()) {
+    let unwound = std::panic::catch_unwind(AssertUnwindSafe(body));
+    assert!(
+        unwound.is_err(),
+        "{what} must actually have panicked — otherwise the teardown under test \
+         was reached by the ordinary path and proves nothing"
+    );
+}
+
+/// Poll `cond` for at most [`TEARDOWN_PATIENCE`] and report whether it held.
+///
+/// Teardown is polled rather than asserted once because `SIGKILL` and
+/// `kill-server` are requests the kernel honours asynchronously, and a killed
+/// orphan lingers as a zombie until its reparented init collects it. A window is
+/// allowed; an indefinite one is not.
+fn settles(mut cond: impl FnMut() -> bool) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < TEARDOWN_PATIENCE {
+        if cond() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    cond()
+}
+
+/// A panic leaves no orphaned process behind.
+///
+/// The subject is the real leak this file can produce: a `cs briefing-backstop`
+/// detached into its own process group, which no `Child` handle anywhere refers
+/// to. Only [`rig_guard::DetachedByArgv`] can reach it.
+///
+/// # Why this is not vacuous
+///
+/// The tmux server is built *outside* the panicking scope and is still standing
+/// when the assertions run — asserted, not assumed. That matters: a backstop
+/// whose session has vanished stops by design within one poll, so a test that
+/// tore the session down first would watch the subject tidy itself away and
+/// credit the guard for it. Here the session is alive, the backstop's budget is
+/// ten minutes, and its composer never clears, so nothing but the guard can end
+/// it.
+#[test]
+fn a_panicking_rig_leaves_no_orphaned_process() {
+    if !tmux_available() {
+        eprintln!("SKIP a_panicking_rig_leaves_no_orphaned_process: tmux not found");
+        return;
+    }
+
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let state_dir = dir.path().join("molecule");
+    std::fs::create_dir_all(&state_dir).expect("state dir");
+
+    let stamp = std::process::id();
+    let socket = format!("cosmon-test-backstop-orphan-{stamp}");
+    let worker = format!("cosmon-backstop-orphan-{stamp}");
+    let needle = format!("COSMON-ORPHAN-NEEDLE-{stamp}");
+    // The unique thing on the detached child's command line. A temp-directory
+    // path is unique per run; `briefing-backstop` would also match a backstop
+    // armed by any other test in this binary.
+    let argv_marker = state_dir.to_string_lossy().into_owned();
+
+    // Outside the panicking scope on purpose — see the doc comment.
+    let server = TmuxServer::new(&socket);
+    // A composer that never clears, so the backstop keeps pressing for its whole
+    // budget instead of signing a receipt and exiting.
+    let pane_script = format!("printf '\\342\\235\\257 {needle}'; sleep 600");
+    let out = server.run(&["new-session", "-d", "-s", &worker, "sh", "-c", &pane_script]);
+    assert!(
+        out.status.success(),
+        "tmux new-session failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let record = cosmon_cli::briefing_backstop::BriefingPending {
+        molecule: "task-20260731-26ad".to_owned(),
+        worker: worker.clone(),
+        socket: socket.clone(),
+        needle,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        inband_seconds: 8,
+        backstop_outcome: None,
+        backstop_ended_at: None,
+        backstop_nudges: None,
+    };
+    cosmon_cli::briefing_backstop::write(&state_dir, &record).expect("persist the record");
+
+    // Reads the process table after the guard inside the scope below has done
+    // its work — which is why it cannot be the same value.
+    let observer = DetachedByArgv::watching(argv_marker.clone());
+
+    expect_panic("the orphan rig", || {
+        let detached = DetachedByArgv::watching(argv_marker.clone());
+
+        let mut caller = ChildGuard::new(
+            Command::new(env!("CARGO_BIN_EXE_cs"))
+                .arg("briefing-backstop")
+                .arg("--detach")
+                .arg("--state-dir")
+                .arg(&state_dir)
+                .arg("--interval-ms")
+                .arg(INTERVAL_MS.to_string())
+                .arg("--budget-secs")
+                .arg("600")
+                .current_dir(dir.path())
+                .spawn()
+                .expect("spawn the arming caller"),
+        );
+        let status = caller.wait().expect("the caller returns immediately");
+        assert!(status.success(), "arming the backstop failed: {status}");
+        // Reaped before the process table is read, so what is seen below is the
+        // orphan and not its arming caller.
+        drop(caller);
+
+        wait_for(
+            "the detached backstop to appear in the process table",
+            || !detached.pids().is_empty(),
+        );
+
+        panic!("deliberate: teardown must be the guard's job, not this line's");
+    });
+
+    assert!(
+        server.has_session(&worker),
+        "the rig's session must still be up here — a backstop whose session has \
+         vanished stops on its own, and this test would then be measuring that \
+         rather than the guard"
+    );
+
+    let cleared = settles(|| observer.pids().is_empty());
+    assert!(
+        cleared,
+        "a panicking rig left orphaned processes behind after \
+         {TEARDOWN_PATIENCE:?}: {:?}",
+        observer.pids()
+    );
+}
+
+/// A panic leaves no tmux session behind.
+///
+/// Deliberately minimal: a bare session on a private socket, abandoned by a
+/// panic. Nothing here can tear itself down, so the only thing that can remove
+/// it is [`rig_guard::TmuxServer`]'s `Drop`.
+#[test]
+fn a_panicking_rig_leaves_no_tmux_session() {
+    if !tmux_available() {
+        eprintln!("SKIP a_panicking_rig_leaves_no_tmux_session: tmux not found");
+        return;
+    }
+
+    let stamp = std::process::id();
+    let socket = format!("cosmon-test-backstop-session-{stamp}");
+    let worker = format!("cosmon-backstop-session-{stamp}");
+
+    // A second handle on the same socket: it asks the questions after the guard
+    // inside the scope below has been dropped. Its own `Drop` is a harmless
+    // second `kill-server`.
+    let observer = TmuxServer::new(&socket);
+
+    // Captured from inside the rig, because a dead server can no longer be asked
+    // where its socket was.
+    let socket_file = std::sync::Mutex::new(None);
+
+    expect_panic("the tmux rig", || {
+        let server = TmuxServer::new(&socket);
+        let out = server.run(&["new-session", "-d", "-s", &worker, "sh", "-c", "sleep 600"]);
+        assert!(
+            out.status.success(),
+            "tmux new-session failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert!(
+            server.has_session(&worker),
+            "the session must be live before it is abandoned, or its later \
+             absence says nothing"
+        );
+        *socket_file.lock().expect("socket path slot") = server.socket_path();
+
+        panic!("deliberate: teardown must be the guard's job, not this line's");
+    });
+
+    assert!(
+        settles(|| !observer.has_session(&worker)),
+        "a panicking rig left its tmux session behind after {TEARDOWN_PATIENCE:?}"
+    );
+
+    // And the socket inode with it. `kill-server` alone does not unlink it, which
+    // is how a machine ends up with several hundred dead `cosmon-test-*` sockets
+    // under `/tmp/tmux-<uid>/` — one per run of a rig that names its socket after
+    // its pid.
+    let socket_file = socket_file
+        .lock()
+        .expect("socket path slot")
+        .clone()
+        .expect("the live rig must have reported its socket path");
+    assert!(
+        settles(|| !socket_file.exists()),
+        "a panicking rig left its socket file behind after \
+         {TEARDOWN_PATIENCE:?}: {}",
+        socket_file.display()
+    );
 }
