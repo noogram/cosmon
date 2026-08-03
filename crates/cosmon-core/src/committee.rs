@@ -204,10 +204,52 @@ pub struct PostureContract {
 /// The parse is deliberately tolerant about everything else — heading wording,
 /// the HTML comment, blank lines — because the gate's job is to refuse an empty
 /// contract, not to refuse a contract whose renderer was revised.
+///
+/// # Why this reads the STRUCTURE and not three substrings
+///
+/// The previous parse searched the *whole text* for a `contract-version` line
+/// and a `contract-hash` line, and called the body "everything after the LAST
+/// `---`". Those three conditions are all satisfied by a document that is
+/// nothing but a heading, a rule and the two metadata lines:
+///
+/// ```text
+/// # posture
+/// ---
+/// - **contract-version:** 1
+/// - **contract-hash:** blake3:0000…
+/// ```
+///
+/// The fields are found — because they were looked for *anywhere* — and the
+/// body is non-empty by *being* the metadata. The document that should fail was
+/// exactly the document a forger writes, which is this lineage's defect class
+/// one turn further in: the earlier witness measured the PRESENCE OF A FILE,
+/// its replacement measured the PRESENCE OF STRINGS INSIDE it, and neither
+/// measured whether the document has the shape the contract defines.
+///
+/// So the format is now read as the format:
+///
+/// - the **header rule** is the FIRST line that is exactly `---`; a document
+///   with no rule is not a rendered contract and parses to `None`;
+/// - the **metadata region** is what precedes that rule, and it is the only
+///   region the fields are read from — a `contract-hash` written below the rule
+///   is body prose, not a declaration;
+/// - the **body** is what follows the rule, and it must carry at least one
+///   non-blank line that is not itself a `- **name:** value` metadata bullet —
+///   a body made only of restated metadata is the forgery above with its
+///   duplicate moved up, and it says nothing.
+///
+/// Taking the FIRST rule rather than the last also *fixes* the truncation the
+/// old comment claimed to avoid: with the last rule, a body containing its own
+/// `---` was silently shortened to its final section. Measured 2026-08-03 over
+/// the 29 live `committee-posture.md` files in the default fleet, 8 carry an
+/// internal rule and every one of them fails digest verification under BOTH
+/// split points, so moving the split changes no verification verdict in the
+/// corpus while returning the whole prose instead of its tail.
 #[must_use]
 pub fn parse_committee_posture(text: &str) -> Option<PostureContract> {
+    let (metadata, body) = split_at_header_rule(text)?;
     let field = |name: &str| -> Option<String> {
-        text.lines().find_map(|l| {
+        metadata.lines().find_map(|l| {
             l.trim()
                 .strip_prefix("- **")?
                 .strip_prefix(name)?
@@ -217,15 +259,55 @@ pub fn parse_committee_posture(text: &str) -> Option<PostureContract> {
     };
     let version: u32 = field("contract-version")?.parse().ok()?;
     let contract_hash = field("contract-hash").filter(|h| !h.is_empty())?;
-    // The body is what follows the LAST header rule — `---` on its own line —
-    // so a body that itself contains a rule cannot truncate the parse.
-    let (_, body) = text.rsplit_once("\n---\n")?;
     let body = body.trim();
-    (!body.is_empty()).then(|| PostureContract {
+    let says_something = body
+        .lines()
+        .any(|l| !l.trim().is_empty() && !is_posture_metadata_line(l));
+    says_something.then(|| PostureContract {
         version,
         contract_hash,
         body: body.to_string(),
     })
+}
+
+/// Split a rendered posture document into its metadata region and its body at
+/// the **first** line that is exactly `---`, or `None` when there is no such
+/// line.
+///
+/// Splitting on a whole line rather than on the substring `"\n---\n"` is what
+/// keeps a rule that happens to be indented, or trailed by whitespace, from
+/// deciding where the contract begins.
+fn split_at_header_rule(text: &str) -> Option<(String, String)> {
+    let mut metadata = String::new();
+    let mut body = String::new();
+    let mut past_rule = false;
+    for line in text.lines() {
+        if !past_rule {
+            if line.trim() == "---" {
+                past_rule = true;
+            } else {
+                metadata.push_str(line);
+                metadata.push('\n');
+            }
+            continue;
+        }
+        body.push_str(line);
+        body.push('\n');
+    }
+    past_rule.then_some((metadata, body))
+}
+
+/// Whether `line` is a metadata bullet — `- **name:** value` — the one shape
+/// [`render_committee_posture`] writes into the region above the header rule.
+///
+/// It exists so the body can be defined as *content that is not metadata*: a
+/// document whose body restates the header carries no contract prose at all,
+/// however many fields a substring search finds in it.
+fn is_posture_metadata_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("- **")
+        .and_then(|rest| rest.split_once(":**"))
+        .is_some()
 }
 
 /// The exact bytes a `contract-hash` is a digest **of**.
@@ -5523,8 +5605,9 @@ mod tests {
         assert_eq!(parsed.contract_hash, "blake3:deadbeef");
         assert_eq!(parsed.body, body);
 
-        // A body carrying its own `---` rule must not truncate the parse: the
-        // body is what follows the LAST rule.
+        // A body carrying its own `---` rule must not truncate the parse. The
+        // split is the FIRST rule — the header's — so the body comes back
+        // WHOLE, both clauses, not just the section after the last rule.
         let sectioned = "First clause.\n\n---\n\nSecond clause.";
         assert_eq!(
             parse_committee_posture(&render_committee_posture(
@@ -5533,10 +5616,10 @@ mod tests {
                 sectioned,
             ))
             .map(|c| c.body),
-            Some("Second clause.".to_string()),
-            "a rule inside the body may not silently shorten the contract; the \
-             parse must still find A body — and this is the documented limit: \
-             what it returns is the last section, not the whole prose"
+            Some(sectioned.to_string()),
+            "a rule inside the body may not silently shorten the contract: \
+             splitting at the LAST rule dropped 'First clause.' from a contract \
+             the seat was certified as having received"
         );
 
         for stub in [
@@ -5551,6 +5634,60 @@ mod tests {
                 parse_committee_posture(stub),
                 None,
                 "a placeholder is not a contract; got a parse for:\n{stub}"
+            );
+        }
+    }
+
+    /// **The forgery falsifier, in both directions.**
+    ///
+    /// The forged documents are BUILT here rather than described, because a
+    /// refusal nobody exercised is a claim about a parser, not a property of
+    /// one. And each is paired with the genuine document it imitates: a gate
+    /// proven only to refuse is indistinguishable from an outage, and one
+    /// proven only to pass is decoration.
+    #[test]
+    fn a_metadata_only_document_is_refused_however_it_arranges_its_fields() {
+        let genuine = render_committee_posture(
+            ADVERSARIAL_BRIEFING_VERSION,
+            "blake3:deadbeef",
+            "Audit the artefacts. The generator's confidence is not evidence.",
+        );
+        assert!(
+            parse_committee_posture(&genuine).is_some(),
+            "the document the renderer writes must parse, or no committee can \
+             ever be convened"
+        );
+
+        // The three-line forgery: a heading, one rule, and the two metadata
+        // lines BELOW it. Under a substring parse every condition holds — both
+        // fields are found because they were looked for anywhere, and the body
+        // is non-empty by BEING the metadata.
+        let below_the_rule = "# posture\n\n---\n\n\
+             - **contract-version:** 1\n\
+             - **contract-hash:** blake3:deadbeef\n";
+        // The same forgery with its fields duplicated, so that the metadata
+        // region is honest and only the BODY is fabricated. This is the variant
+        // that survives scoping the fields to the header and dies only on the
+        // body being defined as content that is not metadata.
+        let duplicated = "# posture\n\n\
+             - **contract-version:** 1\n\
+             - **contract-hash:** blake3:deadbeef\n\n\
+             ---\n\n\
+             - **contract-version:** 1\n\
+             - **contract-hash:** blake3:deadbeef\n";
+        // No rule at all: fields and prose, but not the rendered structure.
+        let no_rule = "# posture\n\n\
+             - **contract-version:** 1\n\
+             - **contract-hash:** blake3:deadbeef\n\n\
+             Be adversarial.\n";
+
+        for forgery in [below_the_rule, duplicated, no_rule] {
+            assert_eq!(
+                parse_committee_posture(forgery),
+                None,
+                "a document that carries the field NAMES without the contract \
+                 STRUCTURE is exactly what a forger writes; it must not \
+                 certify a seat:\n{forgery}"
             );
         }
     }
