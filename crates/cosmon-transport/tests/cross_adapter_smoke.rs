@@ -33,9 +33,29 @@ fn cleanup() {
         .output();
 }
 
+/// The flag each required binary answers a version query with.
+///
+/// Not every tool spells it `--version`: `tmux` accepts only `-V` and
+/// answers `--version` with a usage message on exit code 1. Probing it
+/// with `--version` therefore reported "tmux missing" on a host where
+/// tmux was installed and on PATH — a false negative that made the
+/// Tier-2 job unpassable everywhere rather than merely unprovisioned.
+/// Keep the flag next to the name so the probe cannot drift again.
+fn version_flag(name: &str) -> &'static str {
+    match name {
+        "tmux" => "-V",
+        _ => "--version",
+    }
+}
+
+/// Assert that `name` is a runnable binary on PATH.
+///
+/// Presence is decided by a successful version query, which is the
+/// cheapest invocation that distinguishes "on PATH and executable" from
+/// "absent" without starting a session.
 fn require_binary(name: &str) {
     let ok = Command::new(name)
-        .arg("--version")
+        .arg(version_flag(name))
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false);

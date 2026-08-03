@@ -43,8 +43,18 @@ if [ -z "$CS_BIN" ]; then
 fi
 
 echo "matrix: using cs=$CS_BIN"
+# Resolve $OUTDIR to an absolute path. Each row runs its tackle from
+# inside the scratch project — `(cd "$scratch" && ... > "$row_dir/…")` —
+# so the redirect is opened after the cd and a relative $OUTDIR resolves
+# against the scratch dir, where it does not exist. The open then fails
+# with ENOENT, the subshell exits 1, and every row reports tuple=00000
+# exit=1 whatever fault was injected: the instrument, not the scenarios.
+# CI passed the relative `matrix-artifacts`, which is why the nightly
+# scored an identical 2/21 every night while local runs (absolute
+# default) scored 11/21.
+mkdir -p "$OUTDIR" || exit 2
+OUTDIR="$(cd "$OUTDIR" && pwd)" || exit 2
 echo "matrix: artifacts → $OUTDIR"
-mkdir -p "$OUTDIR"
 
 # Shared PATH for every row: fakes MUST appear first so `tmux` and
 # `claude` invocations hit the shims. We resolve this at the harness
@@ -212,6 +222,18 @@ run_row() {
                 2> "$row_dir/tackle.stderr"
     )
     tackle_exit=$?
+
+    # Harness-fault tripwire. If the redirect above never opened, the
+    # subshell exits 1 without cs having run at all — and rows that
+    # expect a non-zero tackle would score PASS on an observation that
+    # was never made. Refuse to score a row whose evidence is missing:
+    # a harness fault must look like a harness fault, not like a
+    # scenario verdict.
+    if [ ! -f "$row_dir/tackle.stdout" ]; then
+        echo "  [!] harness fault: $row_dir/tackle.stdout absent — row unobserved, not scored"
+        return 1
+    fi
+
     echo "$tackle_exit" > "$row_dir/tackle.exit"
 
     # ── Observe the physical + logical state ───────────────────────────
