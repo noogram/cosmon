@@ -69,6 +69,13 @@ this stage.
 
 ### Fixed
 
+- **Recipient-side spore seal verification is now parallel, observable, and
+  actionable.** `cs spore run` invokes TLC with `-workers auto` and the JVM's
+  parallel collector, announces long checks, and relays TLC progress to stderr
+  while preserving clean `--json` stdout. When TLC rejects a proof, the refusal
+  now names the violated invariant instead of selecting the last raw
+  counterexample-state line.
+
 - **A committee seat's `contract-hash` is now verified against the contract
   body, instead of being taken on the convener's word.** The hash was compared
   against the roster's own copy of itself and never against the prose it claims
