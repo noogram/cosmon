@@ -34,6 +34,149 @@ pub(crate) enum AutoCommitOutcome {
     NotAGitRepo,
 }
 
+/// Maximum number of non-generated paths an automatic snapshot will stage.
+///
+/// A larger change needs a deliberate, path-scoped commit. This ceiling keeps
+/// a missing ignore rule from turning one lifecycle tick into a repository
+/// dump while leaving ordinary source changes comfortably below the limit.
+const AUTO_COMMIT_MAX_PATHS: usize = 1_000;
+
+/// Maximum aggregate size of non-generated files an automatic snapshot will
+/// stage without a deliberate commit by the worker.
+const AUTO_COMMIT_MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Find generated-artifact roots identified by the standard `CACHEDIR.TAG`
+/// marker.
+///
+/// Cargo writes this marker at the root of every target directory, including
+/// target directories with project-specific names. Once a marker is found we
+/// do not descend further: the whole directory is cache material and must be
+/// outside the automatic snapshot.
+fn cachedir_roots(project_root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    fn visit(root: &Path, dir: &Path, found: &mut Vec<PathBuf>) -> anyhow::Result<()> {
+        if dir.join("CACHEDIR.TAG").is_file() {
+            let relative = dir.strip_prefix(root).map_err(|error| {
+                anyhow::anyhow!(
+                    "generated-artifact path {} escaped snapshot root {}: {error}",
+                    dir.display(),
+                    root.display()
+                )
+            })?;
+            if !relative.as_os_str().is_empty() {
+                found.push(relative.to_path_buf());
+            }
+            return Ok(());
+        }
+
+        for entry in fs::read_dir(dir)
+            .map_err(|error| anyhow::anyhow!("scan {} failed: {error}", dir.display()))?
+        {
+            let entry = entry.map_err(|error| {
+                anyhow::anyhow!("scan an entry under {} failed: {error}", dir.display())
+            })?;
+            let file_type = entry.file_type().map_err(|error| {
+                anyhow::anyhow!("inspect {} failed: {error}", entry.path().display())
+            })?;
+            if file_type.is_dir() && entry.file_name() != ".git" {
+                visit(root, &entry.path(), found)?;
+            }
+        }
+        Ok(())
+    }
+
+    let mut found = Vec::new();
+    visit(project_root, project_root, &mut found)?;
+    found.sort();
+    Ok(found)
+}
+
+fn path_is_within(path: &Path, roots: &[PathBuf]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// Refuse an abnormally broad automatic snapshot.
+///
+/// Marker-identified cache trees are excluded before applying the limits.
+/// The remaining candidate paths must fit both ceilings; otherwise the worker
+/// has to inspect the tree and make a deliberate commit, which is the required
+/// confirmation rather than an unsafe non-interactive yes/no default.
+fn guard_snapshot_scale(project_root: &Path, cachedirs: &[PathBuf]) -> anyhow::Result<()> {
+    let output = Command::new("git")
+        .args([
+            "ls-files",
+            "--modified",
+            "--deleted",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(project_root)
+        .output()
+        .map_err(|error| anyhow::anyhow!("git ls-files failed: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git ls-files failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let mut paths = 0_usize;
+    let mut bytes = 0_u64;
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let relative = PathBuf::from(std::str::from_utf8(raw).map_err(|_| {
+            anyhow::anyhow!("automatic snapshot refused: candidate path is not valid UTF-8")
+        })?);
+        if path_is_within(&relative, cachedirs) {
+            continue;
+        }
+        paths = paths.saturating_add(1);
+        if let Ok(metadata) = fs::metadata(project_root.join(&relative)) {
+            bytes = bytes.saturating_add(metadata.len());
+        }
+    }
+
+    if paths > AUTO_COMMIT_MAX_PATHS || bytes > AUTO_COMMIT_MAX_BYTES {
+        anyhow::bail!(
+            "automatic snapshot refused: {paths} paths / {bytes} bytes exceeds the safety ceiling \
+             ({AUTO_COMMIT_MAX_PATHS} paths / {AUTO_COMMIT_MAX_BYTES} bytes); inspect the tree and \
+             commit deliberate paths to confirm this change"
+        );
+    }
+    Ok(())
+}
+
+fn cached_staged_paths(project_root: &Path, cachedirs: &[PathBuf]) -> anyhow::Result<Vec<PathBuf>> {
+    let output = Command::new("git")
+        .args(["diff", "--cached", "--name-only", "-z"])
+        .current_dir(project_root)
+        .output()
+        .map_err(|error| anyhow::anyhow!("git diff --cached failed: {error}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git diff --cached failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut staged = Vec::new();
+    for raw in output
+        .stdout
+        .split(|byte| *byte == 0)
+        .filter(|raw| !raw.is_empty())
+    {
+        let path = PathBuf::from(std::str::from_utf8(raw).map_err(|_| {
+            anyhow::anyhow!("automatic snapshot refused: staged path is not valid UTF-8")
+        })?);
+        if path_is_within(&path, cachedirs) {
+            staged.push(path);
+        }
+    }
+    Ok(staged)
+}
+
 /// Run `git add -A && git commit` in `project_root` if the working tree is
 /// dirty. The commit message follows the convention
 /// `evolve(<mol_id>): step <N>/<M> — <step_name>` so `git log --first-parent`
@@ -83,8 +226,29 @@ pub(crate) fn auto_commit_step(
         return Ok(AutoCommitOutcome::SkippedClean);
     }
 
-    let add = Command::new("git")
-        .args(["add", "-A"])
+    let cachedirs = cachedir_roots(project_root)?;
+    let staged_cache_paths = cached_staged_paths(project_root, &cachedirs)?;
+    if !staged_cache_paths.is_empty() {
+        anyhow::bail!(
+            "automatic snapshot refused: generated artifacts are already staged under {}. \
+             Unstage them and commit deliberate paths",
+            staged_cache_paths[0].display()
+        );
+    }
+    guard_snapshot_scale(project_root, &cachedirs)?;
+
+    let mut add = Command::new("git");
+    add.args(["add", "-A", "--", "."]);
+    for cachedir in &cachedirs {
+        let Some(path) = cachedir.to_str() else {
+            anyhow::bail!(
+                "automatic snapshot refused: generated-artifact directory {} is not valid UTF-8",
+                cachedir.display()
+            );
+        };
+        add.arg(format!(":(top,exclude,literal){path}"));
+    }
+    let add = add
         .current_dir(project_root)
         .output()
         .map_err(|e| anyhow::anyhow!("git add failed: {e}"))?;
@@ -93,6 +257,17 @@ pub(crate) fn auto_commit_step(
             "git add -A failed: {}",
             String::from_utf8_lossy(&add.stderr)
         );
+    }
+
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--quiet"])
+        .current_dir(project_root)
+        .status()
+        .map_err(|e| anyhow::anyhow!("git diff --cached failed: {e}"))?;
+    match staged.code() {
+        Some(0) => return Ok(AutoCommitOutcome::SkippedClean),
+        Some(1) => {}
+        _ => anyhow::bail!("git diff --cached failed while checking the automatic snapshot"),
     }
 
     let message = format!("evolve({mol_id}): step {step_one_based}/{total} — {step_name}");
@@ -1807,6 +1982,80 @@ mod tests {
             subject.starts_with("evolve(mol-x): step 1/3 — implement"),
             "subject was: {subject}"
         );
+    }
+
+    /// Regression for e9f1: an automatic `git add -A` captured 3,256 Cargo
+    /// artifacts because that build used an as-yet-unignored target name.
+    /// The marker identifies the class, independent of the directory name.
+    #[test]
+    fn auto_commit_excludes_arbitrarily_named_cachedir_tree() {
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        let target = td.path().join("target-xyz");
+        std::fs::create_dir_all(target.join("debug/deps")).unwrap();
+        std::fs::write(
+            target.join("CACHEDIR.TAG"),
+            "Signature: 8a477f597d28d172789f06886806bc55\n",
+        )
+        .unwrap();
+        std::fs::write(target.join("debug/deps/libfake.rlib"), "generated").unwrap();
+        std::fs::write(td.path().join("source.rs"), "fn proof() {}\n").unwrap();
+
+        let outcome = auto_commit_step(td.path(), "mol-cache", 1, 1, "proof").unwrap();
+        let sha = match outcome {
+            AutoCommitOutcome::Committed(sha) => sha,
+            other => panic!("expected source commit, got {other:?}"),
+        };
+        let show = Command::new("git")
+            .args(["show", "--name-only", "--format=", &sha])
+            .current_dir(td.path())
+            .output()
+            .unwrap();
+        let committed = String::from_utf8_lossy(&show.stdout);
+        assert!(committed.contains("source.rs"), "commit was: {committed}");
+        assert!(
+            !committed.contains("target-xyz"),
+            "CACHEDIR.TAG tree leaked into automatic snapshot: {committed}"
+        );
+
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(td.path())
+            .output()
+            .unwrap();
+        let remaining = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            remaining.contains("target-xyz/CACHEDIR.TAG")
+                && remaining.contains("target-xyz/debug/deps/libfake.rlib"),
+            "generated tree should remain untracked, got: {remaining}"
+        );
+    }
+
+    #[test]
+    fn cache_only_tree_skips_zero_exergy_commit() {
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        let target = td.path().join("bespoke-build-output");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("CACHEDIR.TAG"), "cache marker\n").unwrap();
+        std::fs::write(target.join("artifact.bin"), "generated").unwrap();
+
+        let outcome = auto_commit_step(td.path(), "mol-cache", 1, 1, "proof").unwrap();
+        assert_eq!(outcome, AutoCommitOutcome::SkippedClean);
+    }
+
+    #[test]
+    fn abnormal_snapshot_scale_requires_deliberate_commit() {
+        let td = tempfile::tempdir().unwrap();
+        init_repo(td.path());
+        for index in 0..=AUTO_COMMIT_MAX_PATHS {
+            std::fs::write(td.path().join(format!("generated-{index:04}.txt")), "x").unwrap();
+        }
+
+        let error = auto_commit_step(td.path(), "mol-wide", 1, 1, "proof").unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("automatic snapshot refused"), "{message}");
+        assert!(message.contains("commit deliberate paths"), "{message}");
     }
 
     #[test]
