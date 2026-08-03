@@ -14,10 +14,25 @@ Three things beyond `cs` itself, because a cosmon worker is a real terminal
 session doing real git work:
 
 ```sh
-git --version     # each worker runs on its own branch, in its own worktree
-tmux -V           # each worker lives in a tmux session
-ollama serve      # a model backend on localhost:11434 (the default adapter)
+git --version         # each worker runs on its own branch, in its own worktree
+tmux -V               # each worker lives in a tmux session
+ollama serve          # a model backend on localhost:11434 (the default adapter)
+ollama pull qwen3:8b  # …serving a model. `serve` alone serves nothing
 ```
+
+`ollama serve` with nothing pulled is the first sharp edge people hit: the
+daemon answers, so everything looks healthy, and the dispatch dies seconds
+after it starts. Cosmon now checks before spawning and refuses with a named
+repair — but pulling the model first skips the detour entirely.
+
+**Pull `qwen3:8b` specifically**, which is also cosmon's built-in default.
+The local loop needs a model that emits structured `tool_calls` on
+`/v1/chat/completions`; `qwen3:8b` was measured to do that. A model that
+merely *looks* more capable is often the wrong choice —
+`qwen2.5-coder:7b`, for instance, pastes its tool call into the message
+text as raw JSON, which lands in your output verbatim instead of creating
+a file. Other models, and how to switch, are in
+`docs/guides/local-model-selection.md`.
 
 Missing one? `brew install git tmux` / `apt install git tmux`, and see
 [Set up cosmon](../tutorials/setup.md) for the backend options (a local

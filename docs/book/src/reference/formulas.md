@@ -33,6 +33,9 @@ Human-readable summary rendered into briefing.md.
 """
 id_prefix = "task"             # molecule ids become task-YYYYMMDD-xxxx
 
+# Optional. What these steps need of the worker that runs them.
+requires_capabilities = ["shell", "vcs"]
+
 [tier]
 level = 0                       # 0 = leaf (no child nucleation)
 
@@ -58,6 +61,27 @@ acceptance = "cargo check + test + clippy + fmt all pass"
 | `[tier] level` | `0` = leaf (no children); higher tiers may decompose. |
 | `[[steps]]` | Ordered steps. Each `cs evolve` advances one step. |
 | `steps.acceptance` | The exit criterion sealed into `briefing.md` per step. |
+| `requires_capabilities` | Optional. Worker faculties these steps need: `shell`, `vcs`, `cs-cli`. |
+
+### `requires_capabilities`
+
+A formula whose steps *are* shell work — run the gate toolchain, execute a
+producer script, resolve a merge conflict — cannot be satisfied by a
+chat-only adapter, however carefully its prompts are worded. Declaring the
+requirement makes `cs tackle` refuse the pairing up front (exit code `17`)
+instead of spending a run on a mission that could never complete: no
+worktree, no pane, no model call, and the molecule stays pending and
+re-tacklable.
+
+Today the split is exactly chat-loop versus coding agent — a local adapter
+(`local` / `ollama` / `llama-cpp` / `llama`) has none of the three, every
+other adapter has all three. The field is opt-in: a formula that omits it
+dispatches everywhere it did before. An unrecognised token fails the
+formula load rather than being ignored, because a silently-dropped
+requirement is a formula claiming a gate it does not enforce.
+
+`COSMON_SKIP_CAPABILITY_GATE=1` dispatches anyway, for an operator
+deliberately experimenting on the local floor.
 
 ## Variables
 
