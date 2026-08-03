@@ -31,6 +31,11 @@ Options:
       --role <ROLE>
           Restrict the purge to workers matching this role discriminator — either `cognition` or `runtime` (see `WorkerRole`). Without this flag `cs purge` removes both runtime and cognition workers that meet the status predicate; with it, operators can clean up one half of a runtime+cognition pair without collapsing the other
 
+      --allow-unharvested
+          Collapse molecules whose work is still unharvested (commits ahead of base, or an unclean worktree).
+          
+          Without this flag `cs purge` fails closed: a worker whose pane is gone but whose branch still carries commits — or whose worktree still has uncommitted files — is left in the fleet, its molecule left `running`, and the commits and files at stake are named in an alert. A dead tmux session is evidence about the pane, not about the work (incident 2026-08-02, where four molecules were silently collapsed after a reboot with up to three commits each still unmerged).
+
   -h, --help
           Print help (see a summary with '-h')
 

@@ -934,6 +934,15 @@ Collapse every molecule in the subtree with an explicit reason, let `cs done` or
 > **Expect:** `cs ensemble` returns an empty list; no stray tmux sessions remain.
 > **Falsified if:** `tmux ls` still lists cosmon worker sessions after `cs purge` — that is a teardown bug.
 
+`cs purge` fails closed on unharvested work. If a worker's pane is gone but
+its molecule's branch still carries commits ahead of base — or its worktree
+still has uncommitted files — the worker is left in the fleet, the molecule
+stays `running`, and purge exits non-zero naming the commits and files at
+stake. A missing tmux session says the pane died; it says nothing about the
+work, which is how the 2026-08-02 reboot turned four healthy molecules into
+`collapsed` ones. Harvest with `cs done <molecule>` first, or repeat the purge
+with `--allow-unharvested` to state that the loss is acceptable.
+
 *See also: [purge.rs](../crates/cosmon-cli/src/cmd/purge.rs), [kill.rs](../crates/cosmon-cli/src/cmd/kill.rs).*
 
 ## Drift patrols <a id="drift-patrols"></a>

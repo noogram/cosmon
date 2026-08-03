@@ -58,6 +58,9 @@ SEE ALSO: cs freeze (graceful + state preservation), cs teardown
 * `--force` — In targeted mode, SIGKILL the tmux session before removing the fleet entry. Ignored in sweep mode. Supersedes the stand-alone `cs kill` verb (ADR-052 §D3)
 * `--status <STATUS>` — Only purge workers matching this desired state (default: sweep all workers — Stopped ones and Running/Paused ones whose tmux session is gone)
 * `--role <ROLE>` — Restrict the purge to workers matching this role discriminator — either `cognition` or `runtime` (see `WorkerRole`). Without this flag `cs purge` removes both runtime and cognition workers that meet the status predicate; with it, operators can clean up one half of a runtime+cognition pair without collapsing the other
+* `--allow-unharvested` — Collapse molecules whose work is still unharvested (commits ahead of base, or an unclean worktree).
+
+   Without this flag `cs purge` fails closed: a worker whose pane is gone but whose branch still carries commits — or whose worktree still has uncommitted files — is left in the fleet, its molecule left `running`, and the commits and files at stake are named in an alert. A dead tmux session is evidence about the pane, not about the work (incident 2026-08-02, where four molecules were silently collapsed after a reboot with up to three commits each still unmerged).
 
 
 
