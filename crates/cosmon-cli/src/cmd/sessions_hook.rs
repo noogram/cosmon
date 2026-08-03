@@ -722,7 +722,9 @@ mod tests {
 
     #[test]
     fn a_session_id_never_escapes_its_ledger_directory() {
-        assert_eq!(sanitize("../../etc/passwd"), "-----etc-passwd");
+        // Six leading separators in, six dashes out: the map is one byte to one
+        // byte, so a traversal cannot shorten itself back into a parent.
+        assert_eq!(sanitize("../../etc/passwd"), "------etc-passwd");
         assert_eq!(sanitize("claude-abc_123"), "claude-abc_123");
     }
 
