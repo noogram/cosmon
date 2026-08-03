@@ -219,6 +219,7 @@ fn heartbeat_meaning(t: HeartbeatTier) -> &'static str {
             "no output for 5 minutes or more — still alive in tmux, not broken"
         }
         HeartbeatTier::Orphaned => "no tmux session at all — the worker is gone",
+        HeartbeatTier::Harvestable => "finished and waiting for `cs done` — not a clock reading",
     }
 }
 

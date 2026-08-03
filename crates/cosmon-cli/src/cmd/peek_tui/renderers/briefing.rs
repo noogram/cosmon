@@ -63,6 +63,7 @@ mod tests {
 
     fn row(topic: Option<&str>, description: Option<&str>) -> RowView {
         RowView {
+            archived: false,
             mol_id: "task-1".into(),
             session_slug: None,
             project: String::new(),

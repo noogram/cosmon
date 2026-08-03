@@ -29,6 +29,33 @@ function, no wildcard arm, living in the core beside the status enum.
 The last two are **terminal**: nothing you do will move them again.
 Everything else is **unfinished**, and unfinished is the default view.
 
+### The harvest queue — one refinement of `done`
+
+`done` covers two states that call for opposite gestures:
+
+| State                      | Meaning                                | Your move   |
+|----------------------------|----------------------------------------|-------------|
+| `completed`, not archived  | work finished, awaiting `cs done`      | **harvest** |
+| `completed`, archived      | finalized by `cs done`, branch torn down | nothing   |
+
+Right after a batch of workers finishes, the first is the whole question and
+the second is 900 rows of noise. `--phase harvestable` selects exactly the
+first: `completed ∧ ¬archived`.
+
+It is not a seventh phase. A phase is a total function of the *status*, and
+`archived` is a second fact on disk that the status does not carry — so
+`harvestable` is a **refinement** of `done`, spelled on the same axis
+because it answers the same question (which molecules). Since it is a strict
+subset, `--phase done,harvestable` is just `--phase done`, and the label
+says so.
+
+The heartbeat column tells the same story. A finished worker's tmux session
+often outlives it, and tmux keeps bumping `#{session_activity}` — so the
+clock said 🟢 *active* about a molecule where nothing was running, and a
+molecule that looks like work in flight never gets harvested. A
+`completed ∧ ¬archived` molecule now reads 🌾 `harvestable` instead, which is
+a fact about the molecule rather than a reading of a clock.
+
 ## CLI flags — one per axis
 
 There are two questions, so there are two flags. **Which molecules** is the
@@ -43,9 +70,9 @@ the other's axis.
 | `--all`          | both      | **sugar** for `--all-galaxies --phase all`, and exactly that   |
 
 `--phase` accepts the six phase names (`live`, `waiting`, `blocked`,
-`parked`, `failed`, `done`) plus two set names: `unfinished` (the default)
-and `all`. The values union, so no ordering of the same flags produces a
-different view.
+`parked`, `failed`, `done`) plus three set names: `unfinished` (the
+default), `all`, and `harvestable` (the harvest queue — see above). The
+values union, so no ordering of the same flags produces a different view.
 
 `--all-galaxies` is spelled the same way in `cs tail --all-galaxies`. One
 word, one meaning, across the binary.
@@ -63,6 +90,8 @@ Every flag works identically in TUI mode (`cs peek`), no-tui mode (`cs peek
 cs peek                              # the daily view — everything still in play
 cs peek --phase unfinished,done,failed  # the above, plus the archive
 cs peek --phase blocked              # only what an external authority refused
+cs peek --phase harvestable          # what is left to harvest — finished, not yet `cs done`
+cs peek --phase harvestable --json   # the same slice, for a patrol
 cs peek --all-galaxies               # the daily view, across every galaxy
 cs peek --all                        # everything, every project
 cs peek --snapshot                   # byte-deterministic snapshot of the unfinished set
@@ -159,9 +188,18 @@ The CLI flags resolve to a single
 - `peek_tui::App.phase_filter` — runtime, mutated by the `A` cycle
 
 The single chokepoint inside the TUI is `App::filtered_indices` — every row
-is matched against `phase_filter.matches(&row.status)`. The snapshot path
-applies `peek_tui::filter_snapshot_by_phase` before handing the snapshot to
-`render_canonical`.
+is matched against `phase_filter.matches_label(&row.status, row.archived)`.
+The snapshot path applies `peek_tui::filter_snapshot_by_phase` before
+handing the snapshot to `render_canonical`.
+
+The predicate takes `archived` as a second argument rather than folding it
+into a classification, because the classification (`MoleculeStatus::phase`)
+must stay a total function of the status alone. A caller therefore has to
+*hold* the archive flag to filter on it — which is why the observability
+`Molecule` projection, the `RowView`, and the `--no-tui` baseline's
+`MoleculeView` all carry it. `PhaseFilter::is_harvestable` is the one
+definition of the set, so the `--phase harvestable` filter and the 🌾
+heartbeat tier cannot drift into two answers about one molecule.
 
 **Why a named codomain and not three booleans.** `PhaseFilter` replaces a
 `StateFilter { running, future, past }` struct whose booleans were

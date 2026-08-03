@@ -48,6 +48,7 @@ fn fmt_heartbeat(hb: Option<HeartbeatTier>) -> &'static str {
         Some(HeartbeatTier::Quiet) => "Quiet",
         Some(HeartbeatTier::Stalled) => "Stalled",
         Some(HeartbeatTier::Orphaned) => "Orphaned",
+        Some(HeartbeatTier::Harvestable) => "Harvestable",
     }
 }
 

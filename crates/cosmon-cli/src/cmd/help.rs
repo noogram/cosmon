@@ -323,6 +323,10 @@ fn print_grouped_reference() {
     println!("  cs peek --phase done,failed  # + the archive (completed + collapsed)");
     println!("                               #   --phase is the temporality axis and");
     println!("                               #   says nothing about the project scope");
+    println!("  cs peek --phase harvestable  # the harvest queue: finished work still");
+    println!("                               #   owed a 'cs done' (completed, not yet");
+    println!("                               #   archived). What is left to harvest");
+    println!("                               #   after a batch of workers finishes.");
     println!("  cs peek --all-galaxies       # the perimeter axis: same phases, every");
     println!("                               #   project (same word as cs tail)");
     println!("  cs peek --all                # sugar for --all-galaxies --phase all:");
@@ -333,9 +337,11 @@ fn print_grouped_reference() {
     println!("                               #    docs/guides/peek-snapshot.md)");
     println!("                               #   --phase/--all widen the wheat-paste byte");
     println!("                               #   stream the same way.");
-    println!("  cs peek --json               # machine view: status + heartbeat +");
-    println!("                               #   last_activity per molecule. Raw core");
-    println!("                               #   status, same word as cs observe --json.");
+    println!("  cs peek --json               # machine view: status + archived +");
+    println!("                               #   heartbeat + last_activity per molecule.");
+    println!("                               #   Raw core status, same word as");
+    println!("                               #   cs observe --json. --phase harvestable");
+    println!("                               #   slices it the same way it slices the TUI.");
     println!("  cs ensemble --tag temp:hot   # actionable backlog snapshot");
     println!("  cs wait <id> &               # block on a worker (pilot stays responsive)");
     println!();

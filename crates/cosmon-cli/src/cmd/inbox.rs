@@ -1013,6 +1013,7 @@ impl App {
             project: String::new(),
             role: String::new(),
             status: format!("{:?}", row.status).to_lowercase(),
+            archived: false,
             step: String::new(),
             updated_at: None,
             energy_in: 0,

@@ -862,6 +862,8 @@ Reads the typed-link DAG (`Blocks` / `BlockedBy`).";
 pub const PEEK: &str = "EXAMPLES:
   cs peek                         # TUI over the current .cosmon/
   cs peek --phase done,failed     # + the archive; project scope unchanged
+  cs peek --phase harvestable     # the harvest queue: finished work still
+                                  #   owed a `cs done` (completed, unarchived)
   cs peek --all-galaxies          # same phases, every .cosmon/ + tmux socket
   cs peek --all                   # sugar for --all-galaxies --phase all
   cs peek --no-tui                # plaintext event stream
