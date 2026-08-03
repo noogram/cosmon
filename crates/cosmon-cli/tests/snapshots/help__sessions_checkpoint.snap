@@ -8,6 +8,7 @@ Usage: cs sessions checkpoint [OPTIONS] <COMMAND>
 
 Commands:
   publish  Publish this pilot's hand-over record for a mission
+  stage    Write the same record as a draft, for the hook to publish at the next natural transition. Takes exactly the flags `publish` takes
   list     List the checkpoints published for a mission
   show     Show one checkpoint in full
 

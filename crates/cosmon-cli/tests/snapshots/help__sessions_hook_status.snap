@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Report whether the hook is wired, and what it has cost
+
+Usage: cs sessions hook status [OPTIONS]
+
+Options:
+      --config <PATH>    Path to configuration file
+      --provider <NAME>  Restrict the report to one provider
+      --settings <PATH>  The settings file to inspect, when it is not the provider's default
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+      --session <SID>    The session whose cost ledger to summarise. Defaults to `$COSMON_SESSION_ID`
+  -h, --help             Print help

@@ -1,0 +1,19 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
+
+Usage: cs sessions hook [OPTIONS] <COMMAND>
+
+Commands:
+  install    Wire this pilot's provider to run the co-pilotage hook
+  uninstall  Remove the co-pilotage hook, leaving the rest of the file untouched
+  status     Report whether the hook is wired, and what it has cost
+  run        The hook body — invoked by the provider, not usually by a human
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

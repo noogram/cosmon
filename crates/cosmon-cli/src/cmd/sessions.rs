@@ -112,6 +112,9 @@ pub enum Sub {
     /// The PRIMARY lease: who may fly, who asked, who granted.
     #[command(subcommand)]
     Takeover(TakeoverSub),
+    /// The bootstrap that runs without being typed — presence, mailbox and
+    /// staged checkpoints, wired into the provider's own hook mechanism.
+    Hook(super::sessions_hook::Args),
 }
 
 /// Arguments for `cs sessions discover`.
@@ -269,6 +272,9 @@ pub struct InboxArgs {
 pub enum CheckpointSub {
     /// Publish this pilot's hand-over record for a mission.
     Publish(CheckpointPublishArgs),
+    /// Write the same record as a draft, for the hook to publish at the next
+    /// natural transition. Takes exactly the flags `publish` takes.
+    Stage(CheckpointPublishArgs),
     /// List the checkpoints published for a mission.
     List(CheckpointListArgs),
     /// Show one checkpoint in full.
@@ -472,6 +478,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Checkpoint(a) => run_checkpoint(ctx, a),
         Sub::Drift(a) => run_drift(ctx, a),
         Sub::Takeover(a) => run_takeover(ctx, a),
+        Sub::Hook(a) => super::sessions_hook::run(ctx, a),
     }
 }
 
@@ -1335,12 +1342,22 @@ fn default_checkpoint_id(session: &str, now: DateTime<Utc>) -> String {
 fn run_checkpoint(ctx: &Context, sub: &CheckpointSub) -> anyhow::Result<()> {
     match sub {
         CheckpointSub::Publish(a) => run_checkpoint_publish(ctx, a),
+        CheckpointSub::Stage(a) => run_checkpoint_stage(ctx, a),
         CheckpointSub::List(a) => run_checkpoint_list(ctx, a),
         CheckpointSub::Show(a) => run_checkpoint_show(ctx, a),
     }
 }
 
-fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow::Result<()> {
+/// Build the checkpoint an operator described on the command line.
+///
+/// Split out of [`run_checkpoint_publish`] so `stage` and `publish` build the
+/// *same* record from the *same* flags. A staged checkpoint that differed from
+/// a published one in any field would make the hook's transition-time
+/// publication a second dialect of the verb it claims to defer.
+fn build_checkpoint(
+    ctx: &Context,
+    args: &CheckpointPublishArgs,
+) -> anyhow::Result<PilotCheckpoint> {
     let sid = presence::resolve_sid_for_poll(&presence::PollArgs {
         session: args.session.clone(),
     })?;
@@ -1383,7 +1400,11 @@ fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow
         .map(|r| parse_evidence(r))
         .collect();
     attach_evidence(&mut cp, &args.evidence)?;
+    Ok(cp)
+}
 
+fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow::Result<()> {
+    let cp = build_checkpoint(ctx, args)?;
     let path = checkpoints(ctx).publish(&cp)?;
 
     if ctx.json {
@@ -1401,6 +1422,41 @@ fn run_checkpoint_publish(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow
             id = cp.id,
             mission = cp.mission_id,
             sid = cp.session_id,
+            epoch = cp.lease_epoch,
+            path = path.display(),
+        );
+    }
+    Ok(())
+}
+
+/// `cs sessions checkpoint stage` — write the record, publish it later.
+///
+/// The division of labour M6 rests on: a hand-over record's *content* is the
+/// pilot's — its hypotheses, its next moves, its open questions — and only the
+/// *moment* belongs to the hook. Staging is how a pilot says what it would
+/// hand over without having to be awake at the transition to say it.
+///
+/// One draft per session, overwritten: a queue of stale drafts published at
+/// later transitions would be a hand-over record of a mind that has moved on.
+fn run_checkpoint_stage(ctx: &Context, args: &CheckpointPublishArgs) -> anyhow::Result<()> {
+    let cp = build_checkpoint(ctx, args)?;
+    let path = super::sessions_hook::stage(ctx, &cp)?;
+
+    if ctx.json {
+        let mut v = serde_json::to_value(&cp)?;
+        if let Some(obj) = v.as_object_mut() {
+            obj.insert("staged".to_owned(), serde_json::Value::Bool(true));
+            obj.insert(
+                "path".to_owned(),
+                serde_json::Value::from(path.display().to_string()),
+            );
+        }
+        println!("{v}");
+    } else {
+        println!(
+            "staged {id} for {mission} — the hook publishes it at the next transition → {path}",
+            id = cp.id,
+            mission = cp.mission_id,
             path = path.display(),
         );
     }

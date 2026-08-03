@@ -580,6 +580,20 @@ HAND-OVER:
   cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
   cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
 
+WITHOUT TYPING ANYTHING (the hook, mission M6):
+  cs sessions hook install --provider claude   # .claude/settings.local.json
+  cs sessions hook install --provider codex    # ~/.codex/config.toml notify
+  cs sessions hook status                      # wired? and what has it cost
+  cs sessions checkpoint stage --mission task-20260731-0d49 \\
+      --next 'gate:affirm=run just gates before done'
+  cs sessions hook uninstall --provider claude # leaves no residue
+  COSMON_COPILOT_HOOK_OFF=1                    # quiet now, still wired
+
+The hook pings presence, drains the mailbox where the pilot can read it
+and publishes a *staged* checkpoint at a transition. It never claims a
+seat and never writes a checkpoint's content: a hand-over record is the
+pilot's own words, and only its moment is the hook's.
+
 The canonical name of a session is `<provider>:<native-session-id>`, and
 nothing else ever breaks a tie: a title, a cwd and a modification time
 help you recognise a session, never choose one. A selector that matches

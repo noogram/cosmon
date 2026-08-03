@@ -171,6 +171,41 @@ after the text has left the process, one place where a seat is checked against
 the ledger before it is written. `cs presence`, `cs session` and `cs pilot`
 keep their bytes; the plural verb is the third thing D3.5 said it would be.
 
+M6 (`task-20260731-0d49`) added **two files and no registry**, both under
+`.cosmon/state/pilot-hooks/` and both owned by one session: `<sid>.cost.jsonl`,
+the append-only measurement the mission's *coût mesuré* clause asks for, and
+`<sid>.draft.json`, the single staged checkpoint the hook publishes at a
+transition. Neither is a registry: the draft is overwritten by each
+`cs sessions checkpoint stage` and deleted when it is published, and the ledger
+is read only by `cs sessions hook status`. The checkpoint that lands is
+`CheckpointStore`'s, in the shape M3 defined; staging is a *delay*, not a
+second dialect — `stage` and `publish` build the record from the same flags
+through the same function.
+
+The division that made this possible is worth naming, because it is what keeps
+the hook inside D6. A hand-over record's **content** is the pilot's — its
+hypotheses, its intended next actions, its unresolved questions — and a hook
+knows none of it. Its **moment** is the hook's, and that is all the hook
+contributes. A hook that filled in the content would publish a checkpoint whose
+author never held those positions, and `cs sessions drift` would then compare it
+as though a mind were behind it: the opaque score D3.4 refuses, arrived at from
+the other direction. So no draft means no publication, said once on stderr.
+
+Two more properties the implementation had to choose, and did:
+
+- **The mailbox is drained only where the pilot can read what comes out.**
+  Claude feeds a `SessionStart` and `UserPromptSubmit` hook's stdout to the
+  model and discards a `Stop` hook's. Acknowledging an envelope at a moment
+  whose output is discarded would consume a message and show it to nobody —
+  at-least-once delivery turned into a shredder. `stdout_reaches_pilot` is that
+  rule, and it is why `turn-end` is the checkpoint moment and `turn-start` the
+  mailbox one.
+- **The heartbeat carries no `--role`.** Every co-pilotage field is carried
+  forward from the snapshot the operator wrote. A hook pinging `--role primary`
+  every thirty seconds would be a takeover nobody decided, executed by a process
+  nobody is watching — precisely what D6's second bullet reserves for an
+  operator gesture.
+
 M3 records `lease_epoch` as a bare `u64` and M4's `LeaseEpoch` serialises
 transparently as one, so the two agree on the wire without
 `cosmon-pilot-checkpoint` taking a dependency on `cosmon-core` it does not
