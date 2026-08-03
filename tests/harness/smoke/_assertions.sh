@@ -58,6 +58,29 @@ smoke_resolve_cs_bin() {
     return 1
 }
 
+# ── Artifact directory ────────────────────────────────────────────────────
+# Every smoke script writes its evidence (tackle.stdout, wait.stderr, …)
+# into $OUTDIR while running the command from inside the scratch project,
+# i.e. `(cd "$SCRATCH" && cs ... > "$OUTDIR/tackle.stdout")`. The redirect
+# is opened AFTER the cd, so a relative $OUTDIR resolves against the
+# scratch dir and the open fails with ENOENT.
+#
+# That is not a cosmetic loss. A failed redirect makes the subshell exit
+# non-zero, which several assertions read as "the command failed as
+# expected" — so the suite reports PASS while having observed nothing.
+# CI set SMOKE_OUTDIR to the relative `smoke-artifacts`, which is why the
+# nightly failed identically every night while local runs (absolute
+# default) stayed green.
+#
+# Resolve $OUTDIR to an absolute path once, at the top, so no caller has
+# to remember which directory a redirect will be opened from.
+
+smoke_absolute_dir() {
+    local dir="$1"
+    mkdir -p "$dir" || return 1
+    (cd "$dir" && pwd)
+}
+
 # ── JSON helpers ──────────────────────────────────────────────────────────
 # Parse a single top-level string field from `cs ... --json` output without
 # depending on jq (not always installed on fresh CI runners).

@@ -195,8 +195,25 @@ jobs:
     # hole, not a red merge gate. Scoped to cosmon-core (the 90%-coverage,
     # invariant-heavy crate) to stay bounded; widen via --package / --whole-tree
     # as CI capacity allows.
+    #
+    # The advisory contract above was declared but not implemented:
+    # `continue-on-error` sat on the mutate STEP, and a step-level flag
+    # cannot absorb a job that dies. On four consecutive nightlies
+    # (2026-07-30 → 08-02) the job ran 4h34m–5h31m and then ended with
+    # "The hosted runner lost communication with the server" — the step
+    # never reported, so the flag never applied and the advisory job
+    # reddened the nightly. Two changes make the declared contract real:
+    # `continue-on-error` moves to the JOB, and `timeout-minutes` bounds
+    # a run that was previously unbounded.
+    #
+    # The starvation itself is not yet attributed: the runner takes its
+    # logs with it, so disk versus memory is still open. The resource
+    # probe below prints both before and after, so the next nightly says
+    # which one — until then, no fix should claim to have addressed it.
     if: github.event_name == 'schedule'
     runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 180
     permissions:
       contents: read
     steps:
@@ -210,9 +227,13 @@ jobs:
         run: cargo install cargo-mutants --locked
       - name: Falsifier preflight (cargo-mutants available)
         run: ./scripts/mutation-falsifier.sh --check
+      - name: Resource baseline (attribute the runner death — disk or memory)
+        run: df -h / /home/runner && free -m
       - name: Mutate cosmon-core (advisory — surviving mutants are reported holes)
-        continue-on-error: true
         run: ./scripts/mutation-falsifier.sh --whole-tree --package cosmon-core --timeout 180
+      - name: Resource after mutation run
+        if: always()
+        run: df -h / /home/runner && free -m
 
   clippy:
     name: Clippy
@@ -468,10 +489,22 @@ jobs:
 
   spawn-matrix:
     name: Spawn matrix (fake tmux + claude)
-    # NON-BLOCKING CANARY: the fake-tmux shim harness has never held on
-    # headless runners (cs env-sanitized spawn resolves the real tmux, so
-    # the S-bit observation misses). Tracked for a structural fix in the
-    # spawn-matrix molecule; keep the signal visible without gating merges.
+    # NON-BLOCKING CANARY.
+    #
+    # The previous note here blamed "cs env-sanitized spawn resolves the
+    # real tmux, so the S-bit observation misses". That was wrong, and
+    # believing it cost four months of uniform nightly red. The shim does
+    # hold: with an absolute MATRIX_OUTDIR the healthy row observes
+    # tuple=11111. What failed was the harness's own artifact redirect
+    # (see run_matrix.sh) — every row scored tuple=00000 exit=1 whatever
+    # was injected, which is the signature of a broken instrument rather
+    # than of 21 broken scenarios.
+    #
+    # Still non-blocking: with the instrument fixed the matrix scores
+    # 11/21, and the ten residual rows are real disagreements between
+    # cosmon's fault-path behaviour and the expected B/W/F bits. Those
+    # are scenario findings for a separate molecule; keep them visible
+    # without gating merges.
     continue-on-error: true
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
@@ -518,6 +551,19 @@ jobs:
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      # The job name states the three binaries this tier needs; until now
+      # the workflow installed none of them, so the suite could only ever
+      # reach its first `require_binary` and abort. Provision what the job
+      # declares, and report each version so a future failure can be read
+      # against a known toolchain rather than guessed at.
+      - name: Install tier-2 binaries (tmux + claude + aider)
+        run: |
+          sudo apt-get install -y -q tmux
+          npm install -g @anthropic-ai/claude-code
+          python3 -m pip install --user aider-install && aider-install || pipx install aider-chat
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Tier-2 binary inventory
+        run: tmux -V && claude --version && aider --version
       - name: Tier-2 smoke (real binaries; #[ignore]-gated)
         run: cargo test -p cosmon-transport --locked -- --ignored cross_adapter
 
@@ -554,10 +600,12 @@ jobs:
 
   smoke-lifecycle:
     name: Lifecycle smoke (nucleate → done)
-    # NON-BLOCKING CANARY: the fake-tmux shim harness has never held on
-    # headless runners (cs env-sanitized spawn resolves the real tmux, so
-    # session-state observations miss). Tracked for a structural fix in the
-    # spawn-matrix molecule; keep the signal visible without gating merges.
+    # NON-BLOCKING CANARY. The previous note blamed the fake-tmux shim on
+    # headless runners; that was wrong. The suite failed because CI passes
+    # a RELATIVE SMOKE_OUTDIR and the scripts redirect into it from inside
+    # the scratch project — see smoke_absolute_dir in smoke/_assertions.sh.
+    # With that fixed the suite scores 4/4 under the same relative path.
+    # Kept non-blocking while the fix earns a few nightlies of confidence.
     continue-on-error: true
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest

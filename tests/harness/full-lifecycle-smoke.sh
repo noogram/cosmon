@@ -48,8 +48,7 @@ if [ ! -x "$FAKES_DIR/fake-tmux/tmux" ] || [ ! -x "$FAKES_DIR/fake-claude/claude
     exit 2
 fi
 
-OUTDIR="${SMOKE_OUTDIR:-$REPO/target/smoke-$$}"
-mkdir -p "$OUTDIR"
+OUTDIR="$(smoke_absolute_dir "${SMOKE_OUTDIR:-$REPO/target/smoke-$$}")" || exit 2
 
 echo "smoke: cs=$CS_BIN"
 echo "smoke: artifacts → $OUTDIR"
