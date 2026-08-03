@@ -826,6 +826,41 @@ mod tests {
         assert!(events.is_empty(), "identical snapshots produce no events");
     }
 
+    /// Strip ANSI CSI sequences so an assertion about *layout* is not also an
+    /// assertion about the runner's terminal.
+    ///
+    /// `colored` decides at call time whether to paint, by probing the
+    /// process's own stdout. Piped — every CI lane, every bench — it paints
+    /// nothing and `status: active` is contiguous; in a live terminal it wraps
+    /// the word and the same assertion reads `status: \x1b[38;2;…mactive`, so
+    /// the test failed for a reason that had nothing to do with the separator
+    /// it was written to pin (issue #43). Removing the styling makes the
+    /// condition the fixture's rather than the runner's; the styling itself is
+    /// covered in `cosmon-style`, where it is forced on explicitly.
+    fn unstyled(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut in_csi = false;
+        for c in s.chars() {
+            if in_csi {
+                in_csi = !c.is_ascii_alphabetic();
+            } else if c == '\x1b' {
+                in_csi = true;
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn unstyled_removes_colour_and_keeps_text() {
+        assert_eq!(
+            unstyled("status: \x1b[38;2;1;2;3mactive\x1b[0m"),
+            "status: active"
+        );
+        assert_eq!(unstyled("no escapes here"), "no escapes here");
+    }
+
     #[test]
     fn render_event_formats_worker_added() {
         let ev = WatchEvent::WorkerAdded {
@@ -835,12 +870,12 @@ mod tests {
                 status: WorkerStatus::Active,
             },
         };
-        let line = render_event(
+        let line = unstyled(&render_event(
             DateTime::parse_from_rfc3339("2026-04-09T12:34:56Z")
                 .unwrap()
                 .to_utc(),
             &ev,
-        );
+        ));
         assert!(line.contains("12:34:56"));
         assert!(line.contains("+ worker quartz"));
         assert!(
