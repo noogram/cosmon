@@ -1,0 +1,19 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+The hook body — invoked by the provider, not usually by a human
+
+Usage: cs sessions hook run [OPTIONS] --event <EVENT> [PAYLOAD]
+
+Arguments:
+  [PAYLOAD]  The provider's payload. Codex passes it as this trailing argument; Claude pipes it on stdin, which is read when this is absent
+
+Options:
+      --config <PATH>    Path to configuration file
+      --event <EVENT>    Which moment fired: `session-start`, `turn-start` or `turn-end`
+      --provider <NAME>  The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
+  -v, --verbose          Enable verbose output
+      --json             Output in JSON format
+      --session <SID>    This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
+  -h, --help             Print help

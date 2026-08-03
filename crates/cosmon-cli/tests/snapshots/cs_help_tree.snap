@@ -66,6 +66,7 @@ sessions send
 sessions inbox
 sessions checkpoint
 sessions checkpoint publish
+sessions checkpoint stage
 sessions checkpoint list
 sessions checkpoint show
 sessions drift
@@ -74,6 +75,11 @@ sessions takeover show
 sessions takeover request
 sessions takeover grant
 sessions takeover check
+sessions hook
+sessions hook install
+sessions hook uninstall
+sessions hook status
+sessions hook run
 daemons
 daemons list
 daemons status

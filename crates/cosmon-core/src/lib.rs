@@ -130,6 +130,8 @@ pub mod config;
 #[doc(hidden)]
 pub mod convoy;
 #[doc(hidden)]
+pub mod copilot_hook;
+#[doc(hidden)]
 pub mod creativity;
 #[doc(hidden)]
 pub mod criticality;

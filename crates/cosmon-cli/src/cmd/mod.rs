@@ -89,6 +89,7 @@ pub mod security;
 pub mod sensorium;
 pub mod session;
 pub mod sessions;
+pub mod sessions_hook;
 pub mod spark;
 pub mod spec_audit;
 pub mod spore;

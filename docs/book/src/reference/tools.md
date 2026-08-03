@@ -308,7 +308,7 @@ Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/se
 
 ## `cs sessions`
 
-Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
+Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover/hook)
 
 **Usage:** `cs sessions <COMMAND>`
 
@@ -333,6 +333,20 @@ HAND-OVER:
   cs sessions takeover show    --mission task-20260731-e4d0
   cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
   cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
+
+WITHOUT TYPING ANYTHING (the hook, mission M6):
+  cs sessions hook install --provider claude   # .claude/settings.local.json
+  cs sessions hook install --provider codex    # ~/.codex/config.toml notify
+  cs sessions hook status                      # wired? and what has it cost
+  cs sessions checkpoint stage --mission task-20260731-0d49 \
+      --next 'gate:affirm=run just gates before done'
+  cs sessions hook uninstall --provider claude # leaves no residue
+  COSMON_COPILOT_HOOK_OFF=1                    # quiet now, still wired
+
+The hook pings presence, drains the mailbox where the pilot can read it
+and publishes a *staged* checkpoint at a transition. It never claims a
+seat and never writes a checkpoint's content: a hand-over record is the
+pilot's own words, and only its moment is the hook's.
 
 The canonical name of a session is `<provider>:<native-session-id>`, and
 nothing else ever breaks a tie: a title, a cwd and a modification time
@@ -363,6 +377,7 @@ cs pilot (cognitive REPL), cs diverge.
 * `checkpoint` — Publish and read hand-over checkpoints
 * `drift` — Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
 * `takeover` — The PRIMARY lease: who may fly, who asked, who granted
+* `hook` — The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
 
 
 
@@ -496,6 +511,7 @@ Publish and read hand-over checkpoints
 ###### **Subcommands:**
 
 * `publish` — Publish this pilot's hand-over record for a mission
+* `stage` — Write the same record as a draft, for the hook to publish at the next natural transition. Takes exactly the flags `publish` takes
 * `list` — List the checkpoints published for a mission
 * `show` — Show one checkpoint in full
 
@@ -506,6 +522,30 @@ Publish and read hand-over checkpoints
 Publish this pilot's hand-over record for a mission
 
 **Usage:** `cs sessions checkpoint publish [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — The mission being flown
+* `--session <SID>` — Publishing session. Defaults to `$COSMON_SESSION_ID`
+* `--epoch <N>` — The authority epoch the publisher believes it is under. Defaults to the epoch on its own presence snapshot, then to 0
+* `--id <ID>` — Identifier for this checkpoint. Defaults to a timestamped id
+* `--include <TEXT>` — Something this mission covers. Repeatable
+* `--exclude <TEXT>` — Something this mission explicitly does not cover. Repeatable
+* `--hypothesis <CLAIM>` — A position currently held, as `SUBJECT[:affirm|deny]=STATEMENT`. Repeatable
+* `--next <CLAIM>` — An intended next move, in the same `SUBJECT[:STANCE]=STATEMENT` form. Repeatable — this is the list a co-pilot's contradiction is found in
+* `--done <TEXT>` — Something already done, in the pilot's words. Repeatable
+* `--risk <TEXT>` — A known risk. Repeatable
+* `--question <TEXT>` — A question the pilot could not answer. Repeatable — this is where uncertainty belongs, never inside a stance
+* `--evidence <SUBJECT=LOCATOR>` — Evidence for one claim, as `SUBJECT=LOCATOR[#DIGEST]`. Repeatable
+* `--checkpoint-evidence <LOCATOR>` — Evidence for the checkpoint as a whole, as `LOCATOR[#DIGEST]`. Repeatable
+
+
+
+## `cs sessions checkpoint stage`
+
+Write the same record as a draft, for the hook to publish at the next natural transition. Takes exactly the flags `publish` takes
+
+**Usage:** `cs sessions checkpoint stage [OPTIONS] --mission <MOLECULE_ID>`
 
 ###### **Options:**
 
@@ -646,6 +686,83 @@ Ask the guard whether a session may pilot. Exits 0 or 1
 * `--mission <MOLECULE_ID>` — Mission the gesture would touch
 * `--session <SID>` — Session issuing the gesture. Defaults to `$COSMON_SESSION_ID`
 * `--epoch <N>` — The epoch the caller believes it holds. Omitting it is itself a refusal
+
+
+
+## `cs sessions hook`
+
+The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
+
+**Usage:** `cs sessions hook <COMMAND>`
+
+###### **Subcommands:**
+
+* `install` — Wire this pilot's provider to run the co-pilotage hook
+* `uninstall` — Remove the co-pilotage hook, leaving the rest of the file untouched
+* `status` — Report whether the hook is wired, and what it has cost
+* `run` — The hook body — invoked by the provider, not usually by a human
+
+
+
+## `cs sessions hook install`
+
+Wire this pilot's provider to run the co-pilotage hook
+
+**Usage:** `cs sessions hook install [OPTIONS] --provider <NAME>`
+
+###### **Options:**
+
+* `--provider <NAME>` — The pilot whose configuration to wire: `claude` or `codex`
+* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
+* `--cs-bin <PATH>` — The `cs` binary the hook should invoke. Defaults to this executable
+* `--dry-run` — Print what would be written without writing it
+
+
+
+## `cs sessions hook uninstall`
+
+Remove the co-pilotage hook, leaving the rest of the file untouched
+
+**Usage:** `cs sessions hook uninstall [OPTIONS] --provider <NAME>`
+
+###### **Options:**
+
+* `--provider <NAME>` — The pilot whose configuration to wire: `claude` or `codex`
+* `--settings <PATH>` — The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
+* `--cs-bin <PATH>` — The `cs` binary the hook should invoke. Defaults to this executable
+* `--dry-run` — Print what would be written without writing it
+
+
+
+## `cs sessions hook status`
+
+Report whether the hook is wired, and what it has cost
+
+**Usage:** `cs sessions hook status [OPTIONS]`
+
+###### **Options:**
+
+* `--provider <NAME>` — Restrict the report to one provider
+* `--settings <PATH>` — The settings file to inspect, when it is not the provider's default
+* `--session <SID>` — The session whose cost ledger to summarise. Defaults to `$COSMON_SESSION_ID`
+
+
+
+## `cs sessions hook run`
+
+The hook body — invoked by the provider, not usually by a human
+
+**Usage:** `cs sessions hook run [OPTIONS] --event <EVENT> [PAYLOAD]`
+
+###### **Arguments:**
+
+* `<PAYLOAD>` — The provider's payload. Codex passes it as this trailing argument; Claude pipes it on stdin, which is read when this is absent
+
+###### **Options:**
+
+* `--event <EVENT>` — Which moment fired: `session-start`, `turn-start` or `turn-end`
+* `--provider <NAME>` — The pilot this hook runs inside. Inferred from the payload when it names one; `claude` otherwise
+* `--session <SID>` — This session's cosmon id. Defaults to `$COSMON_SESSION_ID`
 
 
 

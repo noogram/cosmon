@@ -32,6 +32,12 @@ serde_json.workspace = true
 strum.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# `copilot_hook` edits an operator's own `~/.codex/config.toml`. `toml` would
+# round-trip it through a data model and drop every comment and blank line the
+# operator wrote; `toml_edit` changes the one key and leaves the rest of the
+# file's bytes alone, which is what makes "install the hook" a change a human
+# can read in a diff.
+toml_edit.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -226,7 +226,7 @@ enum Command {
     #[command(after_help = cmd::examples::SESSION)]
     Session(cmd::session::Args),
 
-    /// Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
+    /// Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover/hook)
     #[command(after_help = cmd::examples::SESSIONS)]
     Sessions(cmd::sessions::Args),
 

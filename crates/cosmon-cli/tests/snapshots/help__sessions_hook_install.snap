@@ -1,0 +1,17 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Wire this pilot's provider to run the co-pilotage hook
+
+Usage: cs sessions hook install [OPTIONS] --provider <NAME>
+
+Options:
+      --config <PATH>    Path to configuration file
+      --provider <NAME>  The pilot whose configuration to wire: `claude` or `codex`
+      --settings <PATH>  The settings file to edit. Defaults to the provider's own — for Claude `.claude/settings.local.json` beside the current directory, for Codex `$CODEX_HOME/config.toml` or `~/.codex/config.toml`
+  -v, --verbose          Enable verbose output
+      --cs-bin <PATH>    The `cs` binary the hook should invoke. Defaults to this executable
+      --json             Output in JSON format
+      --dry-run          Print what would be written without writing it
+  -h, --help             Print help

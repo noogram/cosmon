@@ -84,7 +84,7 @@ Tools:
   paths                Paths — project the write-path taxonomy (`--writes`), a pure derived view
   archive              Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
   session              Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
-  sessions             Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover)
+  sessions             Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover/hook)
   inbox                Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
   panel                Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment
   notify               Notify — push a one-line message to every configured operator channel
