@@ -38,6 +38,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             force: true,
             status: None,
             role: None,
+            // The deprecated alias inherits the fail-closed default: it never
+            // had a way to say "discard unharvested work", and inventing one
+            // here would let `cs kill` bypass the guard `cs purge` enforces.
+            allow_unharvested: false,
         },
     )
 }

@@ -28,12 +28,21 @@
 //!    removed, subsuming the former `cs kill` verb. Without `--force` the
 //!    worker is expected to already be in a terminal state (graceful path).
 //!
+//! Both modes fail **closed** on unharvested work (incident 2026-08-02): a
+//! worker whose pane is gone but whose molecule still carries commits ahead
+//! of base — or a dirty worktree — is not purged and its molecule is not
+//! collapsed. A missing tmux session is evidence about the pane, not about
+//! the work; the reboot that removed the tmux server that day took four
+//! healthy molecules with it. `--allow-unharvested` is the explicit gesture
+//! that accepts the loss.
+//!
 //! ADR-052 §D3 collapses `cs kill` + `cs purge` into this one command:
 //! both are infrastructure teardown; the difference was always the force
 //! flag, not the perimeter.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use chrono::Utc;
 use cosmon_core::event_v2::{CollapseReason, EventV2};
@@ -45,6 +54,259 @@ use cosmon_state::StateStore;
 use cosmon_transport::TmuxBackend;
 
 use super::Context;
+
+/// Evidence that a molecule's deliverable is still only on its own branch or
+/// in its own worktree — i.e. the work has **not** been harvested.
+///
+/// Recorded as data rather than a bare bool because the operator-facing
+/// alert has to name what is at stake: an incident is only actionable if it
+/// says *three commits on `feat/task-…-0c2d`* rather than "unharvested work".
+/// The 2026-08-02 incident is precisely the case where nothing was named:
+/// four molecules went `running → collapsed` after a machine reboot removed
+/// the tmux server, and the commits they had already made were discovered by
+/// hand, afterwards.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UnharvestedWork {
+    /// The molecule's work branch (`feat/<mol-id>`).
+    pub branch: String,
+    /// Commits on `branch` not reachable from the molecule's base branch.
+    pub commits_ahead: usize,
+    /// `git status --porcelain` entries in the molecule's worktree.
+    pub dirty_files: Vec<String>,
+    /// Set when the branch exists but its ahead-count could not be probed.
+    ///
+    /// A probe that cannot answer is not evidence of a harvested branch, so
+    /// it counts as unharvested: the whole point of the guard is that
+    /// "I could not check" must not read the same as "there is nothing there".
+    pub probe_error: Option<String>,
+}
+
+impl UnharvestedWork {
+    /// One line naming the commits and files at stake, for the alert.
+    fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        if self.commits_ahead > 0 {
+            parts.push(format!(
+                "{} commit(s) ahead of base on {}",
+                self.commits_ahead, self.branch
+            ));
+        }
+        if !self.dirty_files.is_empty() {
+            parts.push(format!(
+                "{} uncommitted file(s) in the worktree: {}",
+                self.dirty_files.len(),
+                self.dirty_files.join(", ")
+            ));
+        }
+        if let Some(err) = &self.probe_error {
+            parts.push(format!(
+                "branch {} present but unprobeable: {err}",
+                self.branch
+            ));
+        }
+        parts.join("; ")
+    }
+}
+
+/// Ask whether a molecule still holds work that no merge has taken.
+///
+/// A trait rather than a free function because the git probe is I/O at the
+/// edge: the sweep's policy (withhold or collapse) is what deserves a test,
+/// and a test that has to build a real repository with a diverged branch for
+/// every case tests git instead of the policy.
+pub(crate) trait HarvestProbe {
+    /// `Some(evidence)` when the molecule's work is demonstrably unharvested,
+    /// `None` when there is nothing at stake (no repo, no branch, branch
+    /// fully merged and worktree clean).
+    fn unharvested(&self, mol_id: &MoleculeId, base: Option<&str>) -> Option<UnharvestedWork>;
+}
+
+/// The production [`HarvestProbe`]: `git rev-list` + `git status` against the
+/// galaxy repository.
+struct GitHarvestProbe {
+    /// Repository root, or `None` when the command is not run inside one —
+    /// in which case there are no worktrees and no branches to lose, and the
+    /// probe answers `None` for every molecule.
+    repo_root: Option<PathBuf>,
+    /// The galaxy's `[project] trunk_branch`, for base-branch resolution.
+    configured_trunk: Option<String>,
+}
+
+impl GitHarvestProbe {
+    /// Build the probe from the invocation context (repo discovery + config).
+    fn discover(ctx: &Context) -> Self {
+        let repo_root = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim()))
+            .filter(|p| !p.as_os_str().is_empty());
+        let configured_trunk =
+            cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
+                .ok()
+                .and_then(|cfg| cfg.project.trunk_branch);
+        Self {
+            repo_root,
+            configured_trunk,
+        }
+    }
+}
+
+/// `true` when `refs/heads/<branch>` resolves in `repo_root`.
+fn branch_exists(repo_root: &Path, branch: &str) -> bool {
+    Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Commits reachable from `branch` but not from `base`; `None` when the
+/// probe itself failed (which the caller must not read as zero).
+fn commits_ahead_of(repo_root: &Path, base: &str, branch: &str) -> Option<usize> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &repo_root.to_string_lossy(),
+            "rev-list",
+            "--count",
+            &format!("{base}..{branch}"),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Paths reported by `git status --porcelain` in a molecule's worktree.
+///
+/// An absent worktree is not dirty. A `git status` that fails is reported as
+/// clean here on purpose: the branch probe is the load-bearing half, and a
+/// failing status in a directory that may not even be a worktree would
+/// otherwise withhold every purge on the host.
+fn dirty_paths(worktree: &Path) -> Vec<String> {
+    if !worktree.is_dir() {
+        return Vec::new();
+    }
+    let Ok(out) = Command::new("git")
+        .args(["-C", &worktree.to_string_lossy(), "status", "--porcelain"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.get(3..).map(str::trim).filter(|p| !p.is_empty()))
+        .map(str::to_owned)
+        .collect()
+}
+
+impl HarvestProbe for GitHarvestProbe {
+    fn unharvested(&self, mol_id: &MoleculeId, base: Option<&str>) -> Option<UnharvestedWork> {
+        let repo_root = self.repo_root.as_ref()?;
+        let branch = format!("feat/{mol_id}");
+        let worktree = repo_root.join(".worktrees").join(mol_id.as_str());
+        let dirty_files = dirty_paths(&worktree);
+
+        let (commits_ahead, probe_error) = if branch_exists(repo_root, &branch) {
+            let base =
+                cosmon_cli::base_branch::resolve(repo_root, base, self.configured_trunk.as_deref());
+            match commits_ahead_of(repo_root, &base, &branch) {
+                Some(n) => (n, None),
+                None => (
+                    0,
+                    Some(format!("`git rev-list --count {base}..{branch}` failed")),
+                ),
+            }
+        } else {
+            (0, None)
+        };
+
+        if commits_ahead == 0 && dirty_files.is_empty() && probe_error.is_none() {
+            return None;
+        }
+        Some(UnharvestedWork {
+            branch,
+            commits_ahead,
+            dirty_files,
+            probe_error,
+        })
+    }
+}
+
+/// A worker the sweep refused to purge, with the evidence that stopped it.
+struct Withheld {
+    /// The worker whose fleet entry was left in place.
+    worker: WorkerId,
+    /// The still-`Running` molecule that would have been collapsed.
+    molecule: MoleculeId,
+    /// What is at stake.
+    work: UnharvestedWork,
+}
+
+/// Fail-closed split of the stale population (incident 2026-08-02).
+///
+/// A missing tmux session proves that the *pane* is gone. It proves nothing
+/// about the work: when the machine rebooted on 2026-08-02 the tmux server
+/// disappeared under four healthy workers, and `cs purge` read every one of
+/// them as stale and flipped its molecule `running → collapsed` — while
+/// `task-…-16bf` was one commit ahead of main, `task-…-0c2d` two, and
+/// `task-…-7582` had three uncommitted files in its worktree. Nothing in the
+/// output named any of it.
+///
+/// So the sweep now separates two questions. *Is the pane dead?* decides the
+/// stale classification. *Is the work harvested?* decides whether the
+/// molecule may be collapsed. When the second answer is no, the worker is
+/// withheld entirely — neither the molecule flipped nor the fleet entry
+/// removed, so `cs ensemble` keeps showing it and the branch keeps its only
+/// witness. `--allow-unharvested` is the operator's explicit statement that
+/// the loss is acceptable.
+///
+/// Only `Running` molecules are guarded: a terminal molecule is not going to
+/// be collapsed by [`collapse_zombie_molecule`], so there is nothing to fail
+/// closed about.
+fn withhold_unharvested(
+    fleet: &cosmon_state::Fleet,
+    store: &dyn StateStore,
+    probe: &dyn HarvestProbe,
+    stale: Vec<WorkerId>,
+) -> (Vec<WorkerId>, Vec<Withheld>) {
+    let mut keep = Vec::new();
+    let mut withheld = Vec::new();
+    for wid in stale {
+        let mol = fleet
+            .workers
+            .get(&wid)
+            .and_then(|w| w.current_molecule.clone())
+            .and_then(|mid| store.load_molecule(&mid).ok())
+            .filter(|m| m.status == MoleculeStatus::Running);
+        let Some(mol) = mol else {
+            keep.push(wid);
+            continue;
+        };
+        match probe.unharvested(&mol.id, mol.base_branch.as_deref()) {
+            Some(work) => withheld.push(Withheld {
+                worker: wid,
+                molecule: mol.id.clone(),
+                work,
+            }),
+            None => keep.push(wid),
+        }
+    }
+    (keep, withheld)
+}
 
 /// Flip a zombie molecule's `state.json` from `Running` to `Collapsed` when
 /// the worker bound to it is being purged because the worker process is gone
@@ -180,6 +442,19 @@ pub struct Args {
     /// half of a runtime+cognition pair without collapsing the other.
     #[arg(long, value_parser = parse_worker_role)]
     pub role: Option<WorkerRole>,
+
+    /// Collapse molecules whose work is still unharvested (commits ahead of
+    /// base, or an unclean worktree).
+    ///
+    /// Without this flag `cs purge` fails closed: a worker whose pane is
+    /// gone but whose branch still carries commits — or whose worktree still
+    /// has uncommitted files — is left in the fleet, its molecule left
+    /// `running`, and the commits and files at stake are named in an alert.
+    /// A dead tmux session is evidence about the pane, not about the work
+    /// (incident 2026-08-02, where four molecules were silently collapsed
+    /// after a reboot with up to three commits each still unmerged).
+    #[arg(long)]
+    pub allow_unharvested: bool,
 }
 
 fn parse_worker_role(s: &str) -> Result<WorkerRole, String> {
@@ -191,14 +466,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let state_dir = ctx.state_dir();
     let store = ctx.store();
 
+    let probe = GitHarvestProbe::discover(ctx);
+
     // Targeted mode — `cs purge <worker> [--force]` (supersedes `cs kill`).
     if let Some(ref worker_name) = args.worker {
-        return run_targeted(ctx, store.as_ref(), &state_dir, worker_name, args.force);
+        return run_targeted(
+            ctx,
+            store.as_ref(),
+            &state_dir,
+            worker_name,
+            args.force,
+            args.allow_unharvested,
+            &probe,
+        );
     }
 
     let socket = super::tmux_socket_name(ctx);
     let backend = TmuxBackend::new(&socket);
-    run_sweep(ctx, store.as_ref(), &state_dir, &backend, args)
+    run_sweep(ctx, store.as_ref(), &state_dir, &backend, &probe, args)
 }
 
 /// Populations produced by [`classify_sweep`] — one vec per reason code
@@ -301,6 +586,7 @@ fn run_sweep<B: TransportBackend>(
     store: &dyn StateStore,
     state_dir: &Path,
     backend: &B,
+    probe: &dyn HarvestProbe,
     args: &Args,
 ) -> anyhow::Result<()> {
     let mut fleet = store.load_fleet()?;
@@ -315,15 +601,26 @@ fn run_sweep<B: TransportBackend>(
 
     let SweepBuckets {
         terminal,
-        stale,
+        mut stale,
         orphan,
     } = classify_sweep(&fleet, store, backend, filter_desired, filter_role);
 
+    // Fail closed before anything is written: a stale pane whose molecule
+    // still holds unharvested work is withheld from the sweep entirely.
+    let withheld = if args.allow_unharvested {
+        Vec::new()
+    } else {
+        let (keep, withheld) =
+            withhold_unharvested(&fleet, store, probe, std::mem::take(&mut stale));
+        stale = keep;
+        withheld
+    };
+
     let total = terminal.len() + stale.len() + orphan.len();
-    if total == 0 {
+    if total == 0 && withheld.is_empty() {
         if ctx.json {
             println!(
-                r#"{{"command":"purge","purged":0,"workers":[],"terminal":[],"stale":[],"orphan":[]}}"#
+                r#"{{"command":"purge","purged":0,"workers":[],"terminal":[],"stale":[],"orphan":[],"withheld":[]}}"#
             );
         } else {
             println!("Nothing to purge.");
@@ -401,6 +698,14 @@ fn run_sweep<B: TransportBackend>(
             "stale": stale.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
             "orphan": orphan.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
             "zombies_collapsed": zombies_collapsed,
+            "withheld": withheld.iter().map(|w| serde_json::json!({
+                "worker": w.worker.as_str(),
+                "molecule": w.molecule.as_str(),
+                "branch": w.work.branch,
+                "commits_ahead": w.work.commits_ahead,
+                "dirty_files": w.work.dirty_files,
+                "probe_error": w.work.probe_error,
+            })).collect::<Vec<_>>(),
         });
         println!("{out}");
     } else {
@@ -429,9 +734,83 @@ fn run_sweep<B: TransportBackend>(
         for name in &purged {
             println!("  - {name}");
         }
+        if !withheld.is_empty() {
+            println!(
+                "\nWITHHELD — {} worker(s) NOT purged: their pane is gone but their work is not \
+                 harvested.",
+                withheld.len()
+            );
+            for w in &withheld {
+                println!(
+                    "  - {} → molecule {} still running: {}",
+                    w.worker,
+                    w.molecule,
+                    w.work.describe()
+                );
+            }
+            println!(
+                "  Harvest first (`cs done <molecule>`), or repeat with --allow-unharvested to \
+                 collapse them and accept the loss."
+            );
+        }
     }
 
-    Ok(())
+    if withheld.is_empty() {
+        return Ok(());
+    }
+
+    // Non-zero exit, after the safe half of the sweep has been persisted.
+    // The withheld population is exactly the shape the 2026-08-02 incident
+    // took, and it went unnoticed because purge exited 0 and said nothing an
+    // operator would stop for. Re-running the sweep is idempotent, so the
+    // error repeats until the work is harvested or the loss is accepted.
+    let detail = withheld
+        .iter()
+        .map(|w| format!("{} ({}): {}", w.molecule, w.worker, w.work.describe()))
+        .collect::<Vec<_>>()
+        .join("\n  ");
+    anyhow::bail!(
+        "refusing to collapse {} molecule(s) with unharvested work:\n  {detail}\n  \
+         a missing tmux session is not evidence that the work failed. Harvest with \
+         `cs done <molecule>`, or pass --allow-unharvested to collapse anyway.",
+        withheld.len()
+    )
+}
+
+/// The targeted-mode half of the fail-closed guard (see
+/// [`withhold_unharvested`] for the sweep half and the incident it comes
+/// from).
+///
+/// A targeted purge also flips a still-`Running` molecule to `Collapsed`, so
+/// it can discard unmerged commits just as silently as the sweep. `--force`
+/// is a statement about the tmux session, not about the work — only
+/// `--allow-unharvested` accepts the loss, otherwise the guard would be one
+/// `--force` away from useless. Called before any mutation, so a refusal
+/// leaves fleet and molecule state untouched.
+fn refuse_if_unharvested(
+    fleet: &cosmon_state::Fleet,
+    store: &dyn StateStore,
+    probe: &dyn HarvestProbe,
+    worker_id: &WorkerId,
+) -> anyhow::Result<()> {
+    let bound = fleet
+        .workers
+        .get(worker_id)
+        .and_then(|w| w.current_molecule.clone())
+        .and_then(|mid| store.load_molecule(&mid).ok())
+        .filter(|m| m.status == MoleculeStatus::Running);
+    let Some(mol) = bound else { return Ok(()) };
+    let Some(work) = probe.unharvested(&mol.id, mol.base_branch.as_deref()) else {
+        return Ok(());
+    };
+    anyhow::bail!(
+        "refusing to purge {worker_id}: molecule {} is still running with unharvested work — \
+         {}\n  a missing or killed pane is not evidence that the work failed. Harvest with \
+         `cs done {}`, or pass --allow-unharvested to purge anyway.",
+        mol.id,
+        work.describe(),
+        mol.id,
+    )
 }
 
 /// Targeted purge — remove a single worker, optionally SIGKILL'ing tmux first.
@@ -447,6 +826,8 @@ fn run_targeted(
     state_dir: &std::path::Path,
     worker_name: &str,
     force: bool,
+    allow_unharvested: bool,
+    probe: &dyn HarvestProbe,
 ) -> anyhow::Result<()> {
     let worker_id = WorkerId::new(worker_name)?;
 
@@ -475,6 +856,10 @@ fn run_targeted(
             state_dir.display(),
         );
     }
+    if !allow_unharvested {
+        refuse_if_unharvested(&fleet, store, probe, &worker_id)?;
+    }
+
     let Some(worker) = fleet.workers.get_mut(&worker_id) else {
         // Unreachable: presence was just established above.
         anyhow::bail!("worker not found: {worker_id}");
@@ -646,6 +1031,35 @@ mod tests {
         let _ = backend.spawn(&agent, &RuntimeConfig::default());
     }
 
+    /// Probe that reports every molecule as harvested — the ambient case for
+    /// the pre-existing sweep tests, whose fixtures have no git repository.
+    struct NoWork;
+    impl HarvestProbe for NoWork {
+        fn unharvested(&self, _mol: &MoleculeId, _base: Option<&str>) -> Option<UnharvestedWork> {
+            None
+        }
+    }
+
+    /// Probe that reports the given evidence for every molecule — the
+    /// crashed-machine case, where the branch really does hold commits the
+    /// merge never took.
+    struct Unharvested(UnharvestedWork);
+    impl HarvestProbe for Unharvested {
+        fn unharvested(&self, _mol: &MoleculeId, _base: Option<&str>) -> Option<UnharvestedWork> {
+            Some(self.0.clone())
+        }
+    }
+
+    /// The 2026-08-02 shape: commits on the branch, nothing merged.
+    fn commits_ahead(n: usize) -> Unharvested {
+        Unharvested(UnharvestedWork {
+            branch: "feat/task-20260802-16bf".to_owned(),
+            commits_ahead: n,
+            dirty_files: Vec::new(),
+            probe_error: None,
+        })
+    }
+
     fn ctx_for(tmp: &TempDir, json: bool) -> Context {
         Context {
             verbose: false,
@@ -697,8 +1111,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(fleet.workers.len(), 1);
@@ -731,8 +1146,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(fleet.workers.len(), 1, "ghost worker must be purged");
@@ -772,8 +1188,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert!(fleet.workers.is_empty());
@@ -800,8 +1217,9 @@ mod tests {
             force: false,
             status: Some("running".to_owned()),
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(fleet.workers.len(), 1);
@@ -843,8 +1261,9 @@ mod tests {
             force: false,
             status: None,
             role: Some(WorkerRole::Cognition),
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(fleet.workers.len(), 1);
@@ -870,6 +1289,7 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -889,6 +1309,7 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
 
         let err = run(&ctx, &args).unwrap_err();
@@ -914,8 +1335,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(fleet.workers.len(), 1);
@@ -997,8 +1419,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &ErrBackend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &ErrBackend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(
@@ -1052,8 +1475,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert!(
@@ -1094,8 +1518,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert!(fleet.workers.is_empty());
@@ -1125,8 +1550,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(
@@ -1161,8 +1587,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let fleet = store.load_fleet().unwrap();
         assert_eq!(
@@ -1204,8 +1631,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         // Worker removed.
         let fleet = store.load_fleet().unwrap();
@@ -1258,8 +1686,9 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
-        run_sweep(&ctx, &store, tmp.path(), &backend, &args).unwrap();
+        run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(
@@ -1292,6 +1721,7 @@ mod tests {
             force: true,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1329,11 +1759,394 @@ mod tests {
             force: false,
             status: None,
             role: None,
+            allow_unharvested: false,
         };
         run(&ctx, &args).unwrap();
 
         let reloaded = store.load_molecule(&mol.id).unwrap();
         assert_eq!(reloaded.status, MoleculeStatus::Completed);
         assert!(reloaded.collapse_cause.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Fail-closed on unharvested work (incident 2026-08-02, task-…-7c43)
+    // -----------------------------------------------------------------
+
+    /// A stale worker (dead pane) bound to a running molecule whose branch is
+    /// ahead of base. This is the whole incident in one fixture.
+    fn stale_worker_with_running_molecule(
+        store: &dyn StateStore,
+        mol_id: &str,
+        worker_id: &str,
+    ) -> MoleculeId {
+        let mol = sample_mol(mol_id, MoleculeStatus::Running);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let mut fleet = Fleet::new();
+        let w = worker_with_mol(worker_id, mol.id.as_str());
+        fleet.workers.insert(w.id.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+        mol.id
+    }
+
+    #[test]
+    fn test_sweep_refuses_to_collapse_molecule_with_commits_ahead() {
+        // THE regression test for 2026-08-02 09:19: the tmux server vanished
+        // with the machine reboot, so every pane read dead, and `cs purge`
+        // turned four running molecules into `collapsed` — while their
+        // branches were 1, 2 and 3 commits ahead of main. A purge over a dead
+        // roster whose branch is ahead must NEVER produce `collapsed` without
+        // an explicit flag.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-16bf", "w-16bf");
+
+        let backend = MockBackend::new(); // not registered → dead pane → stale
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+        };
+        let err = run_sweep(&ctx, &store, tmp.path(), &backend, &commits_ahead(1), &args)
+            .expect_err("purge must fail closed on unharvested work");
+
+        // The molecule survives, still running.
+        let reloaded = store.load_molecule(&mol_id).unwrap();
+        assert_eq!(
+            reloaded.status,
+            MoleculeStatus::Running,
+            "a dead pane is not evidence that the work failed"
+        );
+        assert!(reloaded.collapse_cause.is_none());
+
+        // The worker entry survives, so the board keeps showing the molecule.
+        let fleet = store.load_fleet().unwrap();
+        assert!(
+            fleet
+                .workers
+                .contains_key(&WorkerId::new("w-16bf").unwrap()),
+            "the withheld worker must stay in the fleet"
+        );
+
+        // The alert names what is at stake.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("task-20260802-16bf"),
+            "alert must name the molecule; got: {msg}"
+        );
+        assert!(
+            msg.contains("1 commit"),
+            "alert must name the commits; got: {msg}"
+        );
+        assert!(
+            msg.contains("--allow-unharvested"),
+            "alert must name the remedy; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sweep_refuses_when_worktree_is_dirty() {
+        // task-…-7582's shape: nothing committed, three modified files still
+        // in the worktree. Equally unharvested, equally not collapsible.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-7582", "w-7582");
+
+        let probe = Unharvested(UnharvestedWork {
+            branch: "feat/task-20260802-7582".to_owned(),
+            commits_ahead: 0,
+            dirty_files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+            probe_error: None,
+        });
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+        };
+        let err = run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args)
+            .expect_err("a dirty worktree must fail closed too");
+
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Running
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("src/a.rs"),
+            "alert must name the files; got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_sweep_with_allow_unharvested_collapses_as_before() {
+        // The explicit gesture: the operator states the loss is acceptable,
+        // and the pre-fix behaviour is restored exactly.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-0c2d", "w-0c2d");
+
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: true,
+        };
+        run_sweep(
+            &ctx,
+            &store,
+            tmp.path(),
+            &MockBackend::new(),
+            &commits_ahead(2),
+            &args,
+        )
+        .unwrap();
+
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Collapsed,
+            "--allow-unharvested must restore the collapsing sweep"
+        );
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+    }
+
+    #[test]
+    fn test_sweep_still_purges_the_harvested_workers_alongside_a_withheld_one() {
+        // The guard is per-worker, not per-sweep: withholding one molecule
+        // must not strand the rest of the roster. The probe answers for the
+        // molecule-bound worker only; the terminal worker has no molecule.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-16bf", "w-16bf");
+
+        let mut fleet = store.load_fleet().unwrap();
+        let retired = worker("retired", WorkerStatus::Stopped, DesiredState::Stopped);
+        fleet.workers.insert(retired.id.clone(), retired);
+        store.save_fleet(&fleet).unwrap();
+
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+        };
+        let _ = run_sweep(
+            &ctx,
+            &store,
+            tmp.path(),
+            &MockBackend::new(),
+            &commits_ahead(1),
+            &args,
+        );
+
+        let fleet = store.load_fleet().unwrap();
+        assert!(
+            !fleet
+                .workers
+                .contains_key(&WorkerId::new("retired").unwrap()),
+            "the clean terminal worker must still be purged"
+        );
+        assert!(fleet
+            .workers
+            .contains_key(&WorkerId::new("w-16bf").unwrap()));
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_targeted_purge_refuses_unharvested_work_even_with_force() {
+        // `--force` is a statement about the tmux session, not about the
+        // work. Without `--allow-unharvested` the targeted path must refuse
+        // too — otherwise the guard is one `--force` away from useless.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-0c2d", "target");
+
+        let ctx = ctx_for(&tmp, false);
+        let err = run_targeted(
+            &ctx,
+            &store,
+            tmp.path(),
+            "target",
+            true,
+            false,
+            &commits_ahead(2),
+        )
+        .expect_err("targeted --force must not discard unharvested work");
+
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Running
+        );
+        assert!(
+            store
+                .load_fleet()
+                .unwrap()
+                .workers
+                .contains_key(&WorkerId::new("target").unwrap()),
+            "a refused targeted purge must leave state untouched"
+        );
+        assert!(err.to_string().contains("--allow-unharvested"));
+    }
+
+    #[test]
+    fn test_targeted_purge_proceeds_when_work_is_harvested() {
+        // Control: the guard is silent when there is nothing to lose.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-clea", "clean");
+
+        let ctx = ctx_for(&tmp, false);
+        run_targeted(&ctx, &store, tmp.path(), "clean", false, false, &NoWork).unwrap();
+
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Collapsed,
+            "a harvested molecule is still zombie-flipped as before"
+        );
+    }
+
+    #[test]
+    fn test_terminal_molecule_is_not_withheld() {
+        // The guard exists to protect a collapse that would lose work. A
+        // molecule that is already terminal is not going to be collapsed, so
+        // its worker must still be swept even if a branch lingers.
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol = sample_mol("task-20260802-done", MoleculeStatus::Completed);
+        store.save_molecule(&mol.id, &mol).unwrap();
+        let mut fleet = Fleet::new();
+        let w = worker_with_mol("done-worker", mol.id.as_str());
+        fleet.workers.insert(w.id.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+        };
+        run_sweep(
+            &ctx,
+            &store,
+            tmp.path(),
+            &MockBackend::new(),
+            &commits_ahead(3),
+            &args,
+        )
+        .unwrap();
+
+        assert!(store.load_fleet().unwrap().workers.is_empty());
+    }
+
+    #[test]
+    fn test_unprobeable_branch_is_treated_as_unharvested() {
+        // Fail-closed applies to the probe itself: "I could not check" must
+        // not read the same as "there is nothing there".
+        let tmp = TempDir::new().unwrap();
+        let store = FileStore::new(tmp.path());
+        let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-dark", "w-dark");
+
+        let probe = Unharvested(UnharvestedWork {
+            branch: "feat/task-20260802-dark".to_owned(),
+            commits_ahead: 0,
+            dirty_files: Vec::new(),
+            probe_error: Some("git rev-list failed".to_owned()),
+        });
+        let ctx = ctx_for(&tmp, false);
+        let args = Args {
+            worker: None,
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+        };
+        assert!(run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args).is_err());
+        assert_eq!(
+            store.load_molecule(&mol_id).unwrap().status,
+            MoleculeStatus::Running
+        );
+    }
+
+    #[test]
+    fn test_git_probe_sees_commits_ahead_and_dirty_worktree() {
+        // The probe half, against a real repository: everything above trusts
+        // `HarvestProbe`, so the git implementation needs its own witness.
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .args(["-C", &repo.to_string_lossy()])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(repo.join("seed"), "seed").unwrap();
+        git(&["add", "-A"]);
+        git(&["commit", "-qm", "seed"]);
+
+        let mol = MoleculeId::new("task-20260802-16bf").unwrap();
+        let wt = repo.join(".worktrees").join(mol.as_str());
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/task-20260802-16bf",
+            &wt.to_string_lossy(),
+        ]);
+
+        let probe = GitHarvestProbe {
+            repo_root: Some(repo.clone()),
+            configured_trunk: Some("main".to_owned()),
+        };
+        assert_eq!(
+            probe.unharvested(&mol, Some("main")),
+            None,
+            "a fresh branch with a clean worktree holds nothing"
+        );
+
+        // One uncommitted file → unharvested.
+        std::fs::write(wt.join("deliverable.md"), "work").unwrap();
+        let dirty = probe.unharvested(&mol, Some("main")).unwrap();
+        assert_eq!(dirty.dirty_files, vec!["deliverable.md".to_owned()]);
+        assert_eq!(dirty.commits_ahead, 0);
+
+        // Commit it → still unharvested, now as a commit ahead of main.
+        let wt_git = |args: &[&str]| {
+            assert!(std::process::Command::new("git")
+                .args(["-C", &wt.to_string_lossy()])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        };
+        wt_git(&["add", "-A"]);
+        wt_git(&["commit", "-qm", "deliverable"]);
+        let ahead = probe.unharvested(&mol, Some("main")).unwrap();
+        assert_eq!(ahead.commits_ahead, 1);
+        assert!(ahead.dirty_files.is_empty());
+        assert_eq!(ahead.branch, "feat/task-20260802-16bf");
     }
 }
