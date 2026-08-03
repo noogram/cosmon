@@ -1,0 +1,24 @@
+--- a/experiments/briefing-submit-race/matrix.py
++++ b/experiments/briefing-submit-race/matrix.py
+@@ def wait_ready(tm: Tmux, session: str, timeout_s: float) -> bool:
+         region = composer_region(pane)
+-        if region and any(
+-            line.strip() in {g.strip() for g in COMPOSER_GLYPHS} for line in region[:1]
+-        ):
++        # Claude Code 2.1.220 renders a rotating placeholder beside the glyph —
++        # `❯ Try "fix lint errors"` — so an equality test against a bare glyph
++        # never fires and every trial reports "composer never rendered".
++        # Accept glyph-alone or glyph + placeholder; still reject a composer
++        # holding real text.
++        _first = region[0].strip() if region else ""
++        _ready = False
++        for _g in COMPOSER_GLYPHS:
++            if _first.startswith(_g.strip()):
++                _rest = _first[len(_g.strip()):].strip()
++                if _rest == "" or _rest.startswith('Try "'):
++                    _ready = True
++                break
++        if _ready:
+             # A composer glyph on an otherwise empty line: ready and idle.
+             time.sleep(0.4)
+             return True
