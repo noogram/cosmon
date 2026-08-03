@@ -8,44 +8,16 @@
 //! loopback TCP listener.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 
 use cosmon_api::{router, AppState};
 use reqwest::StatusCode;
 use tempfile::TempDir;
 
-/// Locate the `cs` binary this crate shells out to.
-///
-/// `cs` belongs to `cosmon-cli`, a sibling workspace member, so cargo hands
-/// us no `CARGO_BIN_EXE_cs`. It is however already on disk under the whole
-/// verification gate — `cargo test --workspace` builds every member's bin
-/// targets before running any test — so the nested `cargo build` below is a
-/// fallback for a standalone `cargo test -p cosmon-api`, never a cost paid
-/// by the gate.
-///
-/// The profile directory is derived from **our own** executable
-/// (`<target>/<profile>/deps/smoke-<hash>`) rather than guessed from
-/// `CARGO_MANIFEST_DIR`: that is the one anchor that stays correct under an
-/// isolated `CARGO_TARGET_DIR`, and it picks up `release` without a second
-/// hard-coded `debug`.
-fn cs_bin() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe
-        .parent() // <target>/<profile>/deps
-        .and_then(std::path::Path::parent) // <target>/<profile>
-        .expect("test binary lives under <target>/<profile>/deps");
-    let candidate = profile_dir.join("cs");
-    if !candidate.exists() {
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-p", "cosmon-cli", "--bin", "cs"])
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "failed to build cs binary for tests");
-    }
-    candidate
-}
+#[path = "support/prebuilt.rs"]
+mod prebuilt;
+
+use prebuilt::cs_bin;
 
 async fn spawn_server(state_dir: &std::path::Path) -> SocketAddr {
     spawn_server_with(|s| s.with_state_dir(state_dir.to_path_buf())).await

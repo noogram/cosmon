@@ -19,31 +19,15 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Duration;
 
 use cosmon_api::instrumentation::{read_ndjson, EngineCallEntered, InvocationMode};
 use cosmon_api::{router, AppState};
 
-/// Locate the `cs` binary, anchored on our own executable — see the twin in
-/// `tests/smoke.rs` for why `CARGO_MANIFEST_DIR` is the wrong anchor under an
-/// isolated `CARGO_TARGET_DIR`.
-fn cs_bin() -> PathBuf {
-    let exe = std::env::current_exe().expect("current_exe");
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("test binary lives under <target>/<profile>/deps");
-    let candidate = profile_dir.join("cs");
-    if !candidate.exists() {
-        let status = Command::new(env!("CARGO"))
-            .args(["build", "-p", "cosmon-cli", "--bin", "cs"])
-            .status()
-            .expect("spawn cargo build");
-        assert!(status.success(), "failed to build cs binary");
-    }
-    candidate
-}
+#[path = "support/prebuilt.rs"]
+mod prebuilt;
+
+use prebuilt::cs_bin;
 
 async fn spawn_server(state: AppState) -> SocketAddr {
     let app = router(state);
