@@ -278,12 +278,13 @@ jobs:
       # `find_cs_binary()` then resolves it from `target/debug/cs`.
       # See docs/guides/cs-thin-parity.md §CI for the rationale.
       #
-      # The `cosmon-api` smoke suite exec's the same binary and depends on
-      # this step too. It resolves it explicitly — `COSMON_TEST_CS_BIN`, else
-      # `target/<profile>/cs`, else a named error — and deliberately never
-      # builds it itself: a nested `cargo build` inside a test races the
-      # parallel runner and can block on cargo's build lock. Dropping this
-      # step therefore turns that suite red instead of slow. The
+      # The `cosmon-api` smoke suite exec's the same binary. It resolves it
+      # explicitly — `COSMON_TEST_CS_BIN`, else `target/<profile>/cs`, else a
+      # named error — and deliberately never builds it itself: a nested
+      # `cargo build` inside a test races the parallel runner and can block on
+      # cargo's build lock. (Measured 2026-08-03: `cargo test --workspace` does
+      # build sibling bin targets, so that suite would survive without this
+      # step; it depends on the artifact, not on this line.) The
       # `no_implicit_cargo_build_in_tests` guard in `cosmon-cli` keeps the
       # implicit-build fallback from coming back.
       - name: Build cs binary (test prerequisite: parity + cosmon-api smoke)

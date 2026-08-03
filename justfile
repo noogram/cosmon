@@ -192,13 +192,17 @@ quick:
 # dies early has not told you the suite is broken in one place, only that it is
 # broken in at least one.
 #
-# The `cargo build --bin cs` below is a *prerequisite*, not a warm-up. Tests
-# that exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke suite)
+# The `cargo build --bin cs` below makes a prerequisite explicit. Tests that
+# exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke suite)
 # resolve it explicitly and fail with a named missing-prerequisite error
 # rather than building it themselves: a nested `cargo build` inside a test
-# races the parallel runner and can block on cargo's own build lock. This is
-# the same step `ci.yml` runs before `cargo test --workspace`; keeping it here
-# is what makes the local gate agree with CI.
+# races the parallel runner and can block on cargo's own build lock.
+#
+# Measured 2026-08-03: `cargo test --workspace` builds sibling bin and example
+# targets on its own, so this step is not load-bearing for the workspace run —
+# it is here because it is the same step `ci.yml` runs, and because a
+# prerequisite that holds by accident of cargo's default target selection is
+# one nobody notices losing.
 #
 # The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
 gates: quick
