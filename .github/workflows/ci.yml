@@ -605,6 +605,13 @@ jobs:
       # is gitignored, so no tree here can carry the ledger and the script
       # says so up front. See task-20260729-dc53.
       - name: Validate merge-commit provenance (ledger where residence keeps it)
+        # On pull_request events GITHUB_SHA is GitHub's synthetic test-merge
+        # commit ("Merge <sha> into <sha>"), which cosmon did not write and
+        # which can never satisfy the provenance pattern — it blocked every
+        # external PR (found by @jdthaler on PR #42). Hand the script the PR
+        # HEAD instead, so the gate judges what the contributor actually wrote.
+        env:
+          COSMON_PROVENANCE_HEAD: ${{ github.event.pull_request.head.sha || '' }}
         run: bash scripts/check-provenance.sh
       - name: Self-test the gate against the c1cb pathology
         run: bash tests/harness/provenance-gate-test.sh

@@ -77,10 +77,16 @@ fi
 if [ "$#" -ge 2 ]; then
     base="$1"
     head="$2"
-elif [ -n "${GITHUB_BASE_REF:-}" ] && [ -n "${GITHUB_SHA:-}" ]; then
+elif [ -n "${GITHUB_BASE_REF:-}" ] && [ -n "${COSMON_PROVENANCE_HEAD:-}${GITHUB_SHA:-}" ]; then
     git fetch --no-tags --depth=200 origin "$GITHUB_BASE_REF" 2>/dev/null || true
     base="origin/$GITHUB_BASE_REF"
-    head="$GITHUB_SHA"
+    # On pull_request events GITHUB_SHA is the synthetic test-merge commit
+    # GitHub fabricates for the PR ("Merge <head> into <base>"). Cosmon did
+    # not write it, its subject can never match, and judging it would block
+    # every external PR (PR #42). The workflow exports the PR's real HEAD as
+    # COSMON_PROVENANCE_HEAD; prefer it so the gate walks the commits the
+    # contributor actually wrote.
+    head="${COSMON_PROVENANCE_HEAD:-$GITHUB_SHA}"
 elif [ -n "${GITHUB_EVENT_BEFORE:-}" ] && [ -n "${GITHUB_SHA:-}" ] \
         && [ "${GITHUB_EVENT_BEFORE:-}" != "0000000000000000000000000000000000000000" ]; then
     base="$GITHUB_EVENT_BEFORE"
