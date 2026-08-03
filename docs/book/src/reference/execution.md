@@ -60,6 +60,10 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
    Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
 
+   # Capability gate (noogram/cosmon #4)
+
+   A formula may declare what its steps need of a worker (`requires_capabilities = ["shell", "vcs"]`). A *local* adapter (`local` / `ollama` / `llama-cpp` / `llama`) is an in-process chat loop with no shell, no VCS and no `cs` command, so such a pairing is refused with exit code 17 — before any worktree, pane or model preflight, and under `--dry-run` too. The molecule stays pending and re-tacklable. Re-run with a coding-agent adapter, or set `COSMON_SKIP_CAPABILITY_GATE=1` to dispatch anyway. Formulas that declare nothing are unaffected on every adapter.
+
    Every invocation (with or without the flag) emits an [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`) can answer "which Adapter ran for this molecule?" without parsing shell history.
 
    # Composition with `cs run --resident` (issue-#21, reconciled)

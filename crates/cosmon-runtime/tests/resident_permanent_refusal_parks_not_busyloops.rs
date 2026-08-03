@@ -1,35 +1,43 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Regression test for the briefless-dispatch busy-loop (task-20260711-4310).
+//! Regression test for the permanent-refusal busy-loop (task-20260711-4310).
 //!
 //! # What this proves
 //!
-//! The sibling fix task-20260711-919a taught `cs tackle` to *refuse* a
-//! **briefless** molecule — one whose formula declares required, default-free
-//! variables that are now missing or blank — by exiting with the guard code
-//! [`cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH`]. That stops a garbage
-//! worker from spawning, but it left a second defect in the resident runtime:
-//! `cs run` dispatches by shelling out `cs tackle`, and its failure handler
-//! treated *every* non-zero exit as **transient** — retracting the optimistic
-//! dispatch mark (`forget_dispatch`) so the molecule re-entered the frontier
-//! and was re-emitted **every tick**. A briefless molecule can never satisfy
-//! the guard on retry, so this was an infinite busy-loop: `cs tackle` spawned
-//! each poll interval, the trace flooded, and — because every tick then
-//! "produced decisions" — the phantom-running stall gate perpetually reset,
-//! starving the reap sweep.
+//! Two guards make `cs tackle` refuse a molecule *permanently* — a refusal an
+//! identical retry reproduces exactly
+//! ([`cosmon_core::dispatch_refusal::is_permanent_refusal`]):
 //!
-//! The fix classifies the briefless exit code as a **permanent** refusal
-//! ([`ResidentError::TackleRefusedBriefless`]) and *parks* the molecule: it
+//! - **briefless** (exit `16`, task-20260711-919a): the formula's required,
+//!   default-free variables are missing or blank, so the molecule carries no
+//!   operator intent.
+//! - **incapable adapter** (exit `17`, noogram/cosmon #4): the formula
+//!   requires worker capabilities — a shell, VCS — that the resolved adapter
+//!   does not have.
+//!
+//! Refusing stops a garbage worker from spawning, but it left a second defect
+//! in the resident runtime: `cs run` dispatches by shelling out `cs tackle`,
+//! and its failure handler treated *every* non-zero exit as **transient** —
+//! retracting the optimistic dispatch mark (`forget_dispatch`) so the molecule
+//! re-entered the frontier and was re-emitted **every tick**. Neither refusal
+//! can be satisfied on retry, so this was an infinite busy-loop: `cs tackle`
+//! spawned each poll interval, the trace flooded, and — because every tick
+//! then "produced decisions" — the phantom-running stall gate perpetually
+//! reset, starving the reap sweep.
+//!
+//! The fix classifies both codes as **permanent** refusals
+//! ([`ResidentError::TackleRefusedPermanently`]) and *parks* the molecule: it
 //! keeps the optimistic mark, so the molecule is attempted **exactly once**
-//! and never re-emitted. This test pins that: molecule `a` is briefless (its
-//! `cs tackle` always exits `16`), molecule `b` is well-formed (drains
+//! and never re-emitted. This test pins that for *each* code in the family —
+//! a new member added to the predicate and not to the loop would go red here.
+//! Molecule `a` is the refused one, molecule `b` is well-formed (drains
 //! normally). We assert:
 //!
 //! - `cs tackle a` was invoked **exactly once** (the park, not a busy-loop).
 //!   Without the fix this count grows without bound until `max_runtime`.
-//! - `b` still drained — the park is specific to the briefless refusal and
+//! - `b` still drained — the park is specific to the refused molecule and
 //!   does not freeze the rest of the DAG.
-//! - The loop reports exactly one `briefless_parked`.
+//! - The loop reports exactly one `permanently_parked`.
 //!
 //! # Why a POSIX `sh` stub
 //!
@@ -50,11 +58,12 @@ use cosmon_runtime::{
 };
 
 /// POSIX-`sh` stub speaking the `cs` subset the loop uses. `tackle a` always
-/// exits `16` (the briefless-dispatch guard code) after bumping a counter file
-/// and leaving `a`'s state untouched (it stays `pending`). Every other
-/// `tackle`/`done` mutates the line-format state so a well-formed molecule
-/// drains. `patrol` (the reap sweep) is a clean no-op so a stall never errors.
-const SH_STUB_BRIEFLESS_A: &str = r#"#!/bin/sh
+/// exits `__REFUSAL_CODE__` (a permanent-refusal guard code, substituted per
+/// test) after bumping a counter file and leaving `a`'s state untouched (it
+/// stays `pending`). Every other `tackle`/`done` mutates the line-format state
+/// so a well-formed molecule drains. `patrol` (the reap sweep) is a clean
+/// no-op so a stall never errors.
+const SH_STUB_REFUSED_A: &str = r#"#!/bin/sh
 STATE="__STATE_PATH__"
 TICK="__TICK_PATH__"
 TACKLE_A="__TACKLE_A_PATH__"
@@ -104,12 +113,12 @@ case "$verb" in
   tackle)
     [ -z "$mol" ] && exit 2
     if [ "$mol" = "a" ]; then
-      # Briefless refusal: bump the attempt counter, leave `a` pending, and
+      # Permanent refusal: bump the attempt counter, leave `a` pending, and
       # exit with the guard code so the loop must park (not retry) it.
       count=$(cat "$TACKLE_A" 2>/dev/null || echo 0)
       echo $((count + 1)) > "$TACKLE_A"
-      echo "cs tackle: refusing dispatch — molecule a is briefless" >&2
-      exit 16
+      echo "cs tackle: refusing dispatch — molecule a" >&2
+      exit __REFUSAL_CODE__
     fi
     tmp="${STATE}.tmp"
     : > "$tmp"
@@ -167,15 +176,37 @@ fn state_has(state_path: &std::path::Path, id: &str) -> bool {
         .any(|first| first == id)
 }
 
+/// The briefless guard (task-20260711-919a) — the refusal this file was
+/// originally written for.
 #[test]
 fn briefless_tackle_is_parked_not_busylooped() {
+    refused_tackle_is_parked_not_busylooped(cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH);
+}
+
+/// The capability gate (noogram/cosmon #4). Written as its own test rather
+/// than folded into the one above because the busy-loop is a property of the
+/// *loop's* classification, not of the guard that produced the code: a new
+/// member of the permanent-refusal family that the loop was never taught to
+/// park would pass every unit test of the predicate and still spin here.
+#[test]
+fn incapable_adapter_tackle_is_parked_not_busylooped() {
+    refused_tackle_is_parked_not_busylooped(
+        cosmon_core::dispatch_refusal::ADAPTER_LACKS_CAPABILITY,
+    );
+}
+
+/// Drive the loop against a stub whose `cs tackle a` always exits
+/// `refusal_code`, and assert `a` is attempted exactly once and parked while
+/// the well-formed `b` still drains.
+fn refused_tackle_is_parked_not_busylooped(refusal_code: i32) {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
     let state_dir = root.join(".cosmon").join("state");
     std::fs::create_dir_all(&state_dir).unwrap();
 
-    // `a` is briefless (tackle always exits 16); `b` is well-formed and has no
-    // blocker, so it drains independently. Line format: `id|status|blockers`.
+    // `a` is permanently refused (tackle always exits `refusal_code`); `b` is
+    // well-formed and has no blocker, so it drains independently. Line format:
+    // `id|status|blockers`.
     let state_path = state_dir.join("fleet.lines");
     std::fs::write(&state_path, "a|pending|\nb|pending|\n").unwrap();
 
@@ -185,13 +216,14 @@ fn briefless_tackle_is_parked_not_busylooped() {
     let tackle_a_path = root.join("tackle_a_count.txt");
 
     let stub_path = root.join("cs_stub.sh");
-    let stub_body = SH_STUB_BRIEFLESS_A
+    let stub_body = SH_STUB_REFUSED_A
         .replace("__STATE_PATH__", state_path.to_string_lossy().as_ref())
         .replace("__TICK_PATH__", tick_path.to_string_lossy().as_ref())
         .replace(
             "__TACKLE_A_PATH__",
             tackle_a_path.to_string_lossy().as_ref(),
-        );
+        )
+        .replace("__REFUSAL_CODE__", &refusal_code.to_string());
     std::fs::write(&stub_path, stub_body).unwrap();
     make_executable(&stub_path);
 
@@ -213,25 +245,25 @@ fn briefless_tackle_is_parked_not_busylooped() {
     let summary = runtime.run(&shutdown).expect("resident loop runs");
 
     let attempts = read_count(&tackle_a_path);
-    if attempts != 1 || summary.briefless_parked != 1 {
+    if attempts != 1 || summary.permanently_parked != 1 {
         let trace = std::fs::read_to_string(&trace_path).unwrap_or_default();
         eprintln!("=== TRACE ===\n{trace}\n=== END TRACE ===\nsummary: {summary:?}");
     }
 
-    // The core regression signal: a briefless molecule is attempted ONCE and
+    // The core regression signal: a refused molecule is attempted ONCE and
     // then parked — not re-dispatched every tick. Before the fix this count
     // grew without bound (one attempt per poll interval until Deadline).
     assert_eq!(
         attempts, 1,
-        "briefless `cs tackle a` must be attempted exactly once then parked, \
+        "refused `cs tackle a` must be attempted exactly once then parked, \
          not busy-looped; got {attempts} attempts (summary: {summary:?})",
     );
     assert_eq!(
-        summary.briefless_parked, 1,
-        "loop must record exactly one parked briefless molecule; got {summary:?}",
+        summary.permanently_parked, 1,
+        "loop must record exactly one permanently-parked molecule; got {summary:?}",
     );
 
-    // The park is specific to the briefless refusal: the well-formed `b` still
+    // The park is specific to the refused molecule: the well-formed `b` still
     // drained (tackled + done + removed), proving the fix does not freeze the
     // rest of the DAG.
     assert!(
@@ -244,8 +276,9 @@ fn briefless_tackle_is_parked_not_busylooped() {
     );
 
     // `a` never completes, so the loop cannot drain — it runs to the deadline.
-    // This is the honest outcome: a briefless molecule genuinely blocks
-    // progress until an operator restores its brief or collapses it.
+    // This is the honest outcome: a permanently-refused molecule genuinely blocks
+    // progress until an operator restores its brief, picks a capable adapter,
+    // or collapses it.
     assert_eq!(
         summary.exit,
         ExitReason::Deadline,
@@ -255,6 +288,6 @@ fn briefless_tackle_is_parked_not_busylooped() {
     );
     assert!(
         state_has(&state_path, "a"),
-        "the briefless molecule `a` stays pending (parked), awaiting operator",
+        "the refused molecule `a` stays pending (parked), awaiting operator",
     );
 }

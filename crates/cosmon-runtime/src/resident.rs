@@ -84,23 +84,32 @@ pub enum ResidentError {
         reason: String,
     },
 
-    /// `cs tackle` refused to dispatch a **briefless** molecule (exit
-    /// [`cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH`], the
-    /// task-20260711-919a guard). Unlike a generic `CsInvocation` failure,
-    /// this refusal is **permanent**: the molecule carries no operator intent
-    /// (its formula's required, default-free variables are missing or blank),
-    /// so `cs tackle` will refuse it identically on every retry. The resident
-    /// loop treats this variant specially — it **parks** the molecule (keeps
-    /// the optimistic dispatch mark) instead of retracting it and re-emitting
-    /// the dispatch next tick, which would busy-loop `cs tackle` forever. The
-    /// refusal is still recorded on the decision trace (never silent);
-    /// recovery is an operator restoring the brief from the molecule's
-    /// `prompt.md` frontmatter, or collapsing it (task-20260711-4310).
-    #[error("cs tackle refused briefless molecule {mol_id} (exit {code}): {reason}")]
-    TackleRefusedBriefless {
-        /// Molecule the runtime refused to dispatch briefless.
+    /// `cs tackle` refused to dispatch, **permanently** — a refusal an
+    /// identical retry reproduces exactly
+    /// ([`cosmon_core::dispatch_refusal::is_permanent_refusal`]).
+    ///
+    /// Two guards qualify today. The molecule is *briefless*
+    /// (task-20260711-919a): its formula's required, default-free variables
+    /// are missing or blank, so it carries no operator intent. Or the
+    /// formula requires worker capabilities the resolved adapter does not
+    /// have (noogram/cosmon #4): a shell-shaped mission pointed at a
+    /// chat-only local adapter. Both are functions of state a retry does
+    /// not change, which is what makes them permanent.
+    ///
+    /// Unlike a generic `CsInvocation` failure, the resident loop treats
+    /// this variant specially — it **parks** the molecule (keeps the
+    /// optimistic dispatch mark) instead of retracting it and re-emitting
+    /// the dispatch next tick, which would busy-loop `cs tackle` forever.
+    /// The refusal is still recorded on the decision trace (never silent),
+    /// and `reason` carries the CLI's own stderr, which names which of the
+    /// two fired and how to recover: restore the brief from the molecule's
+    /// `prompt.md` frontmatter, or re-tackle with a capable adapter
+    /// (task-20260711-4310).
+    #[error("cs tackle permanently refused molecule {mol_id} (exit {code}): {reason}")]
+    TackleRefusedPermanently {
+        /// Molecule the runtime refused to dispatch.
         mol_id: String,
-        /// The refusal exit code (the briefless-dispatch guard code).
+        /// The refusal exit code — which of the permanent guards fired.
         code: i32,
         /// `cs tackle`'s stderr tail explaining the refusal.
         reason: String,
@@ -735,14 +744,18 @@ pub struct RunSummary {
     pub reaps: u32,
     /// Number of complete ticks (snapshot → decisions → side-effects).
     pub ticks: u32,
-    /// Number of **briefless** molecules the loop parked instead of
-    /// dispatching — molecules `cs tackle` refused with the briefless-dispatch
-    /// guard exit code (task-20260711-919a). Each is counted once per
-    /// refusal, not once per tick: the whole point of parking is that a
-    /// briefless molecule is *not* re-attempted every tick (task-20260711-4310).
-    /// A non-zero value means the operator has molecules that need a brief
-    /// restored (from `prompt.md` frontmatter) or a collapse.
-    pub briefless_parked: u32,
+    /// Number of molecules the loop parked instead of dispatching, because
+    /// `cs tackle` refused them **permanently**
+    /// ([`cosmon_core::dispatch_refusal::is_permanent_refusal`]): a briefless
+    /// molecule (task-20260711-919a) or a formula whose required worker
+    /// capabilities the resolved adapter lacks (noogram/cosmon #4).
+    ///
+    /// Each is counted once per refusal, not once per tick: the whole point
+    /// of parking is that such a molecule is *not* re-attempted every tick
+    /// (task-20260711-4310). A non-zero value means the operator has
+    /// molecules needing a brief restored (from `prompt.md` frontmatter), a
+    /// capable `--adapter`, or a collapse — the decision trace names which.
+    pub permanently_parked: u32,
     /// Number of molecules the loop **gave up harvesting** — `cs done` failed
     /// [`TEARDOWN_ATTEMPT_CEILING`] consecutive times, so the loop stopped
     /// retrying and marked the molecule
@@ -912,7 +925,7 @@ impl RuntimeLoop {
             dones: 0,
             reaps: 0,
             ticks: 0,
-            briefless_parked: 0,
+            permanently_parked: 0,
             teardown_blocked: 0,
             exit: ExitReason::Drained,
         };
@@ -1180,10 +1193,11 @@ impl RuntimeLoop {
                     if self.park_or_back_off_teardown(id, &reason, &hash_after)? {
                         summary.teardown_blocked = summary.teardown_blocked.saturating_add(1);
                     }
-                } else if matches!(&result, Err(ResidentError::TackleRefusedBriefless { .. })) {
-                    // Permanent refusal (task-20260711-919a briefless guard,
-                    // read as task-20260711-4310): the molecule carries no
-                    // brief, so `cs tackle` will refuse it identically forever.
+                } else if matches!(&result, Err(ResidentError::TackleRefusedPermanently { .. })) {
+                    // Permanent refusal (task-20260711-919a briefless guard or
+                    // the noogram/cosmon #4 capability gate, read as
+                    // task-20260711-4310): nothing the next tick changes is an
+                    // input, so `cs tackle` refuses it identically forever.
                     // Do NOT `forget_dispatch` — keep the optimistic mark so
                     // the molecule is *parked* rather than re-emitted every
                     // tick. Retracting it here is exactly the busy-loop this
@@ -1194,10 +1208,11 @@ impl RuntimeLoop {
                     // decision record written just above already carries the
                     // refusal reason, so the park is visible, not silent.
                     // Recovery is an operator restoring the brief (prompt.md
-                    // frontmatter) or collapsing the molecule; a fresh `cs run`
+                    // frontmatter), re-tackling with a capable adapter, or
+                    // collapsing the molecule; a fresh `cs run`
                     // re-derives from disk and will attempt it exactly once
                     // more (one warn, then parked again).
-                    summary.briefless_parked = summary.briefless_parked.saturating_add(1);
+                    summary.permanently_parked = summary.permanently_parked.saturating_add(1);
                 } else {
                     // The shell-out failed (non-zero, non-signal). Retract the
                     // optimistic mark so a transient `cs tackle` / `cs done`
@@ -1626,14 +1641,16 @@ fn shell_out(config: &RuntimeLoopConfig, d: &Decision) -> Result<(), ResidentErr
                 verb: d.verb().into(),
             }
         } else if matches!(d, Decision::Tackle { .. })
-            && cosmon_core::dispatch_refusal::is_briefless_refusal(code)
+            && cosmon_core::dispatch_refusal::is_permanent_refusal(code)
         {
-            // Permanent refusal (task-20260711-919a briefless guard): the
-            // molecule carries no brief and `cs tackle` will refuse it
-            // identically on every retry. Surface a distinct variant so the
-            // loop parks the molecule instead of re-arming the dispatch
-            // busy-loop (task-20260711-4310).
-            ResidentError::TackleRefusedBriefless {
+            // Permanent refusal — the briefless guard (task-20260711-919a)
+            // or the capability gate (noogram/cosmon #4). Either way the
+            // refusal is a function of the molecule, its formula and the
+            // adapter chain, none of which the next tick changes, so
+            // `cs tackle` refuses it identically on every retry. Surface a
+            // distinct variant so the loop parks the molecule instead of
+            // re-arming the dispatch busy-loop (task-20260711-4310).
+            ResidentError::TackleRefusedPermanently {
                 mol_id: d.molecule_id().into(),
                 code: code.unwrap_or(cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH),
                 reason: stderr.trim().to_owned(),

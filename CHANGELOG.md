@@ -19,6 +19,47 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **A formula can declare what it needs of its worker, and `cs tackle`
+  refuses a dispatch that cannot supply it** — the open half of
+  noogram/cosmon #4, clause 2, and the reporter's own suggestion: *gate
+  formulas on adapter capabilities*. The `local` adapter is an in-process
+  chat loop with no shell, no VCS and no `cs` command; the earlier fix
+  stopped *telling* it to run cargo and commit (adapter-aware briefing,
+  `d81b58a`), but a formula's step text still describes shell work, and no
+  wording lends a chat loop a shell. Formulas now say so directly —
+  `requires_capabilities = ["shell", "vcs"]` — and `cs tackle` refuses the
+  pairing with exit code **17**, naming the missing faculties and the
+  adapter that has them. The refusal lands before the worktree, the pane
+  and the model preflight, so the molecule stays pending and re-tacklable
+  with nothing to clean up, and it fires under `--dry-run` too. Declared on
+  `producer-work` (its `smoke-dispatch` gate *executes* a script) and
+  `merge-conflict` (VCS surgery); opt-in per formula, so every formula that
+  declares nothing — including everything `cs demo` routes to on the local
+  floor — is untouched. `COSMON_SKIP_CAPABILITY_GATE=1` dispatches anyway
+  for deliberate experiments. Vocabulary: `shell`, `vcs`, `cs-cli`
+  (`cosmon_core::adapter_capability`); an unknown token fails the formula
+  load rather than being silently dropped, since a dropped requirement is a
+  formula claiming a gate it does not enforce. The resident runtime treats
+  the refusal as **permanent** — like the briefless guard, an identical
+  retry reproduces it exactly — and parks the molecule instead of
+  re-dispatching it every tick; the `cs run` summary counter is accordingly
+  `permanently_parked` (was `briefless_parked`, which the new member would
+  have made a lie).
+
+### Documentation
+
+- **The ten-minute quickstart now says to `ollama pull qwen3:8b`, not just
+  `ollama serve`** — the remaining docs item of noogram/cosmon #4. A daemon
+  with nothing pulled answers, so the setup looks healthy and the dispatch
+  dies seconds in. The prerequisite block now names the pull, the
+  structured-`tool_calls` requirement that makes `qwen3:8b` the default, and
+  the concrete failure of a model that lacks it (`qwen2.5-coder:7b` pastes
+  its tool call into the message text as raw JSON). The capability gate
+  above is documented in `docs/guides/local-model-selection.md`, beside the
+  model choice it is easily mistaken for.
+
 ### Fixed
 
 - **A committee seat's `contract-hash` is now verified against the contract

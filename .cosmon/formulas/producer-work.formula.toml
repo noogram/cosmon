@@ -26,6 +26,17 @@ be claimed.
 """
 id_prefix = "task"
 
+# Worker faculties this formula's steps require (noogram/cosmon #4 clause 2).
+# The `smoke-dispatch` gate EXECUTES `./smoke-dispatch.sh` from the worktree
+# and the work is committed to a branch: a chat-only local adapter — an
+# in-process model loop with no shell and no VCS — cannot satisfy either, no
+# matter how the prompt is worded. `cs tackle` refuses the pairing before any
+# worktree or pane lands rather than spending a run on a mission that could
+# never complete. Vocabulary and provision table:
+# `cosmon_core::adapter_capability`.
+requires_capabilities = ["shell", "vcs"]
+
+
 [vars.topic]
 description = "The concrete producer to implement, including its real dispatch path and output record."
 required = true

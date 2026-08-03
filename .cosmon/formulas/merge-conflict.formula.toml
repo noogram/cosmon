@@ -71,6 +71,15 @@ typically after an operator decision or an ADR update.
 """
 id_prefix = "merge"
 
+# Worker faculties this formula's steps require (noogram/cosmon #4 clause 2).
+# Resolving a merge conflict IS version-control surgery driven from a shell —
+# `git rebase`, edit the conflict regions, re-run the gates, commit. A
+# chat-only local adapter has neither, so the dispatch is refused up front
+# instead of producing an empty branch. Vocabulary and provision table:
+# `cosmon_core::adapter_capability`.
+requires_capabilities = ["shell", "vcs"]
+
+
 # Tier 0 — leaf formula, no child nucleation. All work happens in the
 # target worktree; no sibling molecules are spawned.
 

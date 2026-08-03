@@ -811,17 +811,20 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "tackles": summary.tackles,
             "dones": summary.dones,
             "reaps": summary.reaps,
-            "briefless_parked": summary.briefless_parked,
+            "permanently_parked": summary.permanently_parked,
             "teardown_blocked": summary.teardown_blocked,
             "trace": trace_path.display().to_string(),
         });
         println!("{}", serde_json::to_string_pretty(&json_out)?);
     } else {
-        // Surface parked briefless molecules only when non-zero — they are the
-        // exceptional case (an operator has molecules needing a brief restored
-        // or a collapse), so a clean run stays terse (task-20260711-4310).
-        let parked = if summary.briefless_parked > 0 {
-            format!(", {} briefless parked", summary.briefless_parked)
+        // Surface permanently-refused molecules only when non-zero — they are
+        // the exceptional case (an operator has molecules needing a brief
+        // restored, a capable adapter, or a collapse), so a clean run stays
+        // terse (task-20260711-4310). The word is "parked", not "briefless":
+        // the capability gate (noogram/cosmon #4) parks here too, and the
+        // decision trace is where the specific cause is written.
+        let parked = if summary.permanently_parked > 0 {
+            format!(", {} permanently parked", summary.permanently_parked)
         } else {
             String::new()
         };

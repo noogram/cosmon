@@ -86,6 +86,8 @@ pub mod worker;
 #[doc(hidden)]
 pub mod adapter_attribution;
 #[doc(hidden)]
+pub mod adapter_capability;
+#[doc(hidden)]
 pub mod adapter_exit;
 #[doc(hidden)]
 pub mod agent;

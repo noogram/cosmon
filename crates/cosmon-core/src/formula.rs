@@ -42,6 +42,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::adapter_capability::WorkerCapability;
 use crate::id::{FormulaId, MoleculeId};
 
 // ---------------------------------------------------------------------------
@@ -158,6 +159,19 @@ pub enum FormulaError {
         mode: String,
     },
 
+    /// `requires_capabilities` names a token outside the known vocabulary.
+    ///
+    /// This is an error rather than a skipped entry on purpose: a formula
+    /// that silently drops a misspelled requirement is a formula claiming a
+    /// gate it does not enforce, which is worse than no gate at all.
+    #[error("formula declares unknown required capability \"{token}\"; accepted: {accepted}")]
+    UnknownCapability {
+        /// The unrecognised token as written in the TOML source.
+        token: String,
+        /// Comma-separated list of the accepted tokens.
+        accepted: String,
+    },
+
     /// The declared formula tier violates its structural contract.
     #[error("tier violation: {0}")]
     Tier(#[from] TierError),
@@ -248,6 +262,13 @@ struct RawFormula {
     /// Absent defaults to `false` (every agentic formula today).
     #[serde(default)]
     deterministic: bool,
+    /// noogram/cosmon #4 clause 2: faculties this formula's steps require of
+    /// the worker executing them. TOML form:
+    /// `requires_capabilities = ["shell", "vcs"]`. Parsed into
+    /// [`Formula::requires_capabilities`]; an unknown token is a load
+    /// error, never a silent drop.
+    #[serde(default)]
+    requires_capabilities: Vec<String>,
     #[serde(default)]
     steps: Vec<RawStep>,
     #[serde(default)]
@@ -564,6 +585,22 @@ pub struct Formula {
     /// Absent in the TOML source defaults to `false`, so existing formulas
     /// are unaffected.
     pub deterministic: bool,
+    /// Faculties this formula's steps require of the worker that executes
+    /// them (noogram/cosmon #4 clause 2).
+    ///
+    /// A formula whose contract is shell work — run the gate toolchain,
+    /// resolve a merge conflict, execute a producer script — cannot be
+    /// satisfied by a chat-only local adapter, however carefully its prompt
+    /// is worded. Declaring the requirement here lets `cs tackle` refuse the
+    /// dispatch *before* any worktree or pane lands, instead of letting the
+    /// machinery run end to end on a mission that could never satisfy its
+    /// own briefing (the reporter's exact observation).
+    ///
+    /// Absent in the TOML source defaults to empty = dispatchable by any
+    /// adapter, so every existing formula is unaffected. See
+    /// [`crate::adapter_capability`] for the vocabulary and the
+    /// adapter-side provision table.
+    pub requires_capabilities: Vec<WorkerCapability>,
 }
 
 /// A single step within a formula.
@@ -1068,6 +1105,23 @@ impl Formula {
 
         let tier = build_tier(raw.tier)?;
 
+        let requires_capabilities = raw
+            .requires_capabilities
+            .iter()
+            .map(|token| {
+                token
+                    .parse::<WorkerCapability>()
+                    .map_err(|_| FormulaError::UnknownCapability {
+                        token: token.clone(),
+                        accepted: WorkerCapability::ALL
+                            .iter()
+                            .map(|c| c.token())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
         let formula = Formula {
             name,
             version: raw.version,
@@ -1079,6 +1133,7 @@ impl Formula {
             freeze_on_last_step: raw.freeze_on_last_step,
             tier,
             deterministic: raw.deterministic,
+            requires_capabilities,
         };
 
         validate_tier(&formula)?;
@@ -3120,5 +3175,71 @@ output_path = "o.md"
             err,
             FormulaError::MultipleStepKinds { ref kinds, .. } if kinds.contains("query") && kinds.contains("llm")
         ));
+    }
+
+    /// The formula body used by the `requires_capabilities` tests, with
+    /// `{caps}` substituted into the declaration.
+    fn formula_declaring_capabilities(caps: &str) -> String {
+        format!(
+            r#"
+formula = "producer-work"
+version = 1
+description = "."
+requires_capabilities = [{caps}]
+
+[[steps]]
+id = "s"
+title = "."
+description = "."
+"#
+        )
+    }
+
+    #[test]
+    fn requires_capabilities_parses_into_typed_faculties() {
+        let f = Formula::parse(&formula_declaring_capabilities(r#""shell", "vcs""#)).unwrap();
+        assert_eq!(
+            f.requires_capabilities,
+            vec![WorkerCapability::Shell, WorkerCapability::Vcs]
+        );
+    }
+
+    #[test]
+    fn requires_capabilities_defaults_to_empty_so_legacy_formulas_are_unaffected() {
+        // Every formula written before the field exists must stay
+        // dispatchable by every adapter — including the `local` floor that
+        // `cs demo` uses.
+        let f = Formula::parse(
+            r#"
+formula = "legacy"
+version = 1
+description = "."
+
+[[steps]]
+id = "s"
+title = "."
+description = "."
+"#,
+        )
+        .unwrap();
+        assert!(f.requires_capabilities.is_empty());
+    }
+
+    #[test]
+    fn unknown_capability_token_fails_the_load_instead_of_being_dropped() {
+        // A silently-dropped typo would leave a formula claiming a gate it
+        // does not enforce — worse than declaring nothing.
+        let err =
+            Formula::parse(&formula_declaring_capabilities(r#""shell", "shel""#)).unwrap_err();
+        match err {
+            FormulaError::UnknownCapability {
+                ref token,
+                ref accepted,
+            } => {
+                assert_eq!(token, "shel");
+                assert!(accepted.contains("shell"), "must list the vocabulary");
+            }
+            other => panic!("expected UnknownCapability, got {other:?}"),
+        }
     }
 }

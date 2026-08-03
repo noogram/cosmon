@@ -156,6 +156,18 @@ pub struct Args {
     /// COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] =
     /// "claude"` in either config file.
     ///
+    /// # Capability gate (noogram/cosmon #4)
+    ///
+    /// A formula may declare what its steps need of a worker
+    /// (`requires_capabilities = ["shell", "vcs"]`). A *local* adapter
+    /// (`local` / `ollama` / `llama-cpp` / `llama`) is an in-process chat
+    /// loop with no shell, no VCS and no `cs` command, so such a pairing is
+    /// refused with exit code 17 — before any worktree, pane or model
+    /// preflight, and under `--dry-run` too. The molecule stays pending and
+    /// re-tacklable. Re-run with a coding-agent adapter, or set
+    /// `COSMON_SKIP_CAPABILITY_GATE=1` to dispatch anyway. Formulas that
+    /// declare nothing are unaffected on every adapter.
+    ///
     /// Every invocation (with or without the flag) emits an
     /// [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected)
     /// envelope so the cat-test (`jq -c 'select(.type == "adapter_selected")'`)
@@ -691,6 +703,25 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             Ok(triple) => triple,
             Err(e) => return Err(anyhow::anyhow!("{e}")),
         };
+    // Capability-aware formula gate (noogram/cosmon #4 clause 2). The
+    // formula declares what its steps need of a worker
+    // (`requires_capabilities = ["shell", "vcs"]`); refuse here when the
+    // just-resolved adapter cannot provide it.
+    //
+    // Placed at the first point where both halves of the question are
+    // known — the formula was loaded above, the adapter is resolved on the
+    // line before — and deliberately *ahead* of the model chain, the
+    // strong-dispatch ceiling and the Ollama preflight. Same discipline as
+    // the base-branch check at 2b: a cheap, certain, purely-local refusal
+    // must not sit behind an expensive uncertain one, or which refusal the
+    // operator gets depends on which services happen to be up. And no
+    // worktree, pane or paid probe is spent on a dispatch that cannot work,
+    // so the molecule stays pending and re-tacklable with zero cleanup.
+    //
+    // It fires under `--dry-run` too: a dry run is precisely where an
+    // operator wants to learn that this pairing is refused.
+    super::guard::refuse_incapable_adapter_dispatch(&mol, formula.as_ref(), adapter.as_str())?;
+
     // ADR-103: per-Adapter `[adapters.<name>] ownership = "cosmon"`
     // overrides the built-in default — the installation-perimeter
     // escape hatch for TOML-only adapters. Built-in names ignore the

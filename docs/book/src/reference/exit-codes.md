@@ -33,11 +33,18 @@ commands. Errors under `--json` are emitted to `stderr` as
 | `13` | Guard refusal: broker-spawn refusal (a self-referential spawn the Gödel guard forbids). |
 | `14` | Guard refusal: decomposition depth-limit exceeded (the Gödel depth guard). |
 | `15` | Guard refusal: governance tier does not descend (ordinal stratification: a child may not out-rank its parent). |
+| `16` | Guard refusal: briefless dispatch (`cs tackle` on a molecule whose formula's required, default-free variables are missing or blank — a worker would spawn with no Mission). |
+| `17` | Guard refusal: the formula requires worker capabilities the resolved adapter lacks (`requires_capabilities = ["shell", …]` on a chat-only local adapter). Re-run with a coding-agent `--adapter`, or set `COSMON_SKIP_CAPABILITY_GATE=1`. |
 
-Codes `10` to `15` are the **typed CLI guard refusals**: a script can branch
+Codes `10` to `17` are the **typed CLI guard refusals**: a script can branch
 on the specific invariant that fired rather than treating every non-zero
 exit as the same failure. Codes `2` to `3` are the session-carnet guards.
 Any other error falls through to the generic `1`.
+
+`16` and `17` are additionally the **permanent** refusals: unlike the
+others, an identical retry reproduces them exactly, so the resident runtime
+(`cs run`) parks such a molecule rather than re-dispatching it every tick.
+A non-zero `permanently_parked` in the run summary counts them.
 
 ## Example
 

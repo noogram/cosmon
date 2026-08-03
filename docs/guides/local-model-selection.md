@@ -111,6 +111,42 @@ tacklable — nothing was spawned and nothing collapsed. Either
 dispatch anyway (at the risk the preflight exists to prevent), set
 `COSMON_SKIP_ADAPTER_PREFLIGHT=1`.
 
+## Some formulas will not dispatch here at all
+
+Choosing a good model does not make a chat loop into a coding agent. The
+local adapter runs an in-process model loop over a confined tool registry:
+it has **no shell, no git, and no `cs` command**. A formula whose steps
+*are* shell work — run the gate toolchain, execute a producer script,
+resolve a merge conflict — cannot be satisfied here however the prompt is
+worded.
+
+So a formula can say what it needs of its worker:
+
+```toml
+# in <formula>.formula.toml
+requires_capabilities = ["shell", "vcs"]
+```
+
+and `cs tackle` refuses the pairing up front:
+
+```
+cs tackle: refusing dispatch — formula `producer-work` requires worker
+capabilities [shell, vcs] that adapter 'local' does not have. …
+```
+
+Exit code **17**, no worktree, no pane, no model call — the molecule stays
+pending and re-tacklable. Re-run with a coding-agent adapter
+(`--adapter claude`), or set `COSMON_SKIP_CAPABILITY_GATE=1` to dispatch
+anyway if you are deliberately experimenting on the floor.
+
+The vocabulary is `shell`, `vcs`, `cs-cli`. It is opt-in per formula: a
+formula that declares nothing dispatches everywhere it did before, which is
+every formula the quickstart touches. Today every non-local adapter has all
+three and every local one has none, so the gate draws exactly one line —
+chat loop versus coding agent. Details, and why the vocabulary is
+three-valued rather than a `requires_shell` bit, are in
+`crates/cosmon-core/src/adapter_capability.rs`.
+
 ## Provenance
 
 Filed as COSMON #23 by an external tester who ran `cs demo` repeatedly,
@@ -118,3 +154,10 @@ got `qwen3:8b` every time, and concluded the model was hardcoded. The
 resolution chain existed; nothing ever said so. A capability nobody can
 find is, from the user's chair, a capability that does not exist — which
 is why the fix is a flag, a printed line, and this page, not a new knob.
+
+The capability gate above comes from a second report, COSMON #4: a
+shell-shaped mission dispatched to the local floor ran its machinery end to
+end and produced nothing, because *"the worker briefing assumes a full
+coding agent"*. The briefing was made adapter-aware first; the reporter's
+own suggestion — *gate formulas on adapter capabilities* — is what closes
+the rest, because a briefing cannot lend a chat loop a shell.

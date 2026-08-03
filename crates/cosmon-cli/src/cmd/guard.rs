@@ -51,6 +51,15 @@ pub(crate) mod exit_code {
     /// instead of busy-looping its dispatch, task-20260711-4310) and this
     /// CLI emitter cannot drift.
     pub const BRIEFLESS_DISPATCH: i32 = cosmon_core::dispatch_refusal::BRIEFLESS_DISPATCH;
+    /// `GuardError::AdapterLacksCapability` — capability-aware formula gate
+    /// (noogram/cosmon #4 clause 2). Distinct from `BRIEFLESS_DISPATCH`
+    /// because the operator's recovery differs: a briefless molecule needs
+    /// its variables restored, an incapable dispatch needs a different
+    /// `--adapter`. Aliased to the shared cross-crate contract for the same
+    /// reason its sibling is — the resident runtime reads this code to park
+    /// the molecule rather than re-dispatch it every tick.
+    pub const ADAPTER_LACKS_CAPABILITY: i32 =
+        cosmon_core::dispatch_refusal::ADAPTER_LACKS_CAPABILITY;
 }
 
 /// Errors raised by the CLI type-tightening guards.
@@ -203,6 +212,47 @@ pub enum GuardError {
         /// Sorted names of the missing-or-blank required variables.
         missing: Vec<String>,
     },
+
+    /// Capability-aware formula gate (noogram/cosmon #4 clause 2) —
+    /// refusing to dispatch a formula whose steps require faculties the
+    /// resolved adapter does not have.
+    ///
+    /// The reported pathology: a `local` (ADR-100 Direct-API chat loop)
+    /// worker was handed a mission whose contract is shell work. The
+    /// machinery ran end to end and the mission could not satisfy its own
+    /// briefing — no branch, no work product, 65 s of wall clock spent.
+    /// Making the *briefing* adapter-aware (commit `d81b58a`) stopped
+    /// telling a chat model to run cargo; this stops sending it the
+    /// mission at all.
+    ///
+    /// Raised before any worktree, pane or paid probe lands, so the
+    /// molecule stays pending and re-tacklable with zero cleanup — the same
+    /// placement discipline as the base-branch and reviewed-tree checks.
+    #[error(
+        "cs tackle: refusing dispatch — formula `{formula_id}` requires \
+         worker capabilit{} [{}] that adapter '{adapter}' does not have. \
+         A local/chat adapter runs an in-process model loop with no shell, \
+         no VCS and no `cs` command, so this mission could not satisfy its \
+         own briefing. Re-run with a coding-agent adapter \
+         (`cs tackle {mol_id} --adapter claude`), or set \
+         COSMON_SKIP_CAPABILITY_GATE=1 to dispatch anyway. \
+         See noogram/cosmon #4 (capability-aware formula gate).",
+        if missing.len() == 1 { "y" } else { "ies" },
+        missing.join(", ")
+    )]
+    AdapterLacksCapability {
+        /// The molecule that would have been dispatched. A `String`, not a
+        /// `MoleculeId`, for the same reason `BrieflessDispatch` gives: the
+        /// inline id buffer would push `GuardError` past clippy's
+        /// `result_large_err` threshold on the hot dispatch path.
+        mol_id: String,
+        /// The formula whose declared requirements are unmet.
+        formula_id: String,
+        /// The resolved adapter name that lacks them.
+        adapter: String,
+        /// Missing capability tokens, in canonical order.
+        missing: Vec<String>,
+    },
 }
 
 /// Format the sample list for the refusal message.
@@ -237,6 +287,7 @@ impl GuardError {
             GuardError::DepthLimitExceeded { .. } => exit_code::DEPTH_LIMIT_EXCEEDED,
             GuardError::TierDoesNotDescend { .. } => exit_code::TIER_NO_DESCENT,
             GuardError::BrieflessDispatch { .. } => exit_code::BRIEFLESS_DISPATCH,
+            GuardError::AdapterLacksCapability { .. } => exit_code::ADAPTER_LACKS_CAPABILITY,
         }
     }
 }
@@ -356,6 +407,66 @@ pub fn refuse_briefless_dispatch(
         mol_id: mol.id.as_str().to_owned(),
         formula_id: mol.formula_id.as_str().to_owned(),
         missing,
+    })
+}
+
+/// Environment escape hatch for [`refuse_incapable_adapter_dispatch`].
+///
+/// Set to `1` to dispatch anyway. Deliberately an env var rather than a
+/// `cs tackle` flag: the operator who wants this is running an experiment
+/// (driving a shell-shaped formula onto a chat model to see what happens,
+/// which is exactly what the acceptance tests for the local floor do), not
+/// expressing a routine intent that deserves surface area in `cs --help`.
+pub const SKIP_CAPABILITY_GATE_ENV: &str = "COSMON_SKIP_CAPABILITY_GATE";
+
+/// Refuse to dispatch a formula onto an adapter that cannot execute it
+/// (noogram/cosmon #4 clause 2).
+///
+/// A formula declares what its steps need of a worker via
+/// `requires_capabilities = ["shell", "vcs"]`; this asks
+/// [`cosmon_core::adapter_capability::missing_capabilities`] whether the
+/// resolved adapter has them, and refuses when it does not.
+///
+/// The gap this closes is not a prompt-wording gap. `cs tackle` already
+/// hands a local adapter an execution protocol it can satisfy (the briefing
+/// split of commit `d81b58a`), but a formula's *step text* — "run all
+/// gates: build, test, lint, format, doc" — still describes work a chat
+/// loop with no shell cannot do. Wording cannot fix that; only not
+/// dispatching can.
+///
+/// Leniency mirrors the sibling guards: an unloadable formula (`None`) or
+/// one declaring no requirements is skipped rather than blocked. We refuse
+/// only where the formula itself said what it needs.
+///
+/// # Errors
+/// Returns [`GuardError::AdapterLacksCapability`] naming the missing
+/// capabilities, unless [`SKIP_CAPABILITY_GATE_ENV`] is set to `1`.
+pub fn refuse_incapable_adapter_dispatch(
+    mol: &MoleculeData,
+    formula: Option<&cosmon_core::formula::Formula>,
+    adapter: &str,
+) -> Result<(), GuardError> {
+    let Some(formula) = formula else {
+        return Ok(());
+    };
+    if formula.requires_capabilities.is_empty() {
+        return Ok(());
+    }
+    if std::env::var(SKIP_CAPABILITY_GATE_ENV).ok().as_deref() == Some("1") {
+        return Ok(());
+    }
+    let missing = cosmon_core::adapter_capability::missing_capabilities(
+        adapter,
+        &formula.requires_capabilities,
+    );
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(GuardError::AdapterLacksCapability {
+        mol_id: mol.id.as_str().to_owned(),
+        formula_id: mol.formula_id.as_str().to_owned(),
+        adapter: adapter.to_owned(),
+        missing: missing.iter().map(|c| c.token().to_owned()).collect(),
     })
 }
 
@@ -683,6 +794,87 @@ description = "Do it."
         let f = formula_with_gate(false); // declares no [vars]
         let mol = sample_mol(MoleculeStatus::Pending, 0, vec![]);
         refuse_briefless_dispatch(&mol, Some(&f)).unwrap();
+    }
+
+    /// A formula shaped like `producer-work` / `merge-conflict`: its steps
+    /// are shell + VCS work, so it says so.
+    fn formula_requiring_shell_and_vcs() -> Formula {
+        Formula::parse(
+            r#"
+formula = "producer-work"
+version = 1
+description = "test"
+requires_capabilities = ["shell", "vcs"]
+
+[[steps]]
+id = "implement"
+title = "Implement"
+description = "Run ./smoke-dispatch.sh and commit."
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn capability_guard_refuses_a_shell_formula_on_a_chat_only_adapter() {
+        // noogram/cosmon #4 clause 2: the machinery used to run end to end
+        // on a mission the adapter could never satisfy. It must not start.
+        let f = formula_requiring_shell_and_vcs();
+        let mol = sample_mol(MoleculeStatus::Pending, 0, vec![]);
+        for local in ["local", "ollama", "llama-cpp", "llama"] {
+            let err = refuse_incapable_adapter_dispatch(&mol, Some(&f), local).unwrap_err();
+            match &err {
+                GuardError::AdapterLacksCapability {
+                    mol_id,
+                    formula_id,
+                    adapter,
+                    missing,
+                } => {
+                    assert_eq!(mol_id.as_str(), "task-20260414-aaaa");
+                    assert_eq!(formula_id, "task-work");
+                    assert_eq!(adapter, local);
+                    assert_eq!(missing, &vec!["shell".to_string(), "vcs".to_string()]);
+                }
+                other => panic!("expected AdapterLacksCapability, got {other:?}"),
+            }
+            assert_eq!(err.exit_code(), exit_code::ADAPTER_LACKS_CAPABILITY);
+        }
+    }
+
+    #[test]
+    fn capability_guard_names_the_missing_faculties_and_the_way_out() {
+        // The refusal is only useful if the operator can act on it without
+        // reading the source: which capabilities, and what to run instead.
+        let f = formula_requiring_shell_and_vcs();
+        let mol = sample_mol(MoleculeStatus::Pending, 0, vec![]);
+        let msg = refuse_incapable_adapter_dispatch(&mol, Some(&f), "local")
+            .unwrap_err()
+            .to_string();
+        assert!(msg.contains("shell, vcs"), "must name the gap: {msg}");
+        assert!(msg.contains("--adapter claude"), "must name a fix: {msg}");
+        assert!(
+            msg.contains(SKIP_CAPABILITY_GATE_ENV),
+            "must name the override: {msg}"
+        );
+    }
+
+    #[test]
+    fn capability_guard_lets_a_coding_agent_through() {
+        let f = formula_requiring_shell_and_vcs();
+        let mol = sample_mol(MoleculeStatus::Pending, 0, vec![]);
+        for remote in ["claude", "codex", "opencode"] {
+            refuse_incapable_adapter_dispatch(&mol, Some(&f), remote).unwrap();
+        }
+    }
+
+    #[test]
+    fn capability_guard_silent_on_formulas_that_declare_nothing() {
+        // Every formula that predates the field is unaffected — including
+        // on the local floor, which `cs demo` dispatches to by default.
+        let f = formula_with_gate(false); // declares no requires_capabilities
+        let mol = sample_mol(MoleculeStatus::Pending, 0, vec![]);
+        refuse_incapable_adapter_dispatch(&mol, Some(&f), "local").unwrap();
+        refuse_incapable_adapter_dispatch(&mol, None, "local").unwrap();
     }
 
     #[test]
