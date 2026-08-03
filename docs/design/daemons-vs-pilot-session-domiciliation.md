@@ -7,7 +7,7 @@ changement de configuration.
 (diagnostic mesuré, Q1–Q7) ; [ADR-168](../adr/168-a-co-pilot-inherits-the-session-substrate-not-its-delivery-contract.md)
 et ses trois pièces (trace-a-claude, trace-b-codex, probe-log) ; le brief de
 mission co-pilotage multi-provider (stagecraft CMB, 2026-07-24) ;
-`~/.config/cosmon/daemons.toml` (17 daemons) et `patrols.toml` (22 patrouilles) ;
+`~/.config/cosmon/daemons.toml` (21 daemons) et `patrols.toml` (23 patrouilles) ;
 `cs sessions --help` (M5+M6 sur main), `cs run --resident`, `cs presence`,
 `cs whisper`, `cs init` ; ADR-053 (superviseur de daemons), ADR-050 (scheduler) ;
 `docs/guides/pilot-portability.md` et le mécanisme `install.sh --pilot-pack`.
@@ -328,7 +328,7 @@ opérateur écrite.** Avant, on devine ; après, on mesure.
 | # | Molécule | Livrable | Write-set principal | Dépend de |
 |---|---|---|---|---|
 | D1 | **ADR — le test de la corbeille** | ADR qui grave le critère de §1, ses deux rétrodictions et ses falsifiers. Doc-only, aucun octet de CLI. | `docs/adr/` | porte M7 |
-| D2 | **Audit de domiciliation de l'existant** | Passage du test sur les 17 daemons + 22 patrouilles + le résident. Verdict par entrée : *reste*, *descend*, *remonte*. Rapport seul, aucune config modifiée. | `docs/audit/` | D1 |
+| D2 | **Audit de domiciliation de l'existant** | Passage du test sur les 21 daemons + 23 patrouilles + le résident. Verdict par entrée : *reste*, *descend*, *remonte*. Rapport seul, aucune config modifiée. | `docs/audit/` | D1 |
 | D3 | **Re-scoper `cs run --resident` en proposeur** | Le résident publie `ready-queue.jsonl` et n'appelle plus `tackle`/`done`. Test qui échoue d'abord : « le résident ne peut pas dépenser ». | `crates/cosmon-cli/src/cmd/run.rs` | D1 |
 | D4 | **Désarmer le bras collapse de `cs purge`** | `purge` nettoie les fichiers morts ; le collapse d'une molécule non moissonnée exige un geste explicite. Test de régression sur les 4 molécules du 2026-08-03. | `crates/…/cmd/purge.rs` | D1 |
 | D5 | **Pack de transport + installation** | Source de vérité côté cosmon ; `cs sessions hook install` pose le bloc délimité idempotent ; test d'égalité octet-à-octet du corps entre providers. **Dette CLI : `cs help` + `man cs` + parity audit dans le même PR.** | `crates/cosmon-cli/src/cmd/sessions/hook.rs`, assets, `man/`, snapshots | D1 |
