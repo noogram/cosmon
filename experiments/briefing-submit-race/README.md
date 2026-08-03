@@ -37,6 +37,52 @@ where nothing is wrong. The gate therefore accepts a glyph alone or a glyph
 followed by that placeholder, and still rejects a glyph followed by anything
 else — which is the pending briefing it exists to catch.
 
+## What one trial waits for, and for how long
+
+`--settle-s` defaults to **30 s**, not the 4 s this harness started with. A real
+`--busy` trial was measured emptying its composer 23813 ms after the carriage
+return: with a four-second window that trial is recorded as
+`pending_after_settle=True`, which reads as a swallowed submit when what
+actually happened is a pane that had not finished its previous answer yet. A
+window shorter than the slowest accept does not measure the race, it
+manufactures it.
+
+The receipt is watched on its own, shorter deadline (`--ack-deadline-s`, 12 s,
+production's). The two signals are on different clocks — a busy pane empties its
+composer in under a second while `UserPromptSubmit` does not fire until the
+queue drains — so each is polled until its own deadline instead of the loop
+stopping at whichever arrives first.
+
+## The typed receipt column
+
+When `experiments/briefing-receipt-hook` is present, each trial mints a nonce,
+installs the `UserPromptSubmit` receipt hook through an ephemeral
+`claude --settings` overlay (commit 8749887's mechanism, imported rather than
+reimplemented), and records the nonce plus one of three values:
+
+- `ack` — a receipt keyed to *this trial's* nonce exists: the application
+  acknowledged the prompt;
+- `absent` — the hook was installed and wrote no such receipt;
+- `unavailable` — no hook was installed (`--no-receipt`, or the sibling
+  experiment is not in the checkout).
+
+`absent` and `unavailable` are not the same fact and are never folded together:
+the first is evidence about the submit, the second is evidence about nothing.
+The nonce is stamped *after* the `--busy` warm-up prompt, since that prompt goes
+through the same hook and would otherwise claim the receipt.
+
+## The permission-mode x load axis
+
+`--permission-modes` and `--loads` cross the grid with `claude --permission-mode`
+values and with N spinning CPU hogs per trial. Both default to a single cell —
+flag unset, machine as found — so the default run is exactly the grid above;
+they exist because the accepted-submit rate plausibly depends on both and
+neither had ever been varied deliberately.
+
+```sh
+python3 matrix.py ... --permission-modes ,plan,acceptEdits --loads 0,8
+```
+
 Each trial presses submit **exactly once**. That is the point: the production
 retry loop is what makes the phenomenon invisible, so a harness that retried
 would measure the loop instead of the race.

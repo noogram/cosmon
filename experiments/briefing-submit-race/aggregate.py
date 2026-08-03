@@ -85,6 +85,23 @@ def main() -> int:
                 cs.append("—")
         print(f"| {s} | " + " | ".join(cs) + " |")
 
+    # The receipt column, folded per (permission mode x load) cell. `absent`
+    # and `unavailable` are counted apart on purpose: the first is a hook that
+    # stayed silent about a submit, the second is a run that never asked.
+    receipts = defaultdict(lambda: defaultdict(int))
+    for r in ok:
+        key = (r.get("permission_mode", "default"), r.get("load", 0))
+        receipts[key][r.get("receipt", "unavailable")] += 1
+    if receipts:
+        print("\n## Typed receipt per (permission mode x load)\n")
+        print("| mode | load | ack | absent | unavailable |")
+        print("|---|---|---|---|---|")
+        for (mode, hogs), counts in sorted(receipts.items(), key=lambda kv: str(kv[0])):
+            print(
+                f"| {mode} | {hogs} | {counts['ack']} | {counts['absent']} | "
+                f"{counts['unavailable']} |"
+            )
+
     pend_rows = [r for r in ok if r.get("pending_after_settle")]
     print(
         f"\npending trials: {len(pend_rows)}; of those, CR reached the PTY in "

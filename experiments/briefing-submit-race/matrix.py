@@ -19,6 +19,8 @@ One trial:
   5. poll the composer for `settle_s` seconds, recording when it clears;
   6. read the PTY log back: was a `0d` delivered after the bracketed-paste
      terminator?
+  7. when the receipt hook is available, also read the typed receipt: did the
+     application acknowledge a prompt keyed to this trial's nonce?
 
 Each trial appends one JSON line to the results file before the next starts, so
 a machine that sleeps mid-run loses at most the trial in flight.
@@ -36,6 +38,29 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SPY = os.path.join(HERE, "ptyspy.py")
+
+# The receipt prototype lives in the sibling experiment that measured it
+# (`experiments/briefing-receipt-hook`, commit 8749887). It is imported rather
+# than reimplemented so the nonce, the overlay and the receipt filename here are
+# the same artefacts that experiment produced; if it is absent, every trial
+# records `receipt=unavailable` and the rest of the grid is unaffected.
+RECEIPT_DIR_SRC = os.path.join(os.path.dirname(HERE), "briefing-receipt-hook")
+sys.path.insert(0, RECEIPT_DIR_SRC)
+try:
+    import receipt as rcpt  # noqa: E402
+except ImportError:  # pragma: no cover - depends on the checkout's layout
+    rcpt = None
+
+#: The three values of the `receipt` column, and the only three.
+#:
+#: The distinction that matters is `absent` vs `unavailable`: a hook that was
+#: installed and did not fire is evidence about the submit, while a hook that
+#: was never installed is evidence about nothing. Folding both into a falsy
+#: value would let a run with no hook at all read as a run where every submit
+#: went unacknowledged.
+RECEIPT_ACK = "ack"  # a receipt keyed to this trial's nonce exists
+RECEIPT_ABSENT = "absent"  # the hook was installed and wrote no such receipt
+RECEIPT_UNAVAILABLE = "unavailable"  # no hook was installed for this trial
 
 # Bracketed-paste terminator: everything after this in the PTY stream is the
 # separately-sent submit keystroke, not paste payload.
@@ -65,6 +90,38 @@ PASTED_PLACEHOLDER = "Pasted text"
 # (`❯ Try "fix lint errors"...`). An empty composer is therefore no longer a
 # bare glyph, and a readiness gate demanding one waits out its timeout forever.
 COMPOSER_PLACEHOLDER_PREFIX = 'Try "'
+
+
+class CpuLoad:
+    """N spinning processes for the duration of one trial, then killed.
+
+    The load axis exists because the sibling receipt experiment stumbled on the
+    confound by accident: trials that overlapped a `cargo check` lost the submit
+    far more often than trials on an idle machine. An accident is not a
+    measurement, so the load is explicit, per-cell, and off unless asked for.
+    """
+
+    def __init__(self, n: int):
+        self.procs = []
+        for _ in range(max(0, n)):
+            self.procs.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", "while True: pass"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            )
+        if self.procs:
+            atexit.register(self.stop)
+
+    def stop(self):
+        for p in self.procs:
+            try:
+                p.kill()
+                p.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        self.procs = []
 
 
 class Tmux:
@@ -211,11 +268,40 @@ def wait_ready(tm: Tmux, session: str, timeout_s: float) -> bool:
     return False
 
 
-def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int) -> dict:
-    session = f"t{size}_{delay_ms}_{rep}"
+def mode_tag(permission_mode: str) -> str:
+    """A filename-safe abbreviation of a permission mode; `def` when unset."""
+    return "".join(c for c in permission_mode if c.isalnum()) or "def"
+
+
+def install_receipt_hook(args, workdir: str):
+    """Mint the per-trial receipt overlay, or explain why there is none.
+
+    Returns `(receipt_dir, nonce_file, settings_path)` when the hook can be
+    installed and `None` when it cannot — a missing prototype, a missing hook
+    script, or `--no-receipt`. The caller turns `None` into
+    `receipt=unavailable`, never into `absent`.
+    """
+    if args.no_receipt or rcpt is None:
+        return None
+    if not os.path.exists(rcpt.ACK_HOOK):
+        return None
+    receipt_dir = os.path.join(workdir, "receipts")
+    os.makedirs(receipt_dir, exist_ok=True)
+    nonce_file = os.path.join(workdir, "nonce")
+    settings_path = os.path.join(workdir, "overlay.settings.json")
+    rcpt.mint_overlay(settings_path, [rcpt.hook_command(receipt_dir, nonce_file)])
+    return receipt_dir, nonce_file, settings_path
+
+
+def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int,
+          permission_mode: str = "", load: int = 0) -> dict:
+    tag = mode_tag(permission_mode)
+    session = f"t{size}_{delay_ms}_{rep}_{tag}_{load}"
     marker = f"MARKER-{size}-{delay_ms}-{rep}"
     log_path = os.path.join(args.workdir, "logs", f"{session}.log")
     brief_path = os.path.join(args.workdir, f"{session}.txt")
+    trial_dir = os.path.join(args.workdir, "trials", session)
+    os.makedirs(trial_dir, exist_ok=True)
     text = briefing(size, marker)
     with open(brief_path, "w") as fh:
         fh.write(text)
@@ -223,7 +309,31 @@ def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int) -> dict:
     env = {k: v for k, v in os.environ.items() if k not in STRIP_ENV}
     env["TERM"] = "xterm-256color"
 
-    cmd = f"python3 {SPY} {log_path} -- {args.claude_bin}"
+    hook = install_receipt_hook(args, trial_dir)
+    receipt_dir = nonce_file = None
+    claude_argv = args.claude_bin
+    if permission_mode:
+        claude_argv += f" --permission-mode {permission_mode}"
+    if hook is not None:
+        receipt_dir, nonce_file, settings_path = hook
+        claude_argv += f" --settings {settings_path}"
+
+    cmd = f"python3 {SPY} {log_path} -- {claude_argv}"
+    row = {
+        "size_lines": size,
+        "delay_ms": delay_ms,
+        "rep": rep,
+        "permission_mode": permission_mode or "default",
+        "load": load,
+        "session": session,
+        # `unavailable` until a hook is installed *and* consulted; an errored
+        # trial therefore never claims the hook stayed silent.
+        "receipt": RECEIPT_UNAVAILABLE,
+        "receipt_nonce": None,
+        "loadavg_start": os.getloadavg()[0],
+    }
+
+    hogs = CpuLoad(load)
     proc = subprocess.run(
         [
             "tmux",
@@ -246,13 +356,8 @@ def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int) -> dict:
         env=env,
         timeout=30,
     )
-    row = {
-        "size_lines": size,
-        "delay_ms": delay_ms,
-        "rep": rep,
-        "session": session,
-    }
     if proc.returncode != 0:
+        hogs.stop()
         row["error"] = f"new-session failed: {proc.stderr.strip()}"
         return row
 
@@ -279,6 +384,15 @@ def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int) -> dict:
             time.sleep(args.busy_wait_s)
             row["busy"] = True
 
+        nonce = None
+        if nonce_file is not None:
+            # Stamped here and not earlier: the `--busy` warm-up prompt goes
+            # through the same hook, and a nonce published before it would be
+            # acknowledged by that prompt instead of by the briefing under test.
+            nonce = rcpt.mint_nonce()
+            rcpt.stamp_nonce(nonce_file, nonce)
+            row["receipt_nonce"] = nonce
+
         buf = f"b{session}"
         tm.run(["load-buffer", "-b", buf, brief_path])
         tm.run(["send-keys", "-t", session, "C-u"])
@@ -290,22 +404,49 @@ def trial(tm: Tmux, args, delay_ms: int, size: int, rep: int) -> dict:
             tm.run(["send-keys", "-t", session, "-H", "0d"])
 
         # Single-shot: no retry. Poll until the composer clears or we give up.
+        #
+        # The two signals are watched on separate deadlines because they answer
+        # different questions on different clocks: a busy pane queues the paste,
+        # so the composer can empty in under a second while the receipt does not
+        # arrive for several more. Stopping at the first of the two would drop
+        # whichever one is slower on that trial.
         cleared_at = None
-        deadline = time.time() + args.settle_s
+        ack = None
+        ack_at = None
+        settle_deadline = t_cr + args.settle_s
+        ack_deadline = t_cr + args.ack_deadline_s if receipt_dir else t_cr
         last_pane = ""
-        while time.time() < deadline:
-            time.sleep(args.poll_s)
-            last_pane = tm.run(["capture-pane", "-t", session, "-p"]).stdout
-            if not composer_pending(last_pane, marker):
-                cleared_at = time.time()
+        while True:
+            now = time.time()
+            composer_done = cleared_at is not None or now >= settle_deadline
+            ack_done = ack is not None or now >= ack_deadline
+            if composer_done and ack_done:
                 break
+            time.sleep(args.poll_s)
+            if cleared_at is None and time.time() < settle_deadline:
+                last_pane = tm.run(["capture-pane", "-t", session, "-p"]).stdout
+                if not composer_pending(last_pane, marker):
+                    cleared_at = time.time()
+            if receipt_dir is not None and ack is None:
+                ack = rcpt.read_ack(receipt_dir, nonce)
+                if ack is not None:
+                    ack_at = time.time()
+
         row["pending_after_settle"] = cleared_at is None
         row["clear_after_cr_ms"] = (
             None if cleared_at is None else round((cleared_at - t_cr) * 1000)
         )
         row["paste_to_cr_actual_ms"] = round((t_cr - t_paste) * 1000)
         row["pane_tail"] = "\n".join(composer_region(last_pane))[:400]
+        if receipt_dir is not None:
+            row["receipt"] = RECEIPT_ACK if ack is not None else RECEIPT_ABSENT
+            row["ack_after_cr_ms"] = (
+                None if ack_at is None else round((ack_at - t_cr) * 1000)
+            )
+            row["ack_session_id"] = (ack or {}).get("session_id") or None
+        row["loadavg_end"] = os.getloadavg()[0]
     finally:
+        hogs.stop()
         tm.run(["kill-session", "-t", session])
         time.sleep(0.3)
 
@@ -331,7 +472,20 @@ def main() -> int:
     ap.add_argument("--delays", default="0,100,250,500,1000")
     ap.add_argument("--sizes", default="1,12,100,300")
     ap.add_argument("--reps", type=int, default=5)
-    ap.add_argument("--settle-s", type=float, default=4.0)
+    # 30 s, not the 4 s this started with. A real `--busy` trial was measured
+    # emptying its composer 23813 ms after the carriage return, so a four-second
+    # window does not distinguish "the submit was swallowed" from "the submit
+    # was accepted by a pane that had not finished its previous answer" — it
+    # files the second as the first, which is the one reading this harness
+    # exists to rule out.
+    ap.add_argument("--settle-s", type=float, default=30.0)
+    ap.add_argument(
+        "--ack-deadline-s",
+        type=float,
+        default=12.0,
+        help="how long to keep reading for the typed receipt after the submit "
+        "keystroke; production's deadline. Only used when the hook is installed.",
+    )
     ap.add_argument("--poll-s", type=float, default=0.3)
     ap.add_argument("--ready-timeout", type=float, default=60.0)
     ap.add_argument(
@@ -348,6 +502,25 @@ def main() -> int:
         "report pending=True, otherwise the composer detector is vacuous and "
         "the matrix proves nothing.",
     )
+    ap.add_argument(
+        "--no-receipt",
+        action="store_true",
+        help="do not install the UserPromptSubmit receipt hook; every trial "
+        "then records receipt=unavailable.",
+    )
+    ap.add_argument(
+        "--permission-modes",
+        default="",
+        help="comma-separated `claude --permission-mode` values to cross with "
+        "the grid; empty (the default) runs one cell with the flag unset. "
+        "e.g. `--permission-modes ,plan,acceptEdits`.",
+    )
+    ap.add_argument(
+        "--loads",
+        default="0",
+        help="comma-separated CPU-hog counts to cross with the grid, one "
+        "spun-up set per trial; `0` (the default) leaves the machine as found.",
+    )
     args = ap.parse_args()
 
     os.makedirs(os.path.join(args.workdir, "logs"), exist_ok=True)
@@ -357,26 +530,34 @@ def main() -> int:
 
     delays = [int(x) for x in args.delays.split(",") if x]
     sizes = [int(x) for x in args.sizes.split(",") if x]
+    # An empty string is a value here, not an absence: it means "run `claude`
+    # with no --permission-mode flag", which is the default and only cell.
+    modes = args.permission_modes.split(",") if args.permission_modes else [""]
+    loads = [int(x) for x in args.loads.split(",") if x.strip() != ""] or [0]
     tm = Tmux(args.socket)
     tm.kill_server()
 
-    total = len(delays) * len(sizes) * args.reps
+    total = len(delays) * len(sizes) * len(modes) * len(loads) * args.reps
     done = 0
     with open(args.out, "a", buffering=1) as out:
         for rep in range(args.reps):
-            for size in sizes:
-                for delay in delays:
-                    row = trial(tm, args, delay, size, rep)
-                    out.write(json.dumps(row) + "\n")
-                    done += 1
-                    print(
-                        f"[{done}/{total}] size={size} delay={delay} rep={rep} "
-                        f"pending={row.get('pending_after_settle')} "
-                        f"cr_at_pty={row.get('cr_after_paste')} "
-                        f"clear_ms={row.get('clear_after_cr_ms')} "
-                        f"{row.get('error', '')}",
-                        flush=True,
-                    )
+            for mode in modes:
+                for load in loads:
+                    for size in sizes:
+                        for delay in delays:
+                            row = trial(tm, args, delay, size, rep, mode, load)
+                            out.write(json.dumps(row) + "\n")
+                            done += 1
+                            print(
+                                f"[{done}/{total}] size={size} delay={delay} "
+                                f"rep={rep} mode={mode or 'default'} load={load} "
+                                f"pending={row.get('pending_after_settle')} "
+                                f"cr_at_pty={row.get('cr_after_paste')} "
+                                f"receipt={row.get('receipt')} "
+                                f"clear_ms={row.get('clear_after_cr_ms')} "
+                                f"{row.get('error', '')}",
+                                flush=True,
+                            )
     tm.kill_server()
     return 0
 
