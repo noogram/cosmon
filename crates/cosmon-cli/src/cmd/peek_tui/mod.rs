@@ -182,17 +182,30 @@ pub(crate) fn run(ctx: &Context, opts: &TuiOptions) -> anyhow::Result<()> {
 /// configured (os error 6)` error. This preflight gives operators an
 /// actionable message and fails cleanly without touching the terminal.
 fn setup_terminal() -> anyhow::Result<Terminal<CrosstermBackend<io::Stdout>>> {
-    if !io::stdout().is_terminal() {
-        return Err(anyhow::anyhow!(
-            "cs peek requires a TTY on stdout; got a pipe or redirected stream. \
-             Run `cs peek --no-tui` for a non-interactive view, `cs peek --json` \
-             for scripting, or `cs peek --snapshot` for a fixed-width capture."
-        ));
-    }
+    tty_preflight(io::stdout().is_terminal())?;
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+}
+
+/// The preflight rule on its own, with the terminal-ness of stdout supplied
+/// instead of read from the process.
+///
+/// Separated so it can be asserted without side effects. [`setup_terminal`]
+/// cannot: past the check it enables raw mode and enters the alternate screen,
+/// so a test that called it to observe the refusal only observed a refusal
+/// where the *runner's* stdout happened not to be a terminal. On an
+/// interactive bench it took over the operator's terminal instead (issue #43).
+fn tty_preflight(stdout_is_terminal: bool) -> anyhow::Result<()> {
+    if stdout_is_terminal {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "cs peek requires a TTY on stdout; got a pipe or redirected stream. \
+         Run `cs peek --no-tui` for a non-interactive view, `cs peek --json` \
+         for scripting, or `cs peek --snapshot` for a fixed-width capture."
+    ))
 }
 
 fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> anyhow::Result<()> {
@@ -6249,23 +6262,29 @@ mod tests {
         }
     }
 
-    /// Regression: `setup_terminal` must refuse to enter raw mode when stdout
-    /// is not a real TTY. Under `cargo test`, stdout is captured (not a TTY),
-    /// so calling `setup_terminal` should return the preflight error without
-    /// mutating the terminal. Before the preflight, crossterm would fail deep
-    /// inside `enable_raw_mode` with `Device not configured (os error 6)` — a
-    /// cryptic errno that also sometimes left the controlling terminal in an
-    /// inconsistent state on macOS.
+    /// Regression: the setup preflight must refuse raw mode when stdout is not
+    /// a real TTY. Before it existed, crossterm failed deep inside
+    /// `enable_raw_mode` with `Device not configured (os error 6)` — a cryptic
+    /// errno that also sometimes left the controlling terminal inconsistent on
+    /// macOS.
+    ///
+    /// Both rows are asserted through [`super::tty_preflight`], which takes the
+    /// condition as an argument. The old test called `setup_terminal` and
+    /// relied on `cargo test` capturing stdout; run in a live terminal that
+    /// assumption inverted, the preflight passed, and the test proceeded to
+    /// enable raw mode and enter the alternate screen on the operator's own
+    /// terminal (issue #43).
     ///
     /// See `docs/diagnostics/cs-peek-earshot-kill.md` for the investigation.
     #[test]
     fn setup_terminal_refuses_without_tty() {
-        let err = super::setup_terminal().expect_err("must fail without TTY");
+        let err = super::tty_preflight(false).expect_err("must fail without TTY");
         let msg = err.to_string();
         assert!(
             msg.contains("requires a TTY"),
             "expected TTY preflight error, got: {msg}"
         );
+        super::tty_preflight(true).expect("a real TTY on stdout must pass the preflight");
     }
 
     // --- Phase 3 tests: mtime cache, adaptive polling, rows_differ ---

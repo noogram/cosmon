@@ -295,11 +295,28 @@ pub enum Decision {
 /// # Errors
 /// Fails on filesystem I/O errors when persisting the record.
 pub fn ensure_consent() -> anyhow::Result<Option<Decision>> {
+    ensure_consent_where(can_ask_interactively())
+}
+
+/// [`ensure_consent`] with the interactivity of the environment supplied
+/// rather than read from the process's own file descriptors.
+///
+/// This exists because the ambient tty-ness of a `cargo test` process is not
+/// the test author's to choose: piped into a log it is false, run in a live
+/// terminal it is true. A test that called [`ensure_consent`] to exercise the
+/// auto-decline branch therefore asserted about the runner's terminal, not
+/// about the code — and on an interactive bench it printed a real consent
+/// question and blocked on a real read. The condition under test is part of
+/// the fixture, so it is passed in.
+///
+/// # Errors
+/// Fails on filesystem I/O errors when persisting the record.
+fn ensure_consent_where(answerable_here: bool) -> anyhow::Result<Option<Decision>> {
     if load_consent()?.is_some() {
         return Ok(None);
     }
     let recipient = read_recipient();
-    let decision = if can_ask_interactively() {
+    let decision = if answerable_here {
         if prompt_on_tty()? {
             Decision::Accepted
         } else {
@@ -597,7 +614,11 @@ mod tests {
         let pre = ConsentRecord::accepted("age1preset".to_owned());
         save_consent(&pre).expect("preset");
 
-        let outcome = ensure_consent().expect("ensure");
+        // `true` on purpose: the existing record must short-circuit *before*
+        // the question, including where the question would be answerable. A
+        // regression here would prompt, so the assertion has to be made in the
+        // condition that would prompt — injected, never inherited.
+        let outcome = ensure_consent_where(true).expect("ensure");
         assert!(
             outcome.is_none(),
             "ensure_consent must not re-decide when a record exists"
@@ -629,15 +650,24 @@ mod tests {
         assert!(!answerable(false, false), "no terminal at all");
     }
 
+    /// The unanswerable-here branch, with the "here" injected.
+    ///
+    /// This used to call [`ensure_consent`], which reads the *harness's* fds.
+    /// Piped — every CI lane, every bench — those are not terminals and the
+    /// test passed. On a live interactive terminal they are, so the test asked
+    /// the operator a real consent question and blocked reading the answer: at
+    /// `--test-threads=1` it stole the terminal, and under default parallelism
+    /// libtest swallowed the prompt and the run hung forever (issue #43). The
+    /// tty condition is a fixture, so it goes through the seam.
     #[test]
     fn ensure_consent_on_non_tty_stores_declined() {
         let _lock = env_lock();
         let tmp = TempDir::new().expect("tempdir");
         let _g = EnvGuard::set("COSMON_CONFIG_HOME", tmp.path());
 
-        // cargo test runs with stdin attached to a pipe, so is_terminal()
-        // returns false — this branch is exactly what we want to exercise.
-        let outcome = ensure_consent().expect("ensure").expect("decided");
+        let outcome = ensure_consent_where(false)
+            .expect("ensure")
+            .expect("decided");
         assert_eq!(outcome, Decision::SkippedNoTty);
 
         let record = load_consent().expect("load").expect("present");
