@@ -6282,17 +6282,15 @@ fn commit_molecule_artifacts(
     }
 }
 
-/// Find the git repository root from CWD.
+/// Find the git repository this galaxy's work belongs to.
+///
+/// Delegates to [`cosmon_cli::target_repo::resolve`] — the galaxy's `[project]
+/// target_repo` declaration when it has one, the repository containing the
+/// current directory otherwise. Note that in the undeclared case this still
+/// returns the *worktree* path when `cs done` runs from inside
+/// `.worktrees/<mol>/`, which several call sites below rely on.
 fn find_repo_root() -> anyhow::Result<PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!("not in a git repository"));
-    }
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    cosmon_cli::target_repo::resolve()
 }
 
 #[cfg(test)]

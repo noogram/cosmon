@@ -57,6 +57,12 @@ pub mod injection_provenance;
 /// branch cut (`cs tackle`) and the harvest (`cs done`).
 pub mod base_branch;
 
+/// Resolution of a galaxy's target repository — the single place that answers
+/// "which git repository does this galaxy's work land in?", turning a binding
+/// that was implicit-by-cwd into an optional `[project] target_repo`
+/// declaration. Absent, the answer is the pre-existing cwd one, unchanged.
+pub mod target_repo;
+
 /// Shell-side seams for the seal-verification contract (ADR-140 D4, N4):
 /// a real TLC runner and a filesystem verdict cache. The pure decision logic
 /// lives in [`cosmon_core::spore::seal`]; `cs spore run` (N5) wires these in.

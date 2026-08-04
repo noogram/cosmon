@@ -895,6 +895,14 @@ fn generate_config_toml(
          [project]\n\
          project_id = \"{project_id}\"\n\
          {noyau_line}\
+         #\n\
+         # The git repository this galaxy's work lands in. Left unset, it is\n\
+         # whichever repository contains the directory `cs` was fired from —\n\
+         # which is a coincidence, not a declaration, and branches the wrong\n\
+         # repository in silence when the directory is wrong. A relative path\n\
+         # resolves against this galaxy's root; \".\" says the galaxy is its\n\
+         # own repository.\n\
+         # target_repo = \".\"\n\
          \n\
          # ── Worker behavior ───────────────────────────────────────────────\n\
          # What a worker does after completing its molecule.\n\

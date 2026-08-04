@@ -1263,6 +1263,38 @@ pub struct ProjectSection {
     /// remote-discovery behaviour byte for byte (task-20260725-b64f).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trunk_branch: Option<String>,
+
+    /// The git repository this galaxy's work lands in — the explicit answer
+    /// to *"which repository does `cs tackle` branch?"*.
+    ///
+    /// A galaxy and its repository were bound by nothing but coincidence:
+    /// the state resolved by walking up from the current directory to
+    /// `.cosmon/`, the repository by asking git for the nearest `.git` from
+    /// that same directory. Two independent resolutions that happened to
+    /// agree — and, in a nested topology where the deliverable repository
+    /// lives *inside* an orchestration galaxy, deliberately did not, with
+    /// nothing anywhere declaring it.
+    ///
+    /// The cost of the coincidence is silence. A command fired from the wrong
+    /// directory branches the wrong repository, with no error and no warning;
+    /// the work lands elsewhere and is found much later.
+    ///
+    /// Semantics, resolved by the `cosmon_cli::target_repo` module:
+    ///
+    /// * **absent** (the default, and every galaxy that has not opted in) —
+    ///   the repository is the one containing the current directory, exactly
+    ///   as before, byte for byte;
+    /// * **present** — the repository is probed at this path and a path that
+    ///   is not a git working tree is **refused out loud**, never silently
+    ///   replaced by the current directory. A relative value resolves against
+    ///   the galaxy root (the directory holding `.cosmon/`), so the
+    ///   declaration means the same tree from wherever `cs` was fired; `"."`
+    ///   states the merged case — this galaxy *is* its repository.
+    ///
+    /// A leading `~` is refused: a shell expands it and a config file does
+    /// not. Write the absolute path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_repo: Option<String>,
 }
 
 impl ProjectConfig {

@@ -18,7 +18,7 @@ configuration surface without reading cosmon source code.
 
 | Section | Purpose | Required |
 |---------|---------|----------|
-| `[project]` | Project identity (`project_id`) and reference trunk (`trunk_branch`) | **yes** |
+| `[project]` | Project identity (`project_id`), reference trunk (`trunk_branch`), target repository (`target_repo`) | **yes** |
 | `[worker]` | Worker behavior on completion | no |
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
@@ -267,6 +267,62 @@ When set it governs two things:
 It does **not** override a molecule that already carries a base: a molecule
 tackled with `cs tackle --base release/2.0` still merges to `release/2.0`, so
 editing this key never silently retargets work in flight.
+
+## `[project].target_repo` — naming the repository the work lands in
+
+```toml
+[project]
+target_repo = "."          # this galaxy is its own repository
+# target_repo = "deliverable"        # the repo is a subdirectory of the galaxy
+# target_repo = "/srv/client/repo"   # …or somewhere else entirely
+```
+
+Optional, and absent by default. It names the git repository `cs tackle`
+branches, `cs done` merges into, and `cs stitch` and `cs mission` read.
+
+**Why it exists.** Until this key, a galaxy and its repository were bound by
+nothing. Two independent resolutions ran from the same current directory and
+happened to agree:
+
+| Question | Resolver | Answer |
+|---|---|---|
+| Where is the state? | walk up to `.cosmon/` | the galaxy |
+| Where is the repository? | `git rev-parse --show-toplevel` | the nearest `.git` |
+
+Nothing declared that these must be the same tree — and in a **nested
+topology**, where an orchestration galaxy holds a third party's deliverable
+repository in a subdirectory, they deliberately are not. That arrangement
+already worked, by accident, undeclared.
+
+The cost of an undeclared coupling is silence. A `cs tackle` fired from the
+wrong directory branches the wrong repository: no error, no warning, work that
+lands somewhere else and is discovered much later. Same family of failure as a
+guard rail that never speaks.
+
+**Semantics.**
+
+- **Absent** — the repository is the one containing the current directory,
+  exactly as before, byte for byte. Every galaxy that predates the key is
+  unaffected; this is the *v0* behaviour and it is not deprecated.
+- **Present** — the repository is probed at that path. A relative value
+  resolves against the **galaxy root** (the directory holding `.cosmon/`), so
+  the declaration means the same tree from wherever `cs` was fired. `"."` is
+  the merged, one-tree case said out loud.
+- **A declared path that is not a git working tree is refused**, naming the
+  key and the path it resolved to. It never falls back to the current
+  directory: the fallback would restore exactly the silence the declaration
+  exists to remove.
+- **A leading `~` is refused** rather than probed literally. A shell expands
+  the tilde and a config file does not, so `~/repo` would otherwise produce a
+  true message ("not a git repository") about the wrong path. Write the
+  absolute path.
+
+**Known corollary, not yet addressed.** Worktrees are still created at
+`<repo_root>/.worktrees/`, and molecule branches (`feat/mol-*`) still live in
+the target repository. When that repository belongs to a third party, cosmon's
+scaffolding is visible in their tree. Declaring `target_repo` makes this
+*legible* rather than accidental; a separate `worktrees_root` is what would
+make it *movable*. See ADR-170.
 
 ## `config.toml` vs `CLAUDE.md` — overlap and source of truth
 
