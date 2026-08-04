@@ -909,10 +909,12 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
 /// `cs sessions takeover trust` is where that fact is reported.
 pub(crate) fn leases(ctx: &Context) -> anyhow::Result<PilotLeaseStore> {
     let store = PilotLeaseStore::new(state_root(ctx));
-    Ok(match MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))? {
-        Some(v) => store.trusting(std::sync::Arc::new(v)),
-        None => store,
-    })
+    Ok(
+        match MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))? {
+            Some(v) => store.trusting(std::sync::Arc::new(v)),
+            None => store,
+        },
+    )
 }
 
 /// Why `session`'s claim to the primary seat on `mission` at `epoch` would be
@@ -1425,6 +1427,7 @@ pub(crate) fn format_age(now: DateTime<Utc>, heartbeat: DateTime<Utc>) -> String
 mod tests {
     use super::*;
     use cosmon_core::presence::STALE_AFTER;
+    use cosmon_minisign_testkit::Operator;
     use tempfile::tempdir;
 
     fn ctx_for(dir: &Path) -> Context {
@@ -1654,8 +1657,12 @@ mod tests {
     /// guard checks, so a test that wants a primary has to say who granted it.
     /// These M2 tests are about presence, not authority — the helper keeps
     /// their subject unchanged.
-    fn seated_as_primary(ctx: &Context, sid: &str) -> (Option<MoleculeId>, Option<u64>) {
-        let epoch = grant_to(ctx, sid);
+    fn seated_as_primary(
+        ctx: &Context,
+        state: &Path,
+        sid: &str,
+    ) -> (Option<MoleculeId>, Option<u64>) {
+        let epoch = grant_to(ctx, state, sid);
         (Some(mission()), Some(epoch.get()))
     }
 
@@ -1664,10 +1671,9 @@ mod tests {
     /// whom — from a directory scan, with no broker anywhere.
     #[test]
     fn claude_sees_codex_and_codex_sees_claude() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (dir, ctx, state) = lease_world();
 
-        let (mission, epoch) = seated_as_primary(&ctx, "claude-sid");
+        let (mission, epoch) = seated_as_primary(&ctx, &state, "claude-sid");
         ping(
             &ctx,
             PingArgs {
@@ -1696,7 +1702,7 @@ mod tests {
             },
         );
 
-        let seen = PresenceStore::new(dir.path()).scan().unwrap();
+        let seen = PresenceStore::new(&state).scan().unwrap();
         let claude = seen
             .iter()
             .find(|p| p.session_id.as_str() == "claude-sid")
@@ -1724,9 +1730,8 @@ mod tests {
     // operator gestures.
     #[test]
     fn a_bare_heartbeat_does_not_erase_the_seat_it_found() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let (mission, epoch) = seated_as_primary(&ctx, "pilot");
+        let (dir, ctx, state) = lease_world();
+        let (mission, epoch) = seated_as_primary(&ctx, &state, "pilot");
         ping(
             &ctx,
             PingArgs {
@@ -1748,7 +1753,7 @@ mod tests {
             },
         );
 
-        let p = PresenceStore::new(dir.path()).scan().unwrap()[0].clone();
+        let p = PresenceStore::new(&state).scan().unwrap()[0].clone();
         assert!(
             p.role.is_primary(),
             "the heartbeat carried the seat forward"
@@ -1779,9 +1784,8 @@ mod tests {
 
     #[test]
     fn ls_filters_on_role_and_on_the_follows_relation() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let (mission, epoch) = seated_as_primary(&ctx, "primary-sid");
+        let (_dir, ctx, state) = lease_world();
+        let (mission, epoch) = seated_as_primary(&ctx, &state, "primary-sid");
         ping(
             &ctx,
             PingArgs {
@@ -2142,7 +2146,45 @@ mod tests {
         MoleculeId::new("task-20260731-9cf4").unwrap()
     }
 
-    fn grant_to(ctx: &Context, sid: &str) -> LeaseEpoch {
+    /// The human at the keyboard. Since ADR-171 a grant is that human's
+    /// signature, so a lease test needs one; `cosmon-minisign-testkit` holds a
+    /// secret key the shipped tree has no way to use.
+    fn operator() -> &'static Operator {
+        static OP: std::sync::OnceLock<Operator> = std::sync::OnceLock::new();
+        OP.get_or_init(|| Operator::from_seed(23))
+    }
+
+    /// A galaxy laid out the way `leases` expects — `<root>/.cosmon/state` for
+    /// the ledger and `<root>/.cosmon/takeover.pub` for the trust root — so
+    /// these tests resolve the key by the real rule instead of an override.
+    fn lease_world() -> (tempfile::TempDir, Context, PathBuf) {
+        let dir = tempdir().unwrap();
+        let cosmon = dir.path().join(".cosmon");
+        let state = cosmon.join("state");
+        fs::create_dir_all(&state).unwrap();
+        fs::write(cosmon.join("takeover.pub"), operator().public_key_file()).unwrap();
+        let ctx = ctx_for(&state);
+        (dir, ctx, state)
+    }
+
+    /// Sign the transfer that would land next, and return the signature path.
+    fn sign_grant(ctx: &Context, state: &Path, holder: &str, ttl: Option<i64>) -> PathBuf {
+        let epoch = leases(ctx).unwrap().next_epoch(&mission()).unwrap();
+        let challenge = GrantChallenge::new(
+            mission(),
+            SessionId::new(holder.to_owned()).unwrap(),
+            epoch,
+            "test-operator",
+            ttl,
+        )
+        .unwrap();
+        let path = state.join(format!("attest-{epoch}-{holder}.minisig"));
+        fs::write(&path, operator().sign(&challenge.canonical_bytes())).unwrap();
+        path
+    }
+
+    fn grant_to(ctx: &Context, state: &Path, sid: &str) -> LeaseEpoch {
+        let attestation = sign_grant(ctx, state, sid, None);
         run_lease_grant(
             ctx,
             &LeaseGrantArgs {
@@ -2151,10 +2193,16 @@ mod tests {
                 to: Some(sid.to_owned()),
                 ttl: None,
                 granted_by: Some("test-operator".to_owned()),
+                attestation: Some(attestation),
             },
         )
         .unwrap();
-        leases(ctx).unwrap().current(&mission()).unwrap().unwrap().epoch
+        leases(ctx)
+            .unwrap()
+            .current(&mission())
+            .unwrap()
+            .unwrap()
+            .epoch
     }
 
     fn ping_primary(ctx: &Context, sid: &str, epoch: Option<u64>) -> anyhow::Result<()> {
@@ -2185,28 +2233,26 @@ mod tests {
     // the primary seat, however confidently they ask.
     #[test]
     fn the_primary_seat_is_refused_before_any_grant() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (_dir, ctx, state) = lease_world();
         let err = ping_primary(&ctx, "claude-sid", Some(1)).unwrap_err();
         assert!(err.to_string().contains("no lease"), "{err}");
         // And nothing was written — refused before it takes effect.
-        assert!(PresenceStore::new(dir.path()).scan().unwrap().is_empty());
+        assert!(PresenceStore::new(&state).scan().unwrap().is_empty());
     }
 
     #[test]
     fn a_granted_holder_may_take_the_seat_and_a_peer_may_not() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let epoch = grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        let epoch = grant_to(&ctx, &state, "claude-sid");
 
         ping_primary(&ctx, "claude-sid", Some(epoch.get())).unwrap();
-        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Primary);
+        assert_eq!(seat_of(&state, "claude-sid"), PilotRole::Primary);
 
         // PRIMARY-UNIQUE: the concurrent attempt is refused, and leaves no
         // second primary behind.
         let err = ping_primary(&ctx, "codex-sid", Some(epoch.get())).unwrap_err();
         assert!(err.to_string().contains("held by claude-sid"), "{err}");
-        let primaries = PresenceStore::new(dir.path())
+        let primaries = PresenceStore::new(&state)
             .scan()
             .unwrap()
             .into_iter()
@@ -2219,14 +2265,13 @@ mod tests {
     // observed through the surface a pilot actually uses.
     #[test]
     fn the_former_primary_is_demoted_by_its_own_next_heartbeat() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let first = grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        let first = grant_to(&ctx, &state, "claude-sid");
         ping_primary(&ctx, "claude-sid", Some(first.get())).unwrap();
-        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Primary);
+        assert_eq!(seat_of(&state, "claude-sid"), PilotRole::Primary);
 
         // The operator transfers the controls.
-        let second = grant_to(&ctx, "codex-sid");
+        let second = grant_to(&ctx, &state, "codex-sid");
         assert_eq!(second, first.next());
 
         // A bare heartbeat from the old primary — no flags, the hook's ping.
@@ -2241,7 +2286,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(seat_of(dir.path(), "claude-sid"), PilotRole::Copilot);
+        assert_eq!(seat_of(&state, "claude-sid"), PilotRole::Copilot);
 
         // An explicit re-claim at the epoch it used to hold is a refusal.
         let err = ping_primary(&ctx, "claude-sid", Some(first.get())).unwrap_err();
@@ -2250,9 +2295,8 @@ mod tests {
 
     #[test]
     fn a_primary_claim_must_name_a_mission_and_an_epoch() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        grant_to(&ctx, &state, "claude-sid");
 
         let err = run_ping(
             &ctx,
@@ -2274,9 +2318,8 @@ mod tests {
     // verbs, not the store.
     #[test]
     fn a_request_moves_no_authority() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let epoch = grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        let epoch = grant_to(&ctx, &state, "claude-sid");
 
         run_lease_request(
             &ctx,
@@ -2290,7 +2333,7 @@ mod tests {
         .unwrap();
 
         // …and the process dies here. The holder has not moved.
-        let cur = leases(&ctx).current(&mission()).unwrap().unwrap();
+        let cur = leases(&ctx).unwrap().current(&mission()).unwrap().unwrap();
         assert_eq!(cur.holder_session_id.as_str(), "claude-sid");
         assert_eq!(cur.epoch, epoch);
         // The candidate still cannot take the seat.
@@ -2299,9 +2342,8 @@ mod tests {
 
     #[test]
     fn granting_a_request_seats_the_session_it_named() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        grant_to(&ctx, &state, "claude-sid");
         run_lease_request(
             &ctx,
             &LeaseRequestArgs {
@@ -2313,10 +2355,11 @@ mod tests {
         )
         .unwrap();
 
-        let store = leases(&ctx);
+        let store = leases(&ctx).unwrap();
         let pending = store.unanswered_requests(&mission()).unwrap();
         assert_eq!(pending.len(), 1);
 
+        let attestation = sign_grant(&ctx, &state, "codex-sid", None);
         run_lease_grant(
             &ctx,
             &LeaseGrantArgs {
@@ -2325,6 +2368,7 @@ mod tests {
                 to: None,
                 ttl: None,
                 granted_by: Some("test-operator".to_owned()),
+                attestation: Some(attestation),
             },
         )
         .unwrap();
@@ -2334,13 +2378,12 @@ mod tests {
         assert_eq!(cur.request_id.as_ref(), Some(&pending[0].id));
         assert!(store.unanswered_requests(&mission()).unwrap().is_empty());
         ping_primary(&ctx, "codex-sid", Some(cur.epoch.get())).unwrap();
-        assert_eq!(seat_of(dir.path(), "codex-sid"), PilotRole::Primary);
+        assert_eq!(seat_of(&state, "codex-sid"), PilotRole::Primary);
     }
 
     #[test]
     fn granting_an_unknown_request_is_refused_and_writes_nothing() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (_dir, ctx, _state) = lease_world();
         let err = run_lease_grant(
             &ctx,
             &LeaseGrantArgs {
@@ -2349,17 +2392,17 @@ mod tests {
                 to: None,
                 ttl: None,
                 granted_by: None,
+                attestation: None,
             },
         )
         .unwrap_err();
         assert!(err.to_string().contains("no request"), "{err}");
-        assert!(leases(&ctx).current(&mission()).unwrap().is_none());
+        assert!(leases(&ctx).unwrap().current(&mission()).unwrap().is_none());
     }
 
     #[test]
     fn a_grant_with_neither_a_request_nor_a_session_says_so() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (_dir, ctx, _state) = lease_world();
         let err = run_lease_grant(
             &ctx,
             &LeaseGrantArgs {
@@ -2368,6 +2411,7 @@ mod tests {
                 to: None,
                 ttl: None,
                 granted_by: None,
+                attestation: None,
             },
         )
         .unwrap_err();
@@ -2378,12 +2422,11 @@ mod tests {
     // disk is enough to reconstruct who is PRIMARY, with `cat` and `jq`.
     #[test]
     fn the_authority_history_is_readable_on_disk() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        grant_to(&ctx, "claude-sid");
-        grant_to(&ctx, "codex-sid");
+        let (_dir, ctx, state) = lease_world();
+        grant_to(&ctx, &state, "claude-sid");
+        grant_to(&ctx, &state, "codex-sid");
 
-        let path = leases(&ctx).grants_path(&mission());
+        let path = leases(&ctx).unwrap().grants_path(&mission());
         let text = fs::read_to_string(&path).unwrap();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 2, "one line per grant, oldest first");
@@ -2396,7 +2439,10 @@ mod tests {
         assert_eq!(lines[1].contains("codex-sid"), true);
 
         // A reader with no memory recomputes the same head.
-        let fresh = PilotLeaseStore::new(dir.path());
+        let fresh = PilotLeaseStore::new(&state).trusting(std::sync::Arc::new(
+            MinisignOperatorVerifier::from_public_key_text(&operator().public_key_file(), "test")
+                .unwrap(),
+        ));
         assert_eq!(
             fresh
                 .current(&mission())
@@ -2411,9 +2457,8 @@ mod tests {
     // A lease is per-mission: holding one does not seat you on another.
     #[test]
     fn authority_on_one_mission_is_not_authority_on_another() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        let epoch = grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        let epoch = grant_to(&ctx, &state, "claude-sid");
         let other = MoleculeId::new("task-20260731-0c2d").unwrap();
         let err = run_ping(
             &ctx,
@@ -2432,17 +2477,20 @@ mod tests {
 
     #[test]
     fn an_expired_lease_stops_seating_its_holder() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (_dir, ctx, state) = lease_world();
+        // A zero ttl is over on arrival: `is_valid_at` is `now < deadline`.
+        // (A negative one is refused outright — the canonical challenge has no
+        // encoding for a lease that expired before it was granted.)
+        let attestation = sign_grant(&ctx, &state, "claude-sid", Some(0));
         run_lease_grant(
             &ctx,
             &LeaseGrantArgs {
                 mission: mission(),
                 request: None,
                 to: Some("claude-sid".to_owned()),
-                // Already over by the time the guard reads it.
-                ttl: Some(-1),
+                ttl: Some(0),
                 granted_by: Some("test-operator".to_owned()),
+                attestation: Some(attestation),
             },
         )
         .unwrap();
@@ -2452,14 +2500,13 @@ mod tests {
 
     #[test]
     fn show_runs_on_a_mission_with_and_without_a_lease() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
+        let (_dir, ctx, state) = lease_world();
         let args = LeaseShowArgs {
             mission: mission(),
             history: true,
         };
         run_lease_show(&ctx, &args).unwrap();
-        grant_to(&ctx, "claude-sid");
+        grant_to(&ctx, &state, "claude-sid");
         run_lease_show(&ctx, &args).unwrap();
     }
 
@@ -2467,9 +2514,8 @@ mod tests {
     // message never moves authority, and a grant never delivers a message.
     #[test]
     fn the_lease_and_the_mailbox_do_not_touch() {
-        let dir = tempdir().unwrap();
-        let ctx = ctx_for(dir.path());
-        grant_to(&ctx, "claude-sid");
+        let (_dir, ctx, state) = lease_world();
+        grant_to(&ctx, &state, "claude-sid");
         run_send(
             &ctx,
             &SendArgs {
@@ -2483,16 +2529,17 @@ mod tests {
 
         // The message is in the inbox; the ledger has exactly one grant and
         // the holder is unchanged.
-        let mb = PilotMailbox::new(dir.path());
+        let mb = PilotMailbox::new(&state);
         assert_eq!(
             mb.pending(&SessionId::new("claude-sid").unwrap(), Utc::now())
                 .unwrap()
                 .len(),
             1
         );
-        assert_eq!(leases(&ctx).grants(&mission()).unwrap().len(), 1);
+        assert_eq!(leases(&ctx).unwrap().grants(&mission()).unwrap().len(), 1);
         assert_eq!(
             leases(&ctx)
+                .unwrap()
                 .current(&mission())
                 .unwrap()
                 .unwrap()

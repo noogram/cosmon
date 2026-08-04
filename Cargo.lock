@@ -921,8 +921,6 @@ dependencies = [
  "ansi-to-tui 7.0.0",
  "anyhow",
  "axum",
- "base64",
- "blake2",
  "chrono",
  "clap",
  "clap-markdown",
@@ -937,6 +935,7 @@ dependencies = [
  "cosmon-filestore",
  "cosmon-graph",
  "cosmon-hash",
+ "cosmon-minisign-testkit",
  "cosmon-notary",
  "cosmon-observability",
  "cosmon-ops-tools",
@@ -958,7 +957,6 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "dirs",
- "ed25519-dalek",
  "fs2",
  "globset",
  "ignore",
@@ -1191,6 +1189,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "cosmon-minisign-testkit"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2",
+ "ed25519-dalek",
 ]
 
 [[package]]

@@ -848,7 +848,9 @@ mod tests {
     #[test]
     fn the_challenge_of_a_grant_names_that_grant_and_no_other() {
         let lease = lease_held_by("claude", LeaseEpoch::first());
-        let c = lease.challenge().expect("a lease rebuilds its own challenge");
+        let c = lease
+            .challenge()
+            .expect("a lease rebuilds its own challenge");
         assert_eq!(c.mission_id, lease.mission_id);
         assert_eq!(c.holder_session_id, lease.holder_session_id);
         assert_eq!(c.epoch, lease.epoch);
@@ -866,10 +868,7 @@ mod tests {
             t0(),
             Some(t0() + Duration::seconds(900)),
         );
-        assert_eq!(
-            lease.challenge().expect("challenge").ttl_seconds,
-            Some(900)
-        );
+        assert_eq!(lease.challenge().expect("challenge").ttl_seconds, Some(900));
     }
 
     #[test]

@@ -94,7 +94,9 @@ pub enum ChallengeError {
     /// The operator name held a character that would break the line-oriented
     /// encoding. A newline in this field would let a caller append lines of
     /// its own to the signed text.
-    #[error("granted_by {found:?} holds a control character — it would forge a line of the challenge")]
+    #[error(
+        "granted_by {found:?} holds a control character — it would forge a line of the challenge"
+    )]
     OperatorNameNotOneLine {
         /// The rejected name, quoted so the offending byte is visible.
         found: String,
@@ -471,10 +473,7 @@ mod tests {
             None,
         )
         .expect_err("a newline in granted_by must be refused");
-        assert!(matches!(
-            err,
-            ChallengeError::OperatorNameNotOneLine { .. }
-        ));
+        assert!(matches!(err, ChallengeError::OperatorNameNotOneLine { .. }));
     }
 
     #[test]

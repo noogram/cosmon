@@ -55,8 +55,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use cosmon_core::error::CosmonError;
 use cosmon_core::id::{MoleculeId, SessionId};
-use cosmon_core::paths::CosmonPath;
 use cosmon_core::operator_attestation::{AttestationError, OperatorGestureVerifier, OperatorKeyId};
+use cosmon_core::paths::CosmonPath;
 use cosmon_core::pilot_lease::{
     authorize, LeaseDecision, LeaseEpoch, LeaseRequest, PilotLease, RequestId,
 };

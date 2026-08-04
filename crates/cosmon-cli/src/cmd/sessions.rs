@@ -65,8 +65,8 @@ use chrono::{DateTime, Utc};
 use cosmon_core::id::{MoleculeId, SessionId};
 use cosmon_core::operator_attestation::{GrantChallenge, OperatorGestureVerifier};
 use cosmon_core::pilot_lease::{LeaseDecision, LeaseEpoch, RefusalReason, RequestId};
-use cosmon_filestore::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
 use cosmon_core::presence::Presence;
+use cosmon_filestore::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
 use cosmon_pilot_checkpoint::{
     compare, CheckpointStore, Claim, EvidenceRef, MissionId, PilotCheckpoint, Scope,
     SessionId as CheckpointSessionId, Stance,
@@ -1784,10 +1784,10 @@ fn run_takeover_show(ctx: &Context, args: &TakeoverShowArgs) -> anyhow::Result<(
                 by = l.granted_by,
                 at = l.granted_at,
                 verdict = match &g.verdict {
-                    Ok(()) => l.attestation.as_ref().map_or_else(
-                        String::new,
-                        |a| format!(" — signed by {}", a.key_id),
-                    ),
+                    Ok(()) => l
+                        .attestation
+                        .as_ref()
+                        .map_or_else(String::new, |a| format!(" — signed by {}", a.key_id),),
                     Err(e) => format!(" — NOT AN OPERATOR GESTURE: {e}"),
                 },
             );
@@ -1958,8 +1958,7 @@ fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result
         Some(raw) => Some(LeaseEpoch::new(raw)?),
         None => None,
     };
-    let decision =
-        presence::leases(ctx)?.authorize(&args.mission, Utc::now(), &session, epoch)?;
+    let decision = presence::leases(ctx)?.authorize(&args.mission, Utc::now(), &session, epoch)?;
 
     if ctx.json {
         println!("{}", serde_json::to_string(&decision)?);

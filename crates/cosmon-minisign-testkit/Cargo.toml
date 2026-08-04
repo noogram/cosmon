@@ -1,0 +1,16 @@
+[package]
+name = "cosmon-minisign-testkit"
+publish = false
+version = "0.1.0"
+edition = "2021"
+rust-version.workspace = true
+license = "AGPL-3.0-only"
+description = "Test-only minisign signer — the human operator, in a test harness (ADR-171)"
+
+[dependencies]
+base64 = { workspace = true }
+blake2 = { workspace = true }
+ed25519-dalek = { workspace = true }
+
+[lints]
+workspace = true

@@ -18,12 +18,10 @@
 //! - **the three verdicts** — `drift` exits 0 / 1 / 2, and a missing checkpoint
 //!   is 2, never 0.
 
-mod support;
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use support::operator::Operator;
+use cosmon_minisign_testkit::Operator;
 
 const MISSION: &str = "task-20260731-e4d0";
 const CODEX_NATIVE: &str = "0198cccc-2222-4000-8000-000000000001";

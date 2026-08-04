@@ -29,12 +29,10 @@
 //! the agent, which is exactly the failure it exists to catch. The others
 //! cover the write-time and canonical-bytes halves.
 
-mod support;
-
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use support::operator::Operator;
+use cosmon_minisign_testkit::Operator;
 
 const MISSION: &str = "task-20260731-e4d0";
 const BENEFICIARY: &str = "agent-that-wants-the-seat";
@@ -88,7 +86,16 @@ impl World {
 
     /// The bytes the operator would have to sign for this transfer.
     fn challenge(&self, holder: &str, by: &str) -> String {
-        let out = self.cs(&["takeover", "challenge", "--mission", MISSION, "--to", holder, "--by", by]);
+        let out = self.cs(&[
+            "takeover",
+            "challenge",
+            "--mission",
+            MISSION,
+            "--to",
+            holder,
+            "--by",
+            by,
+        ]);
         assert!(
             out.status.success(),
             "challenge failed:\n{}\n{}",
@@ -269,11 +276,16 @@ fn an_operator_signature_cannot_be_replayed_onto_the_next_epoch() {
     let w = world();
     let challenge = w.challenge("claude-primary", "emmanuel");
     let sig = w.write_sig("epoch1.minisig", &w.operator.sign(challenge.as_bytes()));
-    assert!(grant(&w, "claude-primary", "emmanuel", &sig).status.success());
+    assert!(grant(&w, "claude-primary", "emmanuel", &sig)
+        .status
+        .success());
 
     // Same signature, now presented for epoch 2 and for a different holder.
     let out = grant(&w, BENEFICIARY, "emmanuel", &sig);
-    assert!(!out.status.success(), "a replayed signature must be refused");
+    assert!(
+        !out.status.success(),
+        "a replayed signature must be refused"
+    );
     assert!(!w.seats(BENEFICIARY, "2"));
     assert!(
         w.seats("claude-primary", "1"),
@@ -289,7 +301,10 @@ fn a_signature_for_one_pilot_does_not_seat_a_different_one() {
     let sig = w.write_sig("for-claude.minisig", &w.operator.sign(challenge.as_bytes()));
 
     let out = grant(&w, BENEFICIARY, "emmanuel", &sig);
-    assert!(!out.status.success(), "the holder is inside the signed bytes");
+    assert!(
+        !out.status.success(),
+        "the holder is inside the signed bytes"
+    );
     assert!(!w.seats(BENEFICIARY, "1"));
 }
 
@@ -299,7 +314,10 @@ fn a_signature_for_one_pilot_does_not_seat_a_different_one() {
 fn the_operator_name_is_covered_by_the_signature() {
     let w = world();
     let challenge = w.challenge("claude-primary", "emmanuel");
-    let sig = w.write_sig("by-emmanuel.minisig", &w.operator.sign(challenge.as_bytes()));
+    let sig = w.write_sig(
+        "by-emmanuel.minisig",
+        &w.operator.sign(challenge.as_bytes()),
+    );
 
     let out = grant(&w, "claude-primary", "somebody-else", &sig);
     assert!(
@@ -334,7 +352,9 @@ fn removing_the_pinned_key_refuses_grants_rather_than_waving_them_through() {
     let w = world();
     let challenge = w.challenge("claude-primary", "emmanuel");
     let sig = w.write_sig("ok.minisig", &w.operator.sign(challenge.as_bytes()));
-    assert!(grant(&w, "claude-primary", "emmanuel", &sig).status.success());
+    assert!(grant(&w, "claude-primary", "emmanuel", &sig)
+        .status
+        .success());
 
     std::fs::remove_file(&w.pubkey).expect("the agent deletes the trust root");
     // `--config` still points at the same state; only the key is gone.
@@ -344,8 +364,15 @@ fn removing_the_pinned_key_refuses_grants_rather_than_waving_them_through() {
         .arg("--config")
         .arg(&w.state)
         .args([
-            "sessions", "takeover", "check", "--mission", MISSION, "--session",
-            "claude-primary", "--epoch", "1",
+            "sessions",
+            "takeover",
+            "check",
+            "--mission",
+            MISSION,
+            "--session",
+            "claude-primary",
+            "--epoch",
+            "1",
         ]);
     let out = cmd.output().expect("spawn cs");
     assert!(
@@ -394,9 +421,11 @@ fn the_shipped_tree_owns_no_signing_path_for_the_operator_key() {
         if path.extension().is_none_or(|e| e != "rs") {
             return;
         }
-        // The test harness is where the operator lives; that is the design.
+        // Two places are allowed to hold a signer, and both are structural
+        // rather than conventional: the test harness, and the `publish = false`
+        // testkit crate that only ever appears in `[dev-dependencies]`.
         let as_str = path.display().to_string();
-        if as_str.contains("/tests/") {
+        if as_str.contains("/tests/") || as_str.contains("cosmon-minisign-testkit") {
             return;
         }
         let Ok(body) = std::fs::read_to_string(path) else {

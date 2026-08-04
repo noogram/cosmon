@@ -67,10 +67,7 @@ impl MinisignOperatorVerifier {
     ) -> Result<Self, CosmonError> {
         let source = source.into();
         let key = MinisignPublicKey::parse(text).map_err(|e| CosmonError::StateStore {
-            reason: format!(
-                "{} is not a minisign public key: {e}",
-                source.display()
-            ),
+            reason: format!("{} is not a minisign public key: {e}", source.display()),
         })?;
         Ok(Self { key, source })
     }
@@ -122,7 +119,9 @@ impl MinisignOperatorVerifier {
     /// # Errors
     ///
     /// As [`Self::resolve`].
-    pub fn resolve_for_state_root(state_root: impl AsRef<Path>) -> Result<Option<Self>, CosmonError> {
+    pub fn resolve_for_state_root(
+        state_root: impl AsRef<Path>,
+    ) -> Result<Option<Self>, CosmonError> {
         let galaxy_root = state_root
             .as_ref()
             .parent()
@@ -155,9 +154,7 @@ impl OperatorGestureVerifier for MinisignOperatorVerifier {
         }
         minisign::verify(&self.key, &challenge.canonical_bytes(), &parsed).map_err(|e| match e {
             minisign::MinisignError::BadSignature => AttestationError::DoesNotCoverTransfer,
-            minisign::MinisignError::BadGlobalSignature => {
-                AttestationError::TrustedCommentUnsigned
-            }
+            minisign::MinisignError::BadGlobalSignature => AttestationError::TrustedCommentUnsigned,
             other => AttestationError::Malformed(other.to_string()),
         })
     }

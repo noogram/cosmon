@@ -291,7 +291,10 @@ pub fn verify(
     global_message.extend_from_slice(signature.trusted_comment.as_bytes());
     public_key
         .key
-        .verify(&global_message, &Signature::from_bytes(&signature.global_signature))
+        .verify(
+            &global_message,
+            &Signature::from_bytes(&signature.global_signature),
+        )
         .map_err(|_| MinisignError::BadGlobalSignature)
 }
 
@@ -400,7 +403,10 @@ mod tests {
         let original: Vec<&str> = SIGNATURE.lines().collect();
         assert_eq!(parsed.signature_line(), original[1]);
         assert_eq!(parsed.global_signature_line(), original[3]);
-        assert_eq!(parsed.untrusted_comment, "signature from minisign secret key");
+        assert_eq!(
+            parsed.untrusted_comment,
+            "signature from minisign secret key"
+        );
         assert_eq!(parsed.trusted_comment, "cosmon test");
     }
 
