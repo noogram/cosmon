@@ -202,6 +202,63 @@ pub struct AdapterAttribution {
     pub realized: Realized,
 }
 
+/// The realized-axis accumulators of one fold, grouped so an attempt boundary
+/// resets them as a unit.
+///
+/// They were six loose `let mut`s, reset field-by-field at two boundaries.
+/// That shape is one forgotten line away from a stale accumulator surviving a
+/// re-tackle — which is exactly the `codex/gpt-5 ~> opus` fiction the F-02
+/// scoping exists to prevent. [`Self::start_attempt`] makes "a new attempt
+/// discards the previous one's evidence" a single statement.
+#[derive(Default)]
+struct RealizedWalk {
+    /// The realized-model trajectory, consecutive duplicates collapsed.
+    observed: Vec<String>,
+    /// The algorithmic provenance of the current attempt (task-20260729-7dd4).
+    provenance: Option<crate::algorithmic_provenance::AlgorithmicProvenance>,
+    /// Positive evidence the observation seam is broken (task-20260727-3f46).
+    unobservable: bool,
+    /// Whether the molecule completed during this attempt.
+    ran_to_completion: bool,
+}
+
+impl RealizedWalk {
+    /// Begin a new attempt: every realized-axis fact learned about the previous
+    /// one is discarded, because none of it describes this one.
+    fn start_attempt(&mut self) {
+        *self = Self::default();
+    }
+}
+
+/// Does an observation-family event belong to the attempt currently being
+/// folded? (delib-20260718-c70e, F-02.)
+///
+/// **Fail-closed on ambiguity** (round-3): the adapter must match, and once a
+/// worker boundary exists for this attempt an unscoped legacy line
+/// (`worker_id = None`) is rejected — it could belong to ANY attempt. Such a
+/// line folds only on a pure-legacy log that never recorded a `WorkerSpawned`,
+/// where there is nothing to scope against.
+///
+/// Shared by [`EventV2::ModelObserved`] and
+/// [`EventV2::ModelObservationUnavailable`] so the two can never drift: an
+/// observation and the finding that contradicts it must agree on which attempt
+/// they describe.
+fn belongs_to_current_attempt(
+    adapter_name: &str,
+    worker_id: Option<&crate::id::WorkerId>,
+    current_adapter: Option<&str>,
+    current_worker: Option<&crate::id::WorkerId>,
+) -> bool {
+    if current_adapter != Some(adapter_name) {
+        return false;
+    }
+    match (worker_id, current_worker) {
+        (Some(obs), Some(cur)) => obs == cur,
+        (None, Some(_)) => false,
+        _ => true,
+    }
+}
+
 /// Compact, honest label for the origin of an adapter selection — the
 /// display-side projection of [`AdapterSelectionSource`]'s variant.
 ///
@@ -402,18 +459,51 @@ impl AdapterAttribution {
     where
         I: IntoIterator<Item = &'a EventV2>,
     {
+        Self::fold_with_provenance(events).0
+    }
+
+    /// [`Self::fold`] plus the **algorithmic provenance** of the current
+    /// attempt (task-20260729-7dd4) — what is known about the *method* that
+    /// produced the conclusion, beyond the name of the model.
+    ///
+    /// One pass, one scoping implementation: the provenance rides
+    /// [`EventV2::ModelObserved`], so it is subject to the exact same
+    /// per-attempt guard as the realized id and cannot drift from it. The
+    /// **last** in-scope observation wins — a trajectory's later turns carry
+    /// the same dispatch-level record, and a quota fallback that changed the
+    /// realized model may also have changed what is disclosable about it.
+    ///
+    /// `None` means *no in-scope observation carried a record* — either a
+    /// pre-task-20260729-7dd4 line or an emitter that never built one. It is an
+    /// absence, not a disclosure; a reader must not read it as "nothing was
+    /// disclosable", which is what the record's own
+    /// [`Disclosure`](crate::algorithmic_provenance::Disclosure) fields say
+    /// when a producer looked and found nothing.
+    ///
+    /// It is returned **beside** [`AdapterAttribution`] rather than as a field
+    /// of it: the attribution is a `Eq` display value keyed on by several
+    /// consumers, and the provenance carries `f64` decoding parameters, which
+    /// have no total equality. Bolting it on would trade a widely-used trait
+    /// for a field only an audit reads.
+    #[must_use]
+    pub fn fold_with_provenance<'a, I>(
+        events: I,
+    ) -> (
+        Self,
+        Option<crate::algorithmic_provenance::AlgorithmicProvenance>,
+    )
+    where
+        I: IntoIterator<Item = &'a EventV2>,
+    {
         let mut out = Self::default();
-        // Realized axis — accumulated disjointly from the intention fields, and
-        // reset at every attempt boundary so only the last attempt survives.
-        let mut observed: Vec<String> = Vec::new();
-        let mut ran_to_completion = false;
+        // The realized axis — accumulated disjointly from the intention fields
+        // and reset wholesale at every attempt boundary, so only the last
+        // attempt survives the fold.
+        let mut walk = RealizedWalk::default();
+        // Tracked but deliberately never consulted (see the resolution below):
+        // neither an exit nor a dispatch proves anything about which model ran.
         let mut worker_exited = false;
         let mut dispatched = false;
-        // Positive evidence that the observation seam is broken for *this*
-        // attempt (task-20260727-3f46). Cleared at every attempt boundary
-        // alongside `observed`, so a re-tackle under a fixed configuration is
-        // never tainted by the previous attempt's finding.
-        let mut unobservable = false;
         // The current attempt's scope keys — an observation is folded only when
         // it matches these (F-02). `current_adapter` also decides `Silent` vs
         // `Unknown` at resolution (F-05, via `model_report_capability`).
@@ -430,10 +520,7 @@ impl AdapterAttribution {
                     out.adapter_source = Some(AdapterSource::from_event(selection_source));
                     // New attempt: discard any realized state from the prior run.
                     current_adapter = Some(adapter_name.clone());
-                    observed.clear();
-                    unobservable = false;
-                    ran_to_completion = false;
-                    worker_exited = false;
+                    walk.start_attempt();
                     dispatched = true;
                 }
                 EventV2::WorkerSpawned {
@@ -448,10 +535,7 @@ impl AdapterAttribution {
                     if !adapter_name.is_empty() {
                         current_adapter = Some(adapter_name.clone());
                     }
-                    observed.clear();
-                    unobservable = false;
-                    ran_to_completion = false;
-                    worker_exited = false;
+                    walk.start_attempt();
                     dispatched = true;
                 }
                 EventV2::ModelSelected {
@@ -466,30 +550,29 @@ impl AdapterAttribution {
                     worker_id,
                     adapter_name,
                     model,
+                    provenance: observed_provenance,
                     ..
                 } => {
-                    // Scope guard (F-02): reject any observation that does not
-                    // belong to the current attempt — wrong adapter, or a worker
-                    // other than the one currently spawned. Fail-closed on
-                    // ambiguity (round-3): once a worker boundary exists for
-                    // this attempt, an unscoped legacy line (`worker_id=None`)
-                    // could belong to ANY attempt, so it is rejected — it may
-                    // only fold on a pure-legacy log that never recorded a
-                    // `WorkerSpawned` (nothing to scope against).
-                    if current_adapter.as_deref() != Some(adapter_name.as_str()) {
+                    // Scope guard (F-02) — see `belongs_to_current_attempt`.
+                    if !belongs_to_current_attempt(
+                        adapter_name,
+                        worker_id.as_ref(),
+                        current_adapter.as_deref(),
+                        current_worker.as_ref(),
+                    ) {
                         continue;
-                    }
-                    match (worker_id.as_ref(), current_worker.as_ref()) {
-                        (Some(obs_w), Some(cur_w)) if obs_w != cur_w => continue,
-                        (None, Some(_)) => continue,
-                        _ => {}
                     }
                     // Realized trajectory: collapse consecutive duplicates so a
                     // stable session is one element and a quota fallback is two.
                     // This arm names ONLY the realized accumulator — never the
                     // intention fields — so no-clobber is structural.
-                    if observed.last() != Some(model) {
-                        observed.push(model.clone());
+                    if walk.observed.last() != Some(model) {
+                        walk.observed.push(model.clone());
+                    }
+                    // Last in-scope record wins. A line that carries none does
+                    // NOT erase an earlier one: silence is not a retraction.
+                    if let Some(p) = observed_provenance {
+                        walk.provenance = Some(p.clone());
                     }
                 }
                 EventV2::ModelObservationUnavailable {
@@ -500,18 +583,18 @@ impl AdapterAttribution {
                     // Same fail-closed attempt scoping as `ModelObserved`: a
                     // finding from another adapter or another worker says
                     // nothing about this attempt's seam.
-                    if current_adapter.as_deref() != Some(adapter_name.as_str()) {
+                    if !belongs_to_current_attempt(
+                        adapter_name,
+                        worker_id.as_ref(),
+                        current_adapter.as_deref(),
+                        current_worker.as_ref(),
+                    ) {
                         continue;
                     }
-                    match (worker_id.as_ref(), current_worker.as_ref()) {
-                        (Some(obs_w), Some(cur_w)) if obs_w != cur_w => continue,
-                        (None, Some(_)) => continue,
-                        _ => {}
-                    }
-                    unobservable = true;
+                    walk.unobservable = true;
                 }
                 EventV2::MoleculeCompleted { .. } => {
-                    ran_to_completion = true;
+                    walk.ran_to_completion = true;
                 }
                 EventV2::WorkerExited { .. } => {
                     worker_exited = true;
@@ -529,13 +612,13 @@ impl AdapterAttribution {
         let _ = (worker_exited, dispatched);
         out.realized = resolve_realized(
             RealizedAccumulators {
-                observed,
-                unobservable,
-                ran_to_completion,
+                observed: walk.observed,
+                unobservable: walk.unobservable,
+                ran_to_completion: walk.ran_to_completion,
             },
             out.adapter.as_deref(),
         );
-        out
+        (out, walk.provenance)
     }
 
     /// Promote a folded [`Realized::Unknown`] to [`Realized::Pending`] when a
@@ -799,6 +882,7 @@ mod tests {
             adapter_name: adapter.to_string(),
             model: model.to_string(),
             observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,
+            provenance: None,
             observed_at: Utc::now(),
         }
     }

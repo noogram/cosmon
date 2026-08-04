@@ -1149,7 +1149,7 @@ impl Provider for OpenAIProvider {
         // (`OpenAiError::ServerError` — a 5xx response or a pre-response
         // send/DNS/TLS/timeout blip). Quota, content-filter, decode, and 4xx
         // faults are non-retryable and surface on the first response.
-        let resp = {
+        let (resp, request_context) = {
             let mut attempt: u32 = 0;
             // Owned working copy of the conversation. The happy path never
             // mutates it (byte-identical to `log.messages()`); a tool-call
@@ -1189,7 +1189,12 @@ impl Provider for OpenAIProvider {
                     Ok(resp) => {
                         let status = resp.status();
                         if status.is_success() {
-                            break resp;
+                            // Pin the request context that actually produced
+                            // this response — the retry loop may have spliced
+                            // a corrective turn into `current_messages`, so
+                            // only the winning iteration's body is the
+                            // algorithm's input (task-20260729-7dd4).
+                            break (resp, serde_json::to_vec(&body).ok());
                         }
 
                         // Headers BEFORE consuming the body — `text().await`
@@ -1306,7 +1311,12 @@ impl Provider for OpenAIProvider {
         // seam, scoped to this worker, first-observation + on-change. The served
         // id is authoritative — cosmon received it and used to discard it.
         if let Some(model) = realized_model.as_deref() {
-            emit_realized_model(self.telemetry.as_ref(), model);
+            emit_realized_model(
+                self.telemetry.as_ref(),
+                model,
+                &self.base_url,
+                request_context.as_deref(),
+            );
         }
 
         if !wire_calls.is_empty() {
@@ -1944,11 +1954,32 @@ fn emit_silent_failure(telemetry: Option<&AdapterTelemetry>, err: &OpenAiError) 
 /// under the adapter the operator actually selected). First-observation +
 /// on-change dedup is handled by `emit_new_model_observations`; a blank id can
 /// never pass the [`ModelId`](cosmon_core::model_realization::ModelId) newtype.
+/// Carries the **algorithmic provenance** of the turn (task-20260729-7dd4).
+/// The floor is `hosted_unverifiable`, asserted by `base_url`: this provider
+/// also drives self-hosted ollama, but the HTTP envelope exposes no weights
+/// digest and no quantization either way, and the adapter pins no decoding
+/// parameter — so those fields disclose their own reasons rather than guess.
+/// The prompt context *is* pinned, by digest, because cosmon holds the bytes
+/// it sent.
+///
 /// Best-effort: no telemetry, or an unparseable id, is a silent no-op.
-fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
+fn emit_realized_model(
+    telemetry: Option<&AdapterTelemetry>,
+    model: &str,
+    base_url: &str,
+    request_context: Option<&[u8]>,
+) {
     let Some(t) = telemetry else { return };
     let Some(id) = cosmon_core::model_realization::ModelId::new(model) else {
         return;
+    };
+    let base =
+        cosmon_core::algorithmic_provenance::AlgorithmicProvenance::hosted_unverifiable(base_url);
+    // No bytes to hash → the field stays undisclosed with its reason. Hashing
+    // an empty body would mint a digest of nothing and call it provenance.
+    let provenance = match request_context {
+        Some(bytes) => base.with_prompt_context(bytes),
+        None => base,
     };
     cosmon_state::events::worker_spawn::emit_new_model_observations(
         &t.state_dir,
@@ -1957,6 +1988,7 @@ fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
         t.adapter_name.as_deref().unwrap_or(ADAPTER_NAME),
         std::slice::from_ref(&id),
         cosmon_core::model_realization::ModelObservationSource::ProviderResponse,
+        &provenance,
     );
 }
 

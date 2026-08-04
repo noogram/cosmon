@@ -29,6 +29,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
+use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 use cosmon_core::event_v2::{
     AdapterHandleState, AdapterProbeKind, AdapterProbeResult, AdapterSelectionSource, EventV2,
     LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
@@ -367,6 +368,16 @@ pub fn emit_model_selected(
 /// ambiguous forever and the fold treats such legacy lines fail-closed. The
 /// `Option` on the wire exists only for deserializing pre-F-02 lines.
 ///
+/// `provenance` is likewise **mandatory** (task-20260729-7dd4): a model id pins
+/// the *identity* of the method and says nothing about its reliability or
+/// reproducibility, so every conclusion-producing node answers the algorithmic
+/// -provenance question too. The parameter is a value, not an `Option`, because
+/// the honest floor for an adapter that can disclose nothing is itself a
+/// statement —
+/// [`AlgorithmicProvenance::hosted_unverifiable`](cosmon_core::algorithmic_provenance::AlgorithmicProvenance::hosted_unverifiable),
+/// whose every field names the reason it is undisclosed. `None` survives on the
+/// wire only for lines written before this field existed.
+///
 /// The hot path must not fail because telemetry is unhappy: write errors are
 /// swallowed (same trace-not-lock discipline as the other Worker-Spawn helpers).
 pub fn emit_model_observed(
@@ -376,6 +387,7 @@ pub fn emit_model_observed(
     adapter_name: &str,
     model: &str,
     observed_source: ModelObservationSource,
+    provenance: &AlgorithmicProvenance,
 ) {
     let event = EventV2::ModelObserved {
         mol_id: mol_id.clone(),
@@ -383,6 +395,7 @@ pub fn emit_model_observed(
         adapter_name: adapter_name.to_owned(),
         model: model.to_owned(),
         observed_source,
+        provenance: Some(provenance.clone()),
         observed_at: Utc::now(),
     };
     write_event(state_dir, event);
@@ -412,6 +425,12 @@ pub fn emit_model_observed(
 /// violated by duplicate identical lines on the journal. Lock failure degrades
 /// to the unlocked (sequentially-idempotent) behavior rather than losing the
 /// observation.
+///
+/// `provenance` rides every emitted line (task-20260729-7dd4) — see
+/// [`emit_model_observed`] for why it is a value rather than an `Option`. The
+/// same record is attached to each id of a trajectory: the weights, decode and
+/// prompt context are properties of the dispatch, not of the individual turn
+/// that happened to name a new id.
 pub fn emit_new_model_observations(
     state_dir: &Path,
     mol_id: &MoleculeId,
@@ -419,6 +438,7 @@ pub fn emit_new_model_observations(
     adapter_name: &str,
     observed: &[cosmon_core::model_realization::ModelId],
     observed_source: ModelObservationSource,
+    provenance: &AlgorithmicProvenance,
 ) {
     if observed.is_empty() {
         return;
@@ -433,6 +453,7 @@ pub fn emit_new_model_observations(
             adapter_name,
             model.as_str(),
             observed_source,
+            provenance,
         );
     }
 }
@@ -1190,6 +1211,7 @@ mod tests {
             "claude",
             "claude-sonnet-5",
             ModelObservationSource::ClaudeStreamJson,
+            &AlgorithmicProvenance::adapter_silent("claude"),
         );
         let envelopes = read_envelopes(dir.path());
         assert_eq!(envelopes.len(), 1);
@@ -1418,6 +1440,7 @@ mod tests {
                         "claude",
                         &observed,
                         ModelObservationSource::ClaudeStreamJson,
+                        &AlgorithmicProvenance::adapter_silent("claude"),
                     );
                 })
             })

@@ -360,6 +360,39 @@ pub fn realized_attribution(state_dir: &Path, mol_id: &MoleculeId) -> Option<Ada
     Some(AdapterAttribution::fold(&events))
 }
 
+/// The **algorithmic provenance** of a molecule's current attempt
+/// (task-20260729-7dd4) — what is known about the *method* that produced its
+/// conclusions, beyond the name of the model.
+///
+/// The sibling read of [`realized_attribution`], folded from the same
+/// `events.jsonl` slice in the same pass, so the record can never describe a
+/// different attempt than the realized id shown beside it.
+///
+/// Two distinct `None`s, and a caller must not conflate them: no events at all
+/// (nothing was ever dispatched) and no in-scope observation carrying a record
+/// (a pre-task-20260729-7dd4 line, or an emitter that never built one). Neither
+/// is a *disclosure* — the disclosures live inside the record, where each field
+/// names the reason it is empty.
+#[must_use]
+pub fn realized_provenance(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+) -> Option<cosmon_core::algorithmic_provenance::AlgorithmicProvenance> {
+    let path = resolve_events_log_path(state_dir);
+    let bytes = std::fs::read(&path).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let needle = mol_id.as_str();
+    let events: Vec<EventV2> = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && line.contains(needle))
+        .filter_map(|line| Envelope::from_line(line).ok())
+        .map(|envelope| envelope.event)
+        .filter(|event| event.molecule_id().is_some_and(|id| id == mol_id))
+        .collect();
+    AdapterAttribution::fold_with_provenance(&events).1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,6 +660,7 @@ mod tests {
 
         use crate::event_log::{emit_one, resolve_events_log_path};
         use crate::events::worker_spawn::emit_new_model_observations;
+        use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 
         let dir = tempdir().unwrap();
         let m = mol("cmbverify-20260728-8e2a");
@@ -678,6 +712,7 @@ mod tests {
             "codex",
             &[ModelId::new("gpt-5.6-terra").unwrap()],
             ModelObservationSource::CodexSessionMeta,
+            &AlgorithmicProvenance::adapter_silent("codex"),
         );
 
         // The pin-only projection — every word of it true, and none of it the
@@ -708,6 +743,7 @@ mod tests {
 
         use crate::event_log::{emit_one, resolve_events_log_path};
         use crate::events::worker_spawn::emit_new_model_observations;
+        use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 
         let dir = tempdir().unwrap();
         let m = mol("cmbverify-20260728-8e2b");
@@ -758,10 +794,184 @@ mod tests {
             "codex",
             &[ModelId::new("gpt-5.6-sol").unwrap()],
             ModelObservationSource::CodexSessionMeta,
+            &AlgorithmicProvenance::adapter_silent("codex"),
         );
 
         let realized = realized_attribution(dir.path(), &m).expect("attribution present");
         assert!(realized.realized_drift_display().is_none());
+    }
+
+    /// task-20260729-7dd4 — the algorithmic-provenance record survives the
+    /// journal round-trip and comes back beside the realized id it describes.
+    ///
+    /// This is the end-to-end statement of the primitive: an emitter that can
+    /// pin weights, decode and prompt writes them once, and an audit reading
+    /// only `events.jsonl` recovers enough to re-run the method.
+    #[test]
+    fn realized_provenance_round_trips_through_the_journal() {
+        use cosmon_core::algorithmic_provenance::{
+            AlgorithmicProvenance, DecodingParams, Disclosure, WeightsProvenance,
+        };
+        use cosmon_core::event_v2::{AdapterSelectionSource, LoopOwnershipTag};
+        use cosmon_core::id::WorkerId;
+        use cosmon_core::model_realization::{ModelId, ModelObservationSource};
+
+        use crate::event_log::{emit_one, resolve_events_log_path};
+        use crate::events::worker_spawn::emit_new_model_observations;
+
+        let dir = tempdir().unwrap();
+        let m = mol("task-20260729-7dd4");
+        let log = resolve_events_log_path(dir.path());
+        let worker = WorkerId::new("worker-selfhosted").unwrap();
+
+        emit_one(
+            &log,
+            EventV2::AdapterSelected {
+                mol_id: m.clone(),
+                adapter_name: "local".to_owned(),
+                selected_at: Utc::now(),
+                selection_source: AdapterSelectionSource::Cli {
+                    flag: "local".to_owned(),
+                },
+                role_hint: None,
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+        emit_one(
+            &log,
+            EventV2::WorkerSpawned {
+                worker_id: worker.clone(),
+                molecule: Some(m.clone()),
+                session_name: "seat".to_owned(),
+                role: "worker".to_owned(),
+                adapter_name: "local".to_owned(),
+                loop_ownership: LoopOwnershipTag::default(),
+            },
+            None,
+        )
+        .unwrap();
+
+        // The self-hosted case: everything about the method is pinnable.
+        let pinned = AlgorithmicProvenance::hosted_unverifiable("ollama@localhost")
+            .with_weights(WeightsProvenance::Pinned {
+                algorithm: "sha256".to_owned(),
+                digest: "cd".repeat(32),
+            })
+            .with_quantization(Disclosure::Observed("q4_K_M".to_owned()))
+            .with_decoding(DecodingParams {
+                temperature: Disclosure::Observed(0.0),
+                top_p: Disclosure::Observed(1.0),
+                seed: Disclosure::Observed(7),
+            })
+            .with_prompt_context(b"the briefing bytes");
+        emit_new_model_observations(
+            dir.path(),
+            &m,
+            &worker,
+            "local",
+            &[ModelId::new("gpt-oss:120b").unwrap()],
+            ModelObservationSource::ProviderResponse,
+            &pinned,
+        );
+
+        let read = realized_provenance(dir.path(), &m).expect("provenance present");
+        assert_eq!(read, pinned, "the record survives serde byte for byte");
+        assert!(
+            read.is_algorithm_replayable(),
+            "a self-hosted model pins every leg of the method"
+        );
+    }
+
+    /// The provenance is scoped to the attempt exactly like the realized id: a
+    /// re-tackle under a new worker must not inherit the previous attempt's
+    /// weights digest. Otherwise the record would attest to a method that did
+    /// not produce this conclusion — the failure mode the whole primitive
+    /// exists to prevent.
+    #[test]
+    fn a_retackle_does_not_inherit_the_previous_attempts_provenance() {
+        use cosmon_core::algorithmic_provenance::{AlgorithmicProvenance, WeightsProvenance};
+        use cosmon_core::event_v2::{AdapterSelectionSource, LoopOwnershipTag};
+        use cosmon_core::id::WorkerId;
+        use cosmon_core::model_realization::{ModelId, ModelObservationSource};
+
+        use crate::event_log::{emit_one, resolve_events_log_path};
+        use crate::events::worker_spawn::emit_new_model_observations;
+
+        let dir = tempdir().unwrap();
+        let m = mol("task-20260729-9c11");
+        let log = resolve_events_log_path(dir.path());
+
+        let mut spawn = |worker: &WorkerId| {
+            emit_one(
+                &log,
+                EventV2::AdapterSelected {
+                    mol_id: m.clone(),
+                    adapter_name: "local".to_owned(),
+                    selected_at: Utc::now(),
+                    selection_source: AdapterSelectionSource::Cli {
+                        flag: "local".to_owned(),
+                    },
+                    role_hint: None,
+                    loop_ownership: LoopOwnershipTag::default(),
+                },
+                None,
+            )
+            .unwrap();
+            emit_one(
+                &log,
+                EventV2::WorkerSpawned {
+                    worker_id: worker.clone(),
+                    molecule: Some(m.clone()),
+                    session_name: "seat".to_owned(),
+                    role: "worker".to_owned(),
+                    adapter_name: "local".to_owned(),
+                    loop_ownership: LoopOwnershipTag::default(),
+                },
+                None,
+            )
+            .unwrap();
+        };
+
+        // Attempt 1 — weights pinned.
+        let first = WorkerId::new("worker-attempt-1").unwrap();
+        spawn(&first);
+        emit_new_model_observations(
+            dir.path(),
+            &m,
+            &first,
+            "local",
+            &[ModelId::new("gpt-oss:120b").unwrap()],
+            ModelObservationSource::ProviderResponse,
+            &AlgorithmicProvenance::hosted_unverifiable("ollama@localhost").with_weights(
+                WeightsProvenance::Pinned {
+                    algorithm: "sha256".to_owned(),
+                    digest: "ef".repeat(32),
+                },
+            ),
+        );
+
+        // Attempt 2 — a hosted frontier model, which can pin nothing.
+        let second = WorkerId::new("worker-attempt-2").unwrap();
+        spawn(&second);
+        emit_new_model_observations(
+            dir.path(),
+            &m,
+            &second,
+            "local",
+            &[ModelId::new("gpt-5.6-terra").unwrap()],
+            ModelObservationSource::ProviderResponse,
+            &AlgorithmicProvenance::hosted_unverifiable("api.example.com"),
+        );
+
+        let read = realized_provenance(dir.path(), &m).expect("provenance present");
+        assert!(
+            !read.weights.is_verifiable(),
+            "the second attempt's hosted weights must not be reported as pinned \
+             by the first attempt's digest"
+        );
+        assert!(!read.is_algorithm_replayable());
     }
 
     /// A molecule with nothing in the log projects to `None` — an advisory
