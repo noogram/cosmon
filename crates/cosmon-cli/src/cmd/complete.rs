@@ -85,6 +85,19 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
     }
 
+    // ADR-168 §D6 — authority guard, applied to every id before the first one
+    // is completed. A batch is one gesture: refusing halfway would leave the
+    // operator with a partially flown mission set and a refusal to read
+    // afterwards, which is the compensation D6's third bullet rules out.
+    for mol_id in &ids {
+        super::guard::refuse_unleased_pilot_gesture(
+            &ctx.state_dir(),
+            mol_id,
+            "cs complete",
+            &super::guard::process_env,
+        )?;
+    }
+
     let mut results: Vec<serde_json::Value> = Vec::new();
 
     for mol_id in &ids {

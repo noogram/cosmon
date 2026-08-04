@@ -99,6 +99,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let ops_dir = cosmon_filestore::resolve_state_dir(args.ops_dir.as_deref());
     let store = ctx.store_at(&ops_dir);
 
+    // ADR-168 §D6 — authority guard. Terminating a co-piloted mission is the
+    // most irreversible piloting gesture there is; a co-pilot without the
+    // lease is refused before the terminal transition, not compensated after.
+    super::guard::refuse_unleased_pilot_gesture(
+        &ctx.state_dir(),
+        &mol_id,
+        "cs collapse",
+        &super::guard::process_env,
+    )?;
+
     let mol_data = store.load_molecule(&mol_id)?;
     let prev_status = mol_data.status;
     // Stuck-flavored Frozen: when the prior transition to Frozen was

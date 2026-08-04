@@ -1643,6 +1643,18 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let store = FileStore::new(&state_dir);
 
     let mol_id = MoleculeId::new(&args.molecule)?;
+
+    // ADR-168 §D6 — authority guard. `cs done` is no more autonomous than it
+    // was: this adds no right and removes none. It only makes the read-only
+    // co-pilot of a co-piloted mission read-only by mechanism (M7 friction
+    // F9). A mission with no lease reaches this line unchanged.
+    super::guard::refuse_unleased_pilot_gesture(
+        &state_dir,
+        &mol_id,
+        "cs done",
+        &super::guard::process_env,
+    )?;
+
     let mol = store.load_molecule(&mol_id)?;
 
     require_security_review_verdict(&state_dir, &mol)?;

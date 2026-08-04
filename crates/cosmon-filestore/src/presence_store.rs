@@ -107,6 +107,32 @@ impl PresenceStore {
         atomic_write(&path, json.as_bytes())
     }
 
+    /// Read one session's snapshot, by id.
+    ///
+    /// `Ok(None)` covers both "no such session" and "the file is there but
+    /// unreadable as a `Presence`", because the two are the same fact to every
+    /// caller: this session advertises nothing. The authority guard of
+    /// ADR-168 §D6 depends on that collapse being fail-closed — a corrupt
+    /// snapshot must present no epoch, never a trusted one.
+    ///
+    /// Distinct from [`Self::scan`] because a guard on the lifecycle path asks
+    /// about exactly one session and should not pay for the directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmonError::StateStore`] only for a filesystem error that is
+    /// not "the file is absent".
+    pub fn load(&self, sid: &SessionId) -> Result<Option<Presence>, CosmonError> {
+        let path = self.snapshot_path(sid);
+        match fs::read_to_string(&path) {
+            Ok(data) => Ok(serde_json::from_str::<Presence>(&data).ok()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(CosmonError::StateStore {
+                reason: format!("failed to read presence {}: {e}", path.display()),
+            }),
+        }
+    }
+
     /// Scan the presence directory and return every parseable snapshot.
     ///
     /// A file that fails to parse (corrupt JSON, missing field,
@@ -237,6 +263,32 @@ mod tests {
                 heartbeat,
             )
         }
+    }
+
+    #[test]
+    fn load_reads_one_snapshot_and_absence_is_not_an_error() {
+        let (_tmp, store) = make_store();
+        let sid = SessionId::new("sid-alpha").unwrap();
+        assert_eq!(store.load(&sid).unwrap(), None, "a cold tree knows nobody");
+
+        let p = sample("sid-alpha", Utc::now(), std::process::id());
+        store.upsert(&p).unwrap();
+        assert_eq!(store.load(&sid).unwrap().as_ref(), Some(&p));
+
+        let absent = SessionId::new("sid-nobody").unwrap();
+        assert_eq!(store.load(&absent).unwrap(), None);
+    }
+
+    #[test]
+    fn a_corrupt_snapshot_advertises_nothing_rather_than_something() {
+        // Fail-closed: the ADR-168 §D6 authority guard reads this to learn
+        // which epoch a pilot presents. Half a snapshot must present no epoch,
+        // never a trusted one.
+        let (_tmp, store) = make_store();
+        let sid = SessionId::new("sid-alpha").unwrap();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.snapshot_path(&sid), b"{\"session_id\": ").unwrap();
+        assert_eq!(store.load(&sid).unwrap(), None);
     }
 
     #[test]

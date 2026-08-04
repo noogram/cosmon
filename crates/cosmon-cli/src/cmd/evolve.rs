@@ -597,6 +597,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let ops_dir = cosmon_filestore::resolve_state_dir(args.ops_dir.as_deref());
     let store = FileStore::new(&ops_dir);
 
+    // ADR-168 §D6 — authority guard, before any write. On a mission under
+    // co-pilotage, advancing it is the pilot's gesture and a co-pilot without
+    // the lease is refused by the mechanism, not by its brief (M7 friction F9,
+    // `task-20260731-bd92` §8). Silent on a mission with no lease.
+    super::guard::refuse_unleased_pilot_gesture(
+        &ctx.state_dir(),
+        &mol_id,
+        "cs evolve",
+        &super::guard::process_env,
+    )?;
+
     // Worktree-isolated project root for git ops, shell verification, and
     // gate execution. `ops_dir` may have been redirected to the main repo's
     // `.cosmon/state/` (worktree state-host pattern); deriving the project
