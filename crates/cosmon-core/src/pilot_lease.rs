@@ -424,6 +424,44 @@ impl LeaseDecision {
     }
 }
 
+/// The epoch a pilot's seat presents *for `mission`*, given the authority that
+/// seat claims.
+///
+/// `claim` is what a presence snapshot advertises — the pair returned by
+/// `Presence::claimed_authority`: the mission the seat is about, and the epoch
+/// it believes it holds there. This function is the one rule that turns a seat
+/// into an argument for [`authorize`]: **a claim on one mission presents
+/// nothing on another.**
+///
+/// It exists as its own function because that rule is easy to lose at a
+/// call-site. A pilot legitimately PRIMARY on mission A, typing a lifecycle
+/// verb against mission B, would otherwise hand A's epoch to B's guard; if A
+/// and B happened to be at the same epoch number the gesture would be granted
+/// on an authority nobody ever conferred. Filtering by mission first makes
+/// that a refusal (`EpochNotPresented`) rather than a coincidence.
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::id::MoleculeId;
+/// use cosmon_core::pilot_lease::{epoch_presented_for, LeaseEpoch};
+///
+/// let a = MoleculeId::new("task-20260731-9cf4").unwrap();
+/// let b = MoleculeId::new("task-20260724-4cef").unwrap();
+/// let e = LeaseEpoch::first();
+///
+/// assert_eq!(epoch_presented_for(&a, Some((&a, e))), Some(e));
+/// assert_eq!(epoch_presented_for(&b, Some((&a, e))), None);
+/// assert_eq!(epoch_presented_for(&a, None), None);
+/// ```
+#[must_use]
+pub fn epoch_presented_for(
+    mission: &MoleculeId,
+    claim: Option<(&MoleculeId, LeaseEpoch)>,
+) -> Option<LeaseEpoch> {
+    claim.and_then(|(claimed, epoch)| (claimed == mission).then_some(epoch))
+}
+
 /// Decide whether `session`, believing it holds `presented_epoch`, may issue a
 /// piloting gesture on the mission whose current lease is `lease`.
 ///

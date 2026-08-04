@@ -438,6 +438,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     };
     super::guard::refuse_excessive_depth(&env_lookup, sr_config.max_depth)?;
 
+    // ADR-168 §D6 — authority guard. On a mission under co-pilotage, only the
+    // lease holder may dispatch it. Silent on every mission without a lease,
+    // which is every molecule until an operator grants one.
+    super::guard::refuse_unleased_pilot_gesture(
+        &ctx.state_dir(),
+        &mol_id,
+        "cs tackle",
+        &env_lookup,
+    )?;
+
     // Convoy-cascade prophylaxis (warn-level): if the target is pending,
     // stale (>2h), and carries no `temp:*` tag, emit a stderr nag. Does
     // not refuse dispatch — the operator may legitimately resurrect a

@@ -298,6 +298,50 @@ Two consequences the implementation had to choose, and did:
 That second rule is why the former primary loses the seat without anybody
 having to tell it: its own next heartbeat reads the ledger and steps down.
 
+**What the M7 dogfood found the guard was still missing, and where it went**
+(`task-20260804-6158`, from friction F9 of `task-20260731-bd92`). M4 put the
+guard on the gesture that *claims* authority. It did not put it on the gestures
+that *exercise* it, and the dogfood is what made that visible: a real Codex
+co-pilot ran nine commands beside a Claude primary and mutated nothing, which
+was true and was verified afterwards. It abstained because a hand-written brief
+told it to. The five falsifiers that refused all went through
+`cs sessions takeover check`; not one of the nine gestures did. That is the
+difference between an invariant and good conduct, and read-only-by-discipline
+is not a property a supervised hand-over can rest on.
+
+The guard is now also on the five lifecycle verbs — `cs evolve`, `cs complete`,
+`cs collapse`, `cs done`, `cs tackle` — which is the whole of what a co-pilot
+could have typed to move a mission. The model's rights are unchanged and
+`cs done` is no more autonomous than it was; nothing here grants anything.
+
+Three choices the implementation had to make, and did:
+
+- **The guard is scoped to a mission that has a lease.** No lease ⇒ the verb
+  runs exactly as before, which is every molecule on every fleet until an
+  operator types `takeover grant`. D6's *"unknown lease ⇒ read-only"* governs
+  who may fly a **co-piloted** mission; reading it as *"nobody may run
+  `cs evolve` anywhere"* would turn the lease ledger into a global kill-switch
+  the fleet never asked for. Inside the perimeter nothing is relaxed: an
+  unnamed caller, a missing snapshot and a snapshot naming another mission are
+  all refusals.
+- **The epoch comes from the seat, not from a new flag.** A lifecycle verb has
+  no `--epoch` to carry one and does not need one: the pilot's presence
+  snapshot *is* its standing claim, and M4 already checks that claim against
+  the ledger before writing it. So the gesture presents what the seat presents,
+  filtered to this mission — a claim on mission A presents nothing on mission
+  B. Adding a flag instead would have made F2 (*"the identity is retyped at
+  every command"*) worse on the busiest verb in the fleet.
+- **`cs note` is deliberately outside the perimeter.** D6's first bullet grants
+  a co-pilot the right to publish findings, and a note on the mission record is
+  the only way it has to leave one where the primary will read it. Guarding it
+  would have bought nothing — a note mutates no state a pilot could fly — and
+  cost the consultative loop the thing that makes it worth running.
+
+What this does **not** reach is a file edit: nothing in cosmon stands between a
+co-pilot and a text editor. The perimeter is cosmon's own gestures, and F9's
+`.swift` remains editable by anyone with a shell. That is a boundary of the
+mechanism, stated rather than papered over.
+
 ## Falsifiers
 
 This ADR is wrong if any of the following turns out to be true. Each is checkable.
