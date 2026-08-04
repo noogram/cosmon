@@ -92,6 +92,8 @@ pub mod adapter_exit;
 #[doc(hidden)]
 pub mod agent;
 #[doc(hidden)]
+pub mod algorithmic_provenance;
+#[doc(hidden)]
 pub mod artifact_map;
 #[doc(hidden)]
 pub mod atlas;

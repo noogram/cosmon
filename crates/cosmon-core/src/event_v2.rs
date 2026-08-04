@@ -1651,6 +1651,30 @@ pub enum EventV2 {
         /// forensics. Never surfaced at the display (`realized` is an outcome,
         /// not a choice, so it carries no source tag).
         observed_source: crate::model_realization::ModelObservationSource,
+        /// **task-20260729-7dd4** — the algorithmic-provenance subset: what is
+        /// known about the *method* beyond its name (weights digest or
+        /// `hosted_unverifiable`, quantization, decoding parameters, prompt
+        /// context digest, replayability).
+        ///
+        /// A model id pins the **identity** of the method; it says nothing
+        /// about its reliability or reproducibility, which is the other half of
+        /// what an opposable artefact needs. This field carries that half, on
+        /// the event that every conclusion-producing dispatch already emits —
+        /// so the subset is universal rather than a property of the fallback
+        /// path (see
+        /// `docs/adr/169-algorithmic-provenance-rides-the-realized-model-observation.md`).
+        ///
+        /// `None` on a line whose emitter had nothing to say — every line
+        /// predating this field, and any adapter that has not been taught to
+        /// build the record. That is an *absence*, not a disclosure, and a
+        /// reader must treat it as such: the disclosures live *inside*
+        /// [`AlgorithmicProvenance`](crate::algorithmic_provenance::AlgorithmicProvenance),
+        /// where each field is a
+        /// [`Disclosure`](crate::algorithmic_provenance::Disclosure) that names
+        /// its own gap. Emitting a fabricated all-undisclosed record would be
+        /// worse than `None`: it would assert that a producer looked.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provenance: Option<crate::algorithmic_provenance::AlgorithmicProvenance>,
         /// Wall-clock time the observation was recorded.
         observed_at: DateTime<Utc>,
     },
@@ -4106,6 +4130,7 @@ mod tests {
                 adapter_name: "claude".to_owned(),
                 model: "claude-sonnet-5".to_owned(),
                 observed_source: crate::model_realization::ModelObservationSource::ClaudeStreamJson,
+                provenance: None,
                 observed_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
                     .unwrap()
                     .with_timezone(&Utc),

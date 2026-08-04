@@ -130,3 +130,4 @@
 | 162-dispatch-boundary-ready-is-earned | [162-dispatch-boundary-ready-is-earned.md](docs/adr/162-dispatch-boundary-ready-is-earned.md) |
 | 163-a-question-may-only-be-asked-where-an-answer-can-arrive | [163-a-question-may-only-be-asked-where-an-answer-can-arrive.md](docs/adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md) |
 | 164-briefing-is-a-protocol-not-a-jailbreak | [164-briefing-is-a-protocol-not-a-jailbreak.md](docs/adr/164-briefing-is-a-protocol-not-a-jailbreak.md) |
+| 169-algorithmic-provenance-rides-the-realized-model-observation | [169-algorithmic-provenance-rides-the-realized-model-observation.md](docs/adr/169-algorithmic-provenance-rides-the-realized-model-observation.md) |

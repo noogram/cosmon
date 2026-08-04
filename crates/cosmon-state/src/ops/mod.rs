@@ -47,7 +47,8 @@ pub use ensemble::{
 pub use error::{is_kebab_case, ErrorWire, OpsError};
 pub use freeze::{freeze, FreezeError, FreezeJson, FreezeRequest, FreezeView};
 pub use model_attribution::{
-    latest_model_selection, model_selections, realized_attribution, ModelAttribution,
+    latest_model_selection, model_selections, realized_attribution, realized_provenance,
+    ModelAttribution,
 };
 pub use nucleate::{nucleate, NucleateError, NucleateJson, NucleateRequest, NucleateView};
 pub use observe::{

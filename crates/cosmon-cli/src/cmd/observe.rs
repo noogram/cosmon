@@ -332,6 +332,16 @@ fn run_detail(
                 );
             }
         }
+        // The ALGORITHMIC-PROVENANCE axis (task-20260729-7dd4). The realized id
+        // pins *which* method ran; this pins what is known about the method
+        // itself — weights, quantization, decode, prompt context — which is
+        // what an artefact meant to be contested needs and a model id does not
+        // supply. Omitted entirely when no observation carried a record: an
+        // absence is not a disclosure, and printing one would suggest a
+        // producer looked.
+        if let Some(prov) = cosmon_state::ops::realized_provenance(state_dir, &mol.id) {
+            println!("    {}", prov.summary().dimmed());
+        }
     }
 
     // Coupling report — mirrors the bundle that `cs wait` prints. Same

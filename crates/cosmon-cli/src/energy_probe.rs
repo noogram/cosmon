@@ -395,6 +395,11 @@ pub fn capture_realized_from_cwd_under(
         return;
     }
     let adapter_name = adapter.as_deref().unwrap_or("claude");
+    // task-20260729-7dd4 — a session-log adapter reports a model id and nothing
+    // else about the method, so it says exactly that rather than leaving the
+    // provenance question unanswered.
+    let provenance =
+        cosmon_core::algorithmic_provenance::AlgorithmicProvenance::adapter_silent(adapter_name);
     cosmon_state::events::worker_spawn::emit_new_model_observations(
         state_dir,
         mol_id,
@@ -402,6 +407,7 @@ pub fn capture_realized_from_cwd_under(
         adapter_name,
         &observed,
         source,
+        &provenance,
     );
 }
 

@@ -747,7 +747,18 @@ impl Provider for AnthropicProvider {
         // served model; emit `ModelObserved` at the response seam, scoped to
         // this worker, first-observation + on-change.
         if let Some(model) = parsed.model.as_deref() {
-            emit_realized_model(self.telemetry.as_ref(), model);
+            // The prompt is part of the algorithm, so the record pins the
+            // bytes cosmon actually sent — as a digest, never the bytes
+            // themselves. A serialization failure here means there is nothing
+            // honest to hash, so the context stays undisclosed rather than
+            // digested from a partial body.
+            let context = serde_json::to_vec(&body).ok();
+            emit_realized_model(
+                self.telemetry.as_ref(),
+                model,
+                &self.base_url,
+                context.as_deref(),
+            );
         }
 
         // Anthropic returns a flat `content` array. tool_use blocks
@@ -926,11 +937,32 @@ fn harness_error_to_anthropic(err: HarnessError<AnthropicError>) -> AnthropicErr
 /// response seam (F-01), scoped to the telemetry's worker. First-observation +
 /// on-change dedup is handled by `emit_new_model_observations`; a blank id can
 /// never pass the [`ModelId`](cosmon_core::model_realization::ModelId) newtype.
+///
+/// Carries the **algorithmic provenance** of the turn (task-20260729-7dd4):
+/// `hosted_unverifiable` weights asserted by `base_url` — the frontier API
+/// exposes no weights digest and no quantization, and this adapter pins no
+/// decoding parameter, so those disclose their own reasons — plus the digest of
+/// the request context, which is the one leg cosmon *can* pin here because it
+/// holds the bytes it sent.
+///
 /// Best-effort: no telemetry, or an unparseable id, is a silent no-op.
-fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
+fn emit_realized_model(
+    telemetry: Option<&AdapterTelemetry>,
+    model: &str,
+    base_url: &str,
+    request_context: Option<&[u8]>,
+) {
     let Some(t) = telemetry else { return };
     let Some(id) = cosmon_core::model_realization::ModelId::new(model) else {
         return;
+    };
+    let base =
+        cosmon_core::algorithmic_provenance::AlgorithmicProvenance::hosted_unverifiable(base_url);
+    // No bytes to hash → the field stays undisclosed with its reason. Hashing
+    // an empty body would mint a digest of nothing and call it provenance.
+    let provenance = match request_context {
+        Some(bytes) => base.with_prompt_context(bytes),
+        None => base,
     };
     cosmon_state::events::worker_spawn::emit_new_model_observations(
         &t.state_dir,
@@ -939,6 +971,7 @@ fn emit_realized_model(telemetry: Option<&AdapterTelemetry>, model: &str) {
         t.adapter_name.as_deref().unwrap_or(ADAPTER_NAME),
         std::slice::from_ref(&id),
         cosmon_core::model_realization::ModelObservationSource::ProviderResponse,
+        &provenance,
     );
 }
 

@@ -17,6 +17,7 @@
 //!   completed unobserved, and a structurally-mute adapter's silence.
 
 use cosmon_core::adapter_attribution::{AdapterAttribution, Realized};
+use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 use cosmon_core::event_v2::{AdapterSelectionSource, EventV2, ModelSelectionSource};
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
@@ -155,6 +156,7 @@ fn claude_fixture_to_compact_cell() {
         "claude",
         &observed,
         ModelObservationSource::ClaudeStreamJson,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
 
     let att = fold(dir.path(), &m);
@@ -191,6 +193,7 @@ fn codex_turn_context_fixture_to_compact_cell() {
         "codex",
         &observed,
         ModelObservationSource::CodexSessionMeta,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
 
     let att = fold(dir.path(), &m);
@@ -222,6 +225,7 @@ fn provider_response_fixture_to_compact_cell() {
         "openai",
         &observed,
         ModelObservationSource::ProviderResponse,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
 
     let att = fold(dir.path(), &m);
@@ -249,6 +253,7 @@ fn adapter_change_does_not_inherit_prior_realization() {
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
     seed_exited(dir.path(), &m);
     // Attempt 2: re-tackle to codex, no observation.
@@ -275,6 +280,7 @@ fn re_tackle_same_adapter_shows_only_last_attempt() {
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
     seed_exited(dir.path(), &m);
     // Re-tackle same adapter, fresh worker observes sonnet.
@@ -287,6 +293,7 @@ fn re_tackle_same_adapter_shows_only_last_attempt() {
         "claude",
         &ids(&["claude-sonnet-5"]),
         ModelObservationSource::ClaudeStreamJson,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
 
     let att = fold(dir.path(), &m);
@@ -311,6 +318,7 @@ fn late_observation_from_dead_worker_is_ignored() {
         "claude",
         &ids(&["claude-opus-4-8"]),
         ModelObservationSource::ClaudeStreamJson,
+        &AlgorithmicProvenance::adapter_silent("test"),
     );
 
     let att = fold(dir.path(), &m);
