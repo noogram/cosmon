@@ -69,6 +69,7 @@ members = [
     "crates/cosmon-observability",
     "crates/cosmon-archive",
     "crates/cosmon-hash",
+    "crates/cosmon-minisign-testkit",
     "crates/cosmon-notary",
     "crates/cosmon-scenario",
     "crates/cosmon-crashtest",
@@ -271,6 +272,7 @@ ciborium = "0.2"
 # side describes/routes a badge but NEVER verifies it — verification is
 # Rust-only (`verify_badge`). Export runs in a test, not at runtime.
 ts-rs = "10"
+cosmon-minisign-testkit = { path = "crates/cosmon-minisign-testkit" }
 cosmon-notary = { path = "crates/cosmon-notary" }
 
 # NOTE: the `matrix-sdk` workspace dependency, its `[patch.crates-io]` vendored

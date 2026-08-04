@@ -63,8 +63,10 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use cosmon_core::id::{MoleculeId, SessionId};
-use cosmon_core::pilot_lease::{LeaseDecision, LeaseEpoch, RefusalReason};
+use cosmon_core::operator_attestation::{GrantChallenge, OperatorGestureVerifier};
+use cosmon_core::pilot_lease::{LeaseDecision, LeaseEpoch, RefusalReason, RequestId};
 use cosmon_core::presence::Presence;
+use cosmon_filestore::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
 use cosmon_pilot_checkpoint::{
     compare, CheckpointStore, Claim, EvidenceRef, MissionId, PilotCheckpoint, Scope,
     SessionId as CheckpointSessionId, Stance,
@@ -392,6 +394,10 @@ pub enum TakeoverSub {
     Request(TakeoverRequestArgs),
     /// Operator gesture: hand the controls over at the next epoch.
     Grant(TakeoverGrantArgs),
+    /// Print the exact bytes an operator signs to authorise one transfer.
+    Challenge(TakeoverChallengeArgs),
+    /// Show which operator key this galaxy trusts to authorise a transfer.
+    Trust(TakeoverTrustArgs),
     /// Ask the guard whether a session may pilot. Exits 0 or 1.
     Check(TakeoverCheckArgs),
 }
@@ -439,10 +445,39 @@ pub struct TakeoverGrantArgs {
     /// Seconds after which the lease authorises nothing.
     #[arg(long = "ttl", value_name = "SECONDS")]
     pub ttl: Option<i64>,
-    /// Operator identity to record. Defaults to `$USER`.
+    /// Operator identity to record. Defaults to `$USER`. Covered by the
+    /// attestation, so it is a signed claim and not a free string.
+    #[arg(long = "by", value_name = "NAME")]
+    pub granted_by: Option<String>,
+    /// The operator's detached minisign signature over the challenge, or `-`
+    /// for stdin. Required: `--by` is a label, the signature is the gesture.
+    #[arg(long, value_name = "PATH")]
+    pub attestation: Option<PathBuf>,
+}
+
+/// Arguments for `cs sessions takeover challenge`.
+#[derive(clap::Args)]
+pub struct TakeoverChallengeArgs {
+    /// Mission whose controls would be handed over.
+    #[arg(long, value_name = "MOLECULE_ID")]
+    pub mission: MoleculeId,
+    /// Request being answered. The holder is taken from the request.
+    #[arg(long, value_name = "REQUEST_ID")]
+    pub request: Option<String>,
+    /// Session that would be seated, when there is no request to answer.
+    #[arg(long, value_name = "SID")]
+    pub to: Option<String>,
+    /// Seconds after which the lease would authorise nothing.
+    #[arg(long = "ttl", value_name = "SECONDS")]
+    pub ttl: Option<i64>,
+    /// Operator identity the grant would claim. Defaults to `$USER`.
     #[arg(long = "by", value_name = "NAME")]
     pub granted_by: Option<String>,
 }
+
+/// Arguments for `cs sessions takeover trust`.
+#[derive(clap::Args)]
+pub struct TakeoverTrustArgs {}
 
 /// Arguments for `cs sessions takeover check`.
 #[derive(clap::Args)]
@@ -1661,12 +1696,14 @@ fn run_takeover(ctx: &Context, sub: &TakeoverSub) -> anyhow::Result<()> {
         TakeoverSub::Show(a) => run_takeover_show(ctx, a),
         TakeoverSub::Request(a) => run_takeover_request(ctx, a),
         TakeoverSub::Grant(a) => run_takeover_grant(ctx, a),
+        TakeoverSub::Challenge(a) => run_takeover_challenge(ctx, a),
+        TakeoverSub::Trust(a) => run_takeover_trust(ctx, a),
         TakeoverSub::Check(a) => run_takeover_check(ctx, a),
     }
 }
 
 fn run_takeover_show(ctx: &Context, args: &TakeoverShowArgs) -> anyhow::Result<()> {
-    let store = presence::leases(ctx);
+    let store = presence::leases(ctx)?;
     let now = Utc::now();
     let current = store.current(&args.mission)?;
     let pending = store.unanswered_requests(&args.mission)?;
@@ -1680,7 +1717,22 @@ fn run_takeover_show(ctx: &Context, args: &TakeoverShowArgs) -> anyhow::Result<(
                 "valid_now": current.as_ref().is_some_and(|l| l.is_valid_at(now)),
                 "next_epoch": store.next_epoch(&args.mission)?,
                 "unanswered_requests": pending,
-                "history": if args.history { Some(store.grants(&args.mission)?) } else { None },
+                "trusted_operator_key": store.trusted_key_id().map(|k| k.to_string()),
+                "history": if args.history {
+                    Some(
+                        store
+                            .audit(&args.mission)?
+                            .into_iter()
+                            .map(|g| serde_json::json!({
+                                "grant": g.lease,
+                                "attested": g.verdict.is_ok(),
+                                "refusal": g.verdict.err().map(|e| e.to_string()),
+                            }))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    None
+                },
             })
         );
         return Ok(());
@@ -1721,15 +1773,112 @@ fn run_takeover_show(ctx: &Context, args: &TakeoverShowArgs) -> anyhow::Result<(
         }
     }
     if args.history {
-        for l in store.grants(&args.mission)? {
+        // Refused lines are printed, not hidden. A forged grant that vanishes
+        // from every view is a forgery nobody investigates.
+        for g in store.audit(&args.mission)? {
+            let l = &g.lease;
             println!(
-                "  epoch {epoch}: {holder} (by {by} at {at})",
+                "  epoch {epoch}: {holder} (by {by} at {at}){verdict}",
                 epoch = l.epoch,
                 holder = l.holder_session_id.as_str(),
                 by = l.granted_by,
                 at = l.granted_at,
+                verdict = match &g.verdict {
+                    Ok(()) => l
+                        .attestation
+                        .as_ref()
+                        .map_or_else(String::new, |a| format!(" — signed by {}", a.key_id),),
+                    Err(e) => format!(" — NOT AN OPERATOR GESTURE: {e}"),
+                },
             );
         }
+    }
+    Ok(())
+}
+
+/// `cs sessions takeover challenge` — print the bytes, sign them elsewhere.
+///
+/// Printing a challenge confers nothing, so this verb needs no guard: it is a
+/// description of a transfer that has not happened. What makes the transfer
+/// happen is a signature over these bytes, and this command deliberately
+/// cannot produce one — see [`cosmon_core::operator_attestation`].
+fn run_takeover_challenge(ctx: &Context, args: &TakeoverChallengeArgs) -> anyhow::Result<()> {
+    let store = presence::leases(ctx)?;
+    let holder = match (&args.request, &args.to) {
+        (Some(raw), _) => {
+            let id = RequestId::new(raw.clone())?;
+            store
+                .find_request(&args.mission, &id)?
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "no request {id} on mission {mission}",
+                        mission = args.mission.as_str()
+                    )
+                })?
+                .candidate_session_id
+        }
+        (None, Some(sid)) => SessionId::new(sid.clone())?,
+        (None, None) => {
+            return Err(anyhow::anyhow!(
+                "nothing to describe — pass --request <REQUEST_ID> or --to <SID>"
+            ))
+        }
+    };
+
+    let challenge = GrantChallenge::new(
+        args.mission.clone(),
+        holder,
+        store.next_epoch(&args.mission)?,
+        presence::resolve_operator_name(args.granted_by.as_deref()),
+        args.ttl,
+    )?;
+
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "challenge": challenge,
+                "bytes": challenge.to_string(),
+            })
+        );
+    } else {
+        // Bare on stdout, so `cs … challenge … > f && minisign -Sm f` works.
+        print!("{challenge}");
+    }
+    Ok(())
+}
+
+/// `cs sessions takeover trust` — which key may seat a pilot here.
+fn run_takeover_trust(ctx: &Context, _args: &TakeoverTrustArgs) -> anyhow::Result<()> {
+    let resolved = MinisignOperatorVerifier::resolve_for_state_root(presence::state_root(ctx))?;
+
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "trusted_key_id": resolved.as_ref().map(|v| v.trusted_key_id().to_string()),
+                "source": resolved.as_ref().map(|v| v.source().display().to_string()),
+                "default_path": TAKEOVER_PUBKEY_REL,
+                "env_override": TAKEOVER_PUBKEY_ENV,
+            })
+        );
+        return Ok(());
+    }
+
+    match resolved {
+        Some(v) => println!(
+            "operator key {id} — read from {src}\n  \
+             a grant is honoured only if this key signed it",
+            id = v.trusted_key_id(),
+            src = v.source().display(),
+        ),
+        None => println!(
+            "no operator key pinned — no transfer can be authorised here.\n  \
+             `minisign -G -p {TAKEOVER_PUBKEY_REL} -s <secret>` then commit \
+             {TAKEOVER_PUBKEY_REL},\n  \
+             so a swapped trust root is a diff somebody reads. Or set \
+             ${TAKEOVER_PUBKEY_ENV} to a path."
+        ),
     }
     Ok(())
 }
@@ -1779,6 +1928,7 @@ fn run_takeover_grant(ctx: &Context, args: &TakeoverGrantArgs) -> anyhow::Result
             to: args.to.clone(),
             ttl: args.ttl,
             granted_by: args.granted_by.clone(),
+            attestation: args.attestation.clone(),
         },
     )?;
 
@@ -1808,7 +1958,7 @@ fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result
         Some(raw) => Some(LeaseEpoch::new(raw)?),
         None => None,
     };
-    let decision = presence::leases(ctx).authorize(&args.mission, Utc::now(), &session, epoch)?;
+    let decision = presence::leases(ctx)?.authorize(&args.mission, Utc::now(), &session, epoch)?;
 
     if ctx.json {
         println!("{}", serde_json::to_string(&decision)?);

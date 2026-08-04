@@ -33,12 +33,14 @@
 
 pub mod cas;
 pub mod event;
+pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;
 pub mod presence_store;
 pub mod resolve;
 
-pub use pilot_lease_store::PilotLeaseStore;
+pub use operator_trust::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
+pub use pilot_lease_store::{AuditedGrant, PilotLeaseStore};
 pub use pilot_mailbox::{MailboxEntry, MessageAck, PilotMailbox};
 pub use presence_store::PresenceStore;
 

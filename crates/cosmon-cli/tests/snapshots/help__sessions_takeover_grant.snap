@@ -14,5 +14,6 @@ Options:
       --json                   Output in JSON format
       --to <SID>               Session to seat, when granting without a request
       --ttl <SECONDS>          Seconds after which the lease authorises nothing
-      --by <NAME>              Operator identity to record. Defaults to `$USER`
+      --by <NAME>              Operator identity to record. Defaults to `$USER`. Covered by the attestation, so it is a signed claim and not a free string
+      --attestation <PATH>     The operator's detached minisign signature over the challenge, or `-` for stdin. Required: `--by` is a label, the signature is the gesture
   -h, --help                   Print help

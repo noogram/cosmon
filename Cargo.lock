@@ -935,6 +935,7 @@ dependencies = [
  "cosmon-filestore",
  "cosmon-graph",
  "cosmon-hash",
+ "cosmon-minisign-testkit",
  "cosmon-notary",
  "cosmon-observability",
  "cosmon-ops-tools",
@@ -1129,6 +1130,7 @@ dependencies = [
  "chrono",
  "cosmon-core",
  "cosmon-hash",
+ "cosmon-notary",
  "cosmon-state",
  "fs2",
  "nix 0.31.2",
@@ -1190,9 +1192,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmon-minisign-testkit"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "blake2",
+ "ed25519-dalek",
+]
+
+[[package]]
 name = "cosmon-notary"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "blake2",
  "blake3",
  "chrono",
  "cosmon-hash",

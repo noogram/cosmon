@@ -1,0 +1,18 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Print the exact bytes an operator signs to authorise one transfer
+
+Usage: cs sessions takeover challenge [OPTIONS] --mission <MOLECULE_ID>
+
+Options:
+      --config <PATH>          Path to configuration file
+      --mission <MOLECULE_ID>  Mission whose controls would be handed over
+      --request <REQUEST_ID>   Request being answered. The holder is taken from the request
+  -v, --verbose                Enable verbose output
+      --json                   Output in JSON format
+      --to <SID>               Session that would be seated, when there is no request to answer
+      --ttl <SECONDS>          Seconds after which the lease would authorise nothing
+      --by <NAME>              Operator identity the grant would claim. Defaults to `$USER`
+  -h, --help                   Print help

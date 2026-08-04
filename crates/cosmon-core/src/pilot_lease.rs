@@ -14,7 +14,7 @@
 //! lease is the same idea raised from one molecule to one mission, and the
 //! guard here — not the tag — is what refuses.
 //!
-//! # The three rules, and why each exists
+//! # The four rules, and why each exists
 //!
 //! 1. **A transfer increments the epoch.** Two pilots cannot both be at the
 //!    head of a strictly increasing sequence, so NO-SPLIT-BRAIN is a property
@@ -26,6 +26,11 @@
 //! 3. **Anything unknown is read-only.** No lease, no epoch presented, an
 //!    expired lease or a different holder all resolve to a refusal.
 //!    FAIL-CLOSED-AUTHORITY is the default, not a branch.
+//! 4. **A grant is a signature, not a claim.** `granted_by` used to be a free
+//!    string, which made the operator gesture forgeable by the very agent it
+//!    seated (M7 dogfood, friction F1). It is now inside bytes an operator
+//!    signs out of band — see [`crate::operator_attestation`] — and a ledger
+//!    line whose signature does not check is a grant that did not happen.
 //!
 //! # What this module deliberately cannot do
 //!
@@ -39,6 +44,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::id::{IdError, MoleculeId, SessionId};
+use crate::operator_attestation::{ChallengeError, GrantChallenge, OperatorAttestation};
 
 /// Monotonic generation counter of a mission's lease.
 ///
@@ -290,6 +296,15 @@ pub struct PilotLease {
     /// grant the operator issued unprompted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<RequestId>,
+    /// The operator's detached signature over [`PilotLease::challenge`].
+    ///
+    /// `Option` because the field is what a ledger line *carries*, not what a
+    /// reader accepts: a line without one deserialises fine and then confers
+    /// nothing, which is how a hand-appended grant is refused instead of
+    /// crashing the reader. See [`crate::operator_attestation`] for why
+    /// `granted_by` alone was not enough.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<OperatorAttestation>,
 }
 
 impl PilotLease {
@@ -311,6 +326,7 @@ impl PilotLease {
             granted_at,
             expires_at,
             request_id: None,
+            attestation: None,
         }
     }
 
@@ -319,6 +335,36 @@ impl PilotLease {
     pub fn answering(mut self, request: &LeaseRequest) -> Self {
         self.request_id = Some(request.id.clone());
         self
+    }
+
+    /// Attach the operator signature that authorised this transfer.
+    #[must_use]
+    pub fn attested_by(mut self, attestation: OperatorAttestation) -> Self {
+        self.attestation = Some(attestation);
+        self
+    }
+
+    /// The bytes the operator had to sign for this grant to be honoured.
+    ///
+    /// Rebuilt from the record rather than stored beside it, so a ledger line
+    /// cannot carry a signature over a *different* transfer than the one it
+    /// describes. The time-to-live is recovered as `expires_at - granted_at`,
+    /// which is exact because a grant computes both from the same instant.
+    ///
+    /// # Errors
+    ///
+    /// [`ChallengeError`] when the recorded `granted_by` is not a name the
+    /// canonical encoding can hold — which is itself a refusal, since such a
+    /// line could never have been signed.
+    pub fn challenge(&self) -> Result<GrantChallenge, ChallengeError> {
+        GrantChallenge::new(
+            self.mission_id.clone(),
+            self.holder_session_id.clone(),
+            self.epoch,
+            self.granted_by.clone(),
+            self.expires_at
+                .map(|deadline| (deadline - self.granted_at).num_seconds()),
+        )
     }
 
     /// Return `true` iff `now` is within the lease's validity window.
@@ -797,5 +843,37 @@ mod tests {
             assert!(!line.is_empty());
             assert!(!line.contains('\n'), "one line: {line:?}");
         }
+    }
+
+    #[test]
+    fn the_challenge_of_a_grant_names_that_grant_and_no_other() {
+        let lease = lease_held_by("claude", LeaseEpoch::first());
+        let c = lease
+            .challenge()
+            .expect("a lease rebuilds its own challenge");
+        assert_eq!(c.mission_id, lease.mission_id);
+        assert_eq!(c.holder_session_id, lease.holder_session_id);
+        assert_eq!(c.epoch, lease.epoch);
+        assert_eq!(c.granted_by, lease.granted_by);
+        assert_eq!(c.ttl_seconds, None);
+    }
+
+    #[test]
+    fn a_ttl_survives_the_round_trip_through_expires_at() {
+        let lease = PilotLease::new(
+            mission(),
+            sid("claude"),
+            LeaseEpoch::first(),
+            "operator",
+            t0(),
+            Some(t0() + Duration::seconds(900)),
+        );
+        assert_eq!(lease.challenge().expect("challenge").ttl_seconds, Some(900));
+    }
+
+    #[test]
+    fn a_grant_carries_no_attestation_until_one_is_attached() {
+        let lease = lease_held_by("claude", LeaseEpoch::first());
+        assert!(lease.attestation.is_none());
     }
 }

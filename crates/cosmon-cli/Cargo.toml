@@ -119,6 +119,10 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # test (task-20260421-0179), so no build-time deps are needed.
 
 [dev-dependencies]
+# The operator of ADR-171: a secret key the shipped tree deliberately has no
+# way to use. It is a dev-dependency and nothing else, so `cs` has no
+# dependency edge to a signer — which is the mechanism, not a convention.
+cosmon-minisign-testkit.workspace = true
 cosmon-transport = { workspace = true, features = ["test-support"] }
 insta.workspace = true
 # `tests/consent_non_blocking.rs` allocates a real pty (`openpty`) so the

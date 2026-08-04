@@ -331,8 +331,18 @@ HAND-OVER:
   cs sessions checkpoint list --mission task-20260731-e4d0
   cs sessions drift claude-sid codex-sid --mission task-20260731-e4d0
   cs sessions takeover show    --mission task-20260731-e4d0
+  cs sessions takeover trust                   # which key may seat a pilot
   cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
-  cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
+
+THE OPERATOR GESTURE (the part an agent cannot type for itself):
+  cs sessions takeover challenge --mission task-20260731-e4d0 --request req-… --by emmanuel > takeover.txt
+  minisign -Sm takeover.txt                    # your passphrase, your gesture
+  cs sessions takeover grant --mission task-20260731-e4d0 --request req-… --by emmanuel --attestation takeover.txt.minisig
+
+`--by` is a label; the signature is the authority. A grant with no valid
+attestation seats nobody — including one appended straight into the ledger,
+because every line is checked when it is *read*. Pin the public key at
+`.cosmon/takeover.pub` and commit it, so a swapped trust root is a diff.
 
 WITHOUT TYPING ANYTHING (the hook, mission M6):
   cs sessions hook install --provider claude   # .claude/settings.local.json
@@ -625,6 +635,8 @@ The PRIMARY lease: who may fly, who asked, who granted
 * `show` — Who holds the controls, at which epoch, and what has been asked
 * `request` — Ask for the controls. Writes a request and confers nothing
 * `grant` — Operator gesture: hand the controls over at the next epoch
+* `challenge` — Print the exact bytes an operator signs to authorise one transfer
+* `trust` — Show which operator key this galaxy trusts to authorise a transfer
 * `check` — Ask the guard whether a session may pilot. Exits 0 or 1
 
 
@@ -671,7 +683,32 @@ Operator gesture: hand the controls over at the next epoch
 * `--request <REQUEST_ID>` — Request being answered. The holder is taken from the request
 * `--to <SID>` — Session to seat, when granting without a request
 * `--ttl <SECONDS>` — Seconds after which the lease authorises nothing
-* `--by <NAME>` — Operator identity to record. Defaults to `$USER`
+* `--by <NAME>` — Operator identity to record. Defaults to `$USER`. Covered by the attestation, so it is a signed claim and not a free string
+* `--attestation <PATH>` — The operator's detached minisign signature over the challenge, or `-` for stdin. Required: `--by` is a label, the signature is the gesture
+
+
+
+## `cs sessions takeover challenge`
+
+Print the exact bytes an operator signs to authorise one transfer
+
+**Usage:** `cs sessions takeover challenge [OPTIONS] --mission <MOLECULE_ID>`
+
+###### **Options:**
+
+* `--mission <MOLECULE_ID>` — Mission whose controls would be handed over
+* `--request <REQUEST_ID>` — Request being answered. The holder is taken from the request
+* `--to <SID>` — Session that would be seated, when there is no request to answer
+* `--ttl <SECONDS>` — Seconds after which the lease would authorise nothing
+* `--by <NAME>` — Operator identity the grant would claim. Defaults to `$USER`
+
+
+
+## `cs sessions takeover trust`
+
+Show which operator key this galaxy trusts to authorise a transfer
+
+**Usage:** `cs sessions takeover trust`
 
 
 
