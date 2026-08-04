@@ -37,11 +37,11 @@ added without a curated row in `scripts/license-rationales.tsv`.
 <!-- BEGIN LICENSE TABLE -->
 ## Per-crate partition (machine-generated — do not edit by hand)
 
-_Last generated: 2026-08-02, 46 crates._
+_Last generated: 2026-08-04, 47 crates._
 
 _Run `bash scripts/license-table.sh --write` to refresh._
 
-### Core (AGPL-3.0-only) — 38 crates
+### Core (AGPL-3.0-only) — 39 crates
 
 | Crate | Tier | Licence | Rationale |
 |-------|------|---------|-----------|
@@ -62,6 +62,7 @@ _Run `bash scripts/license-table.sh --write` to refresh._
 | `cosmon-graph` | core | AGPL-3.0-only | DAG primitives — layer ① noyau (delib-ca76) |
 | `cosmon-hash` | core | AGPL-3.0-only | hash primitives — layer ① noyau (delib-ca76) |
 | `cosmon-mcp` | core | AGPL-3.0-only | MCP server |
+| `cosmon-minisign-testkit` | core | AGPL-3.0-only | test-only minisign signer (publish=false) — exists so `cs` has NO dependency edge to a signing path (M7-F1); dev-dependency of the pilot-lease tests |
 | `cosmon-notary` | core | AGPL-3.0-only | notary primitives — layer ② (delib-ca76) |
 | `cosmon-observability` | core | AGPL-3.0-only | observability — layer ⑥ (delib-ca76) |
 | `cosmon-oidc-testkit` | core | AGPL-3.0-only | OIDC test kit binary |

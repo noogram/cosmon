@@ -1671,7 +1671,8 @@ mod tests {
     /// whom — from a directory scan, with no broker anywhere.
     #[test]
     fn claude_sees_codex_and_codex_sees_claude() {
-        let (dir, ctx, state) = lease_world();
+        // `_dir` keeps the tempdir alive for the whole test; it is never read.
+        let (_dir, ctx, state) = lease_world();
 
         let (mission, epoch) = seated_as_primary(&ctx, &state, "claude-sid");
         ping(
@@ -1730,7 +1731,8 @@ mod tests {
     // operator gestures.
     #[test]
     fn a_bare_heartbeat_does_not_erase_the_seat_it_found() {
-        let (dir, ctx, state) = lease_world();
+        // `_dir` keeps the tempdir alive for the whole test; it is never read.
+        let (_dir, ctx, state) = lease_world();
         let (mission, epoch) = seated_as_primary(&ctx, &state, "pilot");
         ping(
             &ctx,

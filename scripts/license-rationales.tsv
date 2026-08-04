@@ -44,6 +44,7 @@ cosmon-hash	core	AGPL-3.0-only	hash primitives — layer ① noyau (delib-ca76)
 cosmon-llama	core	AGPL-3.0-only	llama inference wrapper — AGPL Rust binding (off by default)
 cosmon-matrix-tick	core	AGPL-3.0-only	Matrix bridge runtime
 cosmon-mcp	core	AGPL-3.0-only	MCP server
+cosmon-minisign-testkit	core	AGPL-3.0-only	test-only minisign signer (publish=false) — exists so `cs` has NO dependency edge to a signing path (M7-F1); dev-dependency of the pilot-lease tests
 cosmon-notary	core	AGPL-3.0-only	notary primitives — layer ② (delib-ca76)
 cosmon-observability	core	AGPL-3.0-only	observability — layer ⑥ (delib-ca76)
 cosmon-oidc-testkit	core	AGPL-3.0-only	OIDC test kit binary
