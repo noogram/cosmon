@@ -903,7 +903,7 @@ mod tests {
         let m = mol("task-20260729-9c11");
         let log = resolve_events_log_path(dir.path());
 
-        let mut spawn = |worker: &WorkerId| {
+        let spawn = |worker: &WorkerId| {
             emit_one(
                 &log,
                 EventV2::AdapterSelected {
