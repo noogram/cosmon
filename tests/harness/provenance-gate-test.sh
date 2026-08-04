@@ -125,7 +125,16 @@ verdict "4. bypass accepted with COSMON_SKIP_PROVENANCE=1" 0 "$rc"
 # Scenario 5 — CI mirror: run scripts/check-provenance.sh against the
 # whole history. The bypass commit (#4) has no mol_id and no bypass at
 # replay time, so the CI mirror should flag it.
-out=$(bash "$REPO/scripts/check-provenance.sh" 2>&1) && rc=0 || rc=$?
+# Hermetic: this scenario asserts the "whole history" fallback, so it must
+# not inherit the runner's GITHUB_* — on a pull_request event they would
+# steer the script into its PR scope (origin/$GITHUB_BASE_REF..$GITHUB_SHA),
+# which resolves to nothing inside this synthetic repo and yields a green
+# rc=0. Measured 2026-08-04 on the first external PR to ever run this suite
+# (noogram/cosmon#44): the test failed on our own environment leakage, not
+# on the contributor's diff.
+out=$(env -u GITHUB_BASE_REF -u GITHUB_SHA -u GITHUB_EVENT_BEFORE \
+        -u COSMON_PROVENANCE_HEAD \
+        bash "$REPO/scripts/check-provenance.sh" 2>&1) && rc=0 || rc=$?
 if [ "$rc" -ne 0 ] && printf '%s' "$out" | grep -q "$legitimate_merge_sha"; then
     if printf '%s' "$out" | grep -q "ok    $legitimate_merge_sha"; then
         verdict "5a. CI mirror accepts legitimate merge" 0 0
