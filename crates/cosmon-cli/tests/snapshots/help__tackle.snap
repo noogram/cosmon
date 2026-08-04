@@ -78,7 +78,7 @@ Options:
           
           **Strong is never inherited.** Every dispatch resolves the model fresh; a strong (frontier) model is reachable only from this flag or a formula-step pin — a positive per-molecule act — never from a config/env *default* that could silently make an entire fleet expensive (the `/model`-hack leak this axis exists to close).
           
-          The id is carried **opaquely**: cosmon does not check that it is legal for the resolved adapter — the backend rejects an invalid `(adapter, model)` pair at launch (composition validation lands in C5). Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
+          The id is carried **opaquely**: cosmon does not check that it is legal for the resolved adapter. A recognisable cross-family pair produces a non-blocking advisory, but the Adapter remains the authority because custom endpoints can legitimately serve another family's model. Config `default_model` rows are scoped per adapter because a model id only has meaning inside its adapter.
 
       --role-hint <ROLE>
           Forensic-only role-of-origin hint propagated through to [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) (ADR-097 / C6).

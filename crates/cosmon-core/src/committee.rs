@@ -2354,9 +2354,9 @@ pub enum ReviewedTreeResolution {
 ///
 /// The refusal is the load-bearing half. Choosing a matching base is a
 /// convenience; refusing to launch when none carries the pinned tree is what
-/// makes the pin a constraint rather than decoration — the same shape as the
-/// incoherent-pair gate that correctly refused an adapter/model mismatch in
-/// that very run.
+/// makes the pin a constraint rather than decoration. This differs from a
+/// cross-family adapter/model hint, which is advisory because a custom
+/// Adapter endpoint may legitimately serve the requested family.
 ///
 /// Prefix matching is deliberate and bounded: a contract written by a human
 /// carries an abbreviated tree id (`4a25558e446d`), and a pin shorter than
