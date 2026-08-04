@@ -22,8 +22,9 @@
 //! `locate_tla2tools`. The JRE is found via the `JAVA_HOME` environment
 //! variable or a `java` binary on `PATH`.
 
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use cosmon_core::error::CosmonError;
 use cosmon_core::spore::seal::{SealVerdictCache, TlcOutcome, TlcRunner};
@@ -111,6 +112,72 @@ impl RealTlcRunner {
     }
 }
 
+/// Build the TLC command used by recipient-side seal verification.
+fn tlc_command(java: &Path, jar: &Path, module: &Path, config: Option<&Path>) -> Command {
+    let mut cmd = Command::new(java);
+    cmd.arg("-XX:+UseParallelGC")
+        .arg("-cp")
+        .arg(jar)
+        .arg("tlc2.TLC")
+        .arg("-workers")
+        .arg("auto");
+    if let Some(cfg) = config {
+        cmd.arg("-config").arg(cfg);
+    }
+    cmd.arg(module);
+    cmd
+}
+
+/// Relay one TLC stream live to stderr while retaining it for diagnostics.
+///
+/// TLC progress belongs on stderr because `cs spore run --json` reserves
+/// stdout for NDJSON molecule records.
+fn relay_tlc_output(reader: impl Read) -> std::io::Result<String> {
+    let mut reader = BufReader::new(reader);
+    let mut captured = String::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        eprint!("{line}");
+        captured.push_str(&line);
+    }
+    Ok(captured)
+}
+
+/// Extract the invariant TLC names in its standard rejection line.
+fn violated_invariant(output: &str) -> Option<&str> {
+    output.lines().find_map(|line| {
+        let (_, after_prefix) = line.split_once("Invariant ")?;
+        let (name, _) = after_prefix.split_once(" is violated")?;
+        let name = name.trim();
+        (!name.is_empty()).then_some(name)
+    })
+}
+
+/// Choose a concise failure detail, preferring the violated property over the
+/// final raw counterexample state that TLC prints later.
+fn failure_detail(stdout: &str, stderr: &str) -> String {
+    if let Some(name) = violated_invariant(stdout).or_else(|| violated_invariant(stderr)) {
+        return format!("invariant {name} violated");
+    }
+
+    stdout
+        .lines()
+        .chain(stderr.lines())
+        .rev()
+        .find(|line| {
+            let line = line.trim();
+            !line.is_empty() && !line.starts_with("Finished")
+        })
+        .map_or("TLC reported a non-zero exit", str::trim)
+        .chars()
+        .take(200)
+        .collect()
+}
+
 impl TlcRunner for RealTlcRunner {
     fn available(&self) -> bool {
         self.java.is_some() && self.jar.is_some()
@@ -121,32 +188,42 @@ impl TlcRunner for RealTlcRunner {
             return TlcOutcome::Unavailable;
         };
 
-        // `java -cp tla2tools.jar tlc2.TLC [-config <cfg>] <module>`.
-        let mut cmd = Command::new(java);
-        cmd.arg("-cp").arg(jar).arg("tlc2.TLC");
-        if let Some(cfg) = config {
-            cmd.arg("-config").arg(cfg);
-        }
-        cmd.arg(module);
+        eprintln!("seal: verifying with TLC (parallel workers; this can take several minutes)...");
+        let mut cmd = tlc_command(java, jar, module, config);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        match cmd.output() {
-            Ok(out) if out.status.success() => TlcOutcome::Passed,
-            Ok(out) => {
-                // TLC writes the violated invariant / error to stdout; surface a
-                // short, single-line detail.
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let detail = stdout
-                    .lines()
-                    .rev()
-                    .find(|l| {
-                        let l = l.trim();
-                        !l.is_empty() && !l.starts_with("Finished")
-                    })
-                    .map_or("TLC reported a non-zero exit", str::trim)
-                    .chars()
-                    .take(200)
-                    .collect();
-                TlcOutcome::Failed { detail }
+        match cmd.spawn() {
+            Ok(mut child) => {
+                let Some(stdout) = child.stdout.take() else {
+                    return TlcOutcome::Unavailable;
+                };
+                let Some(stderr) = child.stderr.take() else {
+                    return TlcOutcome::Unavailable;
+                };
+                let (status, stdout, stderr) = std::thread::scope(|scope| {
+                    let stdout_reader = scope.spawn(|| relay_tlc_output(stdout));
+                    let stderr_reader = scope.spawn(|| relay_tlc_output(stderr));
+                    let status = child.wait();
+                    let stdout = stdout_reader
+                        .join()
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                    let stderr = stderr_reader
+                        .join()
+                        .ok()
+                        .and_then(Result::ok)
+                        .unwrap_or_default();
+                    (status, stdout, stderr)
+                });
+
+                match status {
+                    Ok(status) if status.success() => TlcOutcome::Passed,
+                    Ok(_) => TlcOutcome::Failed {
+                        detail: failure_detail(&stdout, &stderr),
+                    },
+                    Err(_) => TlcOutcome::Unavailable,
+                }
             }
             // The runner claimed availability but the spawn failed (jar moved,
             // JRE removed mid-run): honest Unavailable, never a silent pass.
@@ -232,6 +309,48 @@ mod tests {
         assert_eq!(
             runner.check(Path::new("spore.tla"), None),
             TlcOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn tlc_uses_parallel_gc_and_all_workers() {
+        let command = tlc_command(
+            Path::new("java"),
+            Path::new("tla2tools.jar"),
+            Path::new("spore.tla"),
+            Some(Path::new("spore.cfg")),
+        );
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-XX:+UseParallelGC",
+                "-cp",
+                "tla2tools.jar",
+                "tlc2.TLC",
+                "-workers",
+                "auto",
+                "-config",
+                "spore.cfg",
+                "spore.tla",
+            ]
+        );
+    }
+
+    #[test]
+    fn failure_detail_names_the_violated_invariant_not_the_last_state() {
+        let output = r#"Error: Invariant BlindBeforeConfrontation is violated.
+State 42: <Action line 7, col 1 to line 9, col 2 of module spore>
+/\\ role = "notice"
+/\\ regime = "rgpd"
+Finished in 01s at (2026-08-04 12:00:00)"#;
+
+        assert_eq!(
+            failure_detail(output, ""),
+            "invariant BlindBeforeConfrontation violated"
         );
     }
 }

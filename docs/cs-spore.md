@@ -134,6 +134,12 @@ wiring always resolves on disk.
 - A **sealed** spore cannot be proven on a machine without the TLC
   verifier wired in, so `cs spore run` **fails closed** by default and
   refuses to germinate.
+- When TLC is available, verification uses all available workers and the JVM's
+  parallel collector. Its startup notice and progress lines are relayed to
+  stderr, so a long recipient-side check remains observable without polluting
+  `--json` stdout.
+- When TLC rejects a seal, the refusal names the violated invariant (for
+  example `BlindBeforeConfrontation`) before any lower-level fallback detail.
 - Pass `--allow-unchecked-seal` to opt into the risk. The status line then
   reads `seal: present, NOT verified`, never `verified`.
 
