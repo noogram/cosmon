@@ -114,12 +114,10 @@ async fn explicit_registry_is_served_audience_keyed_no_jwt_required() {
          [[clients]]\n\
          audience = \"cs-rpp-adapter\"\n\
          client_id = \"runtime-cid-a\"\n\
-         redirect_uris = [\"http://127.0.0.1:7777/callback\"]\n\
          scopes = [\"cosmon:molecule:read\", \"cosmon:molecule:write\"]\n\
          [[clients]]\n\
          audience = \"claude-web\"\n\
-         client_id = \"runtime-cid-b\"\n\
-         redirect_uris = [\"https://claude.ai/api/mcp/auth_callback\"]\n",
+         client_id = \"runtime-cid-b\"\n",
     )
     .unwrap();
 
@@ -147,7 +145,6 @@ async fn explicit_registry_is_served_audience_keyed_no_jwt_required() {
         .unwrap();
     assert_eq!(a["client_id"], "runtime-cid-a");
     assert_eq!(b["client_id"], "runtime-cid-b");
-    assert_eq!(a["redirect_uris"][0], "http://127.0.0.1:7777/callback");
 }
 
 /// df19-F5 regression: a `client_secret` present in `oauth-clients.toml` MUST
@@ -175,8 +172,7 @@ async fn client_secret_never_leaks_through_served_endpoint() {
          [[clients]]\n\
          audience = \"cs-rpp-adapter\"\n\
          client_id = \"runtime-cid-a\"\n\
-         client_secret = \"PER_CLIENT_SHOULD_NEVER_LEAK\"\n\
-         redirect_uris = [\"http://127.0.0.1:7777/callback\"]\n",
+         client_secret = \"PER_CLIENT_SHOULD_NEVER_LEAK\"\n",
     )
     .unwrap();
 

@@ -40,8 +40,8 @@
 //!   "schema_version": 2,
 //!   "issuer": "https://forgejo.example.ts.net",
 //!   "clients": [
-//!     { "audience": "cs-rpp-adapter", "client_id": "…", "redirect_uris": ["http://127.0.0.1:7777/callback"], "scopes": ["cosmon:molecule:read"] },
-//!     { "audience": "claude-web",     "client_id": "…", "redirect_uris": ["https://claude.ai/api/mcp/auth_callback"], "scopes": ["cosmon:mcp"] }
+//!     { "audience": "cs-rpp-adapter", "client_id": "…", "scopes": ["cosmon:molecule:read"] },
+//!     { "audience": "claude-web",     "client_id": "…", "scopes": ["cosmon:mcp"] }
 //!   ]
 //! }
 //! ```
@@ -79,8 +79,8 @@
 //!
 //! 1. `<state_dir>/security/oauth-clients.toml` — the **authoritative**
 //!    registry, written by the provisioner or the operator. It carries the
-//!    full document including per-audience `redirect_uris`/`scopes`.
-//!    Served verbatim after validation.
+//!    full document including per-audience `scopes`. Served verbatim after
+//!    validation.
 //! 2. Absent → **derived** from `<state_dir>/security/trusted-issuers.toml`
 //!    ([`crate::jwks_fetch::TrustedIssuers`]). Since Forgejo hardcodes
 //!    `aud = client_id`, every pinned `audience` *is* a `client_id`. This
@@ -227,12 +227,6 @@ pub struct OAuthClient {
     /// The `OAuth2` `client_id` the client presents in the authorize/token
     /// requests. Public, integrity-checked, not secret.
     pub client_id: String,
-    /// Redirect URIs the `IdP` provisioned for this app. The client
-    /// asserts the loopback URI it is about to use is present before
-    /// starting the flow (fail if the server provisioned a different
-    /// port). Empty in the derived fallback.
-    #[serde(default)]
-    pub redirect_uris: Vec<String>,
     /// Scopes provisioned for this app, advisory to the client. Empty in
     /// the derived fallback.
     #[serde(default)]
@@ -240,23 +234,15 @@ pub struct OAuthClient {
 }
 
 impl OAuthClient {
-    /// Minimal constructor (`redirect_uris`/`scopes` empty). The struct
-    /// is `#[non_exhaustive]`; this is the cross-crate builder.
+    /// Minimal constructor (`scopes` empty). The struct is
+    /// `#[non_exhaustive]`; this is the cross-crate builder.
     #[must_use]
     pub fn new(audience: String, client_id: String) -> Self {
         Self {
             audience,
             client_id,
-            redirect_uris: Vec::new(),
             scopes: Vec::new(),
         }
-    }
-
-    /// Builder-style setter for the provisioned redirect URIs.
-    #[must_use]
-    pub fn with_redirect_uris(mut self, uris: Vec<String>) -> Self {
-        self.redirect_uris = uris;
-        self
     }
 
     /// Builder-style setter for the provisioned scopes.
@@ -396,8 +382,8 @@ pub fn load_registry(state_dir: &Path) -> Result<Option<ClientRegistry>, Discove
 ///
 /// Each audience becomes a client with `client_id == audience` (Forgejo
 /// `aud = client_id`). For non-Forgejo `IdPs` where `aud != client_id`
-/// the explicit file is required. `redirect_uris`/`scopes` are empty —
-/// the explicit file is the way to publish those.
+/// the explicit file is required. `scopes` are empty — the explicit file
+/// is the way to publish those.
 ///
 /// Authorization and token endpoints are **not** derived: the client
 /// fetches them from the `IdP`'s own OIDC Discovery document.
@@ -448,10 +434,8 @@ mod tests {
             "https://forgejo.example.ts.net".to_owned(),
             vec![
                 OAuthClient::new("cs-rpp-adapter".to_owned(), "cid-a".to_owned())
-                    .with_redirect_uris(vec!["http://127.0.0.1:7777/callback".to_owned()])
                     .with_scopes(vec!["cosmon:molecule:read".to_owned()]),
-                OAuthClient::new("claude-web".to_owned(), "cid-b".to_owned())
-                    .with_redirect_uris(vec!["https://claude.ai/api/mcp/auth_callback".to_owned()]),
+                OAuthClient::new("claude-web".to_owned(), "cid-b".to_owned()),
             ],
         )
     }
@@ -529,8 +513,7 @@ mod tests {
              [[clients]]\n\
              audience = \"cs-rpp-adapter\"\n\
              client_id = \"explicit-cid\"\n\
-             client_secret = \"PER_CLIENT_SHOULD_NEVER_LEAK\"\n\
-             redirect_uris = [\"http://127.0.0.1:7777/callback\"]\n",
+             client_secret = \"PER_CLIENT_SHOULD_NEVER_LEAK\"\n",
         )
         .unwrap();
 
@@ -620,8 +603,7 @@ mod tests {
              issuer = \"https://explicit.test\"\n\
              [[clients]]\n\
              audience = \"cs-rpp-adapter\"\n\
-             client_id = \"explicit-cid\"\n\
-             redirect_uris = [\"http://127.0.0.1:7777/callback\"]\n",
+             client_id = \"explicit-cid\"\n",
         )
         .unwrap();
 

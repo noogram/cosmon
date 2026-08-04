@@ -252,18 +252,13 @@ pub async fn discover(
              (the cosmon-oauth-clients document lists none for it)"
             ),
         })?;
-    // A `redirect_uri` published by the (integrity-only) client registry is
-    // never trusted verbatim: validate it is a loopback IP literal over http
-    // before we bind a listener and advertise it to the authorization server.
-    // The built-in default is constructed from the loopback IP literal, so it
-    // is trusted without a re-parse. (Review task-20260710-a6ae F1, HIGH.)
-    let redirect_uri = match client.redirect_uri.clone() {
-        Some(uri) => {
-            loopback::validate_loopback_redirect_uri(&uri)?;
-            uri
-        }
-        None => loopback::redirect_uri(loopback::DEFAULT_REDIRECT_PORT),
-    };
+    // The redirect URI is the client's own loopback literal, never a value the
+    // server dictates: the IdP is the sole authority on which redirect URIs an
+    // app may use and enforces its registered set at authorize time (a loopback
+    // range, RFC 8252 §7.3), so there is nothing for the reverse-discovery
+    // document to publish here. The default is built from the loopback IP
+    // literal, so it needs no re-validation.
+    let redirect_uri = loopback::redirect_uri(loopback::DEFAULT_REDIRECT_PORT);
     // We present the OIDC `id_token` as the cosmon bearer (see
     // [`identity_bearer`]); Forgejo only mints an `id_token` when `openid` is in
     // the authorization request. Guarantee it regardless of what the profile or

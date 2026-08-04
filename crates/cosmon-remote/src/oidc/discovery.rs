@@ -110,11 +110,6 @@ pub struct OAuthClient {
     /// The Forgejo-generated `client_id`. Because `aud == client_id`, this is
     /// also the `aud` component of the credential key — the isolation slot.
     pub client_id: String,
-    /// The redirect URI registered for this client, if the server chooses to
-    /// publish it. When absent the client uses the loopback default
-    /// (`http://127.0.0.1:7777/callback`).
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
     /// The scopes the server recommends for this client, if published. When
     /// absent the client falls back to the profile's scopes.
     #[serde(default)]
@@ -237,7 +232,7 @@ mod tests {
             "issuer": "https://forge.example",
             "clients": [
                 {"audience": "cs-rpp-adapter", "client_id": "aaa-111"},
-                {"audience": "claude-web", "client_id": "bbb-222", "redirect_uri": "http://127.0.0.1:7777/callback"}
+                {"audience": "claude-web", "client_id": "bbb-222"}
             ]
         }"#;
         let reg: ClientRegistry = serde_json::from_str(json).unwrap();
