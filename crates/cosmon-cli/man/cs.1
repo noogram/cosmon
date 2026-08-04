@@ -23,7 +23,11 @@ BASE BRANCH. The branch a molecule merges back into is a property of the MOLECUL
 .PP
 ANTI\-PREEMPTION LEASE. A human \*(Aqcs tackle\*(Aq and a running \*(Aqcs run\*(Aq are two writers racing on the same Pending → Active flip, so every tackle records WHO dispatched it: \*(Aqcs tackle \-\-by human\*(Aq (the default) or \*(Aqcs tackle \-\-by runtime:<pid>\*(Aq (what \*(Aqcs run\*(Aq passes). The walker re\-reads each candidate fresh from disk right before dispatch and SKIPS anything no longer Pending, carrying a sticky \*(Aqhuman\*(Aq claim, or tagged \*(Aqhold:pilot\*(Aq. Use \*(Aqcs claim <id>\*(Aq before reaching for a pending molecule: it writes the durable pilot hold before \*(Aqcs tackle\*(Aq, and \*(Aqcs release <id>\*(Aq removes it. The runtime always defers to that hold. \*(Aqmanual always wins\*(Aq, the runtime never raffles a molecule you reached for. Binary owner field, no clock to calibrate. Operators do not normally type \*(Aq\-\-by\*(Aq; \*(Aqhuman\*(Aq is the default.
 .PP
-SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(Aq template, the way \*(Aqcs nucleate\*(Aq germinates one molecule. A spore is a parameterizable mission plan: a fleet, per\-node formulas, a ParamSchema, a DAG of typed edges, and an optional \*(Aq.tla\*(Aq seal. Three verbs, one role each:
+SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(Aq template, the way \*(Aqcs nucleate\*(Aq germinates one molecule. A spore is a parameterizable mission plan: a fleet, per\-node formulas, a ParamSchema, a DAG of typed edges, and an optional \*(Aq.tla\*(Aq seal. Four verbs, one role each:
+  cs spore install <source>       fetch a shareable bundle and place
+                                  it in this project, copying its
+                                  recipes into .cosmon/formulas/ so
+                                  their per\-step pins reach dispatch.
   cs spore validate <ref>         parse + expand as a dry run; prints
                                   the ordered nucleate call list,
                                   germinates nothing.
@@ -33,6 +37,8 @@ SPORE (ADR\-140) germinates a whole polymer from a shareable \*(Aqspore.toml\*(A
                                   temp:warm, wired to its blocked\-by).
   cs spore export <ref>           content\-addressed bundle hash +
                                   ASTRA descriptive layer (D6).
+.PP
+\*(Aq<source>\*(Aq is a local path, \*(Aqgithub:owner/repo[/subdir][@ref]\*(Aq, a GitHub tree/blob URL, or any other git remote. Install refuses before writing anything: on an \*(Aq\-\-expect\-hash\*(Aq mismatch, a bundle missing a declared file, a symlink in the fetched tree, a non\-empty destination, or a registry recipe of the same name with different content (all overridable with \*(Aq\-\-force\*(Aq where that is meaningful). An identical recipe is a no\-op, so re\-installing is idempotent.
 .PP
 \*(Aq<ref>\*(Aq is a \*(Aqspore.toml\*(Aq file or a directory containing one. \*(Aq\-\-var k=v\*(Aq (repeatable) binds a parameter, coerced into its declared ParamSchema type before expansion. \*(Aq\-\-json\*(Aq on validate and run emits NDJSON (agent\-first invariant). A spore is a declarative front end over the existing \*(Aqcs nucleate\*(Aq verb, not a new scheduler and not a new molecule type.
 .PP

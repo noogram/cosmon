@@ -21,6 +21,36 @@ this stage.
 
 ### Added
 
+- **`cs spore install` — the verb that gets a shared bundle into a project.**
+  The spore family could validate, germinate and export a bundle, but every one
+  of those verbs started from a bundle already on disk, and getting it there had
+  no verb: clone or copy by hand, pick a directory, and copy the recipes into
+  `.cosmon/formulas/`. Skipping that last step is silent and expensive — a
+  molecule stores its formula by **id** and `cs tackle` resolves that id against
+  the mission project's registry, so an uninstalled bundle germinates fine and
+  then runs with every per-step `adapter`/`model` pin inert (the 23-node run of
+  task-20260725-eb3b). `cs spore install <source>` is both steps: it fetches
+  from a local path, `github:owner/repo[/subdir][@ref]`, a GitHub tree/blob URL
+  (paste the browser's), or any other git remote (`--git-ref` / `--subdir`);
+  places the bundle under `<project>/spores/<spore-name>/` or `--dest`; and
+  registers each recipe under the name the recipe **declares**, which is the
+  name dispatch looks up — registering under the bundle's file name would leave
+  the pins exactly as unreachable. It is called `install` and not `add` (which
+  would name a dependency manifest cosmon does not have for spores) or `import`
+  (which would claim to invert `export`, an in-place hash-and-RO-Crate emit).
+  Fail-closed before anything is written: an `--expect-hash` mismatch against
+  the same content-addressed id `cs spore export` prints, a bundle missing a
+  file its manifest declares, a **symlink** in the fetched tree (refused, never
+  followed), a path that escapes the destination, a non-empty destination, or a
+  registry recipe of the same name with different content — the last two
+  overridable with `--force`. A byte-identical recipe is a no-op, so
+  re-installing is idempotent instead of training the operator to pass `--force`
+  past the one conflict that mattered. `--dry-run` prints the plan;
+  `--no-formulas` places the bundle and still reports every pin it is leaving
+  unreachable. Provenance (`source`, resolved commit, bundle hash) is recorded
+  in `.spore-install.toml` in the destination, deliberately outside the coverage
+  set the bundle hash binds. See [`docs/cs-spore.md`](docs/cs-spore.md).
+
 - **A formula can declare what it needs of its worker, and `cs tackle`
   refuses a dispatch that cannot supply it** — the open half of
   noogram/cosmon #4, clause 2, and the reporter's own suggestion: *gate

@@ -1,0 +1,52 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Fetch a shareable bundle and place it into this project, installing its recipes into `.cosmon/formulas/` so their per-step pins reach dispatch
+
+Usage: cs spore install [OPTIONS] <SOURCE>
+
+Arguments:
+  <SOURCE>  Where the bundle comes from: a local path, `github:owner/repo[/dir][@ref]`, a GitHub tree/blob URL, or any other git remote
+
+Options:
+      --config <PATH>         Path to configuration file
+      --dest <DIR>            Where to place the bundle. Defaults to `<project>/spores/<spore-name>/`
+      --git-ref <REF>         Branch, tag, or commit to fetch. Overrides a ref encoded in the source
+  -v, --verbose               Enable verbose output
+      --json                  Output in JSON format
+      --subdir <PATH>         Path to the bundle inside the checkout. Overrides one encoded in the source; the way to install from a subdirectory of a non-GitHub remote
+      --expect-hash <BLAKE3>  Refuse unless the fetched bundle hashes to exactly this id (as printed by `cs spore export`). Checked before anything is written
+      --no-formulas           Place the bundle but do not copy its recipes into `.cosmon/formulas/`. The bundle then germinates without its per-step adapter/model pins
+      --force                 Overwrite a non-empty destination and replace conflicting recipes already in the registry. The copy is a merge: a file the new bundle carries replaces the one there, and a file it does not carry is left alone — nothing is deleted on your behalf
+      --dry-run               Report what would be installed and write nothing
+      --formulas-dir <DIR>    Formula registry to install recipes into (default: walk-up `.cosmon/formulas`)
+  -h, --help                  Print help
+
+EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev
+  cs spore install https://github.com/noogram/cosmon/tree/main/spores/cosmon-dev
+  cs spore install ../shared/bundle --dest spores/shared   # local copy
+  cs spore install github:o/r@v1 --expect-hash blake3:...  # verified fetch
+  cs spore install github:o/r --dry-run --json             # plan only
+
+Fetches the bundle (git remote or local path), places it under
+<project>/spores/<spore-name>/ unless --dest says otherwise, and copies each
+[spore.formulas.*] recipe into .cosmon/formulas/ under the name the recipe
+DECLARES — which is the name 'cs tackle' resolves at dispatch. That second
+half is why the verb is called install and not add: without it a bundle
+germinates fine and then runs with every per-step adapter/model pin silently
+inert (task-20260725-eb3b).
+
+SOURCE: a local path, 'github:owner/repo[/subdir][@ref]', a GitHub tree/blob
+URL, or any other git remote (use --git-ref / --subdir to pin one).
+
+REFUSALS, all before anything is written: a bundle whose hash does not match
+--expect-hash; a bundle missing a file its manifest declares; a symlink
+inside the fetched tree; a non-empty destination (without --force); and a
+registry that already holds a DIFFERENT recipe of the same name (without
+--force), since overwriting changes what already-germinated molecules run.
+An identical recipe is a no-op, so re-installing is idempotent.
+
+SEE ALSO: cs spore validate (inspect what was installed), cs spore export
+(the id --expect-hash checks), docs/cs-spore.md.

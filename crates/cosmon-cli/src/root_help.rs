@@ -70,7 +70,11 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              'spore.toml' template, the way 'cs nucleate' germinates one \
              molecule. A spore is a parameterizable mission plan: a fleet, \
              per-node formulas, a ParamSchema, a DAG of typed edges, and an \
-             optional '.tla' seal. Three verbs, one role each:\n  \
+             optional '.tla' seal. Four verbs, one role each:\n  \
+             cs spore install <source>       fetch a shareable bundle and place\n                                  \
+               it in this project, copying its\n                                  \
+               recipes into .cosmon/formulas/ so\n                                  \
+               their per-step pins reach dispatch.\n  \
              cs spore validate <ref>         parse + expand as a dry run; prints\n                                  \
                the ordered nucleate call list,\n                                  \
                germinates nothing.\n  \
@@ -80,6 +84,13 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
                temp:warm, wired to its blocked-by).\n  \
              cs spore export <ref>           content-addressed bundle hash +\n                                  \
                ASTRA descriptive layer (D6).\n\n\
+             '<source>' is a local path, 'github:owner/repo[/subdir][@ref]', a \
+             GitHub tree/blob URL, or any other git remote. Install refuses \
+             before writing anything: on an '--expect-hash' mismatch, a bundle \
+             missing a declared file, a symlink in the fetched tree, a non-empty \
+             destination, or a registry recipe of the same name with different \
+             content (all overridable with '--force' where that is meaningful). \
+             An identical recipe is a no-op, so re-installing is idempotent.\n\n\
              '<ref>' is a 'spore.toml' file or a directory containing one. \
              '--var k=v' (repeatable) binds a parameter, coerced into its \
              declared ParamSchema type before expansion. '--json' on validate \

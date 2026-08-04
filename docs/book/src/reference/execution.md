@@ -318,6 +318,7 @@ Spore germinates a whole polymer from a shareable `spore.toml` template (validat
 **Usage:** `cs spore <COMMAND>`
 
 EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev  # fetch + place
   cs spore validate ./spore.toml --var subject="octopus cognition"
   cs spore run ./bundle/ --var subject="..." --var axes=a,b,c
   cs spore run ./spore.toml --allow-unchecked-seal     # sealed, no TLC
@@ -325,6 +326,8 @@ EXAMPLES:
   cs spore validate ./spore.toml --json                # NDJSON expansion
 
 VERBS:
+  install    fetch a shareable bundle and place it in this project, copying
+             its recipes into .cosmon/formulas/ so their pins reach dispatch.
   validate   parse + expand as a dry run; prints the ordered nucleate
              call list, germinates nothing.
   run        parse + expand + seal gate, then germinate the polymer into
@@ -341,6 +344,7 @@ SEE ALSO: cs nucleate (one molecule), ADR-140, docs/design/spore-impl-dag-manife
 * `validate` — Parse + expand a spore as a dry run; print the ordered nucleate call list without germinating anything
 * `run` — Germinate the polymer: parse + expand + seal gate, then replay the call list against the live state store
 * `export` — Emit a content-addressed bundle id and an ASTRA descriptive layer (ADR-140 D6) for sharing the spore
+* `install` — Fetch a shareable bundle and place it into this project, installing its recipes into `.cosmon/formulas/` so their per-step pins reach dispatch
 
 
 
@@ -440,6 +444,57 @@ SEE ALSO: cs spore run, ADR-140 D6, ADR-039.
 ###### **Options:**
 
 * `--out <DIR>` — Output directory for the ASTRA descriptive layer. Defaults to the manifest directory. The crate is always written here as `ro-crate-metadata.json` unless `[spore.astra].output` names a different (manifest-relative) path
+
+
+
+## `cs spore install`
+
+Fetch a shareable bundle and place it into this project, installing its recipes into `.cosmon/formulas/` so their per-step pins reach dispatch
+
+**Usage:** `cs spore install [OPTIONS] <SOURCE>`
+
+EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev
+  cs spore install https://github.com/noogram/cosmon/tree/main/spores/cosmon-dev
+  cs spore install ../shared/bundle --dest spores/shared   # local copy
+  cs spore install github:o/r@v1 --expect-hash blake3:...  # verified fetch
+  cs spore install github:o/r --dry-run --json             # plan only
+
+Fetches the bundle (git remote or local path), places it under
+<project>/spores/<spore-name>/ unless --dest says otherwise, and copies each
+[spore.formulas.*] recipe into .cosmon/formulas/ under the name the recipe
+DECLARES — which is the name 'cs tackle' resolves at dispatch. That second
+half is why the verb is called install and not add: without it a bundle
+germinates fine and then runs with every per-step adapter/model pin silently
+inert (task-20260725-eb3b).
+
+SOURCE: a local path, 'github:owner/repo[/subdir][@ref]', a GitHub tree/blob
+URL, or any other git remote (use --git-ref / --subdir to pin one).
+
+REFUSALS, all before anything is written: a bundle whose hash does not match
+--expect-hash; a bundle missing a file its manifest declares; a symlink
+inside the fetched tree; a non-empty destination (without --force); and a
+registry that already holds a DIFFERENT recipe of the same name (without
+--force), since overwriting changes what already-germinated molecules run.
+An identical recipe is a no-op, so re-installing is idempotent.
+
+SEE ALSO: cs spore validate (inspect what was installed), cs spore export
+(the id --expect-hash checks), docs/cs-spore.md.
+
+###### **Arguments:**
+
+* `<SOURCE>` — Where the bundle comes from: a local path, `github:owner/repo[/dir][@ref]`, a GitHub tree/blob URL, or any other git remote
+
+###### **Options:**
+
+* `--dest <DIR>` — Where to place the bundle. Defaults to `<project>/spores/<spore-name>/`
+* `--git-ref <REF>` — Branch, tag, or commit to fetch. Overrides a ref encoded in the source
+* `--subdir <PATH>` — Path to the bundle inside the checkout. Overrides one encoded in the source; the way to install from a subdirectory of a non-GitHub remote
+* `--expect-hash <BLAKE3>` — Refuse unless the fetched bundle hashes to exactly this id (as printed by `cs spore export`). Checked before anything is written
+* `--no-formulas` — Place the bundle but do not copy its recipes into `.cosmon/formulas/`. The bundle then germinates without its per-step adapter/model pins
+* `--force` — Overwrite a non-empty destination and replace conflicting recipes already in the registry. The copy is a merge: a file the new bundle carries replaces the one there, and a file it does not carry is left alone — nothing is deleted on your behalf
+* `--dry-run` — Report what would be installed and write nothing
+* `--formulas-dir <DIR>` — Formula registry to install recipes into (default: walk-up `.cosmon/formulas`)
 
 
 

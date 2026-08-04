@@ -70,6 +70,11 @@ enum Sub {
     /// (ADR-140 D6) for sharing the spore.
     #[command(after_help = super::examples::SPORE_EXPORT)]
     Export(ExportArgs),
+
+    /// Fetch a shareable bundle and place it into this project, installing its
+    /// recipes into `.cosmon/formulas/` so their per-step pins reach dispatch.
+    #[command(after_help = super::examples::SPORE_INSTALL)]
+    Install(InstallArgs),
 }
 
 /// `cs spore validate <ref> --var k=v` arguments.
@@ -127,6 +132,54 @@ pub struct ExportArgs {
     out: Option<PathBuf>,
 }
 
+/// `cs spore install <source>` arguments.
+#[derive(clap::Args)]
+pub struct InstallArgs {
+    /// Where the bundle comes from: a local path, `github:owner/repo[/dir][@ref]`,
+    /// a GitHub tree/blob URL, or any other git remote.
+    #[arg(value_name = "SOURCE")]
+    source: String,
+
+    /// Where to place the bundle. Defaults to `<project>/spores/<spore-name>/`.
+    #[arg(long, value_name = "DIR")]
+    dest: Option<PathBuf>,
+
+    /// Branch, tag, or commit to fetch. Overrides a ref encoded in the source.
+    #[arg(long = "git-ref", value_name = "REF")]
+    git_ref: Option<String>,
+
+    /// Path to the bundle inside the checkout. Overrides one encoded in the
+    /// source; the way to install from a subdirectory of a non-GitHub remote.
+    #[arg(long, value_name = "PATH")]
+    subdir: Option<String>,
+
+    /// Refuse unless the fetched bundle hashes to exactly this id (as printed
+    /// by `cs spore export`). Checked before anything is written.
+    #[arg(long = "expect-hash", value_name = "BLAKE3")]
+    expect_hash: Option<String>,
+
+    /// Place the bundle but do not copy its recipes into `.cosmon/formulas/`.
+    /// The bundle then germinates without its per-step adapter/model pins.
+    #[arg(long = "no-formulas")]
+    no_formulas: bool,
+
+    /// Overwrite a non-empty destination and replace conflicting recipes
+    /// already in the registry. The copy is a merge: a file the new bundle
+    /// carries replaces the one there, and a file it does not carry is left
+    /// alone — nothing is deleted on your behalf.
+    #[arg(long)]
+    force: bool,
+
+    /// Report what would be installed and write nothing.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
+
+    /// Formula registry to install recipes into (default: walk-up
+    /// `.cosmon/formulas`).
+    #[arg(long, value_name = "DIR")]
+    formulas_dir: Option<PathBuf>,
+}
+
 /// Dispatch a `cs spore` invocation to its verb handler.
 ///
 /// # Errors
@@ -136,6 +189,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Sub::Validate(a) => run_validate(ctx, a),
         Sub::Run(a) => run_run(ctx, a),
         Sub::Export(a) => run_export(ctx, a),
+        Sub::Install(a) => run_install(ctx, a),
     }
 }
 
@@ -547,6 +601,358 @@ fn run_export(ctx: &Context, args: &ExportArgs) -> anyhow::Result<()> {
         println!("astra: {}", astra_path.display());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// install
+// ---------------------------------------------------------------------------
+
+/// One recipe's fate at install time, resolved against the live registry.
+struct PlannedFormula {
+    /// The name the recipe declares (`formula = "..."`), which is the name
+    /// `cs tackle` resolves at dispatch — not the file name in the bundle.
+    name: String,
+    /// Where it will live: `<registry>/<name>.formula.toml`.
+    target: PathBuf,
+    /// The bundle's bytes for it.
+    body: String,
+    /// Install, no-op, or refusal.
+    placement: cosmon_core::spore::FormulaPlacement,
+}
+
+/// `cs spore install` — fetch a bundle, place it, and register its recipes.
+///
+/// The verb exists because `cs spore run` reads a bundle by path and germinates
+/// molecules that store their formula **by id**, which `cs tackle` later
+/// resolves against the mission project's `.cosmon/formulas/`. Sharing a spore
+/// therefore had two steps and a trap: get the files (no verb), and copy the
+/// recipes into the registry (no verb, and skipping it silently drops every
+/// per-step adapter/model pin at dispatch — task-20260725-eb3b). This verb is
+/// both steps, and it is called `install` because the registration is the
+/// load-bearing half.
+///
+/// Order matters and is fail-closed: fetch into a temporary checkout, parse the
+/// manifest, hash the bundle and check `--expect-hash`, plan the registry
+/// writes, and only then write anything into the project. A refused install
+/// leaves the project byte-identical to how it started.
+fn run_install(ctx: &Context, args: &InstallArgs) -> anyhow::Result<()> {
+    let source = cosmon_core::spore::parse_source(&args.source)
+        .map_err(|e| anyhow::anyhow!("invalid spore source: {e}"))?;
+    let fetched =
+        cosmon_cli::spore_install::fetch(&source, args.git_ref.as_deref(), args.subdir.as_deref())?;
+
+    // Parse before copying: a bundle that is not a spore never reaches the
+    // project tree.
+    let (spore, bundle_dir) = load_spore(&fetched.root)?;
+
+    // Integrity, when the operator brought an expected id. Same content
+    // addressing as `cs spore export`, so the id an author publishes is the id
+    // a recipient checks (ADR-039).
+    let covered = bundle_files(&spore, &bundle_dir);
+    let bundle = bundle_hash(&covered, &bundle_dir);
+    if let Some(expected) = &args.expect_hash {
+        if expected.trim() != bundle {
+            anyhow::bail!(
+                "bundle hash mismatch: expected {expected}, fetched {bundle}; \
+                 refusing to install (nothing was written)"
+            );
+        }
+    }
+
+    // Every file the manifest declares must actually be in the bundle. A
+    // missing recipe or seal would install a spore that parses and then fails
+    // at germination, which is a worse place to learn it.
+    for rel in &covered {
+        if !bundle_dir.join(rel).is_file() {
+            anyhow::bail!(
+                "bundle declares `{rel}` but the fetched source does not contain it; \
+                 refusing to install an incomplete bundle"
+            );
+        }
+    }
+
+    let registry_dir = cosmon_filestore::resolve_formulas_dir(args.formulas_dir.as_deref());
+    let dest = resolve_install_dest(args.dest.as_deref(), &registry_dir, &spore.name)?;
+    let planned = plan_formulas(&spore, &bundle_dir, &registry_dir)?;
+
+    if !args.force {
+        if cosmon_cli::spore_install::is_occupied(&dest)? {
+            anyhow::bail!(
+                "destination {} is not empty; pass --force to overwrite it",
+                dest.display()
+            );
+        }
+        let conflicts: Vec<&str> = planned
+            .iter()
+            .filter(|p| p.placement == cosmon_core::spore::FormulaPlacement::Conflicts)
+            .map(|p| p.name.as_str())
+            .collect();
+        if !args.no_formulas && !conflicts.is_empty() {
+            anyhow::bail!(
+                "the formula registry {} already holds a DIFFERENT recipe for {}; \
+                 dispatch resolves a molecule's formula id against that registry, so \
+                 overwriting changes what every molecule already germinated from it \
+                 runs. Pass --force to replace, or --no-formulas to keep the registry \
+                 as it is",
+                registry_dir.display(),
+                conflicts.join(", "),
+            );
+        }
+    }
+
+    if args.dry_run {
+        report_install(ctx, &spore, &bundle, &dest, &planned, args, None);
+        return Ok(());
+    }
+
+    let copied = cosmon_cli::spore_install::copy_tree(&bundle_dir, &dest)?;
+
+    let mut installed = Vec::new();
+    if !args.no_formulas {
+        std::fs::create_dir_all(&registry_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to create the formula registry {}: {e}",
+                registry_dir.display()
+            )
+        })?;
+        for p in &planned {
+            if p.placement == cosmon_core::spore::FormulaPlacement::Identical {
+                continue;
+            }
+            std::fs::write(&p.target, &p.body)
+                .map_err(|e| anyhow::anyhow!("failed to install {}: {e}", p.target.display()))?;
+            installed.push(p.name.clone());
+        }
+    }
+
+    write_provenance(&dest, args, &source, &fetched, &bundle, &spore, &installed)?;
+    report_install(
+        ctx,
+        &spore,
+        &bundle,
+        &dest,
+        &planned,
+        args,
+        Some(copied.len()),
+    );
+    Ok(())
+}
+
+/// Where the bundle lands: `--dest` verbatim, else `<project>/spores/<name>/`.
+///
+/// The project root is derived from the resolved registry (`<root>/.cosmon/
+/// formulas`) rather than the process CWD, so `cs spore install` run from a
+/// subdirectory installs into the same project whose registry it writes — the
+/// two halves of the verb cannot end up in different trees.
+fn resolve_install_dest(
+    explicit: Option<&Path>,
+    registry_dir: &Path,
+    spore_name: &str,
+) -> anyhow::Result<PathBuf> {
+    if let Some(dir) = explicit {
+        return Ok(dir.to_path_buf());
+    }
+    let slug = cosmon_core::spore::default_dest_slug(spore_name).map_err(|e| {
+        anyhow::anyhow!("spore name `{spore_name}` cannot be a directory name ({e}); pass --dest")
+    })?;
+    let root = registry_dir
+        .parent()
+        .and_then(Path::parent)
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    Ok(root.join(cosmon_core::spore::SPORES_DIR).join(slug))
+}
+
+/// Resolve every `[spore.formulas.*]` recipe against the live registry.
+///
+/// The registry file name comes from the recipe's declared `formula = "..."`
+/// name, because that is what a molecule stores and what `cs tackle` looks up.
+/// Installing under the bundle's file name instead would put the bytes in the
+/// registry and leave the pins exactly as unreachable as before.
+fn plan_formulas(
+    spore: &Spore,
+    bundle_dir: &Path,
+    registry_dir: &Path,
+) -> anyhow::Result<Vec<PlannedFormula>> {
+    let mut planned: Vec<PlannedFormula> = Vec::new();
+    for f in spore.formulas.values() {
+        let path = bundle_dir.join(&f.path);
+        let body = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?;
+        let formula = cosmon_core::formula::Formula::parse(&body)
+            .map_err(|e| anyhow::anyhow!("bundle recipe {} does not parse: {e}", f.path))?;
+        let name = formula.name.to_string();
+        if planned.iter().any(|p| p.name == name) {
+            continue;
+        }
+        let target = registry_dir.join(cosmon_core::spore::registry_file_name(&name));
+        let existing = std::fs::read_to_string(&target).ok();
+        let placement = cosmon_core::spore::plan_formula(&body, existing.as_deref());
+        planned.push(PlannedFormula {
+            name,
+            target,
+            body,
+            placement,
+        });
+    }
+    Ok(planned)
+}
+
+/// Record what an installed bundle is a copy *of*.
+///
+/// A branch name does not answer that question a week later, so the commit is
+/// recorded next to it. The file is dot-prefixed and deliberately outside the
+/// coverage set [`bundle_files`] binds: writing it never changes the hash of
+/// the bundle it describes.
+fn write_provenance(
+    dest: &Path,
+    args: &InstallArgs,
+    source: &cosmon_core::spore::SporeSource,
+    fetched: &cosmon_cli::spore_install::FetchedBundle,
+    bundle: &str,
+    spore: &Spore,
+    installed_formulas: &[String],
+) -> anyhow::Result<()> {
+    let mut doc = toml::map::Map::new();
+    let mut install = toml::map::Map::new();
+    install.insert("source".into(), toml::Value::String(args.source.clone()));
+    install.insert(
+        "resolved".into(),
+        toml::Value::String(match source {
+            cosmon_core::spore::SporeSource::Local(p) => p.clone(),
+            cosmon_core::spore::SporeSource::Git { remote, .. } => remote.clone(),
+            // `SporeSource` is `#[non_exhaustive]`; a later kind records what
+            // the operator typed rather than nothing at all.
+            _ => args.source.clone(),
+        }),
+    );
+    if let Some(r) = &args.git_ref {
+        install.insert("git_ref".into(), toml::Value::String(r.clone()));
+    }
+    if let Some(s) = &args.subdir {
+        install.insert("subdir".into(), toml::Value::String(s.clone()));
+    }
+    if let Some(commit) = &fetched.commit {
+        install.insert("commit".into(), toml::Value::String(commit.clone()));
+    }
+    install.insert(
+        "bundle_hash".into(),
+        toml::Value::String(bundle.to_string()),
+    );
+    install.insert("spore".into(), toml::Value::String(spore.name.clone()));
+    install.insert(
+        "installed_at".into(),
+        toml::Value::String(chrono::Utc::now().to_rfc3339()),
+    );
+    install.insert(
+        "formulas".into(),
+        toml::Value::Array(
+            installed_formulas
+                .iter()
+                .map(|n| toml::Value::String(n.clone()))
+                .collect(),
+        ),
+    );
+    doc.insert("install".into(), toml::Value::Table(install));
+
+    let body = format!(
+        "# Written by `cs spore install`. Install metadata, not bundle content:\n\
+         # no bundle hash covers this file.\n{}",
+        toml::to_string_pretty(&toml::Value::Table(doc))
+            .map_err(|e| anyhow::anyhow!("failed to render install provenance: {e}"))?
+    );
+    let path = dest.join(cosmon_core::spore::PROVENANCE_FILE);
+    std::fs::write(&path, body)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", path.display()))
+}
+
+/// Print the install outcome (or, for `--dry-run`, the plan).
+///
+/// `copied` is the number of files written, and `None` says nothing was: the
+/// dry run is the only caller that has no count, so the two facts are one
+/// argument rather than two that could disagree.
+fn report_install(
+    ctx: &Context,
+    spore: &Spore,
+    bundle: &str,
+    dest: &Path,
+    planned: &[PlannedFormula],
+    args: &InstallArgs,
+    copied: Option<usize>,
+) {
+    let dry_run = copied.is_none();
+    let formulas: Vec<serde_json::Value> = planned
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "target": p.target.display().to_string(),
+                "action": placement_label(p.placement, args.no_formulas),
+            })
+        })
+        .collect();
+
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "spore": spore.name,
+                "version": spore.version,
+                "bundle_hash": bundle,
+                "dest": dest.display().to_string(),
+                "files": copied,
+                "formulas": formulas,
+                "dry_run": dry_run,
+            })
+        );
+        return;
+    }
+
+    let verb = if dry_run {
+        "would install"
+    } else {
+        "installed"
+    };
+    println!("spore: {} (v{})", spore.name, spore.version);
+    println!("bundle: {bundle}");
+    match copied {
+        Some(n) => println!("{verb} {n} file(s) into {}", dest.display()),
+        None => println!("{verb} into {}", dest.display()),
+    }
+    if planned.is_empty() {
+        println!("formulas: none declared");
+    } else {
+        println!("formulas:");
+        for p in planned {
+            println!(
+                "  - {} → {} [{}]",
+                p.name,
+                p.target.display(),
+                placement_label(p.placement, args.no_formulas)
+            );
+        }
+    }
+    if !dry_run {
+        println!("next: cs spore validate {}", dest.display());
+    }
+}
+
+/// The reported action for one recipe. `--no-formulas` is shown as `skipped`
+/// rather than hidden: an operator who opted out still needs to see which pins
+/// will not reach dispatch.
+fn placement_label(
+    placement: cosmon_core::spore::FormulaPlacement,
+    no_formulas: bool,
+) -> &'static str {
+    use cosmon_core::spore::FormulaPlacement;
+    if no_formulas {
+        return "skipped (--no-formulas)";
+    }
+    match placement {
+        FormulaPlacement::Install => "installed",
+        FormulaPlacement::Identical => "already identical",
+        FormulaPlacement::Conflicts => "replaced (--force)",
+        _ => "unknown",
+    }
 }
 
 // ---------------------------------------------------------------------------

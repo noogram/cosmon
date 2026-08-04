@@ -917,6 +917,7 @@ pilot stays responsive.
 SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.";
 
 pub const SPORE: &str = "EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev  # fetch + place
   cs spore validate ./spore.toml --var subject=\"octopus cognition\"
   cs spore run ./bundle/ --var subject=\"...\" --var axes=a,b,c
   cs spore run ./spore.toml --allow-unchecked-seal     # sealed, no TLC
@@ -924,6 +925,8 @@ pub const SPORE: &str = "EXAMPLES:
   cs spore validate ./spore.toml --json                # NDJSON expansion
 
 VERBS:
+  install    fetch a shareable bundle and place it in this project, copying
+             its recipes into .cosmon/formulas/ so their pins reach dispatch.
   validate   parse + expand as a dry run; prints the ordered nucleate
              call list, germinates nothing.
   run        parse + expand + seal gate, then germinate the polymer into
@@ -980,6 +983,34 @@ same bundle content always yields the same id (content-addressing is the
 registry, ADR-039).
 
 SEE ALSO: cs spore run, ADR-140 D6, ADR-039.";
+
+pub const SPORE_INSTALL: &str = "EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev
+  cs spore install https://github.com/noogram/cosmon/tree/main/spores/cosmon-dev
+  cs spore install ../shared/bundle --dest spores/shared   # local copy
+  cs spore install github:o/r@v1 --expect-hash blake3:...  # verified fetch
+  cs spore install github:o/r --dry-run --json             # plan only
+
+Fetches the bundle (git remote or local path), places it under
+<project>/spores/<spore-name>/ unless --dest says otherwise, and copies each
+[spore.formulas.*] recipe into .cosmon/formulas/ under the name the recipe
+DECLARES — which is the name 'cs tackle' resolves at dispatch. That second
+half is why the verb is called install and not add: without it a bundle
+germinates fine and then runs with every per-step adapter/model pin silently
+inert (task-20260725-eb3b).
+
+SOURCE: a local path, 'github:owner/repo[/subdir][@ref]', a GitHub tree/blob
+URL, or any other git remote (use --git-ref / --subdir to pin one).
+
+REFUSALS, all before anything is written: a bundle whose hash does not match
+--expect-hash; a bundle missing a file its manifest declares; a symlink
+inside the fetched tree; a non-empty destination (without --force); and a
+registry that already holds a DIFFERENT recipe of the same name (without
+--force), since overwriting changes what already-germinated molecules run.
+An identical recipe is a no-op, so re-installing is idempotent.
+
+SEE ALSO: cs spore validate (inspect what was installed), cs spore export
+(the id --expect-hash checks), docs/cs-spore.md.";
 
 pub const HELP: &str = "EXAMPLES:
   cs help                         # grouped command reference
