@@ -63,10 +63,14 @@
 #![deny(missing_docs)]
 
 pub mod commitment;
+pub mod minisign;
 pub mod notarization;
 pub mod signature;
 pub mod verify;
 
+pub use minisign::{
+    hex_key_id, Algorithm, MinisignError, MinisignPublicKey, MinisignSignature,
+};
 pub use commitment::{Commitment, CommitmentError, CANONICAL_COMMITMENT_VERSION, DOMAIN_SEPARATOR};
 pub use notarization::{NotarizationCertificate, NotaryError, Seal};
 pub use signature::{Ed25519Scheme, PublicKey, Scheme, Signature, SigningError};

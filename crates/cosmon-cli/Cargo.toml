@@ -119,7 +119,14 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # test (task-20260421-0179), so no build-time deps are needed.
 
 [dev-dependencies]
+# `tests/takeover_unforgeable.rs` plays the operator: it holds a secret key the
+# shipped tree deliberately has no way to use, and signs a challenge with it.
+# Keeping the signer in the test harness is the point — a `sign` verb in `cs`
+# would be a verb the beneficiary could call.
+base64.workspace = true
+blake2.workspace = true
 cosmon-transport = { workspace = true, features = ["test-support"] }
+ed25519-dalek.workspace = true
 insta.workspace = true
 # `tests/consent_non_blocking.rs` allocates a real pty (`openpty`) so the
 # non-blocking property of the first-run consent question can be asserted

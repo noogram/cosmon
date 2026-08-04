@@ -921,6 +921,8 @@ dependencies = [
  "ansi-to-tui 7.0.0",
  "anyhow",
  "axum",
+ "base64",
+ "blake2",
  "chrono",
  "clap",
  "clap-markdown",
@@ -956,6 +958,7 @@ dependencies = [
  "crossterm",
  "ctrlc",
  "dirs",
+ "ed25519-dalek",
  "fs2",
  "globset",
  "ignore",
@@ -1129,6 +1132,7 @@ dependencies = [
  "chrono",
  "cosmon-core",
  "cosmon-hash",
+ "cosmon-notary",
  "cosmon-state",
  "fs2",
  "nix 0.31.2",
@@ -1193,6 +1197,8 @@ dependencies = [
 name = "cosmon-notary"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "blake2",
  "blake3",
  "chrono",
  "cosmon-hash",

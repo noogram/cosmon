@@ -205,6 +205,8 @@ pub mod nucleon;
 #[doc(hidden)]
 pub mod operator_block;
 #[doc(hidden)]
+pub mod operator_attestation;
+#[doc(hidden)]
 pub mod ops;
 #[doc(hidden)]
 pub mod oracle_boundary;

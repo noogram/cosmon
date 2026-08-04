@@ -44,8 +44,18 @@ HAND-OVER:
   cs sessions checkpoint list --mission task-20260731-e4d0
   cs sessions drift claude-sid codex-sid --mission task-20260731-e4d0
   cs sessions takeover show    --mission task-20260731-e4d0
+  cs sessions takeover trust                   # which key may seat a pilot
   cs sessions takeover request --mission task-20260731-e4d0 --reason 'quota'
-  cs sessions takeover grant   --mission task-20260731-e4d0 --request req-…
+
+THE OPERATOR GESTURE (the part an agent cannot type for itself):
+  cs sessions takeover challenge --mission task-20260731-e4d0 --request req-… --by emmanuel > takeover.txt
+  minisign -Sm takeover.txt                    # your passphrase, your gesture
+  cs sessions takeover grant --mission task-20260731-e4d0 --request req-… --by emmanuel --attestation takeover.txt.minisig
+
+`--by` is a label; the signature is the authority. A grant with no valid
+attestation seats nobody — including one appended straight into the ledger,
+because every line is checked when it is *read*. Pin the public key at
+`.cosmon/takeover.pub` and commit it, so a swapped trust root is a diff.
 
 WITHOUT TYPING ANYTHING (the hook, mission M6):
   cs sessions hook install --provider claude   # .claude/settings.local.json

@@ -52,13 +52,20 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use cosmon_core::cas::{CasStore, ContentHash};
 use cosmon_core::id::{MoleculeId, SessionId};
+use cosmon_core::operator_attestation::{
+    GrantChallenge, OperatorAttestation, OperatorGestureVerifier, OperatorKeyId,
+};
 use cosmon_core::pilot_lease::{
     LeaseDecision, LeaseEpoch, LeaseRequest, PilotLease, RefusalReason, RequestId,
 };
 use cosmon_core::pilot_message::PilotMessage;
 use cosmon_core::presence::{PilotRole, Presence};
 use cosmon_filestore::cas::FileCas;
-use cosmon_filestore::{PilotLeaseStore, PilotMailbox, PresenceStore};
+use cosmon_filestore::{
+    MinisignOperatorVerifier, PilotLeaseStore, PilotMailbox, PresenceStore, TAKEOVER_PUBKEY_ENV,
+    TAKEOVER_PUBKEY_REL,
+};
+use cosmon_notary::minisign::MinisignSignature;
 
 use super::Context;
 
@@ -160,9 +167,15 @@ pub struct LeaseGrantArgs {
     /// holds until the next grant supersedes it.
     #[arg(long = "ttl", value_name = "SECONDS")]
     pub ttl: Option<i64>,
-    /// Operator identity to record. Defaults to `$USER`.
+    /// Operator identity to record. Defaults to `$USER`. Covered by the
+    /// attestation, so it is a signed claim rather than a free string.
     #[arg(long = "by", value_name = "NAME")]
     pub granted_by: Option<String>,
+    /// Path to the operator's detached minisign signature over the challenge
+    /// this grant produces, or `-` to read it from stdin. Without it the
+    /// grant is refused: `--by` names an operator, it does not attest one.
+    #[arg(long, value_name = "PATH")]
+    pub attestation: Option<PathBuf>,
 }
 
 /// Arguments for `cs presence lease check`.
@@ -882,8 +895,24 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
 // The PRIMARY lease — authority, and its supervised transfer (M4)
 // ---------------------------------------------------------------------------
 
-pub(crate) fn leases(ctx: &Context) -> PilotLeaseStore {
-    PilotLeaseStore::new(state_root(ctx))
+/// The lease ledger, with the galaxy's pinned operator key attached.
+///
+/// The key is resolved here rather than at each call site so that no caller
+/// can *forget* it: a store built without a trust root honours no grant, and
+/// a code path that forgot to pin one would look like a mission nobody has
+/// ever granted rather than like a bug. See [`MinisignOperatorVerifier`].
+///
+/// # Errors
+///
+/// Propagates an unreadable or malformed key file. A galaxy with **no** key
+/// pinned is not an error here: it is a store that refuses every grant, and
+/// `cs sessions takeover trust` is where that fact is reported.
+pub(crate) fn leases(ctx: &Context) -> anyhow::Result<PilotLeaseStore> {
+    let store = PilotLeaseStore::new(state_root(ctx));
+    Ok(match MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))? {
+        Some(v) => store.trusting(std::sync::Arc::new(v)),
+        None => store,
+    })
 }
 
 /// Why `session`'s claim to the primary seat on `mission` at `epoch` would be
@@ -906,7 +935,7 @@ fn primary_claim_refusal(
                 .to_owned(),
         ));
     };
-    let decision = leases(ctx).authorize(mission, now, session, epoch)?;
+    let decision = leases(ctx)?.authorize(mission, now, session, epoch)?;
     Ok(decision.refusal().map(RefusalReason::explain))
 }
 
@@ -920,7 +949,7 @@ fn run_lease(ctx: &Context, sub: &LeaseSub) -> anyhow::Result<()> {
 }
 
 fn run_lease_show(ctx: &Context, args: &LeaseShowArgs) -> anyhow::Result<()> {
-    let store = leases(ctx);
+    let store = leases(ctx)?;
     let now = Utc::now();
     let current = store.current(&args.mission)?;
     let pending = store.unanswered_requests(&args.mission)?;
@@ -1038,7 +1067,7 @@ pub(crate) fn request_lease(
         Some(s) => SessionId::new(s.clone())?,
         None => requester.clone(),
     };
-    let store = leases(ctx);
+    let store = leases(ctx)?;
     let observed = store.current(&args.mission)?;
     let request = LeaseRequest::new(
         args.mission.clone(),
@@ -1079,8 +1108,16 @@ fn run_lease_grant(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<()> {
 /// Propagates an unknown request id, a grant naming neither a request nor a
 /// session, and filesystem errors from the lease store.
 pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Result<PilotLease> {
-    let store = leases(ctx);
+    let store = leases(ctx)?;
     let now = Utc::now();
+    let trusted = store.trusted_key_id().ok_or_else(|| {
+        anyhow::anyhow!(
+            "no operator public key pinned — nothing here could tell your gesture from \
+             an agent imitating it, so no grant is written. Pin one at \
+             `<galaxy>/{TAKEOVER_PUBKEY_REL}` (or set ${TAKEOVER_PUBKEY_ENV}); \
+             `minisign -G` makes the pair."
+        )
+    })?;
 
     // The holder comes from the request when there is one, so the operator
     // grants *what was asked for* rather than retyping it beside the id.
@@ -1106,23 +1143,106 @@ pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Resul
     };
 
     let epoch = store.next_epoch(&args.mission)?;
+    let granted_by = resolve_operator_name(args.granted_by.as_deref());
+    let challenge = GrantChallenge::new(
+        args.mission.clone(),
+        holder.clone(),
+        epoch,
+        granted_by.clone(),
+        args.ttl,
+    )?;
+
+    let attestation = read_attestation(args.attestation.as_deref(), &challenge)?;
+
+    // Checked here as well as on every read. The read-time check in
+    // `PilotLeaseStore::grants` is the mechanism — it is what refuses a line
+    // an agent appended without going through this command at all. This one
+    // is ergonomics: it turns "your grant is silently inert" into a message
+    // naming which field of the challenge the signature does not cover.
+    MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))?
+        .ok_or_else(|| anyhow::anyhow!("no operator public key pinned"))?
+        .verify(&challenge, &attestation)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "the attestation does not authorise this transfer: {e}\n\
+                 the challenge cosmon computed was:\n{challenge}\n\
+                 pinned operator key: {trusted}"
+            )
+        })?;
+
     let mut lease = PilotLease::new(
         args.mission.clone(),
         holder,
         epoch,
-        args.granted_by
-            .clone()
-            .or_else(|| std::env::var("USER").ok())
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| "unknown-operator".to_owned()),
+        granted_by,
         now,
         args.ttl.map(|secs| now + chrono::Duration::seconds(secs)),
-    );
+    )
+    .attested_by(attestation);
     if let Some(r) = &answered {
         lease = lease.answering(r);
     }
     store.grant(&lease)?;
     Ok(lease)
+}
+
+/// The operator name a grant claims: `--by`, else `$USER`, else a placeholder.
+///
+/// Shared with `cs sessions takeover challenge` so the bytes the operator
+/// signs and the bytes cosmon later checks are produced by the same rule — a
+/// second resolution order would make the two disagree exactly when `--by` is
+/// omitted, which is the common case.
+pub(crate) fn resolve_operator_name(explicit: Option<&str>) -> String {
+    explicit
+        .map(str::to_owned)
+        .or_else(|| std::env::var("USER").ok())
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "unknown-operator".to_owned())
+}
+
+/// Read a detached minisign signature from a path, or from stdin for `-`.
+fn read_attestation(
+    path: Option<&Path>,
+    challenge: &GrantChallenge,
+) -> anyhow::Result<OperatorAttestation> {
+    let path = path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "this grant carries no operator attestation, so it would seat nobody.\n\
+             The gesture is a signature, not a flag — `--by` is a label an agent can \
+             type as easily as you can.\n\
+             \n\
+             Sign the transfer, then pass the signature:\n\
+             \n  \
+             cs sessions takeover challenge --mission {mission} --to {holder} \
+             --by {by} > takeover.txt\n  \
+             minisign -Sm takeover.txt          # your passphrase — the part no agent has\n  \
+             cs sessions takeover grant --mission {mission} --to {holder} --by {by} \
+             --attestation takeover.txt.minisig",
+            mission = challenge.mission_id.as_str(),
+            holder = challenge.holder_session_id.as_str(),
+            by = challenge.granted_by,
+        )
+    })?;
+
+    let text = if path == Path::new("-") {
+        let mut buf = String::new();
+        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
+            .map_err(|e| anyhow::anyhow!("failed to read the attestation from stdin: {e}"))?;
+        buf
+    } else {
+        std::fs::read_to_string(path)
+            .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?
+    };
+
+    let parsed = MinisignSignature::parse(&text)
+        .map_err(|e| anyhow::anyhow!("{} is not a minisign signature: {e}", path.display()))?;
+    Ok(OperatorAttestation {
+        key_id: OperatorKeyId::from_bytes(parsed.key_id),
+        signature: parsed.signature_line(),
+        global_signature: parsed.global_signature_line(),
+        trusted_comment: parsed.trusted_comment.clone(),
+        untrusted_comment: parsed.untrusted_comment.clone(),
+    })
 }
 
 /// The guard, exposed as a verb. Exits 0 when the gesture may proceed and 1
@@ -1139,7 +1259,7 @@ fn run_lease_check(ctx: &Context, args: &LeaseCheckArgs) -> anyhow::Result<()> {
         Some(raw) => Some(LeaseEpoch::new(raw)?),
         None => None,
     };
-    let decision = leases(ctx).authorize(&args.mission, Utc::now(), &session, epoch)?;
+    let decision = leases(ctx)?.authorize(&args.mission, Utc::now(), &session, epoch)?;
 
     if ctx.json {
         println!("{}", serde_json::to_string(&decision)?);
@@ -2034,7 +2154,7 @@ mod tests {
             },
         )
         .unwrap();
-        leases(ctx).current(&mission()).unwrap().unwrap().epoch
+        leases(ctx).unwrap().current(&mission()).unwrap().unwrap().epoch
     }
 
     fn ping_primary(ctx: &Context, sid: &str, epoch: Option<u64>) -> anyhow::Result<()> {

@@ -13,6 +13,7 @@ description = "JSON filesystem backend for the Cosmon StateStore trait"
 chrono.workspace = true
 cosmon-core.workspace = true
 cosmon-hash.workspace = true
+cosmon-notary.workspace = true
 cosmon-state.workspace = true
 fs2.workspace = true
 nix.workspace = true

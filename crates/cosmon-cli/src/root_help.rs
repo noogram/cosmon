@@ -211,7 +211,14 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              by itself; 'lease grant' is the operator gesture that seats a session \
              at the next epoch; 'lease check' answers the guard's question and \
              exits 0 or 1. There is no takeover verb and no quota trigger — the \
-             transfer is an operator decision by construction. The ledger is two \
+             transfer is an operator decision by construction, and since ADR-171 \
+             it is an operator *signature*: 'cs sessions takeover challenge' \
+             prints the bytes, the operator signs them out of band with minisign, \
+             and 'grant --attestation <sig>' is the only way to seat anybody. \
+             '--by' is a label an agent can type; the signature is not. Every \
+             ledger line is re-checked when it is read against the key pinned at \
+             '.cosmon/takeover.pub' ('cs sessions takeover trust' reports it), so \
+             a grant appended by hand confers nothing. The ledger is two \
              append-only JSONL files under '.cosmon/state/pilot-lease/', so the \
              whole authority history of a mission reads with cat and jq. Taking \
              the primary seat with 'cs presence ping --role primary --mission M \

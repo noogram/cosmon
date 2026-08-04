@@ -30,40 +30,133 @@
 //! demonstrated*. `cat` the grants file and the whole authority history of the
 //! mission is in front of you, oldest first.
 //!
-//! # The one rule the store enforces
+//! # The two rules the store enforces
 //!
-//! An epoch is used once. [`PilotLeaseStore::grant`] refuses a grant whose
+//! **An epoch is used once.** [`PilotLeaseStore::grant`] refuses a grant whose
 //! epoch is not strictly greater than every epoch already in the ledger, so
 //! two operators racing on one mission produce one winner and one refusal
 //! rather than two heads (NO-SPLIT-BRAIN).
+//!
+//! **A grant is honoured only if an operator signed it.** Every line is
+//! checked against the pinned trust root *when it is read*, not only when it
+//! is written. That distinction is the whole point: an agent that wants the
+//! seat does not have to go through `cs` at all — it can `echo` a JSON line
+//! into the ledger. A write-time check is advice to well-behaved callers; a
+//! read-time check is the mechanism, because authority is derived from the
+//! ledger and this is where the derivation happens. A line whose signature
+//! does not check is skipped exactly like a torn one: **a grant that did not
+//! happen**. See [`crate::operator_trust`] for where the key is pinned.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use cosmon_core::error::CosmonError;
 use cosmon_core::id::{MoleculeId, SessionId};
 use cosmon_core::paths::CosmonPath;
+use cosmon_core::operator_attestation::{AttestationError, OperatorGestureVerifier, OperatorKeyId};
 use cosmon_core::pilot_lease::{
     authorize, LeaseDecision, LeaseEpoch, LeaseRequest, PilotLease, RequestId,
 };
 
-/// File-backed lease ledger. Stateless; every call is a pure function of the
-/// on-disk layout, exactly like [`crate::PilotMailbox`].
+/// One ledger line and the verdict on its operator attestation.
+///
+/// Returned by [`PilotLeaseStore::audit`] so `takeover show --history` can
+/// display a refused line instead of hiding it. A forged grant that vanishes
+/// from every view is a forgery nobody investigates.
 #[derive(Debug, Clone)]
+pub struct AuditedGrant {
+    /// The grant as recorded.
+    pub lease: PilotLease,
+    /// `Ok(())` when an operator signed it, otherwise why it confers nothing.
+    pub verdict: Result<(), AttestationError>,
+}
+
+/// File-backed lease ledger. Stateless; every call is a pure function of the
+/// on-disk layout and of the pinned trust root, exactly like
+/// [`crate::PilotMailbox`].
+#[derive(Clone)]
 pub struct PilotLeaseStore {
     /// The cosmon **state root** (`.cosmon/state/`).
     state_root: PathBuf,
+    /// The pinned operator key. `None` means no trust root is configured, and
+    /// therefore that no grant is honoured — absence refuses, it does not
+    /// permit. See [`crate::operator_trust`].
+    verifier: Option<Arc<dyn OperatorGestureVerifier + Send + Sync>>,
+}
+
+impl std::fmt::Debug for PilotLeaseStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PilotLeaseStore")
+            .field("state_root", &self.state_root)
+            .field("trusted_key", &self.trusted_key_id())
+            // The verifier itself is a trait object with no Debug bound; its
+            // key id above is the part anybody reading this would want.
+            .finish_non_exhaustive()
+    }
 }
 
 impl PilotLeaseStore {
-    /// Construct a lease store over the given cosmon state root.
+    /// Construct a lease store over the given cosmon state root, with **no**
+    /// trust root pinned — which means it honours no grant.
+    ///
+    /// Callers that need working authority pair this with
+    /// [`Self::trusting`]. The unpinned constructor still exists because the
+    /// *request* side of the ledger needs no key at all, and because a caller
+    /// that forgets to pin one gets a store that refuses rather than one that
+    /// waves grants through.
     #[must_use]
     pub fn new(state_root: impl Into<PathBuf>) -> Self {
         Self {
             state_root: state_root.into(),
+            verifier: None,
         }
+    }
+
+    /// Pin the operator key whose signature makes a grant a grant.
+    #[must_use]
+    pub fn trusting(mut self, verifier: Arc<dyn OperatorGestureVerifier + Send + Sync>) -> Self {
+        self.verifier = Some(verifier);
+        self
+    }
+
+    /// The pinned key's id, or `None` when no trust root is configured.
+    #[must_use]
+    pub fn trusted_key_id(&self) -> Option<OperatorKeyId> {
+        self.verifier.as_ref().map(|v| v.trusted_key_id())
+    }
+
+    /// Decide whether one recorded grant was an operator gesture.
+    fn attested(&self, lease: &PilotLease) -> Result<(), AttestationError> {
+        let Some(verifier) = self.verifier.as_ref() else {
+            return Err(AttestationError::NoTrustRoot);
+        };
+        let attestation = lease
+            .attestation
+            .as_ref()
+            .ok_or(AttestationError::Missing)?;
+        let challenge = lease
+            .challenge()
+            .map_err(|e| AttestationError::Malformed(e.to_string()))?;
+        verifier.verify(&challenge, attestation)
+    }
+
+    /// Every recorded grant with the verdict on its attestation, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::grants`].
+    pub fn audit(&self, mission: &MoleculeId) -> Result<Vec<AuditedGrant>, CosmonError> {
+        Ok(read_lines(&self.grants_path(mission))?
+            .iter()
+            .filter_map(|l| serde_json::from_str::<PilotLease>(l).ok())
+            .map(|lease| AuditedGrant {
+                verdict: self.attested(&lease),
+                lease,
+            })
+            .collect())
     }
 
     /// Path of a mission's request file.
@@ -80,21 +173,25 @@ impl PilotLeaseStore {
             .join(CosmonPath::PilotLeaseGrants { mission }.rel())
     }
 
-    /// Every grant recorded for `mission`, in file order (oldest first).
+    /// Every **attested** grant recorded for `mission`, in file order.
     ///
-    /// A line that fails to parse is skipped rather than fatal — one torn
-    /// trailing line from a process killed mid-append must not make a
-    /// mission's authority unreadable. It cannot manufacture authority
-    /// either: a skipped line is a grant that did not happen.
+    /// Two kinds of line are skipped rather than fatal, for the same reason:
+    /// one torn by a process killed mid-append, and one no operator signed. A
+    /// torn line must not make a mission's authority unreadable, and an
+    /// unsigned line must not make it *forgeable*. Neither can manufacture
+    /// authority: a skipped line is a grant that did not happen. Use
+    /// [`Self::audit`] to see the lines this hid, and why.
     ///
     /// # Errors
     ///
     /// Returns [`CosmonError::StateStore`] if the file exists but cannot be
     /// read. A missing file is an empty ledger, not an error.
     pub fn grants(&self, mission: &MoleculeId) -> Result<Vec<PilotLease>, CosmonError> {
-        Ok(read_lines(&self.grants_path(mission))?
-            .iter()
-            .filter_map(|l| serde_json::from_str::<PilotLease>(l).ok())
+        Ok(self
+            .audit(mission)?
+            .into_iter()
+            .filter(|g| g.verdict.is_ok())
+            .map(|g| g.lease)
             .collect())
     }
 
@@ -306,8 +403,58 @@ fn append_line(path: &PathBuf, line: &str) -> Result<(), CosmonError> {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
+    use cosmon_core::operator_attestation::{GrantChallenge, OperatorAttestation};
     use cosmon_core::pilot_lease::RefusalReason;
     use tempfile::tempdir;
+
+    /// A stand-in operator, so these tests exercise the *ledger* rules rather
+    /// than Ed25519 — which `cosmon_notary::minisign` already pins against a
+    /// real `minisign` artefact, and which the CLI falsifier drives end to
+    /// end. The stub is still a real binding: its "signature" is a function of
+    /// the challenge, so a lease edited after signing fails here exactly as it
+    /// would under the real verifier.
+    #[derive(Debug)]
+    struct StubOperator;
+
+    const STUB_KEY: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
+
+    fn stub_signature(challenge: &GrantChallenge) -> String {
+        format!("stub-signature-over:{challenge}")
+    }
+
+    fn stub_attestation(challenge: &GrantChallenge) -> OperatorAttestation {
+        OperatorAttestation {
+            key_id: OperatorKeyId::from_bytes(STUB_KEY),
+            signature: stub_signature(challenge),
+            global_signature: String::new(),
+            trusted_comment: String::new(),
+            untrusted_comment: String::new(),
+        }
+    }
+
+    impl OperatorGestureVerifier for StubOperator {
+        fn verify(
+            &self,
+            challenge: &GrantChallenge,
+            attestation: &OperatorAttestation,
+        ) -> Result<(), AttestationError> {
+            if attestation.key_id != self.trusted_key_id() {
+                return Err(AttestationError::UnknownKey {
+                    presented: attestation.key_id,
+                    trusted: self.trusted_key_id(),
+                });
+            }
+            if attestation.signature == stub_signature(challenge) {
+                Ok(())
+            } else {
+                Err(AttestationError::DoesNotCoverTransfer)
+            }
+        }
+
+        fn trusted_key_id(&self) -> OperatorKeyId {
+            OperatorKeyId::from_bytes(STUB_KEY)
+        }
+    }
 
     fn mission() -> MoleculeId {
         MoleculeId::new("task-20260731-9cf4").unwrap()
@@ -323,11 +470,19 @@ mod tests {
 
     fn store() -> (tempfile::TempDir, PilotLeaseStore) {
         let dir = tempdir().unwrap();
-        let store = PilotLeaseStore::new(dir.path());
+        let store = PilotLeaseStore::new(dir.path()).trusting(Arc::new(StubOperator));
         (dir, store)
     }
 
+    /// A grant as an operator would produce it: signed over its own challenge.
     fn lease(holder: &str, epoch: LeaseEpoch) -> PilotLease {
+        let bare = PilotLease::new(mission(), sid(holder), epoch, "operator", t0(), None);
+        let challenge = bare.challenge().expect("a lease rebuilds its challenge");
+        bare.attested_by(stub_attestation(&challenge))
+    }
+
+    /// A grant as a beneficiary could write it: everything but the signature.
+    fn unsigned_lease(holder: &str, epoch: LeaseEpoch) -> PilotLease {
         PilotLease::new(mission(), sid(holder), epoch, "operator", t0(), None)
     }
 
@@ -484,9 +639,19 @@ mod tests {
     fn expiry_refuses_without_erasing_the_ledger() {
         let (_d, s) = store();
         let deadline = t0() + Duration::minutes(30);
-        let mut l = lease("claude", LeaseEpoch::first());
-        l.expires_at = Some(deadline);
-        s.grant(&l).unwrap();
+        // Signed *with* its deadline: the ttl is inside the challenge, so a
+        // lease whose expiry is edited after the fact stops verifying.
+        let bare = PilotLease::new(
+            mission(),
+            sid("claude"),
+            LeaseEpoch::first(),
+            "operator",
+            t0(),
+            Some(deadline),
+        );
+        let challenge = bare.challenge().unwrap();
+        s.grant(&bare.attested_by(stub_attestation(&challenge)))
+            .unwrap();
 
         let late = deadline + Duration::minutes(1);
         assert!(matches!(
@@ -511,7 +676,7 @@ mod tests {
         s.grant(&lease("claude", LeaseEpoch::new(3).unwrap()))
             .unwrap();
 
-        let fresh = PilotLeaseStore::new(dir.path());
+        let fresh = PilotLeaseStore::new(dir.path()).trusting(Arc::new(StubOperator));
         assert_eq!(fresh.grants(&mission()).unwrap().len(), 3);
         let cur = fresh.current(&mission()).unwrap().unwrap();
         assert_eq!(cur.epoch, LeaseEpoch::new(3).unwrap());
@@ -579,6 +744,157 @@ mod tests {
             s.authorize(&other, t0(), &sid("claude"), Some(LeaseEpoch::first()))
                 .unwrap(),
             LeaseDecision::Refused(RefusalReason::NoLease)
+        );
+    }
+
+    // ── The forgery falsifiers (M7 friction F1) ────────────────────────────
+    //
+    // Each of these is a move available to an agent that holds *everything*
+    // the beneficiary holds: the state directory, the ledger file, the CLI,
+    // the pinned public key. None of them may produce authority. Retire the
+    // read-time check in `grants` and every one of them turns green-forged,
+    // which is what makes them a falsifier rather than a demonstration.
+
+    #[test]
+    fn a_hand_appended_line_seats_nobody() {
+        let (_d, s) = store();
+        // Exactly what `cs sessions takeover grant` used to write, minus the
+        // signature — which is all an agent with a shell needs to produce.
+        let forged = unsigned_lease("agent", LeaseEpoch::first());
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&forged).unwrap(),
+        )
+        .unwrap();
+
+        assert!(s.current(&mission()).unwrap().is_none());
+        assert_eq!(
+            s.authorize(&mission(), t0(), &sid("agent"), Some(LeaseEpoch::first()))
+                .unwrap(),
+            LeaseDecision::Refused(RefusalReason::NoLease)
+        );
+    }
+
+    #[test]
+    fn the_refused_line_is_still_visible_to_an_audit() {
+        let (_d, s) = store();
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&unsigned_lease("agent", LeaseEpoch::first())).unwrap(),
+        )
+        .unwrap();
+
+        let audit = s.audit(&mission()).unwrap();
+        assert_eq!(audit.len(), 1, "a forgery must not vanish from the record");
+        assert_eq!(audit[0].verdict, Err(AttestationError::Missing));
+    }
+
+    #[test]
+    fn a_signature_for_one_holder_does_not_seat_another() {
+        let (_d, s) = store();
+        let honest = lease("claude", LeaseEpoch::first());
+        let mut swapped = honest.clone();
+        swapped.holder_session_id = sid("agent");
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&swapped).unwrap(),
+        )
+        .unwrap();
+
+        assert!(s.current(&mission()).unwrap().is_none());
+        assert_eq!(
+            s.audit(&mission()).unwrap()[0].verdict,
+            Err(AttestationError::DoesNotCoverTransfer)
+        );
+    }
+
+    #[test]
+    fn a_signature_for_one_epoch_cannot_be_replayed_on_the_next() {
+        let (_d, s) = store();
+        s.grant(&lease("claude", LeaseEpoch::first())).unwrap();
+
+        // Lift the attestation off the honest epoch-1 grant onto an epoch-2
+        // line naming the agent. Capture-and-replay, with the whole ledger
+        // readable — the epoch is inside the signed bytes, so it fails.
+        let replayed = unsigned_lease("agent", LeaseEpoch::new(2).unwrap())
+            .attested_by(lease("claude", LeaseEpoch::first()).attestation.unwrap());
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&replayed).unwrap(),
+        )
+        .unwrap();
+
+        let cur = s.current(&mission()).unwrap().unwrap();
+        assert_eq!(cur.holder_session_id, sid("claude"));
+        assert_eq!(cur.epoch, LeaseEpoch::first());
+    }
+
+    #[test]
+    fn renaming_the_operator_after_the_fact_invalidates_the_grant() {
+        let (_d, s) = store();
+        let mut relabelled = lease("claude", LeaseEpoch::first());
+        relabelled.granted_by = "emmanuel".to_owned();
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&relabelled).unwrap(),
+        )
+        .unwrap();
+        assert!(s.current(&mission()).unwrap().is_none());
+    }
+
+    #[test]
+    fn a_grant_signed_by_another_key_is_named_as_such() {
+        let (_d, s) = store();
+        let mut foreign = lease("agent", LeaseEpoch::first());
+        if let Some(att) = foreign.attestation.as_mut() {
+            att.key_id = OperatorKeyId::from_bytes([9; 8]);
+        }
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&foreign).unwrap(),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            s.audit(&mission()).unwrap()[0].verdict,
+            Err(AttestationError::UnknownKey { .. })
+        ));
+        assert!(s.current(&mission()).unwrap().is_none());
+    }
+
+    // Removing the trust root must stop transfers, not unlock them. Otherwise
+    // "delete one file" would be the bypass.
+    #[test]
+    fn a_store_with_no_pinned_key_honours_nothing_it_reads() {
+        let (dir, s) = store();
+        s.grant(&lease("claude", LeaseEpoch::first())).unwrap();
+        assert!(s.current(&mission()).unwrap().is_some());
+
+        let unpinned = PilotLeaseStore::new(dir.path());
+        assert!(unpinned.current(&mission()).unwrap().is_none());
+        assert_eq!(
+            unpinned.audit(&mission()).unwrap()[0].verdict,
+            Err(AttestationError::NoTrustRoot)
+        );
+    }
+
+    // A forged high epoch must not let an agent burn the epoch space and
+    // block the operator's next honest grant.
+    #[test]
+    fn a_forged_high_epoch_does_not_block_the_next_honest_grant() {
+        let (_d, s) = store();
+        append_line(
+            &s.grants_path(&mission()),
+            &serde_json::to_string(&unsigned_lease("agent", LeaseEpoch::new(9999).unwrap()))
+                .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(s.next_epoch(&mission()).unwrap(), LeaseEpoch::first());
+        s.grant(&lease("claude", LeaseEpoch::first())).unwrap();
+        assert_eq!(
+            s.current(&mission()).unwrap().unwrap().holder_session_id,
+            sid("claude")
         );
     }
 }

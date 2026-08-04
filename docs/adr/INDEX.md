@@ -131,3 +131,4 @@
 | 163-a-question-may-only-be-asked-where-an-answer-can-arrive | [163-a-question-may-only-be-asked-where-an-answer-can-arrive.md](docs/adr/163-a-question-may-only-be-asked-where-an-answer-can-arrive.md) |
 | 164-briefing-is-a-protocol-not-a-jailbreak | [164-briefing-is-a-protocol-not-a-jailbreak.md](docs/adr/164-briefing-is-a-protocol-not-a-jailbreak.md) |
 | 169-algorithmic-provenance-rides-the-realized-model-observation | [169-algorithmic-provenance-rides-the-realized-model-observation.md](docs/adr/169-algorithmic-provenance-rides-the-realized-model-observation.md) |
+| 171-the-operator-gesture-is-a-signature-not-a-string | [171-the-operator-gesture-is-a-signature-not-a-string.md](docs/adr/171-the-operator-gesture-is-a-signature-not-a-string.md) |

@@ -18,8 +18,12 @@
 //! - **the three verdicts** — `drift` exits 0 / 1 / 2, and a missing checkpoint
 //!   is 2, never 0.
 
+mod support;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+
+use support::operator::Operator;
 
 const MISSION: &str = "task-20260731-e4d0";
 const CODEX_NATIVE: &str = "0198cccc-2222-4000-8000-000000000001";
@@ -33,6 +37,10 @@ struct World {
     repo: PathBuf,
     codex_root: PathBuf,
     claude_root: PathBuf,
+    /// The human at the keyboard. A transfer is their signature, so the walk
+    /// needs one to sign with — see `tests/takeover_unforgeable.rs`.
+    operator: Operator,
+    pubkey: PathBuf,
 }
 
 fn world() -> World {
@@ -63,12 +71,18 @@ fn world() -> World {
     )
     .expect("write rollout");
 
+    let operator = Operator::from_seed(11);
+    let pubkey = state.join("..").join("takeover.pub");
+    std::fs::write(&pubkey, operator.public_key_file()).expect("pin the operator key");
+
     World {
         _tmp: tmp,
         state,
         repo,
         codex_root,
         claude_root,
+        operator,
+        pubkey,
     }
 }
 
@@ -82,11 +96,33 @@ impl World {
             .env_remove("COSMON_MOL_DIR")
             .env("COSMON_SESSIONS_CODEX_ROOT", &self.codex_root)
             .env("COSMON_SESSIONS_CLAUDE_ROOT", &self.claude_root)
+            .env("COSMON_TAKEOVER_PUBKEY", &self.pubkey)
             .arg("--config")
             .arg(&self.state)
             .arg("sessions")
             .args(args);
         cmd.output().expect("spawn cs")
+    }
+
+    /// Play the operator: print the challenge for a transfer, sign it, and
+    /// return the path of the detached signature.
+    fn sign_takeover(&self, request_id: &str) -> PathBuf {
+        let challenge = ok(
+            &self.cs(&[
+                "takeover",
+                "challenge",
+                "--mission",
+                MISSION,
+                "--request",
+                request_id,
+                "--by",
+                "test-operator",
+            ]),
+            "takeover challenge",
+        );
+        let path = self.repo.join("takeover.minisig");
+        std::fs::write(&path, self.operator.sign(challenge.as_bytes())).expect("write signature");
+        path
     }
 
     /// Same, with the global `--json` flag ahead of the verb.
@@ -97,6 +133,7 @@ impl World {
             .env_remove("COSMON_MOL_DIR")
             .env("COSMON_SESSIONS_CODEX_ROOT", &self.codex_root)
             .env("COSMON_SESSIONS_CLAUDE_ROOT", &self.claude_root)
+            .env("COSMON_TAKEOVER_PUBKEY", &self.pubkey)
             .arg("--config")
             .arg(&self.state)
             .arg("--json")
@@ -373,6 +410,9 @@ fn the_operator_walk_runs_end_to_end() {
     ]);
     assert_eq!(before.status.code(), Some(1), "{}", stdout(&before));
 
+    // The grant is the operator's signature over this exact transfer — the
+    // one gesture the beneficiary cannot produce for itself (F1).
+    let attestation = w.sign_takeover(&request_id);
     ok(
         &w.cs(&[
             "takeover",
@@ -381,6 +421,10 @@ fn the_operator_walk_runs_end_to_end() {
             MISSION,
             "--request",
             &request_id,
+            "--by",
+            "test-operator",
+            "--attestation",
+            &attestation.display().to_string(),
         ]),
         "takeover grant",
     );

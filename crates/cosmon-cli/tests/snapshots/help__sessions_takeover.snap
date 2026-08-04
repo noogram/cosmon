@@ -7,10 +7,12 @@ The PRIMARY lease: who may fly, who asked, who granted
 Usage: cs sessions takeover [OPTIONS] <COMMAND>
 
 Commands:
-  show     Who holds the controls, at which epoch, and what has been asked
-  request  Ask for the controls. Writes a request and confers nothing
-  grant    Operator gesture: hand the controls over at the next epoch
-  check    Ask the guard whether a session may pilot. Exits 0 or 1
+  show       Who holds the controls, at which epoch, and what has been asked
+  request    Ask for the controls. Writes a request and confers nothing
+  grant      Operator gesture: hand the controls over at the next epoch
+  challenge  Print the exact bytes an operator signs to authorise one transfer
+  trust      Show which operator key this galaxy trusts to authorise a transfer
+  check      Ask the guard whether a session may pilot. Exits 0 or 1
 
 Options:
       --config <PATH>  Path to configuration file

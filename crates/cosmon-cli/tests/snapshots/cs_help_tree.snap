@@ -74,6 +74,8 @@ sessions takeover
 sessions takeover show
 sessions takeover request
 sessions takeover grant
+sessions takeover challenge
+sessions takeover trust
 sessions takeover check
 sessions hook
 sessions hook install
