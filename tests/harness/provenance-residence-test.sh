@@ -47,6 +47,16 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 GATE="$REPO/scripts/check-provenance.sh"
 
+# Hermetic invocation: these scenarios assert the gate's WHOLE-HISTORY
+# fallback inside a synthetic repo. On a pull_request event the runner's
+# GITHUB_* would steer the gate into its PR scope (which resolves to
+# nothing here) and every assertion would invert. Measured 2026-08-04 on
+# noogram/cosmon#44 — the first external PR whose workflows ever ran.
+run_gate() {
+    env -u GITHUB_BASE_REF -u GITHUB_SHA -u GITHUB_EVENT_BEFORE \
+        -u COSMON_PROVENANCE_HEAD bash "$GATE" "$@"
+}
+
 if [ ! -f "$GATE" ]; then
     echo "harness error: $GATE not found" >&2
     exit 2
@@ -118,7 +128,7 @@ build_repo() {
 # ---------------------------------------------------------------------------
 # Scenario 1 — team residence.
 build_repo untracked || { echo "harness error: build untracked" >&2; exit 2; }
-out=$(bash "$GATE" 2>&1) && rc=0 || rc=$?
+out=$(run_gate 2>&1) && rc=0 || rc=$?
 verdict "1a. team residence: gate still passes on a well-shaped merge" 0 "$rc"
 
 if printf '%s' "$out" | grep -q "team/remote residence"; then
@@ -146,7 +156,7 @@ fi
 # THIS is the assertion that fails against the pre-dc53 gate, which
 # printed `skip … no ledger at scope tip` and exited 0.
 build_repo removed || { echo "harness error: build removed" >&2; exit 2; }
-out=$(bash "$GATE" 2>&1) && rc=0 || rc=$?
+out=$(run_gate 2>&1) && rc=0 || rc=$?
 verdict "2a. tracked residence with the ledger removed: gate FAILS" 1 "$rc"
 
 if printf '%s' "$out" | grep -q "ledger is not there"; then
@@ -159,7 +169,7 @@ fi
 # ---------------------------------------------------------------------------
 # Scenario 3 — where the ledger DOES live under git, the check still bites.
 build_repo present || { echo "harness error: build present" >&2; exit 2; }
-out=$(bash "$GATE" 2>&1) && rc=0 || rc=$?
+out=$(run_gate 2>&1) && rc=0 || rc=$?
 verdict "3a. tracked residence with a complete ledger: gate passes" 0 "$rc"
 
 if printf '%s' "$out" | grep -q "ledger_verified=1"; then
