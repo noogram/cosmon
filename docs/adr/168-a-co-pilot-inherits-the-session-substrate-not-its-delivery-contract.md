@@ -342,6 +342,36 @@ co-pilot and a text editor. The perimeter is cosmon's own gestures, and F9's
 `.swift` remains editable by anyone with a shell. That is a boundary of the
 mechanism, stated rather than papered over.
 
+**And for a while the guard above reached nothing at all** (`task-20260731-d876`,
+the M8 relève exercise). F1 and F9 were built in parallel and each was green on
+its own branch. F1 made a lease store honour no grant unless an operator key is
+pinned into it; F9's guard constructed a store without one. The composition is
+silent by construction: no pinned key ⇒ every recorded grant is skipped on read
+⇒ `current(mission)` is `None` ⇒ the guard's first line returns `Ok(())`. Every
+leased mission read back as a mission nobody had ever granted, so the guard
+waved through exactly the gestures it exists to refuse — an unleased co-pilot
+collapsed a leased mission while `cs sessions takeover check`, reading the same
+ledger through the trusting constructor, refused that same session.
+
+F9's own falsifier could not have caught it: since F1 it could no longer seat a
+lease at all, so four of its five tests were red on `main` and the fifth was
+measuring an unleased mission. The repair is one constructor
+(`presence::leases_at`) for both readers, a falsifier that signs its grants, and
+a source-level test that fails if any production call site builds the store
+bare. The general lesson is older than this ADR and is now paid for twice: **two
+green branches do not make a green merge**, and an authority check that
+degrades to "allow" when a dependency is missing is a check that will one day be
+missing.
+
+The same exercise found the softer half of the same shape. `takeover check`
+resolved the epoch from its `--flag` while a lifecycle verb resolves it from the
+pilot's presence snapshot, so a pilot that holds the lease but has not run
+`attach --role primary` is told `granted` and is then refused by the mechanism.
+Both checkers now print what the seat would present when it differs. The
+authority model is unchanged; what changed is that the command an operator
+consults during a hand-over stopped answering a different question from the one
+it was asked.
+
 ## Falsifiers
 
 This ADR is wrong if any of the following turns out to be true. Each is checkable.
