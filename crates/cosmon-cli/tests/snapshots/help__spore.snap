@@ -10,6 +10,7 @@ Commands:
   validate  Parse + expand a spore as a dry run; print the ordered nucleate call list without germinating anything
   run       Germinate the polymer: parse + expand + seal gate, then replay the call list against the live state store
   export    Emit a content-addressed bundle id and an ASTRA descriptive layer (ADR-140 D6) for sharing the spore
+  install   Fetch a shareable bundle and place it into this project, installing its recipes into `.cosmon/formulas/` so their per-step pins reach dispatch
 
 Options:
       --config <PATH>  Path to configuration file
@@ -18,6 +19,7 @@ Options:
   -h, --help           Print help
 
 EXAMPLES:
+  cs spore install github:noogram/cosmon/spores/cosmon-dev  # fetch + place
   cs spore validate ./spore.toml --var subject="octopus cognition"
   cs spore run ./bundle/ --var subject="..." --var axes=a,b,c
   cs spore run ./spore.toml --allow-unchecked-seal     # sealed, no TLC
@@ -25,6 +27,8 @@ EXAMPLES:
   cs spore validate ./spore.toml --json                # NDJSON expansion
 
 VERBS:
+  install    fetch a shareable bundle and place it in this project, copying
+             its recipes into .cosmon/formulas/ so their pins reach dispatch.
   validate   parse + expand as a dry run; prints the ordered nucleate
              call list, germinates nothing.
   run        parse + expand + seal gate, then germinate the polymer into

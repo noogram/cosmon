@@ -19,7 +19,11 @@ BASE BRANCH. The branch a molecule merges back into is a property of the MOLECUL
 
 ANTI-PREEMPTION LEASE. A human 'cs tackle' and a running 'cs run' are two writers racing on the same Pending → Active flip, so every tackle records WHO dispatched it: 'cs tackle --by human' (the default) or 'cs tackle --by runtime:<pid>' (what 'cs run' passes). The walker re-reads each candidate fresh from disk right before dispatch and SKIPS anything no longer Pending, carrying a sticky 'human' claim, or tagged 'hold:pilot'. Use 'cs claim <id>' before reaching for a pending molecule: it writes the durable pilot hold before 'cs tackle', and 'cs release <id>' removes it. The runtime always defers to that hold. 'manual always wins', the runtime never raffles a molecule you reached for. Binary owner field, no clock to calibrate. Operators do not normally type '--by'; 'human' is the default.
 
-SPORE (ADR-140) germinates a whole polymer from a shareable 'spore.toml' template, the way 'cs nucleate' germinates one molecule. A spore is a parameterizable mission plan: a fleet, per-node formulas, a ParamSchema, a DAG of typed edges, and an optional '.tla' seal. Three verbs, one role each:
+SPORE (ADR-140) germinates a whole polymer from a shareable 'spore.toml' template, the way 'cs nucleate' germinates one molecule. A spore is a parameterizable mission plan: a fleet, per-node formulas, a ParamSchema, a DAG of typed edges, and an optional '.tla' seal. Four verbs, one role each:
+  cs spore install <source>       fetch a shareable bundle and place
+                                  it in this project, copying its
+                                  recipes into .cosmon/formulas/ so
+                                  their per-step pins reach dispatch.
   cs spore validate <ref>         parse + expand as a dry run; prints
                                   the ordered nucleate call list,
                                   germinates nothing.
@@ -29,6 +33,8 @@ SPORE (ADR-140) germinates a whole polymer from a shareable 'spore.toml' templat
                                   temp:warm, wired to its blocked-by).
   cs spore export <ref>           content-addressed bundle hash +
                                   ASTRA descriptive layer (D6).
+
+'<source>' is a local path, 'github:owner/repo[/subdir][@ref]', a GitHub tree/blob URL, or any other git remote. Install refuses before writing anything: on an '--expect-hash' mismatch, a bundle missing a declared file, a symlink in the fetched tree, a non-empty destination, or a registry recipe of the same name with different content (all overridable with '--force' where that is meaningful). An identical recipe is a no-op, so re-installing is idempotent.
 
 '<ref>' is a 'spore.toml' file or a directory containing one. '--var k=v' (repeatable) binds a parameter, coerced into its declared ParamSchema type before expansion. '--json' on validate and run emits NDJSON (agent-first invariant). A spore is a declarative front end over the existing 'cs nucleate' verb, not a new scheduler and not a new molecule type.
 

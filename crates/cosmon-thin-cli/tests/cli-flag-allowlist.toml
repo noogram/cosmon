@@ -59,7 +59,7 @@ reason = "resident-runtime entry point — long-lived; not a one-shot HTTP call.
 verb = "spore"
 class = "operator_only"
 adr_ref = "ADR-080 §5.1 / ADR-140 N5"
-reason = "germinate a polymer from a spore.toml template (validate/run/export); run nucleates a whole DAG against the operator's local store, same operator-only orchestration family as cs run — no one-shot HTTP shape."
+reason = "germinate a polymer from a spore.toml template (install/validate/run/export); run nucleates a whole DAG against the operator's local store, and install writes into the operator's checkout + formula registry — same operator-only orchestration family as cs run, no one-shot HTTP shape."
 
 [[verb_absent_from_thin]]
 verb = "stitch"

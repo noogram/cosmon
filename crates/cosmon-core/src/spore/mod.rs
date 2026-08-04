@@ -82,10 +82,15 @@ use serde::Deserialize;
 use crate::fleet::CrossProviderReview;
 
 pub mod expand;
+pub mod install;
 pub mod output;
 pub mod seal;
 
 pub use expand::{expand, ExpandError, NucleateCall};
+pub use install::{
+    check_bundle_path, default_dest_slug, parse_source, plan_formula, registry_file_name,
+    FormulaPlacement, SourceError, SporeSource, PROVENANCE_FILE, SPORES_DIR,
+};
 pub use output::{
     forbidden_gate_output, inject_run_outputs, node_output_dir, run_dir, EscapedOutputHome,
     ForbiddenOutput, RefusedOutputHome, OUTPUT_DIR_VAR, RUN_DIR_VAR, SPORE_RUNS_DIR,

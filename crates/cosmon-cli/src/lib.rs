@@ -68,6 +68,12 @@ pub mod spore_seal;
 /// no-follow semantics and canonicalizing it against the real run home.
 pub mod spore_containment;
 
+/// Fetching and copying a shareable spore bundle into the current project
+/// (`cs spore install`). The grammar and the refusal rules are pure and live in
+/// [`cosmon_core::spore::install`]; this module owns the `git` subprocess, the
+/// temporary checkout, and the symlink-refusing tree copy.
+pub mod spore_install;
+
 /// Git commit SHA this binary was built from, stamped by `build.rs`.
 ///
 /// Provenance, not verification: the SHA answers *"which commit, in

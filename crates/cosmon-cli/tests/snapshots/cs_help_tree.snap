@@ -112,6 +112,7 @@ spore
 spore validate
 spore run
 spore export
+spore install
 help
 verify
 validate

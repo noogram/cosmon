@@ -37,6 +37,31 @@ The parser is fail-closed: it rejects an emergent node with no bounds, an edge
 cycle, an unknown node kind, a parameter-type mismatch, and duplicate or dangling
 node references.
 
+## Step 0: Install someone else's spore
+
+If the spore is yours, it is already on disk and you can skip to step 1. If
+someone shared one — a repository, a GitHub URL, a directory — install it:
+
+```sh
+cs spore install github:noogram/cosmon/spores/cosmon-dev
+cs spore install https://github.com/noogram/cosmon/tree/main/spores/cosmon-dev
+cs spore install ../shared/bundle --dest spores/shared
+```
+
+This does two things, and the second is the one that is easy to forget by hand:
+it copies the bundle into `<project>/spores/<name>/`, **and** it registers each
+of the bundle's recipes in `.cosmon/formulas/`. A germinated molecule stores its
+formula by *id*, and `cs tackle` looks that id up in your project's registry —
+so a bundle whose recipes were never installed germinates fine and then runs
+every node on the adapter default, with the per-step `adapter`/`model` pins the
+author wrote silently inert.
+
+Install refuses before writing anything: on a `--expect-hash` mismatch (the id
+`cs spore export` prints), a bundle missing a file its manifest declares, a
+symlink in the fetched tree, a non-empty destination, or a registry recipe of
+the same name with different content. Re-installing an unchanged bundle is a
+no-op. Add `--dry-run` to see the plan first.
+
 ## Step 1: Validate before you germinate (dry run)
 
 Always check what a spore *would* create before it creates anything:
