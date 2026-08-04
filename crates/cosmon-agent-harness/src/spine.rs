@@ -270,6 +270,60 @@ pub async fn run_loop<P: Provider>(
     run_loop_with_registry(provider, briefing, work_dir, telemetry, default_registry()).await
 }
 
+/// The observable outcome of a worker loop: the synthesis text **and** the
+/// count of tool dispatches performed.
+///
+/// The tool count is the load-bearing witness that distinguishes real work
+/// from a silent no-op. A worker that reaches [`Turn::Stop`] on its first
+/// turn without ever calling a tool wrote no file and ran no command — its
+/// worktree is byte-identical to the pre-dispatch state. For an in-process
+/// Direct-API adapter whose completion is sealed by the dispatch site rather
+/// than by a self-`cs complete`, that zero-work case must NOT be sealed as
+/// `Completed`: doing so violates the invariant *a completed molecule must
+/// have executed its steps or collapsed loudly* (the founding witness is
+/// `cmbverify-20260724-54cd`, sealed 0/4 with an untouched worktree). Callers
+/// use [`WorkerOutcome::tools_dispatched`] to decide complete-vs-collapse.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct WorkerOutcome {
+    /// The final assistant synthesis text (the `Turn::Stop` payload).
+    pub synthesis: String,
+    /// Cumulative count of tool calls dispatched across every turn. `0` means
+    /// the model stopped without writing a file or running a command — no
+    /// observable work.
+    pub tools_dispatched: u32,
+}
+
+/// [`run_loop`] variant that returns the full [`WorkerOutcome`] — synthesis
+/// plus the tool-dispatch count — instead of the bare synthesis string.
+///
+/// # Errors
+///
+/// Identical to [`run_loop`].
+pub async fn run_loop_counted<P: Provider>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+) -> Result<WorkerOutcome, HarnessError<P::Error>> {
+    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, default_registry()).await
+}
+
+/// [`run_loop_with_registry`] variant that returns the full [`WorkerOutcome`].
+///
+/// # Errors
+///
+/// Identical to [`run_loop_with_registry`].
+pub async fn run_loop_with_registry_counted<P: Provider>(
+    provider: &P,
+    briefing: &str,
+    work_dir: &Path,
+    telemetry: Option<&AdapterTelemetry>,
+    registry: ToolRegistry,
+) -> Result<WorkerOutcome, HarnessError<P::Error>> {
+    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry).await
+}
+
 /// Drive a worker session with a fixed capability registry.
 ///
 /// The caller selects the finite tool set before the first model turn, so an
@@ -286,7 +340,9 @@ pub async fn run_loop_with_registry<P: Provider>(
     telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
 ) -> Result<String, HarnessError<P::Error>> {
-    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry).await
+    run_loop_with_registry_impl(provider, briefing, work_dir, telemetry, registry)
+        .await
+        .map(|outcome| outcome.synthesis)
 }
 
 /// Drive a worker session, gating the `await_operator` blocking primitive
@@ -347,7 +403,7 @@ async fn run_loop_with_registry_impl<P: Provider>(
     work_dir: &Path,
     _telemetry: Option<&AdapterTelemetry>,
     registry: ToolRegistry,
-) -> Result<String, HarnessError<P::Error>> {
+) -> Result<WorkerOutcome, HarnessError<P::Error>> {
     // Bootstrapping (knuth §7) — walk up from `work_dir` collecting
     // `AGENTS.md` / `CLAUDE.md`, prepend them to the briefing so the
     // model sees project conventions before its first tool call.
@@ -487,7 +543,12 @@ async fn run_loop_with_registry_impl<P: Provider>(
                     HarnessError::ToolBudgetExhausted { limit }
                 })?;
             }
-            Turn::Stop(text) => return Ok(text),
+            Turn::Stop(text) => {
+                return Ok(WorkerOutcome {
+                    synthesis: text,
+                    tools_dispatched: used_tools,
+                })
+            }
         }
     }
 
@@ -1347,6 +1408,53 @@ mod tests {
             .await
             .expect("loop must terminate cleanly");
         assert_eq!(result, "done");
+    }
+
+    /// `run_loop_counted` must witness the tool-dispatch count so the caller
+    /// can distinguish real work from a silent no-op. A model that stops
+    /// immediately WITHOUT calling a tool reports `tools_dispatched == 0` —
+    /// the exact signal the in-process Direct-API dispatch site uses to
+    /// collapse loudly instead of sealing a false `Completed`
+    /// (`cmbverify-20260724-54cd`).
+    #[tokio::test]
+    async fn run_loop_counted_reports_zero_tools_on_bare_stop() {
+        let dir = tempdir().unwrap();
+        let provider = ScriptedProvider::new(vec![Turn::Stop("nothing to do".to_owned())]);
+        let outcome = run_loop_counted(&provider, "do the work", dir.path(), None)
+            .await
+            .expect("loop must terminate cleanly");
+        assert_eq!(outcome.synthesis, "nothing to do");
+        assert_eq!(
+            outcome.tools_dispatched, 0,
+            "a bare Stop dispatched no tools — no observable work"
+        );
+    }
+
+    /// The counterpart: a loop that actually dispatches a tool reports a
+    /// non-zero count, so a capable worker's work is admitted.
+    #[tokio::test]
+    async fn run_loop_counted_reports_tool_dispatches() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("note.md"), "content").unwrap();
+        let provider = ScriptedProvider::new(vec![
+            Turn::ToolCalls {
+                assistant: "reading".to_owned(),
+                calls: vec![ToolCall {
+                    id: "call-1".to_owned(),
+                    name: "read_file".to_owned(),
+                    arguments_json: serde_json::json!({ "path": "note.md" }).to_string(),
+                }],
+            },
+            Turn::Stop("done".to_owned()),
+        ]);
+        let outcome = run_loop_counted(&provider, "read note.md", dir.path(), None)
+            .await
+            .expect("loop must terminate cleanly");
+        assert_eq!(outcome.synthesis, "done");
+        assert_eq!(
+            outcome.tools_dispatched, 1,
+            "one tool call was dispatched — observable work"
+        );
     }
 
     /// A tool-execution failure must NOT abort the loop — the typed

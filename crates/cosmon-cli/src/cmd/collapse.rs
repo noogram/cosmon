@@ -13,6 +13,7 @@ use cosmon_core::event::{Envelope, Event};
 use cosmon_core::event_v2::{CollapseReason, EventV2};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::{CollapseCause, MoleculeStatus};
+use cosmon_filestore::FileStore;
 use cosmon_state::event_log;
 
 use super::Context;
@@ -276,6 +277,114 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Drive the canonical `→ Collapsed` terminal transition programmatically,
+/// mirroring [`super::complete::complete_one`] on the failure side.
+///
+/// Exposed as `pub(crate)` so the in-process Direct-API branch of `cs tackle`
+/// can collapse a molecule **loudly** when its synchronous agent loop returned
+/// `Ok` but performed **no observable work** (zero tool dispatches → untouched
+/// worktree, no artefact). Sealing such a molecule `Completed` would violate
+/// the invariant *a completed molecule must have executed its steps or
+/// collapsed loudly* (ADR-100 R2; founding witness `cmbverify-20260724-54cd`,
+/// sealed 0/4 with an empty worktree). This helper is the loud alternative.
+///
+/// Byte-compatible with `cs collapse`'s terminal sequence: status flip to
+/// `Collapsed`, `collapse_reason` / `collapsed_step` recorded, live-process
+/// record released, `log.md` appended, and the legacy + `EventV2`
+/// `MoleculeCollapsed` events emitted. The archive step (`cs collapse`'s
+/// ADR-030 M3 tail) is intentionally omitted — this path has no `Context` and
+/// the caller does not need archival for a zero-work refusal.
+///
+/// # Errors
+///
+/// Returns an error if the molecule cannot be loaded or saved, or if it is
+/// already in a terminal `Completed` state (collapsing a completed molecule
+/// would erase its completion). An already-`Collapsed` molecule is idempotent.
+pub(crate) fn collapse_one(
+    store: &FileStore,
+    ops_dir: &std::path::Path,
+    mol_id: &MoleculeId,
+    reason: &str,
+) -> anyhow::Result<MoleculeStatus> {
+    use cosmon_state::StateStore;
+
+    let prev_status = {
+        let _g = store.lock_fleet()?;
+        let mol_data = store.load_molecule(mol_id)?;
+        let prev_status = mol_data.status;
+
+        if prev_status == MoleculeStatus::Collapsed {
+            return Ok(prev_status);
+        }
+        if prev_status == MoleculeStatus::Completed {
+            anyhow::bail!("molecule {mol_id} is completed — cannot collapse a completed molecule");
+        }
+
+        let mut updated = mol_data;
+        updated.status = MoleculeStatus::Collapsed;
+        updated.collapse_reason = Some(reason.to_owned());
+        updated.collapsed_step = Some(updated.current_step);
+        if updated.process.is_some() {
+            updated.release_process();
+        }
+        updated.updated_at = Utc::now();
+        store.save_molecule(&updated.id.clone(), &updated)?;
+        prev_status
+    };
+
+    // Append to log.md (best-effort — the transition already persisted).
+    let mol_dir = store.molecule_dir(mol_id);
+    let log_path = mol_dir.join("log.md");
+    let timestamp = Utc::now().format("%Y-%m-%d %H:%M UTC");
+    let log_entry = format!("\n## {timestamp} — Collapsed\n\n{reason}\n");
+    let existing_log = fs::read_to_string(&log_path).unwrap_or_default();
+    let new_log = if existing_log.is_empty() {
+        format!("# Evolution Log\n{log_entry}")
+    } else {
+        format!("{existing_log}{log_entry}")
+    };
+    let _ = fs::write(&log_path, new_log);
+
+    // Emit legacy + EventV2 collapse records.
+    let events_path = ops_dir.join("events.jsonl");
+    let _ = cosmon_filestore::event::append(
+        &events_path,
+        &Envelope::now(Event::MoleculeTransitioned {
+            molecule_id: mol_id.clone(),
+            from: prev_status,
+            to: MoleculeStatus::Collapsed,
+        }),
+    );
+    let _ = cosmon_filestore::event::append(
+        &events_path,
+        &Envelope::now(Event::MoleculeCollapsed {
+            molecule_id: mol_id.clone(),
+            reason: reason.to_owned(),
+        }),
+    );
+    let status_seq = event_log::emit_one(
+        &events_path,
+        EventV2::MoleculeStatusChanged {
+            molecule_id: mol_id.clone(),
+            from: prev_status.to_string(),
+            to: "collapsed".to_owned(),
+        },
+        None,
+    )
+    .ok();
+    let _ = event_log::emit_one(
+        &events_path,
+        EventV2::MoleculeCollapsed {
+            molecule_id: mol_id.clone(),
+            reason: reason.to_owned(),
+            kind: None,
+        },
+        status_seq,
+    );
+
+    Ok(prev_status)
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeSet, HashMap};
@@ -351,6 +460,47 @@ mod tests {
             tackled_at: None,
             adapter: None,
         }
+    }
+
+    #[test]
+    fn collapse_one_flips_running_to_collapsed_and_records_reason() {
+        // The programmatic collapse helper the in-process Direct-API dispatch
+        // uses when a loop performed zero work. A Running molecule must become
+        // Collapsed, carry the reason, and record the step it collapsed at.
+        let tmp = tempfile::tempdir().unwrap();
+        let cosmon_dir = tmp.path().join(".cosmon");
+        let state_dir = cosmon_dir.join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+
+        let store = FileStore::new(&state_dir);
+        let m = mol("task-20260415-col9"); // Running, current_step = 1
+        store.save_molecule(&m.id, &m).unwrap();
+
+        let prev = super::collapse_one(&store, &state_dir, &m.id, "zero-tool loop").unwrap();
+        assert_eq!(prev, MoleculeStatus::Running);
+
+        let reloaded = store.load_molecule(&m.id).unwrap();
+        assert_eq!(reloaded.status, MoleculeStatus::Collapsed);
+        assert_eq!(reloaded.collapse_reason.as_deref(), Some("zero-tool loop"));
+        assert_eq!(reloaded.collapsed_step, Some(1));
+
+        // Idempotent on an already-collapsed molecule.
+        let prev2 = super::collapse_one(&store, &state_dir, &m.id, "again").unwrap();
+        assert_eq!(prev2, MoleculeStatus::Collapsed);
+    }
+
+    #[test]
+    fn collapse_one_refuses_a_completed_molecule() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state_dir = tmp.path().join(".cosmon").join("state");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        let store = FileStore::new(&state_dir);
+        let mut m = mol("task-20260415-col10");
+        m.status = MoleculeStatus::Completed;
+        store.save_molecule(&m.id, &m).unwrap();
+
+        let err = super::collapse_one(&store, &state_dir, &m.id, "nope").unwrap_err();
+        assert!(err.to_string().contains("completed"));
     }
 
     #[test]
