@@ -106,6 +106,12 @@ jobs:
       # above (which bans operator/fund IDENTITY terms). Hard on every PR; pure
       # bash + git grep over docs/book/src. Single source of the tool
       # classification: the script itself.
+      # A workflow GitHub cannot parse produces ZERO jobs and reports under its
+      # bare path instead of its name — so every gate it contains silently does
+      # not run, and the red looks like an infrastructure hiccup. Measured
+      # 2026-08-04: an unquoted `prerequisite:` inside a step name did exactly
+      # that on `main`. This lints every workflow file as YAML.
+      - run: ./scripts/check-workflow-yaml.sh
       - run: ./scripts/check-docs-one-gate.sh
       - run: ./scripts/check-docs-one-gate.test.sh
       # Local targets and heading fragments are a hard, offline review gate.
@@ -287,7 +293,7 @@ jobs:
       # step; it depends on the artifact, not on this line.) The
       # `no_implicit_cargo_build_in_tests` guard in `cosmon-cli` keeps the
       # implicit-build fallback from coming back.
-      - name: Build cs binary (test prerequisite: parity + cosmon-api smoke)
+      - name: "Build cs binary (test prerequisite: parity + cosmon-api smoke)"
         run: cargo build --bin cs -p cosmon-cli --locked
       - run: cargo test --workspace --locked
 
