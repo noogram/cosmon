@@ -25,7 +25,8 @@
 //! somewhere else and is discovered later, which is the same shape as a guard
 //! rail that never speaks.
 //!
-//! [`resolve`] makes the binding a **declaration**. The optional
+//! [`resolve()`](crate::target_repo::resolve) makes the binding a
+//! **declaration**. The optional
 //! [`target_repo`](cosmon_core::config::ProjectSection::target_repo) key in
 //! `.cosmon/config.toml` names the repository; when it is present the repo is
 //! resolved from *there* and a non-repository is refused out loud. When it is
@@ -110,11 +111,12 @@ pub fn resolve() -> anyhow::Result<PathBuf> {
     resolve_with_source().map(|r| r.root)
 }
 
-/// [`resolve`], keeping the resolution that produced the answer.
+/// [`resolve()`](crate::target_repo::resolve), keeping the resolution that
+/// produced the answer.
 ///
 /// # Errors
 ///
-/// Same as [`resolve`].
+/// Same as [`resolve()`](crate::target_repo::resolve).
 pub fn resolve_with_source() -> anyhow::Result<ResolvedRepo> {
     let config_path = cosmon_filestore::resolve_config_path(None);
     resolve_from_config(&config_path)
@@ -128,7 +130,7 @@ pub fn resolve_with_source() -> anyhow::Result<ResolvedRepo> {
 ///
 /// # Errors
 ///
-/// Same as [`resolve`].
+/// Same as [`resolve()`](crate::target_repo::resolve).
 pub fn resolve_from_config(config_path: &Path) -> anyhow::Result<ResolvedRepo> {
     let declared = cosmon_filestore::load_project_config(config_path)
         .ok()
