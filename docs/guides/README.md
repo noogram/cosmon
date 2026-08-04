@@ -1,6 +1,6 @@
 # Guides index
 
-One-line map of the how-to guides in `docs/guides/`. These are goal-oriented recipes, cross-linked from [CLAUDE.md](../../CLAUDE.md), `cs help`, and the top-level [docs/INDEX.md](../INDEX.md). Auto-generated from each guide's H1 title.
+One-line map of the how-to guides in `docs/guides/`. These are goal-oriented recipes, cross-linked from [CLAUDE.md](../../CLAUDE.md), `cs help`, and the top-level [docs/INDEX.md](../INDEX.md). Maintained alphabetically from each guide's H1 title.
 
 - [Execution-adapter parity bar](adapter-parity-bar.md)
 - [API ↔ CLI coverage audit](api-cli-coverage.md)
@@ -28,6 +28,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [Fail-closed injection — `G_inject` / `assert-hits`](fail-closed-injection.md)
 - [You are not a router. You are a gardener.](gardener-not-router.md)
 - [gitleaks × cosmon state journals — the shared scan baseline](gitleaks-state-journals.md)
+- [Handing the controls over — and taking them back](takeover-rollback.md)
 - [The harness, fractal — where the agent loop lives](harness-fractal.md)
 - [ILB / tenant_auditor demo container — operator guide](ilb-demo-container.md)
 - [Inbox — 7-day operator trial protocol](inbox-trial.md)

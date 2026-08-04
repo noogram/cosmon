@@ -908,9 +908,32 @@ fn run_inbox(ctx: &Context, args: &InboxArgs) -> anyhow::Result<()> {
 /// pinned is not an error here: it is a store that refuses every grant, and
 /// `cs sessions takeover trust` is where that fact is reported.
 pub(crate) fn leases(ctx: &Context) -> anyhow::Result<PilotLeaseStore> {
-    let store = PilotLeaseStore::new(state_root(ctx));
+    leases_at(&state_root(ctx))
+}
+
+/// The lease ledger over an explicit state root, trust root attached.
+///
+/// The same store [`leases`] builds, for the one caller that has a path rather
+/// than a [`Context`]: the authority guard on the lifecycle verbs
+/// (`super::guard::refuse_unleased_pilot_gesture`). It exists because the
+/// guard once built `PilotLeaseStore::new` directly, and a store with no
+/// pinned key honours no grant — so every leased mission read back as
+/// *unleased* and the guard returned `Ok(())` for callers the ledger refused.
+/// The M8 relève exercise caught it by collapsing a leased mission from an
+/// unleased co-pilot while `cs sessions takeover check`, reading the same
+/// ledger through [`leases`], refused the very same session.
+///
+/// Both readers now come through here, which is the point: this is one
+/// function so that "resolve the trust root" is not a step a call site can
+/// perform differently, or forget.
+///
+/// # Errors
+///
+/// As [`leases`].
+pub(crate) fn leases_at(state_root: &std::path::Path) -> anyhow::Result<PilotLeaseStore> {
+    let store = PilotLeaseStore::new(state_root);
     Ok(
-        match MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))? {
+        match MinisignOperatorVerifier::resolve_for_state_root(state_root)? {
             Some(v) => store.trusting(std::sync::Arc::new(v)),
             None => store,
         },
@@ -1279,11 +1302,67 @@ fn run_lease_check(ctx: &Context, args: &LeaseCheckArgs) -> anyhow::Result<()> {
                 why = reason.explain(),
             ),
         }
+        // The ledger's verdict is not the gesture's verdict: `--epoch` is what
+        // the caller asserts, while a lifecycle verb presents what the seat
+        // records. See the twin of this block in `cmd::sessions` for the M8
+        // relève exercise that found the gap.
+        if let Some(line) = seat_caveat(ctx, &session, &args.mission, epoch, &decision)? {
+            println!("{line}");
+        }
     }
     std::io::stdout().flush().ok();
     // Same shape as `cs diverge`: a decidable answer is a successful run with
     // a non-zero exit code, not an error.
     std::process::exit(i32::from(!decision.is_granted()));
+}
+
+/// The second line a lease check owes its reader: whether this session's seat
+/// would actually present the epoch the ledger just granted it.
+///
+/// `None` when there is nothing to warn about — the check was refused anyway,
+/// or the seat presents exactly what was asked.
+///
+/// Both `cs presence lease check` and `cs sessions takeover check` answer "may
+/// this session pilot" from the *ledger*, using the epoch on the flag. A
+/// lifecycle verb answers it from the *seat*, using the epoch on the presence
+/// snapshot, and the two disagree whenever a pilot was granted a lease but has
+/// not run `cs sessions attach --role primary`. In the M8 relève exercise that
+/// gap cost a successor its whole turn: it read `granted`, reported that it had
+/// the controls, and never noticed its snapshot still said `role: copilot`.
+pub(crate) fn seat_caveat(
+    ctx: &Context,
+    session: &SessionId,
+    mission: &MoleculeId,
+    asked: Option<LeaseEpoch>,
+    decision: &LeaseDecision,
+) -> anyhow::Result<Option<String>> {
+    if !decision.is_granted() {
+        return Ok(None);
+    }
+    let seated = store(ctx)
+        .load(session)?
+        .as_ref()
+        .and_then(Presence::claimed_authority)
+        .map(|(_, e)| e);
+    if seated == asked {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "  but its seat presents {seat}, so a lifecycle gesture would be \
+         refused. Take the seat first:\n  \
+         cs sessions attach --role primary --session {sid} --mission {mission} \
+         --epoch {asked}",
+        seat = match seated {
+            Some(e) => format!("epoch {e}"),
+            None => "nothing — it is not seated as primary on this mission".to_owned(),
+        },
+        sid = session.as_str(),
+        mission = mission.as_str(),
+        asked = match asked {
+            Some(e) => e.to_string(),
+            None => "<N>".to_owned(),
+        },
+    )))
 }
 
 // ---------------------------------------------------------------------------

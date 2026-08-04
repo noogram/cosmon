@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Ask the guard whether a session may pilot. Exits 0 or 1
+Ask whether a session may pilot: the ledger's verdict, plus whether its seat would actually present that epoch. Exits 0 or 1
 
 Usage: cs sessions takeover check [OPTIONS] --mission <MOLECULE_ID>
 

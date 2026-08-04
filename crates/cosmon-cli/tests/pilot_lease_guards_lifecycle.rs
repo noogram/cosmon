@@ -49,6 +49,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cosmon_minisign_testkit::Operator;
+
 /// Exit code for `GuardError::UnleasedPilotGesture`, restated here as the
 /// contract a script or an external scheduler branches on. A change to the
 /// constant that is not a deliberate contract change fails this file.
@@ -80,11 +82,30 @@ fn cs(cwd: &Path) -> Command {
     cmd
 }
 
-/// A galaxy with one formula whose steps need nothing but a state directory.
+/// The human this suite stands in for — the one who holds the secret key.
+///
+/// A fixed seed, so a failing run re-signs the same bytes.
+fn operator() -> Operator {
+    Operator::from_seed(9)
+}
+
+/// A galaxy with one formula whose steps need nothing but a state directory,
+/// and an operator trust root pinned where a real galaxy commits it.
+///
+/// The pin is not decoration. Since ADR-171 a grant is honoured only if its
+/// signature checks against a pinned key, so a galaxy without one is a galaxy
+/// where `takeover grant` writes nothing and every mission below would read
+/// back as unleased — which is precisely the state in which this file's
+/// falsifier passes while proving nothing.
 fn galaxy(tmp: &Path) -> PathBuf {
     let root = tmp.join("galaxy");
     fs::create_dir_all(&root).unwrap();
     assert!(cs(&root).arg("init").status().unwrap().success());
+    fs::write(
+        root.join(".cosmon").join("takeover.pub"),
+        operator().public_key_file(),
+    )
+    .unwrap();
 
     let formulas = root.join(".cosmon").join("formulas");
     fs::create_dir_all(&formulas).unwrap();
@@ -145,25 +166,7 @@ fn nucleate(root: &Path) -> String {
 /// presence snapshot that carries its claim — the two halves of a lease, as
 /// the M7 dogfood performed them at 14:29:27 and 14:29:37.
 fn seat_primary(root: &Path, mission: &str) {
-    let granted = cs(root)
-        .args([
-            "sessions",
-            "takeover",
-            "grant",
-            "--mission",
-            mission,
-            "--to",
-            PRIMARY,
-            "--by",
-            "operator",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        granted.status.success(),
-        "takeover grant failed: {}",
-        String::from_utf8_lossy(&granted.stderr),
-    );
+    grant(root, mission, PRIMARY);
 
     let seated = cs(root)
         .args([
@@ -332,8 +335,35 @@ fn a_mission_nobody_has_leased_is_untouched_by_the_guard() {
     assert_eq!(status(&root, &mission), "collapsed");
 }
 
-/// Grant the mission's controls to `to` without going through a request.
+/// Grant the mission's controls to `to` without going through a request —
+/// the operator's three steps: read the challenge, sign it out of band, record
+/// the grant with the signature attached (ADR-171 §b).
 fn grant(root: &Path, mission: &str, to: &str) {
+    let challenge = cs(root)
+        .args([
+            "sessions",
+            "takeover",
+            "challenge",
+            "--mission",
+            mission,
+            "--to",
+            to,
+            "--by",
+            "operator",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        challenge.status.success(),
+        "takeover challenge for {to} failed: {}",
+        String::from_utf8_lossy(&challenge.stderr),
+    );
+
+    // The signature is produced outside `cs` on purpose: the shipped tree owns
+    // no signing path, which is the whole mechanism of ADR-171.
+    let sig = root.join(format!("grant-{to}.minisig"));
+    fs::write(&sig, operator().sign(&challenge.stdout)).unwrap();
+
     let out = cs(root)
         .args([
             "sessions",
@@ -345,7 +375,9 @@ fn grant(root: &Path, mission: &str, to: &str) {
             to,
             "--by",
             "operator",
+            "--attestation",
         ])
+        .arg(&sig)
         .output()
         .unwrap();
     assert!(
@@ -413,4 +445,86 @@ fn a_stale_epoch_is_refused_even_when_the_seat_came_back() {
          one is true — that is what makes a stale primary diagnosable rather \
          than merely wrong.\nstderr: {stderr}",
     );
+}
+
+// ---------------------------------------------------------------------------
+// The drift that made all of the above vacuous, pinned at the source level.
+// ---------------------------------------------------------------------------
+
+/// Production code must build the lease ledger through `presence::leases_at`,
+/// never through `PilotLeaseStore::new` directly.
+///
+/// This is not style. A store built without a pinned trust root honours **no**
+/// grant, so every leased mission reads back as a mission nobody ever granted
+/// — and a guard that asks "is this mission leased?" answers "no" and waves
+/// the gesture through. That is exactly what happened when the F1 (signature)
+/// and F9 (guard) branches were developed in parallel and merged: both were
+/// green on their own branch, and on merged `main` an unleased co-pilot could
+/// collapse a leased mission while `cs sessions takeover check`, reading the
+/// same ledger through the trusting constructor, refused the very same
+/// session. The M8 relève exercise found it by trying.
+///
+/// The behavioural tests above now catch the regression, and this one catches
+/// the *shape* of it — including at a call site that no test happens to cover
+/// yet.
+#[test]
+fn the_lease_ledger_is_only_ever_built_with_its_trust_root() {
+    let crates_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+    let mut offenders = Vec::new();
+    walk(crates_dir, &mut |path| {
+        if path.extension().is_none_or(|e| e != "rs") {
+            return;
+        }
+        let as_str = path.display().to_string();
+        // Tests may build a bare store to assert what an unpinned one does,
+        // and the filestore crate is where the constructor itself lives.
+        if as_str.contains("/tests/") || as_str.contains("cosmon-filestore") {
+            return;
+        }
+        let Ok(body) = std::fs::read_to_string(path) else {
+            return;
+        };
+        // A `#[cfg(test)]` module may seed a ledger with a bare store: that is
+        // a fixture, not an authority check. Only the shipped half is scanned.
+        let shipped = body.split("#[cfg(test)]").next().unwrap_or_default();
+        for (n, line) in shipped.lines().enumerate() {
+            // Prose about the constructor is not a call to it — this very rule
+            // is explained in a comment at one of the sites it governs.
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            // The one legitimate call site is the trusting constructor, which
+            // pins the key on the very next lines.
+            if line.contains("PilotLeaseStore::new") && !as_str.ends_with("presence.rs") {
+                offenders.push(format!("{as_str}:{}", n + 1));
+            }
+        }
+    });
+    assert!(
+        offenders.is_empty(),
+        "the lease ledger must be built by `presence::leases_at`, which pins \
+         the operator trust root; a bare `PilotLeaseStore::new` honours no \
+         grant and silently turns every authority check into a pass. \
+         Offending call sites: {offenders:?}",
+    );
+}
+
+/// Recursive walk, as `takeover_unforgeable` does it.
+fn walk(dir: &Path, f: &mut impl FnMut(&Path)) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            walk(&path, f);
+        } else {
+            f(&path);
+        }
+    }
 }

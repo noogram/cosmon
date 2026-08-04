@@ -739,9 +739,13 @@ where
     F: Fn(&str) -> Option<String>,
 {
     use cosmon_core::pilot_lease::{authorize, epoch_presented_for, RefusalReason};
-    use cosmon_filestore::{PilotLeaseStore, PresenceStore};
+    use cosmon_filestore::PresenceStore;
 
-    let Some(lease) = PilotLeaseStore::new(state_root).current(mission)? else {
+    // Through `presence::leases_at`, never `PilotLeaseStore::new`: a store with
+    // no trust root pinned honours no grant, so building one here made every
+    // leased mission read back as unleased and turned this whole guard into a
+    // no-op. See that function for the exercise that caught it.
+    let Some(lease) = super::presence::leases_at(state_root)?.current(mission)? else {
         return Ok(());
     };
 
@@ -1380,26 +1384,72 @@ description = "Run ./smoke-dispatch.sh and commit."
         );
     }
 
+    /// A galaxy with a lease the guard will actually honour: the ledger at
+    /// `<root>/.cosmon/state`, the trust root at `<root>/.cosmon/takeover.pub`,
+    /// and one grant carrying the operator's signature over its challenge.
+    ///
+    /// Seeding an *unsigned* grant instead — which this test used to do — makes
+    /// the mission read back as unleased, so the guard stays silent and the
+    /// refusal being asserted never has to happen. That is the same vacuity
+    /// the M8 exercise found in the shipped path.
+    fn leased_galaxy(root: &std::path::Path, holder: &str) -> std::path::PathBuf {
+        use cosmon_core::id::SessionId;
+        use cosmon_core::operator_attestation::GrantChallenge;
+        use cosmon_core::pilot_lease::{LeaseEpoch, PilotLease};
+        use cosmon_minisign_testkit::Operator;
+
+        let cosmon = root.join(".cosmon");
+        let state = cosmon.join("state");
+        std::fs::create_dir_all(&state).unwrap();
+        let operator = Operator::from_seed(23);
+        std::fs::write(cosmon.join("takeover.pub"), operator.public_key_file()).unwrap();
+
+        let holder = SessionId::new(holder.to_owned()).unwrap();
+        let challenge = GrantChallenge::new(
+            mission_id(),
+            holder.clone(),
+            LeaseEpoch::first(),
+            "operator",
+            None,
+        )
+        .unwrap();
+        let signed = cosmon_notary::minisign::MinisignSignature::parse(
+            &operator.sign(&challenge.canonical_bytes()),
+        )
+        .unwrap();
+        let attestation = cosmon_core::operator_attestation::OperatorAttestation {
+            key_id: cosmon_core::operator_attestation::OperatorKeyId::from_bytes(signed.key_id),
+            signature: signed.signature_line(),
+            global_signature: signed.global_signature_line(),
+            trusted_comment: signed.trusted_comment.clone(),
+            untrusted_comment: signed.untrusted_comment.clone(),
+        };
+
+        super::super::presence::leases_at(&state)
+            .unwrap()
+            .grant(
+                &PilotLease::new(
+                    mission_id(),
+                    holder,
+                    LeaseEpoch::first(),
+                    "operator",
+                    Utc::now(),
+                    None,
+                )
+                .attested_by(attestation),
+            )
+            .unwrap();
+        state
+    }
+
     #[test]
     fn an_anonymous_caller_on_a_leased_mission_is_refused() {
-        use cosmon_core::id::SessionId;
-        use cosmon_core::pilot_lease::{LeaseEpoch, PilotLease};
-
         let tmp = tempfile::tempdir().unwrap();
-        cosmon_filestore::PilotLeaseStore::new(tmp.path())
-            .grant(&PilotLease::new(
-                mission_id(),
-                SessionId::new("claude-primary").unwrap(),
-                LeaseEpoch::first(),
-                "operator",
-                Utc::now(),
-                None,
-            ))
-            .unwrap();
+        let state = leased_galaxy(tmp.path(), "claude-primary");
 
         // No COSMON_SESSION_ID, no CLAUDE_SESSION_ID: D6's unknown session,
         // which is read-only and not "probably the holder".
-        let err = refuse_unleased_pilot_gesture(tmp.path(), &mission_id(), "cs evolve", &no_env)
+        let err = refuse_unleased_pilot_gesture(&state, &mission_id(), "cs evolve", &no_env)
             .expect_err("an unnamed caller holds nothing");
         let guard = err
             .downcast_ref::<GuardError>()

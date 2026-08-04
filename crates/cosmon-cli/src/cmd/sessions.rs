@@ -398,7 +398,8 @@ pub enum TakeoverSub {
     Challenge(TakeoverChallengeArgs),
     /// Show which operator key this galaxy trusts to authorise a transfer.
     Trust(TakeoverTrustArgs),
-    /// Ask the guard whether a session may pilot. Exits 0 or 1.
+    /// Ask whether a session may pilot: the ledger's verdict, plus whether its
+    /// seat would actually present that epoch. Exits 0 or 1.
     Check(TakeoverCheckArgs),
 }
 
@@ -1960,8 +1961,24 @@ fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result
     };
     let decision = presence::leases(ctx)?.authorize(&args.mission, Utc::now(), &session, epoch)?;
 
+    // What this session's *seat* would present, which is what a lifecycle verb
+    // actually carries — `--epoch` is what the caller asserts, and the two can
+    // disagree. They did in the M8 relève exercise: the successor was told
+    // `granted` while its snapshot still said `role: copilot`, so its seat
+    // presented nothing and its first real gesture would have been refused. A
+    // confirmation that can be right about the ledger and wrong about the
+    // gesture is worse than no confirmation, because a relève consults it at
+    // exactly the moment nobody can afford to re-check by hand.
+    let caveat = presence::seat_caveat(ctx, &session, &args.mission, epoch, &decision)?;
+
     if ctx.json {
-        println!("{}", serde_json::to_string(&decision)?);
+        println!(
+            "{}",
+            serde_json::json!({
+                "decision": decision,
+                "seat_would_be_refused": caveat.is_some(),
+            })
+        );
     } else {
         match &decision {
             LeaseDecision::Granted { epoch } => println!(
@@ -1975,6 +1992,9 @@ fn run_takeover_check(ctx: &Context, args: &TakeoverCheckArgs) -> anyhow::Result
                 mission = args.mission.as_str(),
                 why = RefusalReason::explain(reason),
             ),
+        }
+        if let Some(line) = caveat {
+            println!("{line}");
         }
     }
     std::io::stdout().flush().ok();

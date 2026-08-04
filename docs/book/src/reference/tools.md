@@ -637,7 +637,7 @@ The PRIMARY lease: who may fly, who asked, who granted
 * `grant` — Operator gesture: hand the controls over at the next epoch
 * `challenge` — Print the exact bytes an operator signs to authorise one transfer
 * `trust` — Show which operator key this galaxy trusts to authorise a transfer
-* `check` — Ask the guard whether a session may pilot. Exits 0 or 1
+* `check` — Ask whether a session may pilot: the ledger's verdict, plus whether its seat would actually present that epoch. Exits 0 or 1
 
 
 
@@ -714,7 +714,7 @@ Show which operator key this galaxy trusts to authorise a transfer
 
 ## `cs sessions takeover check`
 
-Ask the guard whether a session may pilot. Exits 0 or 1
+Ask whether a session may pilot: the ledger's verdict, plus whether its seat would actually present that epoch. Exits 0 or 1
 
 **Usage:** `cs sessions takeover check [OPTIONS] --mission <MOLECULE_ID>`
 

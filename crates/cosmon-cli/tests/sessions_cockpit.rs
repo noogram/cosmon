@@ -475,6 +475,116 @@ fn the_operator_walk_runs_end_to_end() {
     );
 }
 
+/// A grant seats nobody by itself, and `takeover check` must say so.
+///
+/// The M8 relève exercise found this the expensive way. `check` takes the
+/// epoch from its `--flag` — what the caller *asserts* — while a lifecycle
+/// verb takes it from the pilot's presence snapshot — what the seat *records*.
+/// The real Codex successor was told `granted`, believed it had the controls,
+/// and reported so; its snapshot still said `role: copilot`, so it presented
+/// no authority at all and its first real gesture would have been refused.
+///
+/// A confirmation that is right about the ledger and wrong about the gesture
+/// is worse than none, because a relève consults it at the one moment nobody
+/// can afford to re-check by hand.
+#[test]
+fn a_granted_session_that_has_not_taken_the_seat_is_told_so() {
+    let w = world();
+    let requested = ok(
+        &w.cs(&[
+            "takeover",
+            "request",
+            "--mission",
+            MISSION,
+            "--from",
+            "sess-codex",
+            "--reason",
+            "the primary is out of quota",
+        ]),
+        "takeover request",
+    );
+    let request_id = requested
+        .split_whitespace()
+        .nth(1)
+        .expect("request id in output")
+        .to_owned();
+    let attestation = w.sign_takeover(&request_id);
+    ok(
+        &w.cs(&[
+            "takeover",
+            "grant",
+            "--mission",
+            MISSION,
+            "--request",
+            &request_id,
+            "--by",
+            "test-operator",
+            "--attestation",
+            &attestation.display().to_string(),
+        ]),
+        "takeover grant",
+    );
+
+    // Granted by the ledger, seated by nothing.
+    let granted_unseated = w.cs(&[
+        "takeover",
+        "check",
+        "--mission",
+        MISSION,
+        "--session",
+        "sess-codex",
+        "--epoch",
+        "1",
+    ]);
+    let said = stdout(&granted_unseated);
+    assert_eq!(
+        granted_unseated.status.code(),
+        Some(0),
+        "the ledger's verdict is unchanged — this is an addition, not a new refusal:\n{said}",
+    );
+    assert!(
+        said.contains("its seat presents nothing") && said.contains("would be refused"),
+        "a granted-but-unseated session must be told its next gesture will be \
+         refused, and told how to fix it:\n{said}",
+    );
+    assert!(
+        said.contains("attach --role primary"),
+        "and the remedy must be the command to run:\n{said}",
+    );
+
+    // Once it really takes the seat, the caveat goes away.
+    ok(
+        &w.cs(&[
+            "attach",
+            "--session",
+            "sess-codex",
+            "--role",
+            "primary",
+            "--mission",
+            MISSION,
+            "--epoch",
+            "1",
+        ]),
+        "attach as the granted primary",
+    );
+    let seated = w.cs(&[
+        "takeover",
+        "check",
+        "--mission",
+        MISSION,
+        "--session",
+        "sess-codex",
+        "--epoch",
+        "1",
+    ]);
+    let said = stdout(&seated);
+    assert_eq!(seated.status.code(), Some(0), "{said}");
+    assert!(
+        !said.contains("would be refused"),
+        "a seated holder must not be warned about a gesture that will succeed:\n{said}",
+    );
+}
+
 /// Observation is neutral: everything above reads provider logs, and not one
 /// byte of the provider tree changes.
 #[test]
