@@ -4319,23 +4319,14 @@ fn git_tree_of(repo_root: &std::path::Path, rev: &str) -> Option<String> {
     (!tree.is_empty()).then_some(tree)
 }
 
-/// Find the git repository root from CWD.
+/// Find the git repository this galaxy's work belongs to.
+///
+/// Delegates to [`cosmon_cli::target_repo::resolve`]: the galaxy's `[project]
+/// target_repo` declaration when it has one, and otherwise the repository
+/// containing the current directory — the pre-existing behaviour, unchanged
+/// for every galaxy that declares nothing.
 pub(super) fn find_repo_root() -> anyhow::Result<PathBuf> {
-    let output = std::process::Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git: {e}"))?;
-
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "not in a git repository: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-
-    Ok(PathBuf::from(
-        String::from_utf8_lossy(&output.stdout).trim(),
-    ))
+    cosmon_cli::target_repo::resolve()
 }
 
 /// Create a git branch and worktree, idempotently.

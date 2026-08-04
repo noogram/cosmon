@@ -197,22 +197,13 @@ fn harvest_completion_commits(repo_root: &Path) -> BTreeMap<String, String> {
     out
 }
 
-/// Locate the repository root by walking up from the current directory.
-/// Returns `None` when not inside a git repo (the view then omits commits).
+/// Locate the galaxy's repository — its `[project] target_repo` declaration
+/// when it has one, the repository containing the current directory
+/// otherwise. Returns `None` when neither answers (the view then omits
+/// commits): this is a read-only view, so a missing repository degrades the
+/// display rather than failing the command.
 fn find_repo_root() -> Option<std::path::PathBuf> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if path.is_empty() {
-        None
-    } else {
-        Some(std::path::PathBuf::from(path))
-    }
+    cosmon_cli::target_repo::resolve().ok()
 }
 
 fn status_label(status: MoleculeStatus) -> &'static str {

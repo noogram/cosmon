@@ -803,14 +803,10 @@ fn emit_report(ctx: &Context, rows: &[StitchRow]) {
 // Git helpers — narrow re-impl on purpose (no cross-module coupling)
 // ---------------------------------------------------------------------------
 
+/// The galaxy's repository — its `[project] target_repo` declaration when it
+/// has one, the repository containing the current directory otherwise.
 fn find_repo_root() -> anyhow::Result<PathBuf> {
-    let out = Command::new("git")
-        .args(["rev-parse", "--show-toplevel"])
-        .output()?;
-    if !out.status.success() {
-        return Err(anyhow::anyhow!("not in a git repository"));
-    }
-    Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    cosmon_cli::target_repo::resolve()
 }
 
 fn current_branch_name(repo_root: &Path) -> Option<String> {
