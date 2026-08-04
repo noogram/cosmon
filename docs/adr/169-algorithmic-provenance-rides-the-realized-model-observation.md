@@ -133,7 +133,12 @@ computed verdict deliberately does not inherit the claim.
   gaps that produced it. The line is **omitted entirely** when no in-scope
   observation carried a record: an absence is not a disclosure, and printing one
   would suggest a producer looked.
-- `cs peek --json` is deliberately **not** extended. That schema publishes a
+- **The machine surface is the journal itself.** The record is serialized on the
+  `model_observed` line of `events.jsonl`, append-only and readable with `jq`
+  alone. For an artefact meant to be contested that is the right surface: a
+  derived view can be recomputed differently later, whereas the line that was
+  written at the moment of the conclusion cannot. `cs peek --json` is
+  deliberately **not** extended. That schema publishes a
   fleet slice under a stated rule — a field ships only when it is settled and
   not reconstructible — and provenance is neither fleet-scoped nor settled. The
   per-molecule read is `cosmon_state::ops::realized_provenance`.
