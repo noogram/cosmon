@@ -197,7 +197,7 @@ MODEL SELECTION (per\-molecule, ADR\-097). A model pin is the sibling of the ada
   \*(Aq~/.config/cosmon/config.toml::[adapters.<name>.default_model]\*(Aq  → global default (only when the per\-galaxy config is silent).
   floor \*(AqNone\*(Aq                      → cosmon pins NO model; the adapter\*(Aqs own default applies (byte\-identical to no pin — a strong model is unreachable from silence).
 .PP
-The id is carried opaquely: cosmon does not validate that <ID> is legal for the adapter — the backend rejects an invalid (adapter, model) pair at launch (composition validation is C5). The claude adapter carries the pin through the ANTHROPIC_MODEL per\-session closure\-shadow at spawn (no shared\-state mutation); the Direct\-API adapters take it above their config default_model.
+The id is carried opaquely. A recognisable cross\-family pair prints a non\-blocking advisory, but cosmon still dispatches: a custom Adapter endpoint may legitimately serve another family\*(Aqs model, so the Adapter remains authoritative. The claude adapter carries the pin through the ANTHROPIC_MODEL per\-session closure\-shadow at spawn (no shared\-state mutation); the Direct\-API adapters take it above their config default_model.
 .PP
 MODEL BUDGET (fail\-closed strong\-dispatch ceiling, ADR\-097). Declare which ids are STRONG (expensive) per adapter and cap strong dispatches per window — both opt\-in:
   \*(Aq[adapters.<name>].strong = ["<id>", ...]\*(Aq  → the strong cost\-class set. FAIL\-OPEN: an unlisted id is non\-strong (cheap); a cost\-class annotation, NOT a validity table.

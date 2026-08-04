@@ -425,9 +425,10 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              floor 'None'                      → cosmon pins NO model; the \
              adapter's own default applies (byte-identical to no pin — a \
              strong model is unreachable from silence).\n\n\
-             The id is carried opaquely: cosmon does not validate that <ID> is \
-             legal for the adapter — the backend rejects an invalid \
-             (adapter, model) pair at launch (composition validation is C5). \
+             The id is carried opaquely. A recognisable cross-family pair \
+             prints a non-blocking advisory, but cosmon still dispatches: a \
+             custom Adapter endpoint may legitimately serve another family's \
+             model, so the Adapter remains authoritative. \
              The claude adapter carries the pin through the ANTHROPIC_MODEL \
              per-session closure-shadow at spawn (no shared-state mutation); \
              the Direct-API adapters take it above their config default_model.\n\n\

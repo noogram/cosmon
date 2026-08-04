@@ -209,10 +209,11 @@ pub struct Args {
     /// expensive (the `/model`-hack leak this axis exists to close).
     ///
     /// The id is carried **opaquely**: cosmon does not check that it is
-    /// legal for the resolved adapter — the backend rejects an invalid
-    /// `(adapter, model)` pair at launch (composition validation lands in
-    /// C5). Config `default_model` rows are scoped per adapter because a
-    /// model id only has meaning inside its adapter.
+    /// legal for the resolved adapter. A recognisable cross-family pair
+    /// produces a non-blocking advisory, but the Adapter remains the
+    /// authority because custom endpoints can legitimately serve another
+    /// family's model. Config `default_model` rows are scoped per adapter
+    /// because a model id only has meaning inside its adapter.
     #[arg(long, value_name = "MODEL_ID")]
     pub model: Option<String>,
 
@@ -940,33 +941,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    // 3a''-C5a. Fail-closed (adapter, model) COMPOSITION gate.
+    // 3a''-C5a. Non-blocking (adapter, model) composition advisory.
     //
-    //     Everything above resolves an id. Nothing above asks whether the
-    //     ADAPTER will accept it, and an id that resolves is not a pair that is
-    //     legal. MEASURED 2026-07-28: `cs tackle <seat> --adapter codex` with
-    //     `ANTHROPIC_MODEL=claude-opus-5` in the dispatching worker's shell
-    //     resolved to (codex, claude-opus-5, source = env_var) and dispatched.
-    //     codex rejected it at launch with HTTP 400 — "The 'claude-opus-5'
-    //     model is not supported when using Codex with a ChatGPT account" — and
-    //     the seat then sat mute at a prompt, which on a floor-bearing
-    //     committee seat is indistinguishable from a provider refusal. Worse,
-    //     two earlier codex seats' `model-selection.json` recorded
-    //     `{"model":"claude-opus-5","outcome":"available"}`: a probe had
-    //     reported a POSITIVE signal for a pair it never validated.
+    //     A recognisable cross-family pair is worth naming because a stock
+    //     Adapter may reject it upstream. It is not grounds for refusal:
+    //     Adapters such as codex are configurable open-source clients, and a
+    //     custom base_url can legitimately serve a family that differs from
+    //     the Adapter name. Cosmon therefore warns, forwards the opaque pin,
+    //     and lets the Adapter's own resolution and fallback remain the source
+    //     of truth.
     //
-    //     The verdict is DERIVED, never tabulated: the adapter's family comes
+    //     The advisory is DERIVED, never tabulated: the adapter's family comes
     //     from its `base_url` (else its name lineage) and the model's from its
     //     id prefix, through the same resolution the ADR-147 diversity floor
     //     already uses. So a new `gpt-…` or `claude-…` needs no edit here, and
     //     anything not resolvable to a named vendor — a local endpoint, an
     //     undeclared adapter, an unrecognised id — returns `NotChecked` and is
-    //     NOT refused. Refusing on the unknown would break every self-hosted
-    //     endpoint cosmon supports; the bug was never the deferral of full
-    //     validation, it was claiming a positive for what went unchecked.
+    //     silent.
     //
-    //     Placed before the C2 attribution event and before every side effect,
-    //     so an illegal pair costs no worktree, no pane, and no paid probe.
+    //     Placed before the C2 attribution event so the operator sees the
+    //     caveat beside dispatch while the normal attribution path remains
+    //     unchanged.
     if let Some(model) = preferred_model.as_deref() {
         let composition = cosmon_core::provider_diversity::classify_model_composition(
             project_config.adapters.as_ref(),
@@ -978,22 +973,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             model_family,
         } = &composition
         {
-            return Err(anyhow::anyhow!(
-                "cs tackle: refusing to dispatch molecule {} — the pair (adapter \
-                 '{}', model '{model}') is incoherent: the adapter resolves to the \
-                 '{adapter_family}' family and the model to '{model_family}'. The \
-                 adapter would reject it at launch (a provider 400) and the worker \
-                 would sit mute at a prompt, which reads exactly like a provider \
-                 refusal. The pin came from {}. Point the model at a {adapter_family} \
-                 model, or dispatch this molecule under a {model_family} adapter. \
-                 (If the endpoint really does serve {model_family} weights, declare \
-                 its base_url in [adapters.{}] — the family is derived from the \
-                 endpoint, never from the section name.)",
-                mol_id.as_str(),
+            eprintln!(
+                "cs tackle: advisory — model '{model}' looks cross-family for \
+                 adapter '{}': the adapter resolves to '{adapter_family}' and the \
+                 model to '{model_family}'. It may be rejected upstream and fall \
+                 back; cosmon will still dispatch because the Adapter's configured \
+                 endpoint is authoritative. The pin came from {}.",
                 adapter.as_str(),
                 describe_model_source(&model_source),
-                adapter.as_str(),
-            ));
+            );
         }
     }
 
@@ -5029,8 +5017,8 @@ pub(super) fn spawn_and_prompt(
     // Adapter-uniform: each arm carries it in its own way — the claude arm
     // through the `ANTHROPIC_MODEL` closure-shadow, the Direct-API arms as
     // the top-priority override above their `[adapters.<name>].default_model`.
-    // The id is opaque; an invalid `(adapter, model)` pair is rejected by
-    // the backend at launch (composition validation is C5).
+    // The id is opaque. A recognisable cross-family pair is advisory only;
+    // the Adapter's configured endpoint remains authoritative.
     preferred_model: Option<&str>,
     // The resolved adapter's strong cost-class set — threaded to the claude
     // branch's probe-fallback layer so a cheap pin never silently escalates
@@ -6369,13 +6357,13 @@ const MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// codex seats consequently carry `{"model":"claude-opus-5","outcome":
 /// "available"}` in their own trail, for a model codex rejects with an HTTP
 /// 400. The probe was not wrong; it was unlabelled. Naming its scope beside its
-/// verdict is the cheap half of the fix — the fail-closed half is the
-/// composition gate in `run`.
+/// verdict is the cheap half of the fix; `run` adds a non-blocking advisory
+/// when the selected pair looks cross-family.
 const PROBE_SCOPE: &str = "`claude -p` under the worker's resolved account: proves the model id \
      resolves and that account can reach it. It does NOT validate the \
      (adapter, model) composition, and it never ran for a non-claude \
      adapter — see provider_diversity::classify_model_composition, which \
-     decides that before dispatch.";
+     can produce a non-blocking advisory before dispatch.";
 
 /// Resolve the effective model for a claude worker by pre-flighting the
 /// fallback chain, or fail fast when no model in the chain answers
@@ -9624,11 +9612,11 @@ pub(super) fn env_default_model() -> Option<(String, &'static str)> {
 
 /// Name where a model pin came from, in words an operator can act on.
 ///
-/// The composition refusal is only useful if it says which knob to turn:
+/// The composition advisory is only useful if it says which knob to turn:
 /// "the pin came from `$ANTHROPIC_MODEL`" points at the shell, "from
 /// `--model`" points at the command line, and the two remedies are
 /// different. [`ModelSelectionSource`] carries the origin for the audit
-/// trail; this renders it for a human standing at a refused dispatch.
+/// trail; this renders it for a human reading the advisory.
 fn describe_model_source(source: &ModelSelectionSource) -> String {
     match source {
         ModelSelectionSource::Flag { .. } => "the `--model` flag".to_owned(),

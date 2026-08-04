@@ -142,12 +142,12 @@ Two honest, drift-proof options — do **not** invent a client model allowlist:
    the full bundled catalog — including the `codex-*` / sol/terra/luna family —
    valid, at which point a model pin resolves.
 
-A future preflight may read `~/.codex/auth.json` (codex's own drift-proof
-source) and, when `auth_mode == "chatgpt"` **and** an explicit `--model` is
-pinned, surface a clear dispatch-time warning ("non-default model may be
-rejected by the Codex backend under a ChatGPT account; omit `--model` or use
-API-key auth") *instead of* letting the worker die mid-run. It must stay a
-warning, never a hardcoded block, because the valid set is server-owned.
+At dispatch, cosmon emits a soft advisory when the model id looks
+cross-family for the codex Adapter. It still forwards the opaque pin: codex is
+configurable, its endpoint may legitimately serve that family, and only the
+Adapter can resolve its actual capability. Under a stock ChatGPT account the
+advisory is a prompt to omit `--model` or use API-key auth; it is never a
+hardcoded block because the valid set is server-owned.
 
 ---
 
