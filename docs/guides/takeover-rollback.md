@@ -78,8 +78,15 @@ useful cadence is "after each decision", not "before each disaster".
 
 The measure of a good checkpoint is blunt: **the successor should never need
 the predecessor's transcript.** If it does, that is falsifier 9 of ADR-168 and
-the checkpoint was too thin. §5 of this guide gives the four fields that were
-actually consulted during the M8 exercise, in the order they were consulted.
+the checkpoint was too thin.
+
+One field earns its place more than the others, and the M8 exercise measured
+it. A real Codex successor was handed the same mission twice. The first time,
+`--done` said the work was "written and committed"; the successor came back
+with seven things it could not determine, the first being *which commit*. The
+second time the only change was that `--done` named the hash — and its list of
+unanswerable questions dropped from seven to one. **Name the artefact, not the
+activity**: the commit, the path, the id. A successor cannot grep for a verb.
 
 ---
 
@@ -109,7 +116,7 @@ session that will be seated, and the epoch:
 $ cs sessions takeover challenge --mission <mission-id> --request <request-id> > /tmp/challenge
 $ cat /tmp/challenge
 cosmon-takeover-grant-v1
-mission=task-20260804-da48
+mission=task-20260804-7775
 holder=codex-m8-primary
 epoch=2
 granted_by=emmanuel
@@ -136,7 +143,7 @@ shipped tree can sign a takeover challenge.
 ```console
 $ cs sessions takeover grant --mission <mission-id> --request <request-id> \
     --attestation /tmp/grant.minisig
-task-20260804-da48: codex-m8-primary is PRIMARY at epoch 2 — every earlier epoch is refused
+task-20260804-7775: codex-m8-primary is PRIMARY at epoch 2 — every earlier epoch is refused
 ```
 
 Anybody may *type* that command — it is the signature that authorises, not the
@@ -164,22 +171,29 @@ it.
 
 ## 4. What refuses, and what each refusal means
 
-Every one of these exits non-zero. A refusal from the guard on a lifecycle verb
-exits **16**, which is its own code because its remedy is its own: not a
-redispatch, not a repair, but a grant that only a human can issue.
+Every one of these exits non-zero. Every row below was produced by running it,
+not by reading the code — the strings are what the commands actually printed
+during the M8 exercise.
 
 | What you did | What you get | What it means |
 |---|---|---|
-| A gesture from the pilot that used to hold the lease | `refused: … the lease is held by <other>` | It missed the transfer. Nothing was mutated — the refusal is *before* the effect. |
-| A gesture presenting an epoch below the head | names both generations | The stale-epoch falsifier. Identity alone would have let it through; the epoch is what stopped it. |
-| A gesture from a session with no presence snapshot | `refused: … no epoch presented` | A claim that names no generation is not a claim. |
-| A grant with no `--attestation` | the flag is required | `--by` is a label, the signature is the gesture. |
-| A grant signed by the wrong key | the ledger line is skipped on read | A grant that did not happen. |
-| Any of the above with no pinned trust root | refusal | Deleting the key stops handovers; it does not open them. |
+| A gesture from the pilot that used to hold the lease | `refusing the gesture — the lease is held by <other>` | It missed the transfer. Nothing was mutated — the refusal is *before* the effect. |
+| A gesture presenting an epoch below the head | `refusing the gesture — stale epoch 3 — the mission is at epoch 4` | The stale-epoch falsifier. Identity alone would have let it through; the epoch is what stopped it. |
+| A gesture from the holder whose presence snapshot is gone | `refusing the gesture — no epoch presented — a gesture must carry the epoch it believes it holds` | A claim that names no generation is not a claim. Re-take the seat with `cs sessions attach`. |
+| A gesture from a session nobody has ever seated | the same `the lease is held by <holder>` as the first row | An unknown session is not a special case: it is simply not the holder. |
+| A gesture with no `COSMON_SESSION_ID` at all | `this session names no identity, and an unnamed caller holds nothing` | Fail-closed. Anonymity is never read as "probably the holder". |
+| A grant with no `--attestation` | `this grant carries no operator attestation, so it would seat nobody` | `--by` is a label, the signature is the gesture. |
+| A grant whose signature does not cover the challenge | the grant is refused, and cosmon prints the challenge it computed | Compare the two texts: usually `--by` differs between the `challenge` and the `grant`. |
+| A grant line appended to the ledger by hand | silently skipped; `takeover show --history` names it | A grant that did not happen. |
+| Any grant at all with no pinned trust root | `no operator public key pinned — … no grant is written` | Deleting the key stops handovers; it does not open them. |
 
-If you are scripting against these, note that they are not all one shape: four
-render as a `refused: …` line and the malformed-epoch case renders as a typed
-error. That was friction F5 of the M7 dogfood and it is still true.
+Two shapes, not one, and it matters if you script against them: the guard on a
+lifecycle verb exits **16** and prefixes `refusing the gesture —`, while
+`cs sessions takeover check` exits **1** and prefixes `refused:`. Same verdict,
+same ledger, two renderings — friction F5 of the M7 dogfood, still true.
+
+Exit 16 has its own code because its remedy is its own: not a redispatch, not a
+repair, but a grant only a human can issue.
 
 ---
 
