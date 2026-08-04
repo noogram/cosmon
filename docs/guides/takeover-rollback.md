@@ -183,5 +183,67 @@ error. That was friction F5 of the M7 dogfood and it is still true.
 
 ---
 
-<!-- The rest of this guide — §5 onward, the rollback itself — is what the
-     M8 exercise handed to the successor. -->
+## 5. Taking the controls back is another handover
+
+Do not edit the old grant out of the ledger. Do not try to put the epoch back
+to the number it had before. Both moves make the thing you need to understand
+later — that the wrong seat existed — harder to see, and neither makes a stale
+pilot safe. A rollback is a new, signed handover to the pilot who should have
+the controls now.
+
+There are three ordinary reasons to do it: the wrong successor was seated; the
+predecessor came back with the context that matters; or the successor is making
+the mission worse. They differ in urgency, not in mechanics. Ask for the seat
+that should exist after the correction, read and sign the next challenge, then
+record the grant:
+
+```console
+$ cs sessions takeover request --mission <mission-id> --to <returning-sid> \
+    --reason "returning controls after an incorrect handover"
+$ cs sessions takeover challenge --mission <mission-id> --request <request-id> \
+    > /tmp/rollback-challenge
+$ cat /tmp/rollback-challenge
+$ minisign -S -s ~/.minisign/cosmon-takeover.key \
+    -m /tmp/rollback-challenge -x /tmp/rollback.minisig
+$ cs sessions takeover grant --mission <mission-id> --request <request-id> \
+    --attestation /tmp/rollback.minisig
+```
+
+The challenge names the next epoch. If the mistaken transfer was epoch 2, the
+correction is epoch 3 — even when it returns the seat to the person who held
+epoch 1. That is not a cosmetic counter. The old successor's next gesture
+presents epoch 2 and is refused; the returned pilot must present epoch 3.
+
+The rollback costs a real operator gesture: another challenge, another
+passphrase prompt, and another ledger line. That friction is correct. The
+operator is making a new decision in new circumstances, not pressing an undo
+button an agent might learn to press for itself.
+
+It does not undo work already done. The guard refuses a later `cs` gesture; it
+does not reverse a molecule transition, a message, a merge, or a file the
+wrongly seated pilot already changed. Stop to inspect those effects first when
+that matters. Then use the new primary's checkpoint to decide what needs
+repairing. The lease records who may make the next decision; it is not a time
+machine.
+
+## 6. The edge of the mechanism
+
+The lease protects co-piloted mission gestures that go through `cs`. It does
+not make a shell read-only. A pilot can still edit a file, run `git commit`,
+send a network request, or invoke some other tool directly; no lease stands
+between that process and a text editor. The boundary is honest because it is
+small enough to audit: this mechanism decides who may fly the mission through
+cosmon, not who may touch the machine.
+
+That is why a clean rollback has two parts. First, hand the controls to the
+right session at the next epoch so the next protected gesture is refused or
+accepted correctly. Second, inspect the working tree, the history, and the
+external systems the incorrect pilot could have touched. Do not report the
+first part as if it had completed the second.
+
+The same limit applies to the trust root. A process with write access to the
+galaxy can replace `.cosmon/takeover.pub`; ADR-171 makes that swap visible in
+the tracked file and in the key id recorded with a grant, but it cannot make
+the host immutable. Keep the signing secret away from unattended processes,
+review trust-root diffs, and use a hardware token or a second machine when the
+remaining host-level risk is unacceptable.
