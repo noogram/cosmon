@@ -1302,11 +1302,67 @@ fn run_lease_check(ctx: &Context, args: &LeaseCheckArgs) -> anyhow::Result<()> {
                 why = reason.explain(),
             ),
         }
+        // The ledger's verdict is not the gesture's verdict: `--epoch` is what
+        // the caller asserts, while a lifecycle verb presents what the seat
+        // records. See the twin of this block in `cmd::sessions` for the M8
+        // relève exercise that found the gap.
+        if let Some(line) = seat_caveat(ctx, &session, &args.mission, epoch, &decision)? {
+            println!("{line}");
+        }
     }
     std::io::stdout().flush().ok();
     // Same shape as `cs diverge`: a decidable answer is a successful run with
     // a non-zero exit code, not an error.
     std::process::exit(i32::from(!decision.is_granted()));
+}
+
+/// The second line a lease check owes its reader: whether this session's seat
+/// would actually present the epoch the ledger just granted it.
+///
+/// `None` when there is nothing to warn about — the check was refused anyway,
+/// or the seat presents exactly what was asked.
+///
+/// Both `cs presence lease check` and `cs sessions takeover check` answer "may
+/// this session pilot" from the *ledger*, using the epoch on the flag. A
+/// lifecycle verb answers it from the *seat*, using the epoch on the presence
+/// snapshot, and the two disagree whenever a pilot was granted a lease but has
+/// not run `cs sessions attach --role primary`. In the M8 relève exercise that
+/// gap cost a successor its whole turn: it read `granted`, reported that it had
+/// the controls, and never noticed its snapshot still said `role: copilot`.
+pub(crate) fn seat_caveat(
+    ctx: &Context,
+    session: &SessionId,
+    mission: &MoleculeId,
+    asked: Option<LeaseEpoch>,
+    decision: &LeaseDecision,
+) -> anyhow::Result<Option<String>> {
+    if !decision.is_granted() {
+        return Ok(None);
+    }
+    let seated = store(ctx)
+        .load(session)?
+        .as_ref()
+        .and_then(Presence::claimed_authority)
+        .map(|(_, e)| e);
+    if seated == asked {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "  but its seat presents {seat}, so a lifecycle gesture would be \
+         refused. Take the seat first:\n  \
+         cs sessions attach --role primary --session {sid} --mission {mission} \
+         --epoch {asked}",
+        seat = match seated {
+            Some(e) => format!("epoch {e}"),
+            None => "nothing — it is not seated as primary on this mission".to_owned(),
+        },
+        sid = session.as_str(),
+        mission = mission.as_str(),
+        asked = match asked {
+            Some(e) => e.to_string(),
+            None => "<N>".to_owned(),
+        },
+    )))
 }
 
 // ---------------------------------------------------------------------------

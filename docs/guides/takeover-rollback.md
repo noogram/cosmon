@@ -157,8 +157,17 @@ it holds:
 ```console
 $ cs sessions attach --role primary --session <incoming-sid> \
     --as <provider>:<native-session-id> --mission <mission-id> --epoch 2
-$ cs tackle <mission-id> --dry-run   # or any lifecycle verb — it now passes the guard
+$ cs sessions takeover check --mission <mission-id> --session <incoming-sid> --epoch 2
+granted: <incoming-sid> holds <mission-id> at epoch 2
 ```
+
+That step **d** wrote a line in the ledger and step **e** is what seats the
+pilot; neither does the other's job. A grant with no seat is the failure this
+exercise actually produced: the successor read `granted`, believed it had the
+controls, and its snapshot still said `role: copilot` — so it presented no
+authority and its first real gesture would have been refused. `check` now says
+so in a second line when the two disagree, and names the `attach` that fixes
+it. Read both lines.
 
 The outgoing pilot needs to do nothing to step down, and this is the part worth
 trusting: its next ordinary heartbeat reads the ledger, finds an epoch above
