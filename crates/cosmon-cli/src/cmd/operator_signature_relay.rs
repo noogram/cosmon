@@ -146,10 +146,11 @@ pub fn sign_challenge(challenge: &GrantChallenge, secret_key: &Path) -> anyhow::
 /// Two-space-indent a block, so the challenge reads as a quotation rather than
 /// as more of cosmon's own prose.
 fn indent(block: &str) -> String {
-    block
-        .lines()
-        .map(|l| format!("  {l}\n"))
-        .collect::<String>()
+    use std::fmt::Write as _;
+    block.lines().fold(String::new(), |mut acc, l| {
+        let _ = writeln!(acc, "  {l}");
+        acc
+    })
 }
 
 #[cfg(test)]

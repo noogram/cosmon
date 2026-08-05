@@ -1208,7 +1208,7 @@ pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Resul
     MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))?
         .ok_or_else(|| anyhow::anyhow!("no operator public key pinned"))?
         .verify(&challenge, &attestation)
-        .map_err(|e| refusal_an_operator_can_act_on(&e, &challenge, &trusted, args))?;
+        .map_err(|e| refusal_an_operator_can_act_on(&e, &challenge, trusted, args))?;
 
     let mut lease = PilotLease::new(
         args.mission.clone(),
@@ -1318,7 +1318,7 @@ fn parse_attestation(text: &str, source: &str) -> anyhow::Result<OperatorAttesta
 fn refusal_an_operator_can_act_on(
     error: &AttestationError,
     challenge: &GrantChallenge,
-    trusted: &OperatorKeyId,
+    trusted: OperatorKeyId,
     args: &LeaseGrantArgs,
 ) -> anyhow::Error {
     let head = format!(
