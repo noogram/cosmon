@@ -473,6 +473,10 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
       - name: Check for removed test assertions
+        env:
+          # Attacker-controlled text: it reaches the script as a value, never
+          # as source. See the injection note at the grep below.
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
@@ -490,9 +494,17 @@ jobs:
             echo ""
             echo "If these removals are intentional, add 'assert-guard: reviewed' to the PR description."
 
-            # Check if PR description contains the override marker
-            PR_BODY="${{ github.event.pull_request.body }}"
-            if echo "$PR_BODY" | grep -q 'assert-guard: reviewed'; then
+            # Check if PR description contains the override marker.
+            #
+            # The body arrives through the environment, never interpolated into
+            # this script. `${{ github.event.pull_request.body }}` inside a run
+            # block is script injection: the body is attacker-controlled text,
+            # and a backtick or `$(…)` in it executes in the runner. Measured
+            # 2026-08-05 on noogram/cosmon#44 — a body containing `client_id`
+            # in backticks ran as a command, mangled PR_BODY, and the marker it
+            # did contain was never seen. A broken guard that fails closed is
+            # luck; the same bug with `rm` in the backticks is a breach.
+            if printf '%s' "$PR_BODY" | grep -q 'assert-guard: reviewed'; then
               echo ""
               echo "Override marker found in PR description. Proceeding."
               exit 0
