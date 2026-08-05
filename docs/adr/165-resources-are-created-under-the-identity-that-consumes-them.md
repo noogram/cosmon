@@ -162,9 +162,11 @@ is code the pilot runs. The root path was therefore *not* the one that kept the
 boundary. The shared-uid model is not what loses it.
 
 The conclusion to record: if `cs done` must remain a human gesture, that has to
-become a **typed cosmon authorisation** — a capability, an operator seal, or a
-broker — never a side effect of Unix ownership. That is its own decision and it
-is opened as its own molecule; it is deliberately not settled here.
+become a **typed cosmon authorisation** — never a side effect of Unix ownership.
+[ADR-172](172-done-authority-is-an-operator-sealed-capability.md) settles the
+opened question: ordinary harvest is delegable, human-reserved thresholds are
+not, and both travel as an operator-sealed capability. A broker is custody, not
+the authorisation.
 
 ## Consequences
 
@@ -183,4 +185,4 @@ is opened as its own molecule; it is deliberately not settled here.
   changed nothing* — a chown onto the owner a path already had is invisible to
   `stat`. The claim the evidence makes is the first sentence, so the instrument
   has to observe the call.
-- `cs done` authorisation is opened as its own decision.
+- `cs done` authorisation is settled by ADR-172.

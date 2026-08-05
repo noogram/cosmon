@@ -320,7 +320,7 @@ stop and ask whether Y already has its own command.
 | `cs evolve` | advances within Propelled | Worker (in worktree) | Advance one formula step, record evidence | Worker-callable. Auto-completes on last step. |
 | `cs complete` | Active → Completed | Worker (in worktree) | Mark molecule completed, idempotent on Completed | Worker-callable. Does NOT touch infra (tmux/worktree/branch). |
 | `cs stuck` | Active → Frozen | Worker / human | Pause with blocker reason | Freeze with a human-readable cause. |
-| `cs done` | Propelled → Inert | Not-the-worker (human, scheduler, transport watchdog) | Teardown: merge branch, kill tmux, remove worktree, purge fleet, delete branch | **Not worker-internal.** Legitimate callers: humans, external schedulers (cron/launchd), and transport watchdogs (tmux `pane-died` hook via `cs harvest`). Symmetric to `cs tackle`. |
+| `cs done` | Propelled → Inert | Not-the-worker today; holder of `DoneAuthorization` in ADR-172's target contract | Teardown: merge branch, kill tmux, remove worktree, purge fleet, delete branch | **Not worker-internal.** Ordinary harvest is delegable; human-reserved thresholds require a molecule-scoped operator seal. ADR-172 is accepted but its grant surface is not yet implemented. Symmetric to `cs tackle`. |
 | `cs harvest` | Propelled → Inert (bridge) | Transport watchdog / scheduler / human | Check state; exec `cs done` when the molecule is `Completed` with `merged_at = None`; silent no-op otherwise | Hook-friendly bridge that closes the worker-exit → `cs done` gap without violating the "workers cannot self-destroy" spirit: the hook runs in a sibling shell, not inside the worktree. |
 | `cs collapse` | Active → Collapsed | Human | Mark as permanently failed | Terminal, records reason, cannot be reverted by `cs complete`. |
 | `cs freeze` / `cs thaw` | Propelled ↔ Paused | Human | Suspend/resume worker session | Preserves state across preemption. |
@@ -330,9 +330,13 @@ stop and ask whether Y already has its own command.
 ### Two boundaries this table encodes
 
 1. **Worker-callable vs not-worker-callable.** A worker runs inside its
-   own worktree. It **cannot self-destroy**: it cannot kill its own tmux
-   session, remove the worktree it is running in, or merge its branch
-   into main (no access). So worker-callable commands (`cs evolve`,
+   own worktree. It must not self-destroy: killing its own tmux session or
+   removing the worktree beneath its process is structurally unsafe. Under
+   ADR-165's shared uid, Unix ownership does **not** prevent it from invoking
+   `cs done` or git plumbing. ADR-172 therefore makes a sealed capability the
+   target authority contract; until its grant surface lands, the sibling-shell
+   perimeter remains a safety convention rather than authorisation. Out-of-band
+   git writes remain an explicitly detected limitation. Worker-callable commands (`cs evolve`,
    `cs complete`, `cs stuck`) are pure state transitions. Not-worker
    commands (`cs tackle`, `cs done`, `cs kill`, `cs purge`, `cs harvest`)
    handle the infrastructure. The not-worker set is broader than
@@ -343,8 +347,9 @@ stop and ask whether Y already has its own command.
    sibling boundary, not the carbon substrate of the caller. The
    worker-exit → `cs done` bridge (delib-20260418-8166) is the
    motivating example: a tmux hook exec's `cs harvest` from outside
-   the worktree, which in turn exec's `cs done` — zero worker cwd,
-   full not-worker authority.
+   the worktree, which in turn exec's `cs done` — zero worker cwd. The sibling
+   boundary keeps teardown safe; `DoneAuthorization`, not cwd, carries the
+   authority.
 2. **State transition vs infrastructure teardown.** `cs complete`
    transitions a molecule to Completed — nothing more. `cs done` assumes
    the molecule is already Completed and dismantles the L1 Propelled
