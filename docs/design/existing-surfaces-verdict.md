@@ -69,10 +69,14 @@ simulateur présent).
 `RunAtLoad`), démarré le 2026-08-02T09:14, soit **3 j 06 h** d'uptime au moment
 de la mesure. Son log `~/Library/Logs/cosmon-cs-api.out.log` compte **6 lignes** :
 
-- 1 ligne de démarrage ;
-- 5 lignes `engine_call_entered` — **les quatre sondes émises par cette
+- 2 lignes de démarrage — `2026-08-02T09:11:08` puis `2026-08-02T09:14:15`
+  (le log est append-only à travers les redémarrages ; le processus vivant est
+  celui de 09:14, ce que confirme son `ELAPSED` de `03-06:11`) ;
+- 4 lignes `engine_call_entered` — **les quatre sondes émises par cette
   molécule** le 2026-08-05T15:24 (`/peek`, `/session/current`, `/ensemble`,
   `/galaxies`).
+
+Rien d'autre. Aucune ligne entre le 2026-08-02T09:14 et le 2026-08-05T15:24.
 
 L'argument est fermé, pas inféré : le binaire qui tourne journalise chaque
 requête au niveau `INFO` (mes propres sondes l'ont prouvé sur ce même processus).
