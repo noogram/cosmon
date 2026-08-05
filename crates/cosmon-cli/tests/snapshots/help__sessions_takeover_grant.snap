@@ -16,4 +16,5 @@ Options:
       --ttl <SECONDS>          Seconds after which the lease authorises nothing
       --by <NAME>              Operator identity to record. Defaults to `$USER`. Covered by the attestation, so it is a signed claim and not a free string
       --attestation <PATH>     The operator's detached minisign signature over the challenge, or `-` for stdin. Required: `--by` is a label, the signature is the gesture
+      --sign-with <PATH>       The operator's minisign **secret** key. Folds challenge, signature and grant into this one command: the transfer is printed for you to read, `minisign(1)` asks for your passphrase, and no `.minisig` is left behind. cosmon still owns no signer — it relays to yours
   -h, --help                   Print help

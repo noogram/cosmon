@@ -60,6 +60,7 @@ pub mod note;
 pub mod notify;
 pub mod nucleate;
 pub mod observe;
+pub mod operator_signature_relay;
 pub mod opt_in_share;
 pub mod panel;
 pub mod paths;
