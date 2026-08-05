@@ -109,9 +109,16 @@ chacun leur propre `MarkdownView.swift` / `MarkdownTheme.swift`.
 **L'outil d'enforcement n'enforce rien.** F4 de l'étape 1 — *« si deux surfaces
 affichent le même état différemment sans qu'un ADR l'ait autorisé, §8k′ est mort
 en silence »* — n'est pas un risque à surveiller : c'est un fait mesuré au
-2026-08-05. Trois surfaces rendent l'état cosmon en vocabulaire natif SwiftUI, et
-la « remediation bead » d'ADR-066 (convertir `ContentView.swift` en consommateur
-de `WheatPasteView`) n'a pas été posée.
+2026-08-05. Trois surfaces rendent l'état cosmon en vocabulaire natif SwiftUI.
+
+Et la « remediation bead » d'ADR-066 — convertir `PilotView.swift` et
+`ContentView.swift` en consommateurs de `WheatPasteView` — n'a pas été posée.
+Elle ne l'a pas été **par construction** : l'ADR l'écrit noir sur blanc, *« File
+at the moment the remediation is picked up; name it here only so future
+reviewers recognise the pointer »*. Vérifié : aucune molécule de la flotte ne
+mentionne `WheatPaste`, sauf celle-ci. §8k′ a donc été ratifié avec son outil
+d'enforcement et **sans chemin d'adoption** — c'est le mécanisme exact par
+lequel un invariant meurt en silence, et il est à verser au dossier de C1.
 
 ### 1.5 La mesure qui décide du pulse : la surface vivante est cassée
 
