@@ -91,6 +91,7 @@ pub mod cursor;
 pub mod error;
 pub mod event;
 pub mod port;
+pub mod reference;
 pub mod repo;
 pub mod selector;
 
@@ -100,5 +101,8 @@ pub use cursor::{read_lines_from, Continuity, Cursor, LineBatch, RawLine, Restar
 pub use error::ProbeError;
 pub use event::{QuotaReading, SessionEvent, SessionEventKind, TurnUsage};
 pub use port::{DiscoveryFilter, ProbeRead, ProbeRegistry, ProviderSessionRef, SessionProbe};
+pub use reference::{
+    SegmentId, SegmentIdParseError, SegmentReference, SegmentResolution, SegmentResolver,
+};
 pub use repo::{RepoIdentity, RepoKind};
 pub use selector::{NativeSessionId, ProviderName, SessionSelector};
