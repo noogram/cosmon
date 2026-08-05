@@ -4,6 +4,12 @@
 **Decider:** Noogram, on cosmon-ward signal from `mailroom / task-20260425-40a2`
 **Origin:** convergence C4 of `delib-20260425-39c1` (mailroom security panel, 2026-04-25) — forgemaster §3 *Signed commits + worker auto-pilote* and turing *Verdicts compacts* (*« workers signent jamais. Push humain ou push CI-OIDC. Sans exception. »*). Responses reproduced under `/srv/cosmon/mailroom/.cosmon/molecules/delib-20260425-39c1/responses/`.
 
+**Successor clarification:** [ADR-172](172-done-authority-is-an-operator-sealed-capability.md)
+supersedes §2 item 5 and §4.1 only where they make every *local* `cs done`
+invocation human-only. Ordinary local harvest may run under bounded delegated
+authority; human-reserved thresholds require a molecule-scoped operator seal.
+This ADR's remote push and commit-signing boundary is unchanged.
+
 ---
 
 ## 1. Context

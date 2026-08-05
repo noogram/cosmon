@@ -279,6 +279,11 @@ pub struct DoneToken<A: Authority>(PhantomData<A>);
 **The `Authority` phantom is an in-process documentation aid and correctness
 guard, NOT the sole runtime gate for out-of-process calls.**
 
+> **Successor:** [ADR-172](172-done-authority-is-an-operator-sealed-capability.md)
+> retains this phantom as a correctness aid but replaces caller-shape plus an
+> RR-5 event as the authorisation. The effect boundary consumes an
+> operator-sealed `DoneAuthorization`; RR-5 remains forensic evidence.
+
 A rogue process can call `cs done` in a shell script without holding any
 `DoneToken`. The actual runtime gate has two layers:
 1. **`cs done` perimeter check** — walk-up discovery detects if the caller
