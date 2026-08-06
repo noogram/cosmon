@@ -1,6 +1,12 @@
 # Test-suite wall clock — where the 7 minutes actually go — 2026-08-01
 
 **Molecule:** `task-20260731-44b0` · **Kind:** study, no fix bundled
+
+> **Superseded in part, 2026-08-07.** Recommendation 3 (consolidate the four
+> `cosmon-cli` rig groups) was built and measured, and returned 5% against its
+> own 20% threshold: `cosmon-cli` had fallen from 86% of the bill to 18%. See
+> `cli-consolidation-refuted-2026-08-07.md`. Findings 1–3 and both protected
+> lists stand; recommendation 2 is now the largest single lever in the gate.
 **Question answered:** *what would make `cargo test --workspace` significantly
 faster without weakening what it proves?*
 

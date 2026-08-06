@@ -4,6 +4,12 @@ Date: 2026-08-01
 Build: `971f75c53ae018691339acd246a68f909fdd1845`  
 Scope: study only; no test or product code changed.
 
+> **Its own falsification clause fired, 2026-08-07.** The first consolidation
+> was built for `cosmon-cli` and reduced a clean run by 5%, not the 20% this
+> report set as the criterion. Per the criterion, shared-rig work is stopped.
+> The new trace is `cli-consolidation-refuted-2026-08-07.md`. The two protected
+> lists below remain in force.
+
 ## Verdict
 
 Keep `cargo test --workspace` as the gate and consolidate integration test
