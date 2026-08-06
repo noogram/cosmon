@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "views": [
+    {
+      "view": "fleet-overview",
+      "source_cs": "cs peek --json",
+      "stability": "experimental",
+      "introduced": "0.5.0",
+      "surface_class": "viewport",
+      "molecule_id": "task-20260804-2bbb",
+      "date": "2026-08-06",
+      "blurb": "Fleet and molecule lifecycle overview"
+    },
+    {
+      "view": "provider-sessions",
+      "source_cs": "cs sessions discover --json",
+      "stability": "experimental",
+      "introduced": "0.5.0",
+      "surface_class": "command",
+      "molecule_id": "task-20260804-2bbb",
+      "date": "2026-08-06",
+      "blurb": "Provider session discovery, distinct from the operator carnet"
+    }
+  ]
+}

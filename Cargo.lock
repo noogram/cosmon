@@ -952,6 +952,7 @@ dependencies = [
  "cosmon-state",
  "cosmon-style",
  "cosmon-surface",
+ "cosmon-surface-canon",
  "cosmon-transport",
  "cosmon-verify",
  "crossterm",
@@ -1015,6 +1016,7 @@ dependencies = [
  "cosmon-core",
  "cosmon-filestore",
  "cosmon-state",
+ "cosmon-surface-canon",
  "ctrlc",
  "serde",
  "serde_json",
@@ -1533,6 +1535,10 @@ dependencies = [
 [[package]]
 name = "cosmon-surface-canon"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "cosmon-thin-cli"
