@@ -11,6 +11,7 @@ license = "Apache-2.0"
 description = "session-probe-core — the provider-neutral session discovery / incremental-read port (mission co-pilotage M1)"
 
 [dependencies]
+blake3 = { workspace = true }
 chrono = { workspace = true }
 claudion = { workspace = true }
 serde = { workspace = true }
