@@ -7,7 +7,7 @@
 //! # Why through the command
 //!
 //! Every defect these tests pin was invisible to unit tests that passed.
-//! `reinstate_committee_posture_reference` had its own green tests and one
+//! `deliver_committee_posture_reference` had its own green tests and one
 //! production call site — in `cs evolve` — so it proved the adversarial
 //! contract *survives regeneration* while nothing asked whether it existed
 //! *before the first regeneration*, and nothing asked whether it survived the
@@ -252,6 +252,85 @@ fn tackle_does_not_author_the_posture_file_it_points_at() {
          seat that could grow its own contract on dispatch would be attesting \
          its own convening",
         cosmon_core::committee::COMMITTEE_POSTURE_FILE
+    );
+}
+
+/// **R2.** Delivery must not run *before* the briefing is resolved.
+///
+/// `deliver_committee_posture_reference` appends to whatever `briefing.md`
+/// holds, and an absent file reads as the empty string — so calling it first
+/// CREATES a `briefing.md` containing nothing but the pointer. `cs tackle`
+/// then finds a briefing on disk and never reaches
+/// `try_inject_fleet_briefing`, which only runs when the file is missing. A
+/// seat whose role was meant to come from `fleet.toml` would be dispatched
+/// carrying its adversarial contract and none of its job.
+///
+/// The two facts are asserted together on purpose: fixing the ordering by
+/// dropping the delivery would satisfy the role half alone, and the original
+/// bug satisfies the pointer half alone.
+#[test]
+fn tackle_delivers_the_pointer_without_suppressing_the_fleet_briefing() {
+    let (tmp, state_dir, mol_id) = setup("");
+    let mol_dir = molecule_dir(&state_dir, &mol_id);
+    let posture = cosmon_core::committee::render_committee_posture(
+        cosmon_core::committee::ADVERSARIAL_BRIEFING_VERSION,
+        &cosmon_core::committee::committee_contract_hash(POSTURE_BODY),
+        POSTURE_BODY,
+    );
+    fs::write(
+        mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+        posture,
+    )
+    .expect("write posture");
+
+    // The auto-injection path is only reached when no briefing exists, which
+    // is the state a fleet-templated seat is dispatched in.
+    fs::remove_file(mol_dir.join("briefing.md")).expect("remove nucleated briefing");
+
+    // `try_inject_fleet_briefing` resolves `fleet.toml` relative to the state
+    // dir's PARENT, and matches the agent by `formula_id`.
+    let role = "You are the reference seat. Audit, do not agree.";
+    fs::write(
+        state_dir
+            .parent()
+            .expect("state dir has a parent")
+            .join("fleet.toml"),
+        format!(
+            "fleet = \"seat-test\"\nversion = 1\n\n\
+             [[agents]]\nname = \"seat-test\"\nrole = \"implementation\"\n\
+             clearance = \"write\"\nprompt = \"{role}\"\n"
+        ),
+    )
+    .expect("write fleet.toml");
+
+    let out = tackle_dry_run(tmp.path(), &state_dir, &mol_id, &[]);
+    assert!(
+        out.status.success(),
+        "tackle --dry-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let after = fs::read_to_string(mol_dir.join("briefing.md")).expect("briefing.md after tackle");
+    assert!(
+        after.contains(role),
+        "the seat's role must survive delivery — a pointer-only briefing means \
+         delivery ran before the fleet template could be injected; got:\n{after}"
+    );
+    assert!(
+        after.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+        "and the pointer must still be delivered onto the injected briefing; \
+         got:\n{after}"
+    );
+
+    // The prompt the worker actually receives is built from the briefing read
+    // back after delivery, not from the pre-delivery text — so both facts must
+    // appear in what `--dry-run` prints, which IS that prompt.
+    let prompt = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        prompt.contains(role) && prompt.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+        "the dispatched prompt must carry both the role and the pointer; a \
+         briefing correct on disk and stale in the prompt is the same failure \
+         one layer later"
     );
 }
 
@@ -577,7 +656,7 @@ fn tackle_does_not_refuse_a_pair_it_cannot_decide() {
 
 /// **R3-7.** Why there is no posture delivery inside `cs nucleate`.
 ///
-/// A `reinstate_committee_posture_reference` call sat immediately after
+/// A `deliver_committee_posture_reference` call sat immediately after
 /// `write_briefing` in `cs nucleate`, added so a convener could satisfy witness
 /// (2) before handoff. It could never fire: that function returns immediately
 /// unless `committee-posture.md` already exists in the molecule directory, and

@@ -1185,14 +1185,14 @@ The molecule has NOT advanced — its state is unchanged, so this is recoverable
         .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))?;
     }
 
-    // Committee-posture survival: the briefing we just (re)wrote is a fresh
+    // Committee-posture delivery: the briefing we just (re)wrote is a fresh
     // projection of the formula step and carries NO adversarial contract. If
     // this molecule is a committee seat — i.e. the durable, regeneration-stable
-    // `committee-posture.md` exists in its directory — re-establish the stable
+    // `committee-posture.md` exists in its directory — deliver the stable
     // pointer to it so the seat's persona witness stays satisfied across every
     // step advance (committee-20260723-c0a1, witness 2 = `BriefingNotInjected`).
     // Runs before the seal below so the seal covers the delivered pointer.
-    reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
+    deliver_committee_posture_reference(&mol_dir, &briefing_path)?;
 
     // Soft-contract seal: hash the briefing we just wrote and append it
     // to `MoleculeData::briefing_seals`. Defensive — any failure is
@@ -1555,64 +1555,71 @@ fn move_dir_contents(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Re-establish the committee-posture pointer in a freshly regenerated
-/// `briefing.md`, when — and only when — the molecule is a committee seat.
+/// Deliver the committee-posture pointer into `briefing.md`, when — and only
+/// when — the molecule is a committee seat.
 ///
 /// A committee seat carries its adversarial contract in the durable,
 /// regeneration-stable
 /// [`committee-posture.md`](cosmon_core::committee::COMMITTEE_POSTURE_FILE) file
-/// that `cs evolve` never rewrites. This function appends the stable
+/// that no lifecycle verb rewrites. This function appends the stable
 /// [`committee_posture_reference`](cosmon_core::committee::committee_posture_reference)
-/// pointer to the just-regenerated `briefing.md` so the seat's persona witness
-/// keeps seeing a briefing that *references* its contract — closing the
-/// `BriefingNotInjected` hole where wholesale briefing regeneration dropped an
-/// inline `## Committee posture` section (committee-20260723-c0a1).
+/// pointer to whatever `briefing.md` currently holds, so the seat's persona
+/// witness sees a briefing that *references* its contract — the second fact
+/// [`AdversarialBriefing::from_durable_injection`](cosmon_core::committee::AdversarialBriefing::from_durable_injection)
+/// tests, and the one that fails as `BriefingNotInjected`.
 ///
 /// No-ops for ordinary molecules (no durable file → nothing to point at) and is
-/// idempotent (skips when the pointer is already present), so re-running a step
-/// never stacks duplicate stanzas.
+/// idempotent (skips when the pointer is already present), so calling it after
+/// every briefing write never stacks duplicate stanzas.
 ///
-/// # Why `cs tackle` and `cs complete` call it too
+/// # Why the name is not `reinstate`
 ///
-/// For a while this ran from exactly one place — the step-advance path below —
-/// and the mechanism therefore proved that the contract *survives
-/// regeneration* while never asking whether it was there *before the first
-/// regeneration*. Measured on 2026-07-28: immediately after `cs nucleate` plus
-/// writing `committee-posture.md`, a seat's `briefing.md` contained zero
-/// references to it, so
-/// [`AdversarialBriefing::from_durable_injection`](cosmon_core::committee::AdversarialBriefing::from_durable_injection)
-/// returned `injected = false` for **every seat on its step 1** — the step on
-/// which the verdict contract must be written, and the one a provider refusal
-/// is most likely to end on. `cs tackle` now calls this on the briefing it is
-/// about to hand the worker. The call is free for everything else: the
-/// no-op-for-non-seats and idempotence properties above are exactly what make
-/// a second call site safe.
+/// It was, and the name was load-bearing in the wrong direction. Under that
+/// name the function ran from exactly one place — the step-advance path below —
+/// and *re-establishing* is precisely what it did: the contract provably
+/// survived regeneration, while nothing asked whether it was there **before the
+/// first regeneration**. Measured on 2026-07-28: immediately after `cs
+/// nucleate` plus writing `committee-posture.md`, a seat's `briefing.md`
+/// contained zero references to it, so the witness returned `injected = false`
+/// for **every seat on its step 1** — the step on which the verdict contract
+/// must be written, and the one a provider refusal is most likely to end on. A
+/// verb named for restoration reads as complete once restoration works; a verb
+/// named for delivery is unfinished anywhere a briefing is written and does not
+/// call it (committee-20260728-1668 F1).
 ///
-/// The same argument runs once more at the other end. [`cs
+/// The same argument ran once more at the other end. [`cs
 /// complete`](super::complete) rewrites `briefing.md` down to a terse
 /// `**Status:** COMPLETED` line, and it is the verb every seat ends with — so
-/// without a third call site the pointer exists exactly while a seat is running
-/// and is gone by the time anything reads the seat's record, which is the only
-/// time such a record is read. Measured on committee-20260728-2d37's two seats
-/// on 2026-07-29: pointer present after `cs tackle`, `grep -c
+/// without a third call site the pointer existed exactly while a seat was
+/// running and was gone by the time anything read the seat's record, which is
+/// the only time such a record is read. Measured on committee-20260728-2d37's
+/// two seats on 2026-07-29: pointer present after `cs tackle`, `grep -c
 /// committee-posture.md briefing.md == 0` after `cs complete`, both seats.
 ///
-/// So the pointer is re-established wherever `briefing.md` is written: before
-/// the first step (`cs tackle`), at every advance (`cs evolve`), and after the
-/// last (`cs complete`).
+/// # The rule this function is under
+///
+/// **Every production write of `briefing.md` calls this immediately after** —
+/// before the first step (`cs tackle`), at every advance (`cs evolve`), and
+/// after the last (`cs complete`). The rule is not left to memory: the
+/// `committee_posture_delivery_lint` suite reads the sources and fails on any
+/// briefing write that neither calls this nor carries an inline
+/// `committee-posture: exempt — <reason>` waiver on the write. `cs nucleate` is
+/// one such waiver, and reading it is how you learn that a call there would be
+/// a permanent no-op — nucleation mints the directory, so nothing can pre-exist
+/// it.
 ///
 /// # Errors
 ///
 /// Returns an error only if the durable file exists (this *is* a committee
 /// seat) but appending the pointer to `briefing.md` fails — a real I/O fault on
 /// the seat's contract delivery, which must not pass silently.
-pub(super) fn reinstate_committee_posture_reference(
+pub(super) fn deliver_committee_posture_reference(
     mol_dir: &Path,
     briefing_path: &Path,
 ) -> anyhow::Result<()> {
     let posture_path = mol_dir.join(cosmon_core::committee::COMMITTEE_POSTURE_FILE);
     if !posture_path.exists() {
-        // Not a committee seat — nothing to re-establish.
+        // Not a committee seat — nothing to point at.
         return Ok(());
     }
     let reference = cosmon_core::committee::committee_posture_reference();
@@ -1627,8 +1634,10 @@ pub(super) fn reinstate_committee_posture_reference(
     }
     body.push('\n');
     body.push_str(reference);
+    // committee-posture: exempt — this write IS the delivery; calling itself
+    // would recurse, and the idempotence check above already ran.
     fs::write(briefing_path, body).map_err(|e| {
-        anyhow::anyhow!("failed to re-establish committee-posture pointer in briefing.md: {e}")
+        anyhow::anyhow!("failed to deliver committee-posture pointer into briefing.md: {e}")
     })
 }
 
@@ -1675,7 +1684,7 @@ mod tests {
         let original = "# Molecule Briefing\n\n## Current Step 1 of 2\n";
         fs::write(&briefing_path, original).unwrap();
 
-        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+        deliver_committee_posture_reference(mol_dir, &briefing_path).unwrap();
 
         assert_eq!(fs::read_to_string(&briefing_path).unwrap(), original);
     }
@@ -1704,13 +1713,13 @@ mod tests {
         .unwrap();
 
         // First advance: the pointer is (re-)established.
-        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+        deliver_committee_posture_reference(mol_dir, &briefing_path).unwrap();
         let after_first = fs::read_to_string(&briefing_path).unwrap();
         assert!(after_first.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE));
         assert!(after_first.contains("## Committee posture"));
 
         // Second advance on the same briefing: idempotent — no duplicate stanza.
-        reinstate_committee_posture_reference(mol_dir, &briefing_path).unwrap();
+        deliver_committee_posture_reference(mol_dir, &briefing_path).unwrap();
         let after_second = fs::read_to_string(&briefing_path).unwrap();
         assert_eq!(after_first, after_second);
         assert_eq!(after_second.matches("## Committee posture").count(), 1);

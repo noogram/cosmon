@@ -268,7 +268,7 @@ pub(crate) fn complete_one(
     // writes; this is its third and terminal call site. It is a no-op for every
     // molecule that is not a seat (no durable file → nothing to point at), which
     // is what makes a third call site safe.
-    super::evolve::reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
+    super::evolve::deliver_committee_posture_reference(&mol_dir, &briefing_path)?;
 
     // Seal proof-of-work manifest: capture artifact hashes so `cs verify`
     // can later detect tampering. Best-effort — a manifest write failure

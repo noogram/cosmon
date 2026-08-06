@@ -1099,7 +1099,7 @@ fn inspect_absolute_door(
 ///    authors it. What the verbs do is narrower — `cs tackle`, `cs evolve` and
 ///    `cs complete` re-establish the *pointer* to the file in a `briefing.md`
 ///    they have just written
-///    ([`reinstate_committee_posture_reference`](super::evolve::reinstate_committee_posture_reference)),
+///    ([`deliver_committee_posture_reference`](super::evolve::deliver_committee_posture_reference)),
 ///    and that function returns early when the file is absent — so none of them
 ///    can create it, and its presence attests the convening, not the dispatch.
 ///    That last property is asserted rather than asserted-about:
