@@ -289,7 +289,7 @@ fn tackle_delivers_the_pointer_without_suppressing_the_fleet_briefing() {
 
     // `try_inject_fleet_briefing` resolves `fleet.toml` relative to the state
     // dir's PARENT, and matches the agent by `formula_id`.
-    const ROLE: &str = "You are the reference seat. Audit, do not agree.";
+    let role = "You are the reference seat. Audit, do not agree.";
     fs::write(
         state_dir
             .parent()
@@ -298,7 +298,7 @@ fn tackle_delivers_the_pointer_without_suppressing_the_fleet_briefing() {
         format!(
             "fleet = \"seat-test\"\nversion = 1\n\n\
              [[agents]]\nname = \"seat-test\"\nrole = \"implementation\"\n\
-             clearance = \"write\"\nprompt = \"{ROLE}\"\n"
+             clearance = \"write\"\nprompt = \"{role}\"\n"
         ),
     )
     .expect("write fleet.toml");
@@ -312,7 +312,7 @@ fn tackle_delivers_the_pointer_without_suppressing_the_fleet_briefing() {
 
     let after = fs::read_to_string(mol_dir.join("briefing.md")).expect("briefing.md after tackle");
     assert!(
-        after.contains(ROLE),
+        after.contains(role),
         "the seat's role must survive delivery — a pointer-only briefing means \
          delivery ran before the fleet template could be injected; got:\n{after}"
     );
@@ -327,7 +327,7 @@ fn tackle_delivers_the_pointer_without_suppressing_the_fleet_briefing() {
     // appear in what `--dry-run` prints, which IS that prompt.
     let prompt = String::from_utf8_lossy(&out.stdout);
     assert!(
-        prompt.contains(ROLE) && prompt.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
+        prompt.contains(role) && prompt.contains(cosmon_core::committee::COMMITTEE_POSTURE_FILE),
         "the dispatched prompt must carry both the role and the pointer; a \
          briefing correct on disk and stale in the prompt is the same failure \
          one layer later"

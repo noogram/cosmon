@@ -151,7 +151,8 @@ fn all_briefing_writes() -> Vec<Write> {
     rust_sources(&src_root(), &mut files);
     let mut found = Vec::new();
     for path in files {
-        let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let src =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let name = path
             .strip_prefix(src_root())
             .unwrap_or(&path)
@@ -177,7 +178,8 @@ fn every_production_briefing_write_delivers_the_committee_posture_pointer() {
     rust_sources(&src_root(), &mut files);
     let mut offenders = Vec::new();
     for path in &files {
-        let src = fs::read_to_string(path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let src =
+            fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
         let name = path
             .strip_prefix(src_root())
             .unwrap_or(path)
