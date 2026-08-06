@@ -23,6 +23,22 @@ same frozen harness goes green — that is the G5 witness. The mission's own gat
 | `contract-20A-root-bypass-spawn.md` | #20A | root-run spawns a live worker on the dead root path | NO (uid + process assertion) |
 | `contract-20B-prompt-write-outside-worktree.md` | #20B | prompts + state written outside the worktree | offline `claude -p` (model neutralised) |
 
+## The executable harness (repro-20260806-8db2)
+
+| file | issue | class | LLM needed? |
+|------|-------|-------|-------------|
+| `repro-adr161-relative-manifest.sh` | ADR-161 over-refusal | containment guard false positive on a relative manifest reference | NO (pure lexical guard verdict) |
+
+The three seeds above are contract *documents*; this one is a runnable script,
+because the defect it freezes is decidable from a `cs` binary and a temp
+fixture alone — no clean-room container, no model, no network. Run it as
+`repro-adr161-relative-manifest.sh /path/to/cs`: exit **0** = defect absent,
+**1** = defect reproduced, **2** = harness fault (never evidence about the
+defect). It is red on `v0.5.0` and green on the post-`91a3f8de` tree, and it
+carries its own differential control (an absolute-path arm that must stay green
+on both). Same discipline as the seeds, same reason for living here rather than
+in `cargo test --workspace`.
+
 ## The shared discipline (every contract obeys)
 
 1. **Right reason, not merely red.** The failure message must match the *contract
