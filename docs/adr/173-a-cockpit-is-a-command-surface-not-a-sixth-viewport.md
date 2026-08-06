@@ -1,4 +1,4 @@
-# ADR-171 — A cockpit is a command surface, not a sixth viewport
+# ADR-173 — A cockpit is a command surface, not a sixth viewport
 
 **Status:** Accepted (2026-08-06).
 **Date:** 2026-08-06.
