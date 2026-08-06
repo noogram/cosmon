@@ -1437,7 +1437,7 @@ fn nucleate_and_persist(
         write_briefing(&dir, formula, &result)?;
         // NO committee-posture delivery here, and the absence is the point.
         //
-        // A `reinstate_committee_posture_reference(&dir, …)` call sat on this
+        // A `deliver_committee_posture_reference(&dir, …)` call sat on this
         // line, added to let a convener satisfy witness (2) before handoff: the
         // durable `committee-posture.md` must exist in the seat's directory AND
         // `briefing.md` must carry the pointer at it, and only `cs tackle` /
@@ -1688,6 +1688,11 @@ fn write_briefing(
         }
     }
 
+    // committee-posture: exempt — nucleation MINTS the molecule id and creates
+    // the directory, so `committee-posture.md` cannot pre-exist this write and
+    // a delivery call here would be a permanent no-op. The convener writes the
+    // posture file after nucleation; `cs tackle` delivers the pointer. See the
+    // longer note at the `write_briefing` call site in `cmd::nucleate`.
     fs::write(mol_dir.join("briefing.md"), md.as_bytes())
         .map_err(|e| anyhow::anyhow!("failed to write briefing.md: {e}"))
 }

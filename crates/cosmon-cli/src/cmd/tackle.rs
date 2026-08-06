@@ -1128,20 +1128,31 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mol_dir = store.molecule_dir(&mol_id);
     let briefing_path = mol_dir.join("briefing.md");
 
-    // Committee-posture delivery, BEFORE the briefing is read (the read below
-    // is what the worker actually receives). `cs evolve` re-establishes this
-    // pointer on every step advance, which proved the contract survives
-    // regeneration — and left the first step, the one nothing had regenerated
-    // yet, with no pointer at all. A seat's witness (2) therefore failed with
-    // `BriefingNotInjected` on step 1 for every seat, measured 2026-07-28. The
-    // call no-ops for non-seats and is idempotent, so it costs an ordinary
-    // dispatch a `stat`.
-    super::evolve::reinstate_committee_posture_reference(&mol_dir, &briefing_path)?;
-
-    let briefing = match fs::read_to_string(&briefing_path).ok() {
+    // Resolve the briefing first: the file a parent planner wrote, else the
+    // fleet template. Delivery must not run before this. It creates
+    // `briefing.md` when the file is absent (appending to an empty read), so a
+    // seat whose briefing was meant to come from `fleet.toml` would find a
+    // one-line pointer already on disk and never reach the injector — the seat
+    // would carry its adversarial contract and none of its role.
+    let resolved = match fs::read_to_string(&briefing_path).ok() {
         Some(text) => Some(text),
         None => try_inject_fleet_briefing(&state_dir, &mol, &briefing_path),
     };
+
+    // Committee-posture delivery, on the briefing this dispatch is about to
+    // hand the worker. `cs evolve` delivers this pointer on every step advance,
+    // which proved the contract survives regeneration — and left the first
+    // step, the one nothing had regenerated yet, with no pointer at all. A
+    // seat's witness (2) therefore failed with `BriefingNotInjected` on step 1
+    // for every seat, measured 2026-07-28. The call no-ops for non-seats and is
+    // idempotent, so it costs an ordinary dispatch a `stat`.
+    super::evolve::deliver_committee_posture_reference(&mol_dir, &briefing_path)?;
+
+    // Re-read so the worker receives the delivered pointer rather than the
+    // pre-delivery text: `resolved` was captured before the append. Falls back
+    // to `resolved` if the file cannot be read, which is the non-seat case
+    // where nothing was written and there may be no file at all.
+    let briefing = fs::read_to_string(&briefing_path).ok().or(resolved);
 
     // 5. Build bootstrap prompt.
     //
@@ -3148,6 +3159,8 @@ fn try_inject_fleet_briefing(
     if let Some(parent) = briefing_path.parent() {
         let _ = fs::create_dir_all(parent);
     }
+    // committee-posture: exempt — the caller (`cs tackle`, step 4) delivers the
+    // pointer on the very next statement, on whichever briefing this returns.
     if fs::write(briefing_path, &briefing).is_ok() {
         eprintln!("auto-injected briefing from fleet agent \"{}\"", agent.name);
         Some(briefing)
