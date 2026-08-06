@@ -174,9 +174,24 @@ asked to ratify ADR-066).
 
 This section is the file the mission asked to be entered into the record.
 
-- `docs/guides/ux-cli-parity-audit.md` **is not in the repository.** It was
-  moved to `~/galaxies/knowledge/cosmon/guides/ux-cli-parity-audit.md` by
-  `task-20260714-ecbf`.
+- `docs/guides/ux-cli-parity-audit.md` **is not in the repository, and
+  `git log --all -- '*ux-cli-parity-audit.md'` returns nothing** — it is absent
+  from the working tree *and* from every ref of this repository's history. It
+  lives in the knowledge galaxy at
+  `~/galaxies/knowledge/cosmon/guides/ux-cli-parity-audit.md`, added there by
+  `e1f9efa relocate(cosmon): internal docs/guides` (2026-07-14) and last
+  amended by `f8d1682`. Two sibling guides relocated in that same commit
+  (`adapter-parity-bar.md`, `cluster-views.md`, `blink-sideload.md`) show the
+  identical signature — absent from the tree, zero commits in cosmon — while
+  guides that stayed (`api-cli-coverage.md`) carry normal history. So this is
+  the relocation's footprint, not a hole in the log.
+
+  *This is sharper than the brief stated, and it changes what §8l is.* The
+  invariant does not cite a file that drifted out of reach; it cites a file
+  this repository has no record of ever holding, while ADR-068's own scope
+  section lists *"producing the audit guide `docs/guides/ux-cli-parity-audit.md`"*
+  as a deliverable. Whatever the sequence, the state today is: the deliverable
+  is not here, and §8l's rule text links to where it is not.
 - **Six live references still point at the missing path**, three of them from
   the invariants file itself, which is where §8l names its own instrument:
   - `docs/architectural-invariants.md:1873` — inside the quoted rule of §8l,
@@ -237,8 +252,9 @@ The registry is repatriated because **§8l's rule text links to it**, and a
 repository must be able to resolve its own invariants from a bare clone — the
 same argument CLAUDE.md makes for why `publish.sh --check` covers only what is
 decidable from a fresh clone with git and python3. The narrative is not
-repatriated, because `task-20260714-ecbf` moved it for a reason this ADR does
-not reopen.
+repatriated, because the 2026-07-14 relocation put it there for a reason this
+ADR does not reopen — internal guides are internal. What comes home is only
+the part an invariant of this repository is obliged to be able to resolve.
 
 **(iii) The bijection becomes two half-gates with a named seam.** This is the
 part that answers *"a cosmon CI cannot gate an external repository"* honestly
