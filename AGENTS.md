@@ -51,6 +51,24 @@ The doc gate is not redundant with the others: `cargo check` compiles code
 without resolving a doc link, and clippy is not rustdoc. A broken intra-doc
 link passes every other gate and fails only in CI on the trunk.
 
+Run them through `just`, not by hand. Both recipes wrap every step in
+`scripts/no-pilot-env.sh`, the boundary between a worker's *pilotage*
+environment and its gates. `cs tackle` steers a worker with environment
+variables — `COSMON_EGRESS_POLICY`, `CB_DEPTH`, `ANTHROPIC_MODEL` and the rest
+of `cosmon_core::pilot_env::PilotVar` — and a bare `cargo test` inherits them,
+so tests read their parent's instructions as their own configuration. That has
+produced three false verdicts and collapsed one healthy molecule
+(`task-20260804-2bbb`, 2026-08-06; the work was intact at `226b9b0d`). A scoped
+run needs the same wrapper: `./scripts/no-pilot-env.sh cargo test -p <crate>`.
+Forget it and one named test fails with the offending variables listed — not
+eleven unattributable ones.
+
+The strip list is not maintained by hand: `cs tackle` emits every variable
+through `PilotVar::name()`, so a variable absent from that enum cannot be
+injected and everything in it is stripped. The boundary is a **gate** mechanism
+only — it must never appear on a runtime path, where stripping
+`COSMON_EGRESS_POLICY` would weaken a real jail.
+
 `cargo` is not the whole contract. Two more gates run in CI and are not
 subsumed by the five above:
 

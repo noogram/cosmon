@@ -179,13 +179,21 @@ install-mac-pilot:
 # passes every other gate and fails only in CI on the trunk.
 #
 # Every gate EXCEPT the test suite. ~90 s.
+#
+# Every step runs through `scripts/no-pilot-env.sh` — the hermetic boundary
+# between a worker's PILOTAGE environment and its gates. A `cs tackle` worker
+# inherits COSMON_EGRESS_POLICY / CB_DEPTH / ANTHROPIC_MODEL & co., which its
+# tests then read as their own configuration; that has produced three false
+# verdicts and killed one healthy molecule (task-20260804-2bbb, 2026-08-06).
+# The list is a projection of cosmon_core::pilot_env::PilotVar and the parity
+# is pinned by a test — see the script's header.
 quick:
-    cargo fmt --all -- --check
-    cargo check --workspace --locked
-    cargo clippy --workspace --locked -- -D warnings
-    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
-    python3 scripts/spdx-headers.py --check
-    ./scripts/publish.sh --check
+    ./scripts/no-pilot-env.sh cargo fmt --all -- --check
+    ./scripts/no-pilot-env.sh cargo check --workspace --locked
+    ./scripts/no-pilot-env.sh cargo clippy --workspace --locked -- -D warnings
+    ./scripts/no-pilot-env.sh env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+    ./scripts/no-pilot-env.sh python3 scripts/spdx-headers.py --check
+    ./scripts/no-pilot-env.sh ./scripts/publish.sh --check
 
 # `--no-fail-fast` is deliberate: cargo stops at the first red target by
 # default, which hides every later failure at identical wall-clock. A run that
@@ -206,9 +214,9 @@ quick:
 #
 # The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
 gates: quick
-    cargo build --bin cs -p cosmon-cli --locked
-    cargo test --workspace --locked --no-fail-fast
-    ./scripts/release/crossing.test.sh
+    ./scripts/no-pilot-env.sh cargo build --bin cs -p cosmon-cli --locked
+    ./scripts/no-pilot-env.sh cargo test --workspace --locked --no-fail-fast
+    ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
 # It used to run four of the seven gates and was named as if it ran them all —
 # the recurring defect here is a check that measures the property next door.

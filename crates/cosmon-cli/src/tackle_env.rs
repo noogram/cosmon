@@ -31,6 +31,7 @@
 //! `docs/architectural-invariants.md` §8m (multi-account adapter env)
 //! for the structural rule this helper enforces.
 
+use cosmon_core::pilot_env::PilotVar;
 use cosmon_core::root_spawn_policy::{demotion_command_prefix, RootSpawnDecision};
 
 /// MCP servers that drive a **browser attached to the operator's
@@ -129,7 +130,7 @@ where
             return Some(format!("{home}/.claude-accounts/{trimmed}/"));
         }
     }
-    env_lookup("CLAUDE_CONFIG_DIR").filter(|v| !v.is_empty())
+    env_lookup(PilotVar::ClaudeConfigDir.name()).filter(|v| !v.is_empty())
 }
 
 /// Whether the `cb next` probe should be suppressed entirely.
@@ -364,16 +365,12 @@ where
 {
     let mut prefix = String::new();
     if let Some(value) = resolve_claude_config_dir(cb_runner, &env_lookup) {
-        prefix.push_str("CLAUDE_CONFIG_DIR=");
-        prefix.push_str(&shell_quote(&value));
-        prefix.push(' ');
+        push_pilot_var(&mut prefix, PilotVar::ClaudeConfigDir, &value);
     }
     // Model pin pass-through (avatar-surface D1) — value-agnostic
     // re-emission across the tmux boundary; see the doc comment.
-    if let Some(model) = env_lookup("ANTHROPIC_MODEL").filter(|v| !v.is_empty()) {
-        prefix.push_str("ANTHROPIC_MODEL=");
-        prefix.push_str(&shell_quote(&model));
-        prefix.push(' ');
+    if let Some(model) = env_lookup(PilotVar::AnthropicModel.name()).filter(|v| !v.is_empty()) {
+        push_pilot_var(&mut prefix, PilotVar::AnthropicModel, &model);
     }
     // Root-under-bypassPermissions escape valve (task-20260720-18bb / BUG #6).
     // Claude Code v2.x refuses `--permission-mode bypassPermissions` (and
@@ -390,18 +387,14 @@ where
     // byte-identical. Re-emitted value-agnostically across the tmux boundary,
     // exactly like the model pin above (the tmux server freezes its env at
     // startup and drops later shell overrides).
-    if let Some(sandbox) = env_lookup("IS_SANDBOX").filter(|v| !v.is_empty()) {
-        prefix.push_str("IS_SANDBOX=");
-        prefix.push_str(&shell_quote(&sandbox));
-        prefix.push(' ');
+    if let Some(sandbox) = env_lookup(PilotVar::IsSandbox.name()).filter(|v| !v.is_empty()) {
+        push_pilot_var(&mut prefix, PilotVar::IsSandbox, &sandbox);
     }
     // Gödel self-reference guards: propagate role and depth.
     // Spawned workers always inherit role=worker and depth=parent+1.
     let child_depth = resolve_depth(&env_lookup) + 1;
-    let _ = std::fmt::Write::write_fmt(
-        &mut prefix,
-        format_args!("CB_SESSION_ROLE=worker CB_DEPTH={child_depth} "),
-    );
+    push_pilot_var(&mut prefix, PilotVar::SessionRole, "worker");
+    push_pilot_var(&mut prefix, PilotVar::Depth, &child_depth.to_string());
     // Capture the grand-child's stderr to `<mol_dir>/worker.stderr` (C2,
     // delib-20260614-98f2). The worker `claude` is a detached grand-child
     // — `cs tackle` spawns it via tmux and returns; nobody is left holding
@@ -431,8 +424,8 @@ where
     // prefix. `shell_quote` returns a safe path verbatim, so an ordinary state
     // path keeps the command byte-identical; a path carrying a space or a
     // shell metacharacter stops being an injection surface.
-    let mol_dir_q = shell_quote(mol_dir_str);
-    let parent_id_q = shell_quote(parent_id_str);
+    push_pilot_var(&mut prefix, PilotVar::MolDir, mol_dir_str);
+    push_pilot_var(&mut prefix, PilotVar::ParentMolId, parent_id_str);
     // Briefing-receipt overlay (`--settings`). Additive and file-scoped: the
     // file is a new 0600 file cosmon owns, registering one `UserPromptSubmit`
     // hook so the worker's Claude Code can *sign* a receipt for each briefing
@@ -446,10 +439,26 @@ where
         format!(" --settings {}", shell_quote(&path.to_string_lossy()))
     });
     format!(
-        "{prefix}COSMON_MOL_DIR={mol_dir_q} COSMON_PARENT_MOL_ID={parent_id_q} \
-         {demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings} \
+        "{prefix}{demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings} \
          {disallowed}2> {worker_stderr}"
     )
+}
+
+/// Append one `NAME=value ` pair to the env prefix, taking the name from the
+/// [`PilotVar`] manifest and shell-quoting the value.
+///
+/// Every variable `cs tackle` injects goes through here, which is what makes
+/// the manifest a *producer* list rather than a copy of one: a new pilot
+/// variable has to be declared in [`PilotVar`] to be emitted at all, and
+/// everything declared there is stripped by the gate boundary
+/// (`scripts/no-pilot-env.sh`). See `cosmon_core::pilot_env` for why that
+/// closure, and not a hand-maintained denylist, is the protection against the
+/// variable nobody has invented yet.
+fn push_pilot_var(prefix: &mut String, var: PilotVar, value: &str) {
+    prefix.push_str(var.name());
+    prefix.push('=');
+    prefix.push_str(&shell_quote(value));
+    prefix.push(' ');
 }
 
 /// Build the `--add-dir …/--allowedTools …` grant fragment for
