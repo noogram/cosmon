@@ -2,18 +2,22 @@
 
 //! Endpoint + client_id discovery (delib-20260710-33b7 C8).
 //!
-//! Two documents, one standard and one cosmon-namespaced, because Forgejo
-//! answers half the question and not the other half:
+//! Two documents, one standard and one cosmon-namespaced:
 //!
-//! - **`GET <issuer>/.well-known/openid-configuration`** — the RFC 8414 / OIDC
-//!   Discovery document. Standard, so we use it: it yields the `issuer`, the
-//!   `authorization_endpoint`, and the `token_endpoint`. [`ProviderMetadata`].
 //! - **`GET <host>/.well-known/cosmon-oauth-clients`** — a cosmon-namespaced
 //!   reverse-discovery document. Forgejo has **no** Dynamic Client Registration
-//!   (do not invent RFC 7591), so the `client_id` provisioned per audience must
-//!   reach the client some other way. cosmon-server publishes it here, keyed by
-//!   audience, covering **both** the CLI app (audience A) and the MCP connector
-//!   app (audience B) in one document. [`ClientRegistry`].
+//!   (RFC 7591), so the `client_id` provisioned per audience must reach the
+//!   client some other way. cosmon-server publishes it here, keyed by audience,
+//!   covering **both** the CLI app (audience A) and the MCP connector app
+//!   (audience B) in one document. Also carries the IdP `issuer` URL, which the
+//!   client validates against its pinned `expected_issuer` for integrity.
+//!   [`ClientRegistry`].
+//! - **`GET <issuer>/.well-known/openid-configuration`** — the RFC 8414 / OIDC
+//!   Discovery document, fetched from the issuer URL the registry declares. All
+//!   supported IdPs (Forgejo, Auth0, Keycloak) serve this standard document.
+//!   Yields the `authorization_endpoint` and the `token_endpoint`. The client
+//!   also validates `meta.issuer == registry.issuer` (RFC 8414 §3.3).
+//!   [`ProviderMetadata`].
 //!
 //! The split is deliberate: we speak the standard where a standard exists
 //! (endpoints), and reserve the cosmon namespace only for the one thing the
@@ -38,7 +42,7 @@ use crate::error::Result;
 /// The `schema_version` of the `cosmon-oauth-clients` document this binary
 /// understands. A document declaring a higher version is rejected
 /// ([`OidcError::Discovery`]) rather than parsed on a guess — fail-closed.
-pub const CLIENT_REGISTRY_SCHEMA: u32 = 1;
+pub const CLIENT_REGISTRY_SCHEMA: u32 = 2;
 
 /// The subset of the OIDC Discovery document (`.well-known/openid-configuration`)
 /// the login flow needs. **Deserialize-only** and unknown-field-tolerant: a
@@ -106,11 +110,6 @@ pub struct OAuthClient {
     /// The Forgejo-generated `client_id`. Because `aud == client_id`, this is
     /// also the `aud` component of the credential key — the isolation slot.
     pub client_id: String,
-    /// The redirect URI registered for this client, if the server chooses to
-    /// publish it. When absent the client uses the loopback default
-    /// (`http://127.0.0.1:7777/callback`).
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
     /// The scopes the server recommends for this client, if published. When
     /// absent the client falls back to the profile's scopes.
     #[serde(default)]
@@ -128,6 +127,13 @@ pub struct ClientRegistry {
     /// The document schema version. A value greater than
     /// [`CLIENT_REGISTRY_SCHEMA`] is refused.
     pub schema_version: u32,
+    /// The IdP issuer URL. Validated byte-for-byte against the caller's
+    /// pinned `expected_issuer` in [`super::flow::discover`] before the
+    /// document is trusted. `#[serde(default)]` keeps old or minimal
+    /// documents parseable; a missing issuer surfaces as a validation error,
+    /// not a parse error.
+    #[serde(default)]
+    pub issuer: String,
     /// The provisioned clients, one per audience (covers both A and B).
     #[serde(default)]
     pub clients: Vec<OAuthClient>,
@@ -220,22 +226,39 @@ mod tests {
     }
 
     #[test]
-    fn registry_selects_client_by_audience() {
+    fn registry_carries_issuer_and_selects_client_by_audience() {
         let json = r#"{
-            "schema_version": 1,
+            "schema_version": 2,
+            "issuer": "https://forge.example",
             "clients": [
                 {"audience": "cs-rpp-adapter", "client_id": "aaa-111"},
-                {"audience": "claude-web", "client_id": "bbb-222", "redirect_uri": "http://127.0.0.1:7777/callback"}
+                {"audience": "claude-web", "client_id": "bbb-222"}
             ]
         }"#;
         let reg: ClientRegistry = serde_json::from_str(json).unwrap();
         reg.require_supported().unwrap();
+        assert_eq!(reg.issuer, "https://forge.example");
         assert_eq!(
             reg.client_for("cs-rpp-adapter").unwrap().client_id,
             "aaa-111"
         );
         assert_eq!(reg.client_for("claude-web").unwrap().client_id, "bbb-222");
         assert!(reg.client_for("unknown-audience").is_none());
+    }
+
+    #[test]
+    fn registry_accepts_schema_version_1_for_rollback_compatibility() {
+        // A v1 server (old) carries all the same fields the client reads
+        // (issuer, clients); the client must accept it rather than fail
+        // closed — a forced-upgrade barrier here would break staged rollouts.
+        let json = r#"{
+            "schema_version": 1,
+            "issuer": "https://forge.example",
+            "clients": [{"audience": "cs-rpp-adapter", "client_id": "aaa"}]
+        }"#;
+        let reg: ClientRegistry = serde_json::from_str(json).unwrap();
+        reg.require_supported().unwrap();
+        assert_eq!(reg.issuer, "https://forge.example");
     }
 
     #[test]
@@ -254,7 +277,8 @@ mod tests {
         // A forward-compatible field must not hard-fail an older binary — only
         // the schema_version gate is authoritative.
         let json = r#"{
-            "schema_version": 1,
+            "schema_version": 2,
+            "issuer": "https://forge.example",
             "generated_at": "2026-07-10T00:00:00Z",
             "clients": [
                 {"audience": "cs-rpp-adapter", "client_id": "aaa", "grant_types": ["authorization_code"]}

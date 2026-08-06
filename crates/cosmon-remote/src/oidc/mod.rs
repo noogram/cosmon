@@ -56,8 +56,8 @@ pub use flow::{
     RefreshConfig, RefreshRotation, TokenState, LOGIN_TIMEOUT_SECS, REFRESH_LEEWAY_SECS,
 };
 pub use loopback::{
-    parse_callback_target, redirect_uri, validate_loopback_redirect_uri, CallbackParams,
-    LoopbackServer, CALLBACK_PATH, DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
+    parse_callback_target, redirect_uri, CallbackParams, LoopbackServer, CALLBACK_PATH,
+    DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
 };
 pub use pkce_s256::{CodeVerifier, Nonce};
 
