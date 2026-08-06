@@ -259,10 +259,17 @@ fn egress_policy_still_fails_closed_when_absent() {
 /// itself through the boundary would strip its own confinement — the one
 /// outcome that would make this change a security regression rather than a fix.
 ///
-/// Comment lines on those paths are allowed, deliberately: the emitter in
-/// `tackle_env.rs` explains where its variables are stripped, and a rule that
-/// forbade saying so would push the explanation away from the code it
-/// explains. What is forbidden is a line that *runs* it.
+/// Naming the script on those paths is allowed, deliberately: the emitter in
+/// `tackle_env.rs` explains where its variables are stripped, and the canary's
+/// remedy message has to name the way out or it is a diagnosis without a cure.
+/// A rule that forbade saying the name would push the explanation away from
+/// the code it explains. What is forbidden is a line that *runs* it, which on
+/// these paths means a line that also carries a process-spawn construct.
+///
+/// That is a shape heuristic, and it is stated as one: it catches the way a
+/// Rust or shell runtime path would actually invoke the script, not every
+/// conceivable indirection. It is the second lock, behind the first — there is
+/// exactly one script and it is reviewed as a whole.
 #[test]
 fn boundary_is_never_applied_to_a_runtime_path() {
     let out = Command::new("git")
@@ -281,21 +288,23 @@ fn boundary_is_never_applied_to_a_runtime_path() {
         hits.iter().any(|h| h.starts_with("justfile:")),
         "the justfile must reference the boundary; got {hits:?}"
     );
+    // Positive control. A test whose detector never fires is a test that would
+    // stay green through the very change it exists to catch, so prove the
+    // classifier still recognises an invocation before trusting its silence.
+    assert!(
+        applies_the_boundary(
+            r#"crates/cosmon-cli/src/cmd/tackle.rs:9: Command::new("scripts/no-pilot-env.sh")"#
+        ),
+        "the invocation detector stopped detecting invocations"
+    );
+    assert!(
+        !applies_the_boundary("justfile:210:    ./scripts/no-pilot-env.sh cargo test"),
+        "the gate recipe is where the boundary belongs"
+    );
+
     let forbidden: Vec<&String> = hits
         .iter()
-        .filter(|hit| {
-            let (path, rest) = hit.split_once(':').unwrap_or((hit.as_str(), ""));
-            let on_runtime_path = path.starts_with("apps/")
-                || path.starts_with("docker/")
-                || path.starts_with("templates/")
-                || (path.starts_with("crates/") && path.contains("/src/"));
-            // Strip the line number, then judge the line itself: a comment
-            // documents the boundary, anything else runs it.
-            let line = rest.split_once(':').map_or("", |(_, l)| l).trim_start();
-            let is_comment =
-                line.starts_with("//") || line.starts_with('#') || line.starts_with('*');
-            on_runtime_path && !is_comment
-        })
+        .filter(|hit| applies_the_boundary(hit))
         .collect();
     assert!(
         forbidden.is_empty(),
@@ -352,6 +361,34 @@ fn canary_names_the_breach_and_the_remedy() {
 fn this_test_process_is_outside_the_pilotage_environment() {
     let found = pilot_env::detect_in(|k| std::env::var(k).ok());
     assert!(found.is_empty(), "{}", pilot_env::canary_message(&found));
+}
+
+/// Classify one `git grep -n` hit: does this line *apply* the boundary from a
+/// runtime path?
+///
+/// Two conditions, both required. The path must be shipped code rather than a
+/// gate recipe, CI job, doc or test; and the line must carry a process-spawn
+/// construct, because naming the script (in a comment, or in the canary's
+/// remedy message) documents the boundary while spawning it applies it.
+fn applies_the_boundary(hit: &str) -> bool {
+    /// How a runtime path would actually reach the script.
+    const SPAWN_SHAPES: &[&str] = &[
+        "Command::new",
+        "process::Command",
+        "exec ",
+        "sh -c",
+        "system(",
+        "subprocess",
+        "spawn(",
+    ];
+    let (path, rest) = hit.split_once(':').unwrap_or((hit, ""));
+    let on_runtime_path = path.starts_with("apps/")
+        || path.starts_with("docker/")
+        || path.starts_with("templates/")
+        || (path.starts_with("crates/") && path.contains("/src/"));
+    let line = rest.split_once(':').map_or("", |(_, l)| l).trim_start();
+    let is_comment = line.starts_with("//") || line.starts_with('#') || line.starts_with('*');
+    on_runtime_path && !is_comment && SPAWN_SHAPES.iter().any(|shape| line.contains(shape))
 }
 
 fn cs_bin() -> &'static str {
