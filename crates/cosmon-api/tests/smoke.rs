@@ -1,150 +1,128 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Integration smoke tests for `cs-api`.
+//! What `cs-api`'s routes do, asserted on the router.
 //!
-//! Each test binds a fresh `COSMON_STATE_DIR` tempdir so real
-//! `~/.cosmon/state/sessions/` is never touched. The server is built
-//! via `cosmon_api::router` and exercised through `reqwest` over a
-//! loopback TCP listener.
+//! Each test builds a fresh `AppState` over a tempdir so the real
+//! `~/.cosmon/state/sessions/` is never touched, then drives
+//! `cosmon_api::router` in-process through `tower::ServiceExt::oneshot`
+//! — see `tests/support/inproc.rs`.
+//!
+//! # Why no socket
+//!
+//! Every claim in this file is about our own code: which route was
+//! selected, what JSON the handler built, which precondition it
+//! refused, what it wrote to a tempdir, whether it spawned a
+//! subprocess. None of them is about the wire. A loopback connection
+//! adds no evidence for any of them — the bytes on it are hyper's —
+//! and it adds a dependency on a free ephemeral port and on the
+//! ambient environment, which is the failure mode
+//! `task-20260806-4823` was opened for.
+//!
+//! The one claim that does need a socket, that a bound listener served
+//! by `axum::serve` answers at all, lives in `tests/wire.rs`. The rule
+//! and the per-test classification are in
+//! `docs/guides/port-or-wire.md`.
+//!
+//! The ports that are genuinely under test here stay real: the `cs`
+//! subprocess is a real subprocess and the state directory is a real
+//! directory. Only the listener is gone.
 
-use std::net::SocketAddr;
-use std::time::Duration;
-
-use cosmon_api::{router, AppState};
-use reqwest::StatusCode;
+use axum::http::StatusCode;
+use cosmon_api::{AppState, CorsPolicy};
 use tempfile::TempDir;
 
+#[path = "support/inproc.rs"]
+mod inproc;
 #[path = "support/prebuilt.rs"]
 mod prebuilt;
 
+use inproc::Api;
 use prebuilt::cs_bin;
 
-async fn spawn_server(state_dir: &std::path::Path) -> SocketAddr {
-    spawn_server_with(|s| s.with_state_dir(state_dir.to_path_buf())).await
+/// The default router over a scratch state dir.
+fn api(state_dir: &std::path::Path) -> Api {
+    api_with(|s| s.with_state_dir(state_dir.to_path_buf()))
 }
 
-async fn spawn_server_with<F>(configure: F) -> SocketAddr
+/// The default router with an arbitrary `AppState` tweak.
+///
+/// `CorsPolicy::Deny` is what `router` installs and what the daemon
+/// ships; every request below carries no `Origin`, exactly as the
+/// native pilots send them, so the middleware passes them through.
+fn api_with<F>(configure: F) -> Api
 where
     F: FnOnce(AppState) -> AppState,
 {
-    let state = configure(AppState::new(cs_bin()));
-    let app = router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .await
-            .expect("serve");
-    });
-    // Give tokio a moment to start the task.
-    tokio::time::sleep(Duration::from_millis(30)).await;
-    addr
+    Api::with_cors(configure(AppState::new(cs_bin())), CorsPolicy::Deny)
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .expect("build reqwest client")
-}
-
+/// Red proof (2026-08-06): replacing `"ok": true` with `"ok": false` in
+/// the `healthz` handler turns this red on the first assertion;
+/// dropping the `cs --version` shell-out turns it red on the version
+/// prefix.
 #[tokio::test]
 async fn healthz_returns_ok_true_and_cs_version() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/healthz"))
-        .send()
-        .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let body = api(tmp.path()).get("/healthz").await.ok().json();
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert!(body["version"].as_str().unwrap_or("").starts_with("cs "));
     assert!(!body["cs_binary"].as_str().unwrap_or("").is_empty());
 }
 
+/// Red proof (2026-08-06): mapping `EXIT_SESSION_ALREADY_OPEN` to `200`
+/// instead of `CONFLICT` in `session_start` turns this red on the
+/// second status assertion.
 #[tokio::test]
 async fn start_twice_returns_409() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let c = client();
-    let r1 = c
-        .post(format!("http://{addr}/session/start"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(r1.status(), StatusCode::OK);
-    let body: serde_json::Value = r1.json().await.expect("json");
-    assert!(body["session_id"]
+    let api = api(tmp.path());
+
+    let r1 = api.post_empty("/session/start").await;
+    assert_eq!(r1.status, StatusCode::OK, "{}", r1.text());
+    assert!(r1.json()["session_id"]
         .as_str()
         .unwrap_or("")
         .starts_with("session-"));
 
-    let r2 = c
-        .post(format!("http://{addr}/session/start"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(r2.status(), StatusCode::CONFLICT);
-    let body2: serde_json::Value = r2.json().await.expect("json");
-    assert!(body2["error"]
+    let r2 = api.post_empty("/session/start").await;
+    assert_eq!(r2.status, StatusCode::CONFLICT);
+    assert!(r2.json()["error"]
         .as_str()
         .unwrap_or("")
         .contains("already open"));
 }
 
+/// Red proof (2026-08-06): mapping `EXIT_NO_OPEN_SESSION` to `200` in
+/// `session_note` turns this red on the status assertion.
 #[tokio::test]
 async fn note_without_session_returns_409() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let resp = client()
-        .post(format!("http://{addr}/session/note"))
-        .json(&serde_json::json!({"text": "nope"}))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), StatusCode::CONFLICT);
-    let body: serde_json::Value = resp.json().await.expect("json");
-    assert!(body["error"].as_str().unwrap_or("").contains("no session"));
+    let resp = api(tmp.path())
+        .post_json("/session/note", &serde_json::json!({"text": "nope"}))
+        .await;
+    assert_eq!(resp.status, StatusCode::CONFLICT);
+    assert!(resp.json()["error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("no session"));
 }
 
+/// Red proof (2026-08-06): hard-coding `note_count` to `0` in
+/// `session_end` turns this red on the count; stripping the `seal`
+/// field turns it red on the `blake3:` prefix.
 #[tokio::test]
 async fn end_seals_session_with_notes() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let c = client();
+    let api = api(tmp.path());
 
-    c.post(format!("http://{addr}/session/start"))
-        .send()
-        .await
-        .expect("start")
-        .error_for_status()
-        .expect("200");
-
+    api.post_empty("/session/start").await.ok();
     for text in ["first note", "second note"] {
-        c.post(format!("http://{addr}/session/note"))
-            .json(&serde_json::json!({"text": text}))
-            .send()
+        api.post_json("/session/note", &serde_json::json!({"text": text}))
             .await
-            .expect("note")
-            .error_for_status()
-            .expect("200");
+            .ok();
     }
 
-    let end_resp = c
-        .post(format!("http://{addr}/session/end"))
-        .send()
-        .await
-        .expect("end")
-        .error_for_status()
-        .expect("200");
-    let body: serde_json::Value = end_resp.json().await.expect("json");
+    let body = api.post_empty("/session/end").await.ok().json();
     let seal = body["seal"].as_str().unwrap_or("");
     assert!(
         seal.starts_with("blake3:") && seal.len() > "blake3:".len(),
@@ -153,46 +131,27 @@ async fn end_seals_session_with_notes() {
     assert_eq!(body["note_count"].as_u64(), Some(2));
 }
 
+/// Red proof (2026-08-06): making `session_current` always return the
+/// empty projection turns this red on the mid-session `session_id`.
 #[tokio::test]
 async fn current_reports_open_session_notes() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let c = client();
+    let api = api(tmp.path());
 
     // Before any session: empty.
-    let before: serde_json::Value = c
-        .get(format!("http://{addr}/session/current"))
-        .send()
-        .await
-        .expect("get")
-        .json()
-        .await
-        .expect("json");
+    let before = api.get("/session/current").await.ok().json();
     assert!(before["session_id"].is_null());
     assert_eq!(before["notes"].as_array().map(Vec::len), Some(0));
 
-    c.post(format!("http://{addr}/session/start"))
-        .send()
-        .await
-        .expect("start")
-        .error_for_status()
-        .expect("200");
-    c.post(format!("http://{addr}/session/note"))
-        .json(&serde_json::json!({"text": "hello world", "tag": "insight"}))
-        .send()
-        .await
-        .expect("note")
-        .error_for_status()
-        .expect("200");
+    api.post_empty("/session/start").await.ok();
+    api.post_json(
+        "/session/note",
+        &serde_json::json!({"text": "hello world", "tag": "insight"}),
+    )
+    .await
+    .ok();
 
-    let during: serde_json::Value = c
-        .get(format!("http://{addr}/session/current"))
-        .send()
-        .await
-        .expect("get")
-        .json()
-        .await
-        .expect("json");
+    let during = api.get("/session/current").await.ok().json();
     assert!(during["session_id"]
         .as_str()
         .unwrap_or("")
@@ -256,6 +215,8 @@ fn write_molecule(
     std::fs::write(dir.join("state.json"), j.to_string()).unwrap();
 }
 
+/// Red proof (2026-08-06): removing the descending sort in
+/// `whispers::list_whispers` turns this red on `arr[0]["id"] == "2-b"`.
 #[tokio::test]
 async fn whispers_lists_files_newest_first() {
     let tmp = TempDir::new().expect("tempdir");
@@ -264,17 +225,11 @@ async fn whispers_lists_files_newest_first() {
     write_whisper(&inbox, "room-b", "2-b", "2026-04-22T12:00:00Z", "Salut 👋");
     write_whisper(&inbox, "room-a", "3-a", "2026-04-22T11:00:00Z", "middle");
 
-    let addr = spawn_server_with(|s| s.with_whispers_inbox_root(inbox)).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/whispers"))
-        .send()
+    let body = api_with(|s| s.with_whispers_inbox_root(inbox))
+        .get("/whispers")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     let arr = body["whispers"].as_array().expect("array");
     assert_eq!(arr.len(), 3);
     assert_eq!(arr[0]["id"], "2-b", "newest first");
@@ -284,6 +239,9 @@ async fn whispers_lists_files_newest_first() {
     assert!(arr[0]["path"].as_str().unwrap_or("").ends_with("2-b.md"));
 }
 
+/// Red proof (2026-08-06): ignoring the `limit` query parameter turns
+/// the first half red (3 whispers, not 2); making a missing inbox a
+/// `500` instead of an empty list turns the second half red.
 #[tokio::test]
 async fn whispers_respects_limit_and_empty_inbox() {
     let tmp = TempDir::new().expect("tempdir");
@@ -293,36 +251,28 @@ async fn whispers_respects_limit_and_empty_inbox() {
     write_whisper(&inbox, "room-a", "2-a", "2026-04-22T11:00:00Z", "b");
     write_whisper(&inbox, "room-a", "3-a", "2026-04-22T12:00:00Z", "c");
 
-    let addr = spawn_server_with(|s| s.with_whispers_inbox_root(inbox.clone())).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/whispers?limit=2"))
-        .send()
+    let body = api_with(|s| s.with_whispers_inbox_root(inbox.clone()))
+        .get("/whispers?limit=2")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     assert_eq!(body["whispers"].as_array().map(Vec::len), Some(2));
 
     // Missing inbox → empty list, not an error.
     let empty_tmp = TempDir::new().expect("tempdir");
     let empty_inbox = empty_tmp.path().join("not-created/inbox");
-    let empty_addr = spawn_server_with(|s| s.with_whispers_inbox_root(empty_inbox)).await;
-    let empty: serde_json::Value = client()
-        .get(format!("http://{empty_addr}/whispers"))
-        .send()
+    let empty = api_with(|s| s.with_whispers_inbox_root(empty_inbox))
+        .get("/whispers")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     assert_eq!(empty["whispers"].as_array().map(Vec::len), Some(0));
 }
 
+/// Red proof (2026-08-06): turning the rename in
+/// `whispers::archive_whisper` into a copy turns this red on "source
+/// should be gone"; answering `200` for an unknown id turns it red on
+/// the `404`.
 #[tokio::test]
 async fn whisper_archive_moves_file_to_archived_tree() {
     let tmp = TempDir::new().expect("tempdir");
@@ -337,14 +287,10 @@ async fn whisper_archive_moves_file_to_archived_tree() {
     let original = inbox.join("room-a/to-archive.md");
     assert!(original.exists());
 
-    let addr = spawn_server_with(|s| s.with_whispers_inbox_root(inbox.clone())).await;
-    let resp = client()
-        .post(format!("http://{addr}/whispers/to-archive/archive"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body: serde_json::Value = resp.json().await.expect("json");
+    let api = api_with(|s| s.with_whispers_inbox_root(inbox.clone()));
+    let resp = api.post_empty("/whispers/to-archive/archive").await;
+    assert_eq!(resp.status, StatusCode::OK, "{}", resp.text());
+    let body = resp.json();
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert_eq!(body["id"], "to-archive");
 
@@ -354,14 +300,14 @@ async fn whisper_archive_moves_file_to_archived_tree() {
     assert!(archived.exists(), "archived should exist at {archived:?}");
 
     // Missing id -> 404.
-    let miss = client()
-        .post(format!("http://{addr}/whispers/does-not-exist/archive"))
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(miss.status(), StatusCode::NOT_FOUND);
+    let miss = api.post_empty("/whispers/does-not-exist/archive").await;
+    assert_eq!(miss.status, StatusCode::NOT_FOUND);
 }
 
+/// Red proof (2026-08-06): dropping the `--json` state-dir scoping so
+/// the spark lands elsewhere turns this red on the `mol_path` assertion
+/// — the response still says `ok`, which is precisely why the on-disk
+/// check is here and not just the status.
 #[tokio::test]
 async fn whisper_spark_nucleates_molecule() {
     let tmp = TempDir::new().expect("tempdir");
@@ -376,25 +322,15 @@ async fn whisper_spark_nucleates_molecule() {
     );
     std::fs::create_dir_all(&state_dir).unwrap();
 
-    let addr = spawn_server_with(|s| {
+    let api = api_with(|s| {
         s.with_state_dir(state_dir.clone())
             .with_whispers_inbox_root(inbox.clone())
-    })
-    .await;
+    });
 
-    let resp = client()
-        .post(format!("http://{addr}/whispers/spark-source/spark"))
-        .header("Content-Type", "application/json")
-        .body("{}")
-        .send()
-        .await
-        .expect("send");
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        panic!("unexpected {code}: {body}");
-    }
-    let body: serde_json::Value = resp.json().await.expect("json");
+    let resp = api
+        .post_raw("/whispers/spark-source/spark", "application/json", "{}")
+        .await;
+    let body = resp.ok().json();
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert_eq!(body["whisper_id"], "spark-source");
     let spark_id = body["spark"]["id"].as_str().expect("spark id").to_owned();
@@ -408,6 +344,9 @@ async fn whisper_spark_nucleates_molecule() {
     assert!(mol_path.exists(), "missing {mol_path:?}");
 }
 
+/// Red proof (2026-08-06): dropping the completed-status exclusion from
+/// the default `/inbox` filter turns this red on "default filter
+/// excludes completed".
 #[tokio::test]
 async fn inbox_filters_by_status() {
     let tmp = TempDir::new().expect("tempdir");
@@ -440,17 +379,8 @@ async fn inbox_filters_by_status() {
         "2026-04-22T09:00:00Z",
     );
 
-    let addr = spawn_server(&state_dir).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/inbox"))
-        .send()
-        .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let api = api(&state_dir);
+    let body = api.get("/inbox").await.ok().json();
     let arr = body["molecules"].as_array().expect("array");
     let ids: Vec<&str> = arr.iter().map(|m| m["id"].as_str().unwrap()).collect();
     assert!(ids.contains(&"task-pending-1"));
@@ -461,16 +391,7 @@ async fn inbox_filters_by_status() {
     );
 
     // status=all returns every molecule.
-    let all: serde_json::Value = client()
-        .get(format!("http://{addr}/inbox?status=all"))
-        .send()
-        .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let all = api.get("/inbox?status=all").await.ok().json();
     assert_eq!(all["molecules"].as_array().map(Vec::len), Some(3));
 
     // First row (most recently updated) carries the expected kind + topic + tags.
@@ -482,6 +403,10 @@ async fn inbox_filters_by_status() {
     assert_eq!(first["formula"], "task-work");
 }
 
+/// Red proof (2026-08-06): dropping the `.cosmon/` marker check in
+/// `galaxies::list_galaxies` turns this red on
+/// `!names.contains("not-a-galaxy")`; miscounting pending turns it red
+/// on `pending_count`.
 #[tokio::test]
 async fn galaxies_scans_dir_and_counts_pending() {
     let tmp = TempDir::new().expect("tempdir");
@@ -519,17 +444,11 @@ async fn galaxies_scans_dir_and_counts_pending() {
     // A non-galaxy directory
     std::fs::create_dir_all(tmp.path().join("not-a-galaxy/src")).unwrap();
 
-    let addr = spawn_server_with(|s| s.with_galaxies_root(tmp.path().to_path_buf())).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/galaxies"))
-        .send()
+    let body = api_with(|s| s.with_galaxies_root(tmp.path().to_path_buf()))
+        .get("/galaxies")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     let arr = body["galaxies"].as_array().expect("array");
     let names: Vec<&str> = arr.iter().map(|g| g["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"cosmon"));
@@ -545,6 +464,9 @@ async fn galaxies_scans_dir_and_counts_pending() {
     );
 }
 
+/// Red proof (2026-08-06): dropping `fleet.json` parsing turns this red
+/// on `totals.workers`; collapsing the per-status grouping turns it red
+/// on `groups.len() == 3`.
 #[tokio::test]
 async fn ensemble_aggregates_workers_and_molecules_per_galaxy() {
     let tmp = TempDir::new().expect("tempdir");
@@ -596,17 +518,11 @@ async fn ensemble_aggregates_workers_and_molecules_per_galaxy() {
     // workshop galaxy: just the .cosmon/ marker.
     std::fs::create_dir_all(tmp.path().join("workshop/.cosmon/state")).unwrap();
 
-    let addr = spawn_server_with(|s| s.with_galaxies_root(tmp.path().to_path_buf())).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/ensemble"))
-        .send()
+    let body = api_with(|s| s.with_galaxies_root(tmp.path().to_path_buf()))
+        .get("/ensemble")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
 
     assert_eq!(body["scope"], "local");
     assert_eq!(body["totals"]["galaxies"], 2);
@@ -634,6 +550,9 @@ async fn ensemble_aggregates_workers_and_molecules_per_galaxy() {
     assert_eq!(running["sample"][0]["galaxy"], "cosmon");
 }
 
+/// Red proof (2026-08-06): ignoring the `galaxies=` allow-list turns
+/// this red on `names == ["cosmon", "mailroom"]` (workshop appears);
+/// ignoring `statuses=` turns it red on `groups.len() == 1`.
 #[tokio::test]
 async fn ensemble_allowlist_and_status_filter() {
     let tmp = TempDir::new().expect("tempdir");
@@ -659,19 +578,11 @@ async fn ensemble_allowlist_and_status_filter() {
             "2026-04-22T11:00:00Z",
         );
     }
-    let addr = spawn_server_with(|s| s.with_galaxies_root(tmp.path().to_path_buf())).await;
-    let body: serde_json::Value = client()
-        .get(format!(
-            "http://{addr}/ensemble?galaxies=cosmon,mailroom&statuses=pending"
-        ))
-        .send()
+    let body = api_with(|s| s.with_galaxies_root(tmp.path().to_path_buf()))
+        .get("/ensemble?galaxies=cosmon,mailroom&statuses=pending")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     let names: Vec<&str> = body["galaxies_scanned"]
         .as_array()
         .unwrap()
@@ -686,6 +597,8 @@ async fn ensemble_allowlist_and_status_filter() {
     }
 }
 
+/// Red proof (2026-08-06): ignoring `scale=city` so the handler renders
+/// the building view turns this red on `text.contains("CITY VIEW")`.
 #[tokio::test]
 async fn peek_returns_monospace_text_at_city_scale() {
     let tmp = TempDir::new().expect("tempdir");
@@ -710,17 +623,11 @@ async fn peek_returns_monospace_text_at_city_scale() {
     );
     std::fs::create_dir_all(tmp.path().join("mailroom/.cosmon")).unwrap();
 
-    let addr = spawn_server_with(|s| s.with_galaxies_root(tmp.path().to_path_buf())).await;
-    let body: serde_json::Value = client()
-        .get(format!("http://{addr}/peek?scale=city"))
-        .send()
+    let body = api_with(|s| s.with_galaxies_root(tmp.path().to_path_buf()))
+        .get("/peek?scale=city")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     assert_eq!(body["scale"], "city");
     let text = body["text"].as_str().expect("text");
     assert!(text.contains("CITY VIEW"));
@@ -728,6 +635,9 @@ async fn peek_returns_monospace_text_at_city_scale() {
     assert!(text.contains("mailroom"));
 }
 
+/// Red proof (2026-08-06): defaulting the scale to `city` instead of
+/// `building` turns the first half red; dropping the briefing read at
+/// skin scale turns the second half red on `BRIEFING.md`.
 #[tokio::test]
 async fn peek_building_default_and_skin_focus() {
     let tmp = TempDir::new().expect("tempdir");
@@ -744,35 +654,21 @@ async fn peek_building_default_and_skin_focus() {
     let mol_dir = cosmon_state.join("fleets/default/molecules/task-running");
     std::fs::write(mol_dir.join("briefing.md"), "## step 1\n\nDo the thing.\n").unwrap();
 
-    let addr = spawn_server_with(|s| s.with_galaxies_root(tmp.path().to_path_buf())).await;
+    let api = api_with(|s| s.with_galaxies_root(tmp.path().to_path_buf()));
 
     // default building scale
-    let building: serde_json::Value = client()
-        .get(format!("http://{addr}/peek"))
-        .send()
-        .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let building = api.get("/peek").await.ok().json();
     assert_eq!(building["scale"], "building");
     let text = building["text"].as_str().expect("text");
     assert!(text.contains("▸ cosmon"));
     assert!(text.contains("task-running"));
 
     // skin scale + focus
-    let skin: serde_json::Value = client()
-        .get(format!("http://{addr}/peek?scale=skin&focus=task-running"))
-        .send()
+    let skin = api
+        .get("/peek?scale=skin&focus=task-running")
         .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+        .ok()
+        .json();
     assert_eq!(skin["scale"], "skin");
     let text = skin["text"].as_str().expect("text");
     assert!(text.contains("task-running"));
@@ -780,18 +676,15 @@ async fn peek_building_default_and_skin_focus() {
     assert!(text.contains("Do the thing"));
 }
 
+/// Red proof (2026-08-06): dropping the `seal:` line from the sealed
+/// session file turns this red on "file not sealed"; writing only the
+/// last note turns it red on "one".
 #[tokio::test]
 async fn e2e_session_survives_to_disk() {
     let tmp = TempDir::new().expect("tempdir");
-    let addr = spawn_server(tmp.path()).await;
-    let c = client();
+    let api = api(tmp.path());
 
-    c.post(format!("http://{addr}/session/start"))
-        .send()
-        .await
-        .expect("start")
-        .error_for_status()
-        .expect("200");
+    api.post_empty("/session/start").await.ok();
 
     for (text, tag) in [
         ("one", None),
@@ -802,25 +695,10 @@ async fn e2e_session_survives_to_disk() {
         if let Some(t) = tag {
             body["tag"] = serde_json::Value::String(t.into());
         }
-        c.post(format!("http://{addr}/session/note"))
-            .json(&body)
-            .send()
-            .await
-            .expect("note")
-            .error_for_status()
-            .expect("200");
+        api.post_json("/session/note", &body).await.ok();
     }
 
-    let end: serde_json::Value = c
-        .post(format!("http://{addr}/session/end"))
-        .send()
-        .await
-        .expect("end")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let end = api.post_empty("/session/end").await.ok().json();
     assert_eq!(end["note_count"].as_u64(), Some(3));
 
     // File on disk is sealed and carries the three notes.
@@ -843,6 +721,10 @@ async fn e2e_session_survives_to_disk() {
 
 // --- /molecules/{id}/{tackle,tag} ----------------------------------------
 
+/// Red proof (2026-08-06): making the tag handler a no-op that still
+/// answers `ok` turns this red on the re-read through `/inbox` —
+/// `temp:hot` is absent — which is why the assertion is on the mutated
+/// state and not on the response body.
 #[tokio::test]
 async fn tag_molecule_adds_and_removes_tags() {
     let tmp = TempDir::new().expect("tempdir");
@@ -857,40 +739,27 @@ async fn tag_molecule_adds_and_removes_tags() {
         "2026-04-23T10:00:00Z",
     );
 
-    let addr = spawn_server(&state_dir).await;
-    let resp = client()
-        .post(format!("http://{addr}/molecules/task-20260423-aaaa/tag"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"add":["temp:hot"],"remove":["temp:warm"]}"#)
-        .send()
-        .await
-        .expect("send");
-    if !resp.status().is_success() {
-        let code = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        panic!("unexpected {code}: {body}");
-    }
-    let body: serde_json::Value = resp.json().await.expect("json");
+    let api = api(&state_dir);
+    let resp = api
+        .post_raw(
+            "/molecules/task-20260423-aaaa/tag",
+            "application/json",
+            r#"{"add":["temp:hot"],"remove":["temp:warm"]}"#,
+        )
+        .await;
+    let body = resp.ok().json();
     assert_eq!(body["ok"], serde_json::Value::Bool(true));
     assert_eq!(body["id"], "task-20260423-aaaa");
 
     // Re-read via /inbox to verify state.json was mutated.
-    let inbox: serde_json::Value = client()
-        .get(format!("http://{addr}/inbox?status=all"))
-        .send()
-        .await
-        .expect("send")
-        .error_for_status()
-        .expect("200")
-        .json()
-        .await
-        .expect("json");
+    let inbox = api.get("/inbox?status=all").await.ok().json();
     let mol = inbox["molecules"]
         .as_array()
         .unwrap()
         .iter()
         .find(|m| m["id"] == "task-20260423-aaaa")
-        .expect("molecule present");
+        .expect("molecule present")
+        .clone();
     let tags: Vec<&str> = mol["tags"]
         .as_array()
         .unwrap()
@@ -904,6 +773,24 @@ async fn tag_molecule_adds_and_removes_tags() {
     );
 }
 
+/// An empty `{"add":[],"remove":[]}` is a `400`.
+///
+/// # The id here is load-bearing
+///
+/// This test used the id `task-tag-empty`, which `MoleculeId::new`
+/// rejects outright — `tag` is not a `YYYYMMDD` date. So it was green
+/// on an *id* validation error and would have stayed green with the
+/// empty-payload guard deleted entirely. Found on 2026-08-06 by trying
+/// to produce its red proof and failing to; the assertion's message
+/// then read `invalid molecule id "task-tag-empty"`, which is not the
+/// refusal the test is named after. A well-formed id is what makes the
+/// empty-payload branch the one under test.
+///
+/// Red proof (2026-08-06): with the well-formed id, deleting the
+/// `req.add.is_empty() && req.remove.is_empty()` guard *and* remapping
+/// `TagError::EmptyRequest` to `500` turns this red. Deleting only the
+/// handler-side guard leaves it green, because `cosmon_state::ops::tag`
+/// catches the same case — that is defence in depth, and worth knowing.
 #[tokio::test]
 async fn tag_molecule_rejects_empty_payload() {
     let tmp = TempDir::new().expect("tempdir");
@@ -911,26 +798,102 @@ async fn tag_molecule_rejects_empty_payload() {
     write_molecule(
         &state_dir,
         "default",
-        "task-tag-empty",
+        "task-20260423-bbbb",
         "pending",
         "none",
         &[],
         "2026-04-23T10:00:00Z",
     );
 
-    let addr = spawn_server(&state_dir).await;
-    let resp = client()
-        .post(format!("http://{addr}/molecules/task-tag-empty/tag"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"add":[],"remove":[]}"#)
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    let resp = api(&state_dir)
+        .post_raw(
+            "/molecules/task-20260423-bbbb/tag",
+            "application/json",
+            r#"{"add":[],"remove":[]}"#,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST, "{}", resp.text());
+    assert!(
+        resp.json()["error"].as_str().unwrap_or("").contains("add"),
+        "the refusal must be about the empty payload, not about the id: {}",
+        resp.text()
+    );
+}
+
+/// A dangerous id and a flag-shaped tag are each a `400`.
+///
+/// # The second half used to prove nothing
+///
+/// It posted `{"add":["--force"]}` to `/molecules/task-safe/tag` and
+/// asserted `400`. It got one — for the id: `task-safe` is not a legal
+/// `MoleculeId` (`safe` is not a `YYYYMMDD` date), so the request never
+/// reached the tag check at all. The assertion would have held with
+/// every tag guard removed. Found on 2026-08-06 while trying to produce
+/// its red proof. A well-formed id is what puts the tag guard on the
+/// path, and the error message is now asserted so the two refusals
+/// cannot be confused again.
+///
+/// Red proof (2026-08-06): first half — bypassing *both*
+/// `validate_molecule_id` and `MoleculeId::new` turns it red (bypassing
+/// only the first leaves it green; the two are defence in depth).
+/// Second half — removing the leading-dash check in `validate_tag`
+/// *and* making `Tag::new` receive a safe literal turns it red.
+#[tokio::test]
+async fn tag_molecule_rejects_dangerous_ids_and_tags() {
+    let tmp = TempDir::new().expect("tempdir");
+    let state_dir = tmp.path().to_path_buf();
+    write_molecule(
+        &state_dir,
+        "default",
+        "task-20260423-cccc",
+        "pending",
+        "safe",
+        &[],
+        "2026-04-23T10:00:00Z",
+    );
+
+    let api = api(&state_dir);
+
+    // Shell metachar in the id segment — 400.
+    let resp = api
+        .post_raw(
+            "/molecules/task;rm/tag",
+            "application/json",
+            r#"{"add":["temp:hot"]}"#,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert!(
+        resp.json()["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("molecule id"),
+        "the refusal must name the id: {}",
+        resp.text()
+    );
+
+    // Tag that looks like a CLI flag, on an id that is otherwise fine —
+    // so the only thing left to refuse is the tag.
+    let resp = api
+        .post_raw(
+            "/molecules/task-20260423-cccc/tag",
+            "application/json",
+            r#"{"add":["--force"]}"#,
+        )
+        .await;
+    assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+    assert!(
+        resp.json()["error"].as_str().unwrap_or("").contains("tag"),
+        "the refusal must be about the tag, not about the id: {}",
+        resp.text()
+    );
 }
 
 // --- T1 instrumentation -------------------------------------------------
 
+/// Red proof (2026-08-06): reverting `/molecules/{id}/tag` to a `cs tag`
+/// shell-out turns this red twice over — on the `InProcessStateWrite`
+/// assertion and on the `any_subprocess_tag` guard.
 #[tokio::test]
 async fn instrumentation_emits_one_event_per_call_with_correct_mode() {
     use cosmon_api::instrumentation::{read_ndjson, InvocationMode};
@@ -940,7 +903,7 @@ async fn instrumentation_emits_one_event_per_call_with_correct_mode() {
     // tree on its way to the worker's worktree), and so the `/ensemble`
     // cluster aggregator scans an isolated (empty) galaxies root rather
     // than the live `$HOME/galaxies` — otherwise on a machine with a
-    // large fleet the directory walk exceeds the client's 10s timeout.
+    // large fleet the directory walk is unboundedly slow.
     let state_tmp = TempDir::new().expect("tempdir");
     let sink_tmp = TempDir::new().expect("tempdir");
     let galaxies_tmp = TempDir::new().expect("tempdir");
@@ -959,54 +922,32 @@ async fn instrumentation_emits_one_event_per_call_with_correct_mode() {
     let path_for_state = ndjson_path.clone();
     let state_dir_for_state = state_dir.clone();
     let galaxies_root_for_state = galaxies_tmp.path().to_path_buf();
-    let addr = spawn_server_with(move |s| {
+    let api = api_with(move |s| {
         s.with_state_dir(state_dir_for_state)
             .with_galaxies_root(galaxies_root_for_state)
             .with_instrumentation_path(path_for_state)
-    })
-    .await;
-    let c = client();
+    });
 
     // Hit four routes covering the three modes:
     //   /healthz                   → SubprocessShellOut (--version)
     //   /inbox                     → InProcessStateRead  (<scan-inbox>)
     //   /ensemble                  → InProcessStateRead  (<scan-ensemble>)
     //   /molecules/{id}/tag        → InProcessStateWrite (tag) — T3
-    c.get(format!("http://{addr}/healthz"))
-        .send()
-        .await
-        .expect("healthz")
-        .error_for_status()
-        .expect("200");
-    c.get(format!("http://{addr}/inbox"))
-        .send()
-        .await
-        .expect("inbox")
-        .error_for_status()
-        .expect("200");
-    c.get(format!("http://{addr}/ensemble"))
-        .send()
-        .await
-        .expect("ensemble")
-        .error_for_status()
-        .expect("200");
-    let tag_resp = c
-        .post(format!("http://{addr}/molecules/task-20260503-aaaa/tag"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"add":["temp:hot"]}"#)
-        .send()
-        .await
-        .expect("tag");
-    if !tag_resp.status().is_success() {
-        let code = tag_resp.status();
-        let body = tag_resp.text().await.unwrap_or_default();
-        panic!("tag {code}: {body}");
-    }
+    api.get("/healthz").await.ok();
+    api.get("/inbox").await.ok();
+    api.get("/ensemble").await.ok();
+    api.post_raw(
+        "/molecules/task-20260503-aaaa/tag",
+        "application/json",
+        r#"{"add":["temp:hot"]}"#,
+    )
+    .await
+    .ok();
 
-    // Give the writer a brief moment to flush — append is sync but the
-    // request handler returns to the runtime before we read here.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-
+    // The appends are synchronous inside each handler, and `oneshot`
+    // does not return until the handler has. Unlike the socket harness
+    // this replaced, there is no runtime handoff to wait out — the old
+    // 50 ms sleep here was papering over a race the port does not have.
     let events = read_ndjson(&ndjson_path).expect("read ndjson");
     assert!(
         events.len() >= 4,
@@ -1090,6 +1031,10 @@ async fn instrumentation_emits_one_event_per_call_with_correct_mode() {
 // the observe route, where the pre-extraction variant emitted one set per
 // hit. We assert the proxy here — `mode = InProcessStateRead` ↔ "no
 // subprocess spawned" — and document the strace count in `before-after.md`.
+//
+/// Red proof (2026-08-06): reverting the observe route to a `cs observe`
+/// shell-out turns this red on "observe route still shells out"; removing
+/// the `AuthzDecisionEvaluated` emission turns it red on the authz lookup.
 #[tokio::test]
 async fn observe_molecule_emits_in_process_state_read_event() {
     use cosmon_api::instrumentation::{read_ndjson, InvocationMode};
@@ -1110,30 +1055,17 @@ async fn observe_molecule_emits_in_process_state_read_event() {
 
     let path_for_state = ndjson_path.clone();
     let state_dir_for_state = state_dir.clone();
-    let addr = spawn_server_with(move |s| {
+    let api = api_with(move |s| {
         s.with_state_dir(state_dir_for_state)
             .with_instrumentation_path(path_for_state)
-    })
-    .await;
+    });
 
     // Hit the observe route.
-    let resp = client()
-        .get(format!("http://{addr}/molecules/task-20260503-bbea"))
-        .send()
-        .await
-        .expect("get observe");
-    assert!(
-        resp.status().is_success(),
-        "observe returned {}",
-        resp.status()
-    );
-    let body: serde_json::Value = resp.json().await.expect("json");
+    let resp = api.get("/molecules/task-20260503-bbea").await;
+    let body = resp.ok().json();
     assert_eq!(body["id"], "task-20260503-bbea");
     assert_eq!(body["status"], "running");
     assert_eq!(body["formula"], "task-work");
-
-    // Give the writer a brief moment to flush.
-    tokio::time::sleep(Duration::from_millis(50)).await;
 
     let events = read_ndjson(&ndjson_path).expect("read ndjson");
 
@@ -1183,33 +1115,4 @@ async fn observe_molecule_emits_in_process_state_read_event() {
     assert_eq!(observe_authz.subject_kind, "operator");
     assert_eq!(observe_authz.decision, AuthzDecision::Allow);
     assert!(observe_authz.scope_required.is_none());
-}
-
-#[tokio::test]
-async fn tag_molecule_rejects_dangerous_ids_and_tags() {
-    let tmp = TempDir::new().expect("tempdir");
-    let state_dir = tmp.path().to_path_buf();
-    std::fs::create_dir_all(&state_dir).unwrap();
-
-    let addr = spawn_server(&state_dir).await;
-
-    // Shell metachar in the id segment — 400.
-    let resp = client()
-        .post(format!("http://{addr}/molecules/task;rm/tag"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"add":["temp:hot"]}"#)
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-
-    // Tag that looks like a CLI flag — 400.
-    let resp = client()
-        .post(format!("http://{addr}/molecules/task-safe/tag"))
-        .header("Content-Type", "application/json")
-        .body(r#"{"add":["--force"]}"#)
-        .send()
-        .await
-        .expect("send");
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
 }
