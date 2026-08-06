@@ -53,7 +53,7 @@ use chrono::{DateTime, Utc};
 use cosmon_core::cas::{CasStore, ContentHash};
 use cosmon_core::id::{MoleculeId, SessionId};
 use cosmon_core::operator_attestation::{
-    GrantChallenge, OperatorAttestation, OperatorGestureVerifier, OperatorKeyId,
+    AttestationError, GrantChallenge, OperatorAttestation, OperatorGestureVerifier, OperatorKeyId,
 };
 use cosmon_core::pilot_lease::{
     LeaseDecision, LeaseEpoch, LeaseRequest, PilotLease, RefusalReason, RequestId,
@@ -67,6 +67,7 @@ use cosmon_filestore::{
 };
 use cosmon_notary::minisign::MinisignSignature;
 
+use super::operator_signature_relay;
 use super::Context;
 
 /// Top-level arguments for `cs presence`.
@@ -176,6 +177,17 @@ pub struct LeaseGrantArgs {
     /// grant is refused: `--by` names an operator, it does not attest one.
     #[arg(long, value_name = "PATH")]
     pub attestation: Option<PathBuf>,
+    /// Path to the operator's minisign **secret** key: compute the challenge,
+    /// print it for reading, and relay the signing to `minisign(1)`, which
+    /// asks for the passphrase on this terminal. One command instead of
+    /// three, with no `.minisig` left behind — and still no signer inside
+    /// cosmon.
+    #[arg(
+        long = "sign-with",
+        value_name = "PATH",
+        conflicts_with = "attestation"
+    )]
+    pub sign_with: Option<PathBuf>,
 }
 
 /// Arguments for `cs presence lease check`.
@@ -1177,7 +1189,16 @@ pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Resul
         args.ttl,
     )?;
 
-    let attestation = read_attestation(args.attestation.as_deref(), &challenge)?;
+    let attestation = match &args.sign_with {
+        // One command: cosmon composes the bytes, shows them, and relays the
+        // signing to the operator's own minisign. See
+        // `crate::cmd::operator_signature_relay` for why that is not a signer.
+        Some(secret_key) => {
+            let text = operator_signature_relay::sign_challenge(&challenge, secret_key)?;
+            parse_attestation(&text, "the signature minisign produced")?
+        }
+        None => read_attestation(args.attestation.as_deref(), &challenge)?,
+    };
 
     // Checked here as well as on every read. The read-time check in
     // `PilotLeaseStore::grants` is the mechanism — it is what refuses a line
@@ -1187,13 +1208,7 @@ pub(crate) fn grant_lease(ctx: &Context, args: &LeaseGrantArgs) -> anyhow::Resul
     MinisignOperatorVerifier::resolve_for_state_root(state_root(ctx))?
         .ok_or_else(|| anyhow::anyhow!("no operator public key pinned"))?
         .verify(&challenge, &attestation)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "the attestation does not authorise this transfer: {e}\n\
-                 the challenge cosmon computed was:\n{challenge}\n\
-                 pinned operator key: {trusted}"
-            )
-        })?;
+        .map_err(|e| refusal_an_operator_can_act_on(&e, &challenge, trusted, args))?;
 
     let mut lease = PilotLease::new(
         args.mission.clone(),
@@ -1236,11 +1251,19 @@ fn read_attestation(
              The gesture is a signature, not a flag — `--by` is a label an agent can \
              type as easily as you can.\n\
              \n\
-             Sign the transfer, then pass the signature:\n\
+             In one command, with your key:\n\
+             \n  \
+             cs sessions takeover grant --mission {mission} --to {holder} --by {by} \
+             --sign-with ~/.config/cosmon/minisign.key\n\
+             \n\
+             It prints the transfer, then minisign asks for your passphrase — the \
+             part no agent has.\n\
+             \n\
+             Or, when the key lives on another machine, in three:\n\
              \n  \
              cs sessions takeover challenge --mission {mission} --to {holder} \
              --by {by} > takeover.txt\n  \
-             minisign -Sm takeover.txt          # your passphrase — the part no agent has\n  \
+             minisign -Sm takeover.txt\n  \
              cs sessions takeover grant --mission {mission} --to {holder} --by {by} \
              --attestation takeover.txt.minisig",
             mission = challenge.mission_id.as_str(),
@@ -1259,8 +1282,16 @@ fn read_attestation(
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", path.display()))?
     };
 
-    let parsed = MinisignSignature::parse(&text)
-        .map_err(|e| anyhow::anyhow!("{} is not a minisign signature: {e}", path.display()))?;
+    parse_attestation(&text, &path.display().to_string())
+}
+
+/// Parse minisig text into the attestation a grant line carries.
+///
+/// `source` names where the bytes came from, so a parse failure points at the
+/// file the operator passed rather than at "a signature".
+fn parse_attestation(text: &str, source: &str) -> anyhow::Result<OperatorAttestation> {
+    let parsed = MinisignSignature::parse(text)
+        .map_err(|e| anyhow::anyhow!("{source} is not a minisign signature: {e}"))?;
     Ok(OperatorAttestation {
         key_id: OperatorKeyId::from_bytes(parsed.key_id),
         signature: parsed.signature_line(),
@@ -1268,6 +1299,58 @@ fn read_attestation(
         trusted_comment: parsed.trusted_comment.clone(),
         untrusted_comment: parsed.untrusted_comment.clone(),
     })
+}
+
+/// Turn a verification failure into a refusal that names its cause.
+///
+/// Two of these causes were measured in the field and both used to read as
+/// "the attestation does not authorise this transfer", which tells an operator
+/// nothing about what to do next:
+///
+/// - **`--by` omitted** (M8 friction F12). `granted_by` is *inside* the signed
+///   bytes, so a challenge signed as `emmanuel` and a grant that defaulted to
+///   `$USER` are two different transfers. The signature is perfectly valid and
+///   covers something else. The refusal now says so, and says which name to
+///   pass.
+/// - **the operator rotated their key.** The generic wording made a rotation
+///   look like a corrupt file; it now names both key ids and where the pinned
+///   one is read from, which is the file to update.
+fn refusal_an_operator_can_act_on(
+    error: &AttestationError,
+    challenge: &GrantChallenge,
+    trusted: OperatorKeyId,
+    args: &LeaseGrantArgs,
+) -> anyhow::Error {
+    let head = format!(
+        "the attestation does not authorise this transfer: {error}\n\
+         the challenge cosmon computed was:\n{challenge}\n\
+         pinned operator key: {trusted}"
+    );
+    match error {
+        AttestationError::UnknownKey { presented, .. } => anyhow::anyhow!(
+            "{head}\n\
+             \n\
+             This signature is by {presented}, a key this galaxy does not \
+             recognise — it trusts {trusted}. Either you signed with a key you \
+             have since rotated away from, or the pinned trust root is stale. \
+             The pinned key is read from ${TAKEOVER_PUBKEY_ENV} when set, else \
+             `<galaxy>/{TAKEOVER_PUBKEY_REL}`; `cs sessions takeover trust` \
+             prints which. Rotating means committing the new `.pub` there, so \
+             the change is a diff somebody reads."
+        ),
+        AttestationError::DoesNotCoverTransfer if args.granted_by.is_none() => anyhow::anyhow!(
+            "{head}\n\
+             \n\
+             You did not pass `--by`, so `granted_by={by}` above was filled in \
+             from $USER. That line is inside the signed bytes: if the challenge \
+             you signed named a different operator, this signature covers a \
+             different transfer and can never match. Re-run the grant with \
+             `--by <the name you signed>` — or use `--sign-with <key>`, which \
+             signs the bytes it just printed and cannot disagree with itself.",
+            by = challenge.granted_by,
+        ),
+        _ => anyhow::anyhow!("{head}"),
+    }
 }
 
 /// The guard, exposed as a verb. Exits 0 when the gesture may proceed and 1
@@ -2275,6 +2358,7 @@ mod tests {
                 ttl: None,
                 granted_by: Some("test-operator".to_owned()),
                 attestation: Some(attestation),
+                sign_with: None,
             },
         )
         .unwrap();
@@ -2450,6 +2534,7 @@ mod tests {
                 ttl: None,
                 granted_by: Some("test-operator".to_owned()),
                 attestation: Some(attestation),
+                sign_with: None,
             },
         )
         .unwrap();
@@ -2474,6 +2559,7 @@ mod tests {
                 ttl: None,
                 granted_by: None,
                 attestation: None,
+                sign_with: None,
             },
         )
         .unwrap_err();
@@ -2493,6 +2579,7 @@ mod tests {
                 ttl: None,
                 granted_by: None,
                 attestation: None,
+                sign_with: None,
             },
         )
         .unwrap_err();
@@ -2572,6 +2659,7 @@ mod tests {
                 ttl: Some(0),
                 granted_by: Some("test-operator".to_owned()),
                 attestation: Some(attestation),
+                sign_with: None,
             },
         )
         .unwrap();

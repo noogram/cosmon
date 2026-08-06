@@ -454,6 +454,16 @@ pub struct TakeoverGrantArgs {
     /// for stdin. Required: `--by` is a label, the signature is the gesture.
     #[arg(long, value_name = "PATH")]
     pub attestation: Option<PathBuf>,
+    /// The operator's minisign **secret** key. Folds challenge, signature and
+    /// grant into this one command: the transfer is printed for you to read,
+    /// `minisign(1)` asks for your passphrase, and no `.minisig` is left
+    /// behind. cosmon still owns no signer — it relays to yours.
+    #[arg(
+        long = "sign-with",
+        value_name = "PATH",
+        conflicts_with = "attestation"
+    )]
+    pub sign_with: Option<PathBuf>,
 }
 
 /// Arguments for `cs sessions takeover challenge`.
@@ -1930,6 +1940,7 @@ fn run_takeover_grant(ctx: &Context, args: &TakeoverGrantArgs) -> anyhow::Result
             ttl: args.ttl,
             granted_by: args.granted_by.clone(),
             attestation: args.attestation.clone(),
+            sign_with: args.sign_with.clone(),
         },
     )?;
 

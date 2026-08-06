@@ -212,10 +212,18 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              at the next epoch; 'lease check' answers the guard's question and \
              exits 0 or 1. There is no takeover verb and no quota trigger — the \
              transfer is an operator decision by construction, and since ADR-171 \
-             it is an operator *signature*: 'cs sessions takeover challenge' \
-             prints the bytes, the operator signs them out of band with minisign, \
-             and 'grant --attestation <sig>' is the only way to seat anybody. \
-             '--by' is a label an agent can type; the signature is not. Every \
+             it is an operator *signature*. In one command: 'cs sessions takeover \
+             grant --mission M --to S --by N --sign-with <secret-key>' prints the \
+             transfer for you to read, then hands the signing to minisign(1), \
+             which asks for your passphrase on the terminal — cosmon never sees \
+             it, owns no signer, and leaves no '.minisig' behind. When the key \
+             lives elsewhere, the three-step form still works: 'takeover \
+             challenge' prints the bytes, minisign signs them out of band, and \
+             'grant --attestation <sig>' seats the pilot. '--by' is a label an \
+             agent can type; the signature is not — and because '--by' is inside \
+             the signed bytes, omitting it on the grant makes the signature cover \
+             a different transfer, which the refusal now says in those words. \
+             Every \
              ledger line is re-checked when it is read against the key pinned at \
              '.cosmon/takeover.pub' ('cs sessions takeover trust' reports it), so \
              a grant appended by hand confers nothing. The ledger is two \

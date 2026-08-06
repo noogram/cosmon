@@ -407,6 +407,231 @@ fn printing_a_challenge_confers_nothing() {
     assert!(!w.grants_path().exists());
 }
 
+// ── `--sign-with`: one command, and still not a stamp ──────────────────────
+//
+// The operator's verdict of 2026-08-05 was that three commands, a temp file
+// and a `--by` typed twice is laboratory ergonomics. `--sign-with` folds them
+// into one. These tests exist because folding a *relay* into the command must
+// not fold a *signer* into it: the claim under test is unchanged — an agent
+// holding the binary, the ledger, the pinned key and now the `--sign-with`
+// flag still cannot produce authority without the passphrase.
+
+/// Stand a script in for `minisign(1)`. `body` receives the challenge path as
+/// `$MFILE` and is what decides whether a signature appears.
+fn stub_signer(w: &World, name: &str, body: &str) -> PathBuf {
+    let path = w.repo.join(name);
+    std::fs::write(
+        &path,
+        format!("#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = \"-m\" ]; then MFILE=\"$2\"; fi\n  shift\ndone\n{body}\n"),
+    )
+    .expect("write stub signer");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    }
+    path
+}
+
+/// `cs … takeover grant --sign-with <key>`, with `signer` standing in for the
+/// operator's minisign.
+fn grant_signing_with(w: &World, holder: &str, by: &str, signer: &Path, key: &Path) -> Output {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_cs"));
+    cmd.current_dir(&w.repo)
+        .env_remove("COSMON_PARENT_MOL_ID")
+        .env_remove("COSMON_MOL_DIR")
+        .env("COSMON_TAKEOVER_PUBKEY", &w.pubkey)
+        .env("COSMON_MINISIGN_BIN", signer)
+        .arg("--config")
+        .arg(&w.state)
+        .args([
+            "sessions",
+            "takeover",
+            "grant",
+            "--mission",
+            MISSION,
+            "--to",
+            holder,
+            "--by",
+            by,
+            "--sign-with",
+        ])
+        .arg(key);
+    cmd.output().expect("spawn cs")
+}
+
+/// The control for this half of the file: when the operator's signer does
+/// answer the prompt, one command seats the pilot.
+#[test]
+fn one_command_seats_the_pilot_when_the_operator_signs() {
+    let w = world();
+    // What the real minisign would produce, precomputed because the challenge
+    // is a pure function of the ask (`printing_a_challenge_confers_nothing`).
+    let signed = w.repo.join("operator-answered.minisig");
+    std::fs::write(
+        &signed,
+        w.operator
+            .sign(w.challenge("claude-primary", "emmanuel").as_bytes()),
+    )
+    .expect("write signature");
+    let signer = stub_signer(
+        &w,
+        "minisign-ok.sh",
+        &format!("cp {} \"$MFILE.minisig\"", signed.display()),
+    );
+    let key = w.repo.join("operator.key");
+    std::fs::write(&key, "an opaque secret only minisign opens\n").expect("write key");
+
+    let out = grant_signing_with(&w, "claude-primary", "emmanuel", &signer, &key);
+    assert!(
+        out.status.success(),
+        "the one-command form must seat the pilot:\n{}\n{}",
+        text(&out.stdout),
+        text(&out.stderr),
+    );
+    assert!(w.seats("claude-primary", "1"));
+
+    // The transfer is shown before the passphrase is asked for: signing blind
+    // is not a gesture. Stderr, so `--json` stays parseable.
+    let shown = text(&out.stderr);
+    assert!(
+        shown.contains("cosmon-takeover-grant-v1")
+            && shown.contains("holder=claude-primary")
+            && shown.contains("epoch=1"),
+        "the operator must be shown what they are authorising:\n{shown}"
+    );
+
+    // And nothing is left to clean up: the operator asked for one command.
+    let leftovers: Vec<_> = std::fs::read_dir(&w.repo)
+        .expect("read repo")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.ends_with(".minisig") && n != "operator-answered.minisig")
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "--sign-with must leave no signature file behind: {leftovers:?}"
+    );
+}
+
+/// **The falsifier.** An agent has the binary, the ledger, the pinned key and
+/// `--sign-with`. What it does not have is the passphrase, so the signer it
+/// invokes refuses — and the seat must be exactly as empty as before.
+#[test]
+fn sign_with_confers_nothing_without_the_passphrase() {
+    let w = world();
+    // A minisign that was asked for a passphrase and did not get a usable one.
+    let signer = stub_signer(
+        &w,
+        "minisign-refuses.sh",
+        "echo 'Password: ' >&2\necho 'Wrong password for that key' >&2\nexit 1",
+    );
+    let key = w.repo.join("operator.key");
+    std::fs::write(&key, "an opaque secret only minisign opens\n").expect("write key");
+
+    let out = grant_signing_with(&w, BENEFICIARY, "emmanuel", &signer, &key);
+    assert!(
+        !out.status.success(),
+        "a signer that did not sign must not seat anybody:\n{}",
+        text(&out.stdout),
+    );
+    let why = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        why.contains("did not sign"),
+        "the refusal must name the unsigned attempt:\n{why}"
+    );
+    assert!(!w.seats(BENEFICIARY, "1"));
+    assert!(
+        !w.grants_path().exists(),
+        "a grant nobody signed must leave no line behind"
+    );
+}
+
+/// The other half of the same falsifier: a signer that *runs* but holds the
+/// wrong secret. Being able to invoke a signer is not being able to authorise.
+#[test]
+fn sign_with_confers_nothing_under_a_key_this_galaxy_does_not_trust() {
+    let w = world();
+    let impostor = Operator::from_seed(9);
+    let signed = w.repo.join("impostor.minisig");
+    std::fs::write(
+        &signed,
+        impostor.sign(w.challenge(BENEFICIARY, "emmanuel").as_bytes()),
+    )
+    .expect("write signature");
+    let signer = stub_signer(
+        &w,
+        "minisign-impostor.sh",
+        &format!("cp {} \"$MFILE.minisig\"", signed.display()),
+    );
+    let key = w.repo.join("impostor.key");
+    std::fs::write(&key, "the wrong secret\n").expect("write key");
+
+    let out = grant_signing_with(&w, BENEFICIARY, "emmanuel", &signer, &key);
+    assert!(!out.status.success(), "an untrusted key must seat nobody");
+    let why = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    // A rotation must read as a rotation and not as a corrupt file: both key
+    // ids, and where the pinned one is read from.
+    assert!(
+        why.contains("does not recognise") && why.contains(&w.operator.key_id_display()),
+        "the refusal must name the key this galaxy expects:\n{why}"
+    );
+    assert!(!w.seats(BENEFICIARY, "1"));
+}
+
+/// M8 friction F12: `--by` omitted made `granted_by` default to `$USER`, so a
+/// challenge signed as someone else covered a different transfer and the grant
+/// was refused with no hint as to why. The refusal must now name the cause.
+#[test]
+fn a_grant_missing_by_is_refused_by_a_message_that_names_by() {
+    let w = world();
+    // Signed for the operator's real name…
+    let sig = w.write_sig(
+        "signed-as-emmanuel.minisig",
+        &w.operator
+            .sign(w.challenge("claude-primary", "emmanuel").as_bytes()),
+    );
+    // …but granted without `--by`, so cosmon fills `$USER` in instead.
+    let out = w.cs(&[
+        "takeover",
+        "grant",
+        "--mission",
+        MISSION,
+        "--to",
+        "claude-primary",
+        "--attestation",
+        &sig.display().to_string(),
+    ]);
+    assert!(!out.status.success(), "the signature covers another name");
+    let why = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    assert!(
+        why.contains("--by") && why.contains("$USER"),
+        "the refusal must name the omitted flag and where the name came from:\n{why}"
+    );
+    assert!(!w.seats("claude-primary", "1"));
+}
+
+/// The passphrase must never enter cosmon's address space. Structural, like
+/// the no-signing-path test below: capturing the child's streams — to prettify
+/// its prompt, to log it — is the change that would break the property, so it
+/// is asserted against the source rather than assumed.
+#[test]
+fn the_relay_hands_the_passphrase_prompt_straight_to_the_terminal() {
+    let relay = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/operator_signature_relay.rs");
+    let body = std::fs::read_to_string(&relay).expect("read the relay");
+    for captured in ["Stdio::piped", ".output()", "stdin(", "read_passphrase"] {
+        assert!(
+            !body.contains(captured),
+            "the relay must inherit stdio so the passphrase is between the operator \
+             and minisign; found `{captured}`"
+        );
+    }
+    assert!(
+        body.contains(".status()"),
+        "the relay is expected to run the signer with inherited stdio"
+    );
+}
+
 /// The shipped tree must contain no way to sign a takeover challenge. This is
 /// the property the whole design rests on, so it is asserted rather than
 /// trusted: a future `cs sessions takeover sign` would hand the beneficiary

@@ -209,10 +209,9 @@ and is deliberately out of scope here.
 
 ### Cost
 
-- Every transfer is now three commands instead of one, and one of them is a
-  passphrase prompt. That is the intended friction: it is what makes the
-  gesture a gesture. `cs sessions takeover challenge` exists so the operator
-  never composes the bytes by hand.
+- Every transfer is now a passphrase prompt. That is the intended friction: it
+  is what makes the gesture a gesture. It was also, for one day, three commands
+  and a temporary file — see the postscript.
 - A galaxy with no pinned key cannot transfer a seat until it pins one.
   `cs sessions takeover trust` reports which key is in force, or that none is.
 - M7 friction **F9** — the co-pilot's read-only role is requested rather than
@@ -236,3 +235,53 @@ by `crates/cosmon-cli/tests/takeover_unforgeable.rs` unless noted.
 7. `cosmon-notary::minisign` disagrees with stock `minisign` on a real
    artefact — pinned by a genuine `minisign 0.12` fixture in that module's
    tests, not by a self-generated one.
+
+---
+
+## Postscript, 2026-08-05 — `--sign-with` (`task-20260805-2b6d`)
+
+**Entry artefact.** The operator, on reading the recipe M8-bis had to write out
+line by line (`task-20260805-e77f` §6): *« la procédure me semble tout de même
+hyper compliquée »*. Three commands, a temporary file, and a `--by` that had to
+be repeated identically or the signature covered nothing (M8 friction **F12**).
+
+The friction this ADR intended is the **passphrase**. Everything else that had
+accreted around it — composing bytes into a file, remembering `.minisig`, typing
+the same operator name twice — is not friction, it is clerical work, and
+clerical work does not make a gesture more deliberate. Confusing the two is how
+"it is secure" becomes an excuse for "it is painful".
+
+So `cs sessions takeover grant … --sign-with <secret-key>` folds the three into
+one: compute the challenge, **print it** for reading, run the operator's
+`minisign(1)` as a child with the terminal attached, read back the signature,
+delete both temporary files, append the grant.
+
+**What is unchanged, and why this is not a stamp.** cosmon still contains no
+signing code — falsifier 5 above is asserted by the same test and still passes.
+`--sign-with` names a binary to run, not a capability to exercise: the secret
+key is opened by minisign, the passphrase is read by minisign from the terminal,
+and neither crosses this process. The relay inherits stdio precisely so that
+prompt stays between the human and minisign;
+`the_relay_hands_the_passphrase_prompt_straight_to_the_terminal` fails the build
+if a future change captures those streams. `$COSMON_MINISIGN_BIN` redirects to
+another signer (a wrapper, a smartcard); it cannot make cosmon the signer.
+
+Verification is untouched and still happens at the **read** of the ledger.
+`--by` is still inside the signed bytes — `--sign-with` does not exempt it, it
+makes it impossible to get wrong, because the bytes signed are the bytes just
+printed.
+
+**Two measured traps, closed.** `--by` omitted was a refusal that named nothing;
+it now says that `granted_by` came from `$USER` and that the field is inside the
+signature. A rotated key produced the generic "does not authorise this
+transfer"; it now names both key ids and the file the pinned one is read from.
+
+**Additional falsifiers**, all in `takeover_unforgeable.rs`:
+
+8. An agent that can run `--sign-with` but cannot answer the passphrase prompt
+   obtains a seat (`sign_with_confers_nothing_without_the_passphrase`).
+9. A signer that runs under a key the galaxy does not pin obtains a seat
+   (`sign_with_confers_nothing_under_a_key_this_galaxy_does_not_trust`).
+10. The relay reads the passphrase itself, rather than leaving the prompt to
+    minisign on the operator's terminal.
+11. `--sign-with` signs without showing the operator what is being authorised.
