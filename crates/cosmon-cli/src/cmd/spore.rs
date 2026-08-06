@@ -1591,6 +1591,59 @@ acceptance = "any evidence"
         );
     }
 
+    /// G2 frozen red (germ-20260802-037fc8ec): a bare relative spore reference
+    /// and an absolute reference to the same manifest must yield the same
+    /// containment decision for the ordinary run-home destination, and that
+    /// decision must be `Allowed` (`None`). Contract P5 + P10.
+    ///
+    /// The assertion target is the composed resolver
+    /// `forbidden_gate_output(node_output_dir(run_dir(..)), load_spore(ref).dir, repo_root)`
+    /// — the real archived `load_spore` plus the real core path primitives. The
+    /// oracle is the literal constant `None`; nothing under test computes the
+    /// expected value.
+    #[test]
+    fn adr161_relative_and_absolute_references_decide_containment_identically() {
+        use cosmon_core::spore::{forbidden_gate_output, node_output_dir, run_dir};
+
+        // A repository fixture: `.cosmon/state` at the root, the manifest
+        // beneath `spores/starter/` — the repro layout from task-20260724-07bc.
+        let repo = tempfile::tempdir().unwrap();
+        let repo_root = repo.path().canonicalize().unwrap();
+        let spore_dir = repo_root.join("spores").join("starter");
+        std::fs::create_dir_all(&spore_dir).unwrap();
+        std::fs::create_dir_all(repo_root.join(".cosmon").join("state")).unwrap();
+        std::fs::write(spore_dir.join("spore-starter.toml"), SPORE).unwrap();
+        std::fs::write(spore_dir.join("work.formula.toml"), FORMULA).unwrap();
+
+        // The ordinary run-home candidate every germination composes.
+        let state_root = repo_root.join(".cosmon").join("state");
+        let candidate =
+            node_output_dir(&run_dir(&state_root, "germ-adr161-fixture"), "decompose").unwrap();
+
+        // Absolute reference: the resolver hands back the manifest's parent.
+        let (_, abs_dir) = load_spore(&spore_dir.join("spore-starter.toml")).unwrap();
+        let abs_decision = forbidden_gate_output(&candidate, &abs_dir, &repo_root);
+
+        // Bare relative reference resolved from inside the spore directory —
+        // exactly `cd spores/starter && cs spore run spore-starter.toml`.
+        // (Run with --test-threads=1: the cwd is process-global.)
+        let previous = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&spore_dir).unwrap();
+        let rel = load_spore(Path::new("spore-starter.toml"));
+        std::env::set_current_dir(previous).unwrap();
+        let (_, rel_dir) = rel.unwrap();
+        let rel_decision = forbidden_gate_output(&candidate, &rel_dir, &repo_root);
+
+        // P10: the run home is an allowed destination (literal oracle).
+        assert_eq!(abs_decision, None, "absolute reference must be Allowed");
+        assert_eq!(rel_decision, None, "relative reference must be Allowed");
+        // P5: two spellings of one manifest must decide identically.
+        assert_eq!(
+            rel_decision, abs_decision,
+            "relative and absolute references must yield one decision"
+        );
+    }
+
     #[test]
     fn germinate_replays_calls_into_the_store_with_blocked_by() {
         let dir = fixture(SPORE);
