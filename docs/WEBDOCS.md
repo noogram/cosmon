@@ -53,6 +53,18 @@ file is the source of truth.
 > as `additional-js`. If you add a diagram, write a fenced ```` ```mermaid ````
 > block — `mdbook build` turns it into a `<pre class="mermaid">` the JS renders.
 
+> **Surlignage de recherche.** mdBook surligne l'atterrissage d'un résultat à
+> partir de `?highlight=<phrase>`, mot par mot et *partiellement* : sur une
+> phrase un peu longue, `over` est surligné dans `discover`, `takeover` et
+> `HAND-OVER`, et la page devient un damier — 561 `<mark>` sur
+> `/reference/tools.html` pour une seule phrase. Le seul congé prévu en amont
+> est un clic exactement sur un `<mark>`, et le paramètre reste dans l'URL,
+> donc dans le lien copié. `search-highlight-dismiss.js` (`additional-js`)
+> élargit la sortie sans forker le thème : le surlignage tient 1,2 s — le temps
+> de voir où l'on a atterri — puis disparaît au premier clic, à Échap, ou après
+> 240 px de défilement, et `?highlight=` est retiré de l'URL par
+> `history.replaceState` dès l'atterrissage.
+
 ---
 
 ## PUBLICATION GATE — read before deploying
