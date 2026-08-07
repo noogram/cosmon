@@ -21,6 +21,86 @@ this stage.
 
 ### Added
 
+- **`cs sessions` — the co-pilotage cockpit, a new top-level surface with
+  eleven verbs.** Two agents working the same mission previously had no way to
+  see each other: cosmon knew about molecules and workers, not about the
+  *provider sessions* a human and an agent actually sit in. `cs sessions` is
+  that missing layer, and it is a surface addition — no existing verb, flag or
+  output byte changes. Delivered as mission co-pilotage M1→M8 ([ADR-168](docs/adr/168-a-co-pilot-inherits-the-session-substrate-not-its-delivery-contract.md)):
+  - `discover` / `list` / `show` — enumerate the Claude and Codex sessions
+    visible on this host, and read one by its canonical
+    `<provider>:<native-session-id>` selector. Behind a `session-probe-core`
+    port with one adapter per provider, so a third provider is an adapter and
+    not a fork. Log references are content-addressed, never quoted content.
+  - `attach` / `peers` — take a seat (`copilot` or `primary`), publish this
+    session's presence, role and `follows`, and read the neighbourhood back.
+  - `send` / `inbox` — a traced mailbox between pilots. Message bodies are
+    stored content-addressed and the envelope carries the hash; an unread
+    envelope past `--expires-in` reads as `expired` rather than as a fresh
+    instruction.
+  - `checkpoint publish|stage|list|show` and `drift` — hand-over checkpoints,
+    and a **tri-valued** comparison between two pilots' views: `AGREE`,
+    `FINDING` or `INCONCLUSIVE`. The third value is the point: two pilots who
+    never looked at the same thing must not be reported as agreeing.
+  - `takeover show|trust|request|challenge|grant|…` — the **PRIMARY lease**.
+    Authority is a lease with an epoch; a gesture carries the epoch it
+    believes it holds, and anything unknown is read-only. A request confers
+    nothing by itself. The grant is an operator **signature**, not a string
+    ([ADR-171](docs/adr/171-the-operator-gesture-is-a-signature-not-a-string.md)):
+    `--sign-with <secret-key>` prints the transfer for you to read and hands
+    the signing to `minisign(1)`, which asks for your passphrase on the
+    terminal — cosmon never sees it, owns no signer, and leaves no `.minisig`
+    behind. Every ledger line is re-checked on read against the key pinned at
+    `.cosmon/takeover.pub`, so a grant appended by hand confers nothing. The
+    ledger is two append-only JSONL files under `.cosmon/state/pilot-lease/`,
+    readable with `cat` and `jq`. The guard is wired onto the lifecycle
+    gestures, and `cs done` authority is typed as an operator-sealed
+    capability ([ADR-172](docs/adr/172-done-authority-is-an-operator-sealed-capability.md)).
+  - `hook` — the bootstrap that runs **without being typed**: presence,
+    mailbox and staged checkpoints, installed as an idempotent delimited
+    block in the provider's own hook mechanism. A cockpit an operator must
+    remember to start is a cockpit nobody is sitting in.
+
+- **`cs peek --phase harvestable` — the harvest queue.** Completed molecules
+  not yet archived, i.e. still owed a `cs done`. The one slice that says what
+  is finished and still un-merged, which no other filter isolated.
+
+- **The galaxy declares its target repository**
+  ([ADR-170](docs/adr/170-the-galaxy-declares-its-repository.md)). Machinery
+  that needs to know *which repository this galaxy is about* was inferring it
+  from ambient git remotes; it is now a declaration in the project config.
+
+- **Algorithmic provenance rides the realized-model observation**
+  ([ADR-169](docs/adr/169-algorithmic-provenance-rides-the-realized-model-observation.md)).
+  Every conclusion grows a provenance field, and the journal line is named as
+  its machine surface — so "which model actually answered" is a recorded fact
+  rather than a re-derivation from the pin that was requested.
+
+- **Each briefing is signed with a `UserPromptSubmit` receipt, and every
+  keystroke injection names its writer** (noogram/cosmon #26). An operator
+  found a `cs done` sitting unsubmitted in a worker's composer with no way to
+  tell who had typed it. Injections are now attributed at the transport, and
+  `cs tackle` journals `receipt_overlay=installed|unavailable` at spawn, so a
+  dispatch that could not arm the receipt says so at the moment it happens
+  instead of being reconstructed later.
+
+- **A hermetic boundary between a worker's *pilotage* environment and its
+  gates.** `cs tackle` steers a worker with environment variables; the worker
+  then runs `just gates`, and `cargo test` inherits them — so test processes
+  read instructions addressed to their parent. That produced three false
+  verdicts and collapsed one healthy molecule (`COSMON_EGRESS_POLICY`, which
+  timed out every loopback HTTP test; `CB_DEPTH`, 11 suites red that ran
+  1588 passed / 0 failed once stripped; `ANTHROPIC_MODEL`, an F6 credential
+  refusal), each diagnosed by hand from scratch. The pilot-variable list now
+  lives once as `cosmon_core::pilot_env::PilotVar`, `cs tackle` *emits*
+  through it, and `scripts/no-pilot-env.sh` strips that same list — so it is
+  the producer's list, not a denylist somebody must remember to update, and a
+  variable that is not declared there cannot be injected at all. `just quick`
+  and `just gates` run every step through the wrapper. The boundary is a
+  **gate** mechanism only and must never appear on a runtime path, where
+  stripping `COSMON_EGRESS_POLICY` would weaken a real jail; that inverse is
+  pinned by test too.
+
 - **`cs spore install` — the verb that gets a shared bundle into a project.**
   The spore family could validate, germinate and export a bundle, but every one
   of those verbs started from a bundle already on disk, and getting it there had
@@ -78,6 +158,53 @@ this stage.
   `permanently_parked` (was `briefless_parked`, which the new member would
   have made a lie).
 
+### Performance
+
+- **The workspace dev profile builds at `opt-level = 1`.** The test suite's
+  cost was running unoptimised code, not compiling it: 91 % of the gate's CPU
+  is integration tests, each spawning real `cs` children also built at
+  `opt-level = 0`. Measured on the real gate, two runs 12 s apart on one host:
+  **1010.4 s → 299.9 s wall**, 892.7 s → 151.6 s user CPU, 7489 passed /
+  0 failed on both sides. `debug-assertions` and `overflow-checks` keep their
+  dev defaults, so this changes codegen, not semantics. The cold test-world
+  build goes 877 → 2335 CPU-seconds — a developer amortises that, a cold CI
+  runner would not, so **no workflow is touched** and CI adoption stays gated
+  on a runner-side cold-build measurement. Full table:
+  [`docs/measurements/profile-dev-opt-level-2026-08-01.md`](docs/measurements/profile-dev-opt-level-2026-08-01.md).
+
+- **`cs` startup no longer re-parses the whole event log.** Every `cs`
+  invocation emits one `operator.present` event, and the writer primed its
+  sequence caches by walking and JSON-parsing `events.jsonl` from byte 0 —
+  invisible for a long-lived writer, paid in full on every single call for
+  this one. Measured in a galaxy with a 151 MB / ~507 k-line log, same binary:
+  **2.90–3.68 s per `cs observe` from the checkout versus 0.03 s from a
+  tempdir**, linear in log size. The scan cursor is now checkpointed to
+  `events.jsonl.seqidx` under the same lock, write-temp-then-rename; a fresh
+  writer resumes there and parses only the delta. The sidecar is a cache of a
+  pure fold over a prefix and never a source of truth — it carries a digest of
+  the prefix tail, and a missing, stale, truncated or rotated one falls back
+  silently to the full walk. Old and new binaries interleave correctly against
+  the same log. After: 0.01–0.03 s steady state, one full walk on first
+  contact. `main()` also stopped hard-coding `None` for the presence event's
+  state dir, so `--config` now redirects it as it always claimed to.
+
+- **Cross-process tests stopped shelling out to `cargo`.** A test that runs
+  `cargo build` inside itself serialises on the build lock and re-resolves the
+  whole workspace; prebuilt test binaries are now resolved explicitly instead.
+
+### Changed
+
+- **`cs run`'s summary counter `briefless_parked` is now
+  `permanently_parked`.** The capability-gate refusal above is permanent in
+  exactly the same sense as the briefless guard — an identical retry
+  reproduces it — so it parks under the same counter, and the old name would
+  have become a lie. Machine consumers of `cs run --json` must read the new
+  key.
+
+- **`cs reconcile` is a deprecated alias of `cs project`** and prints so
+  ([ADR-052](docs/adr/052-one-ledger-one-writer-one-witness.md) §D3). It will
+  be removed after one release cycle.
+
 ### Documentation
 
 - **The external-contributor architecture path now starts with ten concrete
@@ -97,7 +224,130 @@ this stage.
   above is documented in `docs/guides/local-model-selection.md`, beside the
   model choice it is easily mistaken for.
 
+- **The container walkthrough is followable again** (noogram/cosmon #32).
+  Three defects an external reader hit on `v0.5.0` following
+  `docs/guides/cosmon-mission-in-a-container.md` literally. Steps 4 and 5 were
+  circular — step 4 opened the shell with `-w /srv/mission`, step 5 said
+  `mkdir -p /srv/mission` from inside it, and uid 10001 cannot write into a
+  root-owned `/srv` anyway; the image now creates the directory at build time
+  owned by 10001, *created under the identity that consumes it*
+  ([ADR-165](docs/adr/165-resources-are-created-under-the-identity-that-consumes-them.md)).
+  Step 5 never set the initial branch: Debian's git 2.39 names it `master`
+  while cosmon's base branch resolves to `main`, so the mission ran fine and
+  `cs done` then refused — correctly, and at the very end. `git init -b main`
+  is now in the step, with the reason written beside it.
+
+- **`docs/adr/INDEX.md` is generated by something that actually runs, and a
+  gate says so.** The file declared itself *"auto-generated from docs/adr/"*
+  while nothing regenerated it: the renderer lived in `cosmon-surface`, but
+  `cs reconcile`'s classification loop had no arm for the `project.decisions`
+  referent, so the surface was dropped from the plan before it ever reached
+  `project_surfaces`. The index had drifted seven ADRs behind (165, 166, 167,
+  168, 170, 173, 174 among 27 missing rows) and **every one of its links was
+  dead** — they were written as `docs/adr/<file>` from a file that lives *in*
+  `docs/adr/`, so each resolved to `docs/adr/docs/adr/<file>`. Both are fixed,
+  and `cs project` now regenerates the index like any other surface. A
+  generator nobody runs is the same defect one layer up, so the freshness
+  check is a test (`crates/cosmon-surface/tests/adr_index_freshness.rs`): it
+  re-renders from `docs/adr/` and compares bytes, decidable from a bare clone
+  with no fleet state, no network and no `cs` binary.
+
+- **The test-suite speed studies, including the one that was refuted.** Where
+  the suite's wall clock actually goes; the second-seat speed study and the
+  two-seat comparison; and the `cosmon-cli` rig consolidation, built and then
+  **refuted by measurement** rather than quietly dropped. Under
+  [`docs/measurements/`](docs/measurements/).
+
+- **Nine new ADRs**, 165 through 174 — identity of resource creation, the
+  refused root→uid demote path, the per-molecule journal as a projection, the
+  co-pilot session substrate, algorithmic provenance, the galaxy's declared
+  repository, the operator gesture as a signature, `cs done` authority as a
+  sealed capability, the cockpit as a command surface, and per-worker storage
+  deferred with the bar that reopens it.
+
 ### Fixed
+
+*The first six entries are the external-tester series against the signed
+`v0.5.0` binaries. Anyone who installs `v0.5.0` today still meets all of
+them.*
+
+- **`cargo test` did not compile on linux-musl** (noogram/cosmon #33). The
+  musl-only safety test called two functions private to `store.rs`, and it is
+  `cfg`-ed out on every other target — so the `E0603` was only ever visible on
+  the one target the test exists to protect. `pub(super)` on the two
+  functions; no logic change.
+
+- **A `kill -9`'d worker no longer holds its seat forever** (noogram/cosmon
+  #35). Four defects in the crash-recovery path, all measured on a real
+  killed worker, left the molecule assigned to a process that no longer
+  exists. Recovery now frees the seat.
+
+- **`cosmon-daemon-supervisor` tests passed on BusyBox** (noogram/cosmon #36).
+  A test spawned `/usr/bin/true`; BusyBox ships every applet under `/bin`, so
+  on Alpine the path does not exist and the test failed at spawn — the first
+  red an external contributor meets in that crate on a musl container.
+  `DaemonSpec::binary` is documented as *"absolute (or PATH-resolvable)"* and
+  is handed to `Command::new`, so the fix is to **name** the program rather
+  than locate it (`true`, `sleep`, `sh`). The SIGTERM-ignoring child of
+  `signal_cascade` was a Python one-liner behind a four-step interpreter
+  search ending at a hardcoded `/usr/bin/python3`; Alpine has no interpreter,
+  so that search fell through to `eprintln!("skipping")` — the escalation
+  contract silently untested on the one platform the issue is about. Replaced
+  with `sh -c "trap '' TERM …"`, verified ignoring SIGTERM on both macOS `sh`
+  and BusyBox `sh`. Proof: `cargo test -p cosmon-daemon-supervisor` under
+  `rust:1.97-alpine` — 78 passed, 0 failed; same tree before the change,
+  rc 101.
+
+- **Six `cosmon-runtime` resident tests died on `Deadline` instead of saying
+  what was missing** (noogram/cosmon #37). The resident stub needs `python3`;
+  absent, it now fails fast and names it.
+
+- **A transport test pinned the demote target to a uid the tester does not
+  have** (noogram/cosmon #38). The uid is now picked relative to the tester's
+  own.
+
+- **Three `cs` unit tests read the runner's terminal instead of establishing
+  the condition they assert** (noogram/cosmon #43). Piped — every CI lane,
+  every bench — the ambient value happened to match, so they were green
+  everywhere; run in a live interactive terminal they inverted. One called
+  `ensure_consent()`, which on a terminal printed the real consent question
+  and blocked on a real read: at `--test-threads=1` it stole the terminal, and
+  under default parallelism libtest swallowed the prompt and the run hung
+  forever — the reported *"over 60 seconds"* frozen-terminal symptom, which
+  had been wrongly attributed to Alpine. One entered raw mode and the
+  alternate screen **on the operator's own terminal**. One asserted coloured
+  output as contiguous text. The TTY condition is now a fixture.
+
+- **OIDC login works against IdPs other than Forgejo** (PR #44, contributed by
+  @ph-lean). Hardcoded Forgejo endpoint paths are replaced by standard
+  OIDC/OAuth discovery, with the pinned issuer validated explicitly at both
+  discovery hops (registry and provider metadata, RFC 8414 §3.3) and on both
+  token paths (login and refresh).
+
+- **`cs purge` fails closed when a stale worker's molecule holds unharvested
+  work.** Purging it silently discarded a branch nobody had merged.
+
+- **`cs tackle` collapses an in-process Direct-API loop that does zero work,
+  and names an unresolvable `formula_id`** instead of degrading silently into
+  a dispatch with every per-step pin inert.
+
+- **`cs spore run` stopped over-refusing on a relative manifest directory**
+  (the [ADR-161](docs/adr/161-spore-run-scoped-output-home.md) containment
+  check), and the deterministic red is carried as a composed-resolver
+  regression test rather than as a memory.
+
+- **A teardown failure backs off and parks instead of retrying forever**, and
+  the teardown-park note is signed as the runtime rather than as a human.
+
+- **Four CI instruments that were reporting green while measuring nothing.**
+  A workflow step name containing a colon made the whole YAML unparsable, so
+  the job never ran; the external-PR assert-guard interpolated the PR **body**
+  as shell source rather than as data (found via noogram/cosmon #44, where a
+  body containing backticked `client_id` executed); the provenance gate judged
+  GitHub's synthetic merge commit instead of the PR head, so it answered about
+  a tree nobody wrote; and three instruments behind the chronic nightly red
+  were repaired. Local `RUSTFLAGS` now match what CI sets, so the local gate
+  sees what CI sees.
 
 - **Recipient-side spore seal verification is now parallel, observable, and
   actionable.** `cs spore run` invokes TLC with `-workers auto` and the JVM's
