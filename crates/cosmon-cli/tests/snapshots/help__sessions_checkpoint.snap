@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Publish and read hand-over checkpoints
+Leave — or read — the note that lets someone else resume this mission
 
 Usage: cs sessions checkpoint [OPTIONS] <COMMAND>
 

@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
+Compare what two sessions concluded — `AGREE`, `FINDING` or `INCONCLUSIVE`, never a score
 
 Usage: cs sessions drift [OPTIONS] --mission <MOLECULE_ID> <SESSION_A> <SESSION_B>
 

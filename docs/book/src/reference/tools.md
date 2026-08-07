@@ -308,7 +308,21 @@ Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/se
 
 ## `cs sessions`
 
-Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover/hook)
+Two agent sessions — a Claude and a Codex, or two of either — work the same
+mission on this machine. One holds the controls and may change the mission;
+the other reads the same material, compares, and advises, and can change
+nothing. Both see each other, can write to each other, and leave a hand-over
+note when they stop, so the next session resumes without re-reading the
+whole conversation.
+
+Passing the controls is never automatic. A session may ASK for them; only
+you, the human, hand them over, by signing the request with your key. No
+quota, timeout or heuristic moves them.
+
+The verbs come in the order you meet them: find a session (discover, show),
+take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
+drift, takeover). `hook` wires the routine ones into the agent itself, so
+they happen without being typed.
 
 **Usage:** `cs sessions <COMMAND>`
 
@@ -377,23 +391,23 @@ cs pilot (cognitive REPL), cs diverge.
 
 ###### **Subcommands:**
 
-* `discover` — Enumerate the provider sessions visible on this host
-* `list` — List the cosmon pilots present in the registry
-* `show` — Show one provider session, named by its canonical selector
-* `attach` — Take a seat: publish this session's presence, role and `follows`
-* `peers` — Show the pilots around this session and how they relate to it
-* `send` — Send one traced message envelope to another pilot
-* `inbox` — Read this session's envelopes, acknowledging what it consumed
-* `checkpoint` — Publish and read hand-over checkpoints
-* `drift` — Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
-* `takeover` — The PRIMARY lease: who may fly, who asked, who granted
-* `hook` — The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
+* `discover` — Which agent conversations exist on this machine, and the exact name to refer to one by
+* `list` — Which of them have taken a seat, and in which role
+* `show` — Look inside one conversation — its last events, read-only
+* `attach` — Take a seat: say "I am here, in this role". Until you do, the others cannot see you
+* `peers` — Who is seated around this session, and which way each one faces
+* `send` — Write one message to another session. Delivered, and consumed, once
+* `inbox` — Read the messages addressed to this session (`--peek` to look without consuming them)
+* `checkpoint` — Leave — or read — the note that lets someone else resume this mission
+* `drift` — Compare what two sessions concluded — `AGREE`, `FINDING` or `INCONCLUSIVE`, never a score
+* `takeover` — The controls: who may change the mission, who asked for them, and the signature that hands them over
+* `hook` — Wire the routine gestures — take a seat, read the mailbox, leave a note — into the agent itself, so they happen without being typed
 
 
 
 ## `cs sessions discover`
 
-Enumerate the provider sessions visible on this host
+Which agent conversations exist on this machine, and the exact name to refer to one by
 
 **Usage:** `cs sessions discover [OPTIONS]`
 
@@ -408,7 +422,7 @@ Enumerate the provider sessions visible on this host
 
 ## `cs sessions list`
 
-List the cosmon pilots present in the registry
+Which of them have taken a seat, and in which role
 
 **Usage:** `cs sessions list [OPTIONS]`
 
@@ -423,7 +437,7 @@ List the cosmon pilots present in the registry
 
 ## `cs sessions show`
 
-Show one provider session, named by its canonical selector
+Look inside one conversation — its last events, read-only
 
 **Usage:** `cs sessions show [OPTIONS] <SELECTOR>`
 
@@ -442,7 +456,7 @@ Show one provider session, named by its canonical selector
 
 ## `cs sessions attach`
 
-Take a seat: publish this session's presence, role and `follows`
+Take a seat: say "I am here, in this role". Until you do, the others cannot see you
 
 **Usage:** `cs sessions attach [OPTIONS]`
 
@@ -468,7 +482,7 @@ Take a seat: publish this session's presence, role and `follows`
 
 ## `cs sessions peers`
 
-Show the pilots around this session and how they relate to it
+Who is seated around this session, and which way each one faces
 
 **Usage:** `cs sessions peers [OPTIONS]`
 
@@ -481,7 +495,7 @@ Show the pilots around this session and how they relate to it
 
 ## `cs sessions send`
 
-Send one traced message envelope to another pilot
+Write one message to another session. Delivered, and consumed, once
 
 **Usage:** `cs sessions send [OPTIONS] --to <SID_OR_SELECTOR> --message <TEXT>`
 
@@ -496,7 +510,7 @@ Send one traced message envelope to another pilot
 
 ## `cs sessions inbox`
 
-Read this session's envelopes, acknowledging what it consumed
+Read the messages addressed to this session (`--peek` to look without consuming them)
 
 **Usage:** `cs sessions inbox [OPTIONS]`
 
@@ -514,7 +528,7 @@ Read this session's envelopes, acknowledging what it consumed
 
 ## `cs sessions checkpoint`
 
-Publish and read hand-over checkpoints
+Leave — or read — the note that lets someone else resume this mission
 
 **Usage:** `cs sessions checkpoint <COMMAND>`
 
@@ -604,7 +618,7 @@ Show one checkpoint in full
 
 ## `cs sessions drift`
 
-Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
+Compare what two sessions concluded — `AGREE`, `FINDING` or `INCONCLUSIVE`, never a score
 
 **Usage:** `cs sessions drift [OPTIONS] --mission <MOLECULE_ID> <SESSION_A> <SESSION_B>`
 
@@ -626,7 +640,7 @@ Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`
 
 ## `cs sessions takeover`
 
-The PRIMARY lease: who may fly, who asked, who granted
+The controls: who may change the mission, who asked for them, and the signature that hands them over
 
 **Usage:** `cs sessions takeover <COMMAND>`
 
@@ -634,7 +648,7 @@ The PRIMARY lease: who may fly, who asked, who granted
 
 * `show` — Who holds the controls, at which epoch, and what has been asked
 * `request` — Ask for the controls. Writes a request and confers nothing
-* `grant` — Operator gesture: hand the controls over at the next epoch
+* `grant` — Hand the controls over — your signature, which no agent can produce
 * `challenge` — Print the exact bytes an operator signs to authorise one transfer
 * `trust` — Show which operator key this galaxy trusts to authorise a transfer
 * `check` — Ask whether a session may pilot: the ledger's verdict, plus whether its seat would actually present that epoch. Exits 0 or 1
@@ -673,7 +687,7 @@ Ask for the controls. Writes a request and confers nothing
 
 ## `cs sessions takeover grant`
 
-Operator gesture: hand the controls over at the next epoch
+Hand the controls over — your signature, which no agent can produce
 
 **Usage:** `cs sessions takeover grant [OPTIONS] --mission <MOLECULE_ID>`
 
@@ -729,7 +743,7 @@ Ask whether a session may pilot: the ledger's verdict, plus whether its seat wou
 
 ## `cs sessions hook`
 
-The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
+Wire the routine gestures — take a seat, read the mailbox, leave a note — into the agent itself, so they happen without being typed
 
 **Usage:** `cs sessions hook <COMMAND>`
 
