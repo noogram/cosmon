@@ -42,8 +42,7 @@ fn committed_adr_index_matches_a_fresh_render() {
     );
 
     assert_eq!(
-        committed,
-        fresh,
+        committed, fresh,
         "docs/adr/INDEX.md is stale — regenerate it with `cs project` \
          (from the repository root) and commit the result. It is a generated \
          file: editing it by hand is undone by the next projection."

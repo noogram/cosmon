@@ -1448,7 +1448,8 @@ fn run_check(
             continue;
         }
 
-        let Some(new_content) = render_for_surface(surface, project_root, fleet, molecules, formulas)
+        let Some(new_content) =
+            render_for_surface(surface, project_root, fleet, molecules, formulas)
         else {
             continue;
         };
@@ -1721,7 +1722,8 @@ fn classify_all<'a>(
             });
             continue;
         }
-        let Some(new_content) = render_for_surface(surface, project_root, fleet, molecules, formulas)
+        let Some(new_content) =
+            render_for_surface(surface, project_root, fleet, molecules, formulas)
         else {
             continue;
         };
