@@ -20,6 +20,7 @@ pub mod snapshot;
 pub use config::{Branding, Surface, SurfaceConfig, SurfaceKind};
 pub use github::{preview_github_issues, IssuePreview, PreviewAction};
 pub use render::{
-    filter_by_surface_kinds, project_surfaces, render_deliberations_content, render_ideas_content,
-    render_issues_content, render_status_content, DeclarationMap, FormulaMap,
+    filter_by_surface_kinds, project_surfaces, render_adr_index_content,
+    render_deliberations_content, render_ideas_content, render_issues_content,
+    render_status_content, DeclarationMap, FormulaMap,
 };

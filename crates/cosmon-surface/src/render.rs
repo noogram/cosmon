@@ -196,6 +196,21 @@ pub fn render_deliberations_content(
     render_deliberations(molecules, formulas, branding)
 }
 
+/// Render the ADR index content (public for dry-run diff).
+///
+/// Exists for the same reason as its four siblings above: `cs reconcile`
+/// classifies a surface by re-rendering it and comparing bytes, and it can
+/// only do that for referents it can render. Without this wrapper the
+/// `project.decisions` surface fell out of the classification loop entirely
+/// and no command regenerated `docs/adr/INDEX.md` — a generated file with
+/// no generator on any reachable path.
+///
+/// `adr_dir` is the surface's declared path, relative to `project_root`.
+#[must_use]
+pub fn render_adr_index_content(project_root: &Path, adr_dir: &str, branding: Branding) -> String {
+    render_adr_index(project_root, adr_dir, branding)
+}
+
 /// Filter molecules by the kinds listed in a `Surface` config.
 ///
 /// Returns all molecules if the surface has no `molecule_kinds` filter.
@@ -557,7 +572,11 @@ fn render_adr_index(project_root: &Path, adr_dir: &str, branding: Branding) -> S
         out.push_str("|-----|------|\n");
         for file in &files {
             let name = file.trim_end_matches(".md");
-            let _ = writeln!(out, "| {name} | [{file}]({adr_dir}{file}) |");
+            // The link target is the bare file name, not `{adr_dir}{file}`:
+            // the index is written *inside* `adr_dir` (see the directory
+            // branch of `project_surfaces`), so a directory-prefixed target
+            // resolves to `docs/adr/docs/adr/…` and every row is a 404.
+            let _ = writeln!(out, "| {name} | [{file}]({file}) |");
         }
     }
     out.push('\n');
@@ -1464,6 +1483,33 @@ mod tests {
         }];
         let content = render_ideas(&[mol], &fm(), Branding::HostNative);
         assert!(content.contains("Blocks `task-20260409-imp`"));
+    }
+
+    /// Regression: the ADR index is written *inside* the ADR directory, so
+    /// every row must link to a bare file name. Prefixing the target with
+    /// the surface's own path made each row resolve to
+    /// `docs/adr/docs/adr/<file>` — a table of 150 dead links that no gate
+    /// reads, because the doc-link gates cover the book, not `docs/`.
+    #[test]
+    fn test_render_adr_index_links_are_relative_to_the_index() {
+        let root = tempfile::tempdir().unwrap();
+        let adr_dir = root.path().join("docs/adr");
+        std::fs::create_dir_all(&adr_dir).unwrap();
+        std::fs::write(adr_dir.join("001-first.md"), "# first").unwrap();
+        std::fs::write(adr_dir.join("INDEX.md"), "stale").unwrap();
+
+        let out = render_adr_index(root.path(), "docs/adr/", Branding::HostNative);
+
+        assert!(
+            out.contains("| 001-first | [001-first.md](001-first.md) |"),
+            "expected a bare-filename link target, got:\n{out}"
+        );
+        assert!(
+            !out.contains("(docs/adr/001-first.md)"),
+            "the index must not prefix its own directory:\n{out}"
+        );
+        // The index never lists itself.
+        assert!(!out.contains("INDEX.md"), "index listed itself:\n{out}");
     }
 
     /// Regression: the `typed_links` vector is iterated in-order by the

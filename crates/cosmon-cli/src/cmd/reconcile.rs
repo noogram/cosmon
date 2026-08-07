@@ -1448,13 +1448,12 @@ fn run_check(
             continue;
         }
 
-        let new_content = render_for_surface(surface, fleet, molecules, formulas);
-        if new_content.is_none() {
+        let Some(new_content) = render_for_surface(surface, project_root, fleet, molecules, formulas)
+        else {
             continue;
-        }
-        let new_content = new_content.unwrap();
+        };
 
-        let target = project_root.join(&surface.path);
+        let target = surface_target(project_root, surface);
         let current_file = std::fs::read_to_string(&target).unwrap_or_default();
         let snapshot_hash = snap
             .surfaces
@@ -1632,8 +1631,16 @@ fn report_github_preview(
 
 /// Render the content of a single markdown surface, or `None` if the
 /// referent is unknown / the surface is a non-markdown kind.
+///
+/// `project.decisions` is here and not only in `project_surfaces` because
+/// this function is the classification loop's whole view of a surface: a
+/// referent it cannot render is dropped from the plan, and a surface absent
+/// from the plan is never handed to `project_surfaces` at all. That is how
+/// `docs/adr/INDEX.md` came to declare itself auto-generated while no
+/// command on any path regenerated it.
 fn render_for_surface(
     surface: &cosmon_surface::Surface,
+    project_root: &Path,
     fleet: &cosmon_state::Fleet,
     molecules: &[cosmon_state::MoleculeData],
     formulas: &FormulaMap,
@@ -1668,7 +1675,27 @@ fn render_for_surface(
             formulas,
             surface.branding,
         )),
+        "project.decisions" if surface.kind == cosmon_surface::SurfaceKind::Directory => Some(
+            cosmon_surface::render_adr_index_content(project_root, &surface.path, surface.branding),
+        ),
         _ => None,
+    }
+}
+
+/// The on-disk file a surface's content lives in.
+///
+/// For a markdown surface that is the declared path. For a directory
+/// surface it is `INDEX.md` *inside* the directory — the same target
+/// `project_surfaces` writes. Joining the declared path directly would
+/// hand the classifier a directory to `read_to_string`, which fails, so
+/// every run would read the current content as empty and re-classify a
+/// clean index as a create.
+fn surface_target(project_root: &Path, surface: &cosmon_surface::Surface) -> std::path::PathBuf {
+    let target = project_root.join(&surface.path);
+    if surface.kind == cosmon_surface::SurfaceKind::Directory {
+        target.join("INDEX.md")
+    } else {
+        target
     }
 }
 
@@ -1694,10 +1721,11 @@ fn classify_all<'a>(
             });
             continue;
         }
-        let Some(new_content) = render_for_surface(surface, fleet, molecules, formulas) else {
+        let Some(new_content) = render_for_surface(surface, project_root, fleet, molecules, formulas)
+        else {
             continue;
         };
-        let target = project_root.join(&surface.path);
+        let target = surface_target(project_root, surface);
         let current_file = std::fs::read_to_string(&target).unwrap_or_default();
         let snapshot_hash = snap
             .surfaces
