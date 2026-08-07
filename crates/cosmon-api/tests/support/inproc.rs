@@ -199,7 +199,11 @@ impl Resp {
     ///
     /// The equivalent of `reqwest`'s `error_for_status`, kept explicit
     /// at each call site rather than folded into the request helpers.
-    #[must_use]
+    ///
+    /// Deliberately **not** `#[must_use]`: the assertion *is* the point, so
+    /// `resp.ok();` on its own line is the normal call and not a mistake. The
+    /// pure accessors above keep the attribute, where discarding the value
+    /// really would mean the call did nothing.
     pub fn ok(self) -> Self {
         assert!(
             self.status.is_success(),

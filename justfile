@@ -213,9 +213,16 @@ quick:
 # one nobody notices losing.
 #
 # The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
+# `RUSTFLAGS=-Dwarnings` mirrors the CI workflow's job-level env. Without it
+# the local gate compiles TEST targets with warnings allowed while CI compiles
+# them with warnings fatal, so a warning in a test file is green here and red
+# on the trunk. Measured 2026-08-07: an ill-placed `#[must_use]` in
+# `cosmon-api`'s test support passed `just gates` and failed CI ten times over.
+# `clippy` above already carries `-D warnings` as an argument; this covers the
+# rustc pass that `cargo test` performs.
 gates: quick
-    ./scripts/no-pilot-env.sh cargo build --bin cs -p cosmon-cli --locked
-    ./scripts/no-pilot-env.sh cargo test --workspace --locked --no-fail-fast
+    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo build --bin cs -p cosmon-cli --locked
+    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
     ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
 # It used to run four of the seven gates and was named as if it ran them all —
