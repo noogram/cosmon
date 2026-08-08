@@ -25,7 +25,17 @@ git-repository-url = "https://github.com/noogram/cosmon"
 edit-url-template = "https://github.com/noogram/cosmon/edit/main/docs/book/{path}"
 no-section-label = false
 additional-css = ["noogram-charte.css"]
-additional-js = ["mermaid.min.js", "mermaid-init.js", "conway.js", "page-toc.js"]
+additional-js = [
+    "mermaid.min.js",
+    "mermaid-init.js",
+    "conway.js",
+    "page-toc.js",
+    # Le surlignage `?highlight=` de mdBook ne s'efface qu'en cliquant sur un
+    # <mark> et reste dans l'URL : une phrase un peu longue laisse la page en
+    # damier illisible. Cet asset le rend congédiable (clic / Échap /
+    # défilement) et nettoie l'URL. Voir l'en-tête du fichier.
+    "search-highlight-dismiss.js",
+]
 
 [output.html.fold]
 enable = true
