@@ -226,8 +226,8 @@ enum Command {
     #[command(after_help = cmd::examples::SESSION)]
     Session(cmd::session::Args),
 
-    /// Sessions — co-pilotage cockpit over provider sessions (discover/show/attach/send/checkpoint/drift/takeover/hook)
-    #[command(after_help = cmd::examples::SESSIONS)]
+    /// Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
+    #[command(long_about = cmd::sessions::LONG_ABOUT, after_help = cmd::examples::SESSIONS)]
     Sessions(cmd::sessions::Args),
 
     /// Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)

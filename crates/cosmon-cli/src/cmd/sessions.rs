@@ -79,6 +79,29 @@ use cosmon_session_probe::{
 use super::presence;
 use super::Context;
 
+/// What `cs sessions --help` opens with, before the verbs and the examples.
+///
+/// It exists as a constant rather than a doc comment because the doc comment
+/// is also the one line printed in `cs help`, and that line has to stay one
+/// line. A reader who has never seen this surface meets the mechanism here:
+/// two seats, one set of controls, and a human holding the key to them.
+pub const LONG_ABOUT: &str = "\
+Two agent sessions — a Claude and a Codex, or two of either — work the same
+mission on this machine. One holds the controls and may change the mission;
+the other reads the same material, compares, and advises, and can change
+nothing. Both see each other, can write to each other, and leave a hand-over
+note when they stop, so the next session resumes without re-reading the
+whole conversation.
+
+Passing the controls is never automatic. A session may ASK for them; only
+you, the human, hand them over, by signing the request with your key. No
+quota, timeout or heuristic moves them.
+
+The verbs come in the order you meet them: find a session (discover, show),
+take a seat (attach, list, peers), talk (send, inbox), hand over (checkpoint,
+drift, takeover). `hook` wires the routine ones into the agent itself, so
+they happen without being typed.";
+
 /// Top-level arguments for `cs sessions`.
 #[derive(clap::Args)]
 pub struct Args {
@@ -92,30 +115,35 @@ pub struct Args {
 /// take a seat beside it, talk to it, hand over from it.
 #[derive(clap::Subcommand)]
 pub enum Sub {
-    /// Enumerate the provider sessions visible on this host.
+    /// Which agent conversations exist on this machine, and the exact name
+    /// to refer to one by.
     Discover(DiscoverArgs),
-    /// List the cosmon pilots present in the registry.
+    /// Which of them have taken a seat, and in which role.
     List(ListArgs),
-    /// Show one provider session, named by its canonical selector.
+    /// Look inside one conversation — its last events, read-only.
     Show(ShowArgs),
-    /// Take a seat: publish this session's presence, role and `follows`.
+    /// Take a seat: say "I am here, in this role". Until you do, the others
+    /// cannot see you.
     Attach(AttachArgs),
-    /// Show the pilots around this session and how they relate to it.
+    /// Who is seated around this session, and which way each one faces.
     Peers(PeersArgs),
-    /// Send one traced message envelope to another pilot.
+    /// Write one message to another session. Delivered, and consumed, once.
     Send(SendArgs),
-    /// Read this session's envelopes, acknowledging what it consumed.
+    /// Read the messages addressed to this session (`--peek` to look without
+    /// consuming them).
     Inbox(InboxArgs),
-    /// Publish and read hand-over checkpoints.
+    /// Leave — or read — the note that lets someone else resume this mission.
     #[command(subcommand)]
     Checkpoint(CheckpointSub),
-    /// Compare two pilots' checkpoints — `AGREE`, `FINDING` or `INCONCLUSIVE`.
+    /// Compare what two sessions concluded — `AGREE`, `FINDING` or
+    /// `INCONCLUSIVE`, never a score.
     Drift(DriftArgs),
-    /// The PRIMARY lease: who may fly, who asked, who granted.
+    /// The controls: who may change the mission, who asked for them, and the
+    /// signature that hands them over.
     #[command(subcommand)]
     Takeover(TakeoverSub),
-    /// The bootstrap that runs without being typed — presence, mailbox and
-    /// staged checkpoints, wired into the provider's own hook mechanism.
+    /// Wire the routine gestures — take a seat, read the mailbox, leave a
+    /// note — into the agent itself, so they happen without being typed.
     Hook(super::sessions_hook::Args),
 }
 
@@ -392,7 +420,7 @@ pub enum TakeoverSub {
     Show(TakeoverShowArgs),
     /// Ask for the controls. Writes a request and confers nothing.
     Request(TakeoverRequestArgs),
-    /// Operator gesture: hand the controls over at the next epoch.
+    /// Hand the controls over — your signature, which no agent can produce.
     Grant(TakeoverGrantArgs),
     /// Print the exact bytes an operator signs to authorise one transfer.
     Challenge(TakeoverChallengeArgs),

@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-The bootstrap that runs without being typed — presence, mailbox and staged checkpoints, wired into the provider's own hook mechanism
+Wire the routine gestures — take a seat, read the mailbox, leave a note — into the agent itself, so they happen without being typed
 
 Usage: cs sessions hook [OPTIONS] <COMMAND>
 

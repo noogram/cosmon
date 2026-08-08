@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Send one traced message envelope to another pilot
+Write one message to another session. Delivered, and consumed, once
 
 Usage: cs sessions send [OPTIONS] --to <SID_OR_SELECTOR> --message <TEXT>
 

@@ -2,14 +2,14 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-The PRIMARY lease: who may fly, who asked, who granted
+The controls: who may change the mission, who asked for them, and the signature that hands them over
 
 Usage: cs sessions takeover [OPTIONS] <COMMAND>
 
 Commands:
   show       Who holds the controls, at which epoch, and what has been asked
   request    Ask for the controls. Writes a request and confers nothing
-  grant      Operator gesture: hand the controls over at the next epoch
+  grant      Hand the controls over — your signature, which no agent can produce
   challenge  Print the exact bytes an operator signs to authorise one transfer
   trust      Show which operator key this galaxy trusts to authorise a transfer
   check      Ask whether a session may pilot: the ledger's verdict, plus whether its seat would actually present that epoch. Exits 0 or 1

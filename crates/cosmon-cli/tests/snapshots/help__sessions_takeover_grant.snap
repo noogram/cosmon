@@ -2,7 +2,7 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Operator gesture: hand the controls over at the next epoch
+Hand the controls over — your signature, which no agent can produce
 
 Usage: cs sessions takeover grant [OPTIONS] --mission <MOLECULE_ID>
 
