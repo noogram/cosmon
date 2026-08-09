@@ -162,6 +162,7 @@ pub fn resolve_from_config(config_path: &Path) -> anyhow::Result<ResolvedRepo> {
         .map_err(|e| anyhow::anyhow!("failed to read the current directory: {e}"))?;
     let root = git_toplevel(&cwd)
         .ok_or_else(|| anyhow::anyhow!("not in a git repository: {}", cwd.display()))?;
+    let root = unnest_cosmon_worktree(&root).unwrap_or(root);
     Ok(ResolvedRepo {
         root,
         source: RepoSource::Cwd,
@@ -236,6 +237,75 @@ fn git_toplevel(dir: &Path) -> Option<PathBuf> {
     (!top.is_empty()).then(|| PathBuf::from(top))
 }
 
+/// The main working tree of the repository containing `dir`, when `dir` is a
+/// **cosmon-managed linked worktree** — otherwise `None`.
+///
+/// # Why this exists
+///
+/// `git rev-parse --show-toplevel` answers "which working tree am I in?", and
+/// inside `…/<galaxy>/.worktrees/task-A` that answer is the *worktree*, not
+/// the galaxy. Every caller that then builds `<root>/.worktrees/<mol>` — which
+/// is `cs tackle`'s only way of siting a worker — therefore nests the child
+/// under its parent: `…/.worktrees/task-A/.worktrees/task-B`. That nesting is
+/// not merely untidy. When `cs done task-A` removes the parent's worktree it
+/// takes the child's directory with it, git keeps the now-dangling
+/// registration, and the child's own `cs done` fails its branch delete with
+/// `cannot delete branch 'feat/task-B' used by worktree` — leaving a ghost
+/// branch and a ghost registration that only a manual `git worktree remove
+/// --force` + `git worktree prune` clears. Five such nestings were observed on
+/// 2026-08-08.
+///
+/// The redirection is deliberately narrow: it fires **only** when the linked
+/// worktree sits directly under `<main>/.worktrees/`, i.e. when it is one
+/// cosmon put there. A worktree an operator keeps elsewhere is their own
+/// topology and is returned unchanged — this function must not quietly move
+/// someone's work to a tree they did not name.
+fn unnest_cosmon_worktree(top: &Path) -> Option<PathBuf> {
+    let main = main_worktree_of(top)?;
+    if main == top {
+        return None;
+    }
+    (top.parent()?.file_name()? == ".worktrees" && top.parent()?.parent()? == main).then_some(main)
+}
+
+/// The main working tree of the repository `dir` belongs to.
+///
+/// `--git-common-dir` is the discriminator: it names the *shared* `.git`
+/// directory, which is the main worktree's, whereas `--git-dir` names the
+/// per-worktree one (`…/.git/worktrees/<name>`). Stripping the trailing
+/// `.git` therefore yields the main working tree. Returns `None` for a bare
+/// repository, or when git cannot answer.
+fn main_worktree_of(dir: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args([
+            "-C",
+            &dir.to_string_lossy(),
+            "rev-parse",
+            "--git-common-dir",
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if raw.is_empty() {
+        return None;
+    }
+    // Git reports this path relative to the directory it ran in (`.git` from a
+    // main worktree) or absolute (from a linked one); both are accepted.
+    let common = {
+        let p = PathBuf::from(&raw);
+        if p.is_absolute() {
+            p
+        } else {
+            dir.join(p)
+        }
+    };
+    // A bare repository has no working tree to return.
+    git_toplevel(common.parent()?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -302,6 +372,90 @@ mod tests {
         // The test process runs inside the cosmon checkout, so a toplevel
         // exists; what matters is that the *declaration* did not choose it.
         assert!(resolved.root.is_dir());
+    }
+
+    /// A linked worktree cosmon created under `<main>/.worktrees/` resolves to
+    /// the main working tree — the property that stops `cs tackle` from
+    /// nesting a child worktree inside its parent's (task-20260808-3033).
+    #[test]
+    fn a_cosmon_worktree_resolves_to_the_main_working_tree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap().join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "T"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        let wt = root.join(".worktrees").join("task-a");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &wt.to_string_lossy(),
+            "main",
+        ]);
+
+        assert_eq!(
+            unnest_cosmon_worktree(&wt).as_deref(),
+            Some(root.as_path()),
+            "a worktree under .worktrees/ must resolve to the galaxy"
+        );
+        assert_eq!(
+            unnest_cosmon_worktree(&root),
+            None,
+            "the main working tree is already the answer"
+        );
+    }
+
+    /// A worktree an operator keeps outside `.worktrees/` is their topology,
+    /// not cosmon's, and is returned untouched. Redirecting it would move
+    /// someone's work to a tree they never named.
+    #[test]
+    fn a_worktree_outside_dot_worktrees_is_left_alone() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let base = tmp.path().canonicalize().unwrap();
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "T"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        let wt = base.join("elsewhere");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            &wt.to_string_lossy(),
+            "main",
+        ]);
+
+        assert_eq!(unnest_cosmon_worktree(&wt), None);
     }
 
     /// A declaration pointing at a non-repository refuses out loud, naming the
