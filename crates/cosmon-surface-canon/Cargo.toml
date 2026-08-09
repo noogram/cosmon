@@ -7,9 +7,11 @@ rust-version.workspace = true
 # Frontier crate (ADR-092): consumed at build time by frontier crates
 # (cosmon-thin-cli) — keep on Apache-2.0 to preserve permissive boundary.
 license = "AGPL-3.0-only"
-description = "Parser for the enriched §8p surface event log (data/surface_events.txt) — the single canonical declaration of the cosmon RPP API surface."
+description = "Parsers and projections for Cosmon's versioned RPP and cockpit surface canons."
 
 [dependencies]
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true

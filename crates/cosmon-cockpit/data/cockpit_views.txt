@@ -1,0 +1,20 @@
+# crates/cosmon-cockpit/data/cockpit_views.txt
+#
+# Append-only cockpit surface event log. This canon is deliberately distinct
+# from cosmon-rpp-adapter/data/surface_events.txt: the RPP log governs remote
+# JWT principals and OAuth scopes, while this log governs views presented to a
+# local human operator by an external UI project.
+#
+# Format (eight | separated fields):
+# view | source_cs | stability | introduced | class | molecule_id | date | blurb
+#
+# `view` is stable lower-kebab-case identity. `source_cs` is the exact
+# revealable command that supplies the view. `stability` is `experimental` or
+# `stable`. `introduced` is MAJOR.MINOR.PATCH. `class` is the cockpit class
+# ratified by the governing ADR. The last three fields record provenance.
+#
+# Append new `view_added` events. Never edit, remove, or reorder an existing
+# event. An incompatible replacement gets a new view identifier; consumers
+# keep the old declaration until its compatibility promise permits removal.
+fleet-overview | cs peek --json | experimental | 0.5.0 | viewport | task-20260804-2bbb | 2026-08-06 | Fleet and molecule lifecycle overview
+provider-sessions | cs sessions discover --json | experimental | 0.5.0 | command | task-20260804-2bbb | 2026-08-06 | Provider session discovery, distinct from the operator carnet

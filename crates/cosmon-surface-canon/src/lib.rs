@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Parser for the enriched §8p surface event log — the single canonical
-//! declaration of the cosmon RPP API surface.
+//! Parsers for cosmon's versioned surface declarations.
 //!
-//! The canon lives in `crates/cosmon-rpp-adapter/data/surface_events.txt`,
+//! The RPP canon lives in `crates/cosmon-rpp-adapter/data/surface_events.txt`,
 //! an append-only event log where each non-comment line declares one HTTP
 //! route mounted on the RPP. This crate is the **one** parser of that
 //! format, consumed as a *build-dependency* by every crate that folds the
@@ -19,7 +18,13 @@
 //! [`Exposure`] enum referenced by the generated code is a single type,
 //! not a per-crate mirror.
 //!
-//! # Line format (7 `|`-separated fields)
+//! The distinct local-human cockpit canon lives in
+//! `crates/cosmon-cockpit/data/cockpit_views.txt`. `cosmon-cockpit/build.rs`
+//! uses this crate to validate it and its language-neutral JSON projection.
+//! The logs share parsing discipline but not fields: JWT scopes and local
+//! human views are different contracts.
+//!
+//! # RPP line format (7 `|`-separated fields)
 //!
 //! ```text
 //! METHOD PATH | molecule_id | YYYY-MM-DD | principal | scope | exposure | blurb
@@ -45,6 +50,8 @@
 #![forbid(unsafe_code)]
 
 use std::fmt;
+
+use serde::Serialize;
 
 /// §8p exposure classification of one route. Replaces the two
 /// hand-maintained copies of the §8p frontier that used to live in
@@ -271,6 +278,265 @@ pub fn normalise_path(path: &str) -> String {
         .join("/")
 }
 
+/// Stable identifier of a cockpit view exposed to an external UI.
+///
+/// Keeping this distinct from an arbitrary string prevents callers from
+/// accidentally treating a display label or a CLI command as contract
+/// identity.
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(transparent)]
+pub struct CockpitViewId(String);
+
+impl CockpitViewId {
+    /// Return the wire token stored in the canon and its JSON projection.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Stability promise made to consumers of a cockpit view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ViewStability {
+    /// The view may change while its operator workflow is measured.
+    Experimental,
+    /// The view follows the compatibility rules of the versioned canon.
+    Stable,
+}
+
+impl ViewStability {
+    /// Return the token accepted by the append-only log.
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Experimental => "experimental",
+            Self::Stable => "stable",
+        }
+    }
+
+    fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "experimental" => Some(Self::Experimental),
+            "stable" => Some(Self::Stable),
+            _ => None,
+        }
+    }
+}
+
+/// Architectural class of a cockpit view.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum CockpitSurfaceClass {
+    /// A view with a canonical `cs` raster, governed by §8k′.
+    Viewport,
+    /// An interactive human surface that can reveal and dispatch `cs` actions.
+    Command,
+}
+
+impl CockpitSurfaceClass {
+    /// Return the token accepted by the append-only log.
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Viewport => "viewport",
+            Self::Command => "command",
+        }
+    }
+
+    fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "viewport" => Some(Self::Viewport),
+            "command" => Some(Self::Command),
+            _ => None,
+        }
+    }
+}
+
+/// One immutable `view_added` event from the cockpit surface canon.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CockpitViewEvent {
+    /// Stable machine-facing view name.
+    pub view: CockpitViewId,
+    /// Exact revealable `cs ...` command that supplies the view.
+    pub source_cs: String,
+    /// Compatibility promise made by this declaration.
+    pub stability: ViewStability,
+    /// First cosmon release carrying the view, without a leading `v`.
+    pub introduced: String,
+    /// Surface class decided by the governing cockpit ADR.
+    pub surface_class: CockpitSurfaceClass,
+    /// Molecule or ADR that introduced the declaration.
+    pub molecule_id: String,
+    /// Landing date in `YYYY-MM-DD` form.
+    pub date: String,
+    /// One-line human explanation for external consumers.
+    pub blurb: String,
+}
+
+/// Parse the append-only cockpit view canon.
+///
+/// Each non-comment line has eight `|`-separated fields:
+///
+/// ```text
+/// view | source_cs | stability | introduced | class | molecule_id | date | blurb
+/// ```
+///
+/// # Errors
+///
+/// Returns the first offending line with its 1-based line number. Duplicate
+/// view identifiers are refused because a view is introduced exactly once;
+/// later compatible evolution requires a new view identifier.
+pub fn parse_cockpit_canon(raw: &str, origin: &str) -> Result<Vec<CockpitViewEvent>, String> {
+    let mut events = Vec::new();
+    for (idx, line) in raw.lines().enumerate() {
+        let lineno = idx + 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let event =
+            parse_cockpit_line(trimmed).map_err(|why| format!("{origin}:{lineno}: {why}"))?;
+        if events
+            .iter()
+            .any(|existing: &CockpitViewEvent| existing.view == event.view)
+        {
+            return Err(format!(
+                "{origin}:{lineno}: duplicate cockpit view {:?}",
+                event.view.as_str()
+            ));
+        }
+        events.push(event);
+    }
+    Ok(events)
+}
+
+fn parse_cockpit_line(line: &str) -> Result<CockpitViewEvent, String> {
+    let parts: Vec<&str> = line.split('|').map(str::trim).collect();
+    if parts.len() != 8 {
+        return Err(format!(
+            "malformed cockpit event (need 8 `|`-separated fields, got {}): {line:?}",
+            parts.len()
+        ));
+    }
+    let [view, source_cs, stability, introduced, surface_class, molecule_id, date, blurb] = [
+        parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7],
+    ];
+    validate_view_id(view)?;
+    validate_source_cs(source_cs)?;
+    let Some(stability) = ViewStability::from_token(stability) else {
+        return Err(format!(
+            "unknown stability {stability:?} (expected `experimental` or `stable`)"
+        ));
+    };
+    validate_version(introduced)?;
+    let Some(surface_class) = CockpitSurfaceClass::from_token(surface_class) else {
+        return Err(format!(
+            "unknown surface class {surface_class:?} (expected `viewport` or `command`)"
+        ));
+    };
+    if molecule_id.is_empty() {
+        return Err("molecule_id is required".to_owned());
+    }
+    validate_date(date)?;
+    if blurb.is_empty() {
+        return Err("blurb is required".to_owned());
+    }
+
+    Ok(CockpitViewEvent {
+        view: CockpitViewId(view.to_owned()),
+        source_cs: source_cs.to_owned(),
+        stability,
+        introduced: introduced.to_owned(),
+        surface_class,
+        molecule_id: molecule_id.to_owned(),
+        date: date.to_owned(),
+        blurb: blurb.to_owned(),
+    })
+}
+
+fn validate_view_id(view: &str) -> Result<(), String> {
+    if view.is_empty()
+        || !view
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || !view.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
+    {
+        return Err(format!(
+            "invalid view {view:?} (expected lower-kebab-case beginning with a letter)"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_source_cs(source: &str) -> Result<(), String> {
+    let mut words = source.split_ascii_whitespace();
+    if words.next() != Some("cs") || words.next().is_none() {
+        return Err(format!(
+            "invalid source_cs {source:?} (expected a concrete `cs <verb> ...` command)"
+        ));
+    }
+    if source.contains(['\n', '\r', '|']) {
+        return Err("source_cs must fit on one canon line and cannot contain `|`".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_version(version: &str) -> Result<(), String> {
+    let components: Vec<&str> = version.split('.').collect();
+    if components.len() != 3
+        || components
+            .iter()
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+    {
+        return Err(format!(
+            "invalid introduced version {version:?} (expected MAJOR.MINOR.PATCH)"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_date(date: &str) -> Result<(), String> {
+    let bytes = date.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(idx, byte)| idx != 4 && idx != 7 && !byte.is_ascii_digit())
+    {
+        return Err(format!("invalid date {date:?} (expected YYYY-MM-DD)"));
+    }
+    Ok(())
+}
+
+/// Render the language-neutral JSON artifact consumed by the external UI.
+///
+/// The input order is preserved. The enclosing schema version lets consumers
+/// reject a future incompatible representation instead of guessing.
+///
+/// # Errors
+///
+/// Returns an error if serialization fails.
+pub fn render_cockpit_json(events: &[CockpitViewEvent]) -> Result<String, String> {
+    #[derive(Serialize)]
+    struct Artifact<'a> {
+        schema_version: u8,
+        views: &'a [CockpitViewEvent],
+    }
+
+    serde_json::to_string_pretty(&Artifact {
+        schema_version: 1,
+        views: events,
+    })
+    .map(|mut rendered| {
+        rendered.push('\n');
+        rendered
+    })
+    .map_err(|err| format!("failed to render cockpit canon JSON: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +648,53 @@ mod tests {
             Exposure::OperatorOnly,
         ] {
             assert_eq!(Exposure::from_token(e.as_token()), Some(e));
+        }
+    }
+
+    const COCKPIT_GOOD: &str = "fleet | cs peek --json | experimental | 0.5.0 | \
+                                command | task-x | 2026-08-06 | Fleet overview";
+
+    #[test]
+    fn parses_and_projects_a_cockpit_view() -> Result<(), String> {
+        let events = parse_cockpit_canon(COCKPIT_GOOD, "test")?;
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].view.as_str(), "fleet");
+        assert_eq!(events[0].source_cs, "cs peek --json");
+        assert_eq!(events[0].stability, ViewStability::Experimental);
+        assert_eq!(events[0].surface_class, CockpitSurfaceClass::Command);
+
+        let json = render_cockpit_json(&events)?;
+        assert!(json.contains("\"schema_version\": 1"));
+        assert!(json.contains("\"surface_class\": \"command\""));
+        Ok(())
+    }
+
+    #[test]
+    fn refuses_duplicate_cockpit_views() {
+        let raw = format!("{COCKPIT_GOOD}\n{COCKPIT_GOOD}");
+        let result = parse_cockpit_canon(&raw, "test");
+        assert!(
+            matches!(result, Err(ref err) if err.contains("duplicate cockpit view")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn refuses_ambiguous_cockpit_fields() {
+        for (from, to, expected) in [
+            ("fleet", "Fleet View", "invalid view"),
+            ("cs peek --json", "peek --json", "invalid source_cs"),
+            ("experimental", "maybe", "unknown stability"),
+            ("0.5.0", "v0.5", "invalid introduced version"),
+            ("command", "dashboard", "unknown surface class"),
+            ("2026-08-06", "06/08/2026", "invalid date"),
+        ] {
+            let line = COCKPIT_GOOD.replacen(from, to, 1);
+            let result = parse_cockpit_canon(&line, "test");
+            assert!(
+                matches!(result, Err(ref err) if err.contains(expected)),
+                "replacement {from:?} -> {to:?}: {result:?}"
+            );
         }
     }
 }

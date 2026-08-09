@@ -123,6 +123,7 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 # way to use. It is a dev-dependency and nothing else, so `cs` has no
 # dependency edge to a signer — which is the mechanism, not a convention.
 cosmon-minisign-testkit.workspace = true
+cosmon-surface-canon.workspace = true
 cosmon-transport = { workspace = true, features = ["test-support"] }
 insta.workspace = true
 # `tests/consent_non_blocking.rs` allocates a real pty (`openpty`) so the

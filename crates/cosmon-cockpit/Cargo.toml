@@ -21,6 +21,9 @@ thiserror.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 
+[build-dependencies]
+cosmon-surface-canon.workspace = true
+
 [[bin]]
 name = "cockpit-probe"
 path = "src/bin/cockpit_probe.rs"
