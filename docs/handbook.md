@@ -116,6 +116,18 @@ You skipped `cs done`. A worker can `cs complete` its molecule (a pure state tra
 > **Expect:** exit code 0; the worker's commits now appear in `main`.
 > **Falsified if:** `cs observe <mol>` says `completed` but `git branch --merged main` omits the worker branch.
 
+A worker's worktree is always sited at `<galaxy>/.worktrees/<mol>`, including
+when the `cs tackle` that created it was fired from *inside another worker's
+worktree* — the normal case for a molecule that nucleates and dispatches its
+own children. Before task-20260808-3033 the repository root was read from the
+current directory, so such a child landed at
+`.worktrees/<parent>/.worktrees/<child>`; `cs done <parent>` then deleted the
+child's directory along with the parent's and left git holding a registration
+for a path that no longer existed, which is what made the child's own `cs done`
+report `⚠ branch delete failed`. `cs done` now prunes dead registrations before
+it deletes a branch, so an already-nested pair from before the fix also tears
+down cleanly.
+
 *See also: [done.rs](../crates/cosmon-cli/src/cmd/done.rs), [architectural-invariants §merge-before-dispatch](architectural-invariants.md).*
 
 ### When should I NOT use cosmon? <a id="non-goals"></a>

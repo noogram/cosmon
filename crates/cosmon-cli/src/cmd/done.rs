@@ -2869,6 +2869,17 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     // 5. Remove git worktree (with dirty-state guard).
+    //
+    //    The `!exists` arm is the one that took an incident to find
+    //    (task-20260808-3033). A worktree directory can be gone while git
+    //    still holds its registration — that is what a nested child looks
+    //    like after its parent's worktree was removed out from under it. The
+    //    old code read the missing directory as "nothing to do", and step 6
+    //    then hit `cannot delete branch … used by worktree`. A prune costs one
+    //    cheap git call and turns that failure into a clean teardown.
+    if !args.no_worktree_remove && !worktree_path.exists() {
+        prune_worktrees(&repo_root);
+    }
     if !args.no_worktree_remove && worktree_path.exists() {
         match worktree_is_dirty(&worktree_path) {
             Ok(dirty_files) if !dirty_files.is_empty() && !args.force => {
@@ -4384,7 +4395,17 @@ fn rescue_untracked_files(
     Ok(files)
 }
 
-/// Remove a git worktree.
+/// Remove a git worktree, then prune the registrations it left behind.
+///
+/// The prune is not cosmetic. A worktree's *registration* lives in
+/// `.git/worktrees/<name>` and outlives its directory: if the directory went
+/// away by any route other than `git worktree remove` — the usual one being a
+/// nested child whose directory was inside a parent worktree that `cs done`
+/// removed first (task-20260808-3033) — git still counts the branch as
+/// checked out and answers `git branch -d` with `cannot delete branch … used
+/// by worktree`. `cs done` then reported `⚠ branch delete failed` and left a
+/// ghost branch behind. Pruning here, immediately before step 6's delete, is
+/// what makes that delete succeed.
 fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()> {
     let out = Command::new("git")
         .args([
@@ -4395,6 +4416,7 @@ fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()>
             &worktree_path.to_string_lossy(),
         ])
         .output()?;
+    prune_worktrees(repo_root);
     if out.status.success() {
         Ok(())
     } else {
@@ -4403,6 +4425,17 @@ fn remove_worktree(repo_root: &Path, worktree_path: &Path) -> anyhow::Result<()>
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
+}
+
+/// Drop git's registrations for worktrees whose directory no longer exists.
+///
+/// Best-effort and silent: a failure here costs nothing that the caller has
+/// not already survived, and `git worktree prune` touches only registrations
+/// git itself has decided are dead — never a directory that is still on disk.
+fn prune_worktrees(repo_root: &Path) {
+    let _ = Command::new("git")
+        .args(["-C", &repo_root.to_string_lossy(), "worktree", "prune"])
+        .output();
 }
 
 /// Run a post-merge hook command from the repository root.
@@ -6313,6 +6346,58 @@ mod tests {
     use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// A stale worktree registration — the directory gone, git's bookkeeping
+    /// still holding the branch — blocks `git branch -d` until it is pruned.
+    ///
+    /// This is the shape a nested child was left in on 2026-08-08 once its
+    /// parent's worktree (which physically contained it) was removed: `cs
+    /// done` saw no directory, skipped teardown, and reported `⚠ branch delete
+    /// failed`. The prune is what turns the second half of this test green.
+    #[test]
+    fn pruning_releases_a_branch_held_by_a_vanished_worktree() {
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .unwrap();
+            assert!(
+                out.status.success(),
+                "git {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        };
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.invalid"]);
+        git(&["config", "user.name", "T"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "seed"]);
+        let wt = root.join(".worktrees").join("task-a");
+        git(&[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "feat/task-a",
+            &wt.to_string_lossy(),
+            "main",
+        ]);
+
+        // The directory disappears by a route that is not `git worktree
+        // remove` — exactly what happens to a child nested in a parent's
+        // worktree when the parent is torn down.
+        std::fs::remove_dir_all(&wt).unwrap();
+        assert!(
+            delete_branch(&root, "feat/task-a").is_err(),
+            "precondition: git must still consider the branch checked out"
+        );
+
+        prune_worktrees(&root);
+        delete_branch(&root, "feat/task-a").expect("after the prune the branch must be deletable");
+        assert!(!branch_exists(&root, "feat/task-a"));
+    }
 
     fn make_store() -> (TempDir, FileStore) {
         let tmp = TempDir::new().unwrap();
