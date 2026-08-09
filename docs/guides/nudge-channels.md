@@ -27,13 +27,14 @@ judge. If you find yourself writing `if age > threshold` next to a
 
 ## The inventory
 
-Three **unbidden** channels — cosmon decides, the worker did not ask:
+Four **unbidden** channels — cosmon decides, the worker did not ask:
 
 | Channel | Emitter | Message | Judge |
 |---|---|---|---|
 | `Propulsion` | `cs patrol --propel` → `propel_stale_molecules` | `PROPULSION_NUDGE` | ✅ `decide_nudge`, per-stall ledger + exponential backoff + ceiling + orphan gate |
 | `Briefing` | `cs patrol --nudge` → `nudge_stalled_molecules` | `nudge_message(briefing)` | ✅ `decide_nudge`, idempotence window, no ceiling |
 | `Heal` | `cs patrol --heal` remedy `A2` → `apply_remedy` | `nudge_text(briefing)` | ✅ operator gate; the diagnosis supplies the rest |
+| `ApiStall` | `cs patrol --propel-api-stall` → `propel_api_stalled_molecules` | `API_STALL_NUDGE` | ✅ `decide_api_stall_nudge` = the typed-journal warrant **and then** every `decide_nudge` rule, plus the ADR-137 §5 no-interference guard |
 
 Everything else that reaches a worker's terminal is **operator- or
 lifecycle-initiated** and is deliberately *not* subject to this gate — a human
@@ -48,6 +49,72 @@ or an explicit verb asked for it:
 | `patrol --heal` remedy `A1` (bare Enter) | zero bytes; submits a paste the worker already composed |
 
 If you add a path to the left column, add it to the table *and* to the judge.
+
+## The one channel with a positive warrant: `ApiStall`
+
+Every rule in `decide_nudge` is a **refusal**. Once none of them fires, the only
+reason left to speak is an inference — the clocks are cold, therefore the worker
+is *probably* stuck. That inference is why `cosmon-fleet-propel` has been
+disabled since 2026-07-23, and the operator's reason for disabling it still
+holds: **a worker that is thinking is not a worker that is stuck.** Re-enabling
+that patrol as-is would buy back the same bug that produced the $151 orphan
+livelock.
+
+`cs patrol --propel-api-stall` replaces the inference with a fact. Claude's
+session journal (`~/.claude/projects/**/<session>.jsonl`, the same files
+`cs sessions` reads) records a transport failure as a *typed* record:
+
+```json
+{"type":"assistant","isApiErrorMessage":true, …}
+```
+
+A session whose **last assistant record** carries that flag is not thinking. Its
+turn ended in transport and no turn replaced it; on 2026-08-09 two workers sat
+that way until the operator attached each tmux by hand and typed `continue`.
+
+So the channel's trigger is the conjunction:
+
+1. the last assistant record of the worker's journal has `isApiErrorMessage: true`,
+2. the molecule is still `Running` with a live worker, and
+3. no human is piloting it (ADR-137 §5: presence rows, whisper quiet-period,
+   `health:hold`, `~/.cosmon/health.off`).
+
+Then — and only then — the ordinary judge runs, unchanged: operator gate, orphan
+gate, pane clock, attempt ceiling, exponential backoff, `propel-exhausted`,
+`propel-orphaned`. The typed flag is a warrant to *consider* speaking, never an
+override.
+
+### Why the flag and never the sentence
+
+The freeze is plainly visible in the pane as
+`API Error: Response stalled mid-stream.` Matching that string is forbidden, and
+the prohibition is paid for: in the be1e SEV-1 a bash guard grepped tmux panes
+for a phrase and killed healthy workers, because of three lines carrying the
+phrase, **two were users quoting it**.
+
+The journal has the same hazard and a structural cure: a `user` record can
+contain the identical sentence, but it normalises to `UserMessage`, a variant
+with no `api_error` field to set. Use and mention are separated by the record's
+*type*, not by a cleverer regex. The two tests that pin this are
+`stall::tests::the_same_sentence_quoted_by_a_user_is_not_flagged` and
+`patrol_api_stall::tests::the_same_sentence_quoted_by_a_user_is_not_a_stall` —
+if either ever goes green by matching text, the mechanism has become the bug it
+replaced.
+
+### Reading its report
+
+```
+⚛ API-stall propulsion
+  7 worker(s) journal-checked, 6 with no typed API error
+  → w-a12f ← task-20260808-3e5c (transport stall, progress frozen 640s)
+  ✋ w-b31c ← task-20260808-3033 (flagged, held by the no-interference guard: LivePilot)
+  ? w-c02a ← task-20260808-c0de (journal not attributable: 2 candidate session(s))
+```
+
+The `journal-checked` count is deliberate: without it, "0 propelled" cannot be
+told apart from "the sweep never ran", which is how a narrow trigger rots
+unnoticed. `journal not attributable` means the worktree holds no journal, or
+two equally recent ones — unknown is never treated as a stall.
 
 ## Why the operator gate outranks the clocks
 
@@ -118,6 +185,8 @@ orphaned; the signal is whether a file exists.
 ## See also
 
 - `crates/cosmon-core/src/propel.rs` — the judge and its rationale
+- `crates/cosmon-cli/src/cmd/patrol_api_stall.rs` — the typed-stall channel
+- `crates/cosmon-session-probe/src/stall.rs` — reading the provider's flag
 - ADR-123 — `cs await-operator`, the only sanctioned worker→operator block
 - ADR-137 §2 — why the pane signal is a *duration*, never rendered text
 - ADR-062 — why a `Starved` molecule must never be re-prompted

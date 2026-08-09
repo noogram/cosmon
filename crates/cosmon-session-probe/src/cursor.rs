@@ -231,6 +231,70 @@ pub fn read_lines_from(path: &Path, cursor: Cursor) -> Result<LineBatch, ProbeEr
     })
 }
 
+/// Read the complete lines contained in the **last `max_bytes`** of a log.
+///
+/// The cursor discipline above is for *following* a session; this is for
+/// *asking one question of its end* — "what does the most recent record say?"
+/// — on every tick of a patrol, over logs that reach tens of megabytes. Reading
+/// the whole file to look at its tail would make the question cost O(session)
+/// and turn a 3-minute patrol into a disk sweep.
+///
+/// Same three rules as [`read_lines_from`], one addition:
+///
+/// - the window starts at `len - max_bytes`, which almost certainly lands
+///   mid-line, so the **first partial line is discarded** rather than parsed
+///   (a half-record is not a record);
+/// - a trailing line still being written is left unconsumed, as everywhere;
+/// - offsets are absolute in the file, so a line cited from here addresses the
+///   same bytes a full read would give it.
+///
+/// A log shorter than `max_bytes` is read whole, and its first line is kept.
+///
+/// # Errors
+///
+/// [`ProbeError::Io`] if the file cannot be opened, measured, sought or read.
+pub fn read_tail_lines(path: &Path, max_bytes: u64) -> Result<Vec<RawLine>, ProbeError> {
+    let io = |source| ProbeError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+
+    let mut file = std::fs::File::open(path).map_err(io)?;
+    let len = file.metadata().map_err(io)?.len();
+    let start = len.saturating_sub(max_bytes);
+
+    file.seek(SeekFrom::Start(start)).map_err(io)?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf).map_err(io)?;
+
+    // Drop the head fragment when the window cut into a line. `start == 0` is
+    // the one case where the first line is genuinely a first line.
+    let (skipped, body) = if start == 0 {
+        (0, &buf[..])
+    } else {
+        match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => (i + 1, &buf[i + 1..]),
+            // No newline in the whole window: every byte belongs to one line
+            // whose beginning we cannot see. Nothing complete to report.
+            None => return Ok(Vec::new()),
+        }
+    };
+
+    let consumed = body.iter().rposition(|b| *b == b'\n').map_or(0, |i| i + 1);
+    let mut lines = Vec::new();
+    let mut at = start + skipped as u64;
+    for chunk in body[..consumed].split_inclusive(|b| *b == b'\n') {
+        let text = String::from_utf8_lossy(chunk)
+            .trim_end_matches('\n')
+            .to_string();
+        if !text.trim().is_empty() {
+            lines.push(RawLine { offset: at, text });
+        }
+        at += chunk.len() as u64;
+    }
+    Ok(lines)
+}
+
 /// Read exactly `want` bytes from the start of an open file, leaving the
 /// caller to seek wherever it wants afterwards. The caller guarantees the file
 /// is at least that long.
@@ -353,6 +417,44 @@ mod tests {
         let batch = read_lines_from(&log, Cursor::from_offset(114)).unwrap();
         assert_eq!(batch.continuity, Continuity::Resumed);
         assert!(batch.lines.iter().any(|l| l.text == "tail"));
+    }
+
+    #[test]
+    fn a_tail_read_drops_the_line_the_window_cut_in_half() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("s.jsonl");
+        append(&log, "first-and-very-long\nsecond\nthird\n");
+
+        // A window that starts inside "first-and-very-long".
+        let lines = read_tail_lines(&log, 15).unwrap();
+        let texts: Vec<_> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["second", "third"],
+            "the half line is not parsed"
+        );
+        // Offsets stay absolute in the file.
+        assert_eq!(lines[0].offset, 20);
+    }
+
+    #[test]
+    fn a_tail_read_of_a_short_log_keeps_its_first_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("s.jsonl");
+        append(&log, "only\n");
+        let lines = read_tail_lines(&log, 4096).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].offset, 0);
+    }
+
+    #[test]
+    fn a_tail_read_leaves_the_line_still_being_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let log = tmp.path().join("s.jsonl");
+        append(&log, "done\n{\"half\":");
+        let lines = read_tail_lines(&log, 4096).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "done");
     }
 
     #[test]

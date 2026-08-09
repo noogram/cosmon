@@ -66,6 +66,7 @@ pub mod panel;
 pub mod paths;
 pub mod patrol;
 pub mod patrol_abandon;
+pub mod patrol_api_stall;
 pub mod patrol_heal;
 pub mod peek;
 pub mod peek_tui;
