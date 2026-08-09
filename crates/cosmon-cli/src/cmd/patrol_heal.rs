@@ -137,7 +137,7 @@ impl HealLedger {
 /// [`HealGuardView`]. Reads presence rows, the whisper log, molecule tags / the
 /// `.no-heal` sentinel, the global kill-switch, and the backoff ledger — **never
 /// a pane**.
-fn build_guard_view(
+pub(crate) fn build_guard_view(
     mol: &MoleculeData,
     mol_dir: &Path,
     presences: &[Presence],
@@ -463,7 +463,7 @@ impl HealSweepReport {
 
 /// Resolve `~/.cosmon/health.off` and report whether the global kill-switch is
 /// present (ADR-137 §5.4). Absent home dir ⇒ treat as not set.
-fn global_kill_switch_present() -> bool {
+pub(crate) fn global_kill_switch_present() -> bool {
     dirs::home_dir().is_some_and(|h| h.join(".cosmon").join("health.off").exists())
 }
 

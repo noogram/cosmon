@@ -99,6 +99,20 @@ pub enum SessionEventKind {
         chars: usize,
         /// Per-turn token usage, when the provider attaches it to the turn.
         usage: Option<TurnUsage>,
+        /// The provider itself typed this turn as a **transport failure**, not
+        /// as model output: Claude's `isApiErrorMessage: true`.
+        ///
+        /// This is the one field here that is a *flag the provider set*, not a
+        /// measurement of the turn, and it exists for one reason: a stalled
+        /// session is otherwise indistinguishable from a thinking one. The flag
+        /// is deliberately read from the record's own typed boolean and never
+        /// from the rendered sentence — the same text ("Response stalled
+        /// mid-stream…") appears verbatim in *user* turns that quote it, and a
+        /// guard that keys on the phrase arrests the worker that merely
+        /// mentions it (the be1e SEV-1 use/mention trap). A `user` record
+        /// carrying the phrase normalises to [`SessionEventKind::UserMessage`]
+        /// and can therefore never set this flag, whatever it says.
+        api_error: bool,
     },
     /// A token-usage report that is not attached to one turn.
     TokenUsage {

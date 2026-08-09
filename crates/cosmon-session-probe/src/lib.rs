@@ -94,10 +94,13 @@ pub mod port;
 pub mod reference;
 pub mod repo;
 pub mod selector;
+pub mod stall;
 
 pub use claude::ClaudeProbe;
 pub use codex::CodexProbe;
-pub use cursor::{read_lines_from, Continuity, Cursor, LineBatch, RawLine, RestartCause};
+pub use cursor::{
+    read_lines_from, read_tail_lines, Continuity, Cursor, LineBatch, RawLine, RestartCause,
+};
 pub use error::ProbeError;
 pub use event::{QuotaReading, SessionEvent, SessionEventKind, TurnUsage};
 pub use port::{DiscoveryFilter, ProbeRead, ProbeRegistry, ProviderSessionRef, SessionProbe};
@@ -106,3 +109,4 @@ pub use reference::{
 };
 pub use repo::{RepoIdentity, RepoKind};
 pub use selector::{NativeSessionId, ProviderName, SessionSelector};
+pub use stall::{last_assistant_api_error, ApiStall};

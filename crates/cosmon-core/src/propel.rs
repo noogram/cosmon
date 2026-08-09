@@ -119,6 +119,23 @@
 //! while a false "workable" is the six-hour bleed itself. When the shell cannot
 //! determine briefing presence it passes `briefing_present: true`, degrading to
 //! exactly the pre-orphan behaviour (still bounded by the attempt ceiling).
+//!
+//! # A judge of refusals needs a warrant to say yes
+//!
+//! Everything above is a *refusal*: each rule can only stop a nudge. Once none
+//! of them fires, the reason left for speaking is an inference — the clocks are
+//! cold, so the worker is *probably* stuck. That inference is why
+//! `cosmon-fleet-propel` is disabled (2026-07-23) and why re-enabling it as-is
+//! would be the wrong repair: its trigger was never a fact about the world.
+//!
+//! [`decide_api_stall_nudge`] is the narrow alternative. It demands a positive,
+//! typed warrant — the provider's own `isApiErrorMessage` on the last assistant
+//! record of the session journal ([`NudgeView::api_error_stalled`]) — and only
+//! then consults the same refusals in the same order. A worker stalled that way
+//! is not thinking: its turn ended in transport and no turn replaced it. The
+//! warrant is a boolean a provider wrote, never a phrase read out of output,
+//! which is what keeps it clear of the use/mention trap that made a pane-text
+//! guard kill healthy workers in the be1e SEV-1.
 
 use chrono::Duration;
 use serde::{Deserialize, Serialize};
@@ -159,6 +176,11 @@ pub enum NudgeChannel {
     Briefing,
     /// `cs patrol --heal`, remedy `A2` — re-engagement after a diagnosis.
     Heal,
+    /// `cs patrol --propel-api-stall` — the *narrow* channel: the provider's
+    /// journal typed the worker's last turn as a transport failure. Judged by
+    /// [`decide_api_stall_nudge`], which adds the typed-fact precondition on
+    /// top of every rule the other channels obey.
+    ApiStall,
 }
 
 /// Everything the judge needs about one candidate worker, pre-digested by the
@@ -193,6 +215,14 @@ pub struct NudgeView {
     /// `None` when the transport cannot report it (no backend, unsupported
     /// adapter) — decided as "unknown", never as "idle".
     pub pane_idle: Option<Duration>,
+    /// The provider's own journal typed this worker's **last assistant turn**
+    /// as a transport failure (Claude's `isApiErrorMessage`). Read only by
+    /// [`decide_api_stall_nudge`], which refuses to speak without it.
+    ///
+    /// This is the one *positive* warrant in the whole view: every other field
+    /// can only ever suppress a nudge. It is a typed flag the provider wrote,
+    /// never a phrase recognised in output — see the module docs.
+    pub api_error_stalled: bool,
     /// Nudges already delivered for *this* stall (reset by the shell whenever
     /// the molecule makes real progress).
     pub attempts: u32,
@@ -223,6 +253,12 @@ pub enum NudgeSkip {
         /// Silence required before the worker counts as idle.
         threshold_secs: i64,
     },
+    /// The [`NudgeChannel::ApiStall`] channel found no typed transport-failure
+    /// flag on the worker's last assistant turn. Not evidence of health and not
+    /// a complaint — simply the absence of the only warrant this channel
+    /// accepts. Every worker the channel looks at and does not propel exits
+    /// here, which is exactly why the channel is quiet.
+    NoTypedApiError,
     /// A nudge is due eventually, but not yet — the exponential window from
     /// the previous nudge has not elapsed.
     Backoff {
@@ -379,6 +415,84 @@ pub fn decide_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
     }
 }
 
+/// The **narrow** admission gate: nudge only a worker whose provider journal
+/// says its last turn died in transport.
+///
+/// [`decide_nudge`] answers *"may we speak to this worker?"*. It is a
+/// conjunction of refusals, and once every refusal declines to fire, the
+/// remaining warrant is an inference — *the clocks are cold, so it is probably
+/// stuck*. That inference is what was wrong with `cosmon-fleet-propel`, and it
+/// is why the operator disabled that patrol on 2026-07-23 with a reason that
+/// still holds: **a worker that is thinking is not a worker that is stuck**.
+/// One false positive cost $151 in a livelock (task-20260720-8b63).
+///
+/// This function keeps every refusal and replaces the inference with a fact:
+/// [`NudgeView::api_error_stalled`], the provider's own typed flag on the last
+/// assistant record of the session journal. So the verdict is
+///
+/// > propel **iff** the provider typed the last turn as a transport failure
+/// > **and** [`decide_nudge`] would also have allowed it.
+///
+/// Which makes the channel strictly narrower than propulsion, never wider —
+/// the operator gate, the not-running gate, the orphan gate, the pane clock,
+/// the attempt ceiling and the backoff window all still apply, unchanged and
+/// in the same order. The typed fact is checked *first*, so a worker without it
+/// is dismissed before anything else is even considered, and the overwhelming
+/// majority of a sweep's candidates leave through
+/// [`NudgeSkip::NoTypedApiError`] having been read but not touched.
+///
+/// # Why a flag and not the sentence
+///
+/// The rendered error text is not admissible and never becomes admissible. A
+/// guard that recognised its target by a phrase killed healthy workers in the
+/// be1e SEV-1 — of three pane lines carrying that phrase, two were humans
+/// quoting it. The journal has the same property: a `user` record can contain
+/// the sentence verbatim. The shell that fills this field must therefore read a
+/// typed boolean on a typed record (see
+/// `cosmon_session_probe::last_assistant_api_error`), and no code path may
+/// substitute a string match for it.
+///
+/// # Examples
+///
+/// ```
+/// use chrono::Duration;
+/// use cosmon_core::molecule::MoleculeStatus;
+/// use cosmon_core::propel::{
+///     decide_api_stall_nudge, NudgeChannel, NudgeDecision, NudgeSkip, NudgeView,
+/// };
+///
+/// let stale = Duration::seconds(300);
+/// let mut view = NudgeView {
+///     channel: NudgeChannel::ApiStall,
+///     status: MoleculeStatus::Running,
+///     awaiting_operator: false,
+///     briefing_present: true,
+///     api_error_stalled: true,
+///     progress_age: Duration::minutes(20),
+///     pane_idle: Some(Duration::minutes(20)),
+///     attempts: 0,
+///     since_last_propel: None,
+/// };
+/// assert!(matches!(
+///     decide_api_stall_nudge(&view, stale),
+///     NudgeDecision::Nudge { .. }
+/// ));
+///
+/// // The same idle-looking worker, with no typed error: left alone.
+/// view.api_error_stalled = false;
+/// assert_eq!(
+///     decide_api_stall_nudge(&view, stale),
+///     NudgeDecision::Skip(NudgeSkip::NoTypedApiError)
+/// );
+/// ```
+#[must_use]
+pub fn decide_api_stall_nudge(view: &NudgeView, stale_after: Duration) -> NudgeDecision {
+    if !view.api_error_stalled {
+        return NudgeDecision::Skip(NudgeSkip::NoTypedApiError);
+    }
+    decide_nudge(view, stale_after)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +506,7 @@ mod tests {
             status: MoleculeStatus::Running,
             awaiting_operator: false,
             briefing_present: true,
+            api_error_stalled: false,
             progress_age: Duration::seconds(progress),
             pane_idle: pane.map(Duration::seconds),
             attempts,
@@ -402,11 +517,120 @@ mod tests {
     /// Every channel that can speak into a worker's terminal, so the gate
     /// tests below assert *universally* rather than for propulsion alone —
     /// the regression being fixed was precisely a per-organ repair.
-    const CHANNELS: [NudgeChannel; 3] = [
+    const CHANNELS: [NudgeChannel; 4] = [
         NudgeChannel::Propulsion,
         NudgeChannel::Briefing,
         NudgeChannel::Heal,
+        NudgeChannel::ApiStall,
     ];
+
+    // ---------------------------------------------------------------
+    // The narrow channel: `decide_api_stall_nudge`
+    // ---------------------------------------------------------------
+
+    /// A view of a worker that every clock reads as idle — cold progress, cold
+    /// pane, no gate, no orphan, no attempts spent. Under
+    /// [`decide_nudge`] this is a nudge; under the narrow channel it is a nudge
+    /// only if the provider *typed* the last turn as a transport failure.
+    fn stalled_looking() -> NudgeView {
+        NudgeView {
+            channel: NudgeChannel::ApiStall,
+            ..view(1800, Some(1800), 0, None)
+        }
+    }
+
+    /// The propelling case: the flag is on the record, so the warrant exists.
+    #[test]
+    fn a_typed_api_error_is_the_one_warrant_that_licenses_a_nudge() {
+        let mut v = stalled_looking();
+        v.api_error_stalled = true;
+        assert!(matches!(
+            decide_api_stall_nudge(&v, STALE),
+            NudgeDecision::Nudge { attempt: 1, .. }
+        ));
+    }
+
+    /// The discriminating case, and the whole reason this channel exists apart
+    /// from `--propel`: an identically idle-*looking* worker with no typed
+    /// error is left strictly alone. This is the worker `cosmon-fleet-propel`
+    /// would have nudged — a worker that may simply be thinking.
+    #[test]
+    fn an_idle_looking_worker_without_the_typed_flag_is_never_nudged() {
+        let v = stalled_looking();
+        assert_eq!(
+            decide_api_stall_nudge(&v, STALE),
+            NudgeDecision::Skip(NudgeSkip::NoTypedApiError),
+        );
+        // …while the inference-based channel would have spoken to it. The two
+        // verdicts differing on the same view *is* the narrowing.
+        assert!(matches!(
+            decide_nudge(&v, STALE),
+            NudgeDecision::Nudge { .. }
+        ));
+    }
+
+    /// The typed flag is a warrant, never an override: every refusal the other
+    /// channels obey still applies, unchanged and in the same order.
+    #[test]
+    fn the_typed_flag_never_overrides_a_refusal() {
+        let base = || {
+            let mut v = stalled_looking();
+            v.api_error_stalled = true;
+            v
+        };
+
+        let mut gated = base();
+        gated.awaiting_operator = true;
+        assert_eq!(
+            decide_api_stall_nudge(&gated, STALE),
+            NudgeDecision::Skip(NudgeSkip::AwaitingOperator),
+        );
+
+        let mut done = base();
+        done.status = MoleculeStatus::Completed;
+        assert!(matches!(
+            decide_api_stall_nudge(&done, STALE),
+            NudgeDecision::Skip(NudgeSkip::NotRunning { .. })
+        ));
+
+        let mut orphan = base();
+        orphan.briefing_present = false;
+        assert!(matches!(
+            decide_api_stall_nudge(&orphan, STALE),
+            NudgeDecision::Escalate {
+                reason: EscalateReason::Orphaned,
+                ..
+            }
+        ));
+
+        // A worker whose terminal is still producing output has an API error
+        // *behind* it, not in front of it — the client is retrying, or the
+        // human already typed "continue". Not ours to poke.
+        let mut talking = base();
+        talking.pane_idle = Some(Duration::seconds(5));
+        assert!(matches!(
+            decide_api_stall_nudge(&talking, STALE),
+            NudgeDecision::Skip(NudgeSkip::PaneActive { .. })
+        ));
+
+        let mut spent = base();
+        spent.attempts = PROPEL_MAX_ATTEMPTS;
+        assert!(matches!(
+            decide_api_stall_nudge(&spent, STALE),
+            NudgeDecision::Escalate {
+                reason: EscalateReason::AttemptsExhausted,
+                ..
+            }
+        ));
+
+        let mut recent = base();
+        recent.attempts = 1;
+        recent.since_last_propel = Some(Duration::seconds(30));
+        assert!(matches!(
+            decide_api_stall_nudge(&recent, STALE),
+            NudgeDecision::Skip(NudgeSkip::Backoff { .. })
+        ));
+    }
 
     /// The 2026-07-19 (worker a850) regression: a worker that finished its
     /// work and is holding atomic questions for the operator has both clocks
@@ -713,6 +937,9 @@ mod tests {
                 }
                 NudgeDecision::Skip(NudgeSkip::PaneActive { .. }) => {
                     unreachable!("pane is as cold as the progress clock")
+                }
+                NudgeDecision::Skip(NudgeSkip::NoTypedApiError) => {
+                    unreachable!("this is the propulsion channel, not the api-stall one")
                 }
                 NudgeDecision::Skip(NudgeSkip::AwaitingOperator | NudgeSkip::NotRunning { .. }) => {
                     unreachable!("this worker is Running and holds no operator gate")

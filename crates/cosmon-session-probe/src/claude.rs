@@ -226,6 +226,14 @@ impl SessionProbe for ClaudeProbe {
                     .map(str::to_string),
                 chars: content_chars(content),
                 usage: message.and_then(|m| m.get("usage")).map(usage_from_claude),
+                // The typed flag, read as a boolean and nothing else. Claude
+                // writes `isApiErrorMessage: true` on the synthetic assistant
+                // record it emits when a request died in transport; the text
+                // of that record is not consulted here and must not be.
+                api_error: value
+                    .get("isApiErrorMessage")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
             },
             "" => SessionEventKind::Other {
                 record: "<untyped>".to_string(),
@@ -305,7 +313,9 @@ mod tests {
                 model,
                 chars,
                 usage,
+                api_error,
             } => {
+                assert!(!api_error, "an ordinary turn carries no error flag");
                 assert_eq!(model.as_deref(), Some("claude-opus-5"));
                 assert_eq!(chars, 2);
                 let usage = usage.unwrap();
@@ -316,6 +326,32 @@ mod tests {
             other => panic!("expected an assistant turn, got {other:?}"),
         }
         assert!(ev.at.is_some());
+    }
+
+    /// The typed flag travels; the sentence is incidental.
+    #[test]
+    fn an_assistant_record_flagged_by_the_provider_normalises_as_an_api_error() {
+        let ev = probe().normalize(&line(
+            r#"{"type":"assistant","isApiErrorMessage":true,"message":{"model":"<synthetic>","content":[{"type":"text","text":"API Error: Response stalled mid-stream."}]}}"#,
+        ));
+        assert!(matches!(
+            ev.kind,
+            SessionEventKind::AssistantMessage {
+                api_error: true,
+                ..
+            }
+        ));
+    }
+
+    /// The be1e use/mention trap, at the record level: a **user** turn carrying
+    /// the identical sentence is a `UserMessage`, a variant that has no
+    /// `api_error` field to set. No amount of quoting can manufacture the flag.
+    #[test]
+    fn a_user_record_quoting_the_error_sentence_is_just_a_user_message() {
+        let ev = probe().normalize(&line(
+            r#"{"type":"user","message":{"content":"it printed: API Error: Response stalled mid-stream."}}"#,
+        ));
+        assert!(matches!(ev.kind, SessionEventKind::UserMessage { .. }));
     }
 
     #[test]

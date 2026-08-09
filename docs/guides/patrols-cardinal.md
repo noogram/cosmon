@@ -196,6 +196,46 @@ dispatch         = "detached"
 enabled          = false
 ```
 
+## The typed-stall propulsion patrol (`--propel-api-stall`)
+
+`cosmon-fleet-propel` has been `enabled = false` since 2026-07-23, on purpose:
+its trigger was *apparent idleness*, an inference, and a worker that is thinking
+looks exactly like one that is stuck. Do **not** flip it back on.
+
+`cs patrol --propel-api-stall` is the narrow replacement. It reads each live
+worker's provider session journal — the same `.jsonl` files `cs sessions`
+reads — and re-engages one only when the **last assistant record carries the
+provider's typed transport-failure flag** (`isApiErrorMessage`), the molecule is
+still Running, and the ADR-137 §5 no-interference guard says no human is
+piloting it. The motivating incident: 2026-08-09, two workers frozen on a
+mid-stream API error that the operator had to clear by attaching each tmux and
+typing `continue`.
+
+It never keys on pane text or on the error sentence; a `user` record quoting
+that sentence carries no flag and is never propelled (the be1e SEV-1
+use/mention trap). Full rationale in
+[nudge-channels.md](nudge-channels.md#the-one-channel-with-a-positive-warrant-apistall).
+
+```toml
+# --- api-stall propulsion: propel IFF the provider's journal typed the last
+#     turn as a transport failure. Narrow by construction — a quiet sweep
+#     still reports how many journals it read ("N journal-checked").
+#     Same staging rule as --event-age below: enable only AFTER the post-merge
+#     `just install` has taught ~/.local/bin/cs the flag.
+[[patrol]]
+name             = "cosmon-fleet-api-stall"
+interval_seconds = 180
+command          = ["/Users/you/.local/bin/cs", "patrol", "--propel-api-stall"]
+working_dir      = "/srv/cosmon/cosmon"
+log_file         = "~/.cosmon/logs/cosmon-fleet-api-stall.log"
+dispatch         = "detached"
+enabled          = false
+```
+
+Kill-switches, unchanged: `~/.cosmon/health.off` stops it globally, a
+`health:hold` tag or a `.no-heal` sentinel stops it per molecule, and
+`enabled = false` stops the patrol itself.
+
 > **Why staged, not a live worktree edit.** Wiring is a deployment step the
 > operator (or the `cs done` post-merge hook) performs once the new binary is
 > installed — a worker cannot safely flip `--event-age` on before the install

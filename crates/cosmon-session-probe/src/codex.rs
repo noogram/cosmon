@@ -200,6 +200,12 @@ impl SessionProbe for CodexProbe {
                     .and_then(|p| p.get("message"))
                     .map_or(0, |m| content_chars(Some(m))),
                 usage: None,
+                // Codex publishes no per-turn transport-failure flag of its
+                // own. `false` is the honest answer — "this provider does not
+                // say" — and it fails toward *not* propelling, which is the
+                // safe direction for a signal whose only consumer nudges a
+                // live worker.
+                api_error: false,
             },
             (_, "token_count") => match payload.and_then(usage_from_codex) {
                 Some(usage) => SessionEventKind::TokenUsage {

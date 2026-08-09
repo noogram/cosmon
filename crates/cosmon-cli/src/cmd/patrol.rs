@@ -68,10 +68,29 @@ pub struct Args {
     #[arg(long)]
     pub propel: bool,
 
+    /// Propel on a typed provider stall — the narrow channel. Consults each
+    /// live worker's **provider session journal** and re-engages one only when
+    /// its last assistant record carries the provider's own transport-failure
+    /// flag (Claude's `isApiErrorMessage`), the molecule is still Running, and
+    /// no human is piloting it. Distinct from `--propel`, whose trigger is the
+    /// *inference* "this worker looks idle" — the trigger that had to be turned
+    /// off on 2026-07-23 because a worker that is thinking is not a worker that
+    /// is stuck. The flag is a fact the provider wrote down; a worker parked on
+    /// it has no turn in flight to interrupt. Never keys on pane text or on the
+    /// error sentence: a `user` record quoting that sentence verbatim carries no
+    /// flag and is never propelled (the be1e SEV-1 use/mention trap). Keeps
+    /// every `--propel` guardrail — exponential backoff to `propel-exhausted`,
+    /// the `propel-orphaned` escalation, the ADR-137 §5 no-interference guard
+    /// and the `~/.cosmon/health.off` kill-switch.
+    #[arg(long)]
+    pub propel_api_stall: bool,
+
     /// Staleness threshold in seconds for `--propel` (default: 300).
     /// A molecule is a candidate if `updated_at` is older than this AND its
     /// worker's terminal has been silent at least as long. Also the first
-    /// backoff window, doubling per nudge up to 30 min.
+    /// backoff window, doubling per nudge up to 30 min. `--propel-api-stall`
+    /// reuses it for the terminal-silence bar and the backoff base, but never
+    /// as a candidacy test: there, candidacy is the provider's typed flag.
     #[arg(long, default_value_t = 300)]
     pub stale_after: u64,
 
@@ -670,6 +689,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         PropelSweep::default()
     };
 
+    // API-stall propulsion: the narrow channel. Unlike the sweep above, its
+    // trigger is a typed flag in the provider's journal rather than an
+    // inference from cold clocks — see `patrol_api_stall` for why that
+    // distinction is the whole mechanism.
+    let api_stalled = if args.propel_api_stall {
+        super::patrol_api_stall::propel_api_stalled_molecules(
+            &super::patrol_api_stall::SweepInputs {
+                store: store.as_ref(),
+                state_dir: &state_dir,
+                project_root: project_root.as_deref().unwrap_or_else(|| Path::new(".")),
+                molecules: &molecules,
+                fleet: &fleet,
+                backend: backend.as_ref(),
+                reg: &super::sessions::registry(),
+                stale_after: args.stale_after,
+            },
+        )
+    } else {
+        super::patrol_api_stall::ApiStallSweep::default()
+    };
+
     // Nudge sweep (delib-20260420-1b02 M4) — per-step stall classifier
     // driven by `last_progress_at` + the active step's `timeout_minutes`.
     let nudged = if args.nudge {
@@ -859,6 +899,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     .collect::<Vec<_>>(),
             });
         }
+        if args.propel_api_stall {
+            output["propel_api_stall"] = super::patrol_api_stall::api_stall_json(&api_stalled);
+        }
         if args.propel {
             output["propel"] = serde_json::json!({
                 "running_molecules": running_molecule_count,
@@ -1042,6 +1085,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
         if args.propel {
             print_propel_report(running_molecule_count, args.stale_after, &propelled);
+        }
+        if args.propel_api_stall {
+            super::patrol_api_stall::print_api_stall_report(&api_stalled);
         }
         if args.nudge {
             print_nudge_report(&nudged);
@@ -1798,7 +1844,7 @@ fn notify_propel_orphaned(wid: &WorkerId, mid: &MoleculeId, stale_secs: i64) {
 /// Split out of [`propel_stale_molecules`] so the sweep loop stays readable —
 /// the shell's job is to gather these facts and obey the verdict, never to
 /// re-implement the heuristic (the one-judge discipline of the module docs).
-fn build_propulsion_view(
+pub(crate) fn build_propulsion_view(
     store: &dyn StateStore,
     molecules: &[MoleculeData],
     mid: &MoleculeId,
@@ -1813,6 +1859,11 @@ fn build_propulsion_view(
         status: mol.map_or(MoleculeStatus::Running, |m| m.status),
         awaiting_operator: mol.is_some_and(|m| worker_awaits_operator(store, m)),
         briefing_present: worker_briefing_present(store, mid),
+        // The propulsion channel does not read the provider journal; the
+        // api-stall channel sets this itself after building the view. `false`
+        // here means "no typed warrant established", which is the only honest
+        // default and the one that cannot license a nudge on its own.
+        api_error_stalled: false,
         progress_age,
         pane_idle,
         attempts: attempts.count,
@@ -1826,7 +1877,7 @@ fn build_propulsion_view(
 /// Record an orphaned candidate: tag it `propel-orphaned`, page the operator
 /// via `cs notify`, and file it in the sweep's `orphaned` bucket. Never nudges
 /// — a brief-less worker cannot proceed no matter what it is told.
-fn escalate_orphan(
+pub(crate) fn escalate_orphan(
     store: &dyn StateStore,
     sweep: &mut PropelSweep,
     wid: WorkerId,
@@ -1962,7 +2013,10 @@ pub(crate) fn propel_stale_molecules(
             NudgeDecision::Skip(
                 NudgeSkip::PaneActive { .. }
                 | NudgeSkip::AwaitingOperator
-                | NudgeSkip::NotRunning { .. },
+                | NudgeSkip::NotRunning { .. }
+                // Never produced by `decide_nudge`; it is the api-stall
+                // channel's own refusal.
+                | NudgeSkip::NoTypedApiError,
             )
             | NudgeDecision::Escalate {
                 reason: EscalateReason::Orphaned,
@@ -2059,7 +2113,7 @@ fn propel_attempts(
 /// Best-effort: a load/save failure is swallowed, matching the rest of the
 /// patrol's writer-of-last-resort discipline. The cost of a lost write is one
 /// extra nudge, never a wedged sweep.
-fn record_propel(
+pub(crate) fn record_propel(
     store: &dyn StateStore,
     mid: &MoleculeId,
     attempt: u32,
@@ -2076,7 +2130,7 @@ fn record_propel(
 /// Tag a molecule whose propulsion attempts are spent so the healer and the
 /// operator can see it without re-deriving the ledger. Idempotent — the tag is
 /// a set member, so a repeated sweep re-writes nothing.
-fn mark_propel_exhausted(store: &dyn StateStore, mid: &MoleculeId) {
+pub(crate) fn mark_propel_exhausted(store: &dyn StateStore, mid: &MoleculeId) {
     let Ok(mut mol) = store.load_molecule(mid) else {
         return;
     };
@@ -2272,6 +2326,9 @@ pub(crate) fn nudge_stalled_molecules(
             // brief-less worker to "re-read briefing.md" is exactly as futile
             // as telling it to "continue", so this channel suppresses too.
             briefing_present: worker_briefing_present(store, &mol.id),
+            // Not this channel's warrant: the briefing tier is judged by
+            // `decide_nudge`, which never reads the field.
+            api_error_stalled: false,
             progress_age: now.signed_duration_since(mol.updated_at),
             pane_idle: pane_idle_seconds(be.socket(), &session).map(chrono::Duration::seconds),
             // Deliberately not `mol.nudge_count`: that field is a *lifetime*
@@ -3570,6 +3627,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
@@ -3614,6 +3672,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
@@ -3658,6 +3717,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
@@ -3706,6 +3766,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
@@ -3744,6 +3805,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
@@ -3977,6 +4039,7 @@ mod tests {
             status: MoleculeStatus::Running,
             awaiting_operator: false,
             briefing_present: true,
+            api_error_stalled: false,
             progress_age: chrono::Duration::seconds(644),
             pane_idle: Some(chrono::Duration::seconds(2)),
             attempts: 0,
@@ -4133,6 +4196,7 @@ mod tests {
                     status: mol.status,
                     awaiting_operator: worker_awaits_operator(&store, &mol),
                     briefing_present: true,
+                    api_error_stalled: false,
                     progress_age: chrono::Duration::seconds(300 + pass * 70),
                     pane_idle: Some(chrono::Duration::seconds(300 + pass * 70)),
                     attempts: 0,
@@ -4183,6 +4247,7 @@ mod tests {
             status: mol.status,
             awaiting_operator: worker_awaits_operator(&store, &mol),
             briefing_present: true,
+            api_error_stalled: false,
             progress_age: chrono::Duration::hours(3),
             pane_idle: Some(chrono::Duration::hours(3)),
             attempts: 0,
@@ -5250,6 +5315,7 @@ mod tests {
             respawn: false,
             no_tmux: true,
             propel: false,
+            propel_api_stall: false,
             stale_after: 300,
             expire: false,
             auto_collapse: false,
