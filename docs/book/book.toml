@@ -7,10 +7,11 @@ src = "src"
 
 # Output goes to docs/book/book/ (relative to this file). This is the directory
 # Cloudflare Pages publishes — see wrangler.toml (pages_build_output_dir).
-# NOTE: publication is an operator gesture held behind the membrane-repair gate.
-# There is intentionally NO auto-deploy-on-push workflow for docs.noogram.org:
-# merging these pages to main must NOT flip the site public while the
-# confidentiality scrub (task-20260616-cc22) is still red.
+# NOTE: merging to main does NOT publish — there is intentionally no
+# auto-deploy-on-push workflow. Publication rides the TAG instead: the
+# `publish-docs` job in .github/workflows/release.yml builds this book, stamps
+# the built bundle with the released version, deploys it, and then asserts the
+# live origin serves that version (task-20260810-5d79).
 # Canonical docs host is docs.noogram.org (delib-20260711-8d00, topology A).
 # The apex noogram.org and the noogram.dev→noogram.org 301 are C2's remit
 # (domain/DNS), not configured here.

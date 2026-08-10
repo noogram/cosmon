@@ -25,6 +25,10 @@ name: Release
 #   6. Smoke test           — fresh macOS and Linux runners `brew install` from
 #      the just-published tap and assert `cs --version` returns in < 30 s.
 #      GATED behind the same ENABLE_HOMEBREW_TAP variable as the tap job.
+#   7. Docs publication     — the mdBook site is built, stamped with the tag,
+#      deployed to docs.noogram.org, and then VERIFIED against the live origin.
+#      Before this existed, the docs shipped only when a human remembered to
+#      run wrangler; v0.6.0 proved that memory is not a release mechanism.
 #
 # For v0.1 the supported install channel is `cargo install --git`; steps 1–4
 # (build, sign, Rekor, SBOM, GitHub Release) run on every tag push, so the
@@ -577,3 +581,138 @@ jobs:
           if [ "$elapsed" -gt 30 ]; then
             echo "::warning::install took ${elapsed}s (> 30s budget)"
           fi
+
+  # ---------------------------------------------------------------------------
+  # 5. Publish the documentation site (docs.noogram.org) for this tag.
+  #
+  #    Why this job exists. v0.6.0 (2026-08-10) went out in four minutes — four
+  #    targets built, a signed Release, SBOMs, tap, cold installs green on macOS
+  #    and Ubuntu, eight steps — while docs.noogram.org went on describing
+  #    `cs session`, the verb ADR-175 had just renamed. 31 occurrences of the
+  #    dead name live, zero of the new one, and not one red check anywhere. The
+  #    only publication mechanism for the docs was a human remembering to run
+  #    wrangler by hand, and it failed on the very release that renamed a public
+  #    verb. This job is that memory, made mechanical.
+  #
+  #    It runs AFTER the GitHub Release is cut, and NOTHING depends on it. That
+  #    ordering is deliberate and load-bearing: a signed binary that is already
+  #    downloadable is not unpublished because a CDN did not answer. If this job
+  #    fails, the release stands, the run goes red, and the failure names what
+  #    the origin actually served. It never re-tags, deletes, or edits the
+  #    Release — no rewriting of history to make a site problem disappear.
+  #
+  #    It needs TWO repository secrets, not one:
+  #      * CLOUDFLARE_API_TOKEN   — Workers/Pages-scoped deploy token
+  #      * CLOUDFLARE_ACCOUNT_ID  — the account the cosmon-docs project lives in
+  #    The second is not optional convenience. A Pages-scoped token cannot list
+  #    accounts, so without it wrangler dies on "Failed to automatically
+  #    retrieve account IDs" (verified 2026-08-10). If either is missing the
+  #    preflight step below FAILS LOUDLY rather than skipping: silence is the
+  #    defect being fixed here, and a docs job that quietly no-ops is the same
+  #    bug wearing a workflow file. Set them with:
+  #      gh secret set CLOUDFLARE_API_TOKEN
+  #      gh secret set CLOUDFLARE_ACCOUNT_ID
+  #
+  #    Note this is a TAG-triggered publish, and only that. Merging to main
+  #    still does not touch the site (wrangler.toml, publication gate): the
+  #    site moves when a version ships, which is exactly when its contents
+  #    became true.
+  # ---------------------------------------------------------------------------
+  publish-docs:
+    name: Publish docs.noogram.org
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      MDBOOK_VERSION: '0.4.52'
+      MDBOOK_SHA256: 'c0b903f01dd8f4edc644372ad2b80b1fdddd12552d37b6a098657cbd8eddd768'
+      MDBOOK_MERMAID_VERSION: '0.14.0'
+      MDBOOK_MERMAID_SHA256: '37364965fb190cf9929d93c930c6b6c69b2fed05f7658ea2d312882ed59c645e'
+      # Pinned exactly, like every Action SHA above: a docs deploy is a
+      # credentialed push to a public origin, not a place for `@latest`.
+      WRANGLER_VERSION: '4.120.0'
+      DOCS_BASE_URL: 'https://docs.noogram.org'
+      PAGES_PROJECT: 'cosmon-docs'
+    steps:
+      - name: Preflight — both Cloudflare secrets must exist
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${CLOUDFLARE_API_TOKEN:-}" ]  || missing="${missing} CLOUDFLARE_API_TOKEN"
+          [ -n "${CLOUDFLARE_ACCOUNT_ID:-}" ] || missing="${missing} CLOUDFLARE_ACCOUNT_ID"
+          if [ -n "$missing" ]; then
+            echo "::error::missing repository secret(s):${missing} — the docs for this tag were NOT published. The GitHub Release itself is unaffected. Set them with 'gh secret set <NAME>' and re-run this job." >&2
+            exit 1
+          fi
+          echo "Both Cloudflare secrets are present."
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install mdbook + mdbook-mermaid (pinned, hash-verified)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${HOME}/.local/bin"
+          fetch() {  # fetch <url> <sha256> <tarball-name>
+            curl -fsSL --retry 3 -o "/tmp/$3" "$1"
+            echo "$2  /tmp/$3" | sha256sum -c -
+            tar -xzf "/tmp/$3" -C "${HOME}/.local/bin"
+          }
+          fetch "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+                "${MDBOOK_SHA256}" mdbook.tar.gz
+          fetch "https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" \
+                "${MDBOOK_MERMAID_SHA256}" mdbook-mermaid.tar.gz
+          chmod +x "${HOME}/.local/bin/mdbook" "${HOME}/.local/bin/mdbook-mermaid"
+          echo "${HOME}/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Build the book and stamp it with the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/release/build-docs-site.sh \
+            --version "${{ needs.release.outputs.version }}" \
+            --commit  "${GITHUB_SHA}"
+
+      - name: Deploy to Cloudflare Pages (${{ env.PAGES_PROJECT }})
+        shell: bash
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Without this, a Workers/Pages-scoped token cannot list accounts and
+          # wrangler aborts with "Failed to automatically retrieve account IDs".
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # NO directory argument. wrangler.toml already sets
+          # pages_build_output_dir = docs/book/book, and passing the directory
+          # as well DOUBLE-JOINS the path and fails (docs/WEBDOCS.md, deploy
+          # section). Run from the repo root so that config is the one found.
+          #
+          # --branch=main targets the project's PRODUCTION deployment (the
+          # project was created with --production-branch=main). A tag checkout
+          # is a detached HEAD, so wrangler's branch auto-detection has nothing
+          # sane to infer; naming it is what makes this a prod publish rather
+          # than a preview nobody sees. If it were wrong the verify step below
+          # catches it — the stamp would never appear on the live origin.
+          npx --yes "wrangler@${WRANGLER_VERSION}" pages deploy \
+            --project-name="${PAGES_PROJECT}" \
+            --branch=main \
+            --commit-dirty=true
+
+      - name: Verify the LIVE origin serves this version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # An exit code from `wrangler pages deploy` is not evidence: it is 0
+          # for a bundle identical to last month's. Ask the origin what it is
+          # serving, and fail on the answer, not on the status.
+          ./scripts/release/verify-docs-deploy.sh \
+            --version "${{ needs.release.outputs.version }}" \
+            --base-url "${DOCS_BASE_URL}"

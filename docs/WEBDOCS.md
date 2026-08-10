@@ -69,11 +69,16 @@ file is the source of truth.
 
 ## PUBLICATION GATE — read before deploying
 
-Publishing to docs.noogram.org is an **operator gesture**. There is intentionally
-**NO** auto-deploy-on-push GitHub Actions workflow for this site — merging the
-book pages to `main` must **NOT** flip the site. The prod flip stays under the
-operator's finger, via the manual `wrangler pages deploy` below. The custom
-domain (`docs.noogram.org`) is attached by the operator at deploy time —
+Merging to `main` does **NOT** publish. There is intentionally **NO**
+auto-deploy-on-push workflow for this site: a merged page is a page someone
+agreed with, not a page the world has been promised.
+
+Publication rides the **tag**. `.github/workflows/release.yml`'s `publish-docs`
+job builds the book, stamps the bundle with the released version, deploys it to
+the `cosmon-docs` Pages project, and then fetches the live origin and asserts it
+serves that version. See "Deploying" below for what remains manual.
+
+The custom domain (`docs.noogram.org`) is attached by the operator once —
 Cloudflare custom domain + CNAME + zero-trust coverage — not by anything in this
 repo.
 
@@ -104,10 +109,45 @@ rebuilt on every deploy.
 
 ---
 
-## Deploying (manual — the only path)
+## Deploying
+
+### On a release tag — automatic (the normal path)
+
+Pushing `vX.Y.Z` runs the `publish-docs` job in
+`.github/workflows/release.yml`. It builds the book, stamps it, deploys it, and
+verifies the live origin. Two repository secrets are required, and the job
+**fails loudly** if either is missing rather than skipping:
+
+| Secret | Why |
+|---|---|
+| `CLOUDFLARE_API_TOKEN` | Workers/Pages-scoped deploy token |
+| `CLOUDFLARE_ACCOUNT_ID` | A Pages-scoped token cannot list accounts; without this, wrangler dies on `Failed to automatically retrieve account IDs` |
 
 ```sh
-mdbook build docs/book
+gh secret set CLOUDFLARE_API_TOKEN
+gh secret set CLOUDFLARE_ACCOUNT_ID   # read via `wrangler whoami`
+```
+
+The job runs **after** the GitHub Release is cut, and nothing depends on it. A
+failed docs deploy therefore leaves the release published and intact — a signed
+binary already in someone's hands is not unpublished because a CDN did not
+answer. The run goes red and names what the origin actually served.
+
+Why it was written: **v0.6.0** (2026-08-10) shipped four signed targets in four
+minutes, with a Release, SBOMs, a Homebrew tap, and cold installs green on macOS
+and Ubuntu — while docs.noogram.org went on describing `cs session`, the verb
+ADR-175 had renamed. 31 occurrences of the dead name live, zero of the new one,
+and no check anywhere was red. The publication mechanism was a human remembering
+to run the command below.
+
+### By hand — for a preview, or to re-publish without cutting a tag
+
+```sh
+# Build AND stamp the bundle with the version being published. Use this rather
+# than a bare `mdbook build`: the stamp is what /version.txt serves, and a
+# hand-deploy that skips it leaves the origin claiming a version it no longer
+# has — which is the whole failure mode this file is about, inverted.
+./scripts/release/build-docs-site.sh --version "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 
 # Hard offline validation of local files and heading anchors; HTTP(S) issues warn.
 ./scripts/check-book-links.sh
@@ -115,6 +155,9 @@ mdbook build docs/book
 # already points at docs/book/book, so pass NO directory argument
 # (passing the dir AND having the config set double-joins the path and fails):
 wrangler pages deploy --project-name=cosmon-docs --branch=main
+
+# Then ask the origin what it is actually serving — an exit code will not.
+./scripts/release/verify-docs-deploy.sh --version "$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)"
 ```
 
 `--branch=main` publishes to the **production** deployment (the one mapped to the
