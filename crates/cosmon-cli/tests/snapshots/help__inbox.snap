@@ -30,4 +30,4 @@ Success metric: 5 days out of 7 without opening Claude Code
 to pilot cosmon. See docs/guides/inbox-trial.md.
 
 SEE ALSO: cs ensemble (full backlog), cs peek (fractal TUI portal),
-cs session (operator carnet that inbox reads as its sticky top line).
+cs journal (operator carnet that inbox reads as its sticky top line).

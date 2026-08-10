@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `cs session` — operator carnet, append-only, BLAKE3-sealed.
+//! `cs journal` — operator carnet, append-only, BLAKE3-sealed.
 //!
 //! Three verbs: `start`, `note`, `end`. Each session is one markdown
-//! file under `.cosmon/state/sessions/`, with a YAML frontmatter on
+//! file under `.cosmon/state/journals/`, with a YAML frontmatter on
 //! open, timestamped note blocks in the body, and a YAML footer
 //! carrying `ended_at`, `note_count`, and `seal: blake3:<hex>` on
 //! close.
@@ -16,7 +16,7 @@
 //! shadow contract (silent post-hoc edit) gets flagged.
 //!
 //! Open-session detection is file-based: a session is *open* while
-//! its file has only one YAML block (the frontmatter). `cs session
+//! its file has only one YAML block (the frontmatter). `cs journal
 //! end` appends the closing `---`…`---` footer, making the file
 //! self-identifying as sealed.
 //!
@@ -36,13 +36,13 @@ use cosmon_hash::Hash;
 
 use super::Context;
 
-/// Exit code signalling "a session is already open" (from `cs session start`).
+/// Exit code signalling "a session is already open" (from `cs journal start`).
 pub const EXIT_SESSION_ALREADY_OPEN: i32 = 2;
 
-/// Exit code signalling "no open session" (from `cs session note` / `end`).
+/// Exit code signalling "no open session" (from `cs journal note` / `end`).
 pub const EXIT_NO_OPEN_SESSION: i32 = 3;
 
-/// Top-level arguments for `cs session`.
+/// Top-level arguments for `cs journal`.
 #[derive(clap::Args)]
 pub struct Args {
     #[command(subcommand)]
@@ -52,19 +52,19 @@ pub struct Args {
 /// Session subcommands.
 #[derive(clap::Subcommand)]
 pub enum Sub {
-    /// Start a new session.
+    /// Open a journal — every note you take lands in it until you end it.
     Start(StartArgs),
-    /// Append a timestamped note to the open session.
+    /// Append a timestamped note to the open journal.
     Note(NoteArgs),
-    /// Close the open session, optionally sealing it with BLAKE3.
+    /// Close the open journal, optionally sealing it with BLAKE3.
     End(EndArgs),
-    /// Promote session notes into `spark` molecules (via session-to-spark tick).
+    /// Turn journal notes into `spark` molecules (via the session-to-spark tick).
     Promote(PromoteArgs),
-    /// Route session notes through the Tier-1 regex classifier (ADR-072).
+    /// Route journal notes through the Tier-1 regex classifier (ADR-072).
     ///
-    /// Walks a session file, computes `blake3(body)` for each note,
+    /// Walks a journal file, computes `blake3(body)` for each note,
     /// applies the Tier-1 cascade, writes a sidecar under
-    /// `.cosmon/state/sessions/.route/<sid>/<body_hash>.json`, and
+    /// `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and
     /// (when confidence warrants) nucleates a `temp:proposed` molecule
     /// via `cs nucleate`. Tiers 2–4 are future work; low-confidence
     /// notes are marked `tier4_pending` and escalate to the
@@ -73,14 +73,14 @@ pub enum Sub {
     /// Review router-staged molecules (verdict-door).
     ///
     /// Renders `temp:proposed` molecules as a markdown review file at
-    /// `.cosmon/state/sessions/.review/<sid>.md`, opens it in `$EDITOR`,
+    /// `.cosmon/state/journals/.review/<sid>.md`, opens it in `$EDITOR`,
     /// and — on `--apply` — translates each `verdict:` line into a
     /// `keep` / `dismiss` / `undo` transition. Silent when nothing is
     /// pending (no editor opens). See ADR-072 §7.
     Review(super::review::ReviewArgs),
 }
 
-/// Arguments for `cs session start`.
+/// Arguments for `cs journal start`.
 #[derive(clap::Args)]
 pub struct StartArgs {
     /// Galaxy this session belongs to (free-form label).
@@ -92,7 +92,7 @@ pub struct StartArgs {
     pub root: Vec<String>,
 }
 
-/// Arguments for `cs session note`.
+/// Arguments for `cs journal note`.
 #[derive(clap::Args)]
 pub struct NoteArgs {
     /// Optional tag rendered alongside the timestamp (e.g. `insight`, `todo`).
@@ -126,7 +126,7 @@ pub struct NoteArgs {
     pub text: String,
 }
 
-/// Arguments for `cs session end`.
+/// Arguments for `cs journal end`.
 #[derive(clap::Args)]
 pub struct EndArgs {
     /// Skip the BLAKE3 seal — ephemeral scratch close. By default the
@@ -135,11 +135,11 @@ pub struct EndArgs {
     pub no_seal: bool,
 }
 
-/// Arguments for `cs session promote`.
+/// Arguments for `cs journal promote`.
 ///
 /// Wraps the `scripts/session-to-spark-tick.sh` tick with operator
 /// ergonomics — the most common case (promote one specific note) is
-/// `cs session promote <note_ts>`.
+/// `cs journal promote <note_ts>`.
 ///
 /// See [`docs/guides/session-to-spark.md`](../../../../docs/guides/session-to-spark.md)
 /// for the full workflow.
@@ -176,7 +176,7 @@ pub struct PromoteArgs {
     pub tick_script: Option<PathBuf>,
 }
 
-/// Dispatch a `cs session <sub>` invocation.
+/// Dispatch a `cs journal <sub>` invocation.
 ///
 /// # Errors
 /// Propagates any filesystem, git, or session-state error.
@@ -191,10 +191,34 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 }
 
-/// Resolve the sessions directory (`.cosmon/state/sessions/`).
-fn sessions_dir(ctx: &Context) -> PathBuf {
+/// Execute the hidden, deprecated `cs session` alias.
+///
+/// The alias exists for exactly one consumer: `~/Applications/mac-pilot.app`
+/// is installed on the operator's machine and shells out `["session", …]`,
+/// and no cargo gate crosses that Swift boundary — so a straight removal
+/// would break an installed app silently. It is `hide = true` on purpose:
+/// a *visible* alias would keep the confusable token in `cs help` and in
+/// shell completion, which is the defect the rename removes.
+///
+/// Delete it in the first commit after both `grep -rn '"session"'
+/// apps/mac-pilot/` returns zero and `just install-mac-pilot` has been run
+/// against a tree containing the rename.
+///
+/// # Errors
+/// Propagates whatever [`run`] returns.
+pub fn run_session_alias(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    eprintln!(
+        "cs session: deprecated — use `cs journal` instead. \
+         This hidden alias exists only for the installed mac-pilot app \
+         and will be removed once it is rebuilt."
+    );
+    run(ctx, args)
+}
+
+/// Resolve the journal directory (`.cosmon/state/journals/`).
+fn journals_dir(ctx: &Context) -> PathBuf {
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
-    state_dir.join("sessions")
+    state_dir.join("journals")
 }
 
 /// Format a UTC timestamp as `YYYY-MM-DDTHH-MM-SSZ` (filesystem-safe).
@@ -217,9 +241,9 @@ pub(crate) fn find_open_session(dir: &Path) -> anyhow::Result<Option<PathBuf>> {
     }
     let mut candidates: Vec<PathBuf> = Vec::new();
     for entry in fs::read_dir(dir)
-        .map_err(|e| anyhow::anyhow!("read sessions dir {}: {e}", dir.display()))?
+        .map_err(|e| anyhow::anyhow!("read journals dir {}: {e}", dir.display()))?
     {
-        let entry = entry.map_err(|e| anyhow::anyhow!("read sessions entry: {e}"))?;
+        let entry = entry.map_err(|e| anyhow::anyhow!("read journals entry: {e}"))?;
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
@@ -280,17 +304,17 @@ fn resolve_operator() -> String {
     "unknown".to_owned()
 }
 
-/// Implementation of `cs session start`.
+/// Implementation of `cs journal start`.
 fn run_start(ctx: &Context, args: &StartArgs) -> anyhow::Result<()> {
-    let dir = sessions_dir(ctx);
+    let dir = journals_dir(ctx);
     fs::create_dir_all(&dir)
-        .map_err(|e| anyhow::anyhow!("create sessions dir {}: {e}", dir.display()))?;
+        .map_err(|e| anyhow::anyhow!("create journals dir {}: {e}", dir.display()))?;
 
     if let Some(existing) = find_open_session(&dir)? {
         return Err(anyhow::Error::new(SessionExit {
             code: EXIT_SESSION_ALREADY_OPEN,
             message: format!(
-                "a session is already open: {} — close it first with `cs session end`",
+                "a session is already open: {} — close it first with `cs journal end`",
                 existing.display()
             ),
         }));
@@ -347,13 +371,13 @@ fn run_start(ctx: &Context, args: &StartArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Implementation of `cs session note`.
+/// Implementation of `cs journal note`.
 fn run_note(ctx: &Context, args: &NoteArgs) -> anyhow::Result<()> {
-    let dir = sessions_dir(ctx);
+    let dir = journals_dir(ctx);
     let Some(path) = find_open_session(&dir)? else {
         return Err(anyhow::Error::new(SessionExit {
             code: EXIT_NO_OPEN_SESSION,
-            message: "no open session — run `cs session start` first".to_owned(),
+            message: "no open session — run `cs journal start` first".to_owned(),
         }));
     };
 
@@ -420,9 +444,9 @@ fn build_cause(args: &NoteArgs) -> anyhow::Result<Option<Cause>> {
     }))
 }
 
-/// Implementation of `cs session end`.
+/// Implementation of `cs journal end`.
 fn run_end(ctx: &Context, args: &EndArgs) -> anyhow::Result<()> {
-    let dir = sessions_dir(ctx);
+    let dir = journals_dir(ctx);
     let Some(path) = find_open_session(&dir)? else {
         return Err(anyhow::Error::new(SessionExit {
             code: EXIT_NO_OPEN_SESSION,
@@ -592,7 +616,7 @@ fn auto_commit_session(
     Ok(Some(sha_str))
 }
 
-/// Implementation of `cs session promote`.
+/// Implementation of `cs journal promote`.
 ///
 /// Thin wrapper over `scripts/session-to-spark-tick.sh`. The operator
 /// ergonomics (auto-detect the current open session, default to
@@ -619,13 +643,13 @@ fn run_promote(ctx: &Context, args: &PromoteArgs) -> anyhow::Result<()> {
 
     // If the operator did not pass --session, try to resolve the
     // currently open session — the overwhelming majority of
-    // `cs session promote <ts>` invocations are "the session I am in
+    // `cs journal promote <ts>` invocations are "the session I am in
     // right now". Fall back to scanning every session file only when
     // no explicit timestamps are named.
     let resolved_session: Option<String> = if let Some(s) = args.session.as_deref() {
         Some(s.to_owned())
     } else {
-        let dir = sessions_dir(ctx);
+        let dir = journals_dir(ctx);
         find_open_session(&dir)?.map(|path| {
             path.file_stem()
                 .and_then(|s| s.to_str())
@@ -651,7 +675,7 @@ fn run_promote(ctx: &Context, args: &PromoteArgs) -> anyhow::Result<()> {
 
     // Only enable --all-spark-prefix when the operator asked for it,
     // OR when no explicit timestamps were supplied (so the default
-    // `cs session promote` with no args acts like a tick). When
+    // `cs journal promote` with no args acts like a tick). When
     // timestamps ARE supplied, assume the operator wants a targeted
     // promotion — prefix scanning would be noisy.
     if args.all_spark_prefix || args.note_timestamps.is_empty() {
@@ -690,7 +714,7 @@ fn run_promote(ctx: &Context, args: &PromoteArgs) -> anyhow::Result<()> {
 ///    (the repo checkout that shipped the script).
 ///
 /// Returns a helpful error when the script cannot be found — the
-/// operator may be running `cs session promote` from a deploy of the
+/// operator may be running `cs journal promote` from a deploy of the
 /// binary without the scripts shipped alongside it.
 fn resolve_tick_script(override_path: Option<&Path>) -> anyhow::Result<PathBuf> {
     if let Some(p) = override_path {

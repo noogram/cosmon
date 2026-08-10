@@ -21,17 +21,17 @@ par `cs`, les lectures passent directement par le filesystem.
 1. Clic gauche sur l'icône 🧭 dans la barre de menu → le popover s'ouvre
    (< 200 ms).
 2. Si aucune session n'est ouverte, clic **Start Session** (ou ⌘S).
-   `mac-pilot` appelle `cs session start`, le fichier
-   `/srv/cosmon/cosmon/.cosmon/state/sessions/session-<ts>.md` est créé,
+   `mac-pilot` appelle `cs journal start`, le fichier
+   `/srv/cosmon/cosmon/.cosmon/state/journals/session-<ts>.md` est créé,
    le statut en haut passe à *"Session ouverte depuis 14:32"*.
 3. Le champ *Note* prend le focus automatiquement. Tape, Entrée, la note
-   atterrit dans le carnet (`cs session note`). Tu peux ajouter un tag
+   atterrit dans le carnet (`cs journal note`). Tu peux ajouter un tag
    optionnel (ex. `insight`) dans le petit champ à gauche du bouton.
 4. La liste sous le champ montre les 5 dernières notes — utile pour
    vérifier ce qu'on vient d'écrire. Rafraîchie toutes les 3 s tant que
    le popover est ouvert, en pause quand il est fermé.
 5. Quand la session est terminée, clic **End Session** (ou ⌘S à nouveau).
-   `cs session end` scelle le fichier avec un hash BLAKE3. Le statut
+   `cs journal end` scelle le fichier avec un hash BLAKE3. Le statut
    retourne à *"Aucune session ouverte"*.
 
 Le bouton **Terminal** en bas reste là pour les gros outils (`cs peek`,
@@ -142,7 +142,7 @@ détail dev / build / troubleshooting.
 
 | Fonctionnalité                  | v1 (cette PR)                           | v2 (à venir)                     |
 |---------------------------------|-----------------------------------------|----------------------------------|
-| `cs session start/note/end`     | ✅                                      | ✅                               |
+| `cs journal start/note/end`     | ✅                                      | ✅                               |
 | Whispers inbox (read/spark/ack) | ✅ — lecture FS, shell-out `cs spark`   | ✅                               |
 | Molecule inbox (tackle/collapse)| ✅ — shell-out `cs observe / tackle`    | ✅                               |
 | Galaxies picker (liste + open)  | ✅ — scan `/srv/cosmon/*/`               | ✅ (+ switch applicatif)         |
@@ -163,10 +163,10 @@ PilotView (SwiftUI)
 PilotViewModel (@MainActor)
         │  async / await
         ▼
-CosmonBridge  ──►  Process("cs session …", cwd=/srv/cosmon/cosmon)
+CosmonBridge  ──►  Process("cs journal …", cwd=/srv/cosmon/cosmon)
         │
         ▼
-SessionParser  ◄── .cosmon/state/sessions/session-*.md
+SessionParser  ◄── .cosmon/state/journals/session-*.md
 ```
 
 Le bridge parse directement le markdown `session-*.md` pour détecter la
@@ -176,8 +176,8 @@ n'aura qu'à appeler `cs --json session current` à la place.
 
 ## Pourquoi un shell-out et pas une lib cosmon embarquée ?
 
-Parce que le CLI **est** l'interface stable. `cs session note "foo"` depuis
-une app Swift doit faire exactement la même chose que `cs session note "foo"`
+Parce que le CLI **est** l'interface stable. `cs journal note "foo"` depuis
+une app Swift doit faire exactement la même chose que `cs journal note "foo"`
 depuis un shell — même écriture, même commit, même seal, même reconcile.
 Coller une lib Rust dans l'app, c'est dédoubler un chemin déjà stable et
 casser la garantie. Le shell-out est une ligne de code (`Process.run()`)
@@ -192,4 +192,4 @@ sémantique : même opérations, même fichiers.
   quickstart et troubleshooting.
 - [`CHANGELOG.md`](../../CHANGELOG.md) — entrée `mac-pilot v0`.
 - [`docs/guides/new-interface-faq.md`](new-interface-faq.md) — FAQ sur
-  la séparation `cs session` (dictaphone) vs interfaces live (pilotage).
+  la séparation `cs journal` (dictaphone) vs interfaces live (pilotage).

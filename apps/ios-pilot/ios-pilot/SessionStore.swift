@@ -32,7 +32,7 @@ public final class SessionStore: ObservableObject {
     /// `spark` molecule during this UI session. Used to hide the
     /// "Promouvoir en spark" button on an already-promoted row. This is
     /// a UI-local hint — the authoritative idempotence record lives on
-    /// the mac side under `.cosmon/state/sessions/.promoted/`. When
+    /// the mac side under `.cosmon/state/journals/.promoted/`. When
     /// cs-api gains a `/session/{id}/promoted` GET, we will hydrate
     /// this set on refresh instead of tracking it client-side only.
     @Published public private(set) var promotedTimestamps: Set<String> = []
@@ -126,7 +126,7 @@ public final class SessionStore: ObservableObject {
     /// On `notImplemented` (cs-api has not shipped the route yet), the
     /// error is surfaced through `lastError` and the UI keeps the
     /// button enabled — the operator can fall back to SSH-into-Mac
-    /// and run `cs session promote <ts>` by hand.
+    /// and run `cs journal promote <ts>` by hand.
     @discardableResult
     public func promote(note: Note) async -> String {
         guard let sid = state.sessionID?.value, !sid.isEmpty else {

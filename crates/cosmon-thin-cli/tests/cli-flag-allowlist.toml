@@ -276,9 +276,14 @@ class = "out_of_scope"
 reason = "patrols.toml inspector — operator informational."
 
 [[verb_absent_from_thin]]
-verb = "session"
+verb = "journal"
 class = "out_of_scope"
 reason = "operator carnet — local append-only journal."
+
+[[verb_absent_from_thin]]
+verb = "session"
+class = "out_of_scope"
+reason = "hidden deprecated alias for `journal` (ADR-175). Kept only until the installed mac-pilot app is rebuilt; it inherits the carnet's out-of-scope verdict and is deleted with the alias."
 
 [[verb_absent_from_thin]]
 verb = "sessions"

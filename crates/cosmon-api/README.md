@@ -1,12 +1,12 @@
 # cosmon-api
 
-Local HTTP adapter (`cs-api`) for the `cs session` CLI. Ships the tuyau
+Local HTTP adapter (`cs-api`) for the `cs journal` CLI. Ships the tuyau
 that native pilots (Mac menubar, iOS/iPad) use to open / annotate /
 close an operator carnet without shelling out directly.
 
 `cs-api` is **not** a cosmon runtime. It is a thin HTTP facade:
-every request shells out to `cs session …`, and the filesystem under
-`$COSMON_STATE_DIR/sessions/` (default `~/.cosmon/state/sessions/`)
+every request shells out to `cs journal …`, and the filesystem under
+`$COSMON_STATE_DIR/journals/` (default `~/.cosmon/state/journals/`)
 remains the source of truth.
 
 ## Install
@@ -299,7 +299,7 @@ cargo test -p cosmon-api
 
 Each integration test spawns `cs-api` against a scratch
 `$COSMON_STATE_DIR` tempdir, so nothing leaks into your real
-`~/.cosmon/state/sessions/`.
+`~/.cosmon/state/journals/`.
 
 ## Scope guards
 

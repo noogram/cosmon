@@ -2,9 +2,9 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Promote session notes into `spark` molecules (via session-to-spark tick)
+Turn journal notes into `spark` molecules (via the session-to-spark tick)
 
-Usage: cs session promote [OPTIONS] [NOTE_TIMESTAMPS]...
+Usage: cs journal promote [OPTIONS] [NOTE_TIMESTAMPS]...
 
 Arguments:
   [NOTE_TIMESTAMPS]...

@@ -2,9 +2,9 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Append a timestamped note to the open session
+Append a timestamped note to the open journal
 
-Usage: cs session note [OPTIONS] <TEXT>
+Usage: cs journal note [OPTIONS] <TEXT>
 
 Arguments:
   <TEXT>  Free-form note body

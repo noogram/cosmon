@@ -5,7 +5,7 @@ Native macOS menubar app that drives cosmon without opening a terminal.
 
 | Tab         | Surface                                                                   |
 |-------------|---------------------------------------------------------------------------|
-| Session     | `cs session start` / `note` / `end` (the v0 carnet)                       |
+| Session     | `cs journal start` / `note` / `end` (the v0 carnet)                       |
 | Whispers    | Reads `.cosmon/whispers/inbox/*/` — preview, transform to spark, archive |
 | Inbox       | Shells `cs observe --json` — filter by `temp:hot` / `temp:warm`, tackle   |
 | Galaxies    | Scans `/srv/cosmon/*/.cosmon/` — opens each in a terminal                  |
@@ -109,9 +109,9 @@ All seven points must be green before calling a build shippable:
    the 🧭 icon appears in the menu bar.
 2. Click the icon → popover opens in under 200 ms.
 3. Click **Start Session** → a new `session-*.md` file appears in
-   `/srv/cosmon/cosmon/.cosmon/state/sessions/`. Status flips to
+   `/srv/cosmon/cosmon/.cosmon/state/journals/`. Status flips to
    *"Session ouverte depuis HH:MM"*.
-4. Type `test menubar app` + Enter → `cs session note` runs, the note shows
+4. Type `test menubar app` + Enter → `cs journal note` runs, the note shows
    in the list, and the file on disk contains `## HH:MM:SS — ` followed by
    the note body.
 5. Click **End Session** → the file is sealed with `seal: blake3:…`, the
@@ -162,7 +162,7 @@ If the popover surfaces *"Binaire `cs` introuvable."*:
 
 A prior session is still open (possibly started from the terminal). Either
 click **End Session** in the popover (it re-reads the state on next poll)
-or run `cs session end` in the terminal.
+or run `cs journal end` in the terminal.
 
 ### Polling shows stale notes
 

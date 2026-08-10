@@ -239,7 +239,7 @@ Commands:
   project         Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
   reconcile       Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
   scheduler       Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)
-  session         Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+  journal         Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
   sessions        Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
   daemons         Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
   status          Project pulse — quick DAG overview like git status

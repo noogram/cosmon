@@ -91,14 +91,14 @@ delib's framing.
 ## Daily protocol
 
 1. **Morning.** Open a terminal. `cs inbox`. Read the pile, do not
-   open Claude Code. Use `cs session start --galaxy cosmon` to open
+   open Claude Code. Use `cs journal start --galaxy cosmon` to open
    the daily carnet — the sticky line will now appear above the pile.
 2. **During the day.** Every time the urge strikes to ask Claude Code
    *"what's pending?"* or *"should I merge X?"*, re-open `cs inbox`
    instead. If the pile does not answer the question, write a `cs
    session note` describing the gap — that is the material that
    tomorrow's iteration on inbox will feed on.
-3. **Evening.** `cs session end` — the carnet auto-commits. Record the
+3. **Evening.** `cs journal end` — the carnet auto-commits. Record the
    binary Jobs signal (`✓` / `✗`) in a single-line note under
    `docs/guides/inbox-trial-log.md`.
 

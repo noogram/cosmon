@@ -50,7 +50,7 @@ public protocol CosmonAPIProtocol {
 
     // --- Session promotion (v1) ---
     /// Promote the named session note into a `spark` molecule. Mirror of
-    /// `cs session promote <note_ts>` on the mac side. Returns the new
+    /// `cs journal promote <note_ts>` on the mac side. Returns the new
     /// spark id on success. The HTTP live client requires cs-api to
     /// expose a `/session/{id}/promote` endpoint — until it does, the
     /// live client returns [`CosmonAPIError.notImplemented`]. tenant_auditor's
@@ -203,7 +203,7 @@ public final class CosmonAPI: CosmonAPIProtocol {
         //   → {"ok": true, "spark": {"id": "spark-..."}}
         // When cs-api gains the route, replace this body with a real
         // `post(...)` call. Until then, iOS-native promotion is
-        // explicitly unsupported — the operator should use `cs session
+        // explicitly unsupported — the operator should use `cs journal
         // promote` over SSH (Blink) or run the LaunchAgent on the mac.
         struct Body: Encodable { let note_ts: String }
         struct Response: Decodable {
@@ -219,7 +219,7 @@ public final class CosmonAPI: CosmonAPIProtocol {
             return res.spark?.id ?? ""
         } catch CosmonAPIError.notFound {
             throw CosmonAPIError.notImplemented(
-                "/session/{id}/promote — ssh en local avec `cs session promote`"
+                "/session/{id}/promote — ssh en local avec `cs journal promote`"
             )
         }
     }

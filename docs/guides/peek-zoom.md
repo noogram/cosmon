@@ -52,7 +52,7 @@ when confirmed. Esc cancels every modal without side effects.
 | `t` | tackle          | Confirm: `cs tackle <selected-id>`                 |
 | `m` | merge-and-done  | Confirm (y/N): `cs done <selected-id>` (destructive) |
 | `w` | whisper         | Modal: body → `cs whisper <selected-id> -m "<body>"` |
-| `.` | session note    | Modal: body → `cs session note "<body>"`           |
+| `.` | session note    | Modal: body → `cs journal note "<body>"`           |
 
 Jobs-cockpit rationale (synthesis §I of delib-20260423-becf):
 *"the morning IS the portal. There is no second app to learn, no second

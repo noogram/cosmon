@@ -2,7 +2,7 @@
 # install-session-to-spark-launchagent.sh — install / uninstall the
 # `session-to-spark` LaunchAgent that consumes session notes beginning
 # with `!spark `, nucleates a `spark` per qualifying note, and writes
-# a sidecar marker under `.cosmon/state/sessions/.promoted/`.
+# a sidecar marker under `.cosmon/state/journals/.promoted/`.
 #
 # Mirror of `scripts/install-whisper-to-spark-launchagent.sh` — same
 # verb-door shape so the operator does not have to learn a new ceremony.
@@ -90,7 +90,7 @@ cmd_install() {
     if launchctl load "$TARGET"; then
         echo "install-session-to-spark: loaded — tick fires every 300s (promotes !spark-prefixed notes)"
         echo "install-session-to-spark: logs at $LOG_DIR/session-to-spark.{out,err}"
-        echo "install-session-to-spark: for targeted promotion, use 'cs session promote <note_ts>'"
+        echo "install-session-to-spark: for targeted promotion, use 'cs journal promote <note_ts>'"
     else
         rc=$?
         echo "install-session-to-spark: launchctl load failed (rc=$rc)" >&2

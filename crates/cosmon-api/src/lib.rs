@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `cs-api` — HTTP adapter to the `cs session` CLI.
+//! `cs-api` — HTTP adapter to the `cs journal` CLI.
 //!
 //! This crate is **not** a long-running cosmon runtime. It is a thin
 //! HTTP facade that native pilots (Mac menubar, iOS/iPad) call instead
 //! of shelling out to `cs` directly. Every request shells out to the
-//! `cs` binary; the filesystem under `.cosmon/state/sessions/` (or
-//! `$COSMON_STATE_DIR/sessions/`) remains the source of truth.
+//! `cs` binary; the filesystem under `.cosmon/state/journals/` (or
+//! `$COSMON_STATE_DIR/journals/`) remains the source of truth.
 //!
 //! The library surface is split from the `cs-api` binary so integration
 //! tests can spin up a full router against a scratch `COSMON_STATE_DIR`
@@ -163,9 +163,9 @@ pub struct AppState {
 /// Default timeout for each shell-out to `cs`.
 pub const DEFAULT_SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Exit code from `cs session start` when a session is already open.
+/// Exit code from `cs journal start` when a session is already open.
 const EXIT_SESSION_ALREADY_OPEN: i32 = 2;
-/// Exit code from `cs session note` / `cs session end` when none is open.
+/// Exit code from `cs journal note` / `cs journal end` when none is open.
 const EXIT_NO_OPEN_SESSION: i32 = 3;
 
 impl AppState {
@@ -241,7 +241,7 @@ impl AppState {
     }
 
     /// Resolve the cosmon state directory used to read molecule JSON
-    /// files (see [`resolve_sessions_dir`] for the session variant).
+    /// files (see [`resolve_journals_dir`] for the session variant).
     /// Precedence mirrors the CLI: explicit `state_dir` wins, then
     /// `COSMON_STATE_DIR`, then the `$HOME/.cosmon/state` fallback.
     pub(crate) fn resolve_cosmon_state_dir(&self) -> PathBuf {
@@ -424,7 +424,7 @@ async fn session_start(
     body: Option<Json<StartRequest>>,
 ) -> Result<Json<Value>, ApiError> {
     let req = body.map(|Json(r)| r).unwrap_or_default();
-    let mut args: Vec<String> = vec!["--json".into(), "session".into(), "start".into()];
+    let mut args: Vec<String> = vec!["--json".into(), "journal".into(), "start".into()];
     if let Some(galaxy) = req.galaxy.as_ref() {
         args.push("--galaxy".into());
         args.push(galaxy.clone());
@@ -470,7 +470,7 @@ async fn session_note(
     if req.text.trim().is_empty() {
         return Err(ApiError::new(StatusCode::BAD_REQUEST, "note text is empty"));
     }
-    let mut args: Vec<String> = vec!["--json".into(), "session".into(), "note".into()];
+    let mut args: Vec<String> = vec!["--json".into(), "journal".into(), "note".into()];
     if let Some(tag) = req.tag.as_ref().filter(|t| !t.trim().is_empty()) {
         args.push("--tag".into());
         args.push(tag.clone());
@@ -495,7 +495,7 @@ async fn session_note(
 // --- /session/end --------------------------------------------------------
 
 async fn session_end(State(state): State<Arc<AppState>>) -> Result<Json<Value>, ApiError> {
-    let output = run_cs(&state, "/session/end", &["--json", "session", "end"]).await?;
+    let output = run_cs(&state, "/session/end", &["--json", "journal", "end"]).await?;
     match output.status.code() {
         Some(0) => {}
         Some(EXIT_NO_OPEN_SESSION) => {
@@ -545,7 +545,7 @@ async fn session_current(State(state): State<Arc<AppState>>) -> Result<Json<Valu
         "<scan-session-current>",
         InvocationMode::InProcessStateRead,
         || {
-            let dir = resolve_sessions_dir(&state);
+            let dir = resolve_journals_dir(&state);
             match find_open_session_file(&dir) {
                 Ok(None) => Ok(Json(serde_json::json!({ "session_id": null, "notes": [] }))),
                 Ok(Some(path)) => {
@@ -560,18 +560,18 @@ async fn session_current(State(state): State<Arc<AppState>>) -> Result<Json<Valu
                 }
                 Err(e) => Err(ApiError::new(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("scan sessions dir: {e}"),
+                    format!("scan journals dir: {e}"),
                 )),
             }
         },
     )
 }
 
-fn resolve_sessions_dir(state: &AppState) -> PathBuf {
-    // The sessions dir is always `<state-dir>/sessions`; go through the
+fn resolve_journals_dir(state: &AppState) -> PathBuf {
+    // The journal dir is always `<state-dir>/journals`; go through the
     // one state-dir resolver instead of re-implementing the explicit →
     // `COSMON_STATE_DIR` → `~/.cosmon/state` precedence a second time.
-    state.resolve_cosmon_state_dir().join("sessions")
+    state.resolve_cosmon_state_dir().join("journals")
 }
 
 fn find_open_session_file(dir: &std::path::Path) -> std::io::Result<Option<PathBuf>> {

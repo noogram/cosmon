@@ -3,7 +3,7 @@
 //! What `cs-api`'s routes do, asserted on the router.
 //!
 //! Each test builds a fresh `AppState` over a tempdir so the real
-//! `~/.cosmon/state/sessions/` is never touched, then drives
+//! `~/.cosmon/state/journals/` is never touched, then drives
 //! `cosmon_api::router` in-process through `tower::ServiceExt::oneshot`
 //! — see `tests/support/inproc.rs`.
 //!
@@ -702,9 +702,9 @@ async fn e2e_session_survives_to_disk() {
     assert_eq!(end["note_count"].as_u64(), Some(3));
 
     // File on disk is sealed and carries the three notes.
-    let sessions_dir = tmp.path().join("sessions");
+    let sessions_dir = tmp.path().join("journals");
     let mut files: Vec<_> = std::fs::read_dir(&sessions_dir)
-        .expect("sessions dir")
+        .expect("journals dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .collect();
     files.sort();

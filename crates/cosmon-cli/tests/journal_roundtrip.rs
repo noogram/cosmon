@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! End-to-end test for `cs session start → note → note → end`.
+//! End-to-end test for `cs journal start → note → note → end`.
 //!
 //! Asserts that the sealed session file has the expected structure,
 //! that the BLAKE3 seal over the body matches a fresh re-hash, and
@@ -29,7 +29,7 @@ fn run_cs(state_dir: &std::path::Path, args: &[&str]) -> (String, String, i32) {
 }
 
 fn sessions_dir(state_dir: &std::path::Path) -> PathBuf {
-    state_dir.join("sessions")
+    state_dir.join("journals")
 }
 
 fn first_session_file(state_dir: &std::path::Path) -> PathBuf {
@@ -56,22 +56,22 @@ fn full_round_trip_session_start_note_note_end() {
     let state_dir = tmp.path();
 
     // start
-    let (stdout, _stderr, code) = run_cs(state_dir, &["session", "start", "--galaxy", "cosmon"]);
+    let (stdout, _stderr, code) = run_cs(state_dir, &["journal", "start", "--galaxy", "cosmon"]);
     assert_eq!(code, 0, "start failed: {stdout}");
     let session_id = stdout.trim().to_owned();
     assert!(session_id.starts_with("session-"));
 
     // note (untagged) + note (tagged)
-    let (_o1, _e1, c1) = run_cs(state_dir, &["session", "note", "first body"]);
+    let (_o1, _e1, c1) = run_cs(state_dir, &["journal", "note", "first body"]);
     assert_eq!(c1, 0);
     let (_o2, _e2, c2) = run_cs(
         state_dir,
-        &["session", "note", "--tag", "insight", "second body"],
+        &["journal", "note", "--tag", "insight", "second body"],
     );
     assert_eq!(c2, 0);
 
     // end
-    let (_o3, _e3, c3) = run_cs(state_dir, &["session", "end"]);
+    let (_o3, _e3, c3) = run_cs(state_dir, &["journal", "end"]);
     assert_eq!(c3, 0);
 
     // Inspect the sealed file.
@@ -118,9 +118,9 @@ fn full_round_trip_session_start_note_note_end() {
 fn start_refuses_when_session_already_open_with_exit_code_2() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state_dir = tmp.path();
-    let (_o, _e, c0) = run_cs(state_dir, &["session", "start"]);
+    let (_o, _e, c0) = run_cs(state_dir, &["journal", "start"]);
     assert_eq!(c0, 0);
-    let (_o, _e, c1) = run_cs(state_dir, &["session", "start"]);
+    let (_o, _e, c1) = run_cs(state_dir, &["journal", "start"]);
     assert_eq!(c1, 2, "expected exit code 2 when a session is already open");
 }
 
@@ -128,9 +128,9 @@ fn start_refuses_when_session_already_open_with_exit_code_2() {
 fn note_and_end_fail_with_exit_code_3_when_no_session() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state_dir = tmp.path();
-    let (_o, _e, c_note) = run_cs(state_dir, &["session", "note", "orphan"]);
+    let (_o, _e, c_note) = run_cs(state_dir, &["journal", "note", "orphan"]);
     assert_eq!(c_note, 3);
-    let (_o, _e, c_end) = run_cs(state_dir, &["session", "end"]);
+    let (_o, _e, c_end) = run_cs(state_dir, &["journal", "end"]);
     assert_eq!(c_end, 3);
 }
 
@@ -140,18 +140,18 @@ fn note_with_cause_flags_writes_subline_backward_compatible() {
     let state_dir = tmp.path();
 
     // start
-    let (_o, _e, c0) = run_cs(state_dir, &["session", "start"]);
+    let (_o, _e, c0) = run_cs(state_dir, &["journal", "start"]);
     assert_eq!(c0, 0);
 
     // one legacy note (no cause flags) — must render without `cause:` subline
-    let (_o, _e, c1) = run_cs(state_dir, &["session", "note", "legacy body"]);
+    let (_o, _e, c1) = run_cs(state_dir, &["journal", "note", "legacy body"]);
     assert_eq!(c1, 0);
 
     // one causal note — oracle-suggestion via keyboard
     let (_o, _e, c2) = run_cs(
         state_dir,
         &[
-            "session",
+            "journal",
             "note",
             "--tag",
             "insight",
@@ -170,7 +170,7 @@ fn note_with_cause_flags_writes_subline_backward_compatible() {
     let (_o, _e, c3) = run_cs(
         state_dir,
         &[
-            "session",
+            "journal",
             "note",
             "--cause-kind",
             "transcription",
@@ -183,7 +183,7 @@ fn note_with_cause_flags_writes_subline_backward_compatible() {
     );
     assert_eq!(c3, 0);
 
-    let (_o, _e, c4) = run_cs(state_dir, &["session", "end"]);
+    let (_o, _e, c4) = run_cs(state_dir, &["journal", "end"]);
     assert_eq!(c4, 0);
 
     let path = first_session_file(state_dir);
@@ -218,11 +218,11 @@ fn note_with_cause_flags_writes_subline_backward_compatible() {
 fn end_with_no_seal_still_writes_footer() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let state_dir = tmp.path();
-    let (_o, _e, c0) = run_cs(state_dir, &["session", "start"]);
+    let (_o, _e, c0) = run_cs(state_dir, &["journal", "start"]);
     assert_eq!(c0, 0);
-    let (_o, _e, c1) = run_cs(state_dir, &["session", "note", "scratch"]);
+    let (_o, _e, c1) = run_cs(state_dir, &["journal", "note", "scratch"]);
     assert_eq!(c1, 0);
-    let (_o, _e, c2) = run_cs(state_dir, &["session", "end", "--no-seal"]);
+    let (_o, _e, c2) = run_cs(state_dir, &["journal", "end", "--no-seal"]);
     assert_eq!(c2, 0);
 
     let path = first_session_file(state_dir);
@@ -232,5 +232,63 @@ fn end_with_no_seal_still_writes_footer() {
     assert!(
         !content.contains("seal: "),
         "--no-seal must not write a seal line"
+    );
+}
+
+/// The hidden `cs session` alias still writes into the journal store and
+/// says so on stderr.
+///
+/// It exists for exactly one consumer — the installed `mac-pilot.app`,
+/// which hardcodes `["session", …]` and which no cargo gate can reach.
+/// The two properties that matter are that it *works* (a broken alias
+/// breaks the menubar silently) and that it *warns* (a silent alias never
+/// gets removed). Both are asserted here, so deleting the alias is a
+/// deliberate act that turns this test red rather than an accident.
+#[test]
+fn hidden_session_alias_still_writes_the_journal_and_warns() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_dir = tmp.path();
+
+    let (_out, stderr, code) = run_cs(state_dir, &["session", "start"]);
+    assert_eq!(code, 0, "hidden alias `cs session start` failed: {stderr}");
+    assert!(
+        stderr.contains("deprecated") && stderr.contains("cs journal"),
+        "alias must name its replacement on stderr, got: {stderr}"
+    );
+
+    // Same store as the canonical verb: the alias is a spelling, not a
+    // second carnet.
+    let path = first_session_file(state_dir);
+    assert!(path.starts_with(sessions_dir(state_dir)), "{path:?}");
+
+    // And the canonical verb sees the session the alias opened.
+    let (_o, _e, code) = run_cs(state_dir, &["journal", "note", "written through the alias"]);
+    assert_eq!(code, 0, "canonical verb must see the alias's open session");
+}
+
+/// The confusable token is gone from every surface a user or a shell
+/// completion reads: `cs help` lists `journal`, never `session`.
+///
+/// This is the defect the rename removes, so it is asserted directly
+/// rather than left to the help goldens — a golden can be re-blessed by
+/// accident, a named test cannot.
+#[test]
+fn session_is_absent_from_help_and_journal_is_present() {
+    let out = Command::new(cs_bin())
+        .args(["--help"])
+        .output()
+        .expect("spawn cs");
+    let stdout = String::from_utf8(out.stdout).expect("stdout utf8");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("journal ")),
+        "cs --help must list `journal`"
+    );
+    assert!(
+        !stdout
+            .lines()
+            .any(|l| l.trim_start().starts_with("session ")),
+        "cs --help must not list the hidden `session` alias"
     );
 }

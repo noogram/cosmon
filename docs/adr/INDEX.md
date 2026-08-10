@@ -159,4 +159,5 @@
 | 172-done-authority-is-an-operator-sealed-capability | [172-done-authority-is-an-operator-sealed-capability.md](172-done-authority-is-an-operator-sealed-capability.md) |
 | 173-a-cockpit-is-a-command-surface-not-a-sixth-viewport | [173-a-cockpit-is-a-command-surface-not-a-sixth-viewport.md](173-a-cockpit-is-a-command-surface-not-a-sixth-viewport.md) |
 | 174-per-worker-storage-is-deferred-until-a-named-use-case | [174-per-worker-storage-is-deferred-until-a-named-use-case.md](174-per-worker-storage-is-deferred-until-a-named-use-case.md) |
+| 175-the-operator-carnet-is-cs-journal | [175-the-operator-carnet-is-cs-journal.md](175-the-operator-carnet-is-cs-journal.md) |
 

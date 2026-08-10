@@ -1,6 +1,6 @@
 # `cs-api` — local HTTP adapter for native pilots
 
-`cs-api` is a tiny daemon that exposes `cs session start|note|end`
+`cs-api` is a tiny daemon that exposes `cs journal start|note|end`
 over HTTP. Native apps (Mac menubar, iOS/iPad, a tablet hooked on
 your home WiFi) talk to it instead of shelling out to `cs` directly.
 Every request is a shell-out to the real `cs`; the filesystem remains

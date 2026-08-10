@@ -2,7 +2,7 @@ formula = "session-to-spark"
 version = 1
 description = """
 Convert qualifying notes from session carnets \
-(`.cosmon/state/sessions/session-*.md`) into `spark` molecules. This \
+(`.cosmon/state/journals/session-*.md`) into `spark` molecules. This \
 is the session-side sibling of `whisper-to-spark`: same mechanism, \
 different ingress channel. Where whispers arrive from Matrix, session \
 notes come from the operator's own carnet — same §8j ingress, same \
@@ -13,7 +13,7 @@ spark target.
      is auto-promoted, prefix stripped, on every run. Run via the \
      LaunchAgent for passive automation, or manually with \
      `bash scripts/session-to-spark-tick.sh`.
-  2. **Explicit list** — `cs session promote <note_ts>` (or a \
+  2. **Explicit list** — `cs journal promote <note_ts>` (or a \
      `--promote-notes <session_id>@<ts>,...` flag on the tick script) \
      promotes specific notes regardless of prefix. Used when the \
      operator decides after-the-fact that a plain note is actually a \
@@ -29,7 +29,7 @@ formula is the manual / semantically-tracked entry point.
 
 **Idempotent.** Sessions are sealed (BLAKE3, §8b) and MUST NOT be \
 mutated. Promotion markers live in a **sidecar** directory: \
-`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md`. Presence of \
+`.cosmon/state/journals/.promoted/<session_id>/<ts>.md`. Presence of \
 the sidecar = "already promoted, skip". Sidecar body records the spark \
 id, promoted_at, and nucleon — a self-contained audit record.
 
@@ -41,7 +41,7 @@ the session frontmatter's `operator` field — same §8j discipline as \
 whispers propagating `sender_nucleon_id`.
 
 **Respects §8b (seal is a trace).** Sessions are BLAKE3-sealed at \
-`cs session end`. We NEVER rewrite the session file to record a \
+`cs journal end`. We NEVER rewrite the session file to record a \
 promotion — that would silently invalidate the seal and erase the \
 trace. Sidecar-only.
 
@@ -97,7 +97,7 @@ id = "scan"
 title = "Scan the session notes"
 description = """
 List every note in every session file under \
-`.cosmon/state/sessions/session-*.md` (or just the one named by the \
+`.cosmon/state/journals/session-*.md` (or just the one named by the \
 `session` variable). For each note, record: session_id, note_ts, \
 tag, body excerpt (≤ 80 chars), has_!spark_prefix, \
 already_promoted (sidecar presence), will_promote (given the \
@@ -126,7 +126,7 @@ title = "Nucleate a spark per selected note, write sidecars"
 description = """
 For each note selected by the selection mode (prefix and/or explicit \
 list), and whose sidecar under \
-`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md` does NOT yet \
+`.cosmon/state/journals/.promoted/<session_id>/<ts>.md` does NOT yet \
 exist:
 
   1. Parse the note heading (ts, tag) and body.
@@ -166,7 +166,7 @@ acceptance = """
 MOLECULE_DIR/tick.ndjson exists. Every note that was selected in \
 scan.md is now either (a) referenced by a fresh spark molecule tagged \
 `source:session` AND has a sidecar under \
-`.cosmon/state/sessions/.promoted/<session_id>/<ts>.md`, or (b) logged \
+`.cosmon/state/journals/.promoted/<session_id>/<ts>.md`, or (b) logged \
 as a `note_rejected` / `note_failed` / `note_skipped` line with a \
 reason.
 """
@@ -188,7 +188,7 @@ Synthesize MOLECULE_DIR/report.md from scan.md + tick.ndjson:
   - **Selection mode summary**: which of `prefix` / `explicit` / `both` \
     was active this tick.
   - **Next tick recommendation**: when active under LaunchAgent, \
-    `every 300s with --all-spark-prefix`; when manual, `cs session \
+    `every 300s with --all-spark-prefix`; when manual, `cs journal \
     promote <ts>` per note.
 
 Keep the file short — one page. Operator scans it, acknowledges, \

@@ -25,8 +25,8 @@ commands. Errors under `--json` are emitted to `stderr` as
 |------|---------|
 | `0` | Success. |
 | `1` | Generic failure (an unclassified error; the message is on `stderr`). |
-| `2` | A session is already open (`cs session start` when one is live). |
-| `3` | No open session (`cs session note`/`end` with nothing to write to). |
+| `2` | A session is already open (`cs journal start` when one is live). |
+| `3` | No open session (`cs journal note`/`end` with nothing to write to). |
 | `10` | Guard refusal: missing parent link (a decay/merge child lacks its typed edge back to the parent). |
 | `11` | Guard refusal: a decay produced a homogeneous count that the type-tightening guard rejects. |
 | `12` | Guard refusal: dirty-backlog runtime refusal (a greedy runtime would resurrect stale pendings; ADR-048). |

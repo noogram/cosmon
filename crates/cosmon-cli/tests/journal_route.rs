@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Integration tests for `cs session route` (ADR-072).
+//! Integration tests for `cs journal route` (ADR-072).
 //!
 //! Covers:
 //! - End-to-end dry-run on the 11-note benchmark fixture — meets the
@@ -41,7 +41,7 @@ fn run_cs(state_dir: &Path, args: &[&str]) -> (String, String, i32) {
 /// Write the 11-note benchmark fixture into `state_dir/sessions/`.
 /// Returns the session file path.
 fn write_fixture_session(state_dir: &Path) -> PathBuf {
-    let sessions = state_dir.join("sessions");
+    let sessions = state_dir.join("journals");
     fs::create_dir_all(&sessions).expect("mkdir sessions");
     let path = sessions.join("session-2026-04-22T16-28-09Z.md");
     let content = r"---
@@ -101,7 +101,7 @@ galaxie tenant-demo sur noogram ou noogram-labs?
 }
 
 fn route_dir(state_dir: &Path, sid: &str) -> PathBuf {
-    state_dir.join("sessions").join(".route").join(sid)
+    state_dir.join("journals").join(".route").join(sid)
 }
 
 fn count_sidecars(state_dir: &Path, sid: &str) -> usize {
@@ -129,7 +129,7 @@ fn dry_run_classifies_eleven_notes_without_writing() {
     let (stdout, stderr, code) = run_cs(
         state_dir,
         &[
-            "session",
+            "journal",
             "route",
             "session-2026-04-22T16-28-09Z",
             "--dry-run",
@@ -165,7 +165,7 @@ fn route_writes_sidecar_per_note_with_blake3_hash() {
     let (_out, stderr, code) = run_cs(
         state_dir,
         &[
-            "session",
+            "journal",
             "route",
             "session-2026-04-22T16-28-09Z",
             "--no-stage",
@@ -229,7 +229,7 @@ fn route_is_idempotent_second_run_no_new_sidecars() {
     // First run.
     let (_o, _e, c1) = run_cs(
         state_dir,
-        &["session", "route", sid, "--no-stage", "--json"],
+        &["journal", "route", sid, "--no-stage", "--json"],
     );
     assert_eq!(c1, 0);
     let n1 = count_sidecars(state_dir, sid);
@@ -249,7 +249,7 @@ fn route_is_idempotent_second_run_no_new_sidecars() {
     // Second run.
     let (stdout, _e, c2) = run_cs(
         state_dir,
-        &["session", "route", sid, "--no-stage", "--json"],
+        &["journal", "route", sid, "--no-stage", "--json"],
     );
     assert_eq!(c2, 0);
     let n2 = count_sidecars(state_dir, sid);
@@ -299,7 +299,7 @@ fn route_never_writes_to_the_carnet_i4() {
 
     let (_o, _e, code) = run_cs(
         state_dir,
-        &["session", "route", sid, "--no-stage", "--json"],
+        &["journal", "route", sid, "--no-stage", "--json"],
     );
     assert_eq!(code, 0);
 
@@ -327,7 +327,7 @@ fn orphan_note_becomes_tier4_pending() {
 
     let (_o, _e, c) = run_cs(
         state_dir,
-        &["session", "route", sid, "--no-stage", "--json"],
+        &["journal", "route", sid, "--no-stage", "--json"],
     );
     assert_eq!(c, 0);
 

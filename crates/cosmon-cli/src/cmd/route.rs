@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `cs session route` — Tier-1 regex classifier + sidecar writer (ADR-072).
+//! `cs journal route` — Tier-1 regex classifier + sidecar writer (ADR-072).
 //!
-//! Walks `.cosmon/state/sessions/session-*.md`, extracts each note body,
+//! Walks `.cosmon/state/journals/session-*.md`, extracts each note body,
 //! applies the Tier-1 regex cascade, and writes one
-//! `.cosmon/state/sessions/.route/<sid>/<body_hash>.json` sidecar per
+//! `.cosmon/state/journals/.route/<sid>/<body_hash>.json` sidecar per
 //! note. When the classifier returns `max(confidence) ≥ staging_threshold`
 //! the handler nucleates a `temp:proposed` molecule via `cs nucleate`.
 //!
@@ -15,7 +15,7 @@
 //! amendment A1 (no terminal orphans at tier 1).
 //!
 //! The shell `scripts/session-route-tick.sh` is a thin `LaunchAgent`
-//! wrapper that simply invokes `cs session route --all --json`; all
+//! wrapper that simply invokes `cs journal route --all --json`; all
 //! classification logic lives here so it is type-checked, unit-tested,
 //! and reuses [`cosmon_hash`] for the BLAKE3 `body_hash`.
 //!
@@ -59,7 +59,7 @@ pub const STAGING_THRESHOLD: f32 = 0.75;
 // CLI surface
 // ---------------------------------------------------------------------------
 
-/// Arguments for `cs session route`.
+/// Arguments for `cs journal route`.
 #[derive(clap::Args, Debug)]
 pub struct RouteArgs {
     /// Session file stem (e.g. `session-2026-04-22T10-31-31Z`) or an
@@ -68,7 +68,7 @@ pub struct RouteArgs {
     /// otherwise.
     pub session: Option<String>,
 
-    /// Process every session file under `.cosmon/state/sessions/`.
+    /// Process every session file under `.cosmon/state/journals/`.
     #[arg(long)]
     pub all: bool,
 
@@ -567,27 +567,27 @@ pub fn parse_session_operator(content: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Handler entrypoint — `cs session route`
+// Handler entrypoint — `cs journal route`
 // ---------------------------------------------------------------------------
 
 /// Resolve the sessions directory honouring the global `--config` flag.
 fn sessions_dir(ctx: &Context) -> PathBuf {
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
-    state_dir.join("sessions")
+    state_dir.join("journals")
 }
 
 fn route_sidecar_dir(sessions: &Path, sid: &str) -> PathBuf {
     sessions.join(".route").join(sid)
 }
 
-/// Run `cs session route`. See [`RouteArgs`] for the CLI surface.
+/// Run `cs journal route`. See [`RouteArgs`] for the CLI surface.
 ///
 /// # Errors
 /// Propagates I/O, classification, and nucleation errors.
 pub fn run(ctx: &Context, args: &RouteArgs) -> anyhow::Result<()> {
     let dir = sessions_dir(ctx);
     if !dir.exists() {
-        anyhow::bail!("no .cosmon/state/sessions/ under current project");
+        anyhow::bail!("no .cosmon/state/journals/ under current project");
     }
     let files = resolve_sessions(&dir, args)?;
     let cosmon_root = cosmon_repo_root_from(&dir);
@@ -904,7 +904,7 @@ fn resolve_sessions(dir: &Path, args: &RouteArgs) -> anyhow::Result<Vec<PathBuf>
         return Ok(files);
     }
     // Default: open session only. Reuse the detection from session.rs.
-    let open = super::session::find_open_session(dir)
+    let open = super::journal::find_open_session(dir)
         .map_err(|e| anyhow::anyhow!("find open session: {e}"))?;
     match open {
         Some(p) => Ok(vec![p]),
@@ -913,7 +913,7 @@ fn resolve_sessions(dir: &Path, args: &RouteArgs) -> anyhow::Result<Vec<PathBuf>
 }
 
 fn cosmon_repo_root_from(sessions_dir: &Path) -> Option<PathBuf> {
-    // `<root>/.cosmon/state/sessions/` — three parents up gives `<root>`.
+    // `<root>/.cosmon/state/journals/` — three parents up gives `<root>`.
     sessions_dir
         .parent()
         .and_then(Path::parent)

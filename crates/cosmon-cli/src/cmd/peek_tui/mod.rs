@@ -1161,7 +1161,7 @@ enum ActionModal {
     /// `w` — composing a whisper body for the selected row.
     Whisper { mol_id: String, body: String },
     /// `.` — composing a free-form session note. Shells out to
-    /// `cs session note "<line>"` which is idempotent: no open session →
+    /// `cs journal note "<line>"` which is idempotent: no open session →
     /// graceful error surfaced in the status bar.
     SessionNote { body: String },
 }
@@ -2362,7 +2362,7 @@ impl App {
 
     fn fire_session_note(&mut self, body: &str) {
         let exe = Self::cs_exe();
-        let out = Command::new(&exe).args(["session", "note", body]).output();
+        let out = Command::new(&exe).args(["journal", "note", body]).output();
         self.record_action_outcome("session note", out);
     }
 
@@ -2700,8 +2700,8 @@ impl App {
                 vec![
                     format!("▸ note: {body}"),
                     String::new(),
-                    "cs session note \"<line>\"".to_owned(),
-                    "(requires an open session — start one with `cs session start`).".to_owned(),
+                    "cs journal note \"<line>\"".to_owned(),
+                    "(requires an open session — start one with `cs journal start`).".to_owned(),
                 ],
             ),
         };
