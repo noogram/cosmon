@@ -190,18 +190,18 @@ Promotion never mutates a sealed journal — markers are sidecar-only.
 
 ###### **Subcommands:**
 
-* `start` — Start a new session
-* `note` — Append a timestamped note to the open session
-* `end` — Close the open session, optionally sealing it with BLAKE3
-* `promote` — Promote session notes into `spark` molecules (via session-to-spark tick)
-* `route` — Route session notes through the Tier-1 regex classifier (ADR-072)
+* `start` — Open a journal — every note you take lands in it until you end it
+* `note` — Append a timestamped note to the open journal
+* `end` — Close the open journal, optionally sealing it with BLAKE3
+* `promote` — Turn journal notes into `spark` molecules (via the session-to-spark tick)
+* `route` — Route journal notes through the Tier-1 regex classifier (ADR-072)
 * `review` — Review router-staged molecules (verdict-door)
 
 
 
 ## `cs journal start`
 
-Start a new session
+Open a journal — every note you take lands in it until you end it
 
 **Usage:** `cs journal start [OPTIONS]`
 
@@ -214,7 +214,7 @@ Start a new session
 
 ## `cs journal note`
 
-Append a timestamped note to the open session
+Append a timestamped note to the open journal
 
 **Usage:** `cs journal note [OPTIONS] <TEXT>`
 
@@ -233,7 +233,7 @@ Append a timestamped note to the open session
 
 ## `cs journal end`
 
-Close the open session, optionally sealing it with BLAKE3
+Close the open journal, optionally sealing it with BLAKE3
 
 **Usage:** `cs journal end [OPTIONS]`
 
@@ -245,7 +245,7 @@ Close the open session, optionally sealing it with BLAKE3
 
 ## `cs journal promote`
 
-Promote session notes into `spark` molecules (via session-to-spark tick)
+Turn journal notes into `spark` molecules (via the session-to-spark tick)
 
 **Usage:** `cs journal promote [OPTIONS] [NOTE_TIMESTAMPS]...`
 
@@ -266,9 +266,9 @@ Promote session notes into `spark` molecules (via session-to-spark tick)
 
 ## `cs journal route`
 
-Route session notes through the Tier-1 regex classifier (ADR-072).
+Route journal notes through the Tier-1 regex classifier (ADR-072).
 
-Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
+Walks a journal file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
 
 **Usage:** `cs journal route [OPTIONS] [SESSION]`
 

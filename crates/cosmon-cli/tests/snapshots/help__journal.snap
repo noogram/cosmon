@@ -7,11 +7,11 @@ Write down what you notice while you work; anything worth doing becomes a task w
 Usage: cs journal [OPTIONS] <COMMAND>
 
 Commands:
-  start    Start a new session
-  note     Append a timestamped note to the open session
-  end      Close the open session, optionally sealing it with BLAKE3
-  promote  Promote session notes into `spark` molecules (via session-to-spark tick)
-  route    Route session notes through the Tier-1 regex classifier (ADR-072)
+  start    Open a journal — every note you take lands in it until you end it
+  note     Append a timestamped note to the open journal
+  end      Close the open journal, optionally sealing it with BLAKE3
+  promote  Turn journal notes into `spark` molecules (via the session-to-spark tick)
+  route    Route journal notes through the Tier-1 regex classifier (ADR-072)
   review   Review router-staged molecules (verdict-door)
 
 Options:

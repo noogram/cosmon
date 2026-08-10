@@ -52,17 +52,17 @@ pub struct Args {
 /// Session subcommands.
 #[derive(clap::Subcommand)]
 pub enum Sub {
-    /// Start a new session.
+    /// Open a journal — every note you take lands in it until you end it.
     Start(StartArgs),
-    /// Append a timestamped note to the open session.
+    /// Append a timestamped note to the open journal.
     Note(NoteArgs),
-    /// Close the open session, optionally sealing it with BLAKE3.
+    /// Close the open journal, optionally sealing it with BLAKE3.
     End(EndArgs),
-    /// Promote session notes into `spark` molecules (via session-to-spark tick).
+    /// Turn journal notes into `spark` molecules (via the session-to-spark tick).
     Promote(PromoteArgs),
-    /// Route session notes through the Tier-1 regex classifier (ADR-072).
+    /// Route journal notes through the Tier-1 regex classifier (ADR-072).
     ///
-    /// Walks a session file, computes `blake3(body)` for each note,
+    /// Walks a journal file, computes `blake3(body)` for each note,
     /// applies the Tier-1 cascade, writes a sidecar under
     /// `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and
     /// (when confidence warrants) nucleates a `temp:proposed` molecule

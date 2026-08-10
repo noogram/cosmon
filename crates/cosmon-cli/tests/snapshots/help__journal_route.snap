@@ -2,9 +2,9 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
-Route session notes through the Tier-1 regex classifier (ADR-072).
+Route journal notes through the Tier-1 regex classifier (ADR-072).
 
-Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
+Walks a journal file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
 
 Usage: cs journal route [OPTIONS] [SESSION]
 
