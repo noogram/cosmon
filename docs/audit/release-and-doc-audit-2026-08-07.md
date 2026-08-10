@@ -2,11 +2,20 @@
 
 **Date:** 2026-08-07. **Molecule:** `task-20260807-942f`.
 **Baseline:** `v0.5.0`, tagged 2026-07-31.
-**Range measured:** `v0.5.0..HEAD` — 141 non-merge commits, 333 files,
-+48 715 / −2 147 lines.
+**Range measured:** `v0.5.0..HEAD` at the time of writing — 141 non-merge
+commits, 333 files, +48 715 / −2 147 lines.
 
 **This audit publishes nothing and tags nothing.** It is a decision file. The
 release gesture belongs to the operator.
+
+> **Amended 2026-08-10** (`task-20260810-75e9`), while executing §2.5. The
+> body below is left as it was written; the three corrections are §5, which
+> is appended at the end rather than woven in, so that what this audit
+> concluded on 2026-08-07 stays readable as what it concluded then. In short:
+> six further deliveries landed after the audit (including a rename that is
+> itself part of the MINOR case), the range is now 229 commits / 150
+> non-merge, and step 3 of §2.5 rested on a grep that matched two third-party
+> crates. The **`v0.6.0` recommendation is unchanged and is now stronger.**
 
 ---
 
@@ -287,3 +296,76 @@ someone who was not there.
 | Release needed? | **Yes** — nine external-reported fixes are unreleased, two met on first contact |
 | Which version? | **`v0.6.0`** — new surface forecloses a patch; two small contract breaks fit MINOR pre-1.0 |
 | Docs up to date? | `cs help`, `man cs`, `docs/book`, container walkthrough, THESIS: **yes**. CHANGELOG and ADR index: **were not, now fixed**. CLI/UI parity registry: **remaining work, ~1.5 days, arbitration required** |
+
+---
+
+## 5 · Amendment, 2026-08-10 — executing §2.5
+
+Written by `task-20260810-75e9`, the molecule that carried out the mechanical
+half of §2.5. Three things the audit could not have known, and one it got
+wrong.
+
+### 5.1 · The range grew, and the MINOR case grew with it
+
+`v0.5.0..HEAD` is now **229 commits (150 non-merge), 397 files,
++52 947 / −2 688 lines** — up from the 141 / 333 / +48 715 measured on
+2026-08-07. Six deliveries landed after this audit was committed
+(`0bf1cfc0`):
+
+| Commit | What landed |
+|---|---|
+| `c4f8e18e`, `4c2d0731` | **`cs session` → `cs journal`** ([ADR-175](../adr/175-the-operator-carnet-is-cs-journal.md)) — the carnet moves out of `cs sessions`' prefix; old verb survives hidden with a deprecation line; store `.cosmon/state/sessions/` → `.cosmon/state/journals/` |
+| `8cb99fac` | patrol propels a stalled worker only on the provider's own typed `api_error`, never on inferred idleness |
+| `fce0c60f` | `cs tackle` sites a child worktree at the galaxy, never inside a parent worktree (five nestings on 2026-08-08) |
+| `15edce4c` | versioned cockpit surface canon |
+| `3209619c` | mdBook search highlight dismisses itself (561 `<mark>` on one page) |
+| `4ec284aa` | `cs sessions` help says what the surface lets you do, not which verbs it has |
+
+The rename is not cosmetic bookkeeping: it is a **third** entry in §2.4's
+list of small contract breaks that foreclose a patch release. `cs journal`
+joins `permanently_parked` and the `cs reconcile` deprecation. All three fit
+MINOR pre-1.0, so **§2's `v0.6.0` verdict stands and is now better
+supported**, not weakened.
+
+### 5.2 · §2.5 step 3 is withdrawn — no cosmon row in `supply-chain/config.toml`
+
+The audit instructed *"Refresh `supply-chain/config.toml` (two `0.5.0`
+rows)"*. Measured: `grep -n cosmon supply-chain/config.toml` returns
+**nothing**. The two lines are `[[exemptions.dirs-sys]]` and
+`[[exemptions.heck]]` — third-party crates that happen to be at their own
+version 0.5.0. Editing either would have falsified a `cargo vet` exemption
+and refused a crate whose audit is honest.
+
+The corroborating evidence is the previous release commit: `971f75c5`
+(*chore(release): v0.5.0*) touched six files and `supply-chain/config.toml`
+is not among them. **Step 3 was a grep artefact and is not part of a release
+cut.**
+
+### 5.3 · §2.5 step 2 was one site short
+
+Beyond the two man pages, the workspace version is also embedded in an insta
+snapshot, `crates/cosmon-cli/tests/snapshots/cs_help_grouped_reference.snap`
+(`cs 0.5.0 — Cosmon agent orchestrator`). `971f75c5` reblessed it, and a cut
+that misses it fails the test gate rather than shipping wrong — but it
+belongs on the list. Regenerated here with `INSTA_UPDATE=always`.
+
+Two further `0.5.0` strings were examined and deliberately **not** touched:
+
+- `crates/cosmon-rpp-adapter/openapi/v1.yaml` `info.version` — an API
+  document version, `"0.5.0"` since the initial public commit when the
+  workspace was at `0.1.0`. It does not track the workspace and never has.
+- `crates/cosmon-cockpit/data/cockpit_views.*` `"introduced": "0.5.0"` — a
+  historical fact about when a view appeared, not a current version.
+
+`docs/book/src/getting-started/install.md`'s `ver=0.5.0` **was** bumped: it
+is a worked example telling the reader to fetch a release that exists, and
+after the tag it names the current one.
+
+### 5.4 · What this molecule did not do
+
+It did not tag. The signed tag is the operator's gesture and only theirs, per
+the header of this file. It did not write the acknowledgements section for
+the external contributors of §1.2 — that slot is a marked `TODO-ACK` comment
+in the `[0.6.0]` heading block of `CHANGELOG.md`, for the operator to fill
+before the tag. §3.4's parity registry remains untouched and remains the
+named remaining work.

@@ -19,6 +19,27 @@ this stage.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-10
+
+229 commits since `v0.5.0` (150 non-merge), 397 files, +52 947 / −2 688 lines.
+A MINOR and not a PATCH: `cs sessions` is eleven new verbs, `cs session` was
+renamed to `cs journal`, `cs run --json`'s `briefless_parked` counter became
+`permanently_parked`, and `cs reconcile` is now deprecated. The decision file
+is
+[`docs/audit/release-and-doc-audit-2026-08-07.md`](docs/audit/release-and-doc-audit-2026-08-07.md).
+
+Nine of the fixes below were reported by people outside the fleet against the
+signed `v0.5.0` binaries, and two of them — a `cargo test` that hangs forever
+on a live terminal (#43) and a `cargo test` that does not compile at all on
+linux-musl (#33) — are met on first contact by the population least equipped
+to diagnose them.
+
+<!-- TODO-ACK: acknowledgements section. The operator decides how external
+     contributors are credited here; this release note deliberately leaves the
+     slot empty rather than guessing. Reporters and contributors appear by
+     handle or as "external tester" in the Fixed entries below, which is the
+     record, not the credit. -->
+
 ### Added
 
 - **`cs sessions` — the co-pilotage cockpit, a new top-level surface with
@@ -158,6 +179,27 @@ this stage.
   `permanently_parked` (was `briefless_parked`, which the new member would
   have made a lie).
 
+- **A patrol propels a stalled worker only when the *provider* typed the
+  stall.** Two workers sat frozen on `API Error: Response stalled mid-stream.`
+  with live molecules and live panes, and the operator had to attach each tmux
+  and type `continue` by hand. The obvious repair — re-enabling
+  `cosmon-fleet-propel` — is the wrong one: that patrol triggers on *apparent
+  idleness*, an inference, and a worker that is thinking is indistinguishable
+  from one that is stuck (one false positive cost $151 in an orphan livelock,
+  `task-20260720-8b63`). This is a narrow channel with a **positive, typed
+  warrant** instead: `SessionEventKind::AssistantMessage` gains `api_error`,
+  read from the provider's own `isApiErrorMessage` boolean and never from a
+  phrase recognised in output — so a `user` record quoting the identical
+  sentence normalises to `UserMessage`, which has no such field, and the
+  use/mention trap is closed structurally rather than by regex.
+  `cosmon_session_probe::last_assistant_api_error` answers the question over a
+  bounded tail read, reusing the journal reader `cs sessions` already owns.
+
+- **A versioned surface canon for the cockpit.** Each declared cockpit view
+  records the version that introduced it, the command behind it, its maturity
+  and the molecule that produced it, in a data file a gate can read — see
+  [`docs/cockpit-surface-canon.md`](docs/cockpit-surface-canon.md).
+
 ### Performance
 
 - **The workspace dev profile builds at `opt-level = 1`.** The test suite's
@@ -193,6 +235,27 @@ this stage.
   whole workspace; prebuilt test binaries are now resolved explicitly instead.
 
 ### Changed
+
+- **The operator's carnet moved from `cs session` to `cs journal`**
+  ([ADR-175](docs/adr/175-the-operator-carnet-is-cs-journal.md)). `cs session`
+  (the append-only, BLAKE3-sealed carnet) and `cs sessions` (the co-pilotage
+  cockpit added in this release) named two unrelated surfaces with one word,
+  the plural being a strict prefix-extension of the singular — the only such
+  pair in the ~95-verb namespace not separated by a hyphen, and one shell
+  completion cannot disambiguate from a bare prefix. A five-persona panel
+  found this unanimously to be a design defect; the carnet is the side that
+  moved. The name is `journal` and not the deliberation's `carnet`: the
+  francophone precedent the synthesis leaned on was checked and is false
+  (`cs mur` does not exist; `ensemble`, `spore` and `quench` are English
+  words), so `carnet` would have been the only non-English verb in the
+  namespace. The on-disk store moved with it,
+  `.cosmon/state/sessions/` → `.cosmon/state/journals/` — free exactly once,
+  because no carnet existed on disk, and never free again.
+  **`cs session` still works**, hidden, with one stderr deprecation line; it
+  is deliberately never made visible, since a visible alias would keep the
+  confusable token in `cs help` and in completion, which is the defect. Not
+  touched: `cosmon-session-probe` (provider transcripts really are sessions),
+  the HTTP `/session/*` namespace, and the `session-<ts>.md` file prefix.
 
 - **`cs run`'s summary counter `briefless_parked` is now
   `permanently_parked`.** The capability-gate refusal above is permanent in
@@ -258,12 +321,27 @@ this stage.
   **refuted by measurement** rather than quietly dropped. Under
   [`docs/measurements/`](docs/measurements/).
 
-- **Nine new ADRs**, 165 through 174 — identity of resource creation, the
+- **A search result in the book no longer lands on a green chequerboard.**
+  mdBook highlights a `?highlight=<phrase>` landing by splitting the phrase on
+  spaces and marking each word *partially*, so `over` was marked inside
+  `discover`, `takeover`, `HAND-OVER` and `takeover.pub` — **561 `<mark>`
+  elements** on one reference page, and the content stopped being readable.
+  Upstream offers one way out, clicking exactly on a `<mark>`, and leaves the
+  parameter in the URL so it travels with every copied link. The highlight now
+  holds for 1.2 s — long enough to see where you landed — then clears on the
+  first click, on Escape, or after 240 px of deliberate scrolling, and
+  `?highlight=` is stripped from the URL on landing while the anchor is kept.
+  Added as `additional-js` beside the existing scripts, so the mdBook theme is
+  not forked, and it touches only `mark[data-markjs]` — a `<mark>` an author
+  wrote is left alone.
+
+- **Ten new ADRs**, 165 through 175 — identity of resource creation, the
   refused root→uid demote path, the per-molecule journal as a projection, the
   co-pilot session substrate, algorithmic provenance, the galaxy's declared
   repository, the operator gesture as a signature, `cs done` authority as a
-  sealed capability, the cockpit as a command surface, and per-worker storage
-  deferred with the bar that reopens it.
+  sealed capability, the cockpit as a command surface, per-worker storage
+  deferred with the bar that reopens it, and the operator carnet as
+  `cs journal`.
 
 ### Fixed
 
@@ -330,6 +408,22 @@ them.*
 - **`cs tackle` collapses an in-process Direct-API loop that does zero work,
   and names an unresolvable `formula_id`** instead of degrading silently into
   a dispatch with every per-step pin inert.
+
+- **A child worktree is sited at the galaxy, never inside its parent's
+  worktree.** `cs tackle` built `<repo_root>/.worktrees/<molecule>` with
+  `repo_root` taken from `git rev-parse --show-toplevel`, which inside a
+  linked worktree answers with the worktree itself — so a worker dispatching a
+  child from its own worktree produced
+  `.worktrees/<parent>/.worktrees/<child>`. Five such nestings happened on
+  2026-08-08: `cs done <parent>` removed the child's directory along with the
+  parent's, git kept the dangling registration, and the child's own teardown
+  then failed with *"cannot delete branch used by worktree"*. The resolver now
+  redirects a linked worktree sitting under `<main>/.worktrees/` to the main
+  working tree via `--git-common-dir`; a worktree kept anywhere else is the
+  operator's own topology and is untouched. `cs done` also prunes dead
+  worktree registrations before deleting a branch — including the arm where
+  the directory is already gone, which used to read as *nothing to do* — so
+  pre-existing nestings tear down cleanly.
 
 - **`cs spore run` stopped over-refusing on a relative manifest directory**
   (the [ADR-161](docs/adr/161-spore-run-scoped-output-home.md) containment
@@ -2827,5 +2921,6 @@ release **is**, not how it was built.
   `#![deny(missing_docs)]` on the core, and CI gates on build, test, clippy,
   and fmt.
 
-[Unreleased]: https://github.com/noogram/cosmon/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/noogram/cosmon/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/noogram/cosmon/releases/tag/v0.6.0
 [0.1.0]: https://github.com/noogram/cosmon/releases/tag/v0.1.0
