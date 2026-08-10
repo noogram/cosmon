@@ -92,9 +92,12 @@ fn parse(expr: &str) -> Result<Vec<Segment>, DotPathError> {
     }
     let bytes = trimmed.as_bytes();
     if bytes[0] != b'.' && bytes[0] != b'[' {
+        // Report the offending *character*, not the first byte: an
+        // expression starting with `é` fails this check, and `&trimmed[..1]`
+        // would then panic mid-character while building the error message.
         return Err(DotPathError::Parse(format!(
             "expression must start with `.` or `[`; got `{}`",
-            &trimmed[..1]
+            trimmed.chars().next().unwrap_or_default()
         )));
     }
     let mut segments = Vec::new();

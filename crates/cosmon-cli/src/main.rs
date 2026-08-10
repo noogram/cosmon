@@ -20,6 +20,7 @@ mod operator_event;
 mod pow;
 mod resurrect;
 mod root_help;
+mod text;
 mod visual;
 
 // Sensorium loader (vital strip) lives in the lib crate so external
