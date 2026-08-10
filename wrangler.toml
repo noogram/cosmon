@@ -20,21 +20,35 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # PUBLICATION GATE — read before deploying.
 #
-# Publishing docs.noogram.org is an OPERATOR GESTURE held behind the
-# membrane-repair gate (task-20260616-cc22). Deploying a page to PROD while
-# `git grep tenant-demo` (or any red-list term) still returns the client roster is a
-# PARTIAL PUBLIC FLIP. There is intentionally NO auto-deploy-on-push GitHub
-# Actions workflow for this site — merging these pages to main must NOT publish
-# them. The custom-domain attach (Cloudflare custom domain + CNAME + zero-trust
-# coverage) is done by the operator at deploy time, not by this config.
+# Deploying a page to PROD while `git grep tenant-demo` (or any red-list term)
+# still returns the client roster is a PARTIAL PUBLIC FLIP. There is
+# intentionally NO auto-deploy-ON-PUSH workflow for this site — merging these
+# pages to main must NOT publish them.
 #
-# Until the confidentiality scrub (Guard A) is audit-green, use PREVIEW-scoped
-# deploys only:
+# What DOES publish automatically, since task-20260810-5d79, is a TAG: the
+# `publish-docs` job in .github/workflows/release.yml builds this book, stamps
+# it with the tag, deploys it here, and then verifies the live origin serves
+# that version. The trigger is deliberately the release, not the merge — a
+# version ship is the moment the pages become true, and it is a gesture the
+# operator already makes on purpose. The alternative was the status quo ante,
+# where the mechanism was a human remembering to run the command below; on
+# v0.6.0 that memory failed and the site described `cs session` for a release
+# that had renamed the verb.
+#
+# The custom-domain attach (Cloudflare custom domain + CNAME + zero-trust
+# coverage) is done by the operator once, not by this config.
+#
+# The prod flip has since happened — docs.noogram.org is public — and the guard
+# that used to be "the operator's finger on the deploy" is now a CI gate that
+# runs BEFORE any tag can be cut: `confidentiality-banlist.sh` is hard on every
+# PR over exactly this publishable byte-set (docs/book/src, README, NOTICE), so
+# a red-list term cannot reach the built bundle in the first place. A gate that
+# reads every candidate byte is a stronger membrane than a gesture that has to
+# be remembered — which is the same lesson the deploy itself just learned.
+#
+# For a rehearsal that does not touch production, deploy to a preview branch:
 #
 #     wrangler pages deploy docs/book/book --project-name=cosmon-docs --branch=preview
-#
-# The prod flip (`--branch=main` / promote-to-production) stays under the
-# operator's finger. See docs/book/src/public-release-readiness.md, Guard A.
 # ─────────────────────────────────────────────────────────────────────────────
 
 name = "cosmon-docs"

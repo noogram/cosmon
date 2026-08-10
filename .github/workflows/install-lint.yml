@@ -18,7 +18,9 @@ name: Install lint
 #   5. install.sh's resolvable triples stay in lockstep with the release build
 #      matrix and the packaging surfaces — `triples`. Editing release.yml's
 #      matrix or the brew formula without updating install.sh reddens here (this
-#      is why the triggers below include release.yml + packaging/**);
+#      is why the triggers below include release.yml + packaging/**). The same
+#      job also runs the offline red-path tests for the release-path shell glue,
+#      including the docs-publication verifier;
 #   6. the REAL one-liner installs `cs` end-to-end from the latest PUBLISHED
 #      release on linux-x64 AND macOS — `live`. This catches a binary that does
 #      not run, but only once a public release exists (it self-skips before
@@ -55,12 +57,17 @@ on:
       # otherwise only caught by the weekly schedule after publication.
       - ".github/workflows/release.yml"
       - "packaging/**"
+      # The release-path shell glue and its offline tests (brew formula
+      # rendering, install-drift, docs publication) live here and are exercised
+      # by the `triples` job — editing them must reach their own tests.
+      - "scripts/release/**"
   pull_request:
     paths:
       - "infra/install/**"
       - ".github/workflows/install-lint.yml"
       - ".github/workflows/release.yml"
       - "packaging/**"
+      - "scripts/release/**"
   # Manual trigger — chiefly to run the hosted-`endpoint` smoke on demand once
   # the operator flips the Worker live.
   workflow_dispatch:
@@ -217,6 +224,13 @@ jobs:
       # detector can never quietly stop detecting — see the served-drift job.
       - name: Drift detector reddens on the real incident (offline)
         run: ./scripts/release/check-install-drift.test.sh
+      # The docs-publication pair only ever runs during a tag push against a
+      # live origin. Its load-bearing property — the verifier REDDENS when the
+      # origin serves stale content — is asserted here on every PR, offline,
+      # over file:// origins. A verifier that greens on stale content would
+      # reinstate the v0.6.0 defect while looking like a fix.
+      - name: Docs deploy verifier reddens on a stale origin (offline)
+        run: ./scripts/release/docs-deploy.test.sh
       - name: Compare install.sh, release matrix, and brew formula triples
         run: |
           set -euo pipefail
