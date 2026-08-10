@@ -106,5 +106,5 @@ Authority is a lease with an epoch (ADR-168 §D6). A co-pilot may
 observe, message and checkpoint; only the operator grants the controls,
 and no quota reading transfers them.
 
-SEE ALSO: cs presence (the substrate), cs session (operator carnet),
+SEE ALSO: cs presence (the substrate), cs journal (operator carnet),
 cs pilot (cognitive REPL), cs diverge.

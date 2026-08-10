@@ -43,7 +43,7 @@
 //!
 //! # What this module deliberately does not do
 //!
-//! - **It does not replace `cs session` or `cs pilot`.** The singular verb is
+//! - **It does not replace `cs journal` or `cs pilot`.** The singular verb is
 //!   the operator notebook and `cs pilot` is the cognitive REPL of ADR-115;
 //!   both keep their bytes. This is a third thing (ADR-168 §D3.5).
 //! - **It does not grant authority.** `takeover request` writes an ask;

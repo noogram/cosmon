@@ -4,7 +4,7 @@ expression: stdout
 ---
 Start a new session
 
-Usage: cs session start [OPTIONS]
+Usage: cs journal start [OPTIONS]
 
 Options:
       --config <PATH>    Path to configuration file

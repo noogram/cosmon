@@ -151,42 +151,42 @@ Apply the [archive.retention] policy; `--dry-run` shows the plan
 
 
 
-## `cs session`
+## `cs journal`
 
-Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
 
-**Usage:** `cs session <COMMAND>`
+**Usage:** `cs journal <COMMAND>`
 
 EXAMPLES:
-  cs session start                             # open a carnet
-  cs session start --galaxy example --root delib-example-0001
-  cs session note "Torvalds elected path a"
-  cs session note --tag insight "carnet is the primitive"
-  cs session note "!spark implémenter session-to-spark"  # prefix auto-promotes
-  cs session end                               # seal with BLAKE3 + auto-commit
-  cs session end --no-seal                     # ephemeral scratch close
+  cs journal start                             # open a carnet
+  cs journal start --galaxy example --root delib-example-0001
+  cs journal note "Torvalds elected path a"
+  cs journal note --tag insight "the carnet is the primitive"
+  cs journal note "!spark implémenter session-to-spark"  # prefix auto-promotes
+  cs journal end                               # seal with BLAKE3 + auto-commit
+  cs journal end --no-seal                     # ephemeral scratch close
 
-PROMOTE — turn session notes into spark molecules:
-  cs session promote 10:46:55                  # promote one note by timestamp
-  cs session promote 10:46:55 10:47:01         # promote several
-  cs session promote --all-spark-prefix        # promote every !spark-prefixed note
-  cs session promote --dry-run                 # show what would be promoted
-  cs session promote --session session-2026-04-22T10-31-31Z 10:46:55
+PROMOTE — turn journal notes into spark molecules:
+  cs journal promote 10:46:55                  # promote one note by timestamp
+  cs journal promote 10:46:55 10:47:01         # promote several
+  cs journal promote --all-spark-prefix        # promote every !spark-prefixed note
+  cs journal promote --dry-run                 # show what would be promoted
+  cs journal promote --session session-2026-04-22T10-31-31Z 10:46:55
 
 Notes beginning with `!spark ` are automatically promoted by the
 session-to-spark LaunchAgent (when installed, fires every 5 min).
-Explicit `cs session promote <ts>` works regardless of prefix and is
-idempotent — sidecar markers under .cosmon/state/sessions/.promoted/
+Explicit `cs journal promote <ts>` works regardless of prefix and is
+idempotent — sidecar markers under .cosmon/state/journals/.promoted/
 prevent duplicate sparks.
 
 Exit codes:
-  2    a session is already open (on `cs session start`)
-  3    no open session (on `cs session note` / `cs session end`)
+  2    a session is already open (on `cs journal start`)
+  3    no open session (on `cs journal note` / `cs journal end`)
 
-Sessions live under .cosmon/state/sessions/ as append-only markdown
+Journals live under .cosmon/state/journals/ as append-only markdown
 files. The seal is a BLAKE3 hash of the body between the frontmatter
 and footer — a trace, not a lock (architectural-invariants.md §8b).
-Promotion never mutates a sealed session — markers are sidecar-only.
+Promotion never mutates a sealed journal — markers are sidecar-only.
 
 ###### **Subcommands:**
 
@@ -199,11 +199,11 @@ Promotion never mutates a sealed session — markers are sidecar-only.
 
 
 
-## `cs session start`
+## `cs journal start`
 
 Start a new session
 
-**Usage:** `cs session start [OPTIONS]`
+**Usage:** `cs journal start [OPTIONS]`
 
 ###### **Options:**
 
@@ -212,11 +212,11 @@ Start a new session
 
 
 
-## `cs session note`
+## `cs journal note`
 
 Append a timestamped note to the open session
 
-**Usage:** `cs session note [OPTIONS] <TEXT>`
+**Usage:** `cs journal note [OPTIONS] <TEXT>`
 
 ###### **Arguments:**
 
@@ -231,11 +231,11 @@ Append a timestamped note to the open session
 
 
 
-## `cs session end`
+## `cs journal end`
 
 Close the open session, optionally sealing it with BLAKE3
 
-**Usage:** `cs session end [OPTIONS]`
+**Usage:** `cs journal end [OPTIONS]`
 
 ###### **Options:**
 
@@ -243,11 +243,11 @@ Close the open session, optionally sealing it with BLAKE3
 
 
 
-## `cs session promote`
+## `cs journal promote`
 
 Promote session notes into `spark` molecules (via session-to-spark tick)
 
-**Usage:** `cs session promote [OPTIONS] [NOTE_TIMESTAMPS]...`
+**Usage:** `cs journal promote [OPTIONS] [NOTE_TIMESTAMPS]...`
 
 ###### **Arguments:**
 
@@ -264,13 +264,13 @@ Promote session notes into `spark` molecules (via session-to-spark tick)
 
 
 
-## `cs session route`
+## `cs journal route`
 
 Route session notes through the Tier-1 regex classifier (ADR-072).
 
-Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/sessions/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
+Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 cascade, writes a sidecar under `.cosmon/state/journals/.route/<sid>/<body_hash>.json`, and (when confidence warrants) nucleates a `temp:proposed` molecule via `cs nucleate`. Tiers 2–4 are future work; low-confidence notes are marked `tier4_pending` and escalate to the verdict-door.
 
-**Usage:** `cs session route [OPTIONS] [SESSION]`
+**Usage:** `cs journal route [OPTIONS] [SESSION]`
 
 ###### **Arguments:**
 
@@ -278,7 +278,7 @@ Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 
 
 ###### **Options:**
 
-* `--all` — Process every session file under `.cosmon/state/sessions/`
+* `--all` — Process every session file under `.cosmon/state/journals/`
 * `--dry-run` — Print what would be classified without writing sidecars or nucleating molecules
 * `--no-stage` — Skip auto-nucleation of high-confidence `temp:proposed` molecules — write sidecars only. Useful when backfilling or debugging
 * `--max <MAX>` — Cap sidecars emitted this run (safety net for batch backfills)
@@ -287,13 +287,13 @@ Walks a session file, computes `blake3(body)` for each note, applies the Tier-1 
 
 
 
-## `cs session review`
+## `cs journal review`
 
 Review router-staged molecules (verdict-door).
 
-Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/sessions/.review/<sid>.md`, opens it in `$EDITOR`, and — on `--apply` — translates each `verdict:` line into a `keep` / `dismiss` / `undo` transition. Silent when nothing is pending (no editor opens). See ADR-072 §7.
+Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/journals/.review/<sid>.md`, opens it in `$EDITOR`, and — on `--apply` — translates each `verdict:` line into a `keep` / `dismiss` / `undo` transition. Silent when nothing is pending (no editor opens). See ADR-072 §7.
 
-**Usage:** `cs session review [OPTIONS] [SESSION]`
+**Usage:** `cs journal review [OPTIONS] [SESSION]`
 
 ###### **Arguments:**
 
@@ -386,7 +386,7 @@ Authority is a lease with an epoch (ADR-168 §D6). A co-pilot may
 observe, message and checkpoint; only the operator grants the controls,
 and no quota reading transfers them.
 
-SEE ALSO: cs presence (the substrate), cs session (operator carnet),
+SEE ALSO: cs presence (the substrate), cs journal (operator carnet),
 cs pilot (cognitive REPL), cs diverge.
 
 ###### **Subcommands:**
@@ -841,7 +841,7 @@ Success metric: 5 days out of 7 without opening Claude Code
 to pilot cosmon. See docs/guides/inbox-trial.md.
 
 SEE ALSO: cs ensemble (full backlog), cs peek (fractal TUI portal),
-cs session (operator carnet that inbox reads as its sticky top line).
+cs journal (operator carnet that inbox reads as its sticky top line).
 
 ###### **Options:**
 

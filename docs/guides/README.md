@@ -18,7 +18,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
 - [`cs-api` — local HTTP adapter for native pilots](cs-api.md)
 - [cosmon-matrix-tick — Matrix ingress bridge](cs-matrix-tick.md)
 - [cs-pilot container tests (increment 2)](cs-pilot-container-tests.md)
-- [cs session — operator carnet](cs-session.md)
+- [cs journal — operator carnet](cs-session.md)
 - [cs spark — one-line capture into the inbox](cs-spark.md)
 - [cs ↔ cs-thin parity (T-CST-PARITY)](cs-thin-parity.md)
 - [cs-thin test coverage rapport](cs-thin-test-coverage.md)

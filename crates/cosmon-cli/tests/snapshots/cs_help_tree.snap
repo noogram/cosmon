@@ -49,13 +49,13 @@ reconcile
 scheduler
 scheduler status
 scheduler validate
-session
-session start
-session note
-session end
-session promote
-session route
-session review
+journal
+journal start
+journal note
+journal end
+journal promote
+journal route
+journal review
 sessions
 sessions discover
 sessions list

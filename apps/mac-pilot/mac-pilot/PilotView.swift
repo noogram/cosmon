@@ -38,7 +38,7 @@ final class PilotViewModel: ObservableObject {
     @Published private(set) var lastRefresh: Date?
 
     /// Timestamps (`HH:MM:SS`) of notes in the current session that
-    /// already have a sidecar under `.cosmon/state/sessions/.promoted/`.
+    /// already have a sidecar under `.cosmon/state/journals/.promoted/`.
     /// Used by `notesList` to hide the promote button for done notes.
     @Published private(set) var promotedTimestamps: Set<String> = []
 

@@ -4,7 +4,7 @@ expression: stdout
 ---
 Close the open session, optionally sealing it with BLAKE3
 
-Usage: cs session end [OPTIONS]
+Usage: cs journal end [OPTIONS]
 
 Options:
       --config <PATH>  Path to configuration file

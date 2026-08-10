@@ -37,7 +37,7 @@ struct SessionState: Equatable {
     let notes: [Note]
 }
 
-/// Result of a successful `cs session end`.
+/// Result of a successful `cs journal end`.
 struct Seal: Equatable {
     let sessionID: SessionID
     let hash: String
@@ -316,7 +316,7 @@ struct MotionSpark: Identifiable, Hashable {
 // MARK: - Errors
 
 /// Domain errors surfaced through `CosmonBridge`. Exit codes 2 and 3 are the
-/// cosmon contract (see `cs session --help`) — map them to actionable messages
+/// cosmon contract (see `cs journal --help`) — map them to actionable messages
 /// rather than raw `executionFailed`.
 enum CosmonError: LocalizedError, Equatable {
     case csNotFound

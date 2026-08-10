@@ -226,12 +226,12 @@ pub struct NucleonScan {
     #[serde(default)]
     pub sparked_edges: u32,
 
-    /// Number of carnet entries under `.cosmon/state/sessions/` that
+    /// Number of carnet entries under `.cosmon/state/journals/` that
     /// carry a `cause:` subline (T5 evidence).
     #[serde(default)]
     pub carnet_entries_with_cause: u32,
 
-    /// Total carnet entries under `.cosmon/state/sessions/` for this
+    /// Total carnet entries under `.cosmon/state/journals/` for this
     /// candidate. A gap between this and
     /// [`Self::carnet_entries_with_cause`] indicates legacy notes
     /// that are not admission-blocking but must be surfaced.
@@ -677,7 +677,7 @@ fn probe_test(id: TestId, s: &NucleonScan) -> TestResult {
                 (
                     Verdict::Pass,
                     format!(
-                        "{} pilot-session(s) under .cosmon/state/sessions/; all append-only and sealed",
+                        "{} pilot-session(s) under .cosmon/state/journals/; all append-only and sealed",
                         s.pilot_sessions
                     ),
                 )

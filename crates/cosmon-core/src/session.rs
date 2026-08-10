@@ -3,7 +3,7 @@
 //! Session carnet note schema with causal-closure support.
 //!
 //! A [`SessionNote`] is one timestamped entry in the operator carnet
-//! (`.cosmon/state/sessions/session-<ts>.md`). The optional
+//! (`.cosmon/state/journals/session-<ts>.md`). The optional
 //! [`SessionNote::cause`] field records *how* the note came to exist —
 //! direct keyboard input, voice transcription, oracle suggestion, or
 //! autonomous agent output — so the carnet can always answer the

@@ -527,36 +527,36 @@ SEE ALSO:
   ADR-076 (binary security posture),
   cs key (operator notary key).";
 
-pub const SESSION: &str = "EXAMPLES:
-  cs session start                             # open a carnet
-  cs session start --galaxy example --root delib-example-0001
-  cs session note \"Torvalds elected path a\"
-  cs session note --tag insight \"carnet is the primitive\"
-  cs session note \"!spark implémenter session-to-spark\"  # prefix auto-promotes
-  cs session end                               # seal with BLAKE3 + auto-commit
-  cs session end --no-seal                     # ephemeral scratch close
+pub const JOURNAL: &str = "EXAMPLES:
+  cs journal start                             # open a carnet
+  cs journal start --galaxy example --root delib-example-0001
+  cs journal note \"Torvalds elected path a\"
+  cs journal note --tag insight \"the carnet is the primitive\"
+  cs journal note \"!spark implémenter session-to-spark\"  # prefix auto-promotes
+  cs journal end                               # seal with BLAKE3 + auto-commit
+  cs journal end --no-seal                     # ephemeral scratch close
 
-PROMOTE — turn session notes into spark molecules:
-  cs session promote 10:46:55                  # promote one note by timestamp
-  cs session promote 10:46:55 10:47:01         # promote several
-  cs session promote --all-spark-prefix        # promote every !spark-prefixed note
-  cs session promote --dry-run                 # show what would be promoted
-  cs session promote --session session-2026-04-22T10-31-31Z 10:46:55
+PROMOTE — turn journal notes into spark molecules:
+  cs journal promote 10:46:55                  # promote one note by timestamp
+  cs journal promote 10:46:55 10:47:01         # promote several
+  cs journal promote --all-spark-prefix        # promote every !spark-prefixed note
+  cs journal promote --dry-run                 # show what would be promoted
+  cs journal promote --session session-2026-04-22T10-31-31Z 10:46:55
 
 Notes beginning with `!spark ` are automatically promoted by the
 session-to-spark LaunchAgent (when installed, fires every 5 min).
-Explicit `cs session promote <ts>` works regardless of prefix and is
-idempotent — sidecar markers under .cosmon/state/sessions/.promoted/
+Explicit `cs journal promote <ts>` works regardless of prefix and is
+idempotent — sidecar markers under .cosmon/state/journals/.promoted/
 prevent duplicate sparks.
 
 Exit codes:
-  2    a session is already open (on `cs session start`)
-  3    no open session (on `cs session note` / `cs session end`)
+  2    a session is already open (on `cs journal start`)
+  3    no open session (on `cs journal note` / `cs journal end`)
 
-Sessions live under .cosmon/state/sessions/ as append-only markdown
+Journals live under .cosmon/state/journals/ as append-only markdown
 files. The seal is a BLAKE3 hash of the body between the frontmatter
 and footer — a trace, not a lock (architectural-invariants.md §8b).
-Promotion never mutates a sealed session — markers are sidecar-only.";
+Promotion never mutates a sealed journal — markers are sidecar-only.";
 
 pub const SESSIONS: &str = "EXAMPLES:
   cs sessions discover                         # provider sessions in this repo
@@ -620,7 +620,7 @@ Authority is a lease with an epoch (ADR-168 §D6). A co-pilot may
 observe, message and checkpoint; only the operator grants the controls,
 and no quota reading transfers them.
 
-SEE ALSO: cs presence (the substrate), cs session (operator carnet),
+SEE ALSO: cs presence (the substrate), cs journal (operator carnet),
 cs pilot (cognitive REPL), cs diverge.";
 
 pub const DAEMONS: &str = "IMAGE:
@@ -1272,7 +1272,7 @@ Success metric: 5 days out of 7 without opening Claude Code
 to pilot cosmon. See docs/guides/inbox-trial.md.
 
 SEE ALSO: cs ensemble (full backlog), cs peek (fractal TUI portal),
-cs session (operator carnet that inbox reads as its sticky top line).";
+cs journal (operator carnet that inbox reads as its sticky top line).";
 
 pub const DROP: &str = "EXAMPLES:
   cs drop                     # universal Inbox gesture — captures whatever is in scope

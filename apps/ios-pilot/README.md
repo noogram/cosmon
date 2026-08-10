@@ -7,7 +7,7 @@ Six tabs sit over `cs-api` (HTTP over Tailscale): **Session** (notes carnet),
 across every local galaxy), **Réglages** (settings).
 
 - **v0** (task-20260422-b031 / -16c1) — *Session* tab only, the dictaphone for
-  `cs session`.
+  `cs journal`.
 - **v1** (task-20260422-335b) — adds *Whispers*, *Inbox*, *Galaxies* tabs on
   top of the five `cs-api` endpoints shipped by `task-20260422-db9f`.
 - **v1 cluster** (task-20260423-d3ae, this task) — adds the *Cluster* tab

@@ -2,13 +2,13 @@
 
 > **Sibling formula of `whisper-to-spark`.** Where whispers arrive from
 > Matrix (humans or peers talking TO cosmon), session notes come from
-> the operator's own carnet (`cs session note`). Both become typed
+> the operator's own carnet (`cs journal note`). Both become typed
 > `spark` molecules via the same §8j ingress pattern — different port,
 > same spark target.
 
 ## Why
 
-A `cs session note` is a **carnet entry** — sealed by BLAKE3, meant to
+A `cs journal note` is a **carnet entry** — sealed by BLAKE3, meant to
 record thinking in flight. But sometimes a note *is* a real task: "!I
 should implement X", "TODO Y", a spark the operator wants dispatched.
 
@@ -18,29 +18,29 @@ ways:
 
 1. **Prefix syntactic**: start the note with `!spark ` and the
    LaunchAgent picks it up on the next tick (every 5 min).
-2. **Explicit promotion**: `cs session promote <note_ts>` turns any
+2. **Explicit promotion**: `cs journal promote <note_ts>` turns any
    note — prefixed or not — into a spark right away.
 
 ## Command surface
 
 ```sh
 # default: promote every !spark-prefixed note in the open session
-cs session promote
+cs journal promote
 
 # promote one specific note (regardless of prefix)
-cs session promote 10:46:55
+cs journal promote 10:46:55
 
 # promote several notes at once
-cs session promote 10:46:55 11:02:30
+cs journal promote 10:46:55 11:02:30
 
 # target a non-open session explicitly
-cs session promote --session session-2026-04-22T10-31-31Z 15:44:43
+cs journal promote --session session-2026-04-22T10-31-31Z 15:44:43
 
 # dry-run — show what would be promoted, change nothing
-cs session promote --dry-run
+cs journal promote --dry-run
 
 # fully-qualified session@ts pair (when you know the full handle)
-cs session promote session-2026-04-22T10-31-31Z@15:44:43
+cs journal promote session-2026-04-22T10-31-31Z@15:44:43
 ```
 
 All flags:
@@ -56,7 +56,7 @@ All flags:
 
 ## The `!spark ` prefix
 
-Typing `cs session note "!spark implement session-to-spark"` produces
+Typing `cs journal note "!spark implement session-to-spark"` produces
 this carnet line:
 
 ```markdown
@@ -71,7 +71,7 @@ picks up the prefix, and emits:
 - one `spark` molecule (`kind = idea`, tagged `temp:hot`,
   `source:session`, `stream:session-to-spark`,
   `session-note:<sid>@<HH-MM-SS>`)
-- one sidecar at `.cosmon/state/sessions/.promoted/<sid>/<HH-MM-SS>.md`
+- one sidecar at `.cosmon/state/journals/.promoted/<sid>/<HH-MM-SS>.md`
   recording the spark id, promoted_at, and nucleon
 
 The spark lands at the top of `cs inbox` under HOT. The operator
@@ -82,7 +82,7 @@ dispatches it with `cs tackle`, retags it, or collapses it.
 The tick is safe to re-run at any cadence:
 
 - A note is promoted **at most once**. The presence of a sidecar under
-  `.cosmon/state/sessions/.promoted/<sid>/<ts>.md` is the dedup key.
+  `.cosmon/state/journals/.promoted/<sid>/<ts>.md` is the dedup key.
 - Sessions are BLAKE3-sealed (§8b). **We never mutate the session
   file** — the seal would silently invalidate. Sidecars are the trace.
 - Re-running with no new `!spark` notes is cheap (~10 ms per session).
@@ -116,7 +116,7 @@ is the tick's NDJSON, one line per processed note. `tail -f` follows
 the flow.
 
 The agent runs `scripts/session-to-spark-tick.sh --all-spark-prefix
---json`. For targeted promotion (`cs session promote <ts>`), the
+--json`. For targeted promotion (`cs journal promote <ts>`), the
 operator invokes the CLI directly — the agent does not get in the way.
 
 ## Mechanism
@@ -125,7 +125,7 @@ The heavy lifting lives in `scripts/session-to-spark-tick.sh`. The
 tick:
 
 1. Walks up from `$PWD` (or `--cosmon-root <DIR>`) to find
-   `.cosmon/state/sessions/`.
+   `.cosmon/state/journals/`.
 2. Enumerates every `session-*.md` (or just the one named by
    `--session`).
 3. Parses the frontmatter `operator` and the `## HH:MM:SS — tag` note
@@ -136,7 +136,7 @@ tick:
    present, then `cs --json nucleate spark --var ... --tag ... --no-parent`.
 5. Writes the sidecar. Emits NDJSON per note.
 
-`cs session promote` is a thin Rust wrapper that forwards operator
+`cs journal promote` is a thin Rust wrapper that forwards operator
 intent (the open session, the named timestamps, `--dry-run`) to the
 tick script. It resolves the tick's location via:
 
@@ -150,7 +150,7 @@ The ios-pilot `Session` tab renders a `sparkles` button next to each
 recent note; tapping it calls the cs-api `/session/{id}/promote`
 endpoint (not yet shipped — the mock client exercises the UI path; the
 live HTTP client returns `notImplemented` until the endpoint lands).
-tenant_auditor's primary path on iOS remains Blink Shell → SSH → `cs session
+tenant_auditor's primary path on iOS remains Blink Shell → SSH → `cs journal
 note "!spark …"` on the mac, picked up by the LaunchAgent within one
 tick.
 
@@ -163,8 +163,8 @@ They differ in the **ingress port**:
 | Dimension | `whisper-to-spark` | `session-to-spark` |
 |---|---|---|
 | Ingress | Matrix E2E inbox | Session carnet |
-| File location | `.cosmon/whispers/inbox/<room>/*.md` | `.cosmon/state/sessions/session-*.md` |
-| Archive | `.cosmon/whispers/sparked/<room>/` | `.cosmon/state/sessions/.promoted/<sid>/` |
+| File location | `.cosmon/whispers/inbox/<room>/*.md` | `.cosmon/state/journals/session-*.md` |
+| Archive | `.cosmon/whispers/sparked/<room>/` | `.cosmon/state/journals/.promoted/<sid>/` |
 | Selection | every admitted whisper | `!spark ` prefix OR explicit list |
 | Author | Matrix sender | session operator |
 | Tags | `source:whisper`, `stream:matrix` | `source:session`, `stream:session-to-spark` |
@@ -175,16 +175,16 @@ to one channel.
 
 ## Troubleshooting
 
-- **"scripts/session-to-spark-tick.sh not found"** — `cs session
+- **"scripts/session-to-spark-tick.sh not found"** — `cs journal
   promote` walks up from `$PWD`. Either `cd` into a cosmon-like repo,
   or pass `--tick-script` or set `$COSMON_REPO_ROOT`.
 - **Notes repeat in `cs inbox`** — if the idempotence sidecar got
-  lost (`rm -rf .cosmon/state/sessions/.promoted`), the tick will
+  lost (`rm -rf .cosmon/state/journals/.promoted`), the tick will
   re-nucleate. Collapse the duplicates with `cs collapse <id> --reason
   duplicate`.
 - **Nothing is promoted** — by default the tick only acts on `!spark`
-  -prefixed notes. Either add the prefix (`cs session note "!spark
-  …"`), pass explicit timestamps to `cs session promote`, or use
+  -prefixed notes. Either add the prefix (`cs journal note "!spark
+  …"`), pass explicit timestamps to `cs journal promote`, or use
   `--all-spark-prefix` (no-op when you already have it).
 - **Empty spark body** — a note containing only `!spark` with no
   text is rejected (`note_rejected`, reason `empty_spark_body`).

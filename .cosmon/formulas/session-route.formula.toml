@@ -2,10 +2,10 @@ formula = "session-route"
 version = 1
 description = """
 Tier-1 regex classifier over session carnet notes (ADR-072). For each \
-note in `.cosmon/state/sessions/session-*.md`, compute \
+note in `.cosmon/state/journals/session-*.md`, compute \
 `body_hash = blake3(body)`, apply the regex cascade in \
 `crates/cosmon-cli/src/cmd/route.rs`, and emit one sidecar at \
-`.cosmon/state/sessions/.route/<sid>/blake3-<hash>.json`. High-\
+`.cosmon/state/journals/.route/<sid>/blake3-<hash>.json`. High-\
 confidence proposals are auto-staged as `temp:proposed` molecules; \
 low-confidence notes land as `tier4_pending` awaiting operator \
 verdict (verdict-door is `task-20260424-69c1`).
@@ -18,11 +18,11 @@ future work; v0 ships Tier 1 + sidecar infrastructure.
 
 **Mechanism is shell-thin.** The only glue is \
 `scripts/session-route-tick.sh`, a LaunchAgent-friendly wrapper over \
-`cs session route --all --json`. All classification, hashing, \
+`cs journal route --all --json`. All classification, hashing, \
 sidecar writing, and molecule nucleation live in the Rust \
 implementation — type-checked, unit-tested against the 11-note \
 benchmark corpus, and reachable from both the tick and \
-`cs session route` directly.
+`cs journal route` directly.
 
 **Idempotent** (invariant I2). A note whose `blake3(body)` already \
 has a matching sidecar at the current `router_version` is skipped \
@@ -85,12 +85,12 @@ id = "scan"
 title = "Scan the session notes (dry-run classification)"
 description = """
 List every note in every session file under \
-`.cosmon/state/sessions/session-*.md` (or just the one named by the \
+`.cosmon/state/journals/session-*.md` (or just the one named by the \
 `session` variable). For each note, record: session_id, note_ts, \
 body_hash, tier1 verdict (axes + proposed_action), terminal flag, \
 and whether a sidecar is already on disk.
 
-Delegate to `cs session route --all --dry-run --json` (or with \
+Delegate to `cs journal route --all --dry-run --json` (or with \
 `<session>` when the `session` variable is set). Capture the NDJSON \
 and render a table into MOLECULE_DIR/scan.md:
 
@@ -115,7 +115,7 @@ current `router_version`:
 
   1. Classify via Tier-1 regex.
   2. Write a sidecar at \
-     `.cosmon/state/sessions/.route/<sid>/blake3-<hash>.json` with \
+     `.cosmon/state/journals/.route/<sid>/blake3-<hash>.json` with \
      the full schema from ADR-072 §3 (note_id, body_hash, \
      router_version, prompt_version, axes, confidences, \
      proposed_action, decided_by, decided_at).
@@ -128,7 +128,7 @@ current `router_version`:
      surface these for operator review.
 
 **Preferred implementation**: delegate to \
-`cs session route --all --json` (or with `<session>` from the \
+`cs journal route --all --json` (or with `<session>` from the \
 variable). The Rust implementation handles the full pipeline.
 
 If the `dry_run` variable is `"1"`, pass `--dry-run`. If the \
@@ -160,7 +160,7 @@ Synthesize MOLECULE_DIR/report.md from scan.md + tick.ndjson:
     | excerpt — these are what the verdict-door will show.
   - **Skipped / failed table** (if any): session@note_ts | reason.
   - **Next tick recommendation**: when active under LaunchAgent, \
-    `every 300s`; when manual, `cs session route --all`.
+    `every 300s`; when manual, `cs journal route --all`.
 
 Keep the file short — one page. Operator scans it, acknowledges, \
 moves on.

@@ -7,7 +7,7 @@ action — le résultat atterrit dans `.cosmon/state/…` sur le MacBook Pro
 à la maison, via HTTP sur [cs-api](../../crates/cosmon-api) derrière
 Tailscale.
 
-> v0 (task-20260422-b031 / -16c1) — dictaphone pour `cs session` seul.
+> v0 (task-20260422-b031 / -16c1) — dictaphone pour `cs journal` seul.
 >
 > v1 (task-20260422-335b) — ajoute les onglets **Whispers**, **Inbox**,
 > **Galaxies** au-dessus des endpoints `cs-api` livrés par
@@ -31,7 +31,7 @@ Mac (dev): cs-api --bind <ip-tailscale-du-mac>:4222 \
                   --i-know-this-exposes-an-unauthenticated-api
         │
         ▼
-.cosmon/state/sessions/session-<ts>.md   (le fichier source-de-vérité)
+.cosmon/state/journals/session-<ts>.md   (le fichier source-de-vérité)
 ```
 
 Trois propriétés invariantes :
@@ -181,7 +181,7 @@ de notes, la session disparaît du status.
 | "cs-api injoignable" au démarrage | Mac endormi, Tailscale off, daemon pas lancé | `tailscale status` ; relancer `cs-api --bind $(tailscale ip -4):4222 --i-know-this-exposes-an-unauthenticated-api` |
 | `refusing to bind 0.0.0.0:4222` au lancement | On a demandé « toutes les interfaces » | Nommer l'IP Tailscale du Mac — voir [la section serrure](#la-serrure-de-cs-api-à-lire-avant-de-louvrir) |
 | `refusing to bind …: no authentication` | Adresse non-loopback sans le geste explicite | Ajouter `--i-know-this-exposes-an-unauthenticated-api` après avoir lu ce qu'il ouvre |
-| "session already open" | Une session était déjà ouverte (autre client) | **Fermer session** sur l'appareil courant, ou `cs session end` côté Mac |
+| "session already open" | Une session était déjà ouverte (autre client) | **Fermer session** sur l'appareil courant, ou `cs journal end` côté Mac |
 | Notes tapées non visibles dans le fichier Mac | cs-api écrit dans un autre galaxie | Vérifier `--galaxy` côté Mac ; les sessions sont par-galaxie |
 | Polling cogne la batterie | Intervalle trop court | Dans Réglages, passer à 10–30 s, ou couper le polling |
 

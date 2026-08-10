@@ -3,12 +3,12 @@
 //  mac-pilot
 //
 //  Bridge between the SwiftUI popover and the `cs` CLI. v0 is a thin
-//  shell-out: we spawn `/path/to/cs session <verb>` via `Process` and map
+//  shell-out: we spawn `/path/to/cs journal <verb>` via `Process` and map
 //  exit codes 2 (`session already open`) and 3 (`no open session`) to typed
 //  `CosmonError` cases.
 //
 //  The `cs` CLI does not yet expose a `session current` subcommand, so we
-//  read the sessions directory directly and recognise the open session as
+//  read the journal directory directly and recognise the open session as
 //  the one without a closing `---` frontmatter block. This parser mirrors
 //  the exact file layout produced by `crates/cosmon-cli/src/cmd/session.rs`
 //  (frontmatter / `## HH:MM:SS — tag` note headings / optional sealed
@@ -30,9 +30,9 @@ enum CosmonBridge {
         return home.appendingPathComponent("galaxies/cosmon", isDirectory: true)
     }()
 
-    /// Directory where `cs session start` lays down `session-*.md` files.
+    /// Directory where `cs journal start` lays down `session-*.md` files.
     static var sessionsDir: URL {
-        galaxyRoot.appendingPathComponent(".cosmon/state/sessions", isDirectory: true)
+        galaxyRoot.appendingPathComponent(".cosmon/state/journals", isDirectory: true)
     }
 
     /// Parent directory holding every sibling galaxy (`~/galaxies`).
@@ -58,7 +58,7 @@ enum CosmonBridge {
     /// promoted already — the UI reads this to hide the "Promouvoir en
     /// spark" button from notes that are already done.
     static var sessionPromotedRoot: URL {
-        galaxyRoot.appendingPathComponent(".cosmon/state/sessions/.promoted", isDirectory: true)
+        galaxyRoot.appendingPathComponent(".cosmon/state/journals/.promoted", isDirectory: true)
     }
 
     // MARK: - cs binary resolution
@@ -172,7 +172,7 @@ enum CosmonBridge {
     /// Start a new session. Returns the `SessionID` of the freshly opened carnet.
     @discardableResult
     static func start(galaxy: String?) async throws -> SessionID {
-        var args = ["session", "start"]
+        var args = ["journal", "start"]
         if let galaxy, !galaxy.isEmpty {
             args.append(contentsOf: ["--galaxy", galaxy])
         }
@@ -197,7 +197,7 @@ enum CosmonBridge {
         guard !trimmedText.isEmpty else {
             throw CosmonError.parseFailure("empty note body")
         }
-        var args = ["session", "note"]
+        var args = ["journal", "note"]
         if let tag, !tag.trimmingCharacters(in: .whitespaces).isEmpty {
             args.append(contentsOf: ["--tag", tag.trimmingCharacters(in: .whitespaces)])
         }
@@ -215,7 +215,7 @@ enum CosmonBridge {
     /// End the current session. Returns the `Seal` recovered from the sealed file footer.
     static func end() async throws -> Seal {
         let stateBefore = try await current()
-        let result = try await run(["session", "end"])
+        let result = try await run(["journal", "end"])
         if result.status == 3 { throw CosmonError.noSessionOpen }
         guard result.status == 0 else {
             throw CosmonError.executionFailed(
@@ -230,8 +230,8 @@ enum CosmonBridge {
 
     /// Returns the state of the currently open session, or `nil` if none.
     ///
-    /// Implementation note: `cs session current` does not exist. We instead
-    /// walk `.cosmon/state/sessions/` and pick the single file that does not
+    /// Implementation note: `cs journal current` does not exist. We instead
+    /// walk `.cosmon/state/journals/` and pick the single file that does not
     /// yet carry a closing `---` frontmatter footer. If several candidates
     /// exist (should never happen) we take the lexicographically largest one,
     /// i.e. the most recent.
@@ -252,7 +252,7 @@ enum CosmonBridge {
     }
 
     /// Promote a single session note into a `spark` molecule by shelling
-    /// out to `cs session promote <note_ts> --session <sid>`.
+    /// out to `cs journal promote <note_ts> --session <sid>`.
     ///
     /// The CLI wrapper handles the open-session detection and the
     /// sidecar bookkeeping — this function only needs to translate the
@@ -267,7 +267,7 @@ enum CosmonBridge {
         }
         let result = try await run([
             "--json",
-            "session", "promote",
+            "journal", "promote",
             "--session", sessionID.raw,
             ts,
         ])

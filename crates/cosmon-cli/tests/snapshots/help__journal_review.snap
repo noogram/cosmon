@@ -4,9 +4,9 @@ expression: stdout
 ---
 Review router-staged molecules (verdict-door).
 
-Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/sessions/.review/<sid>.md`, opens it in `$EDITOR`, and — on `--apply` — translates each `verdict:` line into a `keep` / `dismiss` / `undo` transition. Silent when nothing is pending (no editor opens). See ADR-072 §7.
+Renders `temp:proposed` molecules as a markdown review file at `.cosmon/state/journals/.review/<sid>.md`, opens it in `$EDITOR`, and — on `--apply` — translates each `verdict:` line into a `keep` / `dismiss` / `undo` transition. Silent when nothing is pending (no editor opens). See ADR-072 §7.
 
-Usage: cs session review [OPTIONS] [SESSION]
+Usage: cs journal review [OPTIONS] [SESSION]
 
 Arguments:
   [SESSION]

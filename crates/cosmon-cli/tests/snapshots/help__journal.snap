@@ -1,0 +1,52 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
+
+Usage: cs journal [OPTIONS] <COMMAND>
+
+Commands:
+  start    Start a new session
+  note     Append a timestamped note to the open session
+  end      Close the open session, optionally sealing it with BLAKE3
+  promote  Promote session notes into `spark` molecules (via session-to-spark tick)
+  route    Route session notes through the Tier-1 regex classifier (ADR-072)
+  review   Review router-staged molecules (verdict-door)
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help
+
+EXAMPLES:
+  cs journal start                             # open a carnet
+  cs journal start --galaxy example --root delib-example-0001
+  cs journal note "Torvalds elected path a"
+  cs journal note --tag insight "the carnet is the primitive"
+  cs journal note "!spark implémenter session-to-spark"  # prefix auto-promotes
+  cs journal end                               # seal with BLAKE3 + auto-commit
+  cs journal end --no-seal                     # ephemeral scratch close
+
+PROMOTE — turn journal notes into spark molecules:
+  cs journal promote 10:46:55                  # promote one note by timestamp
+  cs journal promote 10:46:55 10:47:01         # promote several
+  cs journal promote --all-spark-prefix        # promote every !spark-prefixed note
+  cs journal promote --dry-run                 # show what would be promoted
+  cs journal promote --session session-2026-04-22T10-31-31Z 10:46:55
+
+Notes beginning with `!spark ` are automatically promoted by the
+session-to-spark LaunchAgent (when installed, fires every 5 min).
+Explicit `cs journal promote <ts>` works regardless of prefix and is
+idempotent — sidecar markers under .cosmon/state/journals/.promoted/
+prevent duplicate sparks.
+
+Exit codes:
+  2    a session is already open (on `cs journal start`)
+  3    no open session (on `cs journal note` / `cs journal end`)
+
+Journals live under .cosmon/state/journals/ as append-only markdown
+files. The seal is a BLAKE3 hash of the body between the frontmatter
+and footer — a trace, not a lock (architectural-invariants.md §8b).
+Promotion never mutates a sealed journal — markers are sidecar-only.

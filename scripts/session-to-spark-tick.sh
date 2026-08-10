@@ -4,7 +4,7 @@
 # Sibling of `whisper-to-spark-tick.sh`. Where the whisper tick consumes
 # Matrix-ingressed whispers (`.cosmon/whispers/inbox/<room>/*.md`), this
 # tick consumes operator session notes from
-# `.cosmon/state/sessions/session-*.md` and nucleates one `spark` molecule
+# `.cosmon/state/journals/session-*.md` and nucleates one `spark` molecule
 # per qualifying note.
 #
 # Two selection modes:
@@ -13,12 +13,12 @@
 #      spark topic).
 #   2. **Explicit list** (`--promote-notes <session_id>:<ts>,...`): the
 #      operator names specific notes regardless of prefix. Used by
-#      `cs session promote <note_ts>`.
+#      `cs journal promote <note_ts>`.
 #
 # Idempotence: the session is sealed (BLAKE3, §8b) and MUST NOT be
 # rewritten. Promotion markers live in a **sidecar** directory:
 #
-#     .cosmon/state/sessions/.promoted/<session_id>/<note_ts>.md
+#     .cosmon/state/journals/.promoted/<session_id>/<note_ts>.md
 #
 # Presence of the sidecar = "this note was already promoted, skip".
 # The sidecar body records the spark molecule id and the note body so a
@@ -59,7 +59,7 @@
 #     carries `source:session` + `stream:session-to-spark` tags so
 #     downstream sees the provenance.
 #   - ADR-016 no-daemon-in-core: one-shot script fired by external
-#     scheduler (LaunchAgent) or operator (`cs session promote`).
+#     scheduler (LaunchAgent) or operator (`cs journal promote`).
 #   - CLI-first: we invoke `cs nucleate spark` (via `cs spark` internals
 #     through `nucleate`), not the MCP server.
 
@@ -100,12 +100,12 @@ emit_json() {
     printf '}\n'
 }
 
-# Walk up from $1 until a directory containing `.cosmon/state/sessions/` is found.
+# Walk up from $1 until a directory containing `.cosmon/state/journals/` is found.
 discover_root() {
     local dir="$1"
     dir="$(cd "$dir" && pwd -P)"
     while [[ "$dir" != "/" && -n "$dir" ]]; do
-        if [[ -d "$dir/.cosmon/state/sessions" ]]; then
+        if [[ -d "$dir/.cosmon/state/journals" ]]; then
             printf '%s\n' "$dir"
             return 0
         fi
@@ -167,10 +167,10 @@ fi
 
 if [[ -z "$COSMON_ROOT" ]]; then
     COSMON_ROOT="$(discover_root "$(pwd)")"
-    [[ -n "$COSMON_ROOT" ]] || die "no .cosmon/state/sessions/ found above $(pwd) — pass --cosmon-root <DIR>"
+    [[ -n "$COSMON_ROOT" ]] || die "no .cosmon/state/journals/ found above $(pwd) — pass --cosmon-root <DIR>"
 fi
 
-SESSIONS_DIR="$COSMON_ROOT/.cosmon/state/sessions"
+SESSIONS_DIR="$COSMON_ROOT/.cosmon/state/journals"
 PROMOTED_DIR="$SESSIONS_DIR/.promoted"
 [[ -d "$SESSIONS_DIR" ]] || die "$SESSIONS_DIR does not exist"
 if (( DRY_RUN == 0 )); then

@@ -4,7 +4,7 @@ expression: stdout
 ---
 Append a timestamped note to the open session
 
-Usage: cs session note [OPTIONS] <TEXT>
+Usage: cs journal note [OPTIONS] <TEXT>
 
 Arguments:
   <TEXT>  Free-form note body

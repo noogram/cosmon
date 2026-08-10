@@ -222,9 +222,13 @@ enum Command {
     #[command(hide = true)]
     Sensorium(cmd::sensorium::Args),
 
-    /// Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
-    #[command(after_help = cmd::examples::SESSION)]
-    Session(cmd::session::Args),
+    /// Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
+    #[command(after_help = cmd::examples::JOURNAL)]
+    Journal(cmd::journal::Args),
+
+    /// Deprecated alias for `cs journal` — hidden, kept only for the installed mac-pilot app
+    #[command(hide = true)]
+    Session(cmd::journal::Args),
 
     /// Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
     #[command(long_about = cmd::sessions::LONG_ABOUT, after_help = cmd::examples::SESSIONS)]
@@ -672,7 +676,8 @@ fn main() {
         Command::Scheduler(args) => cmd::scheduler::run(&ctx, &args),
         Command::Security(args) => cmd::security::run(&ctx, &args),
         Command::Sensorium(args) => cmd::sensorium::run(&ctx, &args),
-        Command::Session(args) => cmd::session::run(&ctx, &args),
+        Command::Journal(args) => cmd::journal::run(&ctx, &args),
+        Command::Session(args) => cmd::journal::run_session_alias(&ctx, &args),
         Command::Sessions(args) => cmd::sessions::run(&ctx, &args),
         Command::Daemons(args) => cmd::daemons::run(&ctx, &args),
         Command::Status(args) => cmd::status::run(&ctx, &args),
@@ -754,7 +759,7 @@ fn main() {
         // Typed CLI guard refusals carry their own exit codes so
         // scripts can branch on the specific rule that fired. Any
         // other error falls through to the generic exit-1 path.
-        if let Some(code) = cmd::session::extract_exit_code(&e) {
+        if let Some(code) = cmd::journal::extract_exit_code(&e) {
             std::process::exit(code);
         }
         let code: i32 = e

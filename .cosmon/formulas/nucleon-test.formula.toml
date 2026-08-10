@@ -140,7 +140,7 @@ Output — write `MOLECULE_DIR/scan.md` with:
     `substrate` variable (optional), discovery date, window.
   - **Corpus inventory** — counts of `pilot-session` molecules,
     nucleated molecules with `author_nucleon_id == candidate`, carnet
-    files under `.cosmon/state/sessions/`, identity files under
+    files under `.cosmon/state/journals/`, identity files under
     `.cosmon/state/nucleons/<candidate>/`, sealed events.
   - **Cited paths** — every entry cites an existing path inside
     `.cosmon/` (or names the expected path explicitly when absent —

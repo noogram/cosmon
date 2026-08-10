@@ -212,7 +212,7 @@ pub(crate) fn command_group_layout() -> Vec<CommandGroup> {
                 Derived("prime"),
                 Derived("paths"),
                 Derived("archive"),
-                Derived("session"),
+                Derived("journal"),
                 Derived("sessions"),
                 Derived("inbox"),
                 Derived("panel"),

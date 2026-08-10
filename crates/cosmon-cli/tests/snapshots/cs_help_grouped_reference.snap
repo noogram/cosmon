@@ -83,7 +83,7 @@ Tools:
   prime                Prime the system — load .cosmon/config.toml and self-check gates
   paths                Paths — project the write-path taxonomy (`--writes`), a pure derived view
   archive              Archive — operator view over durable terminal snapshots (list/show/verify/prune, ADR-030)
-  session              Session — operator carnet (start/note/end), append-only, BLAKE3-sealed
+  journal              Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
   sessions             Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
   inbox                Inbox — vertical pile of atomic actions awaiting operator decision (cs inbox)
   panel                Panel — convene a hash-pinned supermajority panel to gate a constitutional amendment

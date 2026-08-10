@@ -398,9 +398,9 @@ impl Snapshot {
 
 /// Scan `<state_dir>/sessions/` for the single unsealed session, if any.
 /// Silently drops read/parse errors — inbox is read-only on this path and
-/// `cs session` is the authoritative tool for sealing.
+/// `cs journal` is the authoritative tool for sealing.
 fn find_open_session(state_dir: &Path) -> Option<SessionSticky> {
-    let dir = state_dir.join("sessions");
+    let dir = state_dir.join("journals");
     let entries = std::fs::read_dir(&dir).ok()?;
     let mut candidates: Vec<(PathBuf, String)> = Vec::new();
     for entry in entries.flatten() {
@@ -1360,7 +1360,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
         // No molecules — we only care about the session sticky.
-        let sessions_dir = tmp.path().join("sessions");
+        let sessions_dir = tmp.path().join("journals");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let session_path = sessions_dir.join("session-20260422T140000Z.md");
         std::fs::write(
@@ -1380,7 +1380,7 @@ mod tests {
     fn snapshot_ignores_sealed_session() {
         let tmp = TempDir::new().unwrap();
         let store = FileStore::new(tmp.path());
-        let sessions_dir = tmp.path().join("sessions");
+        let sessions_dir = tmp.path().join("journals");
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let session_path = sessions_dir.join("session-20260422T140000Z.md");
         std::fs::write(

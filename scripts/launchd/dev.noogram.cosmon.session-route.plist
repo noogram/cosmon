@@ -5,7 +5,7 @@
 
   Fires `scripts/session-route-tick.sh --all --json` every 300 seconds
   (5 min, same cadence as session-to-spark so the two coexist during
-  the deprecation window). The tick delegates to `cs session route`;
+  the deprecation window). The tick delegates to `cs journal route`;
   all classification logic is in
   `crates/cosmon-cli/src/cmd/route.rs`. The script is idempotent —
   re-runs that see a matching sidecar skip with no I/O.

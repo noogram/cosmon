@@ -8,13 +8,13 @@
   so a `!spark`-prefixed note lands as a spark molecule within one
   tick). The flag makes the invocation explicit and self-documenting:
   the LaunchAgent only promotes notes that begin with the `!spark `
-  prefix. Targeted promotion (`cs session promote <ts>`) bypasses
+  prefix. Targeted promotion (`cs journal promote <ts>`) bypasses
   this agent and runs synchronously in the operator's shell.
 
   The script is idempotent — re-runs with nothing to do are cheap
   (~10ms to iterate every session's notes and skip via sidecar). It
   walks up from `$WorkingDirectory` to find the project's
-  `.cosmon/state/sessions/` directory, so running from the repo root
+  `.cosmon/state/journals/` directory, so running from the repo root
   is enough.
 
   Placeholders substituted by

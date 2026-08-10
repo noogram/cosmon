@@ -3,7 +3,7 @@
 //! `cs-api` — local HTTP daemon shelling out to the `cs` CLI.
 //!
 //! Designed for native pilots (Mac menubar, iOS, iPad) that need to
-//! drive `cs session start|note|end` over HTTP instead of spawning a
+//! drive `cs journal start|note|end` over HTTP instead of spawning a
 //! subprocess directly. See the crate-level docs on [`cosmon_api`] for
 //! the endpoint surface and security model.
 

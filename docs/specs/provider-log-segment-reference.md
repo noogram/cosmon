@@ -125,5 +125,5 @@ synthétique et d’un adaptateur réels.
   implicite des logs dans ce lot ;
 - ADR-056 / `cosmon-notary` : commitment et signature Ed25519, sans prétendre
   que la signature assure disponibilité ou cognition ;
-- `cs session end` : cohérence avec le scellement BLAKE3 existant, avec une
+- `cs journal end` : cohérence avec le scellement BLAKE3 existant, avec une
   séparation de domaine propre au segment.

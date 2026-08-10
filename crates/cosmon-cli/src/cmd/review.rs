@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! `cs session review` — verdict-door for router-staged molecules.
+//! `cs journal review` — verdict-door for router-staged molecules.
 //!
 //! The single interaction surface through which the operator approves,
 //! dismisses, or undoes router proposals. Consumes the staged molecules
-//! emitted by `cs session route` (tag `temp:proposed` +
+//! emitted by `cs journal route` (tag `temp:proposed` +
 //! `session-note:<sid>@<HH-MM-SS>`) and surfaces them as a markdown
 //! review file opened in `$EDITOR`.
 //!
@@ -44,7 +44,7 @@ use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 
 use super::Context;
 
-/// Staging tag — matches the tag applied by `cs session route`.
+/// Staging tag — matches the tag applied by `cs journal route`.
 const TEMP_PROPOSED: &str = "temp:proposed";
 
 /// Promotion tag applied on `keep`.
@@ -54,7 +54,7 @@ const TEMP_HOT: &str = "temp:hot";
 /// and scripting-facing so it MUST NOT drift).
 const ROUTER_DISCARDED: &str = "router_discarded";
 
-/// Arguments for `cs session review`.
+/// Arguments for `cs journal review`.
 #[derive(clap::Args, Debug)]
 pub struct ReviewArgs {
     /// Session id (e.g. `session-2026-04-22T10-31-31Z`). When omitted,
@@ -73,7 +73,7 @@ pub struct ReviewArgs {
     pub editor: Option<String>,
 }
 
-/// Entry point for `cs session review`.
+/// Entry point for `cs journal review`.
 ///
 /// # Errors
 /// Propagates filestore, I/O, editor-spawn, and verdict-parse errors.
@@ -88,7 +88,7 @@ pub fn run(ctx: &Context, args: &ReviewArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let review_dir = state_dir.join("sessions").join(".review");
+    let review_dir = state_dir.join("journals").join(".review");
     let review_path = review_file_path(&review_dir, args.session.as_deref());
 
     if args.apply {
@@ -109,7 +109,7 @@ pub fn run(ctx: &Context, args: &ReviewArgs) -> anyhow::Result<()> {
     open_editor(&review_path, args.editor.as_deref())?;
 
     println!(
-        "review file: {}\nrun `cs session review{} --apply` when ready.",
+        "review file: {}\nrun `cs journal review{} --apply` when ready.",
         review_path.display(),
         args.session
             .as_deref()
@@ -272,7 +272,7 @@ fn render_review_markdown(proposals: &[Proposal]) -> String {
     out.push_str("# Session review\n\n");
     out.push_str(
         "Write `keep`, `dismiss`, or `undo` on each `verdict:` line,\n\
-         save, then run `cs session review --apply`.\n\n\
+         save, then run `cs journal review --apply`.\n\n\
          - `keep`    → promotes the molecule to `temp:hot` (normal backlog).\n\
          - `dismiss` → `cs collapse` with reason `router_discarded`.\n\
          - `undo`    → hard-deletes the staged molecule (the raw note\n  is untouched — the carnet stays sealed).\n\n",
@@ -386,7 +386,7 @@ fn apply_verdicts(
 ) -> anyhow::Result<()> {
     if !review_path.is_file() {
         anyhow::bail!(
-            "review file not found at {} — run `cs session review` first to compose it",
+            "review file not found at {} — run `cs journal review` first to compose it",
             review_path.display()
         );
     }

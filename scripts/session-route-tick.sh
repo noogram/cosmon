@@ -4,7 +4,7 @@
 # Sibling of `session-to-spark-tick.sh`. Where the older script parses
 # the session markdown in awk and decides what to spark, this one
 # delegates **all** logic to the Rust implementation in
-# `crates/cosmon-cli/src/cmd/route.rs` via `cs session route`. The
+# `crates/cosmon-cli/src/cmd/route.rs` via `cs journal route`. The
 # shell script only exists to satisfy the LaunchAgent contract and
 # provide an install/uninstall hook point.
 #
@@ -57,12 +57,12 @@ DRY_RUN=0
 ALL_SESSIONS=1  # default when invoked from LaunchAgent
 SESSION_ARG=""
 
-# Walk up from $1 until a directory containing `.cosmon/state/sessions/` is found.
+# Walk up from $1 until a directory containing `.cosmon/state/journals/` is found.
 discover_root() {
     local dir="$1"
     dir="$(cd "$dir" && pwd -P)"
     while [[ "$dir" != "/" && -n "$dir" ]]; do
-        if [[ -d "$dir/.cosmon/state/sessions" ]]; then
+        if [[ -d "$dir/.cosmon/state/journals" ]]; then
             printf '%s\n' "$dir"
             return 0
         fi
@@ -71,7 +71,7 @@ discover_root() {
     printf ''
 }
 
-# Parse CLI flags. Anything we recognise is forwarded to `cs session route`;
+# Parse CLI flags. Anything we recognise is forwarded to `cs journal route`;
 # anything else errors.
 while (($#)); do
     case "$1" in
@@ -104,15 +104,15 @@ done
 
 if [[ -z "$COSMON_ROOT" ]]; then
     COSMON_ROOT="$(discover_root "$(pwd)")"
-    [[ -n "$COSMON_ROOT" ]] || die "no .cosmon/state/sessions/ found above $(pwd) — pass --cosmon-root <DIR>"
+    [[ -n "$COSMON_ROOT" ]] || die "no .cosmon/state/journals/ found above $(pwd) — pass --cosmon-root <DIR>"
 fi
 
-[[ -d "$COSMON_ROOT/.cosmon/state/sessions" ]] || die "$COSMON_ROOT/.cosmon/state/sessions does not exist"
+[[ -d "$COSMON_ROOT/.cosmon/state/journals" ]] || die "$COSMON_ROOT/.cosmon/state/journals does not exist"
 
 command -v cs >/dev/null 2>&1 || die "'cs' not on PATH"
 
-# Build the final argv for `cs session route`.
-CS_ARGS=("session" "route")
+# Build the final argv for `cs journal route`.
+CS_ARGS=("journal" "route")
 if [[ -n "$SESSION_ARG" ]]; then
     CS_ARGS+=("$SESSION_ARG")
 elif (( ALL_SESSIONS )); then
@@ -125,5 +125,5 @@ CS_ARGS+=("${FORWARD_ARGS[@]:-}")
 cd "$COSMON_ROOT"
 
 # Capture + forward stdout. We deliberately do NOT swallow stderr — a
-# panic in `cs session route` must surface in LaunchAgent's `.err` log.
+# panic in `cs journal route` must surface in LaunchAgent's `.err` log.
 exec cs "${CS_ARGS[@]}"

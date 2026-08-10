@@ -140,9 +140,9 @@ async fn a_cross_origin_write_is_refused_on_the_served_stack() {
     );
 
     // The side effect is the property: a refused start leaves no
-    // session behind. `sessions/` is created lazily by the handler, so
+    // session behind. `journals/` is created lazily by the handler, so
     // its absence is the observable.
-    let sessions = state_dir.join("sessions");
+    let sessions = state_dir.join("journals");
     let opened = std::fs::read_dir(&sessions)
         .map(|entries| entries.count())
         .unwrap_or(0);
