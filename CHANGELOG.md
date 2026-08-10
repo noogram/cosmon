@@ -34,11 +34,14 @@ on a live terminal (#43) and a `cargo test` that does not compile at all on
 linux-musl (#33) — are met on first contact by the population least equipped
 to diagnose them.
 
-<!-- TODO-ACK: acknowledgements section. The operator decides how external
-     contributors are credited here; this release note deliberately leaves the
-     slot empty rather than guessing. Reporters and contributors appear by
-     handle or as "external tester" in the Fixed entries below, which is the
-     record, not the credit. -->
+### Acknowledgements
+
+First release with contributions from outside the project. Thanks to:
+
+- **@ph-lean** — OIDC discovery, so `cs` works with identity providers other
+  than Forgejo (#44)
+- **@jdthaler** — external rate-measurement data, 400 trials on aarch64
+  (#41, #42)
 
 ### Added
 
