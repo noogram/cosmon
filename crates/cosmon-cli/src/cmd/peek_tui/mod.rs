@@ -5108,6 +5108,38 @@ mod tests {
         }
     }
 
+    /// The exact seam the operator hit on 2026-08-11. The header strip clips
+    /// `galaxy "headline"` to 28 columns and the headline is a sentence the
+    /// operator typed; byte 27 of the reported panic is `28 - 1`, the old
+    /// `&s[..max - 1]`.
+    ///
+    /// The galaxy name is what is swept, not the headline: lengthening the
+    /// prefix slides the cut one byte at a time across the accented text, so
+    /// some iteration necessarily lands inside a multi-byte character. Fixing
+    /// the headline and shortening its tail instead would keep every accent
+    /// at the same distance from the cut and could miss the bug entirely.
+    #[test]
+    fn presence_label_survives_an_accented_headline() {
+        use unicode_width::UnicodeWidthStr;
+        let headline = "évolution différée de la tâche 👻";
+        for pad in 0..40 {
+            let galaxy = "g".repeat(pad);
+            let entry = presence_reader::PresenceEntry {
+                sid: "sid-af1e".to_owned(),
+                galaxy: Some(galaxy.clone()),
+                headline: Some(headline.to_owned()),
+                current_molecule: None,
+                heartbeat_at: None,
+            };
+            let label = presence_label(&entry);
+            assert!(
+                label.width() <= 28,
+                "galaxy of {pad} chars produced a {}-column label: {label:?}",
+                label.width()
+            );
+        }
+    }
+
     /// The silent half of the same defect: byte-counting clipped accented
     /// text earlier than asked, so a title that fits the column was shown
     /// with an ellipsis it did not need.
