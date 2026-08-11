@@ -2367,11 +2367,10 @@ fn execute_query(
     let _ = fs::write(mol_dir.join("query-output.log"), log_content);
 
     // Emit the typed event.
-    let preview = if serialised.len() > 512 {
-        format!("{}…", &serialised[..512])
-    } else {
-        serialised.clone()
-    };
+    // Byte budget on an event field, not a frame width — and the serialised
+    // query result carries whatever text the molecule holds, so the cut has
+    // to land on a character boundary. See [`crate::text`].
+    let preview = crate::text::truncate_bytes(&serialised, 512);
     let _ = cosmon_state::event_log::emit_one(
         &events_path,
         cosmon_core::event_v2::EventV2::QueryStepEvaluated {
@@ -9183,16 +9182,7 @@ fn emit_supervision_setup_failed_event_to(
 /// codepoint, 3 bytes UTF-8) when truncation occurred so an audit can
 /// tell at a glance that the field was clipped.
 fn truncate_at_utf8_boundary(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_owned();
-    }
-    let mut cut = max_bytes;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut out = s[..cut].to_owned();
-    out.push('…');
-    out
+    crate::text::truncate_bytes(s, max_bytes)
 }
 
 /// Undo every side-effect `cs tackle` has taken on the filesystem before

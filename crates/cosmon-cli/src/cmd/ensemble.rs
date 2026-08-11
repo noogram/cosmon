@@ -1235,11 +1235,10 @@ fn observe_cognitive(
     let display = if detail.is_empty() {
         status.clone()
     } else {
-        let short = if detail.len() > 20 {
-            format!("{}…", &detail[..19])
-        } else {
-            detail.to_owned()
-        };
+        // The detail is free text from the molecule's own state file, so it
+        // may hold accents or an emoji; clip it by rendered width, never by
+        // byte offset. See [`crate::text`].
+        let short = crate::text::truncate_display(detail, 20);
         format!("{status}:{short}")
     };
 

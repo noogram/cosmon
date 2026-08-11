@@ -660,12 +660,12 @@ fn replay_shell(command: &str, step_id: &str, work_dir: &Path, checks: &mut Vec<
     }
 }
 
+/// Clip a gate command down to `n` display columns for the check line.
+///
+/// A shell command can contain any text the operator wrote, accents
+/// included, so this must not slice bytes. See [`crate::text`].
 fn truncate(s: &str, n: usize) -> String {
-    if s.len() <= n {
-        s.to_owned()
-    } else {
-        format!("{}…", &s[..n])
-    }
+    crate::text::truncate_display(s, n)
 }
 
 /// Walk the event-log hash chain (plumbing v2 behaviour).

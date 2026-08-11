@@ -177,14 +177,12 @@ fn run_health(ctx: &Context, args: &HealthArgs) -> Result<()> {
     Ok(())
 }
 
+/// Clip a probe detail to `n` columns of the report line.
+///
+/// Counted in display columns rather than `char`s so a wide glyph in a daemon
+/// message cannot push the line past the frame. See [`crate::text`].
 fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n {
-        s.to_string()
-    } else {
-        let mut out = s.chars().take(n).collect::<String>();
-        out.push('…');
-        out
-    }
+    crate::text::truncate_display(s, n)
 }
 
 #[cfg(test)]
@@ -196,9 +194,21 @@ mod tests {
         assert_eq!(truncate("hello", 10), "hello");
     }
 
+    /// The ellipsis is paid for out of the budget, so a 5-column cell is
+    /// five columns wide and not six — a clipped line must not be the one
+    /// that overflows the frame.
     #[test]
     fn truncate_long_string_appends_ellipsis() {
-        assert_eq!(truncate("0123456789abcdef", 5), "01234…");
+        assert_eq!(truncate("0123456789abcdef", 5), "0123…");
+    }
+
+    /// A detail with an accent used to be clipped a character early, because
+    /// the old implementation compared `chars()` but the shared one measures
+    /// what the terminal paints.
+    #[test]
+    fn truncate_counts_display_columns_not_bytes() {
+        assert_eq!(truncate("éé", 2), "éé");
+        assert_eq!(truncate("序章", 2), "…");
     }
 
     #[test]

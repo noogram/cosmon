@@ -498,33 +498,29 @@ impl RowView {
     }
 }
 
-/// Truncate a session slug to `max` chars, preserving the trailing short-hash
-/// suffix (last 4–5 chars after the final `-`). If the slug fits, return it
-/// unchanged. Otherwise: `prefix…-suffix`.
+/// Truncate a session slug to `max` display columns, preserving the trailing
+/// short-hash suffix (last 4–5 chars after the final `-`). If the slug fits,
+/// return it unchanged. Otherwise: `prefix…-suffix`.
 fn truncate_slug(slug: &str, max: usize) -> String {
-    if slug.len() <= max {
+    use unicode_width::UnicodeWidthStr;
+    if slug.width() <= max {
         return slug.to_owned();
     }
     // Preserve the suffix after the last '-' (usually the 4-char mol hash).
+    // `rfind` returns a byte index that is a char boundary by construction.
     let suffix = slug.rfind('-').map_or("", |i| &slug[i..]);
-    // We need room for at least 1 char + '…' + suffix.
-    let avail = max.saturating_sub(suffix.len() + 1); // 1 for '…'
+    // We need room for at least 1 column + '…' + suffix.
+    let avail = max.saturating_sub(suffix.width() + 1); // 1 for '…'
     if avail == 0 {
         // Extreme: just hard-truncate.
         return truncate_str(slug, max);
     }
-    format!("{}…{}", &slug[..avail], suffix)
+    format!("{}…{}", crate::text::take_width(slug, avail), suffix)
 }
 
-/// Hard-truncate a string to `max` chars, appending `…` if trimmed.
+/// Hard-truncate a string to `max` display columns, appending `…` if trimmed.
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_owned()
-    } else if max <= 1 {
-        "…".to_owned()
-    } else {
-        format!("{}…", &s[..max - 1])
-    }
+    crate::text::truncate_display(s, max)
 }
 
 /// Compute a centered subrectangle that takes `pct_x` percent of `r`'s
@@ -5075,6 +5071,84 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A molecule title with an accent used to take the whole TUI down:
+    /// *panicked at mod.rs:526: end byte index 27 is not a char boundary; it
+    /// is inside 'é'*. Both cell truncators are exercised at every width from
+    /// nothing to wider than the string, because the panic only fired when
+    /// the cut landed inside a character — a single example width would test
+    /// one offset and miss the ones that break.
+    #[test]
+    fn cell_truncation_survives_every_width_on_non_ascii() {
+        use unicode_width::UnicodeWidthStr;
+        let specimens = [
+            "évolution-différée-af1e",
+            "tâche-préparée-2bbb",
+            "序章-molecule-9fbee",
+            "👻-ghost-♥-af1e",
+            "plain-ascii-slug-af1e",
+        ];
+        for s in specimens {
+            for n in 0..=s.len() + 4 {
+                let cell = truncate_str(s, n);
+                assert!(
+                    cell.width() <= n,
+                    "truncate_str({s:?}, {n}) rendered {} columns: {cell:?}",
+                    cell.width()
+                );
+                // The slug variant keeps the trailing short hash, and pays
+                // for it out of the same budget.
+                let slug = truncate_slug(s, n);
+                assert!(
+                    slug.width() <= n,
+                    "truncate_slug({s:?}, {n}) rendered {} columns: {slug:?}",
+                    slug.width()
+                );
+            }
+        }
+    }
+
+    /// The exact seam the operator hit on 2026-08-11. The header strip clips
+    /// `galaxy "headline"` to 28 columns and the headline is a sentence the
+    /// operator typed; byte 27 of the reported panic is `28 - 1`, the old
+    /// `&s[..max - 1]`.
+    ///
+    /// The galaxy name is what is swept, not the headline: lengthening the
+    /// prefix slides the cut one byte at a time across the accented text, so
+    /// some iteration necessarily lands inside a multi-byte character. Fixing
+    /// the headline and shortening its tail instead would keep every accent
+    /// at the same distance from the cut and could miss the bug entirely.
+    #[test]
+    fn presence_label_survives_an_accented_headline() {
+        use unicode_width::UnicodeWidthStr;
+        let headline = "évolution différée de la tâche 👻";
+        for pad in 0..40 {
+            let galaxy = "g".repeat(pad);
+            let entry = presence_reader::PresenceEntry {
+                sid: "sid-af1e".to_owned(),
+                galaxy: Some(galaxy.clone()),
+                headline: Some(headline.to_owned()),
+                current_molecule: None,
+                heartbeat_at: None,
+            };
+            let label = presence_label(&entry);
+            assert!(
+                label.width() <= 28,
+                "galaxy of {pad} chars produced a {}-column label: {label:?}",
+                label.width()
+            );
+        }
+    }
+
+    /// The silent half of the same defect: byte-counting clipped accented
+    /// text earlier than asked, so a title that fits the column was shown
+    /// with an ellipsis it did not need.
+    #[test]
+    fn cell_truncation_keeps_a_title_that_fits() {
+        // 10 characters, 12 bytes — the byte version clipped this at 10.
+        assert_eq!(truncate_str("évolutioné", 10), "évolutioné");
+        assert_eq!(truncate_slug("évolutioné-af1e", 15), "évolutioné-af1e");
+    }
 
     /// The glyph legend lives on page 2, so page 1 must name the key
     /// that reaches it. An undiscoverable second page is the same defect
