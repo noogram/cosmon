@@ -28,26 +28,23 @@
 //!   credential store would be unsafe to run twice or in a script, which
 //!   is precisely how `doctor` is run.
 //!
-//! # Two auth shapes, one gate: the cached credential state
+//! # One gate: the cached credential state
 //!
-//! A **real-OIDC** profile (a `login` recorded `issuer` + `client_id`) holds
-//! its token in the credential store, not behind `/issue`. The state of that
-//! cached token *is* the branch:
+//! Auth is OIDC: `login` runs the browser PKCE flow, records the `issuer` +
+//! `client_id`, and holds the token in the credential store — never behind an
+//! `/issue` mint. `doctor` reads that cached token's state and branches on it:
 //!
 //! - **Fresh** — a valid session is cached. Present it to `/v1/auth/me` (a
 //!   read, no refresh): the 200 body answers both badge checks at once.
 //! - **Stale / Cold** — there is no presentable token, so testing acceptance
 //!   is impossible; test *acquisition* instead: can `login`/refresh reach the
 //!   IdP (`oidc-discovery`) and is the client provisioned (`cosmon-registry`)?
-//!   The badge checks are `Skipped` until the operator logs in.
-//!
-//! A **mock** profile (no recorded `login`) has no persisted token and no
-//! discovery document; its only signal is the ephemeral `/issue` mint, so that
-//! path keeps its single `oidc-mint` probe.
+//!   The badge checks are `Skipped` until the operator logs in. A profile that
+//!   has never logged in reads as Cold — the same "run `login`" repair.
 //!
 //! The module is UI-free: [`run`] returns a [`DoctorReport`] the binary
 //! renders (text or `--json`). The credential store is an injected port so
-//! tests drive the real-OIDC path against a temp-dir store; network probes go
+//! tests drive the auth path against a temp-dir store; network probes go
 //! through a wiremock server, and each red state is provoked independently.
 
 use serde::Serialize;
@@ -66,13 +63,11 @@ use crate::oidc::{
 /// `doctor`), so they are constants rather than ad-hoc strings.
 pub const CHECK_PROFILE: &str = "profile";
 pub const CHECK_HOST: &str = "host-reachable";
-/// Mock-only: the ephemeral `/issue` mint probe.
-pub const CHECK_OIDC: &str = "oidc-mint";
-/// Real-OIDC: the cached credential's local state (read-only, no refresh).
+/// The cached credential's local state (read-only, no refresh).
 pub const CHECK_CREDENTIAL: &str = "credential";
-/// Real-OIDC acquisition: the IdP's discovery document is reachable.
+/// Acquisition: the IdP's discovery document is reachable.
 pub const CHECK_DISCOVERY: &str = "oidc-discovery";
-/// Real-OIDC acquisition: the deployment provisions a client for this audience.
+/// Acquisition: the deployment provisions a client for this audience.
 pub const CHECK_REGISTRY: &str = "cosmon-registry";
 pub const CHECK_TENANT_BADGE: &str = "badge-tenant";
 pub const CHECK_WORKER_GLASSES: &str = "badge-worker-claude";
@@ -129,35 +124,24 @@ impl DoctorReport {
 /// but never the mutating parts of that road: it presents the cached token, it
 /// never refreshes it.
 ///
-/// The check *set* depends on the profile's auth shape (see the module docs): a
-/// real-OIDC profile yields `credential` + either the badge checks (fresh) or
-/// the acquisition checks (stale/cold); a mock profile yields `oidc-mint` + the
-/// badge checks.
+/// The auth check *set* depends on the cached credential's state (see the module
+/// docs): `credential` + either the badge checks (fresh) or the acquisition
+/// checks (stale/cold, including a profile that has never logged in).
 pub async fn run(profile: &Profile, store: &CredentialStore) -> DoctorReport {
-    let mut checks = Vec::with_capacity(5);
+    // Worst case (stale/cold): profile, host, credential, discovery, registry,
+    // and the two badges — the acquisition path pushes the most lines.
+    let mut checks = Vec::with_capacity(7);
     let profile_ok = check_profile(profile, &mut checks);
     let host_ok = check_host(profile, &mut checks).await;
-    if !profile_ok {
-        push_skipped_auth(profile, &mut checks);
-    } else if profile.is_real_oidc() {
+    if profile_ok {
         check_auth_oidc(profile, store, host_ok, &mut checks).await;
     } else {
-        check_auth_mock(profile, host_ok, &mut checks).await;
+        push_skipped_auth(&mut checks);
     }
     DoctorReport { checks }
 }
 
-/// ── auth, mock shape — the ephemeral `/issue` mint, then the two badges.
-/// Minting is the mock's only signal; it is non-persisted and idempotent, so it
-/// does not violate the observe-only rule the real-OIDC path upholds.
-async fn check_auth_mock(profile: &Profile, host_ok: bool, checks: &mut Vec<Check>) {
-    match check_oidc_mint(profile, checks).await {
-        Some(client) if host_ok => check_badges(&client, checks).await,
-        _ => push_skipped_badges(checks),
-    }
-}
-
-/// ── auth, real-OIDC shape — the cached credential state is the gate.
+/// ── auth — the cached credential state is the gate.
 async fn check_auth_oidc(
     profile: &Profile,
     store: &CredentialStore,
@@ -218,7 +202,13 @@ async fn check_auth_oidc(
 /// — the one place doctor touches the store. Threads the profile's credential
 /// key through the injected `store`.
 fn read_cached(profile: &Profile, store: &CredentialStore) -> crate::error::Result<CacheState> {
-    let key = profile.credential_key()?;
+    // A profile that has never logged in has no recorded issuer, so
+    // `credential_key` cannot build a key. That is not an error to surface — it
+    // is the Cold state: no session is cached and the repair is `login`, exactly
+    // what the Cold arm already reports.
+    let Ok(key) = profile.credential_key() else {
+        return Ok(CacheState::Cold);
+    };
     let leeway = chrono::Duration::seconds(REFRESH_LEEWAY_SECS);
     cached_access(store, &key, Utc::now(), leeway)
 }
@@ -291,45 +281,6 @@ async fn check_host(profile: &Profile, checks: &mut Vec<Check>) -> bool {
                 ),
             });
             false
-        }
-    }
-}
-
-/// ── mock oidc-mint — mint a JWT via the profile's issuer (the Dave
-/// wall n°2: an oidc_url templated for another host). Least-privilege
-/// scope: read-only, no spawn. Returns the authenticated client the
-/// badge checks reuse. The caller only reaches this with a ready profile.
-async fn check_oidc_mint(profile: &Profile, checks: &mut Vec<Check>) -> Option<Client> {
-    let probe = match Client::new_unchecked(profile, None) {
-        Ok(client) => client
-            .mint_jwt(&["cosmon:molecule:read".to_owned()])
-            .await
-            .map(|minted| client.with_token(minted.access_token)),
-        Err(e) => Err(e),
-    };
-    match probe {
-        Ok(client) => {
-            checks.push(Check {
-                name: CHECK_OIDC,
-                outcome: Outcome::Pass,
-                detail: format!("token minted via {}", profile.oidc_url),
-                fix: None,
-            });
-            Some(client)
-        }
-        Err(e) => {
-            checks.push(Check {
-                name: CHECK_OIDC,
-                outcome: Outcome::Fail,
-                detail: format!("mint failed via {}: {e}", profile.oidc_url),
-                fix: Some(
-                    "cosmon-remote config show — the `oidc-url` must point to YOUR \
-                     deployment's issuer (re-run install.sh from the host if it was \
-                     templated for another machine)"
-                        .to_owned(),
-                ),
-            });
-            None
         }
     }
 }
@@ -458,8 +409,8 @@ fn worker_glasses_check(me: &crate::client::AuthMeResponse) -> Check {
     }
 }
 
-/// The two badge checks depend on a minted token AND a reachable host;
-/// when either prerequisite is red they are skipped with a pointer to
+/// The two badge checks depend on a presentable cached token AND a reachable
+/// host; when either prerequisite is red they are skipped with a pointer to
 /// the real cause, never turned into duplicate red lines.
 fn push_skipped_badges(checks: &mut Vec<Check>) {
     for name in [CHECK_TENANT_BADGE, CHECK_WORKER_GLASSES] {
@@ -613,21 +564,16 @@ async fn check_cosmon_registry(
 }
 
 /// When the profile itself is incomplete every auth check is `Skipped` — the
-/// `profile` red above is the single cause. The skipped *set* still matches the
-/// auth shape, so the operator sees which checks will run once the profile is fixed.
-fn push_skipped_auth(profile: &Profile, checks: &mut Vec<Check>) {
-    let names: &[&'static str] = if profile.is_real_oidc() {
-        &[
-            CHECK_CREDENTIAL,
-            CHECK_DISCOVERY,
-            CHECK_REGISTRY,
-            CHECK_TENANT_BADGE,
-            CHECK_WORKER_GLASSES,
-        ]
-    } else {
-        &[CHECK_OIDC, CHECK_TENANT_BADGE, CHECK_WORKER_GLASSES]
-    };
-    for &name in names {
+/// `profile` red above is the single cause. The skipped *set* is the full auth
+/// suite, so the operator sees which checks will run once the profile is fixed.
+fn push_skipped_auth(checks: &mut Vec<Check>) {
+    for &name in &[
+        CHECK_CREDENTIAL,
+        CHECK_DISCOVERY,
+        CHECK_REGISTRY,
+        CHECK_TENANT_BADGE,
+        CHECK_WORKER_GLASSES,
+    ] {
         checks.push(Check {
             name,
             outcome: Outcome::Skipped,

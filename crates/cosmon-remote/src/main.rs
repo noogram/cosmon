@@ -54,8 +54,8 @@ struct Cli {
     json: bool,
 
     /// Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an
-    /// authenticated call is made, the CLI mints a token via the
-    /// profile's `oidc_url`.
+    /// authenticated call is made, the CLI uses the OIDC credential recorded
+    /// by `login`, refreshing it silently; run `login` if none is stored.
     #[arg(long, global = true)]
     token: Option<String>,
 
@@ -856,10 +856,9 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
     }
 }
 
-/// Top-level `converse` dispatch (the conversational channel). The
-/// scope is minted from the canon line (`cosmon:pilote:converse`);
-/// output is the full response envelope as JSON — a wire-mirror, not
-/// a renderer, like the instance-lifecycle verbs.
+/// Top-level `converse` dispatch (the conversational channel). Output
+/// is the full response envelope as JSON — a wire-mirror, not a
+/// renderer, like the instance-lifecycle verbs.
 #[allow(clippy::too_many_arguments)]
 async fn run_converse(
     profile: &Profile,
@@ -871,13 +870,12 @@ async fn run_converse(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let route = canon::POST_V1_AVATAR_CONVERSE;
     let message_value = if message_json {
         serde_json::from_str(message)?
     } else {
         serde_json::Value::String(message.to_owned())
     };
-    let client = client_for(profile, token, &route.scopes()).await?;
+    let client = client_for(profile, token).await?;
     let env = client
         .converse(avatar_id, &message_value, kind.as_wire(), hop)
         .await?;
@@ -894,11 +892,8 @@ async fn run_noyaux(
     token_override: Option<String>,
     json: bool,
 ) -> Result<()> {
-    // `/v1/noyaux` is a discovery surface (no scope check); the auth
-    // scope catalog matches `/v1/auth/me` — bind only `openid` so the
-    // mint succeeds against IdPs that do not vend cosmon-specific
-    // scopes.
-    let client = client_for(profile, token_override, &auth_scopes()).await?;
+    // `/v1/noyaux` is a discovery surface (no scope check).
+    let client = client_for(profile, token_override).await?;
     match sub {
         NoyauxCmd::List => {
             let resp = client.noyaux().await?;
@@ -956,7 +951,7 @@ fn render_noyaux_table(resp: &cosmon_remote::client::NoyauxResponse) {
 /// [`cosmon_remote::client::QuotaResponse`] either as JSON (when
 /// `--json` is set) or as a small human table.
 async fn run_quota(profile: &Profile, token_override: Option<String>, json: bool) -> Result<()> {
-    let client = client_for(profile, token_override, &molecule_scopes()).await?;
+    let client = client_for(profile, token_override).await?;
     let snap = client.quota().await?;
     if json {
         print_json(true, &serde_json::to_value(&snap)?);
@@ -975,7 +970,7 @@ async fn run_workers(
     token_override: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let client = client_for(profile, token_override, &worker_read_scopes()).await?;
+    let client = client_for(profile, token_override).await?;
     match sub {
         WorkersCmd::List => {
             let resp = client.workers().await?;
@@ -1144,7 +1139,7 @@ async fn run_auth(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let client = client_for(profile, token, &auth_scopes()).await?;
+    let client = client_for(profile, token).await?;
     match sub {
         AuthCmd::Login { email, code } => {
             let start = client.auth_start().await?;
@@ -1239,24 +1234,7 @@ async fn run_molecule(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    // The molecule family mints read+write; `tackle` and `run`
-    // additionally require the canon's composed scope (write+spawn —
-    // the grid the pre-fusion client under-minted, 403ing every
-    // remote tackle; a drain spawns workers too).
-    let mut scopes = molecule_scopes();
-    let composed = match &sub {
-        MoleculeCmd::Tackle { .. } => Some(canon::POST_V1_MOLECULES_ID_TACKLE.scopes()),
-        MoleculeCmd::Run { .. } => Some(canon::POST_V1_MOLECULES_ID_RUN.scopes()),
-        _ => None,
-    };
-    if let Some(extras) = composed {
-        for extra in extras {
-            if !scopes.contains(&extra) {
-                scopes.push(extra);
-            }
-        }
-    }
-    let client = client_for(profile, token, &scopes).await?;
+    let client = client_for(profile, token).await?;
     match sub {
         MoleculeCmd::Nucleate {
             formula,
@@ -1408,9 +1386,8 @@ async fn run_molecule(
     Ok(())
 }
 
-/// D-AVATAR lifecycle dispatch. Scopes are minted per route from the
-/// canon (`world:observe` for reads, `pilote:converse` for binds) —
-/// no hand scope list to drift.
+/// D-AVATAR lifecycle dispatch. Each arm dials one canon route; the
+/// server enforces the route's scope against the caller's bearer.
 async fn run_avatar(
     profile: &Profile,
     sub: AvatarCmd,
@@ -1419,8 +1396,7 @@ async fn run_avatar(
 ) -> Result<()> {
     let env = match &sub {
         AvatarCmd::Status { instance_id } => {
-            let route = canon::GET_V1_AVATAR_INSTANCE_ID_STATUS;
-            let client = client_for(profile, token, &route.scopes()).await?;
+            let client = client_for(profile, token).await?;
             client.avatar_status(instance_id).await?
         }
         AvatarCmd::Incarnate {
@@ -1429,8 +1405,7 @@ async fn run_avatar(
             tenant,
             juridiction,
         } => {
-            let route = canon::POST_V1_AVATAR_INSTANCE_ID_INCARNATE;
-            let client = client_for(profile, token, &route.scopes()).await?;
+            let client = client_for(profile, token).await?;
             client
                 .avatar_incarnate(instance_id, pilote, tenant, juridiction)
                 .await?
@@ -1440,18 +1415,15 @@ async fn run_avatar(
             canal,
             target,
         } => {
-            let route = canon::POST_V1_AVATAR_INSTANCE_ID_GRANT;
-            let client = client_for(profile, token, &route.scopes()).await?;
+            let client = client_for(profile, token).await?;
             client.avatar_grant(instance_id, canal, target).await?
         }
         AvatarCmd::Audit { instance_id } => {
-            let route = canon::GET_V1_AVATAR_INSTANCE_ID_AUDIT;
-            let client = client_for(profile, token, &route.scopes()).await?;
+            let client = client_for(profile, token).await?;
             client.avatar_audit(instance_id).await?
         }
         AvatarCmd::MouldInfo { instance_id } => {
-            let route = canon::GET_V1_AVATAR_INSTANCE_ID_MOULD_INFO;
-            let client = client_for(profile, token, &route.scopes()).await?;
+            let client = client_for(profile, token).await?;
             client.avatar_mould_info(instance_id).await?
         }
     };
@@ -1465,7 +1437,7 @@ async fn run_artifact(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let client = client_for(profile, token, &molecule_scopes()).await?;
+    let client = client_for(profile, token).await?;
     match sub {
         ArtifactCmd::List { mol_id } => {
             let m = client.list_artifacts(&mol_id).await?;
@@ -1554,7 +1526,7 @@ async fn run_events(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    let client = client_for(profile, token, &events_scopes()).await?;
+    let client = client_for(profile, token).await?;
     match sub {
         EventsCmd::Stream {
             molecule_id,
@@ -1602,22 +1574,7 @@ async fn run_do_cmd(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    // Union of everything the composition dials: nucleate (write),
-    // tackle (write+spawn), observe (read), events tail (subscribe).
-    let mut scopes = molecule_scopes();
-    for extra in canon::POST_V1_MOLECULES_ID_TACKLE.scopes() {
-        if !scopes.contains(&extra) {
-            scopes.push(extra);
-        }
-    }
-    if opts.follow_events {
-        for extra in events_scopes() {
-            if !scopes.contains(&extra) {
-                scopes.push(extra);
-            }
-        }
-    }
-    let client = client_for(profile, token, &scopes).await?;
+    let client = client_for(profile, token).await?;
 
     let confirm = |prompt: &str| -> std::io::Result<bool> {
         use std::io::Write as _;
@@ -1674,23 +1631,7 @@ async fn run_run_cmd(
     token: Option<String>,
     json: bool,
 ) -> Result<()> {
-    // Same union as `do`: nucleate (write), tackle (write+spawn),
-    // observe (read), events tail (subscribe). The quota read needs only
-    // `cosmon:molecule:read`, already in `molecule_scopes()`.
-    let mut scopes = molecule_scopes();
-    for extra in canon::POST_V1_MOLECULES_ID_TACKLE.scopes() {
-        if !scopes.contains(&extra) {
-            scopes.push(extra);
-        }
-    }
-    if opts.follow_events {
-        for extra in events_scopes() {
-            if !scopes.contains(&extra) {
-                scopes.push(extra);
-            }
-        }
-    }
-    let client = client_for(profile, token, &scopes).await?;
+    let client = client_for(profile, token).await?;
 
     let confirm = |prompt: &str| -> std::io::Result<bool> {
         use std::io::Write as _;
@@ -1842,41 +1783,20 @@ fn print_json(json: bool, body: &serde_json::Value) {
     }
 }
 
-fn molecule_scopes() -> Vec<String> {
-    vec![
-        "cosmon:molecule:read".into(),
-        "cosmon:molecule:write".into(),
-    ]
-}
-
-fn auth_scopes() -> Vec<String> {
-    vec!["cosmon:auth:claude:write".into()]
-}
-
-fn events_scopes() -> Vec<String> {
-    vec!["cosmon:events:subscribe".into()]
-}
-
-fn worker_read_scopes() -> Vec<String> {
-    vec!["cosmon:worker:read".into()]
-}
-
 /// Construct a [`Client`] for an authenticated call. Token-resolution precedence
 /// (delib-20260710-33b7 C2 — the "chaque commande lit le trousseau" seam):
 ///
 /// 1. explicit `--token` flag,
 /// 2. `$COSMON_REMOTE_TOKEN` (CI / smoke harness),
-/// 3. **the persisted credential + silent refresh** — for real-OIDC profiles
-///    (`login` has recorded `issuer` + `client_id`): read the keyring, use the
+/// 3. **the persisted credential + silent refresh** — for a profile `login` has
+///    provisioned (`issuer` + `client_id` recorded): read the keyring, use the
 ///    access token directly when valid (zero network), refresh it silently when
-///    expiring, and tell the operator to `login` when the refresh is exhausted,
-/// 4. the legacy OIDC **mock mint** (`oidc_url/issue`) — unchanged for mock
-///    deployments that never ran a real `login`.
-async fn client_for(
-    profile: &Profile,
-    flag_token: Option<String>,
-    scopes: &[String],
-) -> Result<Client> {
+///    expiring, and tell the operator to `login` when the refresh is exhausted.
+///
+/// A profile that has never logged in (and carries no `--token` / env token)
+/// cannot authenticate: there is no mint fallback, so it fails with a precise
+/// `login` instruction rather than a null response.
+async fn client_for(profile: &Profile, flag_token: Option<String>) -> Result<Client> {
     if let Some(t) = flag_token {
         return Client::new(profile, Some(t));
     }
@@ -1886,19 +1806,20 @@ async fn client_for(
         }
     }
 
-    // Real-OIDC profile: reach for the persisted credential and refresh silently.
-    // Proactive refresh happens here (on the 15-min boundary); the returned
-    // reactive binding lets a command recover from a residual server `401`
-    // (clock drift past the leeway) with a single silent refresh + retry.
+    // Reach for the persisted credential and refresh silently. Proactive refresh
+    // happens here (on the 15-min boundary); the returned reactive binding lets a
+    // command recover from a residual server `401` (clock drift past the leeway)
+    // with a single silent refresh + retry.
     if profile.is_real_oidc() {
         let (token, reauth) = ensure_persisted_token(profile).await?;
         return Ok(Client::new(profile, Some(token))?.with_reauth(reauth));
     }
 
-    // No token in hand — mint one via the deployment's OIDC mock.
-    let unauth = Client::new(profile, None)?;
-    let minted = unauth.mint_jwt(scopes).await?;
-    Ok(unauth.with_token(minted.access_token))
+    Err(Error::Config(format!(
+        "profile {:?} has not logged in — run `cosmon-remote login` \
+         (or pass --token / set $COSMON_REMOTE_TOKEN)",
+        profile.sub
+    )))
 }
 
 /// Read the persisted credential for a real-OIDC `profile`, refreshing silently

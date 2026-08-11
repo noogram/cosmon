@@ -91,8 +91,9 @@ cosmon-remote healthz
 Global flags:
 - `--profile <name>` — override the active profile for one call.
 - `--json` — emit machine-readable JSON on stdout.
-- `--token <jwt>` — supply a JWT directly (otherwise minted via the
-  profile's `oidc_url`). Also honours `$COSMON_REMOTE_TOKEN`.
+- `--token <jwt>` — supply a JWT directly (otherwise the OIDC credential
+  recorded by `login` is used and refreshed silently). Also honours
+  `$COSMON_REMOTE_TOKEN`.
 
 ## Examples
 
