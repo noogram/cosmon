@@ -770,7 +770,8 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
         }
         Cmd::Doctor => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
-            let report = doctor::run(&profile).await;
+            let cred_store = cosmon_remote::CredentialStore::detect()?;
+            let report = doctor::run(&profile, &cred_store).await;
             if cli.json {
                 print_json(true, &serde_json::to_value(&report)?);
             } else {
@@ -1908,15 +1909,11 @@ async fn client_for(
 /// exhausted, abort with a precise "run `login`" message rather than silently
 /// falling through to the mock mint.
 async fn ensure_persisted_token(profile: &Profile) -> Result<(String, ReactiveRefresh)> {
-    use cosmon_remote::credential::{CredentialKey, CredentialStore};
+    use cosmon_remote::credential::CredentialStore;
     use cosmon_remote::oidc::{self, TokenState};
 
-    let issuer = profile
-        .issuer
-        .as_deref()
-        .ok_or_else(|| Error::Config("profile has no recorded issuer; run `login`".into()))?;
+    let key = profile.credential_key()?;
     let client_id = profile.effective_client_id().to_owned();
-    let key = CredentialKey::new(issuer, &profile.sub, &client_id);
     let store = CredentialStore::detect()?;
     // One HTTP client, reused for the (rare) proactive discovery+refresh and
     // handed to the reactive binding.
