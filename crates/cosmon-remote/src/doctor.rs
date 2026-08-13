@@ -18,8 +18,9 @@
 //! - **No check fabricates its verdict** — every probe reads a signal
 //!   that exists independently of this binary (`/healthz` body, the
 //!   issuer's HTTP status, `/v1/auth/me`'s `claude_credentials_present`
-//!   which is a plain existence check on the credentials file the PKCE
-//!   confirm handler writes).
+//!   which the server derives by reading the credentials file the PKCE
+//!   confirm handler writes and asking whether a worker could start
+//!   with it).
 //!
 //! The module is UI-free: [`run`] returns a [`DoctorReport`] the binary
 //! renders (text or `--json`). Tests drive [`run`] against a wiremock
@@ -276,19 +277,51 @@ async fn check_badges(client: &Client, checks: &mut Vec<Check>) {
         Some(true) => checks.push(Check {
             name: CHECK_WORKER_GLASSES,
             outcome: Outcome::Pass,
-            detail: "the Claude worker is connected (credentials present)".to_owned(),
+            detail: match me.claude_credentials_status.as_deref() {
+                Some("refreshable") => "the Claude worker is connected (access token \
+                     expired, renewed from the stored refresh token on first use)"
+                    .to_owned(),
+                _ => "the Claude worker is connected (credentials usable)".to_owned(),
+            },
             fix: None,
         }),
         Some(false) => checks.push(Check {
             name: CHECK_WORKER_GLASSES,
             outcome: Outcome::Fail,
-            detail: "the Claude worker is NOT connected — every `tackle` will fail with 503"
-                .to_owned(),
-            fix: Some(
-                "cosmon-remote auth login --email you@example.com  (once; \
-                 this is the second badge — distinct from your tenant token)"
+            // The status names *which* precondition failed, so the
+            // line points at the cause instead of printing one
+            // undifferentiated « not connected » for every shape of
+            // it. Issue #48: an unreadable file is an operator-side
+            // filesystem problem and no amount of `auth login` fixes
+            // it — saying so is the whole point of the field.
+            detail: match me.claude_credentials_status.as_deref() {
+                Some("absent") => "the Claude worker is NOT connected — no credentials \
+                     file; every `tackle` will fail with 503"
                     .to_owned(),
-            ),
+                Some("expired") => "the Claude worker is NOT connected — the stored token \
+                     expired and carries no refresh token; every `tackle` will fail \
+                     with 503"
+                    .to_owned(),
+                Some("malformed") => "the Claude worker is NOT connected — the credentials \
+                     file exists but holds no usable token; every `tackle` will fail \
+                     with 503"
+                    .to_owned(),
+                Some("unreadable") => "the Claude worker is NOT connected — the credentials \
+                     path exists but cannot be read (permissions, or a directory in its \
+                     place)"
+                    .to_owned(),
+                _ => "the Claude worker is NOT connected — every `tackle` will fail with 503"
+                    .to_owned(),
+            },
+            fix: Some(match me.claude_credentials_status.as_deref() {
+                Some("unreadable") => "the file is there but unreadable — this is an \
+                     operator-side fix on the container (ownership/mode of \
+                     ~/.claude/.credentials.json); `auth login` will not repair it"
+                    .to_owned(),
+                _ => "cosmon-remote auth login --email you@example.com  (once; \
+                     this is the second badge — distinct from your tenant token)"
+                    .to_owned(),
+            }),
         }),
         None => checks.push(Check {
             name: CHECK_WORKER_GLASSES,

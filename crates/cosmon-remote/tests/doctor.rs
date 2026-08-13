@@ -243,6 +243,78 @@ async fn missing_worker_glasses_reds_with_auth_login_fix() {
     assert!(fix_of(&report, CHECK_WORKER_GLASSES).contains("auth login"));
 }
 
+/// Issue #48, client half: when the server says *why* the worker
+/// cannot start, doctor must repeat the cause instead of one
+/// undifferentiated « not connected ». `unreadable` in particular is
+/// an operator-side filesystem problem that `auth login` cannot fix,
+/// so proposing it there would be the same kind of confident-wrong
+/// advice the issue was about.
+#[tokio::test]
+async fn worker_glasses_status_shapes_the_detail_and_the_fix() {
+    for (status, detail_needle) in [
+        ("absent", "no credentials file"),
+        ("expired", "expired"),
+        ("malformed", "holds no usable token"),
+    ] {
+        let server = MockServer::start().await;
+        mount_healthz(&server).await;
+        mount_issue(&server).await;
+        let mut body = auth_me_body(Some("tenant-demo-sandbox"), Some(false));
+        body["claude_credentials_status"] = json!(status);
+        mount_auth_me(&server, &body).await;
+
+        let report = doctor::run(&profile_for(&server)).await;
+        let check = report
+            .checks
+            .iter()
+            .find(|c| c.name == CHECK_WORKER_GLASSES)
+            .unwrap();
+        assert_eq!(check.outcome, Outcome::Fail, "status {status}");
+        assert!(
+            check.detail.contains(detail_needle),
+            "status {status}: detail {:?} must name the cause",
+            check.detail
+        );
+        assert!(fix_of(&report, CHECK_WORKER_GLASSES).contains("auth login"));
+    }
+
+    // `unreadable` is the exception: no `auth login` in the fix.
+    let server = MockServer::start().await;
+    mount_healthz(&server).await;
+    mount_issue(&server).await;
+    let mut body = auth_me_body(Some("tenant-demo-sandbox"), Some(false));
+    body["claude_credentials_status"] = json!("unreadable");
+    mount_auth_me(&server, &body).await;
+
+    let report = doctor::run(&profile_for(&server)).await;
+    assert_eq!(outcome_of(&report, CHECK_WORKER_GLASSES), Outcome::Fail);
+    let fix = fix_of(&report, CHECK_WORKER_GLASSES);
+    assert!(
+        !fix.contains("auth login --email"),
+        "an unreadable file is not fixed by logging in again, got {fix:?}"
+    );
+    assert!(fix.contains("operator-side"));
+}
+
+/// A server that answers `true` with no status (an adapter older than
+/// issue #48) must still read as green — the client degrades to the
+/// bare boolean rather than demanding the new field.
+#[tokio::test]
+async fn worker_glasses_without_status_still_passes() {
+    let server = MockServer::start().await;
+    mount_healthz(&server).await;
+    mount_issue(&server).await;
+    mount_auth_me(
+        &server,
+        &auth_me_body(Some("tenant-demo-sandbox"), Some(true)),
+    )
+    .await;
+
+    let report = doctor::run(&profile_for(&server)).await;
+    assert_eq!(outcome_of(&report, CHECK_WORKER_GLASSES), Outcome::Pass);
+    assert!(report.healthy());
+}
+
 #[tokio::test]
 async fn older_server_without_signal_reports_unknown_not_green() {
     // An adapter that predates `claude_credentials_present` (or has no

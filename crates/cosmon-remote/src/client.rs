@@ -483,13 +483,25 @@ pub struct AuthMeResponse {
     pub noyau: Option<String>,
     pub expires_at: String,
     pub issuer: String,
-    /// Worker-glasses signal: whether the container's
-    /// Claude credentials file exists. `None` both when the server
+    /// Worker-glasses signal: whether a worker could start with the
+    /// container's Claude credentials. `None` both when the server
     /// predates the field and when the deployment has no auth-claude
     /// surface — `doctor` renders that honestly as "unknown", never as
     /// green or red.
+    ///
+    /// Servers before issue #48 answered this with a bare file-exists
+    /// check, so an old adapter can still report `true` for
+    /// credentials the worker rejects. The client cannot fix that
+    /// remotely; it only stops repeating it as certainty.
     #[serde(default)]
     pub claude_credentials_present: Option<bool>,
+    /// Which precondition decided the boolean above — `"usable"`,
+    /// `"refreshable"`, `"absent"`, `"unreadable"`, `"malformed"`,
+    /// `"expired"`, or any value a newer server adds. `None` against
+    /// servers that predate the field; treat an unrecognised value as
+    /// "some other cause", never as an error.
+    #[serde(default)]
+    pub claude_credentials_status: Option<String>,
     #[serde(flatten)]
     pub extra: BTreeMap<String, serde_json::Value>,
 }

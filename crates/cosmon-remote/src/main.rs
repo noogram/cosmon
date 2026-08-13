@@ -1208,11 +1208,21 @@ async fn run_auth(
                 // server publishes it.
                 match me.claude_credentials_present {
                     Some(true) => println!("worker:     claude connected"),
-                    Some(false) => println!(
-                        "worker:     claude NOT connected — `{} auth login` \
-                         required before any tackle",
-                        invoked_name()
-                    ),
+                    // The status (issue #48) names which precondition
+                    // failed; without it the server is an older
+                    // adapter and only the bare boolean exists.
+                    Some(false) => match me.claude_credentials_status.as_deref() {
+                        Some("unreadable") => println!(
+                            "worker:     claude NOT connected — credentials file \
+                             unreadable on the container (operator-side fix)"
+                        ),
+                        status => println!(
+                            "worker:     claude NOT connected ({}) — `{} auth login` \
+                             required before any tackle",
+                            status.unwrap_or("no credentials"),
+                            invoked_name()
+                        ),
+                    },
                     None => {}
                 }
             }

@@ -357,10 +357,15 @@ async fn valid_jwt_without_binding_returns_200_with_null_noyau() {
 //
 // `claude_credentials_present` is the server-side signal `cosmon-remote
 // doctor` turns into « lance `auth login` » before the first tackle
-// 503. Three states, each asserted: surface unconfigured → null;
-// configured + file absent → false; configured + file present → true.
-// The probe reads the credentials file itself — falsified below by
-// simply (not) writing it.
+// 503. States asserted below: surface unconfigured → null; configured
+// + file absent → false; configured + usable credentials → true.
+//
+// Since issue #48 the probe no longer answers `path.exists()`: it
+// reads the file and asks whether a worker could start with it. The
+// tests at the end of this section pin the case that misled the
+// issue's author — the file EXISTS and the field must still not say
+// "present", because the worker would refuse. `claude_credentials_status`
+// names which precondition failed.
 
 async fn auth_me_body_with(state: AppState, jwt: &str) -> Value {
     let app = router(state);
@@ -419,6 +424,35 @@ async fn claude_credentials_present_is_null_when_surface_unconfigured() {
         "field must be present on the wire"
     );
     assert!(body["claude_credentials_present"].is_null());
+    assert!(
+        body.get("claude_credentials_status").is_some(),
+        "status field must be present on the wire"
+    );
+    assert!(body["claude_credentials_status"].is_null());
+}
+
+/// Credentials in the shape `write_credentials_file` produces, with a
+/// caller-chosen expiry (Unix epoch **ms**) and refresh token. The
+/// worker-glasses probe reads exactly these fields.
+fn credentials_bytes(access: &str, expires_at_ms: i64, refresh: &str) -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": access,
+            "refreshToken": refresh,
+            "expiresAt": expires_at_ms,
+            "scopes": ["user:inference"],
+        }
+    }))
+    .unwrap()
+}
+
+/// One year from now, in epoch ms — a comfortably live token.
+fn far_future_ms() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    now + 365 * 24 * 3_600_000
 }
 
 #[tokio::test]
@@ -456,17 +490,115 @@ async fn claude_credentials_present_reads_the_file_both_states() {
         state
     };
 
-    // Red state: surface configured, no login yet → false.
+    // Red state: surface configured, no login yet → false, "absent".
     let jwt = issue_jwt(&oidc, "jti-glasses-false");
     let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
     assert_eq!(body["claude_credentials_present"], serde_json::json!(false));
+    assert_eq!(body["claude_credentials_status"], serde_json::json!("absent"));
 
-    // Green state: write the credentials file where the PKCE confirm
-    // handler would — the probe must flip to true.
+    // Green state: write credentials where the PKCE confirm handler
+    // would, with a live token — the probe must flip to true.
     let creds = AuthClaudeConfig::defaults_with_home(home.path()).credentials_path;
     std::fs::create_dir_all(creds.parent().unwrap()).unwrap();
-    std::fs::write(&creds, b"{}").unwrap();
+    std::fs::write(
+        &creds,
+        credentials_bytes("sk-ant-oat01-live", far_future_ms(), "sk-ant-ort01-live"),
+    )
+    .unwrap();
     let jwt = issue_jwt(&oidc, "jti-glasses-true");
     let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
     assert_eq!(body["claude_credentials_present"], serde_json::json!(true));
+    assert_eq!(body["claude_credentials_status"], serde_json::json!("usable"));
+}
+
+/// **Issue #48, the case that misled the author.** The credentials
+/// file EXISTS — `path.exists()` was true, and the old field answered
+/// `claude_credentials_present: true` — while the worker refused to
+/// start. Both unusable shapes are exercised: a placeholder object
+/// with no token, and a token that expired with nothing to renew it.
+/// In both, the field must not report "present", and the status must
+/// name the cause.
+#[tokio::test]
+async fn existing_but_unusable_credentials_are_not_reported_present() {
+    use cosmon_rpp_adapter::auth_claude::{
+        AuthClaudeConfig, AuthClaudeState, FilesystemSessionStore, SessionStore,
+    };
+
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("tenant-demo-sandbox");
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-tenant".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let creds = AuthClaudeConfig::defaults_with_home(home.path()).credentials_path;
+    std::fs::create_dir_all(creds.parent().unwrap()).unwrap();
+
+    let make_with_auth_claude = || {
+        let config = AuthClaudeConfig::defaults_with_home(home.path());
+        let store: Arc<dyn SessionStore> =
+            Arc::new(FilesystemSessionStore::new(security_dir.path()).unwrap());
+        let mut state = make_state(
+            &oidc,
+            &tenants,
+            vec![(
+                "tenant-demo-operator",
+                "nuc-tenant-demo",
+                "tenant-demo-sandbox",
+                "cosmon-rpp-tenant",
+            )],
+            security_dir.path(),
+        );
+        state.auth_claude = Some(Arc::new(AuthClaudeState::new(config, store)));
+        state
+    };
+
+    // (a) The file is there but holds no token at all.
+    std::fs::write(&creds, b"{}").unwrap();
+    assert!(creds.exists(), "the misleading premise: the file DOES exist");
+    let jwt = issue_jwt(&oidc, "jti-glasses-malformed");
+    let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
+    assert_eq!(
+        body["claude_credentials_present"],
+        serde_json::json!(false),
+        "an existing file with no usable token must not read as present"
+    );
+    assert_eq!(
+        body["claude_credentials_status"],
+        serde_json::json!("malformed")
+    );
+
+    // (b) The file holds a token that expired, with no refresh token —
+    //     nothing the worker can present or renew.
+    std::fs::write(
+        &creds,
+        credentials_bytes("sk-ant-oat01-stale", 1_700_000_000_000, ""),
+    )
+    .unwrap();
+    assert!(creds.exists());
+    let jwt = issue_jwt(&oidc, "jti-glasses-expired");
+    let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
+    assert_eq!(body["claude_credentials_present"], serde_json::json!(false));
+    assert_eq!(
+        body["claude_credentials_status"],
+        serde_json::json!("expired")
+    );
+
+    // (c) Contrast: expired but renewable — the worker starts, so the
+    //     field stays true. A probe that only checked expiry would
+    //     trade one false verdict for its mirror image.
+    std::fs::write(
+        &creds,
+        credentials_bytes("sk-ant-oat01-stale", 1_700_000_000_000, "sk-ant-ort01-ok"),
+    )
+    .unwrap();
+    let jwt = issue_jwt(&oidc, "jti-glasses-refreshable");
+    let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
+    assert_eq!(body["claude_credentials_present"], serde_json::json!(true));
+    assert_eq!(
+        body["claude_credentials_status"],
+        serde_json::json!("refreshable")
+    );
 }
