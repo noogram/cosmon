@@ -273,8 +273,19 @@ async fn check_badges(client: &Client, checks: &mut Vec<Check>) {
             ),
         }),
     }
+    checks.push(worker_glasses_check(&me));
+}
+
+/// The badge-worker-claude line, derived from `/v1/auth/me`'s
+/// worker-glasses pair.
+///
+/// Split out of [`check_badges`] because the six statuses issue #48
+/// introduced each carry their own sentence — and because the mapping
+/// « status → what the tenant should do » is the part worth reading on
+/// its own.
+fn worker_glasses_check(me: &crate::client::AuthMeResponse) -> Check {
     match me.claude_credentials_present {
-        Some(true) => checks.push(Check {
+        Some(true) => Check {
             name: CHECK_WORKER_GLASSES,
             outcome: Outcome::Pass,
             detail: match me.claude_credentials_status.as_deref() {
@@ -284,8 +295,8 @@ async fn check_badges(client: &Client, checks: &mut Vec<Check>) {
                 _ => "the Claude worker is connected (credentials usable)".to_owned(),
             },
             fix: None,
-        }),
-        Some(false) => checks.push(Check {
+        },
+        Some(false) => Check {
             name: CHECK_WORKER_GLASSES,
             outcome: Outcome::Fail,
             // The status names *which* precondition failed, so the
@@ -322,8 +333,8 @@ async fn check_badges(client: &Client, checks: &mut Vec<Check>) {
                      this is the second badge — distinct from your tenant token)"
                     .to_owned(),
             }),
-        }),
-        None => checks.push(Check {
+        },
+        None => Check {
             name: CHECK_WORKER_GLASSES,
             outcome: Outcome::Unknown,
             detail: "the server does not publish this signal (older adapter, or \
@@ -334,7 +345,7 @@ async fn check_badges(client: &Client, checks: &mut Vec<Check>) {
                  cosmon-remote auth login --email you@example.com"
                     .to_owned(),
             ),
-        }),
+        },
     }
 }
 

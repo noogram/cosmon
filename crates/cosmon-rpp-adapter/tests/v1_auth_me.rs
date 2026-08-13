@@ -494,7 +494,10 @@ async fn claude_credentials_present_reads_the_file_both_states() {
     let jwt = issue_jwt(&oidc, "jti-glasses-false");
     let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
     assert_eq!(body["claude_credentials_present"], serde_json::json!(false));
-    assert_eq!(body["claude_credentials_status"], serde_json::json!("absent"));
+    assert_eq!(
+        body["claude_credentials_status"],
+        serde_json::json!("absent")
+    );
 
     // Green state: write credentials where the PKCE confirm handler
     // would, with a live token — the probe must flip to true.
@@ -508,7 +511,10 @@ async fn claude_credentials_present_reads_the_file_both_states() {
     let jwt = issue_jwt(&oidc, "jti-glasses-true");
     let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
     assert_eq!(body["claude_credentials_present"], serde_json::json!(true));
-    assert_eq!(body["claude_credentials_status"], serde_json::json!("usable"));
+    assert_eq!(
+        body["claude_credentials_status"],
+        serde_json::json!("usable")
+    );
 }
 
 /// **Issue #48, the case that misled the author.** The credentials
@@ -557,7 +563,10 @@ async fn existing_but_unusable_credentials_are_not_reported_present() {
 
     // (a) The file is there but holds no token at all.
     std::fs::write(&creds, b"{}").unwrap();
-    assert!(creds.exists(), "the misleading premise: the file DOES exist");
+    assert!(
+        creds.exists(),
+        "the misleading premise: the file DOES exist"
+    );
     let jwt = issue_jwt(&oidc, "jti-glasses-malformed");
     let body = auth_me_body_with(make_with_auth_claude(), &jwt).await;
     assert_eq!(
