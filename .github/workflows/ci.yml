@@ -110,8 +110,11 @@ jobs:
       # bare path instead of its name — so every gate it contains silently does
       # not run, and the red looks like an infrastructure hiccup. Measured
       # 2026-08-04: an unquoted `prerequisite:` inside a step name did exactly
-      # that on `main`. This lints every workflow file as YAML.
+      # that on `main`. This lints every workflow file as YAML, and rejects any
+      # event expression written inside the body of a `run:` block — comments
+      # included, since Actions substitutes before the shell parses.
       - run: ./scripts/check-workflow-yaml.sh
+      - run: ./scripts/check-workflow-yaml.test.sh
       - run: ./scripts/check-docs-one-gate.sh
       - run: ./scripts/check-docs-one-gate.test.sh
       # Local targets and heading fragments are a hard, offline review gate.
@@ -475,11 +478,15 @@ jobs:
       - name: Check for removed test assertions
         env:
           # Attacker-controlled text: it reaches the script as a value, never
-          # as source. See the injection note at the grep below.
+          # as source. See the injection note at the grep below. This mapping
+          # is the ONLY place in the step where an event expression may be
+          # written; scripts/check-workflow-yaml.sh enforces that.
           PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          BASE="${{ github.event.pull_request.base.sha }}"
-          HEAD="${{ github.event.pull_request.head.sha }}"
+          BASE="$BASE_SHA"
+          HEAD="$HEAD_SHA"
 
           # Match removed lines containing Rust test assertions
           PATTERN='^\-.*\b(assert!|assert_eq!|assert_ne!|debug_assert!|debug_assert_eq!|debug_assert_ne!|#\[should_panic)'
@@ -496,14 +503,19 @@ jobs:
 
             # Check if PR description contains the override marker.
             #
-            # The body arrives through the environment, never interpolated into
-            # this script. `${{ github.event.pull_request.body }}` inside a run
-            # block is script injection: the body is attacker-controlled text,
-            # and a backtick or `$(…)` in it executes in the runner. Measured
-            # 2026-08-05 on noogram/cosmon#44 — a body containing `client_id`
-            # in backticks ran as a command, mangled PR_BODY, and the marker it
-            # did contain was never seen. A broken guard that fails closed is
-            # luck; the same bug with `rm` in the backticks is a breach.
+            # The body arrives through the environment, never as source. An
+            # event expression written anywhere in this run block — code OR
+            # comment — is substituted textually by Actions before the shell
+            # ever sees the script, so naming the PR-body expression here
+            # would inject the body here. Two measured failures, same cause:
+            # 2026-08-05 on noogram/cosmon#44 a body containing backticks ran
+            # as a command and the marker it did contain was never seen; then
+            # 2026-08-11 on PR #47 (run 31498866585) the surviving mention of
+            # the expression in this very comment carried a multi-line body
+            # out of the `#` and killed the job at parse time — "line 76:
+            # unexpected EOF while looking for matching quote", exit 2, on a
+            # branch that already had the first fix. Which is why the rule is
+            # now mechanical: see scripts/check-workflow-yaml.sh.
             if printf '%s' "$PR_BODY" | grep -q 'assert-guard: reviewed'; then
               echo ""
               echo "Override marker found in PR description. Proceeding."
