@@ -22,10 +22,32 @@ pub fn for_api_error(status: u16, label: &str) -> Option<&'static str> {
     match (status, label) {
         // The janis marche n°1: the worker badge. The probable cause is
         // named, the repair command is singular, doctor closes the loop.
+        //
+        // `tackle_unavailable` is the generic fallback for unclassified
+        // non-zero exits — it persists for cases not covered by the more
+        // specific codes below. The hint names the most likely cause; the
+        // specific codes give a better starting point when they apply.
         (503, "tackle_unavailable") => Some(
             "probable cause: the container's Claude worker is not connected (the second \
              badge, distinct from your tenant token).\n  fix:    cosmon-remote auth login \
              --email you@example.com\n  verify: cosmon-remote doctor",
+        ),
+        (503, "subprocess_spawn_failed") => Some(
+            "the `cs` binary could not be started — it is missing or not executable in \
+             the container image.\n  verify: cosmon-remote doctor",
+        ),
+        (503, "worker_credential_missing") => Some(
+            "the container's Claude Code worker has no login credential. \
+             Provision one by: (a) exporting CLAUDE_CODE_OAUTH_TOKEN, \
+             (b) running `claude` interactively and completing `/login`, \
+             or (c) mounting `.credentials.json` into CLAUDE_CONFIG_DIR.\n  \
+             verify: cosmon-remote doctor",
+        ),
+        (503, "adapter_backend_unreachable") => Some(
+            "the local adapter's backend (e.g. Ollama) is not reachable or cannot \
+             serve the resolved model. Start it with `ollama serve`, pull the model \
+             with `ollama pull <model>`, or update [adapters.local].base_url / \
+             COSMON_LOCAL_BASE_URL. The molecule is untouched and still tacklable.",
         ),
         (503, "tenant_unavailable") => Some(
             "your space is not yet provisioned on this instance — that is an operator \
@@ -151,6 +173,42 @@ mod tests {
         assert!(hint.contains("auth login"));
         assert!(hint.contains("doctor"));
         assert!(hint.contains("probable cause"));
+    }
+
+    /// `subprocess_spawn_failed` names the missing binary and points at doctor.
+    #[test]
+    fn subprocess_spawn_failed_names_binary_and_doctor() {
+        let hint = for_api_error(503, "subprocess_spawn_failed").unwrap();
+        assert!(hint.contains("`cs`"), "must name the binary");
+        assert!(hint.contains("doctor"));
+    }
+
+    /// `worker_credential_missing` names all three credential provisioning paths.
+    #[test]
+    fn worker_credential_missing_names_all_three_paths() {
+        let hint = for_api_error(503, "worker_credential_missing").unwrap();
+        assert!(
+            hint.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "must name env var path"
+        );
+        assert!(hint.contains("/login"), "must name interactive login path");
+        assert!(
+            hint.contains(".credentials.json"),
+            "must name file mount path"
+        );
+    }
+
+    /// `adapter_backend_unreachable` names `ollama serve`, `ollama pull`,
+    /// and states the molecule is untouched.
+    #[test]
+    fn adapter_backend_unreachable_names_repair_and_states_recoverability() {
+        let hint = for_api_error(503, "adapter_backend_unreachable").unwrap();
+        assert!(hint.contains("ollama serve"), "must name start command");
+        assert!(hint.contains("ollama pull"), "must name pull command");
+        assert!(
+            hint.contains("untouched"),
+            "must state molecule is untouched"
+        );
     }
 
     /// The artifact 4xx hints state the rule (reserved `responses/…`
