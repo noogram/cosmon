@@ -1582,16 +1582,29 @@ fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) ->
 
 /// Record the child-process evidence needed to diagnose a tackle rejection
 /// without leaking it into the HTTP response.
+///
+/// Emitted at **`warn`**, not `debug`. A tackle that fails is an operational
+/// event, not trace noise: `tackle_unavailable` is a catch-all — every
+/// non-zero `cs` exit that is not "already active" lands there — so the
+/// response alone cannot tell an unreachable adapter backend from a missing
+/// worker credential from a spawn failure. The `stderr_excerpt` captured here
+/// is the only thing that can, and at `debug` it is unreachable in practice:
+/// a production deployment runs at `info`, where a failed tackle leaves
+/// nothing behind but the `tower_http` `on_failure` line.
+///
+/// This is the server-side half of the diagnosis. The excerpt still does not
+/// cross the HTTP boundary — the caller gets a label and a `request_id`, and
+/// whoever holds the logs can correlate the two.
 fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &RppRejectReason) {
     if let RppRejectReason::SubprocessExitNonZero { stderr_excerpt, .. } = reason {
-        tracing::debug!(
+        tracing::warn!(
             request_id = %spark.request_id,
             molecule_id,
             stderr_excerpt,
             "tackle subprocess rejected"
         );
     } else {
-        tracing::debug!(
+        tracing::warn!(
             request_id = %spark.request_id,
             molecule_id,
             reason = %reason,
