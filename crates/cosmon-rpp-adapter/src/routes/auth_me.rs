@@ -54,6 +54,7 @@ use axum::response::Json;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::auth_claude::credentials::{classify_credentials_file, CredentialsVerdict};
 use crate::error::ApiError;
 use crate::jwt::JwtVerifier;
 use crate::AppState;
@@ -87,16 +88,45 @@ pub struct AuthMeResponse {
     /// `https://cs-oidc-mock` or the Forgejo issuer URL).
     pub issuer: String,
     /// Worker-glasses signal (smithy C1 onboarding, janis pre-mortem
-    /// « les deux badges ») : whether the container's Claude Code
-    /// credentials file exists — i.e. whether `auth login` has been
-    /// completed at least once. `None` when the auth-claude surface is
-    /// not configured on this deployment (the server cannot know);
-    /// `Some(false)` is the signal `cosmon-remote doctor` turns into
-    /// « lance `auth login` » *before* the tenant discovers it via a
-    /// 503 on their first tackle. Additive field, gated behind a valid
-    /// JWT — the unauthenticated `/healthz` deliberately does not
-    /// carry it.
+    /// « les deux badges ») : whether a worker could start with the
+    /// container's Claude Code credentials — readable, parseable, and
+    /// carrying a token that is either unexpired or renewable. `None`
+    /// when the auth-claude surface is not configured on this
+    /// deployment (the server cannot know); `Some(false)` is the
+    /// signal `cosmon-remote doctor` turns into « lance `auth login` »
+    /// *before* the tenant discovers it via a 503 on their first
+    /// tackle. Additive field, gated behind a valid JWT — the
+    /// unauthenticated `/healthz` deliberately does not carry it.
+    ///
+    /// Until issue #48 this was `credentials_path.exists()`. A file
+    /// holding `{}`, or an expired token, answered `true` while the
+    /// worker refused to start — the field confirmed the wrong
+    /// hypothesis for the person hunting the cause. The name is kept
+    /// (renaming a published field breaks every deployed client) and
+    /// the *measure* was moved under it, in the only direction that is
+    /// safe for existing readers: `true` still means "go ahead", and
+    /// the cases that changed are exactly the ones where `true` was a
+    /// lie. See [`claude_credentials_status`](Self::claude_credentials_status)
+    /// for which precondition failed.
+    ///
+    /// The check is local and therefore necessary, not sufficient: a
+    /// token revoked upstream still reads as usable here. This is a
+    /// pre-flight hint, never an entitlement claim.
     pub claude_credentials_present: Option<bool>,
+    /// Which worker-glasses precondition decided the boolean above —
+    /// `"usable"`, `"refreshable"`, `"absent"`, `"unreadable"`,
+    /// `"malformed"` or `"expired"`. `None` exactly when
+    /// `claude_credentials_present` is `None`.
+    ///
+    /// Additive field (issue #48). It exists so a client can say
+    /// *what* to do — `absent` means run `auth login`, `expired` means
+    /// run it again, `unreadable` is an operator-side filesystem
+    /// problem — instead of printing one undifferentiated « not
+    /// connected » for six distinct causes. Older clients that only
+    /// read the boolean are unaffected; the string set is
+    /// additive-only, so a client must treat an unknown value as
+    /// "some other cause" rather than panicking.
+    pub claude_credentials_status: Option<String>,
     /// Adapter binary version, aligned on the cosmon release version —
     /// the same string as the release tag, the tarball the operator
     /// downloaded, and `cosmon-rpp-adapter --version` (release `v0.2.1`
@@ -143,16 +173,20 @@ pub async fn get_auth_me(
     //    a stale value.
     let expires_at = format_exp_iso8601(jwt.exp);
 
-    // 6. Worker-glasses probe: a plain existence check on the
-    //    credentials file the PKCE confirm handler writes
-    //    (`write_credentials_file`). Reading the *artifact itself* —
-    //    not a session record — keeps the signal independent of how
-    //    the login happened (API flow, operator docker-exec, image
-    //    seed) and falsifiable by deleting the file.
-    let claude_credentials_present = state
+    // 6. Worker-glasses probe: read the credentials file the PKCE
+    //    confirm handler writes (`write_credentials_file`) and decide
+    //    whether a worker could actually start with it. Reading the
+    //    *artifact itself* — not a session record — keeps the signal
+    //    independent of how the login happened (API flow, operator
+    //    docker-exec, image seed) and falsifiable by corrupting or
+    //    deleting the file. An existence check was not enough: see the
+    //    field docs on `AuthMeResponse::claude_credentials_present`.
+    let verdict = state
         .auth_claude
         .as_ref()
-        .map(|ac| ac.config.credentials_path.exists());
+        .map(|ac| classify_credentials_file(&ac.config.credentials_path));
+    let claude_credentials_present = verdict.map(CredentialsVerdict::is_usable);
+    let claude_credentials_status = verdict.map(|v| v.as_wire().to_owned());
 
     let body = AuthMeResponse {
         sub: jwt.sub,
@@ -162,6 +196,7 @@ pub async fn get_auth_me(
         expires_at,
         issuer: jwt.iss,
         claude_credentials_present,
+        claude_credentials_status,
         version: env!("CARGO_PKG_VERSION").to_owned(),
         api_surface_version: crate::surface_events::SURFACE_EVENTS.len(),
     };

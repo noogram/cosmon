@@ -1981,11 +1981,39 @@ components:
           type: boolean
           nullable: true
           description: |
-            Whether the worker container's Claude Code credentials
-            file exists — i.e. whether `auth login` has completed at
-            least once. `null` when the auth-claude surface is not
-            configured on this deployment (the server cannot know).
-            Additive field (smithy C1 onboarding).
+            Whether a worker could start with the container's Claude
+            Code credentials: the file is readable, parseable, and
+            carries a token that is either unexpired or renewable
+            from a stored refresh token. `null` when the auth-claude
+            surface is not configured on this deployment (the server
+            cannot know). Additive field (smithy C1 onboarding).
+
+            Semantics tightened by issue #48. It previously reported
+            a bare file-existence check, which answered `true` for a
+            placeholder or expired file while the worker refused to
+            start. The field name and type are unchanged — the only
+            behavioural difference is that cases which used to answer
+            `true` incorrectly now answer `false`, with
+            `claude_credentials_status` naming the cause. The check is
+            local, so it is necessary and not sufficient: a token
+            revoked upstream still reads as usable.
+        claude_credentials_status:
+          type: string
+          nullable: true
+          enum: [usable, refreshable, absent, unreadable, malformed, expired]
+          description: |
+            Which precondition decided `claude_credentials_present`.
+            `null` exactly when that field is `null`. Additive field
+            (issue #48) — the enumeration is additive-only, so clients
+            must treat an unrecognised value as "some other cause"
+            rather than an error.
+
+            `usable` / `refreshable` accompany `true`; `absent`,
+            `unreadable`, `malformed` and `expired` accompany `false`.
+            The distinction is actionable: `absent` and `expired` call
+            for `auth login`, while `unreadable` is an operator-side
+            filesystem problem on the container that logging in again
+            will not repair.
         version:
           type: string
           description: |
