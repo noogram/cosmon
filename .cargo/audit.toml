@@ -15,11 +15,7 @@ ignore = [
     "RUSTSEC-2025-0141",
     # yaml-rust via tui-markdown→syntect — upstream migrating to yaml-rust2.
     "RUSTSEC-2024-0320",
-    # paste proc-macro via candle-core→gemm — awaiting candle stack update.
-    "RUSTSEC-2024-0436",
-    # rand 0.9 unsoundness via candle-core — not reachable from cosmon code.
+    # rand 0.9 unsoundness via proptest→rand in cosmon-fuzz — not reachable
+    # from cosmon code (we never install a custom logger).
     "RUSTSEC-2026-0097",
-    # lru 0.12 unsoundness via ratatui 0.29 — Stacked-Borrows IterMut bug,
-    # not reachable from cosmon TUI code (we never iter_mut this LRU).
-    "RUSTSEC-2026-0002",
 ]

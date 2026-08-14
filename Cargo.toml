@@ -257,7 +257,7 @@ http-body-util = "0.1"
 # Feature set = reqwest 0.12 defaults minus `default-tls`, plus `rustls-tls` +
 # `json`, so behaviour is identical except the TLS provider.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "system-proxy"] }
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"
 unicode-width = "0.2"
 unicode-normalization = "0.1"

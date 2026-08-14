@@ -20,20 +20,11 @@ ignore = [
     # tui-markdown 0.3.7 → syntect 5.3 → yaml-rust (unmaintained, no upgrade path).
     # syntect upstream tracks the migration to yaml-rust2.
     { id = "RUSTSEC-2024-0320", reason = "transitive via tui-markdown→syntect→yaml-rust; upstream migration to yaml-rust2 pending" },
-    # paste (proc-macro, unmaintained) — now pulled via ratatui→paste (and
-    # ansi-to-tui→ratatui) in cosmon-cli. The old candle-core→gemm→paste path
-    # was git-rm'd with the voice bridge (ADR-126), but the advisory still fires
-    # through ratatui; track ratatui dropping the paste proc-macro. (Do NOT
-    # delete this entry: removing it re-surfaces the live advisory.)
-    { id = "RUSTSEC-2024-0436", reason = "transitive via ratatui→paste proc-macro (ex-candle path removed, ADR-126); awaiting ratatui bump" },
     # rand 0.9 (unsound only under a custom logger) — now pulled via
     # proptest→rand in cosmon-fuzz, not the removed candle stack. We never
     # install a custom logger, so the unsoundness is not reachable from cosmon
     # code paths. (Do NOT delete: proptest still pulls rand 0.9.)
     { id = "RUSTSEC-2026-0097", reason = "transitive via proptest→rand 0.9 in cosmon-fuzz (ex-candle path removed, ADR-126); custom-logger unsoundness not reachable" },
-    # ratatui 0.29 → lru 0.12 (Stacked Borrows IterMut bug). We never iter_mut
-    # this LRU; track ratatui upgrade once a fixed lru lands upstream.
-    { id = "RUSTSEC-2026-0002", reason = "transitive via ratatui→lru 0.12; iter_mut not exercised in cosmon code paths" },
 ]
 
 [licenses]
