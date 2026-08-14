@@ -1,9 +1,21 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! Write `~/.claude/.credentials.json` in the format `claude` CLI
-//! expects. Schema observed by reverse-engineering the macOS Keychain
+//! expects, and read it back to say whether a worker could actually
+//! use it. Schema observed by reverse-engineering the macOS Keychain
 //! store (`Claude Code-credentials`, 2026-05-19). See ADR-0017 §6
 //! (Q-impl-2 RESOLVED) for documentation.
+//!
+//! # Why this module also *reads*
+//!
+//! `GET /v1/auth/me` used to answer the worker-glasses question with
+//! `path.exists()`. A file that exists but holds `{}`, or a token that
+//! expired months ago, reported `claude_credentials_present: true`
+//! while the worker refused to start — the signal confirmed the wrong
+//! hypothesis at the exact moment someone was hunting the real cause
+//! (issue #48). [`classify_credentials_file`] replaces the existence
+//! check with the necessary conditions the worker itself needs, and
+//! names which one failed.
 
 use std::path::Path;
 
@@ -122,6 +134,122 @@ pub fn write_credentials_file(path: &Path, resp: &TokenResponse) -> Result<(), W
     Ok(())
 }
 
+/// What a worker would find if it tried to use the credentials file
+/// right now.
+///
+/// The variants are the *decidable* preconditions — everything the
+/// adapter can establish from the artifact alone, without spending an
+/// Anthropic round-trip. They are necessary, not sufficient: a
+/// [`CredentialsVerdict::Usable`] token can still be revoked upstream.
+/// That residual uncertainty is why the wire field stays a
+/// worker-glasses *hint* and never becomes an entitlement claim.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CredentialsVerdict {
+    /// No file at the configured path — `auth login` was never
+    /// completed (or the file was deleted).
+    Absent,
+    /// The path exists but could not be read (permissions, a
+    /// directory, an I/O error). Existence alone told the old probe
+    /// "present"; a worker gets nothing from it.
+    Unreadable,
+    /// The bytes are not JSON, or carry no `claudeAiOauth.accessToken`
+    /// string, or that string is empty. The canonical `{}` placeholder
+    /// lands here.
+    Malformed,
+    /// `accessToken` is past its `expiresAt` and no `refreshToken` is
+    /// stored — the worker has nothing left to present or to renew
+    /// with.
+    Expired,
+    /// `accessToken` is past its `expiresAt` but a `refreshToken` is
+    /// stored, so the `claude` CLI renews it on first use. Reported as
+    /// usable: refusing here would trade one false verdict for its
+    /// mirror image.
+    Refreshable,
+    /// Every locally decidable precondition holds.
+    Usable,
+}
+
+impl CredentialsVerdict {
+    /// Whether a worker can start with these credentials, as far as
+    /// the adapter can tell. This is what the `/v1/auth/me`
+    /// worker-glasses boolean reports.
+    #[must_use]
+    pub const fn is_usable(self) -> bool {
+        matches!(self, Self::Refreshable | Self::Usable)
+    }
+
+    /// Stable wire label, published as `claude_credentials_status` so
+    /// a client can say *which* precondition failed instead of
+    /// guessing from a bare `false`. Snake-case, additive-only.
+    #[must_use]
+    pub const fn as_wire(self) -> &'static str {
+        match self {
+            Self::Absent => "absent",
+            Self::Unreadable => "unreadable",
+            Self::Malformed => "malformed",
+            Self::Expired => "expired",
+            Self::Refreshable => "refreshable",
+            Self::Usable => "usable",
+        }
+    }
+}
+
+/// Classify already-read credential bytes against a caller-supplied
+/// clock (Unix epoch **milliseconds**, matching the file's `expiresAt`).
+///
+/// Split out from [`classify_credentials_file`] so the expiry branch is
+/// testable without sleeping or mocking the process clock.
+#[must_use]
+pub fn classify_credentials_bytes(bytes: &[u8], now_ms: i64) -> CredentialsVerdict {
+    let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return CredentialsVerdict::Malformed;
+    };
+    let Some(oauth) = parsed.get("claudeAiOauth") else {
+        return CredentialsVerdict::Malformed;
+    };
+    let access_ok = oauth
+        .get("accessToken")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|t| !t.trim().is_empty());
+    if !access_ok {
+        return CredentialsVerdict::Malformed;
+    }
+    // A missing `expiresAt` is not treated as expired: some seeded
+    // images write long-lived credentials without one, and the worker
+    // starts fine with those. Only a value we can read *and* that is
+    // in the past is evidence of expiry.
+    let expired = oauth
+        .get("expiresAt")
+        .and_then(serde_json::Value::as_i64)
+        .is_some_and(|exp| exp <= now_ms);
+    if !expired {
+        return CredentialsVerdict::Usable;
+    }
+    let refreshable = oauth
+        .get("refreshToken")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|t| !t.trim().is_empty());
+    if refreshable {
+        CredentialsVerdict::Refreshable
+    } else {
+        CredentialsVerdict::Expired
+    }
+}
+
+/// Classify the credentials file at `path` as of now.
+///
+/// Never returns an error: every failure mode *is* one of the
+/// verdicts, because the caller's question ("could a worker start?")
+/// has an answer in each case.
+#[must_use]
+pub fn classify_credentials_file(path: &Path) -> CredentialsVerdict {
+    match std::fs::read(path) {
+        Ok(bytes) => classify_credentials_bytes(&bytes, Utc::now().timestamp_millis()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => CredentialsVerdict::Absent,
+        Err(_) => CredentialsVerdict::Unreadable,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,6 +291,113 @@ mod tests {
         assert!(scopes
             .iter()
             .any(|v| v.as_str() == Some("user:sessions:claude_code")));
+    }
+
+    // ── Usability probe (issue #48) ───────────────────────────────
+    //
+    // The case that misled the issue's author: the file EXISTS, so the
+    // old `path.exists()` probe said "present", while the worker
+    // refused to start. Each test below is one shape of that lie.
+
+    const NOW_MS: i64 = 1_779_451_200_000; // 2026-05-22T12:00:00Z
+
+    fn creds_json(access: &str, expires_at: i64, refresh: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": access,
+                "refreshToken": refresh,
+                "expiresAt": expires_at,
+                "scopes": ["user:inference"],
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn a_written_credentials_file_is_usable() {
+        let bytes = render_credentials(&sample_response()).unwrap();
+        assert_eq!(
+            classify_credentials_bytes(&bytes, Utc::now().timestamp_millis()),
+            CredentialsVerdict::Usable
+        );
+    }
+
+    #[test]
+    fn empty_object_is_malformed_not_present() {
+        assert_eq!(
+            classify_credentials_bytes(b"{}", NOW_MS),
+            CredentialsVerdict::Malformed
+        );
+        assert!(!CredentialsVerdict::Malformed.is_usable());
+    }
+
+    #[test]
+    fn truncated_or_blank_token_is_malformed() {
+        assert_eq!(
+            classify_credentials_bytes(b"{\"claudeAiOauth\": {", NOW_MS),
+            CredentialsVerdict::Malformed
+        );
+        assert_eq!(
+            classify_credentials_bytes(&creds_json("", NOW_MS + 1, "r"), NOW_MS),
+            CredentialsVerdict::Malformed
+        );
+    }
+
+    #[test]
+    fn expired_without_refresh_token_is_expired() {
+        let bytes = creds_json("sk-ant-oat01-old", NOW_MS - 1, "");
+        assert_eq!(
+            classify_credentials_bytes(&bytes, NOW_MS),
+            CredentialsVerdict::Expired
+        );
+        assert!(!CredentialsVerdict::Expired.is_usable());
+    }
+
+    #[test]
+    fn expired_with_refresh_token_stays_usable() {
+        let bytes = creds_json("sk-ant-oat01-old", NOW_MS - 1, "sk-ant-ort01-new");
+        assert_eq!(
+            classify_credentials_bytes(&bytes, NOW_MS),
+            CredentialsVerdict::Refreshable
+        );
+        assert!(CredentialsVerdict::Refreshable.is_usable());
+    }
+
+    #[test]
+    fn missing_expiry_is_not_read_as_expired() {
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "claudeAiOauth": { "accessToken": "sk-ant-oat01-seeded" }
+        }))
+        .unwrap();
+        assert_eq!(
+            classify_credentials_bytes(&bytes, NOW_MS),
+            CredentialsVerdict::Usable
+        );
+    }
+
+    #[test]
+    fn absent_file_is_absent_and_a_directory_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            classify_credentials_file(&dir.path().join("nope.json")),
+            CredentialsVerdict::Absent
+        );
+        // A directory at the credentials path exists, so the old probe
+        // reported `true`; reading it fails.
+        assert_eq!(
+            classify_credentials_file(dir.path()),
+            CredentialsVerdict::Unreadable
+        );
+    }
+
+    #[test]
+    fn wire_labels_are_stable() {
+        assert_eq!(CredentialsVerdict::Absent.as_wire(), "absent");
+        assert_eq!(CredentialsVerdict::Unreadable.as_wire(), "unreadable");
+        assert_eq!(CredentialsVerdict::Malformed.as_wire(), "malformed");
+        assert_eq!(CredentialsVerdict::Expired.as_wire(), "expired");
+        assert_eq!(CredentialsVerdict::Refreshable.as_wire(), "refreshable");
+        assert_eq!(CredentialsVerdict::Usable.as_wire(), "usable");
     }
 
     #[test]

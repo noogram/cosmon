@@ -14,24 +14,32 @@
 //!   reserved) without echoing what the server refused — the hint is
 //!   the same whatever the input, so it adds no oracle surface;
 //! - unknown labels get no hint — silence is better than a wrong map.
+//!
+//! The same silence applies to a label that is *known* but ambiguous. A
+//! catch-all label — several distinct server-side causes collapsed onto
+//! one `(status, label)` pair — cannot carry a "probable cause" line,
+//! because the line is then true for one reader and a three-week
+//! detour for the next (issue #48, `503 tackle_unavailable`). A branch
+//! belongs here only when it **knows** what happened from the pair
+//! alone; when it would have to **guess**, it is absent.
 
 /// Static hint for a wire error, looked up by `(status, label)`.
 /// `None` when this binary has nothing trustworthy to say.
 #[must_use]
 pub fn for_api_error(status: u16, label: &str) -> Option<&'static str> {
     match (status, label) {
-        // The janis marche n°1: the worker badge. The probable cause is
-        // named, the repair command is singular, doctor closes the loop.
+        // `tackle_unavailable` deliberately has NO hint, and keeps none.
+        // It is the generic fallback: every `cs tackle` failure the server
+        // could not classify still collapses onto it. A hint here can only
+        // guess which cause it was, and the one that used to live here
+        // guessed "worker badge not connected" for three weeks at a reader
+        // who had already provisioned that badge (issue #48). A wrong hint
+        // costs more than no hint.
         //
-        // `tackle_unavailable` is the generic fallback for unclassified
-        // non-zero exits — it persists for cases not covered by the more
-        // specific codes below. The hint names the most likely cause; the
-        // specific codes give a better starting point when they apply.
-        (503, "tackle_unavailable") => Some(
-            "probable cause: the container's Claude worker is not connected (the second \
-             badge, distinct from your tenant token).\n  fix:    cosmon-remote auth login \
-             --email you@example.com\n  verify: cosmon-remote doctor",
-        ),
+        // The three hints below are the return that comment promised: they
+        // are keyed on causes the server now actually distinguishes, so
+        // they state rather than guess. The condition was the split, and
+        // the split has happened — for these three labels and no others.
         (503, "subprocess_spawn_failed") => Some(
             "the `cs` binary could not be started — it is missing or not executable in \
              the container image.\n  verify: cosmon-remote doctor",
@@ -165,14 +173,24 @@ pub fn for_result_status(
 mod tests {
     use super::*;
 
-    /// The 503 hint must name the probable cause AND the single repair
-    /// command, and point back at doctor.
+    /// `503 tackle_unavailable` renders NOTHING. The server collapses
+    /// several unrelated causes onto that one label (missing worker
+    /// credential, unreachable local-adapter backend, missing `cs`
+    /// binary, spawn failure), so any cause named here is a guess — and
+    /// the guess that used to live here cost the reporter of issue #48
+    /// three weeks of investigation on a badge they had already
+    /// provisioned. Negative control: restore the old hint and this
+    /// assertion fails on the very first line.
     #[test]
-    fn tackle_503_names_cause_and_repair() {
-        let hint = for_api_error(503, "tackle_unavailable").unwrap();
-        assert!(hint.contains("auth login"));
-        assert!(hint.contains("doctor"));
-        assert!(hint.contains("probable cause"));
+    fn tackle_503_is_silent_because_the_label_is_a_catch_all() {
+        assert!(
+            for_api_error(503, "tackle_unavailable").is_none(),
+            "a catch-all label must carry no hint — a wrong hint costs more than no hint"
+        );
+        // The neighbouring 503 is NOT a catch-all (both producers mean
+        // exactly one thing: the tenant root is not staged), so it keeps
+        // its hint. Silence is scoped to the ambiguity, not to the status.
+        assert!(for_api_error(503, "tenant_unavailable").is_some());
     }
 
     /// `subprocess_spawn_failed` names the missing binary and points at doctor.

@@ -279,9 +279,16 @@ fetches bytes with `--out`; when omitted, it writes under
 
 ### Troubleshooting and security
 
-On a sovereign local-adapter host, a `503 tackle_unavailable` message mentioning
-“Claude Code not installed” is an expected default-container diagnostic, not a
-requirement for the local Ollama path. An empty `artifact list` normally means
+A `503 tackle_unavailable` arrives bare: the client prints the status, the
+label, and the `request_id`, and no probable cause. That is deliberate. The
+label is a catch-all — the adapter collapses every unrecognised `cs tackle`
+failure onto it (worker credential absent, local-adapter backend unreachable,
+`cs` binary missing, subprocess spawn failure), so a cause printed here would
+be a guess, and a guess that names the wrong one sends the investigation the
+wrong way. Diagnose it instead with `cosmon-remote doctor`, which *checks* each
+of those and reports what it found. On a sovereign local-adapter host in
+particular, this 503 does not imply a missing Claude Code install: the local
+Ollama path does not require one. An empty `artifact list` normally means
 the worker has not written its deliverable or has not completed yet. A `401` or
 `403` from `auth me` means to compare the token's issuer, subject, audience, and
 scopes with `trusted-issuers.toml` and the rendered nucleon binding.
