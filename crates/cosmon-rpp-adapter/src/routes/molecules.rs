@@ -1336,8 +1336,18 @@ pub async fn stuck_molecule(
 ///   (turing §8.2.3 — no existence oracle).
 /// - **409 `already_active`** — `cs tackle` refused because a worker
 ///   session is already attached (idempotency check inside the CLI).
-/// - **503 `tackle_unavailable`** — `cs` binary missing, subprocess
-///   spawn failed, or Claude Code not installed in the container.
+/// - **503 `subprocess_spawn_failed`** — the `cs` binary could not be
+///   spawned at the OS level (binary missing or not executable in the
+///   container).
+/// - **503 `adapter_backend_unreachable`** — the local adapter backend
+///   (e.g. Ollama) is not reachable or cannot serve the resolved model.
+///   Detected by `cs tackle`'s preflight; the molecule is untouched.
+/// - **503 `worker_credential_missing`** — `cs tackle` refused because
+///   the Claude Code credential needed to start an interactive worker is
+///   absent (no OAuth token, no keychain item, no credentials file).
+/// - **503 `tackle_unavailable`** — generic 503 for any other non-zero
+///   `cs tackle` exit whose stderr does not match a more specific code.
+///   Persists as the stable fallback; it is not deprecated.
 /// - **504 `subprocess_timeout`** — `cs tackle` exceeded the per-call
 ///   subprocess deadline (default 30s; tackle should return in <5s
 ///   after the tmux session is detached).
@@ -1537,11 +1547,32 @@ fn build_tackle_response(molecule_id: &str, parsed: &Value) -> Value {
 /// Map a subprocess-side rejection into the wire-stable
 /// [`ApiError`] for the tackle route.
 ///
-/// The mapping is deliberately conservative: any non-zero exit from
-/// `cs tackle` whose stderr mentions the canonical idempotency string
-/// is collapsed to 409 `already_active`, otherwise to 503
-/// `tackle_unavailable`. The discipline mirrors the §3.6 reject
-/// taxonomy without leaking the raw stderr to the wire (turing G9).
+/// # Taxonomy
+///
+/// Stderr substring detection is used for [`RppRejectReason::SubprocessExitNonZero`]
+/// because the subprocess exit code alone cannot distinguish failure modes
+/// (both a missing credential and an unreachable backend exit 1). The substrings
+/// are stable fragments of messages emitted by `cs tackle` itself (not the
+/// worker process), so they are first-party.
+///
+/// - `"already running"` / `"already tackled"` / `"worker already"` →
+///   **409 `already_active`** — idempotency guard inside the CLI.
+/// - `"refusing to spawn a claude worker"` →
+///   **503 `worker_credential_missing`** — emitted by `check_tui_credentials`
+///   when no usable Claude Code credential is found.
+/// - `"refusing to dispatch"` →
+///   **503 `adapter_backend_unreachable`** — emitted by the local-adapter
+///   preflight when the backend is unreachable or cannot serve the model.
+/// - Everything else → **503 `tackle_unavailable`** — generic fallback;
+///   persists as the stable fallback, not deprecated.
+///
+/// [`RppRejectReason::SubprocessSpawnFailed`] maps to
+/// **503 `subprocess_spawn_failed`** (OS-level spawn failure, e.g. binary
+/// missing) rather than the generic `tackle_unavailable` — the label comes
+/// from the existing [`RppRejectReason::label`] taxonomy.
+///
+/// No stderr content crosses the wire — the labels are the only error
+/// identifiers on the response body (turing G9).
 fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) -> ApiError {
     match reason {
         RppRejectReason::SubprocessTimeout(_) => ApiError {
@@ -1549,11 +1580,15 @@ fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) ->
             label: "subprocess_timeout",
             request_id: Some(request_id.to_owned()),
         },
+        RppRejectReason::SubprocessSpawnFailed(_) => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
         RppRejectReason::SubprocessExitNonZero { stderr_excerpt, .. } => {
-            // The cs CLI signals "already tackled" with a distinct
-            // message ("already running", "worker already attached",
-            // …). The substring match is intentionally tolerant —
-            // a tighter contract is a §10 amendment.
+            // The cs CLI signals distinct failure modes through stderr.
+            // Substring match is intentionally tolerant — a tighter
+            // contract is a §10 amendment.
             let lower = stderr_excerpt.to_ascii_lowercase();
             if lower.contains("already running")
                 || lower.contains("already tackled")
@@ -1562,6 +1597,18 @@ fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) ->
                 ApiError {
                     status: StatusCode::CONFLICT,
                     label: "already_active",
+                    request_id: Some(request_id.to_owned()),
+                }
+            } else if lower.contains("refusing to spawn a claude worker") {
+                ApiError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    label: "worker_credential_missing",
+                    request_id: Some(request_id.to_owned()),
+                }
+            } else if lower.contains("refusing to dispatch") {
+                ApiError {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    label: "adapter_backend_unreachable",
                     request_id: Some(request_id.to_owned()),
                 }
             } else {
@@ -2000,5 +2047,96 @@ mod tests {
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(api.label, "tackle_unavailable");
+    }
+
+    /// OS-level spawn failure (binary missing) maps to `subprocess_spawn_failed`,
+    /// not the generic `tackle_unavailable` — the label comes from the existing
+    /// [`RppRejectReason::SubprocessSpawnFailed`] taxonomy.
+    #[test]
+    fn spawn_failed_maps_to_subprocess_spawn_failed() {
+        let api = tackle_subprocess_error_to_api(
+            &RppRejectReason::SubprocessSpawnFailed("No such file or directory".to_owned()),
+            "req-spawn",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "subprocess_spawn_failed");
+    }
+
+    /// The exact stderr fragment emitted by `check_tui_credentials` when the
+    /// Claude Code credential is absent maps to `worker_credential_missing`.
+    #[test]
+    fn credential_refusal_maps_to_worker_credential_missing() {
+        let api = tackle_subprocess_error_to_api(
+            &RppRejectReason::SubprocessExitNonZero {
+                code: 1,
+                stderr_excerpt:
+                    "cs tackle: refusing to spawn a claude worker for molecule task-1: \
+                     no usable Claude Code credential for the interactive worker"
+                        .to_owned(),
+            },
+            "req-cred",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "worker_credential_missing");
+    }
+
+    /// The exact stderr fragment emitted by `preflight_local_adapter_model` when
+    /// the local backend is unreachable maps to `adapter_backend_unreachable`.
+    #[test]
+    fn local_backend_unreachable_maps_to_adapter_backend_unreachable() {
+        let api = tackle_subprocess_error_to_api(
+            &RppRejectReason::SubprocessExitNonZero {
+                code: 1,
+                stderr_excerpt: "refusing to dispatch: the local adapter's backend at \
+                     http://localhost:11434 is not reachable (connection refused). \
+                     Start it (`ollama serve`)"
+                    .to_owned(),
+            },
+            "req-backend",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "adapter_backend_unreachable");
+    }
+
+    /// The `ModelNotServed` preflight variant (backend reachable but model not
+    /// pulled) also maps to `adapter_backend_unreachable` — from the tenant's
+    /// perspective the adapter cannot serve the request.
+    #[test]
+    fn model_not_served_maps_to_adapter_backend_unreachable() {
+        let api = tackle_subprocess_error_to_api(
+            &RppRejectReason::SubprocessExitNonZero {
+                code: 1,
+                stderr_excerpt: "refusing to dispatch: the local adapter resolved to model \
+                     'qwen3:8b', but the backend at http://localhost:11434 cannot \
+                     serve it — it serves no models at all"
+                    .to_owned(),
+            },
+            "req-model",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "adapter_backend_unreachable");
+    }
+
+    /// Unrecognised stderr (worktree path, git errors, …) stays as the
+    /// generic `tackle_unavailable` — it is the stable fallback, not deprecated.
+    #[test]
+    fn unclassified_stderr_stays_tackle_unavailable() {
+        for excerpt in [
+            "fatal: worktree path not found",
+            "some unexpected error from cs",
+            "",
+        ] {
+            let api = tackle_subprocess_error_to_api(
+                &RppRejectReason::SubprocessExitNonZero {
+                    code: 1,
+                    stderr_excerpt: excerpt.to_owned(),
+                },
+                "req-unclassified",
+            );
+            assert_eq!(
+                api.label, "tackle_unavailable",
+                "excerpt {excerpt:?} should remain tackle_unavailable"
+            );
+        }
     }
 }

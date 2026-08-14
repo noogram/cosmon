@@ -28,16 +28,35 @@
 #[must_use]
 pub fn for_api_error(status: u16, label: &str) -> Option<&'static str> {
     match (status, label) {
-        // `tackle_unavailable` deliberately has NO hint. The label is a
-        // catch-all: `tackle_subprocess_error_to_api` collapses every
-        // unrecognised `cs tackle` failure onto it — missing worker
-        // credential, unreachable local adapter backend, missing `cs`
-        // binary, spawn failure. A hint here can only guess which one,
-        // and this one guessed "worker badge not connected" for three
-        // weeks at a reader who had already provisioned that badge
-        // (issue #48). A wrong hint costs more than no hint. Hints keyed
-        // on this status come back when the label is split into causes
-        // the server actually distinguishes — not before.
+        // `tackle_unavailable` deliberately has NO hint, and keeps none.
+        // It is the generic fallback: every `cs tackle` failure the server
+        // could not classify still collapses onto it. A hint here can only
+        // guess which cause it was, and the one that used to live here
+        // guessed "worker badge not connected" for three weeks at a reader
+        // who had already provisioned that badge (issue #48). A wrong hint
+        // costs more than no hint.
+        //
+        // The three hints below are the return that comment promised: they
+        // are keyed on causes the server now actually distinguishes, so
+        // they state rather than guess. The condition was the split, and
+        // the split has happened — for these three labels and no others.
+        (503, "subprocess_spawn_failed") => Some(
+            "the `cs` binary could not be started — it is missing or not executable in \
+             the container image.\n  verify: cosmon-remote doctor",
+        ),
+        (503, "worker_credential_missing") => Some(
+            "the container's Claude Code worker has no login credential. \
+             Provision one by: (a) exporting CLAUDE_CODE_OAUTH_TOKEN, \
+             (b) running `claude` interactively and completing `/login`, \
+             or (c) mounting `.credentials.json` into CLAUDE_CONFIG_DIR.\n  \
+             verify: cosmon-remote doctor",
+        ),
+        (503, "adapter_backend_unreachable") => Some(
+            "the local adapter's backend (e.g. Ollama) is not reachable or cannot \
+             serve the resolved model. Start it with `ollama serve`, pull the model \
+             with `ollama pull <model>`, or update [adapters.local].base_url / \
+             COSMON_LOCAL_BASE_URL. The molecule is untouched and still tacklable.",
+        ),
         (503, "tenant_unavailable") => Some(
             "your space is not yet provisioned on this instance — that is an operator \
              gesture. Check the binding with `cosmon-remote auth me` (noyau field).",
@@ -172,6 +191,42 @@ mod tests {
         // exactly one thing: the tenant root is not staged), so it keeps
         // its hint. Silence is scoped to the ambiguity, not to the status.
         assert!(for_api_error(503, "tenant_unavailable").is_some());
+    }
+
+    /// `subprocess_spawn_failed` names the missing binary and points at doctor.
+    #[test]
+    fn subprocess_spawn_failed_names_binary_and_doctor() {
+        let hint = for_api_error(503, "subprocess_spawn_failed").unwrap();
+        assert!(hint.contains("`cs`"), "must name the binary");
+        assert!(hint.contains("doctor"));
+    }
+
+    /// `worker_credential_missing` names all three credential provisioning paths.
+    #[test]
+    fn worker_credential_missing_names_all_three_paths() {
+        let hint = for_api_error(503, "worker_credential_missing").unwrap();
+        assert!(
+            hint.contains("CLAUDE_CODE_OAUTH_TOKEN"),
+            "must name env var path"
+        );
+        assert!(hint.contains("/login"), "must name interactive login path");
+        assert!(
+            hint.contains(".credentials.json"),
+            "must name file mount path"
+        );
+    }
+
+    /// `adapter_backend_unreachable` names `ollama serve`, `ollama pull`,
+    /// and states the molecule is untouched.
+    #[test]
+    fn adapter_backend_unreachable_names_repair_and_states_recoverability() {
+        let hint = for_api_error(503, "adapter_backend_unreachable").unwrap();
+        assert!(hint.contains("ollama serve"), "must name start command");
+        assert!(hint.contains("ollama pull"), "must name pull command");
+        assert!(
+            hint.contains("untouched"),
+            "must state molecule is untouched"
+        );
     }
 
     /// The artifact 4xx hints state the rule (reserved `responses/…`
