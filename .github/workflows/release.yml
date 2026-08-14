@@ -105,9 +105,15 @@ jobs:
       - name: Resolve version
         id: version
         shell: bash
+        env:
+          # Event data reaches the script as a value, never as source: an
+          # expression written inside a `run:` block is substituted textually
+          # before the shell parses it. scripts/check-workflow-yaml.sh enforces
+          # that `env:` is the only place it may appear.
+          RELEASE_REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          ref="$RELEASE_REF"
           version="${ref#refs/tags/}"
           version="${version#v}"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -551,10 +557,14 @@ jobs:
           ref: ${{ github.event.inputs.tag || github.ref }}
       - name: brew install from tap + assert <30s
         shell: bash
+        env:
+          # See the note on the `Resolve version` step: event data enters
+          # through `env:`, never through the body of a `run:` block.
+          RELEASE_REF: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           owner="${{ github.repository_owner }}"
-          ref="${{ github.event.inputs.tag || github.ref_name }}"
+          ref="$RELEASE_REF"
           version="${ref#refs/tags/}"
           version="${version#v}"
           start="$(date +%s)"
