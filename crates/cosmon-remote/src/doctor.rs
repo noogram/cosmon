@@ -393,4 +393,81 @@ mod tests {
         });
         assert!(!report.healthy());
     }
+
+    /// An `/v1/auth/me` payload reduced to the two fields the worker-glasses
+    /// line reads. Everything else is filler: the check is a pure function of
+    /// `claude_credentials_present` and `claude_credentials_status`, which is
+    /// exactly why it is falsifiable here rather than behind a mock server.
+    fn auth_me(present: Option<bool>, status: Option<&str>) -> crate::client::AuthMeResponse {
+        crate::client::AuthMeResponse {
+            sub: "tenant-demo-operator".to_owned(),
+            aud: vec!["cosmon-rpp-tenant".to_owned()],
+            scopes: vec!["cosmon:molecule:read".to_owned()],
+            noyau: Some("tenant-demo-sandbox".to_owned()),
+            expires_at: "2026-06-10T12:00:00Z".to_owned(),
+            issuer: "https://mock-issuer".to_owned(),
+            claude_credentials_present: present,
+            claude_credentials_status: status.map(str::to_owned),
+            extra: Default::default(),
+        }
+    }
+
+    /// Issue #48, client half: when the server says *why* the worker cannot
+    /// start, doctor must repeat the cause instead of one undifferentiated
+    /// « not connected ». Each status shapes the detail line it is paired with.
+    #[test]
+    fn worker_glasses_status_shapes_the_detail() {
+        for (status, detail_needle) in [
+            ("absent", "no credentials file"),
+            ("expired", "expired"),
+            ("malformed", "holds no usable token"),
+        ] {
+            let check = worker_glasses_check(&auth_me(Some(false), Some(status)));
+            assert_eq!(check.outcome, Outcome::Fail, "status {status}");
+            assert!(
+                check.detail.contains(detail_needle),
+                "status {status}: detail {:?} must name the cause",
+                check.detail
+            );
+            assert!(
+                check.fix.unwrap_or_default().contains("auth login"),
+                "status {status}: a re-login is the fix for this cause"
+            );
+        }
+    }
+
+    /// `unreadable` is the exception: an operator-side filesystem problem that
+    /// `auth login` cannot repair, so proposing it would be the same kind of
+    /// confident-wrong advice the issue was about.
+    #[test]
+    fn unreadable_glasses_do_not_propose_a_re_login() {
+        let check = worker_glasses_check(&auth_me(Some(false), Some("unreadable")));
+        assert_eq!(check.outcome, Outcome::Fail);
+        let fix = check.fix.unwrap_or_default();
+        assert!(
+            !fix.contains("auth login --email"),
+            "an unreadable file is not fixed by logging in again, got {fix:?}"
+        );
+        assert!(fix.contains("operator-side"));
+    }
+
+    /// A server that answers `true` with no status (an adapter older than issue
+    /// #48) must still read as green — the client degrades to the bare boolean
+    /// rather than demanding the new field.
+    #[test]
+    fn worker_glasses_without_status_still_passes() {
+        let check = worker_glasses_check(&auth_me(Some(true), None));
+        assert_eq!(check.outcome, Outcome::Pass);
+        assert!(check.fix.is_none());
+    }
+
+    /// An unrecognised status is "some other cause", never an error: the
+    /// boolean still decides, and the generic detail stands in.
+    #[test]
+    fn unrecognised_status_falls_back_to_the_boolean() {
+        let check = worker_glasses_check(&auth_me(Some(false), Some("some-future-cause")));
+        assert_eq!(check.outcome, Outcome::Fail);
+        assert!(check.detail.contains("NOT connected"));
+        assert!(check.fix.unwrap_or_default().contains("auth login"));
+    }
 }
