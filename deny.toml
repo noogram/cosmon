@@ -20,11 +20,68 @@ ignore = [
     # tui-markdown 0.3.7 → syntect 5.3 → yaml-rust (unmaintained, no upgrade path).
     # syntect upstream tracks the migration to yaml-rust2.
     { id = "RUSTSEC-2024-0320", reason = "transitive via tui-markdown→syntect→yaml-rust; upstream migration to yaml-rust2 pending" },
+    # paste (proc-macro, unmaintained) — now pulled via ratatui→paste (and
+    # ansi-to-tui→ratatui) in cosmon-cli. The old candle-core→gemm→paste path
+    # was git-rm'd with the voice bridge (ADR-126), but the advisory still fires
+    # through ratatui; track ratatui dropping the paste proc-macro. (Do NOT
+    # delete this entry: removing it re-surfaces the live advisory.)
+    { id = "RUSTSEC-2024-0436", reason = "transitive via ratatui→paste proc-macro (ex-candle path removed, ADR-126); awaiting ratatui bump" },
     # rand 0.9 (unsound only under a custom logger) — now pulled via
     # proptest→rand in cosmon-fuzz, not the removed candle stack. We never
     # install a custom logger, so the unsoundness is not reachable from cosmon
     # code paths. (Do NOT delete: proptest still pulls rand 0.9.)
     { id = "RUSTSEC-2026-0097", reason = "transitive via proptest→rand 0.9 in cosmon-fuzz (ex-candle path removed, ADR-126); custom-logger unsoundness not reachable" },
+    # ratatui 0.29 → lru 0.12 (Stacked Borrows IterMut bug). We never iter_mut
+    # this LRU; track ratatui upgrade once a fixed lru lands upstream.
+    { id = "RUSTSEC-2026-0002", reason = "transitive via ratatui→lru 0.12; iter_mut not exercised in cosmon code paths" },
+    #
+    # RUSTSEC-2026-0253 — lru, INFO/Unsound: `LruCache::pop()` is not panic-safe,
+    # so a key whose `Drop` panics can leave the cache observably corrupt
+    # (use-after-free) when the stack unwinds. Three conditions must hold at once
+    # for the defect to fire: a cache KEY carrying a user `Drop`, that `Drop`
+    # panicking, and unwinding enabled.
+    #
+    # The first condition is not satisfiable in this tree, structurally — not
+    # merely improbably. Exactly two crates consume `lru` here (`ratatui` and
+    # `ratatui-core`, no other consumer in Cargo.lock), and both declare the
+    # SAME single cache:
+    #     type Cache = LruCache<(Rect, Layout), (Segments, Spacers)>;
+    #   - ratatui-0.29.0/src/layout/layout.rs:31
+    #   - ratatui-core-0.1.0/src/layout/layout.rs:36
+    # The key is `(Rect, Layout)`. `Rect` is four u16. `Layout` is a Direction
+    # (unit enum), a `Vec<Constraint>`, a Margin (2×u16), a Flex (unit enum) and
+    # a Spacing (enum over u16); every `Constraint` variant carries only numbers
+    # — Min/Max/Length/Percentage/Fill(u16), Ratio(u32,u32). And
+    # `grep -rn "impl Drop"` returns ZERO hits across both crates' `src/`.
+    # Dropping such a key drops a Vec of numeric enums: no user code runs, so
+    # nothing on that path can panic, so the unwind the advisory needs cannot
+    # begin.
+    #
+    # There is no narrow upgrade path: the advisory is fixed only in lru
+    # >= 0.18.2 (no 0.12.x or 0.16.x backport), while ratatui 0.29 requires
+    # lru ^0.12 and ratatui-core 0.1.0 requires ^0.16. Reaching the fixed lru
+    # therefore forces ratatui 0.29 → 0.30, which adds 56 crates and removes 2
+    # — a supply-chain surface that `cargo vet` then refuses (65 unvetted
+    # dependencies). Trading a structurally unreachable INFO defect for 56
+    # unaudited crates is the worse deal; hence this exemption (operator
+    # decision 2026-08-17, task-20260817-7338, reverting 58ac85f8).
+    #
+    # THE EXEMPTION LAPSES if EITHER holds — re-read it, do not renew blindly:
+    #   (a) a new `lru` consumer enters the tree whose cache key type carries a
+    #       user `Drop` impl (re-check with the two greps above), or
+    #   (b) ratatui is bumped for its own merits, at which point the fixed lru
+    #       arrives for free and the exemption is simply dead weight.
+    #
+    # Measured 2026-08-17: cargo-deny 0.19.4 does not itself surface either lru
+    # advisory (both are `informational = "unsound"`), so this entry and the
+    # RUSTSEC-2026-0002 one above each emit a benign `advisory-not-detected`
+    # warning locally — non-fatal, and CI runs `cargo deny check --all-features`
+    # which does not fail on warnings. The tool that actually enforces this pair
+    # is `cargo audit`, via the twin entry in .cargo/audit.toml. The entry stays
+    # here anyway: cargo-deny's informational policy is a default that can flip
+    # on a version bump, and that is precisely the day the exemption must
+    # already be written down rather than discovered as a red gate.
+    { id = "RUSTSEC-2026-0253", reason = "transitive via ratatui→lru 0.12 and ratatui-core→lru 0.16; unreachable — the only cache key in either crate is (Rect, Layout), a numeric-only type with zero `impl Drop` in both crates, so no user Drop can panic during pop(); the fix requires lru>=0.18.2, reachable only via a ratatui 0.30 bump that adds 56 crates and breaks cargo vet. See the comment block above for the lapse conditions." },
 ]
 
 [licenses]
