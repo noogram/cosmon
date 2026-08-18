@@ -64,8 +64,9 @@ pub fn after_long_help(bin: &str) -> String {
 /// matches what the verbs render.
 const LONG_HELP_SECTIONS: &str = "\
 AUTHENTICATION — two independent badges:\n  \
-1. The API badge (JWT). Minted automatically from the profile's\n     \
-oidc_url when needed, or supplied via --token / $COSMON_REMOTE_TOKEN.\n  \
+1. The API badge (JWT). From the OIDC credential recorded by\n     \
+`login`, refreshed silently, or supplied via\n     \
+--token / $COSMON_REMOTE_TOKEN.\n  \
 2. The worker badge (Claude credential). Posed once with `auth login`\n     \
 (a guided three-step flow — see `auth login --help`). Without it,\n     \
 a tackled worker has nothing to spend.\n\n\

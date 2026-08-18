@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::credential::CredentialKey;
 use crate::error::{Error, Result};
 
 /// Environment variable name overriding the active profile for a single
@@ -198,6 +199,29 @@ impl Profile {
             .as_deref()
             .filter(|s| !s.is_empty())
             .unwrap_or(&self.aud)
+    }
+
+    /// Build the [`CredentialKey`] addressing this profile's persisted credential
+    /// — the single seam every credential lookup goes through (`client_for`'s
+    /// silent refresh, `logout`, and `doctor`'s read-only probe), so the
+    /// `(issuer, sub, client_id)` triple is assembled in exactly one place.
+    ///
+    /// `issuer` is recorded only by a successful `login`. A profile that has
+    /// never logged in has no key, so this returns an error rather than fabricate
+    /// one: the caller then knows the repair is `login`, not a malformed lookup.
+    pub fn credential_key(&self) -> Result<CredentialKey> {
+        let issuer = self
+            .issuer
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                Error::Config("profile has no recorded issuer; run `login`".to_owned())
+            })?;
+        Ok(CredentialKey::new(
+            issuer,
+            &self.sub,
+            self.effective_client_id(),
+        ))
     }
 
     /// Apply a `key=value` pair from `config set <key> <value>`. The

@@ -15,7 +15,7 @@ Options:
       --kind <KIND>
           
       --token <TOKEN>
-          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
       --var <KEY=VALUE>
           Free-form variables `--var k=v`, repeat as needed
       --tag <TAGS>

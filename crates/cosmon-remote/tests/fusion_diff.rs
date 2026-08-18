@@ -125,6 +125,19 @@ const LEGIBILITY_SUBS: &[(&str, &str)] = &[
 const THAW_PRE: &str = "  thaw      `POST /v1/molecules/{id}/thaw`";
 const THAW_POST: &str = "  thaw      `POST /v1/molecules/{id}/freeze` with `state: \"active\"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)";
 
+/// The global `--token` about was reworded when this PR removed the
+/// CLI's own token-minting path. The pre-fusion text — "the CLI mints a
+/// token via the profile's `oidc_url`" — described a behaviour that no
+/// longer exists, the same category as the thaw line above: help
+/// factually naming a thing the code dropped. Every page's option row
+/// now points at the OIDC credential `login` records. In-place
+/// description edit, blessed here as (pre, post) pairs; `artifact_push`
+/// pads the row wider, so it carries the same text at that column.
+const TOKEN_PRE: &str = "      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`";
+const TOKEN_POST: &str = "      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored";
+const TOKEN_PRE_WIDE: &str = "      --token <TOKEN>                Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`";
+const TOKEN_POST_WIDE: &str = "      --token <TOKEN>                Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored";
+
 /// The `Commands:` block of a rendered help page — the catalogue of
 /// verbs, i.e. the contract surface scripts and tenants key on.
 fn commands_section(lines: &[String]) -> Vec<String> {
@@ -241,10 +254,10 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_line() {
     let removed: Vec<&String> = pre.iter().filter(|l| !post.contains(l)).collect();
     assert_eq!(
         removed.len(),
-        2,
-        "blessed removals: the pre-fusion thaw + tackle lines, got {removed:?}"
+        3,
+        "blessed removals: the pre-fusion thaw + tackle lines + the reworded --token row, got {removed:?}"
     );
-    for old_line in [THAW_PRE, TACKLE_PRE] {
+    for old_line in [THAW_PRE, TACKLE_PRE, TOKEN_PRE] {
         assert!(
             removed.iter().any(|l| l.as_str() == old_line),
             "expected the pre-fusion line to be substituted: {old_line:?}, removed = {removed:?}"
@@ -252,12 +265,16 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_line() {
     }
     assert_eq!(
         added.len(),
-        3,
-        "blessed: thaw correction + tackle marker + run line, got {added:?}"
+        4,
+        "blessed: thaw correction + tackle marker + run line + --token reword, got {added:?}"
     );
     assert!(
         added.iter().any(|l| l.as_str() == THAW_POST),
         "missing the blessed thaw correction, got {added:?}"
+    );
+    assert!(
+        added.iter().any(|l| l.as_str() == TOKEN_POST),
+        "missing the blessed --token reword, got {added:?}"
     );
     assert!(
         added.iter().any(|l| l.as_str() == TACKLE_POST),
@@ -307,11 +324,14 @@ fn no_operator_only_verb_on_the_client_surface() {
 fn molecule_thaw_diff_is_the_about_correction() {
     assert_diff_is_exactly(
         "molecule_thaw",
-        &[(
-            "`POST /v1/molecules/{id}/thaw`",
-            "`POST /v1/molecules/{id}/freeze` with `state: \"active\"` — resume a frozen \
-             molecule (the legacy `/thaw` route is 410 Gone)",
-        )],
+        &[
+            (
+                "`POST /v1/molecules/{id}/thaw`",
+                "`POST /v1/molecules/{id}/freeze` with `state: \"active\"` — resume a frozen \
+                 molecule (the legacy `/thaw` route is 410 Gone)",
+            ),
+            (TOKEN_PRE, TOKEN_POST),
+        ],
     );
 }
 
@@ -335,14 +355,18 @@ fn artifact_diffs_are_the_canon_placeholder_names() {
                 "  push  `PUT /v1/molecules/{mol_id}/artifacts/{name}`",
                 "  push  `PUT /v1/molecules/{id}/artifacts/{token}`",
             ),
+            (TOKEN_PRE, TOKEN_POST),
         ],
     );
     assert_diff_is_exactly(
         "artifact_list",
-        &[(
-            "`GET /v1/molecules/{mol_id}/artifacts`",
-            "`GET /v1/molecules/{id}/artifacts`",
-        )],
+        &[
+            (
+                "`GET /v1/molecules/{mol_id}/artifacts`",
+                "`GET /v1/molecules/{id}/artifacts`",
+            ),
+            (TOKEN_PRE, TOKEN_POST),
+        ],
     );
     // `artifact_get` diverges further since replay-Dave D2
     // (task-20260610-828e, merged via task-20260611-7c7f): the
@@ -397,10 +421,13 @@ fn artifact_diffs_are_the_canon_placeholder_names() {
     }
     assert_diff_is_exactly(
         "artifact_push",
-        &[(
-            "`PUT /v1/molecules/{mol_id}/artifacts/{name}`",
-            "`PUT /v1/molecules/{id}/artifacts/{token}`",
-        )],
+        &[
+            (
+                "`PUT /v1/molecules/{mol_id}/artifacts/{name}`",
+                "`PUT /v1/molecules/{id}/artifacts/{token}`",
+            ),
+            (TOKEN_PRE_WIDE, TOKEN_POST_WIDE),
+        ],
     );
 }
 

@@ -29,7 +29,7 @@ Options:
           Render machine-readable JSON instead of human text where applicable
 
       --token <TOKEN>
-          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI mints a token via the profile's `oidc_url`
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
 
   -h, --help
           Print help (see a summary with '-h')
@@ -48,8 +48,9 @@ Diagnostics (when something breaks, not before):
   doctor · healthz · auth me · quota · workers list · noyaux list
 
 AUTHENTICATION — two independent badges:
-  1. The API badge (JWT). Minted automatically from the profile's
-     oidc_url when needed, or supplied via --token / $COSMON_REMOTE_TOKEN.
+  1. The API badge (JWT). From the OIDC credential recorded by
+     `login`, refreshed silently, or supplied via
+     --token / $COSMON_REMOTE_TOKEN.
   2. The worker badge (Claude credential). Posed once with `auth login`
      (a guided three-step flow — see `auth login --help`). Without it,
      a tackled worker has nothing to spend.
