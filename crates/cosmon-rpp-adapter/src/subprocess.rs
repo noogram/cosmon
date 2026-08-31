@@ -91,8 +91,8 @@ pub mod env {
 ///
 /// **What is not here.** No `COSMON_*` name at all. The three envelope
 /// correlation vars, `COSMON_STATE_DIR`, `COSMON_ARTIFACT_DIR` and the
-/// model pin are *set* explicitly by [`SystemInvoker::build_command`]
-/// after the clear, from adapter config — never inherited. Everything
+/// model pin are *set* explicitly by [`SystemInvoker`]'s command
+/// builder after the clear, from adapter config — never inherited. Everything
 /// else (`COSMON_SKIP_PRE_DONE_HOOK`, `COSMON_OPERATOR_GESTURE`,
 /// `COSMON_GALAXY`, `CB_DEPTH`, the pilot vars, …) is simply gone.
 ///

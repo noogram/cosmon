@@ -273,7 +273,7 @@ async fn only_allow_listed_vars_reach_child() {
 async fn process_basics_survive_the_clear() {
     let _lock = env_lock();
     let _path_guard = EnvGuard::set("PATH", "/usr/bin:/bin");
-    let _home_guard = EnvGuard::set("HOME", "/home/adapter-under-test");
+    let _home_guard = EnvGuard::set("HOME", "/home/user");
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let invoker = invoker_for(tmp.path());
@@ -287,7 +287,7 @@ async fn process_basics_survive_the_clear() {
     );
     assert_eq!(
         map.get("HOME").and_then(Value::as_str),
-        Some("/home/adapter-under-test"),
+        Some("/home/user"),
         "HOME must cross the perimeter — git and the claude CLI read no config without it"
     );
 }
