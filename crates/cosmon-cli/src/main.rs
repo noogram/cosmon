@@ -607,8 +607,8 @@ fn main() {
             } else {
                 eprintln!("cs: {refusal}");
             }
-            // Through the guard registry, not `refusal.exit_code()`, so this
-            // refusal's code sits in the same table every other typed CLI
+            // Through the guard registry, not the core constant directly, so
+            // this refusal's code sits in the same table every other typed CLI
             // refusal is reserved in and nobody re-uses 17.
             std::process::exit(cmd::guard::exit_code::OPERATOR_ONLY_VERB_IN_API);
         }

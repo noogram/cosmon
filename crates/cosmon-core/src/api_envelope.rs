@@ -126,14 +126,6 @@ impl fmt::Display for OperatorOnlyVerbInApi {
 
 impl std::error::Error for OperatorOnlyVerbInApi {}
 
-impl OperatorOnlyVerbInApi {
-    /// Exit code to leave for the caller — [`EXIT_OPERATOR_ONLY_VERB_IN_API`].
-    #[must_use]
-    pub const fn exit_code(&self) -> i32 {
-        EXIT_OPERATOR_ONLY_VERB_IN_API
-    }
-}
-
 /// Whether this process *is* an RPP request — `COSMON_API_REQUEST=1`.
 ///
 /// Exactly the predicate the three existing readers already use
@@ -221,7 +213,6 @@ mod tests {
             let refusal = refuse_operator_only_verb(verb, &lookup)
                 .expect_err("an operator-only verb must not run under the envelope");
             assert_eq!(refusal.verb, *verb);
-            assert_eq!(refusal.exit_code(), EXIT_OPERATOR_ONLY_VERB_IN_API);
         }
     }
 
