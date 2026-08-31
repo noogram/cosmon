@@ -105,7 +105,7 @@ fn expand_member(root: &Path, pat: &str) -> Vec<PathBuf> {
             return Vec::new();
         };
         iter.flatten()
-            .filter(|e| e.file_type().ok().is_some_and(|t| t.is_dir()))
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
             .map(|e| e.path())
             .collect()
     } else {

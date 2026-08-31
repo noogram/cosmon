@@ -199,7 +199,7 @@ version = "0.2.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.chacha20]]
-version = "0.10.0"
+version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.chrono]]

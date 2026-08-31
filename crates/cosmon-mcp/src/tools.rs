@@ -2850,16 +2850,16 @@ impl ServerHandler for CosmonService {
             .await
     }
 
-    async fn list_tools(
+    fn list_tools(
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult {
+    ) -> impl std::future::Future<Output = Result<ListToolsResult, McpError>> {
+        std::future::ready(Ok(ListToolsResult {
             tools: self.tool_router.list_all(),
             meta: None,
             next_cursor: None,
-        })
+        }))
     }
 
     fn get_tool(&self, name: &str) -> Option<Tool> {

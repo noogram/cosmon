@@ -1627,7 +1627,7 @@ fn scan_and_migrate(
 /// Check whether a molecule already exists in any fleet directory.
 fn is_already_migrated(fleets_root: &Path, dir_name: &str) -> bool {
     fleets_root.is_dir()
-        && fs::read_dir(fleets_root).ok().is_some_and(|entries| {
+        && fs::read_dir(fleets_root).is_ok_and(|entries| {
             entries
                 .flatten()
                 .any(|fleet_entry| fleet_entry.path().join("molecules").join(dir_name).is_dir())
