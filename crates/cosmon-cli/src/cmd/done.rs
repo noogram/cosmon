@@ -5553,7 +5553,7 @@ fn require_security_review_verdict(state_dir: &Path, mol: &MoleculeData) -> anyh
         .join("molecules")
         .join(mol.id.as_str())
         .join("review-verdict.md");
-    let approved = std::fs::read_to_string(&verdict).ok().is_some_and(|text| {
+    let approved = std::fs::read_to_string(&verdict).is_ok_and(|text| {
         text.lines()
             .any(|line| line.trim().eq_ignore_ascii_case("verdict: approved"))
     });
