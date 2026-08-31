@@ -8,12 +8,14 @@
 //! - **Set** per-tenant `cwd` and the three correlation env vars
 //!   (`COSMON_API_REQUEST=1`, `COSMON_API_REQUEST_ID`,
 //!   `COSMON_API_NUCLEON`), plus a hard timeout.
-//! - **Strip** per-adapter `COSMON_*` resolution vars that would
-//!   otherwise leak into the child and redirect its state lookups.
-//!   `cosmon-filestore` lets env-vars win over walk-up, so an
-//!   adapter started with `COSMON_STATE_DIR=/wrong` would pollute
-//!   every spawned subprocess if the variable were inherited. The
-//!   strip half closes that seam (see [`STRIP_VARS`]).
+//! - **Clear**, then re-admit only the names on an explicit
+//!   allow-list ([`PASSTHROUGH_VARS`]). Nothing of the adapter's own
+//!   environment reaches the child unless it is written there with a
+//!   reason. This half used to be a deny-list; it was wrong by
+//!   default for every variable added elsewhere in the workspace, and
+//!   `COSMON_SKIP_PRE_DONE_HOOK` — the operator kill-switch of the
+//!   blocking `pre_done` gate — crossed the perimeter through that
+//!   gap (delib-20260819-cda2, C2).
 //!
 //! Stdout/stderr capture is *only* echoed back through response
 //! fields the route schema explicitly allows.
@@ -29,7 +31,6 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use cosmon_filestore::resolve::RESOLUTION_VARS;
 use serde_json::Value;
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -61,91 +62,108 @@ pub mod env {
     pub const ANTHROPIC_MODEL: &str = "ANTHROPIC_MODEL";
 }
 
-/// `COSMON_*` strip vars that are **owned by this adapter**, not by the
-/// filestore resolver — the leg of the deny-list that
-/// [`RESOLUTION_VARS`] does not (and should not) carry.
+/// Allow-list half of the §3.5 envelope — the **only** variables of the
+/// adapter's own environment that are allowed to cross the
+/// adapter→subprocess boundary.
 ///
-/// These steer resolution that happens *outside* `cosmon-filestore`
-/// (galaxy / molecule / config-home / cluster-root / repo-root) or are
-/// capability / instrumentation secrets that must never cross the
-/// adapter→subprocess boundary. The filestore resolver knows nothing
-/// about them, so they live here; the state/formulas/config/cluster
-/// vars come in as a view of [`RESOLUTION_VARS`] (see [`STRIP_VARS`]).
-const ADAPTER_LOCAL_STRIP_VARS: &[&str] = &[
-    // Galaxy resolution (`cosmon-daemon`, `cs ensemble`/`tail`).
-    "COSMON_GALAXIES_ROOT",
-    "COSMON_GALAXY",
-    // Molecule / config-home / cluster-root / repo-root resolution
-    // (resolved in `cosmon-cli`, not in `cosmon-filestore`).
-    "COSMON_MOL_DIR",
-    "COSMON_CONFIG_HOME",
-    "COSMON_CLUSTER_ROOT",
-    "COSMON_REPO_ROOT",
-    // Slow-path capability gate (`almanac-scihub-index`) — never
-    // grantable across the adapter perimeter.
-    "COSMON_OPERATOR_GESTURE",
-    "COSMON_OPERATOR_GESTURE_ID",
-    // Audit-path instrumentation that would mis-route token / authz
-    // events into the adapter's instrumentation tree.
-    "COSMON_TOKEN_INSTRUMENTATION_PATH",
-    "COSMON_AUTHZ_INSTRUMENTATION_PATH",
-    // Artifact-dir convention (e653, task-20260522-ef4f). Stripped
-    // by default; re-set per-spawn by `invoke_owned` when the invoker
-    // was configured with `with_artifact_root`. Stripping first keeps
-    // a stale env var from one tenant leaking into another's worker.
-    "COSMON_ARTIFACT_DIR",
+/// **Why an allow-list.** This set used to be a deny-list
+/// (`STRIP_VARS`): everything was inherited except a hand-maintained
+/// roster of `COSMON_*` resolution vars. A security envelope built that
+/// way is wrong by default for every variable added anywhere else in
+/// the code — the omission is not an oversight, it is the normal
+/// behaviour of the structure. The concrete falsification
+/// (delib-20260819-cda2, C2) was `COSMON_SKIP_PRE_DONE_HOOK`: the
+/// human operator's kill-switch for the blocking `pre_done` gate
+/// ([`cosmon_core::config`] `pre_done`), absent from the deny-list, and
+/// therefore inherited by the spawned `cs run` drain and by every
+/// `cs done` that drain launches. One variable set once — an image
+/// entrypoint, a service wrapper, an operations shell — disarmed the
+/// Definition-of-Done of every subsequent harvest, inside a container
+/// where no operator exists to make the gesture. Same family as the
+/// defect `docs/adr/171-the-operator-gesture-is-a-signature-not-a-string.md`
+/// falsified: an operator derogation exercisable by someone who is not
+/// the operator.
+///
+/// Under an allow-list the default is reversed: a variable reaches the
+/// child only because its name is written here, with a reason. A new
+/// `COSMON_*` reader elsewhere in the workspace is closed on arrival,
+/// not on the next audit.
+///
+/// **What is not here.** No `COSMON_*` name at all. The three envelope
+/// correlation vars, `COSMON_STATE_DIR`, `COSMON_ARTIFACT_DIR` and the
+/// model pin are *set* explicitly by [`SystemInvoker::build_command`]
+/// after the clear, from adapter config — never inherited. Everything
+/// else (`COSMON_SKIP_PRE_DONE_HOOK`, `COSMON_OPERATOR_GESTURE`,
+/// `COSMON_GALAXY`, `CB_DEPTH`, the pilot vars, …) is simply gone.
+///
+/// **What is here, and why.** Only process-hygiene variables a POSIX
+/// child and the tools `cs` shells out to (git, tmux, sh, claude)
+/// cannot work without. Each line is a deliberate hole in the envelope;
+/// adding one is a security decision, which is exactly the property the
+/// deny-list did not have.
+pub const PASSTHROUGH_VARS: &[&str] = &[
+    // Process basics. Without `PATH` the child cannot find `git`,
+    // `sh` or `tmux`; without `HOME` git and the claude CLI read no
+    // configuration at all.
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TMPDIR",
+    "PWD",
+    // Terminal / locale — `cs tackle` drives tmux, and UTF-8 paths
+    // round-trip only with a sane locale.
+    "TERM",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    // XDG bases: where the child's own tooling keeps per-user state.
+    "XDG_RUNTIME_DIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    // Git transport over ssh (agent socket) — a worker that cannot
+    // authenticate cannot push a branch.
+    "SSH_AUTH_SOCK",
+    // Egress proxy configuration, when the deployment has one. Absent
+    // from the child, every network call inside the container would
+    // bypass the proxy and fail closed at the jail.
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "no_proxy",
+    // Anthropic credentials / endpoint for the worker `claude` the
+    // child launches. `ANTHROPIC_API_KEY` is additionally *set* from
+    // config when the invoker was built with
+    // [`SystemInvoker::with_anthropic_key`] (the key may live in a
+    // file the adapter env never carried); this entry covers the
+    // plain-inheritance deployment. `ANTHROPIC_MODEL` is likewise
+    // re-set by the pin when one is configured.
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    env::ANTHROPIC_MODEL,
+    // Diagnostics for the child itself. Read-only knobs; they steer no
+    // resolution and grant no capability.
+    "RUST_LOG",
+    "RUST_BACKTRACE",
 ];
 
-/// Number of entries in the assembled [`STRIP_VARS`] view.
-const STRIP_VARS_LEN: usize = RESOLUTION_VARS.len() + ADAPTER_LOCAL_STRIP_VARS.len();
-
-/// Concatenate the resolver's canonical set with the adapter-local set
-/// at compile time, so [`STRIP_VARS`] is a true *view* of
-/// [`RESOLUTION_VARS`] rather than a hand-maintained mirror.
-const fn assemble_strip_vars() -> [&'static str; STRIP_VARS_LEN] {
-    let mut out = [""; STRIP_VARS_LEN];
-    let mut i = 0;
-    while i < RESOLUTION_VARS.len() {
-        out[i] = RESOLUTION_VARS[i];
-        i += 1;
-    }
-    let mut j = 0;
-    while j < ADAPTER_LOCAL_STRIP_VARS.len() {
-        out[i] = ADAPTER_LOCAL_STRIP_VARS[j];
-        i += 1;
-        j += 1;
-    }
-    out
+/// Whether `key` is allowed to be inherited by a spawned `cs`.
+///
+/// The single decision point of the allow-list, exposed so the envelope
+/// invariant is testable as a pure predicate rather than only through a
+/// spawn. Exact-match by design: no prefix rule, because a prefix rule
+/// (`COSMON_*`, `ANTHROPIC_*`) is how a deny-list grows holes again —
+/// it admits names nobody has read.
+#[must_use]
+pub fn is_passthrough(key: &str) -> bool {
+    PASSTHROUGH_VARS.contains(&key)
 }
-
-/// Backing storage for [`STRIP_VARS`]. Kept separate so the public
-/// surface can stay a `&[&str]` slice (byte-identical to the historical
-/// type) while the array length is computed from the two source sets.
-const STRIP_VARS_ARR: [&str; STRIP_VARS_LEN] = assemble_strip_vars();
-
-/// Strip half of the §3.5 envelope — `COSMON_*` resolution vars that
-/// must NOT cross the adapter→subprocess boundary.
-///
-/// `cosmon-filestore` and friends let env vars win over walk-up
-/// discovery, so an adapter started with any of these would silently
-/// redirect every spawned `cs` to the adapter's state tree instead of
-/// the per-tenant galaxy tree (T25 Gap 2). The
-/// fix is to scrub them before spawn.
-///
-/// **A view, not a copy.** The state/formulas/config/cluster leg is
-/// imported as a view of [`RESOLUTION_VARS`] — the filestore resolver's
-/// own canonical set. Adding a `COSMON_*` reader var in
-/// `cosmon-filestore::resolve` therefore strips it here for free at the
-/// next build; there is no second list to keep in sync. The
-/// adapter-only leg (galaxy / molecule / capability / instrumentation
-/// vars the resolver knows nothing about) lives in
-/// `ADAPTER_LOCAL_STRIP_VARS`.
-///
-/// **Pass-through.** Three vars are deliberately absent — they are
-/// *set* by the envelope: `COSMON_API_REQUEST`,
-/// `COSMON_API_REQUEST_ID`, `COSMON_API_NUCLEON`. Stripping them
-/// would defeat the envelope.
-pub const STRIP_VARS: &[&str] = &STRIP_VARS_ARR;
 
 /// Result of a successful subprocess invocation.
 #[derive(Debug)]
@@ -314,35 +332,44 @@ impl SystemInvoker {
     fn build_command(&self, spark: &Spark, args: &[String]) -> Command {
         let mut cmd = Command::new(&self.cs_path);
         cmd.args(args.iter().map(String::as_str))
-            .env(env::COSMON_API_REQUEST, "1")
-            .env(env::COSMON_API_REQUEST_ID, &spark.request_id)
-            .env(env::COSMON_API_NUCLEON, &spark.nucleon_id)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Allow-list half of the §3.5 envelope — see
+        // [`PASSTHROUGH_VARS`]. Clear the inherited environment
+        // wholesale, then re-admit only the named process-hygiene
+        // vars. This comes FIRST: everything the envelope needs
+        // (`COSMON_API_*`, `COSMON_STATE_DIR`, `COSMON_ARTIFACT_DIR`,
+        // the model pin, the API key) is *set* below from adapter
+        // config, and the inverse order would erase the envelope.
+        cmd.env_clear();
+        for (key, value) in std::env::vars_os() {
+            if key.to_str().is_some_and(is_passthrough) {
+                cmd.env(key, value);
+            }
+        }
+        // Set half of the §3.5 envelope — the three correlation vars.
+        // Deliberately after the clear, and deliberately not readable
+        // from the adapter env: a request's identity is minted here,
+        // never inherited.
+        cmd.env(env::COSMON_API_REQUEST, "1")
+            .env(env::COSMON_API_REQUEST_ID, &spark.request_id)
+            .env(env::COSMON_API_NUCLEON, &spark.nucleon_id);
         // Step 3c — inject the boot-resolved Anthropic key so the
-        // spawned worker `claude` inherits it. `ANTHROPIC_API_KEY` is
-        // deliberately NOT in `STRIP_VARS`, so the strip loop below
-        // leaves it intact.
+        // spawned worker `claude` inherits it. Set after the clear,
+        // so a config-resolved key (which may come from a file the
+        // adapter env never carried) wins over any inherited one.
         if let Some(ref key) = self.anthropic_api_key {
             cmd.env("ANTHROPIC_API_KEY", key);
         }
-        // Model pin (avatar-surface D1) — exported alongside the key
-        // and equally NOT in `STRIP_VARS`. The value was resolved from
-        // the instance config at boot; `None` (explicit opt-out) skips
-        // the export entirely so the claude CLI applies its own
-        // default.
+        // Model pin (avatar-surface D1) — exported alongside the key.
+        // The value was resolved from the instance config at boot;
+        // `None` (explicit opt-out) skips the export entirely so the
+        // claude CLI applies its own default. When no pin is
+        // configured the allow-list still lets an inherited
+        // `ANTHROPIC_MODEL` through.
         if let Some(ref model) = self.claude_model {
             cmd.env(env::ANTHROPIC_MODEL, model);
-        }
-        // Strip half of the §3.5 envelope — see [`STRIP_VARS`] doc for
-        // rationale. The order matters: env_remove after env(...) is
-        // fine because the three envelope vars are NOT in STRIP_VARS,
-        // but if they ever were, the strip would silently undo the
-        // envelope. Likewise, `COSMON_ARTIFACT_DIR` is stripped here
-        // and re-set below from the invoker config — never inherited.
-        for key in STRIP_VARS {
-            cmd.env_remove(key);
         }
         // Artifact dir convention (e653 spec, `task-20260522-ef4f`).
         // If an artifact root is configured AND we have a molecule id
@@ -350,8 +377,10 @@ impl SystemInvoker {
         // its path so the worker writes outputs there. Best-effort:
         // a failed mkdir does not abort the spawn — `cs tackle` will
         // fail later if the dir truly cannot exist, with a clearer
-        // error than a missing env var. Comes *after* the strip loop
-        // so the just-set value is not immediately removed.
+        // error than a missing env var. Comes *after* the clear so the
+        // just-set value is not immediately erased — and the variable
+        // is absent from the allow-list, so a tenant's dir can never
+        // be inherited from another tenant's spawn.
         if let (Some(root), Some(mol_id)) = (&self.artifact_root, spark.molecule_id.as_deref()) {
             let dir = root.join(spark.noyau.as_str()).join(mol_id);
             // `create_dir_all` is idempotent; pre-existing dir is fine.
@@ -360,8 +389,8 @@ impl SystemInvoker {
         }
         // State-dir re-pose (B1 moussage resident, task-20260610-e5f6;
         // fix of the known `tackle 503 — COSMON_STATE_DIR strip
-        // divergence`). The strip loop above removes the variable so a
-        // mis-set adapter env can never redirect the child — but the
+        // divergence`). The clear above drops the inherited variable so
+        // a mis-set adapter env can never redirect the child — but the
         // library-direct routes resolve the tenant store as
         // `<galaxies_root>/<noyau>/.cosmon/state` while the subprocess
         // was left to walk-up discovery from `cwd`. Those two paths
@@ -626,13 +655,14 @@ mod tests {
 
     #[test]
     fn build_command_model_pin_survives_strip_loop() {
-        // The export happens before the STRIP_VARS env_remove loop;
-        // this guards the ordering (a future re-shuffle that strips
-        // after setting would silently undo the pin, exactly like the
-        // COSMON_ARTIFACT_DIR precedent the comment warns about).
+        // The pin is exported AFTER `env_clear`; this guards the
+        // ordering (a re-shuffle that cleared after setting would
+        // silently undo the pin, exactly like the COSMON_ARTIFACT_DIR
+        // precedent the comment warns about).
         assert!(
-            !STRIP_VARS.contains(&env::ANTHROPIC_MODEL),
-            "ANTHROPIC_MODEL must never join STRIP_VARS — it is a set-half var"
+            is_passthrough(env::ANTHROPIC_MODEL),
+            "ANTHROPIC_MODEL is a set-half var and an inheritable one: \
+             an unpinned invoker must still let the adapter's value through"
         );
         let invoker = SystemInvoker::new(
             PathBuf::from("/nonexistent/cs"),
@@ -645,6 +675,98 @@ mod tests {
             built_env(&cmd, env::ANTHROPIC_MODEL).as_deref(),
             Some("operator-override-model")
         );
+    }
+
+    // ── §3.5 allow-list envelope (delib-20260819-cda2, C2) ──────────────
+    //
+    // The structural invariants of the allow-list, as pure predicates.
+    // They hold without spawning anything; the spawn-level proof lives
+    // in `tests/subprocess_env_hygiene.rs`.
+
+    #[test]
+    fn operator_kill_switch_never_crosses_the_perimeter() {
+        // The defect that motivated the deny-list → allow-list change.
+        // `COSMON_SKIP_PRE_DONE_HOOK` disarms the blocking `pre_done`
+        // gate for every `cs done` that inherits it; it is the human
+        // operator's per-invocation gesture, and there is no operator
+        // inside the adapter's container.
+        assert!(
+            !is_passthrough("COSMON_SKIP_PRE_DONE_HOOK"),
+            "the pre_done kill-switch must never be inheritable across \
+             the adapter perimeter"
+        );
+    }
+
+    #[test]
+    fn no_cosmon_variable_is_inheritable() {
+        // The structural property, not a roster check: under an
+        // allow-list, a `COSMON_*` reader added anywhere in the
+        // workspace is closed on arrival. Every `COSMON_*` the child
+        // legitimately needs is SET by `build_command` from adapter
+        // config, never inherited.
+        for name in PASSTHROUGH_VARS {
+            assert!(
+                !name.starts_with("COSMON_"),
+                "no COSMON_* var may be inheritable; found {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn filestore_resolution_vars_are_not_inheritable() {
+        // T25 Gap 2 regression guard, restated for the allow-list: an
+        // adapter booted with `COSMON_STATE_DIR=/wrong` must not
+        // redirect the child's filestore lookups.
+        for name in cosmon_filestore::resolve::RESOLUTION_VARS {
+            assert!(
+                !is_passthrough(name),
+                "filestore resolution var {name} must not be inheritable"
+            );
+        }
+    }
+
+    #[test]
+    fn pilot_vars_are_not_inheritable() {
+        // The worker *pilotage* vars (`CB_DEPTH`, `COSMON_EGRESS_POLICY`,
+        // `ANTHROPIC_MODEL`, …) are emitted by `cs tackle` for its own
+        // children. An adapter that inherited them would hand one
+        // tenant's steering to another's worker. `ANTHROPIC_MODEL` is
+        // the documented exception: it is the avatar-surface model pin,
+        // re-set from config when one is configured.
+        for name in cosmon_core::pilot_env::names() {
+            if name == env::ANTHROPIC_MODEL {
+                continue;
+            }
+            assert!(
+                !is_passthrough(name),
+                "pilot var {name} must not cross the adapter perimeter"
+            );
+        }
+    }
+
+    #[test]
+    fn allow_list_has_no_duplicate_names() {
+        // A duplicate is the shape a hand-maintained roster rots into:
+        // two entries, one reviewed, one not.
+        let mut seen = PASSTHROUGH_VARS.to_vec();
+        seen.sort_unstable();
+        let len_before = seen.len();
+        seen.dedup();
+        assert_eq!(
+            len_before,
+            seen.len(),
+            "duplicate entry in PASSTHROUGH_VARS"
+        );
+    }
+
+    #[test]
+    fn process_basics_stay_inheritable() {
+        // The other failure mode of an allow-list: too narrow, and the
+        // child cannot find `git` or read any config at all. These
+        // three are load-bearing for every `cs` verb that shells out.
+        for name in ["PATH", "HOME", "TMPDIR"] {
+            assert!(is_passthrough(name), "{name} must stay inheritable");
+        }
     }
 
     // ── B1 moussage resident (task-20260610-e5f6) — state-dir re-pose ────
@@ -672,13 +794,13 @@ mod tests {
 
     #[test]
     fn state_dir_repose_survives_strip_loop() {
-        // COSMON_STATE_DIR *is* in STRIP_VARS (that is the point: a
-        // mis-set adapter env never leaks). The re-pose must therefore
-        // come AFTER the env_remove loop — this test fails if a future
-        // re-shuffle strips after re-posing.
+        // COSMON_STATE_DIR is NOT on the allow-list (that is the
+        // point: a mis-set adapter env never leaks). The re-pose must
+        // therefore come AFTER `env_clear` — this test fails if a
+        // future re-shuffle clears after re-posing.
         assert!(
-            STRIP_VARS.contains(&"COSMON_STATE_DIR"),
-            "COSMON_STATE_DIR must stay in STRIP_VARS — inherited \
+            !is_passthrough("COSMON_STATE_DIR"),
+            "COSMON_STATE_DIR must stay off the allow-list — inherited \
              values are never trusted; the re-pose sets the canonical one"
         );
         let invoker = SystemInvoker::new(
