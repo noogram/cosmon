@@ -94,6 +94,8 @@ pub mod agent;
 #[doc(hidden)]
 pub mod algorithmic_provenance;
 #[doc(hidden)]
+pub mod api_envelope;
+#[doc(hidden)]
 pub mod artifact_map;
 #[doc(hidden)]
 pub mod atlas;

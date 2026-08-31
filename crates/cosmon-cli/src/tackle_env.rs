@@ -426,6 +426,27 @@ where
     // shell metacharacter stops being an injection surface.
     push_pilot_var(&mut prefix, PilotVar::MolDir, mol_dir_str);
     push_pilot_var(&mut prefix, PilotVar::ParentMolId, parent_id_str);
+    // ADR-080 §3.5 hand-off. `COSMON_API_REQUEST=1` means "this process IS
+    // the network request"; a tmux worker is not — it is the tenant's own
+    // machinery, and its entire job is `cs evolve` / `cs complete`, both on
+    // the operator-only closed list. `cs` now refuses those under the
+    // envelope (the §3.5 second lock), so a worker that inherited the marker
+    // would die on its first step.
+    //
+    // It can inherit it: the tmux server freezes its environment at startup,
+    // and in a per-tenant container that server is started by the first
+    // `cs tackle` the adapter spawns — with the marker set. Emitting the
+    // neutralised value here makes the worker's posture deterministic
+    // instead of a function of who happened to start tmux.
+    //
+    // This drops no confinement. `cs tackle` never pushed an egress variable
+    // onto the tmux path, and the exposed-host decision the marker feeds
+    // (`egress_launch_is_exposed` → fail-closed refusal) has already been
+    // taken, in this process, *before* this command is built: an exposed
+    // dispatch that could not be kernel-enforced never reaches a spawn.
+    if cosmon_core::api_envelope::envelope_active(&env_lookup) {
+        push_pilot_var(&mut prefix, PilotVar::ApiRequest, "");
+    }
     // Briefing-receipt overlay (`--settings`). Additive and file-scoped: the
     // file is a new 0600 file cosmon owns, registering one `UserPromptSubmit`
     // hook so the worker's Claude Code can *sign* a receipt for each briefing
@@ -1189,6 +1210,50 @@ mod tests {
             |_| None,
         );
         assert!(cmd.contains("CB_SESSION_ROLE=worker"), "got: {cmd}");
+    }
+
+    // -- ADR-080 §3.5 hand-off: the worker is not the request --
+
+    /// A worker spawned from an RPP dispatch must not carry the request
+    /// marker: `cs evolve` and `cs complete` are on the operator-only
+    /// closed list, so an inherited `COSMON_API_REQUEST=1` would make the
+    /// §3.5 second lock refuse the worker's own first step.
+    #[test]
+    fn an_rpp_dispatch_neutralises_the_request_marker_for_its_worker() {
+        let cmd = build_claude_command(
+            "/tmp/mol",
+            "task-Y",
+            "claude",
+            "bypassPermissions",
+            &[],
+            &RootSpawnDecision::SpawnAsIs,
+            None,
+            cb_absent,
+            |k| (k == "COSMON_API_REQUEST").then(|| "1".to_owned()),
+        );
+        assert!(cmd.contains("COSMON_API_REQUEST=''"), "got: {cmd}");
+        assert!(
+            !cmd.contains("COSMON_API_REQUEST=1"),
+            "the worker must never inherit the live marker: {cmd}"
+        );
+    }
+
+    /// …and an ordinary operator dispatch is byte-identical to before:
+    /// no marker in, no marker out.
+    #[test]
+    fn a_local_dispatch_emits_no_request_marker_at_all() {
+        let cmd = build_claude_command(
+            "/tmp/mol",
+            "task-Y",
+            "claude",
+            "bypassPermissions",
+            &[],
+            &RootSpawnDecision::SpawnAsIs,
+            None,
+            cb_absent,
+            |_| None,
+        );
+        assert!(!cmd.contains("COSMON_API_REQUEST"), "got: {cmd}");
     }
 
     // -- COSMON-DEV #20 / contract-20A: anchor-collision adversarial suite --

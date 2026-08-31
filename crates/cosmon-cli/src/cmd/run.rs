@@ -557,10 +557,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let mut torn_down = 0;
         for m in &dag_mols {
             if should_tear_down(m.status) {
-                let done_result = std::process::Command::new("cs")
+                let mut done_cmd = std::process::Command::new("cs");
+                done_cmd
                     .args(["done", m.id.as_str()])
-                    .current_dir(state_dir.parent().unwrap_or(&state_dir))
-                    .status();
+                    .current_dir(state_dir.parent().unwrap_or(&state_dir));
+                // Same hand-off as the runtime executor's `on_complete`
+                // (ADR-080 §3.5): an auto-teardown under a tenant-requested
+                // bounded drain is a local gesture, not the network request,
+                // and must not trip the operator-only refusal.
+                cosmon_core::api_envelope::hand_off_to_local_child(&mut done_cmd);
+                let done_result = done_cmd.status();
                 match done_result {
                     Ok(s) if s.success() => torn_down += 1,
                     _ => {
