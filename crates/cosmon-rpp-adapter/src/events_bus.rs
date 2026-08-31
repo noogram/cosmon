@@ -117,8 +117,8 @@ impl MoleculeEvent {
     /// Build a `drain.terminated` event — the resident drain loop
     /// exited with the NAMED `reason` token (I4 — never a stall):
     /// `drained`, `budget_exhausted`, `molecule_quota_exceeded`,
-    /// `max_depth_exceeded`, `timeout`, or `error`. The tokens mirror
-    /// the `cs run` exit codes 0/90/91/92/124 (B1 moussage); the mirror
+    /// `max_depth_exceeded`, `teardown_failed`, `timeout`, or `error`.
+    /// The tokens mirror the `cs run` exit codes 0/90/91/92/93/124; the mirror
     /// is pinned by
     /// `drain_exit_reason_mirrors_reject_labels` in
     /// `routes::molecules`.

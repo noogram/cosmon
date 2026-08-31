@@ -98,6 +98,15 @@ pub struct Args {
     pub poll_interval: u64,
 
     /// Skip automatic teardown of completed molecules after the run.
+    ///
+    /// Teardown runs `cs done` on every molecule that reached `Completed`
+    /// — and only those. A `Collapsed` molecule is explicitly-abandoned
+    /// work: it is terminal, but `cs done` also merges the molecule's
+    /// branch onto the trunk, so a collapsed branch must never be handed
+    /// to it. A teardown that fails exits with the NAMED code 93
+    /// (`teardown_failed`): the branch is unmerged and the worktree /
+    /// session is still standing, which a detached caller cannot learn
+    /// any other way.
     #[arg(long)]
     pub no_teardown: bool,
 
@@ -528,12 +537,26 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    // 9. Auto-teardown: run `cs done` on every completed molecule in the DAG
+    // 9. Auto-teardown: run `cs done` on every *completed* molecule in the DAG
     //    to clean up worktrees, tmux sessions, fleet entries, and merge branches.
+    //
+    //    The predicate is `== Completed`, NOT `is_terminal()`
+    //    (task-20260831-74d1, from delib-20260819-cda2). `is_terminal()` is
+    //    correct for what it names — {Completed, Collapsed} — but half of what
+    //    `cs done` does here is *merge the molecule's branch onto the trunk*,
+    //    and a collapsed molecule is explicitly-abandoned work whose branch
+    //    must never reach the trunk. This is the only place in the codebase
+    //    where a single predicate commands both halves of `done`, and it is
+    //    exactly the place where that predicate is wrong for one of them.
+    //    Closing a collapsed molecule is legitimate; merging its branch is not.
+    //
+    //    We restrict the predicate rather than passing `--if-completed`: the
+    //    guard then does not depend on a flag the next caller could forget.
+    let mut teardown_failed = 0usize;
     if !args.no_teardown {
         let mut torn_down = 0;
         for m in &dag_mols {
-            if m.status.is_terminal() {
+            if should_tear_down(m.status) {
                 let done_result = std::process::Command::new("cs")
                     .args(["done", m.id.as_str()])
                     .current_dir(state_dir.parent().unwrap_or(&state_dir))
@@ -541,8 +564,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 match done_result {
                     Ok(s) if s.success() => torn_down += 1,
                     _ => {
+                        teardown_failed += 1;
                         if !ctx.json {
-                            eprintln!("  ⚠ teardown of {} failed (non-fatal)", m.id);
+                            eprintln!("  ✗ teardown of {} failed", m.id);
                         }
                     }
                 }
@@ -565,6 +589,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
     if report.reason == ShutdownReason::MoleculeQuotaExceeded {
         std::process::exit(91);
+    }
+    // A teardown that failed is a molecule whose branch is NOT integrated and
+    // whose worktree / tmux session / fleet entry is still standing. `cs done`
+    // fails hard and tears nothing down by design; swallowing that on a
+    // *detached* drain that already answered `202` annuls its contract and
+    // leaves the caller believing the DAG landed. Named exit code in the
+    // existing moussage family (90/91/92/124), carried onto the drain
+    // termination event as `teardown_failed`
+    // (`crate::routes::molecules::drain_exit_reason` in cosmon-rpp-adapter).
+    if teardown_failed > 0 {
+        if !ctx.json {
+            eprintln!(
+                "✗ teardown_failed: {teardown_failed} molecule(s) not integrated — \
+                 branch unmerged and session still standing; see `cs peek`"
+            );
+        }
+        std::process::exit(93);
     }
 
     Ok(())
@@ -875,6 +916,23 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Does this molecule's terminal state authorize `cs run`'s step-9 teardown?
+///
+/// `true` for `Completed` and nothing else. The distinction is load-bearing
+/// because `cs done` performs two things under one name: it closes the
+/// molecule (legitimate for any terminal state) **and** merges its branch
+/// onto the trunk (legitimate only for work that succeeded). Step 9 used
+/// [`MoleculeStatus::is_terminal`], whose set is `{Completed, Collapsed}` —
+/// correct for what that predicate names, wrong as the guard on a merge.
+///
+/// ```ignore
+/// assert!(should_tear_down(MoleculeStatus::Completed));
+/// assert!(!should_tear_down(MoleculeStatus::Collapsed));
+/// ```
+fn should_tear_down(status: MoleculeStatus) -> bool {
+    matches!(status, MoleculeStatus::Completed)
+}
+
 /// Colorize a molecule status for human output.
 fn colorize_status(status: MoleculeStatus) -> String {
     let s = status.to_string();
@@ -906,6 +964,47 @@ mod tests {
     // single canonical chain and is resolved by the child `cs tackle` (source
     // `EnvVar`), never hoisted into a rung-1 directive here. Exercise the pure
     // resolver so this boundary is pinned without mutating process-global env.
+    /// Step-9 teardown authorizes ONLY `Completed`.
+    ///
+    /// The regression this pins (task-20260831-74d1, delib-20260819-cda2):
+    /// the loop filtered on `is_terminal()`, whose set includes `Collapsed`,
+    /// and called `cs done` without `--if-completed` — so the branch of
+    /// explicitly-abandoned work was merged onto the trunk. `cs run` step 9
+    /// is the only path on which a tenant reaches a trunk write today, which
+    /// is what makes the difference between the two predicates observable.
+    #[test]
+    fn teardown_authorizes_completed_but_never_collapsed() {
+        assert!(
+            should_tear_down(MoleculeStatus::Completed),
+            "successful work is integrated and torn down"
+        );
+        assert!(
+            !should_tear_down(MoleculeStatus::Collapsed),
+            "an abandoned molecule is terminal, but its branch must never \
+             reach the trunk — `is_terminal()` would have said yes here"
+        );
+        for other in [
+            MoleculeStatus::Pending,
+            MoleculeStatus::Queued,
+            MoleculeStatus::Running,
+            MoleculeStatus::Frozen,
+        ] {
+            assert!(
+                !should_tear_down(other),
+                "{other} is not terminal and must not be torn down"
+            );
+        }
+    }
+
+    /// `is_terminal()` itself stays as it is — the predicate is correct for
+    /// what it names; it was its *use* as a merge guard that was wrong. This
+    /// pins that the fix did not "fix" the wrong thing.
+    #[test]
+    fn is_terminal_still_admits_collapsed() {
+        assert!(MoleculeStatus::Collapsed.is_terminal());
+        assert!(MoleculeStatus::Completed.is_terminal());
+    }
+
     #[test]
     fn run_adapter_directive_uses_the_flag() {
         assert_eq!(
