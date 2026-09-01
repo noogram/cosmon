@@ -160,4 +160,5 @@
 | 173-a-cockpit-is-a-command-surface-not-a-sixth-viewport | [173-a-cockpit-is-a-command-surface-not-a-sixth-viewport.md](173-a-cockpit-is-a-command-surface-not-a-sixth-viewport.md) |
 | 174-per-worker-storage-is-deferred-until-a-named-use-case | [174-per-worker-storage-is-deferred-until-a-named-use-case.md](174-per-worker-storage-is-deferred-until-a-named-use-case.md) |
 | 175-the-operator-carnet-is-cs-journal | [175-the-operator-carnet-is-cs-journal.md](175-the-operator-carnet-is-cs-journal.md) |
+| 176-remote-harvest-authority-is-a-sealed-capability | [176-remote-harvest-authority-is-a-sealed-capability.md](176-remote-harvest-authority-is-a-sealed-capability.md) |
 
