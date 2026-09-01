@@ -274,7 +274,9 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
 * `--poll-interval <POLL_INTERVAL>` — Seconds between runtime ticks. Lower values are more responsive but increase store I/O
 
   Default value: `1`
-* `--no-teardown` — Skip automatic teardown of completed molecules after the run
+* `--no-teardown` — Skip automatic teardown of completed molecules after the run.
+
+   Teardown runs `cs done` on every molecule that reached `Completed` — and only those. A `Collapsed` molecule is explicitly-abandoned work: it is terminal, but `cs done` also merges the molecule's branch onto the trunk, so a collapsed branch must never be handed to it. A teardown that fails exits with the NAMED code 93 (`teardown_failed`): the branch is unmerged and the worktree / session is still standing, which a detached caller cannot learn any other way.
 * `--sweep-every <SWEEP_EVERY>` — ADR-038 Limit 1: re-walk the store every N ticks to absorb descendants nucleated dynamically by workers (mission-controller decompose, deep-think step 4, etc.) that are not reachable from the runtime's root via pre-existing typed links. Zero disables the sweep (default) — the scope is frozen at compile-plan time, which is the pre-2026-04-14 behavior
 
   Default value: `0`

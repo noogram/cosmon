@@ -1684,7 +1684,8 @@ fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &
 /// spawn publishes `drain.started` on the events bus; the detached
 /// task publishes `drain.terminated` with the NAMED reason token
 /// (I4) when the loop exits — `drained`, `budget_exhausted`,
-/// `molecule_quota_exceeded`, `max_depth_exceeded`, `timeout`, or
+/// `molecule_quota_exceeded`, `max_depth_exceeded`, `teardown_failed`,
+/// `timeout`, or
 /// `error` (see [`drain_exit_reason`]).
 ///
 /// Errors mapped to:
@@ -1870,6 +1871,12 @@ pub fn drain_exit_reason(code: i32) -> &'static str {
         90 => "budget_exhausted",
         91 => "molecule_quota_exceeded",
         92 => "max_depth_exceeded",
+        // Post-drain integration failure (task-20260831-74d1): the loop
+        // itself drained, but `cs done` refused to tear a completed
+        // molecule down, so its branch is unmerged and its session still
+        // stands. Distinct from `error` because it names *what* is left
+        // undone rather than "something went wrong".
+        93 => "teardown_failed",
         124 => "timeout",
         _ => "error",
     }
@@ -1947,6 +1954,7 @@ mod tests {
             RppRejectReason::DrainMaxDepthExceeded.label()
         );
         assert_eq!(drain_exit_reason(0), "drained");
+        assert_eq!(drain_exit_reason(93), "teardown_failed");
         assert_eq!(drain_exit_reason(124), "timeout");
         assert_eq!(drain_exit_reason(1), "error");
     }
