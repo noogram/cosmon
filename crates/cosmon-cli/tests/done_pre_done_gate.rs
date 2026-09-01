@@ -1106,7 +1106,7 @@ fn cargo_absent_falls_through_to_build_command() {
 }
 
 /// Defect 1 wiring, guarded (task-20260715-ff5b): a delegated `integrity_command`
-/// under an EXPOSED (`COSMON_API_REQUEST=1`) `deny-external` dispatch is routed
+/// under an EXPOSED (`COSMON_EGRESS_EXPOSED=1`) `deny-external` dispatch is routed
 /// through the egress jail. On a host that cannot kernel-enforce the jail
 /// (`netns_available() == false`, e.g. macOS), the gate REFUSES fail-closed —
 /// the repo-supplied shell never runs and the merge rolls back. On a
@@ -1143,7 +1143,18 @@ fn delegated_command_egress_refused_on_unenforceable_exposed_host() {
         // Exposed multi-tenant + strict-local egress that this host cannot
         // enforce ⇒ the delegated command must be refused fail-closed.
         .env("COSMON_EGRESS_POLICY", "deny-external")
-        .env("COSMON_API_REQUEST", "1")
+        // The exposed multi-tenant posture, stated through its dedicated knob.
+        // This used to say `COSMON_API_REQUEST=1`, which reaches the same
+        // `exposed_multitenant_from_env()` input — but that marker means "this
+        // process IS an RPP request", and ADR-080 §3.5's second lock now
+        // refuses `cs done` outright under it (see
+        // `operator_only_verb_refused_under_api_envelope` in
+        // `api_envelope_second_lock.rs`). Asserting the *egress* routing needs
+        // the posture, not the request identity: with the marker the process
+        // would exit at parse time and this test would pass while measuring
+        // nothing. `COSMON_EGRESS_EXPOSED` is the knob
+        // `cmd::egress_delegate::jail_delegated_sh` documents for exactly this.
+        .env("COSMON_EGRESS_EXPOSED", "1")
         .args(["--json", "done", &mol_id, "--no-auto-propel"])
         .output()
         .expect("cs done");

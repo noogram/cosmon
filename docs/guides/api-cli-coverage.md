@@ -50,6 +50,14 @@ Legend for the **Exposed via API?** column:
 | `NO` | not exposed; reason in the rightmost column. Adding a route requires a successor ADR. |
 | `**NO (NEVER)**` | structurally never exposable (operator-only or worker-only verb, ADR-080 §5.1). |
 
+A `**NO (NEVER)**` verb is refused **twice**: the adapter will not route
+to it (`OPERATOR_ONLY_VERBS` in `cosmon-rpp-adapter::admission`), and `cs`
+itself refuses to run it under the request envelope
+`COSMON_API_REQUEST=1`, at parse time, with exit code 17
+(`cosmon_core::api_envelope`, ADR-080 §3.5 / §3.5.1). The second lock
+existed only on paper until 2026-09-01; a mis-wired route used to
+traverse the whole defence.
+
 Verbs are ordered roughly by lifecycle: capture → nucleate → observe →
 advance → terminate → infrastructure → introspection.
 

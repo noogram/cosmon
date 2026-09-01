@@ -211,6 +211,22 @@ adapter, where it belongs.
 
 The CLI side honours the envelope: `cs` MUST detect `COSMON_API_REQUEST=1` and refuse operator-only verbs at parse time (return a typed `OperatorOnlyVerbInApi` error before any state mutation). The list of operator-only verbs is enumerated in §5.
 
+#### 3.5.2 Implementation note — the second lock, and where the envelope stops *(2026-09-01, `task-20260831-294e`, C3 of `delib-20260819-cda2`)*
+
+The clause above went unimplemented until this note. Every non-test occurrence of `COSMON_API_REQUEST` in `crates/` read the marker to suppress a `cb` probe or to project the exposed egress posture; none refused a verb. The guarantee this ADR announces as defence in depth was, for its first year, a single layer: `OPERATOR_ONLY_VERBS` in `cosmon-rpp-adapter::admission`, which one mis-wired route traverses whole.
+
+The lock now lives in `cosmon_core::api_envelope`, which is also where `OPERATOR_ONLY_VERBS` is declared — the adapter re-exports it. Two locks over two copies of a list is one lock plus a latent divergence.
+
+§3.5.1 and this note are the two halves of the same clause: §3.5.1 fixes *what the envelope carries*, this one fixes *what the envelope forbids*. Neither subsumes the other — an allow-listed environment still delivers a verb to a `cs` that had no reason to refuse it, and a refusing `cs` still inherits whatever the envelope hands it.
+
+**The verb name comes from clap, not from a `match`.** `cs` gates on the subcommand name `ArgMatches` resolved, so a verb that is renamed or added cannot fall out of the gate silently; the only way off the closed list is to leave the list.
+
+**Where the envelope stops.** `COSMON_API_REQUEST=1` means *this process **is** the network request* — not *somewhere upstream there was one*. Two verbs that §8p **does** expose spawn `cs` again as a local gesture of the tenant's own machinery: `POST /v1/molecules/{id}/run` (ADR-124) runs a resident loop that calls `cs done` to tear each completed molecule down, and `POST /v1/molecules/{id}/tackle` spawns a worker whose entire job is `cs evolve` / `cs complete`. All three are on the closed list. Inherited wholesale, the marker would have made this ADR's second lock un-ship two of its own routes.
+
+So the envelope is **consumed** at those hand-offs (`api_envelope::hand_off_to_local_child`, and the neutralised value `cs tackle` emits into a worker's tmux prefix). Only the two correlation markers are dropped; no security posture is. `COSMON_EGRESS_POLICY` and `COSMON_EGRESS_EXPOSED` travel across the hand-off unchanged, and the fail-closed exposed-host refusal `cs tackle` performs happens *before* the spawn. A hand-off is a statement about identity, never a relaxation of confinement — the same distinction `cosmon_core::pilot_env` draws between a pilot variable and a jail.
+
+**Residual, stated rather than papered over.** The lock is keyed on an environment marker, so it defends against a mis-wired *route*, which is the threat §3.5 names. It does not defend against local code execution inside the tenant container, which can set or clear any variable — at that point clause (e) is not the boundary that matters.
+
 ### 3.6 Reject taxonomy
 
 ```rust

@@ -576,7 +576,43 @@ fn main() {
         std::process::exit(code);
     }
 
-    let cli = Cli::parse();
+    // Parse through `ArgMatches` rather than `Cli::parse()` so the verb the
+    // §3.5 gate below refuses is the name **clap** resolved, not a name a
+    // hand-written `match` arm claims. A renamed or newly-added operator-only
+    // verb therefore cannot fall out of the gate silently; the only way to
+    // leave the closed list is to leave `OPERATOR_ONLY_VERBS`.
+    let matches = build_cli().get_matches();
+    let cli = match <Cli as clap::FromArgMatches>::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(err) => err.exit(),
+    };
+
+    // ADR-080 §3.5, the second lock. The adapter refuses to *route* to an
+    // operator-only verb (`cosmon_rpp_adapter::admission`); this refuses to
+    // *run* one, so a single mis-wired route no longer traverses the whole
+    // defence. It fires here — after parsing, before the presence event, the
+    // store walk-up and every handler — because §3.5 says "at parse time,
+    // before any state mutation", and because `cs done` is irreversible by
+    // the time a handler could think about it.
+    //
+    // Off the RPP path this is dead weight by construction: no envelope, no
+    // refusal, byte-identical behaviour for a local operator.
+    if let Some(verb) = matches.subcommand_name() {
+        if let Err(refusal) =
+            cosmon_core::api_envelope::refuse_operator_only_verb(verb, |k| std::env::var(k).ok())
+        {
+            if cli.json {
+                let err = serde_json::json!({"error": refusal.to_string()});
+                eprintln!("{err}");
+            } else {
+                eprintln!("cs: {refusal}");
+            }
+            // Through the guard registry, not the core constant directly, so
+            // this refusal's code sits in the same table every other typed CLI
+            // refusal is reserved in and nobody re-uses 17.
+            std::process::exit(cmd::guard::exit_code::OPERATOR_ONLY_VERB_IN_API);
+        }
+    }
 
     // Before any dispatch: from here on a `tracing::warn!` reaches the operator
     // instead of the floor.

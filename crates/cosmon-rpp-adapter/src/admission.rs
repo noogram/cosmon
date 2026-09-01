@@ -31,24 +31,13 @@ use crate::nucleon_map::{HabilitationMap, Noyau};
 use crate::rate_limit::{hash_sub, IngressRateLimiter, RateOutcome};
 
 /// Operator-only verbs the RPP MUST refuse to expose (ADR-080 §5.1).
-/// The list is **closed**: extending it requires a successor ADR with
-/// a `delegate_for` claim model.
-pub const OPERATOR_ONLY_VERBS: &[&str] = &[
-    "done",
-    "evolve",
-    "complete",
-    "security",
-    // `run` left the list 2026-06-11 (ADR-124, task-20260610-56c4):
-    // `POST /v1/molecules/{id}/run` admits a REQUEST for a bounded
-    // drain of the caller's own DAG — bounds binding-sealed (B1/B2/B3),
-    // loop resident in the tenant container. Not the operator verb.
-    "kill",
-    "purge",
-    "reconcile",
-    "verify",
-    "whisper",
-    "drop",
-];
+///
+/// Re-exported from [`cosmon_core::api_envelope`] rather than declared
+/// here: ADR-080 gives this list **two** locks — the adapter refuses to
+/// route to one (below), and `cs` refuses to run one under the §3.5
+/// request envelope. Two locks over two copies of a list is one lock plus
+/// a latent divergence, so both read this constant.
+pub use cosmon_core::api_envelope::OPERATOR_ONLY_VERBS;
 
 /// Authenticated and admitted "Spark" — the unit of perturbation
 /// downstream of admission. Carries everything the subprocess

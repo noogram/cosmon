@@ -66,6 +66,14 @@ pub(crate) mod exit_code {
     /// recovery is neither a re-dispatch nor a repair: it is a lease grant,
     /// and only a human can issue one.
     pub const UNLEASED_PILOT_GESTURE: i32 = 16;
+    /// The ADR-080 §3.5 parse-time refusal of an operator-only verb under
+    /// the RPP request envelope. Not a `GuardError` variant: the refusal
+    /// fires in `main` before any handler runs (that is the point of a
+    /// *parse-time* lock), so it never travels this error type. The code is
+    /// reserved here, aliased to the cross-crate contract, so the next guard
+    /// does not claim 17 and make two refusals indistinguishable to a script.
+    pub const OPERATOR_ONLY_VERB_IN_API: i32 =
+        cosmon_core::api_envelope::EXIT_OPERATOR_ONLY_VERB_IN_API;
 }
 
 /// Errors raised by the CLI type-tightening guards.

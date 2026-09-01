@@ -484,6 +484,13 @@ impl Executor for SubprocessExecutor {
         // the predecessor's work.
         let mut cmd = Command::new("cs");
         cmd.args(["done", id.as_str()]).current_dir(&self.cwd);
+        // ADR-080 §3.5: `cs done` is operator-only, and `cs` now refuses it
+        // under the RPP request envelope. This teardown is not the request —
+        // it is the resident loop's own local gesture, downstream of a
+        // `POST /v1/molecules/{id}/run` the tenant merely *asked* for
+        // (ADR-124). Consume the envelope so the child says so. No security
+        // posture is dropped; see `hand_off_to_local_child`.
+        cosmon_core::api_envelope::hand_off_to_local_child(&mut cmd);
         if self.quiet {
             cmd.stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
