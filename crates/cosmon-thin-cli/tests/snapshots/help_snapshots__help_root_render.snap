@@ -27,6 +27,7 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
   ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
   freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
+  land       POST   /v1/molecules/:id/land           scope: cosmon:molecule:write
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
   run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn

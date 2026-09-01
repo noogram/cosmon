@@ -442,6 +442,19 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/run",
             post(routes::molecules::run_molecule),
         )
+        // The harvest door (task-20260901-3b53, ADR-176, issue #51).
+        // The tenant asks for ONE molecule to be closed and, where the
+        // second authority arises, integrated. The body carries no
+        // options — strategy, reservations and base are sealed fields of
+        // the operator's grant (D4). Synchronous by decision: a 202 on a
+        // transaction that may integrate nothing is the defect #51
+        // reports. Refuses `not_authorized` in any galaxy that has not
+        // armed `[harvest_authority] required` — the JWT authenticates
+        // the requester, the seal authorises the effect.
+        .route(
+            "/v1/molecules/{id}/land",
+            post(routes::molecules::land_molecule),
+        )
         // Artifact endpoints (e653 spec, task-20260522-ef4f). The
         // PUT and GET share `/artifacts/{token}` — axum disambiguates
         // by method; the path segment carries the manifest token on

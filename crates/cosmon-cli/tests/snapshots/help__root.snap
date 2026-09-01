@@ -251,6 +251,7 @@ Commands:
   paths           Paths — project the write-path taxonomy (`--writes`), a pure derived view
   done            Done — terminal teardown for a molecule (merge + cleanup, human-callable)
   harvest         Harvest — close a completed-but-unmerged molecule by invoking `cs done`
+  land            Land — the harvest door: close one molecule, and integrate it where that second authority arises (ADR-176; the §8p `POST /v1/molecules/{id}/land` twin). Takes the molecule and nothing else: no strategy, no force, no hook skip. A galaxy must have armed `[harvest_authority] required` for it to do anything at all
   stuck           Stuck — freeze a molecule and record the blocker
   await-operator  Await-operator — the only sanctioned way to block on an operator decision at an irreversibility boundary (ADR-123). Routes on the molecule's `op-block:*` capability: block-and-emit, or surface-and-continue
   topology        Topology — structural maps of the workspace (wraps the `topon` CLI)

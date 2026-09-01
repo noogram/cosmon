@@ -50,6 +50,12 @@ adr_ref = "ADR-080 §5.1 (ADR-123)"
 reason = "worker-internal block-on-operator (ADR-123); emitted by a live worker inside its worktree at an irreversible boundary — same NEVER-on-the-wire class as cs evolve / cs complete."
 
 [[verb_absent_from_thin]]
+verb = "land"
+class = "out_of_scope"
+adr_ref = "ADR-176 D1"
+reason = "the harvest door is delivered by `cosmon-remote land`, the tenant CLI that carries the §8p client. cs-thin is the transport-shape prover and holds no galaxy: the door refuses without an operator-sealed grant resolved server-side, so a cs-thin arm could only ever demonstrate the refusal."
+
+[[verb_absent_from_thin]]
 verb = "run"
 class = "operator_only"
 adr_ref = "ADR-080 §5.1"

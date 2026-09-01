@@ -262,7 +262,10 @@ mod tests {
     }
 
     fn required() -> HarvestAuthorityConfig {
-        HarvestAuthorityConfig { required: true }
+        HarvestAuthorityConfig {
+            required: true,
+            ..HarvestAuthorityConfig::default()
+        }
     }
 
     fn mol(raw: &str) -> MoleculeId {

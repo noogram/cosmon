@@ -73,7 +73,9 @@ use crate::audit::new_request_id;
 use crate::error::{ApiError, RppRejectReason};
 use crate::events_bus::MoleculeEvent;
 use crate::jwt::{JwtVerifier, ValidatedJwt};
-use crate::subprocess::{parse_cs_json, run_molecule_args, tackle_molecule_args, SystemInvoker};
+use crate::subprocess::{
+    land_molecule_args, parse_cs_json, run_molecule_args, tackle_molecule_args, SystemInvoker,
+};
 use crate::AppState;
 
 // Scope catalog lives in `crate::auth::scopes` (since v1.0.0-rc,
@@ -1818,6 +1820,203 @@ pub async fn run_molecule(
         },
     });
     Ok((StatusCode::ACCEPTED, Json(body)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// The harvest door — land (`POST /v1/molecules/:id/land`)
+// ---------------------------------------------------------------------------
+
+/// How long the door waits on `cs land`.
+///
+/// A harvest is a merge and a teardown, not an agent run: seconds, not hours.
+/// The short deadline is what lets this route stay synchronous, and staying
+/// synchronous is the decision — see [`land_molecule`].
+const LAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+/// `POST /v1/molecules/:id/land` — the harvest door (ADR-176, issue #51).
+///
+/// # A request door, not a command
+///
+/// The body carries **no options**, and that is a property this route
+/// enforces rather than inherits: any body but an empty one or `{}` is
+/// refused with `unsupported_parameter`. Merge strategy, reservations and
+/// base are sealed fields of the operator's grant, never request parameters
+/// (ADR-176 D4). The requester states one intent — *land this molecule* —
+/// and the door decides which of the two authorities that intent needs
+/// (D2: the closure authority always; the integration authority when, and
+/// only when, the molecule's resolved base is the kernel's reference trunk).
+///
+/// # Two proofs, two keys
+///
+/// The JWT **authenticates the requester**; the operator-sealed grant
+/// **authorises the effect**, and it is verified inside the trunk lock with
+/// every fact re-derived there (ADR-172 D3). A bearer brings a request, never
+/// an authority: in a galaxy that has not armed `[harvest_authority]
+/// required`, every call to this route refuses `not_authorized`.
+///
+/// # Never 202
+///
+/// The other out-of-process route on this surface (`/run`) answers 202
+/// because a drain is hours-shaped. This one must not. A 202 on a
+/// transaction that may integrate nothing rebuilds exactly the defect issue
+/// #51 reports — the tenant reads success, the branch is stranded, and
+/// nobody is coming. `never_202_on_a_transaction_that_may_integrate_nothing`
+/// pins it.
+///
+/// # Named refusals
+///
+/// Every outcome is one of the seven [`DoorRefusal`] labels, read back from
+/// the CLI door's **exit code** rather than parsed out of stderr, so the two
+/// sides cannot drift into two vocabularies. `base_not_fast_forward` maps to
+/// 503 alone: ADR-176 D7 classes it an operator *configuration* error,
+/// decidable at arming time, and charging it to the requester as a 4xx would
+/// convert the operator's misconfiguration into the tenant's failure class.
+///
+/// [`DoorRefusal`]: cosmon_core::harvest_door::DoorRefusal
+pub async fn land_molecule(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    AxumPath(molecule_id_str): AxumPath<String>,
+    body: axum::body::Bytes,
+) -> Result<Response, ApiError> {
+    // 1. Authorization header → JWT validation. This proves *who asks*.
+    let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
+    let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
+        .map_err(|e| state.reject(e))?;
+
+    // 2. Scope. `cosmon:molecule:write` alone — deliberately NOT the
+    //    `+ worker:spawn` composition that tackle and run carry. That pair
+    //    exists because those two verbs burn Anthropic credit; this one does
+    //    not, because auto-propel is disarmed on this path by construction
+    //    (ADR-176 D6). Requiring the spawn scope here would say the door
+    //    spends agent budget, which would then be true the day someone
+    //    re-armed escalation.
+    authorise_scope(
+        &state,
+        &jwt,
+        "land",
+        &[SCOPE_MOLECULE_WRITE],
+        SCOPE_MOLECULE_WRITE,
+    )?;
+
+    // 3. Admission boundary (clauses a–d, materialise inbox).
+    let spark = build_spark(&state, &jwt, Verb::LandMolecule, Some(&molecule_id_str))?;
+
+    // 4. The body must be empty. Checked *here*, on raw bytes, rather than by
+    //    deserialising into a field-less struct: a struct with
+    //    `deny_unknown_fields` refuses the fields it knows about today, while
+    //    this refuses the whole channel. A door whose body is inert cannot
+    //    grow a parameter by accident.
+    if !body.is_empty() && body.as_ref() != b"{}" {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            label: "unsupported_parameter",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+
+    // 5. Malformed id and absent tenant root both collapse to 404 — the same
+    //    no-existence-oracle boundary the rest of the surface holds.
+    let _molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
+        status: StatusCode::NOT_FOUND,
+        label: "not_found",
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
+    if !tenant_root.exists() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+
+    // 6. The effect, synchronously, inside the tenant container where the
+    //    advisory `trunk.lock` flock actually binds (the I1 validity
+    //    condition that also made `run` a subprocess).
+    let invoker = SystemInvoker::new(
+        state.cs_path.clone(),
+        state.galaxies_root.clone(),
+        LAND_TIMEOUT,
+    )
+    .with_artifact_root(Some(state.artifact_root.clone()));
+    let args = land_molecule_args(&molecule_id_str);
+
+    match invoker.invoke_owned(&spark, &args).await {
+        Ok(result) => {
+            let outcome = parse_cs_json(&result.stdout)
+                .ok()
+                .and_then(|v| {
+                    v.get("outcome")
+                        .and_then(Value::as_str)
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_else(|| "landed".to_owned());
+            let body = json!({
+                "request_id": spark.request_id,
+                "harvest": {
+                    "molecule": molecule_id_str,
+                    "outcome": outcome,
+                },
+            });
+            // 200, never 202: by the time this line runs, the merge either
+            // happened or it did not, and the answer says which.
+            Ok((StatusCode::OK, Json(body)).into_response())
+        }
+        Err(RppRejectReason::SubprocessTimeout(_)) => Err(ApiError {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            label: "harvest_timeout",
+            request_id: Some(spark.request_id),
+        }),
+        Err(RppRejectReason::SubprocessExitNonZero { code, .. }) => {
+            Err(refusal_to_api_error(code, &spark.request_id))
+        }
+        Err(reason) => Err(state.reject(reason)),
+    }
+}
+
+/// Map the harvest door's exit code to its named §8p refusal.
+///
+/// The label comes from [`cosmon_core::harvest_door::DoorRefusal`] — the one
+/// spelling shared by the CLI, this route and the operator's log — so a
+/// refusal cannot acquire a second name on the way out.
+///
+/// An exit code the door does not own becomes an anonymous 500. That is
+/// deliberate: inventing a name for an outcome the closed set does not
+/// contain would be the unnamed refusal in disguise.
+fn refusal_to_api_error(code: i32, request_id: &str) -> ApiError {
+    use cosmon_core::harvest_door::DoorRefusal;
+
+    let Some(refusal) = DoorRefusal::from_exit_code(code) else {
+        return ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "harvest_failed",
+            request_id: Some(request_id.to_owned()),
+        };
+    };
+    let status = match refusal {
+        // The requester holds a token but no authority, or holds neither —
+        // and, for a reservation, a human attached a condition only a human
+        // lifts. Both are 403 for the same reason: the door is not going to
+        // do this for anybody who asks the same way again.
+        DoorRefusal::NotAuthorized | DoorRefusal::ReservationRequiresSeal => StatusCode::FORBIDDEN,
+        // State conflicts: the work is not landable *right now*, and the
+        // requester can tell from the label what would change that.
+        DoorRefusal::NotCompleted | DoorRefusal::MergeConflict => StatusCode::CONFLICT,
+        // A bounded queue at its bound. 429 rather than 409 because the
+        // honest reading is "later, not never" — and because the ceiling is
+        // an operator's quantity, which is what 429 means everywhere else on
+        // this surface.
+        DoorRefusal::BacklogFull | DoorRefusal::PreDoneRefused => StatusCode::TOO_MANY_REQUESTS,
+        // ADR-176 D7 — an operator configuration fault, never charged to the
+        // requester as a 4xx.
+        DoorRefusal::BaseNotFastForward => StatusCode::SERVICE_UNAVAILABLE,
+    };
+    ApiError {
+        status,
+        label: refusal.as_str(),
+        request_id: Some(request_id.to_owned()),
+    }
 }
 
 /// Detach the resident drain: run the `cs run` subprocess to its

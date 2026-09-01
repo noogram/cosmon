@@ -243,11 +243,15 @@ const TACKLE_PRE: &str = "  tackle    `POST /v1/molecules/{id}/tackle`";
 const TACKLE_POST: &str = "  tackle    `POST /v1/molecules/{id}/tackle` [co\u{fb}teux]";
 
 #[test]
-fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_line() {
+fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_land_lines() {
     // In-place substitutions: the thaw about correction (A2, blessed
-    // in CHANGELOG 0.2.0) and the scope-derived [co\u{fb}teux] marker on
-    // tackle (A3, task-20260610-10d2). One blessed addition: the
-    // `run` verb (B2 bounded drain, task-20260610-56c4).
+    // in CHANGELOG 0.2.0) and the scope-derived [coûteux] marker on
+    // tackle (A3, task-20260610-10d2). Two blessed additions: the
+    // `run` verb (B2 bounded drain, task-20260610-56c4) and the `land`
+    // verb — the harvest door of ADR-176, answering issue #51
+    // (task-20260901-3b53). `land` is additive and carries no options,
+    // which is why it can join a surface pinned this tightly: the line
+    // it adds is the whole change.
     let pre = lines_of("molecule.pre-fusion.help.txt");
     let post = lines_of("molecule.help.txt");
     let added: Vec<&String> = post.iter().filter(|l| !pre.contains(l)).collect();
@@ -265,8 +269,9 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_line() {
     }
     assert_eq!(
         added.len(),
-        4,
-        "blessed: thaw correction + tackle marker + run line + --token reword, got {added:?}"
+        5,
+        "blessed: thaw correction + tackle marker + run line + land line + --token reword, \
+         got {added:?}"
     );
     assert!(
         added.iter().any(|l| l.as_str() == THAW_POST),
@@ -285,6 +290,12 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_line() {
             .iter()
             .any(|l| l.starts_with("  run       `POST /v1/molecules/{id}/run`")),
         "missing the blessed run verb line, got {added:?}"
+    );
+    assert!(
+        added
+            .iter()
+            .any(|l| l.starts_with("  land      `POST /v1/molecules/{id}/land`")),
+        "missing the blessed land verb line (the harvest door), got {added:?}"
     );
 }
 

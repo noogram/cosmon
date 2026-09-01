@@ -184,6 +184,53 @@ pub struct Args {
     deploy_off_trunk: bool,
 }
 
+impl Args {
+    /// The one argument set the **harvest door** may build (ADR-176 D4).
+    ///
+    /// Every field is fixed here rather than defaulted, because "no option
+    /// crosses the wire" has to be a property of the *type* and not of a
+    /// caller's discipline. `cs land` — and, through it, the §8p harvest
+    /// route — has no way to vary any of them: the constructor takes the
+    /// molecule and nothing else.
+    ///
+    /// The three that carry the doctrine:
+    ///
+    /// - `no_auto_propel: true` and `max_retries: 0` disarm escalation **by
+    ///   construction** (D6). Auto-propel injects a natural-language
+    ///   instruction, partly authored by the requester through the molecule
+    ///   briefing, into a live worker session to resolve a conflict *on the
+    ///   trunk*, and renders the result as `merged_after_n_escalation(s)` — a
+    ///   success label. Leaving it merely defaulted off would make a config
+    ///   edit elsewhere re-arm it here.
+    /// - `skip_pre_done_hook: false` keeps the galaxy's Definition-of-Done in
+    ///   force. That flag is the human operator's kill-switch over a gate
+    ///   built to protect third parties; a requester holding it holds the
+    ///   gate's own off-switch.
+    /// - `if_completed: true` refuses to integrate the branch of an abandoned
+    ///   molecule — the ADR-176 §1 defect in its general form. `is_terminal()`
+    ///   is `Completed | Collapsed`, and only one of those two is work anyone
+    ///   asked to land.
+    #[must_use]
+    pub fn sealed_door(molecule: String) -> Self {
+        Self {
+            molecule,
+            force: false,
+            if_completed: true,
+            dry_run: false,
+            no_merge: false,
+            no_worktree_remove: false,
+            no_branch_delete: false,
+            no_kill: false,
+            strategy: MergeStrategy::Merge,
+            no_auto_propel: true,
+            propel_message: None,
+            max_retries: 0,
+            skip_pre_done_hook: false,
+            deploy_off_trunk: false,
+        }
+    }
+}
+
 /// Merge strategy used by `cs done` when integrating the worker's branch.
 ///
 /// Default is [`MergeStrategy::Merge`] because parallel tackling is the
@@ -6602,6 +6649,59 @@ mod tests {
     use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
+
+    /// ADR-176 D4 and D6, asserted on the type rather than trusted to a
+    /// caller: the harvest door's argument set varies nothing.
+    ///
+    /// This test is the surface freeze of the door. If someone adds a flag to
+    /// `Args` and wires it into [`Args::sealed_door`] with a permissive value,
+    /// this fails — which is the only moment anyone will be looking.
+    #[test]
+    fn the_sealed_door_arms_no_degree_of_freedom() {
+        let args = Args::sealed_door("task-20260101-abcd".to_owned());
+
+        // D6 — auto-propel is off by construction, not by configuration.
+        assert!(args.no_auto_propel, "auto-propel must be disarmed (D6)");
+        assert_eq!(
+            args.max_retries, 0,
+            "no escalation budget on this path (D6)"
+        );
+        assert!(
+            args.propel_message.is_none(),
+            "no requester-authored propel text (D6)"
+        );
+
+        // D4 — no derogation is reachable by the beneficiary of the effect.
+        assert!(!args.force, "--force overrules a refusal (D4)");
+        assert!(
+            !args.skip_pre_done_hook,
+            "the Definition-of-Done stays armed (D4)"
+        );
+        assert!(
+            !args.deploy_off_trunk,
+            "the deploy hook stays bounded to the trunk (D4)"
+        );
+        assert_eq!(
+            args.strategy,
+            MergeStrategy::Merge,
+            "strategy is not selectable (D4)"
+        );
+
+        // ADR-176 §1 — an abandoned molecule's branch is not integrated.
+        assert!(
+            args.if_completed,
+            "Collapsed must not reach the merge (ADR-176 §1)"
+        );
+
+        // The teardown steps are the closure authority; the door exercises
+        // it in full or refuses. A half-torn-down molecule is the state
+        // nobody can reason about.
+        assert!(!args.no_merge);
+        assert!(!args.no_worktree_remove);
+        assert!(!args.no_branch_delete);
+        assert!(!args.no_kill);
+        assert!(!args.dry_run);
+    }
 
     /// A stale worktree registration — the directory gone, git's bookkeeping
     /// still holding the branch — blocks `git branch -d` until it is pruned.

@@ -286,6 +286,13 @@ enum Command {
     #[command(after_help = cmd::examples::HARVEST)]
     Harvest(cmd::harvest::Args),
 
+    /// Land — the harvest door: close one molecule, and integrate it where
+    /// that second authority arises (ADR-176; the §8p `POST
+    /// /v1/molecules/{id}/land` twin). Takes the molecule and nothing else:
+    /// no strategy, no force, no hook skip. A galaxy must have armed
+    /// `[harvest_authority] required` for it to do anything at all.
+    Land(cmd::land::Args),
+
     /// Stitch — fleet-locked sequential merge of a mission DAG into base (Phase 1 Commit 2)
     #[command(after_help = cmd::examples::STITCH, hide = true)]
     Stitch(cmd::stitch::Args),
@@ -729,6 +736,7 @@ fn main() {
         Command::Paths(args) => cmd::paths::run(&ctx, &args),
         Command::Done(args) => cmd::done::run(&ctx, &args),
         Command::Harvest(args) => cmd::harvest::run(&ctx, &args),
+        Command::Land(args) => cmd::land::run(&ctx, &args),
         Command::Stitch(args) => cmd::stitch::run(&ctx, &args),
         Command::Stuck(args) => cmd::stuck::run(&ctx, &args),
         Command::AwaitOperator(args) => cmd::await_operator::run(&ctx, &args),
@@ -797,6 +805,12 @@ fn main() {
         // scripts can branch on the specific rule that fired. Any
         // other error falls through to the generic exit-1 path.
         if let Some(code) = cmd::journal::extract_exit_code(&e) {
+            std::process::exit(code);
+        }
+        // A harvest-door refusal carries the stable code the §8p route reads
+        // back to pick its label (ADR-176 D7). Placed before the generic
+        // exit-1 path so a named refusal never reaches a script as "failed".
+        if let Some(code) = cmd::land::refusal_exit_code(&e) {
             std::process::exit(code);
         }
         let code: i32 = e

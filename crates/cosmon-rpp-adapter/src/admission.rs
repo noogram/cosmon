@@ -111,6 +111,18 @@ pub enum Verb {
     /// of I1 — an advisory flock only binds holders on the same
     /// filesystem).
     RunMolecule,
+    /// `POST /v1/molecules/{id}/land` — the harvest door (ADR-176).
+    /// Closes one molecule and, where the second authority arises,
+    /// integrates its branch into the resolved base. The request
+    /// carries the molecule id and **nothing else**: no strategy, no
+    /// force, no hook waiver (D4 — a derogation requested by its
+    /// beneficiary is not a derogation). Like tackle and run it is
+    /// out-of-process, because the merge must happen inside the tenant
+    /// container where the `trunk.lock` flock actually binds; unlike
+    /// them it is **synchronous**, because a 202 on a transaction that
+    /// may integrate nothing is precisely the silent failure of issue
+    /// #51.
+    LandMolecule,
     /// `GET /v1/molecules/{id}/artifacts` — list artifacts produced
     /// by the worker for a molecule (e653 spec).
     /// Artifacts live on disk under
@@ -183,6 +195,13 @@ impl Verb {
             Self::StuckMolecule => "stuck",
             Self::TackleMolecule => "tackle",
             Self::RunMolecule => "run",
+            // NOT "done". The audit log names the verb that was admitted,
+            // and `done` stays on the closed list of ADR-080 §5.1: the door
+            // is a different gesture with a different argument set, and
+            // spelling it `done` here would make the two indistinguishable
+            // to anyone reading the log — and would trip the operator-only
+            // clause below, correctly.
+            Self::LandMolecule => "land",
             Self::ListArtifacts => "list_artifacts",
             Self::FetchArtifact => "fetch_artifact",
             Self::PushArtifact => "push_artifact",
