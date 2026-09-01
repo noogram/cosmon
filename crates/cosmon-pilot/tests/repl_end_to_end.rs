@@ -172,6 +172,7 @@ fn seed_molecule(root: &Path, id: &str, status: &str) {
         base_branch: None,
         pending_step: None,
         merged_at: None,
+        non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
         bootstrap_seals: Vec::new(),

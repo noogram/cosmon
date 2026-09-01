@@ -451,6 +451,23 @@ pub struct MoleculeData {
     /// in the runtime loop — see ADR-041 for the rationale.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub merged_at: Option<DateTime<Utc>>,
+    /// Why this molecule's work is **not** on the trunk, when it is not.
+    ///
+    /// The exact complement of [`Self::merged_at`]: at most one of the two
+    /// is set. `cs done` writes this on every path that ends without an
+    /// integration (conflict, hard merge failure, refused `pre_done`
+    /// gate, no branch, `--no-merge`) and clears it in the same save that
+    /// stamps `merged_at` when a later attempt lands.
+    ///
+    /// `None` with `merged_at == None` therefore means exactly one thing:
+    /// **no harvest has been attempted yet** — the meaning the old
+    /// four-way-ambiguous triplet could never express. See
+    /// [`NonIntegration`] for why this is a reason rather than a ninth
+    /// [`cosmon_core::molecule::MoleculeStatus`] variant.
+    ///
+    /// Legacy state files deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub non_integration: Option<NonIntegration>,
     /// Soft-contract seal captured when `prompt.md` was first written at
     /// nucleation time. `None` for legacy molecules that predate the
     /// feature — `cs verify` treats the absence as "inconclusive", not
@@ -722,6 +739,111 @@ pub struct PendingStep {
     /// against `git log --grep`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit_sha: Option<String>,
+}
+
+/// Why a molecule's work is **not on the trunk**, recorded trunk-side by
+/// the same `cs done` path that writes [`MoleculeData::merged_at`].
+///
+/// # Why this is a reason and not a status
+///
+/// "Not merged" is not a quality of the molecule, it is a *relation*
+/// between the molecule and a given trunk: the same branch is merged
+/// relative to one base and unmerged relative to another. Writing that
+/// relation as a ninth [`cosmon_core::molecule::MoleculeStatus`] variant
+/// would absolutise what is relative — and, mechanically, it would break
+/// [`crate::frontier`], which releases successors on
+/// `status == Completed && merged_at.is_some()`: a new status variant
+/// would fall into a catch-all arm and dispatch a successor onto a trunk
+/// that never received its predecessor.
+///
+/// So the relativity stays explicit: the reason travels with the
+/// [`NonIntegration::base_branch`] it was observed against.
+///
+/// # Why it must be persisted
+///
+/// Before this field, the triplet `(Completed, merged_at = None,
+/// archived)` carried at least four disjoint meanings — never harvested,
+/// conflict, `pre_done` refusal, molecule without a branch. Only two of
+/// them leave a `MergeCompleted` event in the journal (`conflict` and
+/// `error`); a refused `pre_done` gate aborts *before* the merge block
+/// and emits nothing, so the journal cannot separate it from "never
+/// harvested". Without the partition there is **no retry predicate**:
+/// every drain re-attempts the same blocked molecules, and an escalation
+/// ceiling bounded per invocation stops being a ceiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// Kebab-case on disk so the persisted form and the wire tag emitted by
+// [`NonIntegrationReason::as_str`] are the SAME string. One spelling, read
+// the same by `jq` over `state.json` and by a tenant reading the API.
+#[serde(rename_all = "kebab-case")]
+pub enum NonIntegrationReason {
+    /// A textual merge conflict that survived auto-propel (or was never
+    /// escalated because `--no-auto-propel` was set).
+    Conflict,
+    /// A hard, non-textual merge failure: fast-forward refusal, HEAD not
+    /// on base, post-merge verification miss, or a raw git error.
+    MergeFailed,
+    /// The blocking `[hooks] pre_done` gate refused the DONE before the
+    /// merge was ever attempted. Nothing was touched.
+    PreDoneRefused,
+    /// The molecule never produced a feature branch (delib, drainage
+    /// worker, empty-branch task). There is nothing to integrate.
+    NoBranch,
+    /// The operator ran `cs done --no-merge`: integration was deliberately
+    /// skipped, the branch is preserved.
+    MergeSkipped,
+}
+
+impl NonIntegrationReason {
+    /// Stable kebab-case wire tag — the value the tenant reads on the
+    /// observation and result routes.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Conflict => "conflict",
+            Self::MergeFailed => "merge-failed",
+            Self::PreDoneRefused => "pre-done-refused",
+            Self::NoBranch => "no-branch",
+            Self::MergeSkipped => "merge-skipped",
+        }
+    }
+
+    /// Whether re-running `cs done` unchanged could plausibly integrate
+    /// the work — **the retry predicate** this partition exists to
+    /// provide.
+    ///
+    /// `true` only for the two mechanical failures: a conflict can be
+    /// resolved by a rebase and a hard merge failure by fixing the trunk
+    /// or the base resolution. A refused `pre_done` gate, a molecule with
+    /// no branch, and a deliberate `--no-merge` all need a *decision*
+    /// first; re-attempting them on every drain is the busy-loop that
+    /// makes the escalation ceiling meaningless.
+    #[must_use]
+    pub fn is_retryable(self) -> bool {
+        matches!(self, Self::Conflict | Self::MergeFailed)
+    }
+}
+
+/// A recorded non-integration: the reason, when it was observed, and the
+/// trunk it was observed *against*.
+///
+/// Written under the fleet lock by `cs done` on the trunk side — never by
+/// the worker. A state meaning "awaiting arbitration" that the awaiting
+/// principal can write is a state it can erase.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NonIntegration {
+    /// Why the work is not on the trunk.
+    pub reason: NonIntegrationReason,
+    /// When the non-integration was observed.
+    pub at: DateTime<Utc>,
+    /// The base branch the molecule was *not* integrated into. `None`
+    /// when the refusal happened before base resolution (a `pre_done`
+    /// gate aborts ahead of it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
+    /// Short operator-facing detail (conflicted files, hook command,
+    /// error head). Never a full stderr dump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 /// One escalation attempt recorded during `cs done` auto-propel.
@@ -1142,6 +1264,95 @@ pub trait StateStore {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod non_integration_tests {
+    use super::*;
+
+    /// A `state.json` written before this field existed must load, and it
+    /// must load as `None` — not as a default reason. The absence IS the
+    /// fourth meaning ("never harvested"); inventing a reason for a legacy
+    /// molecule would fabricate a refusal that never happened.
+    #[test]
+    fn legacy_state_without_the_field_reads_as_no_reason() {
+        let json = r#"{"reason":null}"#;
+        #[derive(serde::Deserialize)]
+        struct Legacy {
+            #[serde(default)]
+            non_integration: Option<NonIntegration>,
+        }
+        let legacy: Legacy = serde_json::from_str(json).unwrap();
+        assert!(legacy.non_integration.is_none());
+    }
+
+    /// The wire tags are the tenant-visible contract; pin them so a
+    /// rename shows up as a failing test rather than as a silently
+    /// changed API.
+    #[test]
+    fn wire_tags_are_stable() {
+        use NonIntegrationReason as R;
+        assert_eq!(R::Conflict.as_str(), "conflict");
+        assert_eq!(R::MergeFailed.as_str(), "merge-failed");
+        assert_eq!(R::PreDoneRefused.as_str(), "pre-done-refused");
+        assert_eq!(R::NoBranch.as_str(), "no-branch");
+        assert_eq!(R::MergeSkipped.as_str(), "merge-skipped");
+    }
+
+    /// The retry predicate — the reason this partition is persisted at
+    /// all. Only the two *mechanical* failures may be re-attempted; the
+    /// three that need a decision must not, or every drain re-runs them
+    /// and the per-invocation escalation ceiling stops bounding anything.
+    #[test]
+    fn only_mechanical_failures_are_retryable() {
+        use NonIntegrationReason as R;
+        assert!(R::Conflict.is_retryable());
+        assert!(R::MergeFailed.is_retryable());
+        for r in [R::PreDoneRefused, R::NoBranch, R::MergeSkipped] {
+            assert!(
+                !r.is_retryable(),
+                "{} needs a decision, not a retry",
+                r.as_str()
+            );
+        }
+    }
+
+    /// The persisted spelling and the wire tag are the same string.
+    /// Two spellings for one value is a bug generator: `jq` over
+    /// `state.json` and the tenant reading the API would disagree.
+    #[test]
+    fn the_persisted_form_equals_the_wire_tag() {
+        use NonIntegrationReason as R;
+        for r in [
+            R::Conflict,
+            R::MergeFailed,
+            R::PreDoneRefused,
+            R::NoBranch,
+            R::MergeSkipped,
+        ] {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(json, format!("\"{}\"", r.as_str()));
+        }
+    }
+
+    /// The reason round-trips through serde with its relativity intact:
+    /// "not merged" is a relation to a trunk, so `base_branch` must
+    /// survive the write. A reason without its base is an absolutised
+    /// relation — exactly what a new `MoleculeStatus` variant would have
+    /// been.
+    #[test]
+    fn the_reason_carries_the_trunk_it_is_relative_to() {
+        let ni = NonIntegration {
+            reason: NonIntegrationReason::Conflict,
+            at: chrono::Utc::now(),
+            base_branch: Some("release/1.x".to_owned()),
+            detail: Some("2 conflicted file(s)".to_owned()),
+        };
+        let round: NonIntegration =
+            serde_json::from_str(&serde_json::to_string(&ni).unwrap()).expect("round-trip");
+        assert_eq!(round.base_branch.as_deref(), Some("release/1.x"));
+        assert_eq!(round.reason, NonIntegrationReason::Conflict);
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -1243,6 +1454,7 @@ mod tests {
             base_branch: None,
             pending_step: None,
             merged_at: None,
+            non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
             bootstrap_seals: Vec::new(),
@@ -2083,6 +2295,7 @@ mod tests {
                         base_branch: None,
                         pending_step: None,
                         merged_at: None,
+                        non_integration: None,
                         prompt_seal: None,
                         briefing_seals,
                         bootstrap_seals: Vec::new(),

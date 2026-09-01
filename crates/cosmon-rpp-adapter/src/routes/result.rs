@@ -212,11 +212,19 @@ fn file_name_lossy(p: &Path) -> String {
 /// Derived availability/liveness of a molecule's canonical result.
 ///
 /// **Never persisted.** A pure projection of the molecule state and the
-/// wall clock — see [`derive_result_status`]. The six variants form the
+/// wall clock — see [`derive_result_status`]. The seven variants form the
 /// minimal-and-complete taxonomy (godel §3): every wire value tells the
-/// client one of two things — *keep waiting* (`pending` / `running`),
-/// *read it* (`ready` / `done-no-deliverable`), or *relaunch*
-/// (`stalled` / `failed`).
+/// client one of three things — *keep waiting* (`pending` / `running`),
+/// *read it* (`ready` / `done-no-deliverable`), or *act*
+/// (`stalled` / `failed` / `not-integrated`).
+///
+/// # Why a seventh value (C6)
+///
+/// The first six say nothing at all about *integration*. A molecule whose
+/// deliverable is readable answers `ready` — which is true, and is exactly
+/// what made a failed merge silent rather than annoying: the tenant reads
+/// its haiku, the work is not on the trunk, and no field anywhere says so.
+/// [`Self::NotIntegrated`] is that missing sentence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResultStatus {
     /// Nucleated but never tackled — no worker has touched it yet.
@@ -237,6 +245,16 @@ pub enum ResultStatus {
     /// Collapsed, frozen, or starved — the run is broken or arrested and
     /// needs operator action.
     Failed,
+    /// The work finished and is readable, but it is **not on the trunk** —
+    /// and the molecule records why (conflict, hard merge failure, refused
+    /// `pre_done` gate, no branch, or a deliberate `--no-merge`).
+    ///
+    /// One sentence, which is the naming criterion this variant had to
+    /// meet: *your work is finished and readable, it is not yet on the
+    /// trunk, and here is why.* The `why` rides the response's
+    /// `integration` block, not this tag — the tag says the state, the
+    /// block says the cause.
+    NotIntegrated,
 }
 
 impl ResultStatus {
@@ -251,6 +269,7 @@ impl ResultStatus {
             Self::DoneNoDeliverable => "done-no-deliverable",
             Self::Stalled => "stalled",
             Self::Failed => "failed",
+            Self::NotIntegrated => "not-integrated",
         }
     }
 }
@@ -291,13 +310,24 @@ pub fn stall_timeout() -> Duration {
 ///    Takes precedence over a lingering deliverable: a broken run must
 ///    not be advertised as finished. The body still carries the bytes
 ///    when one resolved, so nothing salvageable is hidden.
-/// 2. **Disk-proven** (`resolved.is_some()`) → `ready`. Checked before
+/// 2. **Not integrated** — the molecule carries a persisted
+///    `non_integration` reason and no `merged_at` stamp →
+///    `not-integrated`. Checked *before* the disk proof, for the same
+///    reason clause 1 is: a deliverable that never reached the trunk must
+///    not be advertised as plainly finished. Nothing is hidden — the body
+///    still carries the bytes when one resolved, and the `integration`
+///    block names the cause.
+///
+///    Gated on the *reason*, never on `merged_at.is_none()` alone: a
+///    completed molecule that simply has not been harvested yet is not an
+///    anomaly, and must keep answering `ready`.
+/// 3. **Disk-proven** (`resolved.is_some()`) → `ready`. Checked before
 ///    the completed/running split so a deliverable written mid-run is
 ///    surfaced honestly — and so `completed` alone can *never* mint
 ///    `ready`.
-/// 3. `completed` with empty resolution → `done-no-deliverable`.
-/// 4. `pending` / `queued` → `pending`.
-/// 5. `running` → `running` iff the worker process is active **and** the
+/// 4. `completed` with empty resolution → `done-no-deliverable`.
+/// 5. `pending` / `queued` → `pending`.
+/// 6. `running` → `running` iff the worker process is active **and** the
 ///    tackle is within the [`stall_timeout`] decree; otherwise
 ///    `stalled`. A missing `tackled_at` is treated as out-of-decree
 ///    (conservative: an un-stamped runner is assumed stalled).
@@ -315,15 +345,22 @@ pub fn derive_result_status(
         return ResultStatus::Failed;
     }
 
-    // 2 — `ready` is proven only by a deliverable read from disk.
+    // 2 — the trunk-side verdict. `non_integration` is written by `cs
+    // done` under the lock and cleared the moment a merge lands, so its
+    // presence with no `merged_at` is exactly "finished, off-trunk".
+    if data.non_integration.is_some() && data.merged_at.is_none() {
+        return ResultStatus::NotIntegrated;
+    }
+
+    // 3 — `ready` is proven only by a deliverable read from disk.
     if resolved.is_some() {
         return ResultStatus::Ready;
     }
 
     match data.status {
-        // 3 — completed, but resolution was empty.
+        // 4 — completed, but resolution was empty.
         S::Completed => ResultStatus::DoneNoDeliverable,
-        // 4 — running: live process + within decree, else stalled.
+        // 5 — running: live process + within decree, else stalled.
         S::Running => {
             let process_active = data
                 .process
@@ -338,13 +375,56 @@ pub fn derive_result_status(
                 ResultStatus::Stalled
             }
         }
-        // 5 — `pending` / `queued` → `pending`. The `Collapsed` /
+        // 6 — `pending` / `queued` → `pending`. The `Collapsed` /
         // `Frozen` / `Starved` failure statuses already returned in step
         // 1; a future `#[non_exhaustive]` status we don't yet understand
         // also falls here, the safest "keep observing" default — never a
         // spurious "relaunch".
         _ => ResultStatus::Pending,
     }
+}
+
+/// Build the `integration` block — the relation between this molecule's
+/// work and the trunk, which the six-value taxonomy could not express.
+///
+/// Always present, always three fields, so a tenant can read it without
+/// branching on the status tag:
+///
+/// * `merged_at` — when the branch landed, or `null`.
+/// * `reason` — the kebab-case [`cosmon_state::NonIntegrationReason`] tag
+///   when it did not, or `null`.
+/// * `base_branch` / `detail` / `at` — the trunk the refusal is *relative
+///   to*, a one-line cause, and when it was observed.
+///
+/// `merged_at == null` with `reason == null` is the fourth honest state:
+/// no harvest has been attempted yet.
+fn integration_block(data: &MoleculeData) -> Value {
+    let (reason, at, base_branch, detail, retryable) = data.non_integration.as_ref().map_or(
+        (
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+            Value::Null,
+        ),
+        |ni| {
+            (
+                Value::String(ni.reason.as_str().to_owned()),
+                serde_json::to_value(ni.at).unwrap_or(Value::Null),
+                serde_json::to_value(&ni.base_branch).unwrap_or(Value::Null),
+                serde_json::to_value(&ni.detail).unwrap_or(Value::Null),
+                Value::Bool(ni.reason.is_retryable()),
+            )
+        },
+    );
+    json!({
+        "merged_at": data.merged_at,
+        "reason": reason,
+        "observed_at": at,
+        "base_branch": base_branch,
+        "detail": detail,
+        "retryable": retryable,
+    })
 }
 
 /// Build the raw `liveness` block (godel F4 — refus d'opacité). The
@@ -471,6 +551,7 @@ pub async fn get_result(
         "status": view.data.status.to_string(),
         "result_status": result_status.as_str(),
         "liveness": liveness_block(&view.data, stale_after),
+        "integration": integration_block(&view.data),
         "result": result_json,
     })))
 }
@@ -689,6 +770,130 @@ mod tests {
             derive_result_status(&m, None, now(), timeout()),
             ResultStatus::DoneNoDeliverable
         );
+    }
+
+    // ── C6: the integration projection ───────────────────────────────
+
+    /// THE CUT. A completed molecule whose deliverable is readable but
+    /// whose branch never landed answered `ready` — true, and exactly what
+    /// made the failure silent. It must now answer `not-integrated`.
+    ///
+    /// Negative control: delete the `non_integration` object from the
+    /// fixture and this assertion goes back to `ready`.
+    #[test]
+    fn derive_not_integrated_when_a_reason_is_recorded() {
+        let m = mol(json!({
+            "status": "completed",
+            "non_integration": {
+                "reason": "conflict",
+                "at": "2026-06-14T00:30:00Z",
+                "base_branch": "main",
+                "detail": "2 conflicted file(s): a.rs, b.rs",
+            },
+        }));
+        assert_eq!(
+            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            ResultStatus::NotIntegrated
+        );
+    }
+
+    /// …and it says so even with nothing on disk, rather than hiding the
+    /// off-trunk fact behind `done-no-deliverable`.
+    #[test]
+    fn derive_not_integrated_beats_done_no_deliverable() {
+        let m = mol(json!({
+            "status": "completed",
+            "non_integration": {
+                "reason": "pre-done-refused",
+                "at": "2026-06-14T00:30:00Z",
+            },
+        }));
+        assert_eq!(
+            derive_result_status(&m, None, now(), timeout()),
+            ResultStatus::NotIntegrated
+        );
+    }
+
+    /// THE GARDE-FOU on the other side: a molecule that completed and has
+    /// simply not been harvested yet carries NO reason, and must keep
+    /// answering `ready`. Keying the new status on `merged_at.is_none()`
+    /// alone would flag every freshly-completed molecule in the fleet as
+    /// a failed integration.
+    #[test]
+    fn derive_ready_when_completed_and_merely_unharvested() {
+        let m = mol(json!({ "status": "completed" }));
+        assert!(m.merged_at.is_none() && m.non_integration.is_none());
+        assert_eq!(
+            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            ResultStatus::Ready
+        );
+    }
+
+    /// A merge that landed clears the reason, so a merged molecule is
+    /// `ready` even if a stale reason object were somehow present: the
+    /// stamp is checked, not just the reason.
+    #[test]
+    fn derive_ready_when_merged_despite_a_stale_reason() {
+        let m = mol(json!({
+            "status": "completed",
+            "merged_at": "2026-06-14T00:45:00Z",
+            "non_integration": {
+                "reason": "conflict",
+                "at": "2026-06-14T00:30:00Z",
+            },
+        }));
+        assert_eq!(
+            derive_result_status(&m, Some(&ready_marker()), now(), timeout()),
+            ResultStatus::Ready
+        );
+    }
+
+    /// A hard failure still outranks the integration verdict: a collapsed
+    /// run is broken, and `failed` is the more urgent instruction.
+    #[test]
+    fn derive_failed_still_outranks_not_integrated() {
+        let m = mol(json!({
+            "status": "collapsed",
+            "non_integration": {
+                "reason": "conflict",
+                "at": "2026-06-14T00:30:00Z",
+            },
+        }));
+        assert_eq!(
+            derive_result_status(&m, None, now(), timeout()),
+            ResultStatus::Failed
+        );
+    }
+
+    /// The `integration` block is unconditional and names the trunk the
+    /// refusal is relative to — "not merged" is a relation, and the wire
+    /// carries both of its terms.
+    #[test]
+    fn integration_block_names_the_reason_and_its_trunk() {
+        let m = mol(json!({
+            "status": "completed",
+            "non_integration": {
+                "reason": "merge-failed",
+                "at": "2026-06-14T00:30:00Z",
+                "base_branch": "release/1.x",
+                "detail": "not fast-forward",
+            },
+        }));
+        let b = integration_block(&m);
+        assert_eq!(b["reason"], json!("merge-failed"));
+        assert_eq!(b["base_branch"], json!("release/1.x"));
+        assert_eq!(b["retryable"], json!(true));
+        assert_eq!(b["merged_at"], Value::Null);
+    }
+
+    /// Never harvested: both terms null, and no invented reason.
+    #[test]
+    fn integration_block_is_all_null_before_any_harvest() {
+        let m = mol(json!({ "status": "completed" }));
+        let b = integration_block(&m);
+        assert_eq!(b["merged_at"], Value::Null);
+        assert_eq!(b["reason"], Value::Null);
+        assert_eq!(b["retryable"], Value::Null);
     }
 
     #[test]
