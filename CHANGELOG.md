@@ -19,6 +19,23 @@ this stage.
 
 ## [Unreleased]
 
+### Security
+
+- **RPP subprocess envelope: the environment half is now an allow-list, not a
+  deny-list.** `cosmon-rpp-adapter` clears the inherited environment before
+  spawning `cs` and re-admits only the named process-hygiene variables
+  (`PATH`, `HOME`, locale, terminal, XDG bases, ssh-agent, proxy, Anthropic
+  credentials, `RUST_LOG`). No `COSMON_*` variable is inheritable; the ones the
+  child needs are set from adapter configuration after the clear. The deny-list
+  it replaces let `COSMON_SKIP_PRE_DONE_HOOK` — the human operator's
+  kill-switch for the blocking `pre_done` Definition-of-Done gate — cross the
+  perimeter into the `cs run` drain and into every `cs done` that drain
+  launched, disarming the gate for all subsequent harvests inside a container
+  where no operator exists to make the gesture. Reported as GitHub issue #51,
+  adjudicated in `delib-20260819-cda2` (C2), amendment §3.5.1 of
+  [ADR-080](docs/adr/080-remote-pilot-port-https-oidc.md).
+
+
 ## [0.6.0] — 2026-08-10
 
 229 commits since `v0.5.0` (150 non-merge), 397 files, +52 947 / −2 688 lines.

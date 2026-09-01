@@ -172,6 +172,43 @@ Bidirectional designs (operator initiates a request, RPP answers, a worker reads
 > - Subprocess timeout (default 30 s; operator-tunable per route);
 > - Subprocess stdout/stderr captured into the `.cosmon/whispers/inbox/api/<request_id>.json` *response* sibling, never back-channelled to the operator's HTTP response except through fields the response schema explicitly allows.
 
+#### 3.5.1 Amendment (2026-09-01) — the environment half is an allow-list
+
+*Source: `delib-20260819-cda2` C2, GitHub issue #51; implemented in `task-20260831-bf15`.*
+
+The envelope's environment half was first implemented as a **deny-list**: the
+child inherited the adapter's environment minus a hand-maintained roster of
+`COSMON_*` resolution variables. That structure is wrong by default for every
+variable introduced anywhere else in the workspace afterwards, and it was
+falsified concretely. `COSMON_SKIP_PRE_DONE_HOOK` — the human operator's
+per-invocation kill-switch for the blocking `pre_done` Definition-of-Done gate
+— was never on the roster. Set once in the container (an image entrypoint, a
+service wrapper, an operations shell), it was inherited by the `cs run` drain
+the adapter spawns and by every `cs done` that drain launches at teardown,
+disarming the DoD gate of all subsequent harvests, with no trace in the request
+and no trace in any grant. Same family as the defect
+`docs/adr/171-the-operator-gesture-is-a-signature-not-a-string.md` falsified: an
+operator derogation exercisable by someone who is not the operator.
+
+The envelope therefore MUST clear the inherited environment and re-admit only
+an explicit allow-list of process-hygiene variables (`PATH`, `HOME`, locale,
+terminal, XDG bases, ssh-agent, proxy configuration, Anthropic credentials and
+endpoint, `RUST_LOG`/`RUST_BACKTRACE`). No `COSMON_*` variable is inheritable;
+every one the child legitimately needs — the three correlation vars,
+`COSMON_STATE_DIR`, `COSMON_ARTIFACT_DIR` — is *set* from adapter configuration
+after the clear. Adding a name to the allow-list is a security decision made in
+a diff someone reads; that is the property the deny-list did not have.
+
+Implementation: `cosmon_rpp_adapter::subprocess::PASSTHROUGH_VARS` and
+`is_passthrough`. The perimeter is proved by spawn in
+`crates/cosmon-rpp-adapter/tests/subprocess_env_hygiene.rs`, whose structural
+test asserts that *nothing* reaches the child that is not allow-listed or set
+by the envelope.
+
+Scope note: `scripts/no-pilot-env.sh` is a **gate** mechanism and must never
+appear on an execution path; the runtime perimeter is fixed here, in the
+adapter, where it belongs.
+
 The CLI side honours the envelope: `cs` MUST detect `COSMON_API_REQUEST=1` and refuse operator-only verbs at parse time (return a typed `OperatorOnlyVerbInApi` error before any state mutation). The list of operator-only verbs is enumerated in §5.
 
 ### 3.6 Reject taxonomy

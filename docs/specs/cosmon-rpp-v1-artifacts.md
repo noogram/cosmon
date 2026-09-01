@@ -59,8 +59,9 @@ At `cs tackle` time, the adapter:
 
 1. `mkdir -p <artifact_root>/<noyau>/<molecule_id>/` (best-effort).
 2. Exports `COSMON_ARTIFACT_DIR=<that path>` into the subprocess env.
-3. Strips any inherited `COSMON_ARTIFACT_DIR` first (§3.5 strip list)
-   so a stale value from one tenant can never leak to another.
+3. Clears the inherited environment first (§3.5 allow-list, amendment
+   3.5.1): `COSMON_ARTIFACT_DIR` is not inheritable, so a stale value
+   from one tenant can never leak to another.
 
 The worker writes its outputs under that directory using normal
 filesystem APIs (`tee output.json > $COSMON_ARTIFACT_DIR/output.json`,

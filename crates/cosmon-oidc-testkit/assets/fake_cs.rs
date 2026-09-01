@@ -19,14 +19,18 @@
 //!   `state.json` to disk so a follow-up `observe` succeeds, and
 //!   prints the cosmon-style nucleate JSON on stdout. Honours an empty
 //!   formula → exit 2 to exercise the 409 mapping.
-//! - `--json __dump_env`: prints every `COSMON_*` env var the child
-//!   inherited as a JSON object on stdout (`{ "COSMON_FOO": "bar", … }`)
-//!   and exits 0. Used by the subprocess env-hygiene test
-//!   (idea-20260514-5c2e child A) to assert the §3.5 strip half — the
+//! - `--json __dump_env`: prints **every** env var the child inherited
+//!   as a JSON object on stdout (`{ "COSMON_FOO": "bar", … }`) and
+//!   exits 0. Used by the subprocess env-hygiene test
+//!   (idea-20260514-5c2e child A) to assert the §3.5 envelope — the
 //!   asymmetry that an adapter `COSMON_STATE_DIR=/wrong` does NOT
 //!   reach the child while the three envelope vars
 //!   (`COSMON_API_REQUEST`, `COSMON_API_REQUEST_ID`,
-//!   `COSMON_API_NUCLEON`) DO.
+//!   `COSMON_API_NUCLEON`) DO. The dump is unfiltered since the
+//!   envelope became an allow-list (delib-20260819-cda2, C2): a
+//!   `COSMON_*`-only view could not observe a non-`COSMON_` variable
+//!   crossing the perimeter, which is precisely what the allow-list
+//!   claims to prevent.
 //! - Any other invocation exits 2.
 //!
 //! The cwd lookup is intentional and load-bearing: it is precisely
@@ -60,17 +64,15 @@ fn main() -> ExitCode {
     }
 }
 
-/// `--json __dump_env` — emit every inherited `COSMON_*` env var as a
-/// JSON object on stdout. Used by the subprocess env-hygiene test to
-/// verify the §3.5 strip half: the asymmetry that adapter-side
+/// `--json __dump_env` — emit every inherited env var as a JSON object
+/// on stdout. Used by the subprocess env-hygiene test to
+/// verify the §3.5 envelope: the asymmetry that adapter-side
 /// `COSMON_STATE_DIR` etc. do NOT reach the child while the envelope
 /// vars DO. The argv-form `__dump_env` keeps the entry point inside
 /// the existing `--json <subcommand>` dispatch shape so the real `cs`
 /// surface is unchanged.
 fn dump_env() -> ExitCode {
-    let mut keys: Vec<(String, String)> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("COSMON_"))
-        .collect();
+    let mut keys: Vec<(String, String)> = std::env::vars().collect();
     keys.sort_by(|a, b| a.0.cmp(&b.0));
     let pairs: Vec<(&str, serde_json_lite::Value)> = keys
         .iter()
