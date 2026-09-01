@@ -87,6 +87,7 @@ fn seed(
         base_branch: None,
         pending_step: None,
         merged_at,
+        non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
         bootstrap_seals: Vec::new(),

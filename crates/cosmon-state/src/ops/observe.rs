@@ -499,6 +499,24 @@ pub struct ObserveJson {
     /// its adapter). `None` when no `ModelSelected` event was recorded.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_adapter: Option<String>,
+    /// When this molecule's branch landed on the trunk, RFC3339. `None`
+    /// while it has not.
+    ///
+    /// Serialised here because the observation route was, until C6,
+    /// entirely silent about integration: a tenant whose deliverable was
+    /// readable saw `completed` and had no field that could tell it the
+    /// work never reached the trunk. Integration is half of what "done"
+    /// means, so both halves are on the wire — this stamp, and
+    /// [`Self::non_integration`] when it is absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub merged_at: Option<String>,
+    /// Why the work is **not** on the trunk, when it is not — the
+    /// persisted [`crate::NonIntegration`], projected verbatim.
+    ///
+    /// Complement of [`Self::merged_at`]: at most one of the two appears.
+    /// Both absent means no harvest has been attempted yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub non_integration: Option<crate::NonIntegration>,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -556,6 +574,8 @@ impl ObserveJson {
             model: view.model.as_ref().and_then(|m| m.model.clone()),
             model_source: view.model.as_ref().map(|m| m.source_slug().to_owned()),
             model_adapter: view.model.as_ref().map(|m| m.adapter_name.clone()),
+            merged_at: mol.merged_at.map(|t| t.to_rfc3339()),
+            non_integration: mol.non_integration.clone(),
         }
     }
 }
@@ -650,6 +670,7 @@ mod tests {
             base_branch: None,
             pending_step: None,
             merged_at: None,
+            non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
             bootstrap_seals: Vec::new(),

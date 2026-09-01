@@ -164,6 +164,14 @@ pub fn for_result_status(
             "finished, but this formula produces no single deliverable. \
              List what it did write: `{name} artifact list {id}`"
         )),
+        // Finished and readable, but off-trunk. The body is printed
+        // alongside this line (the deliverable resolved), so the hint
+        // names the ONE thing the body cannot say: the work is not on the
+        // trunk, and the observation route carries why.
+        "not-integrated" => Some(format!(
+            "the deliverable is readable but the work is NOT on the trunk. \
+             Read the cause: `{name} molecule get {id}` (field `integration.reason`)"
+        )),
         // `ready` prints the body; unknown statuses stay silent.
         _ => None,
     }
@@ -294,6 +302,19 @@ mod tests {
 
         // done-no-deliverable → list the artifacts (the REAL command is
         // `artifact list`, not `molecule artifacts`).
+        // not-integrated → read the cause on the observation route. The
+        // deliverable itself is already printed; the missing gesture is
+        // the one that explains why it is off-trunk.
+        let h = for_result_status("not-integrated", name, id, None).unwrap();
+        assert!(
+            h.contains(&format!("{name} molecule get {id}")),
+            "not-integrated must point at `get`, got: {h}"
+        );
+        assert!(
+            h.contains("trunk"),
+            "not-integrated must name the trunk, got: {h}"
+        );
+
         let h = for_result_status("done-no-deliverable", name, id, None).unwrap();
         assert!(
             h.contains(&format!("{name} artifact list {id}")),

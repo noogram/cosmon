@@ -385,13 +385,43 @@ pub struct Liveness {
     pub stale_after_s: Option<u64>,
 }
 
+/// The `integration` block of a result envelope: whether the molecule's
+/// work reached the trunk, and — when it did not — why.
+///
+/// Both `merged_at` and `reason` `None` is the honest fourth state: no
+/// harvest has been attempted yet. They are never both `Some`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct Integration {
+    /// When the branch landed on the trunk, RFC3339.
+    #[serde(default)]
+    pub merged_at: Option<String>,
+    /// Kebab-case non-integration reason (`conflict`, `merge-failed`,
+    /// `pre-done-refused`, `no-branch`, `merge-skipped`).
+    #[serde(default)]
+    pub reason: Option<String>,
+    /// When the non-integration was observed, RFC3339.
+    #[serde(default)]
+    pub observed_at: Option<String>,
+    /// The trunk the work is not integrated *into* — "not merged" is a
+    /// relation, so the wire names the other term of it.
+    #[serde(default)]
+    pub base_branch: Option<String>,
+    /// One-line operator-facing cause.
+    #[serde(default)]
+    pub detail: Option<String>,
+    /// Whether re-running the harvest unchanged could plausibly land it.
+    #[serde(default)]
+    pub retryable: Option<bool>,
+}
+
 /// Envelope returned by `GET /v1/molecules/{id}/result`.
 ///
 /// The route returns 200 for *any*
 /// molecule that exists: `result` is `null` when no deliverable is
-/// resolved, and `result_status` carries the derived six-state verdict
+/// resolved, and `result_status` carries the derived seven-state verdict
 /// (`pending` · `running` · `ready` · `done-no-deliverable` · `stalled`
-/// · `failed`). The bare 404 only survives for an absent molecule.
+/// · `failed` · `not-integrated`). The bare 404 only survives for an
+/// absent molecule.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ResultEnvelope {
     pub request_id: String,
@@ -406,6 +436,11 @@ pub struct ResultEnvelope {
     /// Raw liveness signals (C1). `None` from a pre-C1 server.
     #[serde(default)]
     pub liveness: Option<Liveness>,
+    /// Relation between the work and the trunk (C6). `None` from a
+    /// pre-C6 server — every field inside is itself optional, so a
+    /// partial block from a future server still deserialises.
+    #[serde(default)]
+    pub integration: Option<Integration>,
     /// The canonical deliverable, or `None` when none is resolved.
     #[serde(default)]
     pub result: Option<MoleculeResult>,

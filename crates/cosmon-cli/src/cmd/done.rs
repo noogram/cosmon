@@ -1962,6 +1962,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // `cs trust` first.
             cosmon_cli::trust::ensure_trusted(&repo_root)?;
             run_pre_done_hook(&repo_root, hook_cmd, &mol_id).inspect_err(|e| {
+                // Persist the refusal BEFORE reporting it. This is the
+                // one non-integration the event journal can never
+                // reconstruct: the gate aborts ahead of the merge block,
+                // so no `MergeCompleted` is ever emitted and the molecule
+                // is byte-identical on disk to one that was simply never
+                // harvested.
+                record_non_integration(
+                    &store,
+                    &mol_id,
+                    cosmon_state::NonIntegrationReason::PreDoneRefused,
+                    Some(&base_branch),
+                    Some(short_detail(&format!("pre_done gate `{hook_cmd}` refused"))),
+                    ContradictsStamp::No,
+                );
                 report_pre_done_failure(ctx, &mol_id, hook_cmd, &e.to_string());
             })?;
         }
@@ -2248,6 +2262,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // (`CompletedUnharvested`) becomes clearable. See the
                 // `no_branch_teardown` declaration above.
                 no_branch_teardown = true;
+                // The archive below makes this molecule terminal, but
+                // terminal is not integrated: nothing of it is on the
+                // trunk and nothing ever will be. Name that rather than
+                // leaving a bare `(Completed, merged_at = None,
+                // archived)` for the reader to guess at.
+                record_non_integration(
+                    &store,
+                    &mol_id,
+                    cosmon_state::NonIntegrationReason::NoBranch,
+                    Some(&base_branch),
+                    Some(short_detail(&format!(
+                        "no branch `{branch_name}` to integrate"
+                    ))),
+                    ContradictsStamp::No,
+                );
             }
             Ok(MergeLoopOutcome::Conflict { files, recovery }) => {
                 // SILENT-INTEGRITY FIX (spark-20260622-6036 / task-20260622-1057).
@@ -2265,6 +2294,23 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 //      never says the word "done",
                 //   3. return `Err` (non-zero exit) BEFORE any teardown step —
                 //      the tmux session, worktree, and branch are all preserved.
+                //
+                // Step 0, added by C6: persist the *reason*. The event
+                // below is an append-only trace; the molecule's own state
+                // is what every observer (drain, health pass, tenant
+                // route) reads, and it must say why the work is off-trunk.
+                record_non_integration(
+                    &store,
+                    &mol_id,
+                    cosmon_state::NonIntegrationReason::Conflict,
+                    Some(&base_branch),
+                    Some(short_detail(&format!(
+                        "{} conflicted file(s): {}",
+                        files.len(),
+                        files.join(", ")
+                    ))),
+                    ContradictsStamp::No,
+                );
                 let _ = cosmon_state::event_log::emit_one(
                     &events_path,
                     cosmon_core::event_v2::EventV2::MergeCompleted {
@@ -2308,6 +2354,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // route it through `report_merge_failure` (never the "done"
                 // wording) and return non-zero. Same silent-integrity class as
                 // the conflict path; the only difference is the label.
+                record_non_integration(
+                    &store,
+                    &mol_id,
+                    cosmon_state::NonIntegrationReason::MergeFailed,
+                    Some(&base_branch),
+                    Some(short_detail(&e.to_string())),
+                    ContradictsStamp::No,
+                );
                 let _ = cosmon_state::event_log::emit_one(
                     &events_path,
                     cosmon_core::event_v2::EventV2::MergeCompleted {
@@ -2330,6 +2384,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 return Err(e);
             }
         }
+    }
+
+    // `--no-merge`: the operator deliberately opted out of integration.
+    // That is still a terminal teardown, so it must ARCHIVE — and archive
+    // *with the reason*. Before this, the flag reached the end of `cs done`
+    // having stamped neither `merged_at` nor `archived`, manufacturing a
+    // `CompletedUnharvested` anomaly (A8) that the health pass re-flagged on
+    // every sweep. An anomaly is what you get when a deliberate choice is
+    // not written down; `merge-skipped` is that choice, written down.
+    let merge_skipped_teardown = args.no_merge;
+    if merge_skipped_teardown {
+        record_non_integration(
+            &store,
+            &mol_id,
+            cosmon_state::NonIntegrationReason::MergeSkipped,
+            Some(&base_branch),
+            Some(short_detail(
+                "`cs done --no-merge`: integration skipped by the operator, branch preserved",
+            )),
+            ContradictsStamp::No,
+        );
     }
 
     // RR-SAFE-1 — fast, state-combined integration gate.
@@ -2500,6 +2575,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             Ok(mut latest) => {
                 if latest.merged_at.is_none() {
                     latest.merged_at = Some(chrono::Utc::now());
+                    // `merged_at` and `non_integration` are complements —
+                    // at most one is ever set. A prior run may have
+                    // recorded a conflict that this run just resolved; the
+                    // landing erases the reason in the same save, so the
+                    // partition stays monotone and no stale "conflict"
+                    // survives an integration.
+                    latest.non_integration = None;
                     // Invariant `archived ⇒ status.is_terminal()` (idea-20260618-1b10):
                     // `cs done --force` is the only path that can land `merged_at` /
                     // `archived` on a molecule that never reached a terminal state
@@ -2766,7 +2848,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     molecule-health A8 (`CompletedUnharvested`) pass re-flags them on
     //     every sweep as a phantom anomaly. Archival is what makes A8
     //     clearable, decoupled from the (non-existent) merge.
-    if (merge_succeeded || no_branch_teardown) && project_config.archive.enabled {
+    //     The `merge_skipped_teardown` disjunct (C6) extends it once more, to
+    //     `--no-merge`: same shape, same fix — a deliberate non-integration
+    //     is a state (`merge-skipped`), not an anomaly, and it reaches the
+    //     terminal Inert form like any other terminal teardown.
+    if (merge_succeeded || no_branch_teardown || merge_skipped_teardown)
+        && project_config.archive.enabled
+    {
         match store.load_molecule(&mol_id) {
             Ok(mut latest) => {
                 if latest.archived {
@@ -3028,6 +3116,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if !args.no_merge {
         let base = &base_branch;
         if unmerged_work_remains(&repo_root, &branch_name, base) {
+            // The silent class, caught structurally: `merged_at` may even
+            // have been stamped by the block above. The topology says
+            // otherwise, and topology wins — record the reason so this
+            // molecule is not left indistinguishable from an unharvested
+            // one, and clear any stamp that contradicts the probe.
+            record_non_integration(
+                &store,
+                &mol_id,
+                cosmon_state::NonIntegrationReason::MergeFailed,
+                Some(base),
+                Some(short_detail(&format!(
+                    "branch {branch_name} still has commit(s) unreachable from `{base}` \
+                     after a teardown that reported success"
+                ))),
+                ContradictsStamp::Yes,
+            );
             report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
             return Err(anyhow::anyhow!(
                 "teardown reported success but did NOT integrate the work: branch \
@@ -3598,6 +3702,90 @@ fn try_merge_with_escalation(
         files: last_conflict_files,
         recovery,
     })
+}
+
+/// Whether the caller holds evidence that outranks an existing
+/// `merged_at` stamp — see [`record_non_integration`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContradictsStamp {
+    /// The stamp wins; skip the write if one is present.
+    No,
+    /// Fresh git topology says the branch never landed; clear the stamp.
+    Yes,
+}
+
+/// Persist **why** a molecule's work is not on the trunk, on the trunk
+/// side, under the fleet lock.
+///
+/// This is the durable half of the merge outcome that used to live only in
+/// a local `MergeLoopOutcome` variable and die with the function. Without
+/// it the triplet `(Completed, merged_at = None, archived)` conflates at
+/// least four disjoint worlds — never harvested, conflict, refused
+/// `pre_done`, no branch — and there is no retry predicate: every drain
+/// re-attempts the same blocked molecules.
+///
+/// **Only `cs done` calls this.** The reason is written by the same
+/// trunk-side path that writes `merged_at`, never by the worker: a state
+/// meaning "awaiting arbitration" that the awaiting principal can write is
+/// a state it can erase.
+///
+/// Best-effort, like [`record_escalation`]: a failure to record the reason
+/// must never turn a merge refusal into a teardown abort. The caller is
+/// already returning its own loud error on the failing paths.
+fn record_non_integration(
+    store: &FileStore,
+    mol_id: &MoleculeId,
+    reason: cosmon_state::NonIntegrationReason,
+    base_branch: Option<&str>,
+    detail: Option<String>,
+    contradicts_stamp: ContradictsStamp,
+) {
+    // ADR-131 Decision 2: RAII guard. `cs done` holds the trunk lock on
+    // the merge paths and none on the `pre_done` path; taking the fleet
+    // lock here keeps the documented `trunk ⊃ fleet` order in both cases.
+    if let Ok(_g) = store.lock_fleet() {
+        if let Ok(mut mol) = store.load_molecule(mol_id) {
+            // `merged_at` and `non_integration` are complements, so a
+            // stamped merge normally wins: if a concurrent path landed the
+            // branch between the failure and this write, the merge is the
+            // truth and this reason is stale before it is written.
+            //
+            // `Yes` inverts that, and only the final topology probe passes
+            // it. There the caller has *fresh git evidence* that the
+            // branch is not reachable from base, which outranks a stamp we
+            // wrote ourselves — so the stamp is cleared with the reason
+            // recorded. That also re-closes the frontier: a successor must
+            // not stay released on a predecessor that never landed.
+            match contradicts_stamp {
+                ContradictsStamp::No if mol.merged_at.is_some() => return,
+                ContradictsStamp::No => {}
+                ContradictsStamp::Yes => mol.merged_at = None,
+            }
+            mol.non_integration = Some(cosmon_state::NonIntegration {
+                reason,
+                at: chrono::Utc::now(),
+                base_branch: base_branch.map(str::to_owned),
+                detail,
+            });
+            let _ = store.save_molecule(mol_id, &mol);
+        }
+    }
+}
+
+/// Truncate an operator-facing detail to a single readable line.
+///
+/// The reason field is a *signal*, not a log: a full stderr dump in
+/// `state.json` is re-read by every observer of the molecule and crosses
+/// the wire on the tenant's observation route.
+fn short_detail(s: &str) -> String {
+    const MAX: usize = 200;
+    let line = s.lines().next().unwrap_or("").trim();
+    if line.chars().count() <= MAX {
+        return line.to_owned();
+    }
+    let mut out: String = line.chars().take(MAX).collect();
+    out.push('…');
+    out
 }
 
 /// Record an escalation entry in the molecule's state.
@@ -6445,6 +6633,7 @@ mod tests {
             base_branch: None,
             pending_step: None,
             merged_at: None,
+            non_integration: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
             bootstrap_seals: Vec::new(),

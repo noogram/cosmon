@@ -534,9 +534,22 @@ fn exit_code_for(err: &Error) -> i32 {
 #[derive(Debug, PartialEq, Eq)]
 enum ResultRender {
     /// A utf8 deliverable body — print verbatim to stdout, exit 0.
-    Body(String),
+    ///
+    /// `caveat` is a stderr line printed *alongside* the body when the
+    /// deliverable is readable but its work never reached the trunk. It
+    /// does not change the exit code: the bytes are real and the tenant
+    /// asked for them. It exists because a body printed alone is exactly
+    /// how a failed integration stayed silent — `ready` was true, and
+    /// unhelpful.
+    Body {
+        body: String,
+        caveat: Option<String>,
+    },
     /// A binary deliverable — a one-line metadata note, exit 0.
-    BinaryNote(String),
+    BinaryNote {
+        note: String,
+        caveat: Option<String>,
+    },
     /// No deliverable: the derived `status` plus the actionable next
     /// gesture (`None` only for a status this binary doesn't recognise),
     /// and a non-zero exit. The cut that kills the bare 404.
@@ -568,6 +581,31 @@ fn result_age_secs(
     u64::try_from((now - ts).num_seconds()).ok()
 }
 
+/// The stderr caveat for a deliverable that is readable but off-trunk.
+///
+/// `None` for every other case — including a pre-C6 server that sends no
+/// `integration` block, and a molecule that simply has not been harvested
+/// yet (no reason recorded). Silence beats a wrong claim about the trunk,
+/// the same discipline the API-error hints follow.
+fn integration_caveat(env: &ResultEnvelope) -> Option<String> {
+    if env.result_status.as_deref() != Some("not-integrated") {
+        return None;
+    }
+    let integration = env.integration.as_ref()?;
+    let reason = integration.reason.as_deref()?;
+    let base = integration
+        .base_branch
+        .as_deref()
+        .map_or_else(String::new, |b| format!(" onto `{b}`"));
+    let detail = integration
+        .detail
+        .as_deref()
+        .map_or_else(String::new, |d| format!(" — {d}"));
+    Some(format!(
+        "⚠ this deliverable is NOT integrated{base} (reason: {reason}){detail}"
+    ))
+}
+
 /// Decide what `result` should print for a human. When a deliverable is
 /// present, hand it over; otherwise consume `result_status` (falling back
 /// to the raw lifecycle `status` for a pre-C1 server) and pose the next
@@ -579,13 +617,20 @@ fn render_result(
     now: chrono::DateTime<chrono::Utc>,
 ) -> ResultRender {
     if let Some(result) = &env.result {
+        let caveat = integration_caveat(env);
         return if result.encoding == "utf8" {
-            ResultRender::Body(result.content.clone())
+            ResultRender::Body {
+                body: result.content.clone(),
+                caveat,
+            }
         } else {
-            ResultRender::BinaryNote(format!(
-                "binary result: source={} content_type={} size={} (use --json for base64 body)",
-                result.source, result.content_type, result.size_bytes
-            ))
+            ResultRender::BinaryNote {
+                note: format!(
+                    "binary result: source={} content_type={} size={} (use --json for base64 body)",
+                    result.source, result.content_type, result.size_bytes
+                ),
+                caveat,
+            }
         };
     }
     let status = env.result_status.as_deref().unwrap_or(&env.status);
@@ -1306,10 +1351,24 @@ async fn run_molecule(
                 match render_result(&env, &invoked_name(), &id, chrono::Utc::now()) {
                     // The whole point of the route: hand the tenant their
                     // deliverable, verbatim to stdout.
-                    ResultRender::Body(body) => print!("{body}"),
+                    // The caveat goes to stderr so a redirected stdout
+                    // still captures the deliverable byte-for-byte, while
+                    // an interactive tenant cannot miss that it never
+                    // reached the trunk.
+                    ResultRender::Body { body, caveat } => {
+                        if let Some(line) = caveat {
+                            eprintln!("{line}");
+                        }
+                        print!("{body}");
+                    }
                     // Binary deliverable — don't spray bytes at the
                     // terminal; report what is there, let them use --json.
-                    ResultRender::BinaryNote(note) => println!("{note}"),
+                    ResultRender::BinaryNote { note, caveat } => {
+                        if let Some(line) = caveat {
+                            eprintln!("{line}");
+                        }
+                        println!("{note}");
+                    }
                     // No deliverable. The cut (C4): never a bare 404,
                     // never silence — name the status and pose the next
                     // gesture in the same breath, then exit non-zero.
@@ -2201,7 +2260,71 @@ mod tests {
         }));
         assert_eq!(
             render_result(&env, "cosmon", "task-1", chrono::Utc::now()),
-            ResultRender::Body("the deliverable".into())
+            ResultRender::Body {
+                body: "the deliverable".into(),
+                caveat: None,
+            }
+        );
+    }
+
+    /// THE CUT (C6). A deliverable that is readable but never reached the
+    /// trunk is still handed over verbatim — the bytes are real — but the
+    /// tenant is TOLD, on stderr, that it is off-trunk and why. Printing
+    /// the body alone is precisely how a failed integration stayed silent.
+    ///
+    /// Negative control: drop the `integration` block from the envelope
+    /// and the caveat disappears (see the test below).
+    #[test]
+    fn render_result_warns_when_the_body_is_not_on_the_trunk() {
+        let env = result_env(serde_json::json!({
+            "request_id": "r-6", "molecule_id": "task-6",
+            "status": "completed", "result_status": "not-integrated",
+            "integration": {
+                "merged_at": null, "reason": "conflict",
+                "base_branch": "main", "detail": "2 conflicted file(s): a.rs, b.rs",
+                "retryable": true
+            },
+            "result": {
+                "source": "result.md", "content_type": "text/markdown",
+                "encoding": "utf8", "content": "the deliverable",
+                "size_bytes": 15, "integrity": {"algo": "blake3", "hex": "ab"}
+            }
+        }));
+        match render_result(&env, "cosmon", "task-6", chrono::Utc::now()) {
+            ResultRender::Body { body, caveat } => {
+                assert_eq!(body, "the deliverable", "the bytes are still handed over");
+                let caveat = caveat.expect("an off-trunk body must carry a caveat");
+                assert!(caveat.contains("NOT integrated"), "got: {caveat}");
+                assert!(caveat.contains("main"), "must name the trunk: {caveat}");
+                assert!(
+                    caveat.contains("conflict"),
+                    "must name the reason: {caveat}"
+                );
+            }
+            other => panic!("expected a body with a caveat, got {other:?}"),
+        }
+    }
+
+    /// Silence beats a wrong claim about the trunk: a pre-C6 server sends
+    /// no `integration` block, and the body is printed with no caveat
+    /// rather than with a guess.
+    #[test]
+    fn render_result_stays_silent_about_a_trunk_it_cannot_see() {
+        let env = result_env(serde_json::json!({
+            "request_id": "r-7", "molecule_id": "task-7",
+            "status": "completed", "result_status": "ready",
+            "result": {
+                "source": "result.md", "content_type": "text/markdown",
+                "encoding": "utf8", "content": "the deliverable",
+                "size_bytes": 15, "integrity": {"algo": "blake3", "hex": "ab"}
+            }
+        }));
+        assert_eq!(
+            render_result(&env, "cosmon", "task-7", chrono::Utc::now()),
+            ResultRender::Body {
+                body: "the deliverable".into(),
+                caveat: None,
+            }
         );
     }
 
