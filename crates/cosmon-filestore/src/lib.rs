@@ -33,12 +33,17 @@
 
 pub mod cas;
 pub mod event;
+pub mod harvest_authority;
 pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;
 pub mod presence_store;
 pub mod resolve;
 
+pub use harvest_authority::{
+    FileConsumptionLedger, MinisignHarvestVerifier, NoHarvestTrustRoot, HARVEST_CONSUMED_REL,
+    HARVEST_GRANTS_REL, HARVEST_GRANT_ENV, HARVEST_PUBKEY_ENV, HARVEST_PUBKEY_REL,
+};
 pub use operator_trust::{MinisignOperatorVerifier, TAKEOVER_PUBKEY_ENV, TAKEOVER_PUBKEY_REL};
 pub use pilot_lease_store::{AuditedGrant, PilotLeaseStore};
 pub use pilot_mailbox::{MailboxEntry, MessageAck, PilotMailbox};

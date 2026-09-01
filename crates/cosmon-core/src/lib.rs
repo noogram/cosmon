@@ -170,6 +170,8 @@ pub mod gate;
 #[doc(hidden)]
 pub mod governance;
 #[doc(hidden)]
+pub mod harvest_authorization;
+#[doc(hidden)]
 pub mod hook;
 // Provenance vocabulary for keystroke injection into a worker session
 // (COSMON #26 residual). Documented by the module's own `//!` header and NOT by
