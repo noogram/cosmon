@@ -206,6 +206,41 @@ provenance ledger and git/CI gates, not impossible. The implementation must say
 - The CLI/UI parity audit is owed by the implementation molecule that adds the
   grant/challenge surface. This ADR changes no command bytes by itself.
 
+## Implementation status
+
+Gaged by `task-20260901-6da6` (C5 of `delib-20260819-cda2`), 2026-09-01.
+
+- `cosmon_core::harvest_authorization` — `DoneAuthorization`, `HarvestGrant`
+  and the `cosmon-harvest-grant-v1` canonical encoding, `GrantEpoch`,
+  `HarvestScope`, the reservation vocabulary of §D1, and the I/O-free
+  `authorize` reducer.
+- `cosmon_filestore::harvest_authority` — the pinned trust root
+  (`$COSMON_HARVEST_PUBKEY`, then `<galaxy>/.cosmon/harvest.pub`, then the
+  galaxy's `takeover.pub` as the domain-separated subkey §D2 permits), the
+  monotone epoch, the sealed-grant store, and the append-only consumption
+  ledger.
+- `cosmon_cli::cmd::done_authority` — the §D3 effect boundary. It takes the
+  trunk guard as a parameter so "call it before locking" is a compile error,
+  re-derives every fact there, and appends the receipt before the first git
+  mutation.
+
+Two things this molecule deliberately did **not** do:
+
+- **No grant/challenge command surface.** The operator seals the canonical
+  bytes out of band with stock `minisign` and drops the result under
+  `.cosmon/state/harvest/grants/`. The parity audit this ADR anticipates is
+  therefore still owed by the molecule that adds that surface, and no command
+  bytes changed here.
+- **Not on by default.** `[harvest_authority] required` in the galaxy's
+  tracked `.cosmon/config.toml` turns it on. A fail-closed mechanism shipped
+  as a default would refuse every harvest in every galaxy that had not yet
+  pinned a key. Once on, §D4 holds exactly: deleting the trust root stops
+  harvests instead of unlocking them.
+
+Falsifier 6 — the central one — is asserted by
+`cosmon-cli/tests/done_authorization_unforgeable.rs`, alongside a check that
+the refusal text keeps the §D5 claim bound.
+
 ## Implementation obligations and falsifiers
 
 This ADR is the decision, not the command implementation. The implementation

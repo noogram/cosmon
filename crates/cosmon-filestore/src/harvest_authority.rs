@@ -54,9 +54,7 @@ use cosmon_core::harvest_authorization::{
     HarvestSealVerifier, PermitId,
 };
 use cosmon_core::id::MoleculeId;
-use cosmon_core::operator_attestation::{
-    AttestationError, OperatorAttestation, OperatorKeyId,
-};
+use cosmon_core::operator_attestation::{AttestationError, OperatorAttestation, OperatorKeyId};
 use cosmon_notary::minisign::{self, MinisignPublicKey, MinisignSignature};
 
 /// Environment variable naming an explicit harvest trust-root path.
@@ -249,6 +247,38 @@ pub fn read_epoch(galaxy_root: impl AsRef<Path>) -> Result<GrantEpoch, CosmonErr
                 path.display()
             ),
         })
+}
+
+/// Path of the tracked autonomous-harvest policy, relative to a galaxy root.
+pub const HARVEST_POLICY_REL: &str = ".cosmon/harvest-policy.toml";
+
+/// The digest of the autonomous policy a delegation is bound to.
+///
+/// A [`cosmon_core::harvest_authorization::HarvestScope::Mission`] grant seals
+/// this digest, so editing the policy changes it and the delegation lapses —
+/// with nobody notified and nothing to revoke. That is the arithmetic form of
+/// revocation ADR-172 asks for, applied to policy rather than to the epoch.
+///
+/// A missing policy file digests the empty string rather than erroring: a
+/// galaxy that has approved no autonomous policy has one, and it is empty. A
+/// delegation signed against the empty digest is still a delegation the
+/// operator sealed.
+///
+/// # Errors
+///
+/// [`CosmonError::StateStore`] when the file exists but cannot be read.
+pub fn read_policy_digest(galaxy_root: impl AsRef<Path>) -> Result<String, CosmonError> {
+    let path = galaxy_root.as_ref().join(HARVEST_POLICY_REL);
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(CosmonError::StateStore {
+                reason: format!("failed to read harvest policy {}: {e}", path.display()),
+            })
+        }
+    };
+    Ok(cosmon_core::harvest_authorization::policy_digest(&bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -572,7 +602,10 @@ mod tests {
     fn the_ledger_is_append_only_so_a_second_receipt_does_not_erase_the_first() {
         let dir = tempdir().expect("tempdir");
         let ledger = FileConsumptionLedger::at_state_root(dir.path());
-        for (raw, inv) in [("task-20260901-6da6", "inv-1"), ("task-20260901-aaaa", "inv-2")] {
+        for (raw, inv) in [
+            ("task-20260901-6da6", "inv-1"),
+            ("task-20260901-aaaa", "inv-2"),
+        ] {
             let molecule = mol(raw);
             let auth = authorization(&molecule);
             ledger

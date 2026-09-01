@@ -26,6 +26,7 @@ pub mod dispatch_ledger;
 pub mod diverge;
 pub mod doctor;
 pub mod done;
+pub mod done_authority;
 pub mod drop;
 pub(crate) mod egress_delegate;
 pub mod ensemble;

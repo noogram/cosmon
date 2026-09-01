@@ -100,6 +100,19 @@ pub struct ProjectConfig {
     #[serde(default)]
     pub confidential_blocklist: ConfidentialBlocklistConfig,
 
+    /// Harvest-authority policy — whether `cs done` demands an
+    /// operator-sealed [`crate::harvest_authorization::DoneAuthorization`]
+    /// before it mutates the trunk (ADR-172).
+    ///
+    /// Opt-in per galaxy, and deliberately so: a galaxy that has not yet
+    /// pinned a trust root and issued a delegation would otherwise have every
+    /// harvest refused the moment the mechanism shipped. Once
+    /// `required = true`, the check is fail-closed — deleting the trust root
+    /// stops harvests rather than unlocking them. See
+    /// [`HarvestAuthorityConfig`].
+    #[serde(default)]
+    pub harvest_authority: HarvestAuthorityConfig,
+
     /// Scope-guard policy — the warn-vs-abort knob for the `cs done`
     /// change-perimeter gate (P3 of `task-20260712-3819`). A molecule
     /// declares its allowed perimeter with `--var scope_allow=<globs>`;
@@ -566,6 +579,45 @@ pub struct ScopeGuardConfig {
     /// warning. Default `false` (advisory) — the §8b-aligned honest default.
     #[serde(default)]
     pub strict: bool,
+}
+
+/// Whether `cs done` requires an operator-sealed harvest authorisation
+/// (ADR-172).
+///
+/// ```toml
+/// [harvest_authority]
+/// required = true
+/// ```
+///
+/// # Why this is a switch and not a constant
+///
+/// The authority model is fail-closed once it is in force: with `required =
+/// true` and no trust root pinned, every harvest is refused. That is the
+/// correct end state and a catastrophic default, because it would refuse every
+/// harvest in every galaxy that had not yet pinned a key and issued a
+/// delegation. The switch is the galaxy's statement that it has.
+///
+/// It lives in `.cosmon/config.toml`, which is **tracked**. A worker can edit
+/// it — a same-uid process can edit any file the operator can — but not
+/// quietly: flipping it back is a line in a diff somebody reads. That is the
+/// same honest ceiling ADR-171 states for the trust root itself, and it is why
+/// the switch is here rather than in `.cosmon/state/`, which nobody reviews.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HarvestAuthorityConfig {
+    /// `true` to demand a sealed authorisation at the effect boundary.
+    ///
+    /// Default `false`: byte-identical behaviour to a cosmon that predates
+    /// ADR-172, so shipping the mechanism does not strand a galaxy.
+    #[serde(default)]
+    pub required: bool,
+}
+
+impl HarvestAuthorityConfig {
+    /// Whether the harvest-authority check is in force for this galaxy.
+    #[must_use]
+    pub fn is_required(&self) -> bool {
+        self.required
+    }
 }
 
 /// Publish-identity gate — the D7 publish-closure widening (ADR-128 §V1).

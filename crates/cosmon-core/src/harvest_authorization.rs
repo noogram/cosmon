@@ -249,7 +249,9 @@ pub enum GrantError {
     /// A ratified seal was offered a mission scope. Per-molecule ratification
     /// is the whole point of the variant: approval for one reviewed molecule
     /// must not become approval for its siblings.
-    #[error("an operator harvest seal is molecule-scoped — {found} is a delegation, not a ratification")]
+    #[error(
+        "an operator harvest seal is molecule-scoped — {found} is a delegation, not a ratification"
+    )]
     RatificationIsNotMissionScoped {
         /// The scope that was offered.
         found: HarvestScope,
@@ -393,9 +395,7 @@ impl HarvestGrant {
             HarvestScope::Mission {
                 mission: sealed,
                 policy_digest: sealed_digest,
-            } => {
-                mission == Some(sealed) && policy_digest == Some(sealed_digest.as_str())
-            }
+            } => mission == Some(sealed) && policy_digest == Some(sealed_digest.as_str()),
         }
     }
 }
@@ -442,6 +442,25 @@ fn hex_digest(bytes: &[u8]) -> String {
         let _ = write!(acc, "{b:02x}");
         acc
     })
+}
+
+/// The digest an autonomous policy is identified by inside a delegation.
+///
+/// Exposed so an adapter that reads the policy file and the domain that seals
+/// its digest agree on one function rather than on a shared convention.
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::harvest_authorization::policy_digest;
+///
+/// // A galaxy that has approved no policy still has one, and it is empty.
+/// assert_eq!(policy_digest(b"").len(), 64);
+/// assert_ne!(policy_digest(b"a"), policy_digest(b"b"));
+/// ```
+#[must_use]
+pub fn policy_digest(bytes: &[u8]) -> String {
+    hex_digest(bytes)
 }
 
 /// Digest of a grant's signed bytes.
@@ -512,14 +531,9 @@ impl OperatorHarvestSeal {
     /// [`GrantError::RatificationIsNotMissionScoped`] when the grant carries a
     /// mission scope: that is a delegation, and calling it a ratification
     /// would let one signature ratify a whole DAG.
-    pub fn new(
-        grant: HarvestGrant,
-        attestation: OperatorAttestation,
-    ) -> Result<Self, GrantError> {
+    pub fn new(grant: HarvestGrant, attestation: OperatorAttestation) -> Result<Self, GrantError> {
         if matches!(grant.scope, HarvestScope::Mission { .. }) {
-            return Err(GrantError::RatificationIsNotMissionScoped {
-                found: grant.scope,
-            });
+            return Err(GrantError::RatificationIsNotMissionScoped { found: grant.scope });
         }
         Ok(Self { grant, attestation })
     }
@@ -593,6 +607,43 @@ impl fmt::Display for PermitId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// The reservations `tags` crosses, in the vocabulary ADR-172 §D1 fixes.
+///
+/// This is the list of thresholds the operator reserved: `hold:human`,
+/// `needs-review` and its cross-provider variant, `security` and every
+/// `security:*`, `no-auto-harvest`, and every `harvest_to:*` routing intent.
+/// A harvest that crosses any of them needs a grant that names it.
+///
+/// Kept here, in the domain, rather than beside the `cs done` call site, so
+/// that the set a grant is checked against and the set an operator reads in
+/// the ADR are the same list in one place.
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::harvest_authorization::reservations_crossed;
+///
+/// let crossed = reservations_crossed(["needs-review", "kind:task", "security:leak"]);
+/// assert_eq!(crossed, vec!["needs-review".to_owned(), "security:leak".to_owned()]);
+/// ```
+#[must_use]
+pub fn reservations_crossed(tags: impl IntoIterator<Item = impl AsRef<str>>) -> Vec<String> {
+    let mut out = BTreeSet::new();
+    for tag in tags {
+        let tag = tag.as_ref();
+        let reserved = matches!(
+            tag,
+            "hold:human" | "needs-review" | "needs-review-cross-provider" | "security"
+        ) || tag.starts_with("security:")
+            || tag == "no-auto-harvest"
+            || tag.starts_with("harvest_to:");
+        if reserved {
+            out.insert(tag.to_owned());
+        }
+    }
+    out.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -750,8 +801,10 @@ pub enum HarvestRefusal {
     OutOfScope {
         /// Molecule about to be harvested.
         molecule: MoleculeId,
-        /// Scope inside the signed bytes.
-        scope: HarvestScope,
+        /// Scope inside the signed bytes. Boxed because a refusal travels in
+        /// the `Err` arm of every authorisation and a fat error makes every
+        /// success pay for it.
+        scope: Box<HarvestScope>,
     },
     /// The resolved base branch is not the one signed for.
     #[error("the grant authorises base {sealed}, this harvest resolves to {actual}")]
@@ -795,9 +848,9 @@ pub enum HarvestRefusal {
     #[error("this authority was already spent on {spent_on} and cannot authorise {requested}")]
     AlreadySpentElsewhere {
         /// Effect the permit was consumed on.
-        spent_on: HarvestEffect,
+        spent_on: Box<HarvestEffect>,
         /// Effect it is now being offered for.
-        requested: HarvestEffect,
+        requested: Box<HarvestEffect>,
     },
 }
 
@@ -946,7 +999,7 @@ pub fn authorize(
     ) {
         return Err(HarvestRefusal::OutOfScope {
             molecule: facts.molecule.clone(),
-            scope: grant.scope.clone(),
+            scope: Box::new(grant.scope.clone()),
         });
     }
     if grant.base != facts.base {
@@ -988,8 +1041,8 @@ pub fn authorize(
             return Ok(AuthorizedHarvest::AlreadyLanded(Box::new(record.clone())));
         }
         return Err(HarvestRefusal::AlreadySpentElsewhere {
-            spent_on: record.effect.clone(),
-            requested: effect,
+            spent_on: Box::new(record.effect.clone()),
+            requested: Box::new(effect),
         });
     }
 
@@ -1189,7 +1242,9 @@ mod tests {
         let a = grant(scope.clone(), &["security", "needs-review", "security"]);
         let b = grant(scope, &["needs-review", "security"]);
         assert_eq!(a.canonical_bytes(), b.canonical_bytes());
-        assert!(a.to_string().contains("reservations=needs-review,security\n"));
+        assert!(a
+            .to_string()
+            .contains("reservations=needs-review,security\n"));
     }
 
     #[test]
@@ -1208,7 +1263,10 @@ mod tests {
         .expect_err("a newline in galaxy must be refused");
         assert!(matches!(
             err,
-            GrantError::FieldNotOneLine { field: "galaxy", .. }
+            GrantError::FieldNotOneLine {
+                field: "galaxy",
+                ..
+            }
         ));
     }
 

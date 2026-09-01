@@ -2066,6 +2066,61 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         Some(store.lock_trunk(&format!("cs done {mol_id}"))?)
     };
 
+    // ADR-172 §D3 — the effect boundary. The authorisation is verified and
+    // consumed HERE: inside the trunk lock, with every fact re-derived at this
+    // instant, and before the first thing that can touch git. Everything above
+    // this line is perimeter and evidence; this is the authority.
+    //
+    // The MergeDispatched emission below can be flushed into a bookkeeping
+    // commit by the merge helper, so it counts as a git mutation and the
+    // consumption goes before it, not after.
+    //
+    // Inert unless the galaxy set `[harvest_authority] required = true`. Once
+    // set it is fail-closed: no trust root means no harvest, and the refusal
+    // names every grant it considered. `--no-merge` mutates no trunk and
+    // therefore spends no authority.
+    if let Some(guard) = trunk_guard.as_deref() {
+        let invocation_id = format!(
+            "cs-done:{}:{}",
+            mol_id.as_str(),
+            chrono::Utc::now().timestamp_millis()
+        );
+        let mission = super::lineage::mission_root(&store, &mol_id);
+        let tags: Vec<String> = mol.tags.iter().map(ToString::to_string).collect();
+        match super::done_authority::authorize_harvest(
+            guard,
+            &project_cfg.harvest_authority,
+            &super::done_authority::HarvestRequest {
+                galaxy_root: &galaxy_root,
+                state_root: &state_dir,
+                galaxy: project_cfg
+                    .project
+                    .project_id
+                    .as_ref()
+                    .map_or("<galaxy>", |id| id.as_str()),
+                molecule: &mol_id,
+                mission: Some(mission),
+                tags: &tags,
+                base: &base_branch,
+                invocation_id: &invocation_id,
+            },
+        )? {
+            super::done_authority::HarvestDecision::NotInForce => {}
+            super::done_authority::HarvestDecision::Authorized(receipt) => {
+                actions.push(receipt);
+            }
+            super::done_authority::HarvestDecision::AlreadyLanded(record) => {
+                // Idempotent replay: this exact harvest already landed under
+                // this permit. Re-running the merge would be a second effect
+                // for an authority that has none left, so report and stop.
+                actions.push(format!(
+                    "harvest_already_landed: permit={} invocation={}",
+                    record.permit, record.invocation_id
+                ));
+            }
+        }
+    }
+
     // Capture the exact pre-merge revision before `cs done` emits its merge
     // event. The merge helper may flush that event into a bookkeeping commit
     // before invoking `git merge`; RR-SAFE-1 must roll back that commit too.
