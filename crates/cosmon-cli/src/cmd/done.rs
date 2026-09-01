@@ -2086,7 +2086,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             chrono::Utc::now().timestamp_millis()
         );
         let mission = super::lineage::mission_root(&store, &mol_id);
-        let tags: Vec<String> = mol.tags.iter().map(ToString::to_string).collect();
+        // Re-read the tags HERE rather than reusing the snapshot taken before
+        // the gates ran. A reservation added while `cs done` was working its
+        // way down the perimeter is a fact that changed, and D3 says the facts
+        // are the ones true inside the lock — the earlier `mol` would let a
+        // grant signed for an unreserved harvest cross a reservation that now
+        // exists.
+        let tags: Vec<String> = store
+            .load_molecule(&mol_id)
+            .as_ref()
+            .unwrap_or(&mol)
+            .tags
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         match super::done_authority::authorize_harvest(
             guard,
             &project_cfg.harvest_authority,
