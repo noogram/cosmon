@@ -610,13 +610,44 @@ pub struct HarvestAuthorityConfig {
     /// ADR-172, so shipping the mechanism does not strand a galaxy.
     #[serde(default)]
     pub required: bool,
+
+    /// How many molecules may sit *closed but not integrated* in this kernel
+    /// before the remote harvest door refuses further requests (ADR-176 D7).
+    ///
+    /// The `pre_done` refusal is the one door outcome whose missing input is
+    /// a human judgement, so it queues rather than resolving. An unbounded
+    /// queue is the silent block ADR-110 I4 forbids — the request neither
+    /// failed nor progressed, and nobody is coming. A bounded one always
+    /// terminates in a named refusal, which is why this ceiling is a field of
+    /// the operator's configuration and never a request parameter (D4).
+    ///
+    /// `None` uses [`HarvestAuthorityConfig::DEFAULT_BACKLOG_CEILING`]. The
+    /// ceiling is never absent: "no ceiling" is not expressible here, because
+    /// the whole point of the field is that the queue is bounded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_unintegrated: Option<u32>,
 }
 
 impl HarvestAuthorityConfig {
+    /// Backlog ceiling applied when the galaxy names none.
+    ///
+    /// Small on purpose. The backlog is a debt ledger, not a work queue: each
+    /// entry is a molecule whose branch is stranded pending a human verdict,
+    /// and a galaxy that has accumulated eight of them has a problem that
+    /// admitting a ninth request does not help.
+    pub const DEFAULT_BACKLOG_CEILING: u32 = 8;
+
     /// Whether the harvest-authority check is in force for this galaxy.
     #[must_use]
     pub fn is_required(&self) -> bool {
         self.required
+    }
+
+    /// The effective closed-but-unintegrated ceiling for this galaxy.
+    #[must_use]
+    pub fn backlog_ceiling(&self) -> u32 {
+        self.max_unintegrated
+            .unwrap_or(Self::DEFAULT_BACKLOG_CEILING)
     }
 }
 

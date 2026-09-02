@@ -19,6 +19,30 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **A harvest door on the Remote Pilot Port — `cs land` and
+  `POST /v1/molecules/{id}/land`.** The answer to GitHub issue #51: a tenant
+  whose molecule finished had no gesture that put its branch on the trunk,
+  because `cs done` is refused across §8p. The door takes the molecule and
+  **nothing else** — no merge strategy, no `--force`, no hook waiver, no propel
+  message — because a derogation requested by its beneficiary is not a
+  derogation ([ADR-176](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)
+  D4). Two proofs, two keys: the JWT authenticates the requester, an
+  operator-sealed `HarvestGrant` authorises the effect, and the verb refuses
+  `not_authorized` in any galaxy that has not armed `[harvest_authority]
+  required`. Auto-propel is disarmed by construction (D6), the
+  closed-but-unintegrated queue is bounded by a configured ceiling and refuses
+  past it (D7), and the reply is **200 with the outcome, never 202** — a 202 on
+  a transaction that may integrate nothing is the silent failure #51 reports.
+  Seven named refusals, mirrored to stable exit codes 70–76.
+  `cosmon-remote molecule land` is the delivered client verb; its help golden
+  is re-blessed for that one added line. `cs done` is unchanged and stays on
+  the closed list of ADR-080 §5.1 — both `NO (NEVER)` coverage rows stand.
+  Deliberated in `delib-20260819-cda2` (C7). **Cross-repo**: the smithy
+  `docs/specs/cosmon-rpp-api-reference.md` needs regenerating (`cargo xtask
+  gen-api-ref`) — the route count moved 39 → 40.
+
 ### Security
 
 - **RPP subprocess envelope: the environment half is now an allow-list, not a

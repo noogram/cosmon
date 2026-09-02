@@ -346,6 +346,8 @@ enum MoleculeCmd {
     Tackle { id: String },
     #[command(about = format!("{} — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream", canon::POST_V1_MOLECULES_ID_RUN.label()))]
     Run { id: String },
+    #[command(about = format!("{} — the harvest door (ADR-176): close this molecule and integrate it where that second authority arises. Carries no options — strategy, reservations and base are sealed in the operator's grant. Refused unless a grant covers it; 200 with the outcome, never 202", canon::POST_V1_MOLECULES_ID_LAND.label()))]
+    Land { id: String },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_COLLAPSE.label(), canon::POST_V1_MOLECULES_ID_COLLAPSE.effect_suffix()))]
     Collapse {
         id: String,
@@ -1394,6 +1396,14 @@ async fn run_molecule(
                     env.tackle.molecule_id,
                     env.tackle.worker_session.as_deref().unwrap_or("-")
                 );
+            }
+        }
+        MoleculeCmd::Land { id } => {
+            let env = client.land(&id).await?;
+            if json {
+                print_json(true, &serde_json::to_value(&env)?);
+            } else {
+                println!("{} — {}", env.harvest.molecule, env.harvest.outcome);
             }
         }
         MoleculeCmd::Run { id } => {

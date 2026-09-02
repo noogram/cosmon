@@ -13,6 +13,7 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ✓ converse       POST   /v1/avatar/converse
 ✓ ensemble       GET    /v1/molecules
 ✓ freeze         POST   /v1/molecules/:id/freeze
+✓ land           POST   /v1/molecules/:id/land
 ✓ nucleate       POST   /v1/molecules
 ✓ observe        GET    /v1/molecules/:id
 ✓ run            POST   /v1/molecules/:id/run
@@ -32,6 +33,6 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ⚠ drop           OPERATOR-ONLY (ADR-080 §5.1)
 
 ─────────────────────────────────────────────────
-15/15 RPP-exposable verbs covered.
+16/16 RPP-exposable verbs covered.
 10 operator-only verbs by design (see ADR-080 §5.1).
 Status: COMPLETE.

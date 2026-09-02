@@ -275,6 +275,36 @@ pub struct TackleBody {
     pub spawned_at: Option<String>,
 }
 
+/// Response of `POST /v1/molecules/{id}/land` — the harvest door
+/// (ADR-176, issue #51).
+///
+/// **200-shaped, deliberately.** Its sibling [`RunEnvelope`] is 202
+/// because a drain is hours-shaped; a harvest is not, and answering
+/// "accepted" for a transaction that may integrate nothing is the
+/// failure issue #51 reports. By the time this decodes, the merge
+/// either happened or it did not, and `outcome` says which.
+///
+/// Refusals never decode into this type: they arrive as HTTP errors
+/// carrying one of the seven named labels
+/// ([`cosmon_core::harvest_door::DoorRefusal`]).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct LandEnvelope {
+    pub request_id: String,
+    pub harvest: HarvestLanded,
+}
+
+/// The `harvest` body of [`LandEnvelope`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HarvestLanded {
+    /// The molecule that was closed, and integrated where the second
+    /// authority arose.
+    pub molecule: String,
+    /// `landed`, or `already_landed` when the harvest had already
+    /// happened — the idempotent reply that makes a retry over a lossy
+    /// network safe.
+    pub outcome: String,
+}
+
 /// Response of `POST /v1/molecules/{id}/run` (bounded drain,
 /// ADR-124). 202-shaped: the drain was spawned,
 /// not completed — progress arrives on `GET /v1/events`
@@ -892,6 +922,21 @@ impl Client {
     pub async fn run(&self, id: &str) -> Result<RunEnvelope> {
         let resp = self
             .send(self.req_canon(canon::POST_V1_MOLECULES_ID_RUN, &[id]))
+            .await?;
+        decode_json(resp).await
+    }
+
+    /// `POST /v1/molecules/{id}/land` — the harvest door (ADR-176).
+    ///
+    /// Ask for one molecule to be closed and, where the second authority
+    /// arises, integrated into its resolved base. The request carries the
+    /// id and nothing else: no strategy, no force, no hook waiver — those
+    /// are sealed fields of the operator's grant, not parameters (D4).
+    /// Refused unless an operator-sealed grant covers the molecule on that
+    /// base; the bearer token authenticates the asker, never the effect.
+    pub async fn land(&self, id: &str) -> Result<LandEnvelope> {
+        let resp = self
+            .send(self.req_canon(canon::POST_V1_MOLECULES_ID_LAND, &[id]))
             .await?;
         decode_json(resp).await
     }

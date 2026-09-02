@@ -130,6 +130,7 @@ pub static ROUTES_USED: &[&CanonRoute] = &[
     POST_V1_MOLECULES_ID_STUCK,
     POST_V1_MOLECULES_ID_TACKLE,
     POST_V1_MOLECULES_ID_RUN,
+    POST_V1_MOLECULES_ID_LAND,
     // D-AVATAR canal (b) — top-level `converse` verb (task-20260610-0b57).
     POST_V1_AVATAR_CONVERSE,
     // D-AVATAR instance lifecycle (tenant verbs).

@@ -11,6 +11,7 @@ collapse     POST /v1/molecules/:id/collapse
 converse     POST /v1/avatar/converse
 ensemble     GET /v1/molecules
 freeze       POST /v1/molecules/:id/freeze
+land         POST /v1/molecules/:id/land
 nucleate     POST /v1/molecules
 observe      GET /v1/molecules/:id
 run          POST /v1/molecules/:id/run

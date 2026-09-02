@@ -475,6 +475,27 @@ deny-list gap, and the missing `COSMON_API_REQUEST` parse-time refusal for
 `done` are all repairs to the *current* state and are more urgent than this
 decision about the intended one.
 
+**Postscript — the condition is met, and the door exists.** All three repairs
+landed (`8b54b0bd`, `6c8eee2f`, `f0bfe4f9`), and `DoneAuthorization` is code
+(`crates/cosmon-core/src/harvest_authorization.rs`, verified and consumed at
+the effect boundary by `crates/cosmon-cli/src/cmd/done_authority.rs`). The door
+this ADR bounds was then built by `task-20260901-3b53` as the verb **`cs land`**
+and the route **`POST /v1/molecules/{id}/land`** — a distinct gesture, not
+`cs done` with fewer flags reachable: its argument set is fixed at the type
+(`done::Args::sealed_door`), and rows L76/L77 of the coverage guide stay
+`NO (NEVER)` unchanged. `cs done` is still refused across §8p, by the closed
+list and by the parse-time second lock, and that is the point: the door varies
+nothing and refuses without a seal, so it withholds every degree of freedom D4
+enumerates.
+
+One falsifier of §8 could **not** be satisfied as written and is recorded
+rather than papered over: falsifier 6 wants `base_not_fast_forward` refused at
+capability arming, and cosmon ships no grant-issuing path to put that check in
+(ADR-172 D2 — verification without a signer). The door instead makes the class
+unreachable through itself (it fixes `strategy = Merge`, so no request can
+select a fast-forward) and answers the residue as `503` — the only refusal on
+this route that is not charged to the requester.
+
 ---
 
 ## 10 · Amendments to `docs/guides/api-cli-coverage.md`

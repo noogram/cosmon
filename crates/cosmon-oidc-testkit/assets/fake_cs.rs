@@ -31,6 +31,11 @@
 //!   `COSMON_*`-only view could not observe a non-`COSMON_` variable
 //!   crossing the perimeter, which is precisely what the allow-list
 //!   claims to prevent.
+//! - `--json land <id>`: stand-in for the harvest door (ADR-176). A
+//!   `land-exit` file in the molecule dir pins the exit code, so each of
+//!   the seven named refusals is reachable without staging a real merge
+//!   conflict; a `land-outcome` file pins the reported outcome. Takes
+//!   exactly one argument and exits 2 on any extra token.
 //! - Any other invocation exits 2.
 //!
 //! The cwd lookup is intentional and load-bearing: it is precisely
@@ -55,6 +60,17 @@ fn main() -> ExitCode {
         Some("run") => match argv.get(2) {
             Some(root) => run(root),
             None => ExitCode::from(2),
+        },
+        // The harvest door takes ONE argument and refuses every extra
+        // token (ADR-176 D4). The arity check lives here rather than in
+        // `land` so a route that ever grew a parameter fails loudly in the
+        // adapter's own tests instead of passing one through unread.
+        Some("land") => match (argv.get(2), argv.len()) {
+            (Some(id), 3) => land(id),
+            _ => {
+                eprintln!("fake-cs: land takes exactly one argument, got {args:?}");
+                ExitCode::from(2)
+            }
         },
         Some("__dump_env") => dump_env(),
         _ => {
@@ -164,6 +180,53 @@ fn run(root: &str) -> ExitCode {
             "exit",
             serde_json_lite::Value::String("drained".to_owned()),
         ),
+    ]);
+    print!("{stdout}");
+    ExitCode::SUCCESS
+}
+
+/// `--json land <id>` — stand-in for the harvest door (ADR-176).
+///
+/// - molecule missing → exit 4 (not found);
+/// - a `land-exit` file inside the molecule dir → exit with the code it
+///   contains, which is how a test exercises each of the seven named
+///   refusals (70–76) without staging a real merge conflict;
+/// - a `land-outcome` file → echo its contents as the outcome, so the
+///   idempotent `already_landed` reply is reachable;
+/// - otherwise prints `{"molecule": ..., "outcome": "landed"}`, exit 0.
+///
+/// It takes NO flags, and that is on purpose: an extra argument makes it
+/// exit 2, so a route that ever grew a parameter would fail the tests here
+/// rather than silently pass one through.
+fn land(id: &str) -> ExitCode {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("fake-cs: cannot read cwd: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let base = cwd.join(".cosmon").join("state");
+    let candidates = [
+        base.join("fleets").join("default").join("molecules").join(id),
+        base.join("molecules").join(id),
+    ];
+    let Some(mol_dir) = candidates.iter().find(|p| p.exists()) else {
+        eprintln!("fake-cs: molecule {id} not found");
+        return ExitCode::from(4);
+    };
+    if let Ok(text) = std::fs::read_to_string(mol_dir.join("land-exit")) {
+        if let Ok(code) = text.trim().parse::<u8>() {
+            eprintln!("fake-cs: land refusing with pinned code {code}");
+            return ExitCode::from(code);
+        }
+    }
+    let outcome = std::fs::read_to_string(mol_dir.join("land-outcome"))
+        .map(|t| t.trim().to_owned())
+        .unwrap_or_else(|_| "landed".to_owned());
+    let stdout = serde_json_lite::object(&[
+        ("molecule", serde_json_lite::Value::String(id.to_owned())),
+        ("outcome", serde_json_lite::Value::String(outcome)),
     ]);
     print!("{stdout}");
     ExitCode::SUCCESS

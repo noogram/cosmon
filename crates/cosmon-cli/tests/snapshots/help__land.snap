@@ -1,0 +1,16 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Land — the harvest door: close one molecule, and integrate it where that second authority arises (ADR-176; the §8p `POST /v1/molecules/{id}/land` twin). Takes the molecule and nothing else: no strategy, no force, no hook skip. A galaxy must have armed `[harvest_authority] required` for it to do anything at all
+
+Usage: cs land [OPTIONS] <MOLECULE>
+
+Arguments:
+  <MOLECULE>  Molecule to close and, where the second authority arises, integrate
+
+Options:
+      --config <PATH>  Path to configuration file
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

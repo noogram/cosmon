@@ -539,6 +539,27 @@ pub fn run_molecule_args(
     ]
 }
 
+/// Build the argument vector for the harvest door — `cs land <id> --json`.
+///
+/// **The whole point of this function is what it does not contain.** ADR-176
+/// D4 forbids any parameter that could alter a gate's verdict, a merge's
+/// strategy, or a destructive step's precondition, and the enforcement is
+/// structural: the function takes one `&str` and has no other input to spend.
+/// A body field would have nowhere to go even if a future handler decoded one.
+///
+/// `no_option_crosses_the_wire` pins that. It is a *surface* test rather than
+/// a review convention because the property is not self-maintaining: `run`'s
+/// argument vector is safe today only because every flag it emits comes from
+/// operator-sealed bounds, and nothing in the type system stops that from
+/// changing.
+///
+/// `--json` is the global output selector and precedes the subcommand; it
+/// changes no effect, which is exactly why it is admissible here.
+#[must_use]
+pub fn land_molecule_args(molecule_id: &str) -> Vec<String> {
+    vec!["--json".into(), "land".into(), molecule_id.to_owned()]
+}
+
 /// Build the argument vector for `cs tackle <id> --json`.
 ///
 /// T9 remote-tackle V2 — the only §8p verb that re-uses the §3.5 subprocess
@@ -585,6 +606,49 @@ mod tests {
     use super::*;
     use crate::nucleon_map::Noyau;
     use std::ffi::OsStr;
+
+    /// ADR-176 D4 as a surface freeze: the harvest door's argument vector
+    /// is the molecule and the output selector, and nothing else.
+    ///
+    /// The assertion is written as "no argument starts with `--` except
+    /// `--json`" rather than as an equality against a literal vector, so it
+    /// keeps firing if someone appends a flag at the end — which is where a
+    /// flag gets appended.
+    #[test]
+    fn no_option_crosses_the_wire() {
+        let args = land_molecule_args("task-20260901-3b53");
+        assert_eq!(args, vec!["--json", "land", "task-20260901-3b53"]);
+        let options: Vec<&String> = args
+            .iter()
+            .filter(|a| a.starts_with("--") && a.as_str() != "--json")
+            .collect();
+        assert!(
+            options.is_empty(),
+            "the harvest door must expose no parameter (ADR-176 D4); found {options:?}",
+        );
+    }
+
+    /// The forbidden set, named one by one.
+    ///
+    /// A generic "no options" check passes vacuously if someone renames the
+    /// door's flags; naming the five ADR-176 D4 enumerates makes the test
+    /// fail on the specific derogations the deliberation refused.
+    #[test]
+    fn the_five_named_derogations_are_absent() {
+        let rendered = land_molecule_args("task-20260901-3b53").join(" ");
+        for flag in [
+            "--force",
+            "--strategy",
+            "--skip-pre-done-hook",
+            "--no-branch-delete",
+            "--propel-message",
+        ] {
+            assert!(
+                !rendered.contains(flag),
+                "`{flag}` reached the harvest door's argv (ADR-176 D4)",
+            );
+        }
+    }
 
     /// Minimal spark for zero-I/O command-assembly tests. No tenant
     /// dir is materialised — `build_command`'s best-effort `cwd` check
