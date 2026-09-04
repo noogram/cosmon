@@ -21,6 +21,37 @@ this stage.
 
 ### Added
 
+- **`cosmon-remote login --bind <IP>` — a configurable bind address for the
+  OIDC loopback callback.** The answer to GitHub issue #52: the login flow's
+  one-shot redirect catcher bound `127.0.0.1` and advertised
+  `http://127.0.0.1:7777/callback` as one indivisible fact, so a client running
+  inside a container or a VM could never complete a login — the browser dials
+  *its own* loopback and the redirect never crosses the boundary. The two facts
+  are now separate. `--bind` moves the **listener**; the advertised
+  `redirect_uri` does **not** move, because the IdP enforces its registered
+  redirect set by exact match (RFC 8252 §7.3) and because that literal is what a
+  port-forward from the browser's machine dials. The documented recipe is the
+  reporter's own: forward `127.0.0.1:7777` into the container (`ssh -L`, or the
+  runtime's published port) and `login --bind 0.0.0.0` inside it — see
+  [Run cosmon as a remote service](docs/book/src/how-to/deploy-remote-service.md).
+  The flag carries an address, never `host:port`: the port is shared with the
+  advertised URI in a single carried `oidc::LoopbackBind { addr, port }`, which
+  also removes the second source of truth the login path used to re-parse out of
+  the `redirect_uri` string. `OidcEndpoints`'s `redirect_uri` and `bind` are now
+  private, read through accessors and re-established together by
+  `with_redirect_uri` / `with_bind_addr`: the two must name the same port, and
+  an invariant over two fields belongs to the type that owns them. A non-loopback bind is opt-in and announced on
+  stderr, once, before the browser opens; what bounds it is unchanged and
+  already load-bearing — only a request echoing the per-flow high-entropy
+  `state` can end the wait (`classify_request`), and a captured code is inert
+  without the PKCE verifier that never leaves the process. Deliberately **not** a
+  `config set` key: a durable profile value would make an unusual posture silent
+  and permanent, while the knob is needed exactly as often as a login happens.
+  The default path is byte-identical — same authorize URL, same advertised URI.
+  `login`'s help golden gains that one option line; the man page is unchanged
+  (it carries no per-subcommand flags).
+  [ADR-080 §3.1.1](docs/adr/080-remote-pilot-port-https-oidc.md).
+
 - **A harvest door on the Remote Pilot Port — `cs land` and
   `POST /v1/molecules/{id}/land`.** The answer to GitHub issue #51: a tenant
   whose molecule finished had no gesture that put its branch on the trunk,
