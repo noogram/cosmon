@@ -464,48 +464,6 @@ pub fn parse_cs_json(stdout: &[u8]) -> Result<Value, RppRejectReason> {
     })
 }
 
-/// Build the argument vector for `cs observe :id --json`. Exposed
-/// for unit tests of route-level argument construction.
-#[must_use]
-pub fn observe_molecule_args(molecule_id: &str) -> Vec<&str> {
-    vec!["--json", "observe", molecule_id]
-}
-
-/// Build the argument vector for `cs nucleate <formula> ...`.
-///
-/// Order: `--json nucleate <formula> [--kind <kind>] [--var k=v ...]
-/// [--tag t1 ...]`. The `--json` flag is global on the cosmon CLI and
-/// MUST precede the subcommand. The variables map is iterated in
-/// stable insertion order (each `(key, value)` rendered as
-/// `--var key=value`).
-///
-/// Each entry is owned `String` because the formula and kind/var/tag
-/// inputs come from a JSON body that does not survive the subprocess
-/// invocation. Tests that exercise the shape independently can
-/// construct the vector directly.
-#[must_use]
-pub fn nucleate_molecule_args(
-    formula: &str,
-    kind: Option<&str>,
-    variables: &[(String, String)],
-    tags: &[String],
-) -> Vec<String> {
-    let mut args: Vec<String> = vec!["--json".into(), "nucleate".into(), formula.to_owned()];
-    if let Some(k) = kind {
-        args.push("--kind".into());
-        args.push(k.to_owned());
-    }
-    for (k, v) in variables {
-        args.push("--var".into());
-        args.push(format!("{k}={v}"));
-    }
-    for t in tags {
-        args.push("--tag".into());
-        args.push(t.clone());
-    }
-    args
-}
-
 /// Build the argument vector for the resident drain —
 /// `cs run <root>` with the binding-derived bounds (design (a),
 /// B1 moussage resident).
@@ -907,14 +865,6 @@ mod tests {
                 "--timeout",
                 "600",
             ]
-        );
-    }
-
-    #[test]
-    fn observe_args_emit_json_flag() {
-        assert_eq!(
-            observe_molecule_args("mol-1"),
-            vec!["--json", "observe", "mol-1"]
         );
     }
 
