@@ -48,29 +48,51 @@ fn write_env_echo_cs(dir: &Path) -> PathBuf {
     path
 }
 
-/// Write a fake `cs` executable that implements just enough of
-/// `cs init --upgrade` for the orchestration test: on that subcommand
-/// it materialises `.cosmon/config.toml` (with a `[project]` section)
-/// in the current working directory, the same artifact the real
-/// `cs init --upgrade` backfills. Any other invocation is a no-op exit
-/// 0. Returns the path to the script.
-fn write_fake_cs(dir: &Path) -> PathBuf {
-    let path = dir.join("fake-cs-init.sh");
-    let script = r#"#!/bin/sh
-# Minimal `cs` stub for image_init orchestration tests.
-if [ "$1" = "init" ]; then
-    mkdir -p .cosmon
-    if [ ! -f .cosmon/config.toml ]; then
-        printf '[project]\nproject_id = "test-pid"\n' > .cosmon/config.toml
-    fi
-    exit 0
+/// Name of the marker file the poison `cs` drops when it is invoked.
+/// Its absence after a full `ImageInit::run` is the falsifier for
+/// "state materialization no longer shells out to `cs`".
+const CS_INVOCATION_MARKER: &str = "cs-was-invoked";
+
+/// `project_id` the poison `cs` would write. If it ever appears in a
+/// materialised `config.toml`, the shell-out came back.
+const POISON_PROJECT_ID: &str = "poison-shelled-out";
+
+/// Write a poison `cs` executable: it records its own invocation in
+/// `<dir>/cs-was-invoked` and writes a recognisable `config.toml`, then
+/// exits 0.
+///
+/// Before issue #54 this script's stub behaviour was what made the
+/// image-init tests pass — step 2a shelled out to `cs init --upgrade`.
+/// Now nothing in the materialization path may run it, so the same
+/// script serves the opposite purpose: a tripwire. Exiting 0 matters —
+/// a failing stub would be caught by `all_ok()` for the wrong reason.
+fn write_poison_cs(dir: &Path) -> PathBuf {
+    let path = dir.join("poison-cs.sh");
+    let script = format!(
+        r#"#!/bin/sh
+# Tripwire `cs` for image_init tests — must never be invoked.
+: > "{marker}"
+mkdir -p .cosmon
+if [ ! -f .cosmon/config.toml ]; then
+    printf '[project]\nproject_id = "{pid}"\n' > .cosmon/config.toml
 fi
 exit 0
-"#;
+"#,
+        marker = dir.join(CS_INVOCATION_MARKER).display(),
+        pid = POISON_PROJECT_ID,
+    );
     std::fs::write(&path, script).unwrap();
     #[cfg(unix)]
     make_executable(&path);
     path
+}
+
+/// Assert the poison `cs` was never spawned during `ImageInit::run`.
+fn assert_cs_never_invoked(td: &Path) {
+    assert!(
+        !td.join(CS_INVOCATION_MARKER).exists(),
+        "image init shelled out to `cs` — state materialization must be library-direct",
+    );
 }
 
 fn image_init_for(td: &Path, cs_path: PathBuf) -> ImageInit {
@@ -95,10 +117,37 @@ fn assert_noyau_materialized(galaxies_root: &Path, noyau: &str) {
             "noyau {noyau}: missing .cosmon/state/{sub}",
         );
     }
-    // Step 2a — cs init produced config.toml.
+    // Step 2a — the library upgrade pass produced config.toml with a
+    // real generated project_id, plus the artifacts only the real
+    // `cs init --upgrade` writes: canonical formulas, the neurion
+    // registry, the gitleaks baseline. A stub could fake config.toml;
+    // it could not fake these.
+    let config = root.join(".cosmon/config.toml");
     assert!(
-        root.join(".cosmon/config.toml").is_file(),
-        "noyau {noyau}: cs init did not produce config.toml",
+        config.is_file(),
+        "noyau {noyau}: init --upgrade did not produce config.toml",
+    );
+    let body = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        body.contains("project_id = "),
+        "noyau {noyau}: config.toml carries no project_id:\n{body}",
+    );
+    assert!(
+        !body.contains(POISON_PROJECT_ID),
+        "noyau {noyau}: config.toml was written by the poison `cs`, not the library",
+    );
+    assert!(
+        root.join(".cosmon/formulas/task-work.formula.toml")
+            .is_file(),
+        "noyau {noyau}: canonical formulas were not backfilled",
+    );
+    assert!(
+        root.join(".cosmon/registry.sqlite").is_file(),
+        "noyau {noyau}: registry.sqlite was not seeded",
+    );
+    assert!(
+        root.join(".gitleaks.toml").is_file(),
+        "noyau {noyau}: gitleaks baseline was not written",
     );
     // Step 2b — git repo with at least the initial commit.
     assert!(root.join(".git").is_dir(), "noyau {noyau}: missing .git");
@@ -109,7 +158,7 @@ fn single_noyau_materializes_all_steps() {
     // Equivalence: one noyau, the exact tenant-demo V1 case. Every step the
     // shell ENTRYPOINT performed must land.
     let td = tempfile::tempdir().unwrap();
-    let cs = write_fake_cs(td.path());
+    let cs = write_poison_cs(td.path());
     let init = image_init_for(td.path(), cs);
 
     let report = init.run(&[Noyau::new("tenant-demo-sandbox")]);
@@ -120,6 +169,7 @@ fn single_noyau_materializes_all_steps() {
     assert!(td.path().join("whispers/inbox").is_dir());
 
     // Steps 2/2a/2b — per noyau.
+    assert_cs_never_invoked(td.path());
     assert_noyau_materialized(&td.path().join("galaxies"), "tenant-demo-sandbox");
 
     // Steps 3a/3b — Claude Code gates in the worker $HOME.
@@ -138,7 +188,7 @@ fn rerun_is_idempotent() {
     // every step `AlreadyPresent`, config.toml untouched, exactly one
     // git commit, no churn.
     let td = tempfile::tempdir().unwrap();
-    let cs = write_fake_cs(td.path());
+    let cs = write_poison_cs(td.path());
     let init = image_init_for(td.path(), cs);
     let noyaux = [Noyau::new("tenant-demo-sandbox")];
 
@@ -164,8 +214,9 @@ fn rerun_is_idempotent() {
     assert_eq!(second.claude_onboarding, StepOutcome::AlreadyPresent);
     assert_eq!(second.claude_skip_dangerous, StepOutcome::AlreadyPresent);
 
-    // config.toml was NOT clobbered — cs init was correctly skipped.
+    // config.toml was NOT clobbered — step 2a was correctly skipped.
     assert_eq!(std::fs::read_to_string(&config).unwrap(), sentinel);
+    assert_cs_never_invoked(td.path());
 }
 
 #[test]
@@ -173,7 +224,7 @@ fn multi_noyau_materializes_each_independently() {
     // The whole point of Phase 1: more than one convive. Two noyaux,
     // two independent galaxy trees, each fully materialised.
     let td = tempfile::tempdir().unwrap();
-    let cs = write_fake_cs(td.path());
+    let cs = write_poison_cs(td.path());
     let init = image_init_for(td.path(), cs);
 
     let report = init.run(&[Noyau::new("tenant-demo-sandbox"), Noyau::new("democorp")]);
@@ -181,6 +232,7 @@ fn multi_noyau_materializes_each_independently() {
     assert_eq!(report.noyaux.len(), 2);
 
     let galaxies = td.path().join("galaxies");
+    assert_cs_never_invoked(td.path());
     assert_noyau_materialized(&galaxies, "tenant-demo-sandbox");
     assert_noyau_materialized(&galaxies, "democorp");
 
@@ -199,7 +251,7 @@ fn no_noyaux_still_materializes_instance_level() {
     // yet) must not panic — instance-level steps still run, the
     // per-noyau loop is simply empty. Non-regression: the adapter boots.
     let td = tempfile::tempdir().unwrap();
-    let cs = write_fake_cs(td.path());
+    let cs = write_poison_cs(td.path());
     let init = image_init_for(td.path(), cs);
 
     let report = init.run(&[]);
@@ -207,6 +259,28 @@ fn no_noyaux_still_materializes_instance_level() {
     assert!(report.noyaux.is_empty());
     assert!(td.path().join("whispers/inbox").is_dir());
     assert!(td.path().join("home/.claude.json").is_file());
+}
+
+#[test]
+fn materializes_with_no_cs_binary_anywhere() {
+    // The falsifier for issue #54 U2. The shipped container image
+    // carries no `cs` binary, so step 2a must not need one. Here the
+    // configured `cs_path` names a file that does not exist: a
+    // shell-out cannot even reach the poison tripwire, it fails to
+    // spawn. The run must still materialise a complete galaxy.
+    //
+    // Stub the function this test covers and it goes red: without
+    // `upgrade_project`, no `config.toml`, no formulas, no registry.
+    let td = tempfile::tempdir().unwrap();
+    let absent_cs = td.path().join("there-is-no-cs-here");
+    assert!(!absent_cs.exists(), "fixture must not provide a cs binary");
+    let init = image_init_for(td.path(), absent_cs);
+
+    let report = init.run(&[Noyau::new("tenant-demo-sandbox")]);
+
+    assert!(report.all_ok(), "report had a failed step: {report:?}");
+    assert_eq!(report.noyaux[0].cs_init, StepOutcome::Done);
+    assert_noyau_materialized(&td.path().join("galaxies"), "tenant-demo-sandbox");
 }
 
 fn spark_for(noyau: &str, request_id: &str) -> Spark {
