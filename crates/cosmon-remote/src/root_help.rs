@@ -107,6 +107,28 @@ in-flight session with `auth status <session_id>` / `auth logout\n\
 <session_id>`.\
 ";
 
+/// `login` `after_long_help` — the non-browser opener seam.
+///
+/// It lives here rather than in the command's `about` because the `about`
+/// is also the one line the root `--help` prints for `login`; a paragraph
+/// about a headless environment variable does not belong in a command
+/// index. This block renders in `login --help` and in the man page, which
+/// is where an operator goes when the browser is the problem.
+pub const LOGIN_AFTER_LONG_HELP: &str = "\
+NO BROWSER? — set COSMON_REMOTE_BROWSER to the command that should open\n\
+the sign-in URL. The URL is appended as the command's LAST argument; the\n\
+value is split on whitespace and run directly, NOT through a shell (no\n\
+quoting, no globbing, no $VAR expansion). Examples:\n\n  \
+COSMON_REMOTE_BROWSER=xdg-open cosmon-remote login\n  \
+COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login\n\n\
+The second form is the headless smoke: against an auto-approving test\n\
+IdP, curl follows the redirect straight into the loopback callback this\n\
+command is already listening on, and the login completes with no display\n\
+attached. Setting the variable to an empty value is an error, not a\n\
+fallback — a login that silently opened a browser instead would hang on\n\
+the callback until the 5-minute timeout.\
+";
+
 /// `molecule nucleate` `after_long_help` — nucleate's place in the
 /// three-verb chain plus the formula-opacity boundary.
 pub const NUCLEATE_AFTER_LONG_HELP: &str = "\

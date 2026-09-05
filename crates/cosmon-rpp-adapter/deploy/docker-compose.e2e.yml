@@ -1,0 +1,39 @@
+# docker-compose.e2e.yml — the container smoke's override of the
+# reference deployment (`docker-compose.yml`, which it never edits).
+#
+# Why an override file and not a flag on the shipped one: the claim
+# issue #54 makes is about what the SHIPPED image contains. A smoke that
+# provisioned its dummy agent by editing the deployment operators read
+# would be asserting the claim against an image nobody deploys. Here the
+# base file renders byte-identically whether or not this file exists,
+# and everything test-only is in one place a reviewer can read end to
+# end.
+#
+# Used as:
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up …
+#
+# `scripts/rpp-remote-e2e.sh` does that for its `tackle` leg. Two things
+# change, both on `rpp-adapter`:
+#
+#   1. `target: e2e` — the Dockerfile's test stage, a `FROM runtime`
+#      layer that adds a dummy `claude` and a worker-side `cs`. The
+#      shipped `runtime` stage is untouched and still contains neither.
+#      The image is tagged `:e2e`, never `:v0`, so a smoke run cannot
+#      leave a doctored image behind under the name a deployment pulls.
+#   2. `COSMON_DEFAULT_ADAPTER` — the adapter name the library tackle
+#      executor resolves to when no formula, project config or dispatch
+#      pin names one, and therefore the command it spawns in the pane.
+#      Spelled explicitly: a smoke that relied on the resolution default
+#      would go red the day that default moved, and would be reporting
+#      the wrong thing when it did.
+
+services:
+  rpp-adapter:
+    build:
+      context: ../../..
+      dockerfile: crates/cosmon-rpp-adapter/Dockerfile
+      target: e2e
+    image: cs-rpp-adapter:e2e
+    environment:
+      RUST_LOG: ${RUST_LOG:-info}
+      COSMON_DEFAULT_ADAPTER: claude

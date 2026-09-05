@@ -15,6 +15,19 @@
 #   auth-prompt     print "authentication required" to stderr, exit 1
 #   partial-output  write a couple of events.jsonl lines, then die
 #   echo-prompt     echo argv + stdin to stdout then exit 0
+#   complete-molecule
+#                   read the briefing off stdin, find the molecule id in it,
+#                   and run `cs complete <id>` — the smallest worker that
+#                   actually finishes its molecule. Used by the container
+#                   e2e (scripts/rpp-remote-e2e.sh) to prove that a worker
+#                   the rpp-adapter spawned can drive `cs` against the
+#                   tenant store. Requires `cs` on PATH and a resolvable
+#                   state dir (COSMON_STATE_DIR, which the adapter's worker
+#                   envelope pins). Knobs: FAKE_CLAUDE_READ_TIMEOUT (default
+#                   120s of silence before giving up), FAKE_CLAUDE_DONE_FILE
+#                   (a breadcrumb written with the id it acted on),
+#                   FAKE_CLAUDE_LINGER (seconds to stay alive after
+#                   completing, default 120 — see the mode's own comment).
 #
 # ── Debug hooks ────────────────────────────────────────────────────────────
 #   PROMPT_ECHO=1            tee stdin + argv to $FAKE_CLAUDE_LOG before acting
@@ -99,6 +112,58 @@ case "$mode" in
 {"type":"assistant","message":{"content":[{"type":"text","text":"hello"}]}}
 EOF
         exit 1
+        ;;
+    complete-molecule)
+        # The briefing arrives the way a real agent receives it: pasted
+        # into the pane's tty by the transport port, then submitted. We
+        # read lines until one carries a cosmon molecule id.
+        #
+        # `read -t` is what keeps this from being the mute hang the fleet
+        # cannot distinguish from work: a briefing that never arrives ends
+        # as a NAMED failure on stderr, not a pane that idles forever.
+        id=""
+        while IFS= read -r -t "${FAKE_CLAUDE_READ_TIMEOUT:-120}" line; do
+            candidate="$(printf '%s\n' "$line" \
+                | grep -oE '\b[a-z][a-z0-9]*-[0-9]{8}-[0-9a-f]{4}\b' \
+                | head -1)"
+            if [ -n "$candidate" ]; then
+                id="$candidate"
+                break
+            fi
+        done
+        if [ -z "$id" ]; then
+            echo "fake-claude: no molecule id in the briefing (or none arrived)" >&2
+            exit 3
+        fi
+        # One shot, then CHECK. The exit code alone is not enough:
+        # `cs complete` on an id it cannot find prints
+        # "error completing <id>: molecule not found" and still exits 0,
+        # so a fake that trusted the status would report success for a
+        # molecule it never touched — and the e2e would then blame the
+        # spawn for a completion that never happened.
+        cs complete "$id" --reason "fake-claude complete-molecule" || true
+        if ! cs --json observe "$id" | grep -q '"status": *"completed"'; then
+            echo "fake-claude: $id is not completed after cs complete" >&2
+            exit 4
+        fi
+        if [ -n "${FAKE_CLAUDE_DONE_FILE:-}" ]; then
+            printf '%s\n' "$id" >"$FAKE_CLAUDE_DONE_FILE"
+        fi
+        # Then STAY ALIVE, like the agent this stands in for.
+        #
+        # Not cosmetic. The transport delivers a briefing as
+        # load-buffer -> paste-buffer -> a trailing submit key, and a
+        # worker that exits the instant it reads the paste takes its tmux
+        # session — and, if it is the only one, the whole tmux server —
+        # down between the paste and the submit. The submit then fails,
+        # the dispatch is reported as a SPAWN failure, and its ledger
+        # entry and worktree are rolled back under a molecule that is by
+        # then already `completed`. Every part of that is a real
+        # sequence, observed in the container smoke; none of it is what
+        # the smoke is trying to measure. A real `claude` never
+        # disappears mid-briefing, so neither does this.
+        sleep "${FAKE_CLAUDE_LINGER:-120}"
+        exit 0
         ;;
     echo-prompt)
         echo "fake-claude echo-prompt argv: $*"

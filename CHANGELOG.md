@@ -51,6 +51,168 @@ this stage.
 
 ### Added
 
+- **The container smoke now dispatches a real worker — the `tackle` leg that
+  proves the shipped image is library-direct** (issue #54 U7). Until U6 the
+  adapter reached `tackle`, `run` and `land` by running the `cs` binary, which
+  its own Dockerfile has never shipped: every in-process suite was green while
+  all three routes failed against the image an operator deploys. U6 cut
+  dispatch over to the library executor; whether that is true *of the image* is
+  not a claim any in-process test can make. `scripts/rpp-remote-e2e.sh` now
+  makes it, in the container: `tackle` (a worker pane really opened, a git
+  worktree really cut, the briefing really pasted in), a wait for the molecule
+  to reach `completed`, then `land`. The falsifier is one knob, not a second
+  script — `RPP_E2E_BUILD_ROOT` points the image build at a checkout that
+  predates the cut-over and `RPP_E2E_EXPECT_TACKLE_LABEL` names the refusal it
+  must return, so the same scenario walks both sides of the change.
+  `RPP_E2E_EXPECT_LAND_LABEL` moves with it: the script now arms
+  `[harvest_authority] required` in its throwaway galaxy, so the door's
+  decision half *admits* the harvest and the pinned refusal is the effect
+  half's `land_effect_unavailable` ([ADR-176
+  §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)) — no
+  longer `subprocess_spawn_failed`, which named a missing binary rather than a
+  missing implementation. Two staging steps became load-bearing and are now
+  explicit: the tenant galaxy is `git init`-ed (the library executor resolves a
+  repo root from it before cutting the worktree) and the staged compose file's
+  build context is rewritten to an absolute path, which also removes the
+  `context: ../../..` that only resolved because the run directory happened to
+  sit two levels under the repo.
+
+  **Nothing of this is in the image you deploy.** The dummy agent and the
+  worker-side `cs` live in a new `e2e` Dockerfile stage — a `FROM runtime`
+  layer, tagged `cs-rpp-adapter:e2e`, selected only by the new
+  `crates/cosmon-rpp-adapter/deploy/docker-compose.e2e.yml` (`target: e2e`,
+  `COSMON_DEFAULT_ADAPTER=claude`). The shipped `runtime` stage is byte-identical
+  whether or not the test stage is built, and still contains no `cs` and no
+  agent CLI. The stage adds three things and each is named for a reason: a
+  `cs` built from the same workspace and lockfile (the worker's job *is*
+  `cs complete`; the claim is that the adapter spawns no `cs`, not that none
+  exists anywhere), `tests/fakes/fake-claude` installed as `claude` behind a
+  wrapper that bakes its mode in (`FAKE_CLAUDE_MODE` is not on the §3.5
+  allow-list and must not be — an allow-list with a hole for a test fixture is
+  no longer the thing under test), and a `safe.directory` waiver for git. That
+  last one is test-stage provisioning of a real deployment concern: a
+  bind-mounted galaxy carries the *host's* uid, and `git worktree add` refuses a
+  repository it considers someone else's — an operator mounting a galaxy owned
+  by another uid needs the same waiver, or matching ownership.
+  `tests/fakes/fake-claude` gained the `complete-molecule` mode this needs: the
+  only mode that succeeds at the job rather than reproducing a way of failing
+  at it, reading the briefing off the pane and running `cs complete` on the id
+  it finds.
+
+- **`scripts/rpp-remote-e2e.sh` — a container-level smoke of the Remote Pilot
+  Port, and a nightly CI job that runs it.** The third part of GitHub issue #53.
+  Every other test of this surface runs the adapter in-process against test
+  doubles: that proves the handlers and can prove nothing about the *deployment*
+  — that the two images boot, that the JWKS hand-off between them lands where
+  the adapter looks for it, that the nucleon binding an operator materialises is
+  the shape the loader reads, or that a tenant's `cosmon-remote login` walks the
+  mock IdP's authorization-code flow to a persisted credential. The script boots
+  the real `crates/cosmon-rpp-adapter/deploy/` stack with `docker compose up
+  --wait` (both healthchecks were already declared there; `--wait` is what makes
+  them load-bearing) and drives it with the compiled `cosmon-remote` over the
+  published loopback ports: `login` → `auth me` → `nucleate` → `observe` →
+  `land`. Each step is one NDJSON line `{step, rc, ms, evidence}`; the first red
+  step ends the run. It never edits the tracked `deploy/` tree — it copies it,
+  materialises the nucleon binding into the copy, and points the stack at a
+  throwaway galaxy destroyed with it; `$HOME` is redirected and the credential
+  backend named explicitly so the run touches neither the operator's profiles
+  nor their OS keychain. A missing `docker` is exit 2 with a sentence, never a
+  skip that prints green — that is how an absent prerequisite becomes a passing
+  nightly. `tackle` and `done` are deliberately absent: those routes still shell
+  out to `cs`, the adapter image has shipped none since it went library-direct,
+  and issue #54 owns both the fix and that leg of this scenario. `land` shells
+  out too, so the script pins the *name* of the refusal it returns today
+  (`subprocess_spawn_failed`) rather than asserting a harvest — when #54 makes
+  the door library-direct, the pin goes red and says so, instead of passing for
+  a new reason. The compose file gained the four variables the second stack
+  needs (`COSMON_RPP_ISSUER`, `COSMON_RPP_HOST_PORT`, `COSMON_OIDC_HOST_PORT`,
+  `COSMON_RPP_NAME_SUFFIX`), each defaulting to its previous literal so the
+  rendered configuration of the reference deployment is unchanged.
+
+### Fixed
+
+- **No worker could ever start in the adapter image: tmux ran every pane
+  command through `/usr/sbin/nologin`.** The service account's login shell is
+  `nologin` on purpose, and tmux runs a pane's command with the account's login
+  shell — so `new-session` returned 0, `nologin` printed its line and exited,
+  the tmux server exited with it, and the dispatch failed one step later with
+  `worker not found`: a message about the missing session, not about why it was
+  missing. Every route-level suite was green throughout, because they inject an
+  in-memory backend; the only test that runs a worker in this image is the
+  container smoke, and it found this on its first honest run. The fix is
+  `set -g default-shell /bin/sh` in the image's `tmux.conf`, which moves what
+  tmux *execs* without touching what `/etc/passwd` says the account may log in
+  as — the hardening the `nologin` line exists for is unchanged. Shipped in the
+  `runtime` stage, not the test stage: the defect is the deployed image's.
+
+- **The `COSMON_RPP_CS` line in `deploy/docker-compose.yml` was a fossil.** It
+  pointed the adapter at `/usr/local/bin/cs` inside an image that has shipped no
+  `cs` binary since it went library-direct (`task-20260504-6ad4`). It read as
+  configuration and configured nothing: the two routes that still shell out
+  (`tackle`, `land`) fail `subprocess_spawn_failed` there whether it is set or
+  not, and setting it made that failure look like a mis-set path rather than the
+  missing binary it is. Removed, with the reason and the issue that will retire
+  the shell-out (#54) written where the line used to be. No `cs` was added to
+  the image.
+
+- **Headless `cosmon-remote login`, and a `cs-oidc-mock` that can actually be
+  logged into.** GitHub issue #53 asks for a container smoke that "uses login,
+  then …". Neither half existed. The mock IdP served only `/jwks` and `/issue`,
+  so there was no `/authorize` for a client to visit and no `/token` to redeem
+  a code at; and `login` hard-coded the system browser as the thing that opens
+  the authorize URL, which a container has none of. Both halves are now real.
+  `cs-oidc-mock` gained `GET /.well-known/openid-configuration` (S256 only —
+  `plain` is a PKCE downgrade and is not advertised), a `GET /authorize` that
+  auto-approves and 302s back with `code` + the caller's `state` verbatim, and a
+  `POST /token` that redeems a **single-use, 60-second** code bound to its
+  `client_id` and `redirect_uri`, refusing any request whose PKCE verifier does
+  not digest to the challenge presented at `/authorize`. Its V0 endpoints are
+  untouched. `cosmon-remote login` gained one seam, not a second CLI surface:
+  `$COSMON_REMOTE_BROWSER` names a command that opens the sign-in URL (appended
+  as its last argument, run directly, no shell), so
+  `COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login`
+  completes a full login with no display attached. Setting it empty is an error
+  raised **before** the listener binds, not a silent fallback — the alternative
+  is a `login` that opens nothing and then waits five minutes without saying
+  why. The default (system browser) is unchanged. `login --help` and
+  `man cosmon-remote` were re-blessed to carry the new `NO BROWSER?` block; the
+  root `--help` line is byte-identical, because a paragraph about a headless
+  environment variable does not belong in a command index. The whole IdP now
+  lives in `cosmon-oidc-testkit`'s library as a router, so
+  `crates/cosmon-remote/tests/login_headless.rs` drives the **shipped**
+  handlers in-process rather than a second mock that would stay green while the
+  binary drifted.
+
+- **`cosmon-remote login --bind <IP>` — a configurable bind address for the
+  OIDC loopback callback.** The answer to GitHub issue #52: the login flow's
+  one-shot redirect catcher bound `127.0.0.1` and advertised
+  `http://127.0.0.1:7777/callback` as one indivisible fact, so a client running
+  inside a container or a VM could never complete a login — the browser dials
+  *its own* loopback and the redirect never crosses the boundary. The two facts
+  are now separate. `--bind` moves the **listener**; the advertised
+  `redirect_uri` does **not** move, because the IdP enforces its registered
+  redirect set by exact match (RFC 8252 §7.3) and because that literal is what a
+  port-forward from the browser's machine dials. The documented recipe is the
+  reporter's own: forward `127.0.0.1:7777` into the container (`ssh -L`, or the
+  runtime's published port) and `login --bind 0.0.0.0` inside it — see
+  [Run cosmon as a remote service](docs/book/src/how-to/deploy-remote-service.md).
+  The flag carries an address, never `host:port`: the port is shared with the
+  advertised URI in a single carried `oidc::LoopbackBind { addr, port }`, which
+  also removes the second source of truth the login path used to re-parse out of
+  the `redirect_uri` string. `OidcEndpoints`'s `redirect_uri` and `bind` are now
+  private, read through accessors and re-established together by
+  `with_redirect_uri` / `with_bind_addr`: the two must name the same port, and
+  an invariant over two fields belongs to the type that owns them. A non-loopback bind is opt-in and announced on
+  stderr, once, before the browser opens; what bounds it is unchanged and
+  already load-bearing — only a request echoing the per-flow high-entropy
+  `state` can end the wait (`classify_request`), and a captured code is inert
+  without the PKCE verifier that never leaves the process. Deliberately **not** a
+  `config set` key: a durable profile value would make an unusual posture silent
+  and permanent, while the knob is needed exactly as often as a login happens.
+  The default path is byte-identical — same authorize URL, same advertised URI.
+  `login`'s help golden gains that one option line; the man page is unchanged
+  (it carries no per-subcommand flags).
+  [ADR-080 §3.1.1](docs/adr/080-remote-pilot-port-https-oidc.md).
 
 - **A harvest door on the Remote Pilot Port — `cs land` and
   `POST /v1/molecules/{id}/land`.** The answer to GitHub issue #51: a tenant

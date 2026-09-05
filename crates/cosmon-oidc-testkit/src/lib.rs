@@ -10,6 +10,12 @@
 //!   (axum + tokio), an embedded RSA-2048 signing key, and a
 //!   [`OidcMock::issue_jwt`] helper that produces tokens compatible
 //!   with `cosmon-rpp-adapter::JwtVerifier`.
+//! - [`idp`] — the full `cs-oidc-mock` HTTP surface as an axum
+//!   `Router`, so
+//!   the same handlers a container smoke drives can also be served
+//!   in-process by a downstream crate's test. Adds the OAuth 2.0
+//!   authorization-code endpoints (`/.well-known/openid-configuration`,
+//!   `/authorize`, `/token`) to the V0 JWKS + `/issue` pair.
 //! - [`tenant_workspace`] — a `TempDir` factory that lays out a per-noyau
 //!   `~/galaxies/<noyau>/.cosmon/state/` tree, the canonical subprocess
 //!   `cwd` from ADR-080 §3.5 clause (e). Multi-tenant variants live on
@@ -39,9 +45,11 @@
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod idp;
 mod mock;
 mod workspace;
 
+pub use idp::{router, IdpConfig, MockIdp};
 pub use mock::{IssueJwt, OidcMock, OidcMockConfig, DEFAULT_AUDIENCE, DEFAULT_ISSUER, DEFAULT_KID};
 pub use workspace::{tenant_workspace, TenantPath, TenantWorkspace, TenantWorkspaces};
 
@@ -82,3 +90,31 @@ pub const TEST_RSA_E_B64URL: &str = "AQAB";
 /// default to this const. Edit this one number and the trace tells you
 /// which `Dockerfile` drifted.
 pub const COSMON_CONTAINER_UID: u32 = 10000;
+
+/// Verify a JWT this crate's `IdP` minted, and return its claims.
+///
+/// Checks the RS256 signature against the embedded public key, the
+/// `exp`, the `iss` and the `aud` — the same four things
+/// `cosmon-rpp-adapter::JwtVerifier` checks before it lets a request in.
+/// A consumer's end-to-end test asserts on the result of *this*, not on
+/// the token's shape: a bearer that decodes but does not verify is
+/// exactly the bearer the resource server would 401.
+///
+/// # Errors
+///
+/// Fails if the embedded public key is unusable, or if the token's
+/// signature, expiry, issuer or audience does not hold up.
+pub fn verify_signed_claims(
+    token: &str,
+    issuer: &str,
+    audience: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let key = jsonwebtoken::DecodingKey::from_rsa_pem(TEST_RSA_PUBLIC_PEM.as_bytes())
+        .map_err(|e| anyhow::anyhow!("embedded RSA public test key is malformed: {e}"))?;
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&[audience]);
+    let data = jsonwebtoken::decode::<serde_json::Value>(token, &key, &validation)
+        .map_err(|e| anyhow::anyhow!("token does not verify: {e}"))?;
+    Ok(data.claims)
+}

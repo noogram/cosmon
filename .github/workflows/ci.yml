@@ -674,6 +674,60 @@ jobs:
             smoke-artifacts/
           retention-days: 7
 
+  rpp-remote-e2e:
+    name: RPP container e2e (compose stack + real cosmon-remote)
+    # NON-BLOCKING NIGHTLY. Same class as smoke-lifecycle: it boots the
+    # real `crates/cosmon-rpp-adapter/deploy/` compose stack, waits on
+    # both declared healthchecks, and drives it with the compiled
+    # `cosmon-remote` over the published loopback ports —
+    # login -> auth me -> nucleate -> observe -> tackle -> the worker's
+    # own completion -> the named `land` refusal. Both images do a full
+    # `cargo build --release --locked`, so this is minutes of work and
+    # belongs on the schedule, not on every push.
+    #
+    # The `tackle` leg (issue #54 U7) is the one that cannot be moved
+    # in-process: it asserts that the SHIPPED adapter image spawns a real
+    # worker with no `cs` binary of its own. Its dummy agent lives in a
+    # test-only Dockerfile stage the deployment never builds.
+    #
+    # `continue-on-error` is about blast radius, not confidence: the
+    # script itself has no SKIP path and exits 2 rather than report a
+    # green it did not earn. The artifact below is the record — read
+    # `e2e.ndjson` per step, not the job's colour.
+    continue-on-error: true
+    if: ${{ github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    # 90, not 60, since issue #54 U7: the adapter image is built from the
+    # Dockerfile's `e2e` stage, which adds a second full `cargo build
+    # --release --locked` (the worker-side `cs`) on top of the adapter's.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+      - name: Install system libdbus (Linux keyring backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+      - name: Container engine inventory
+        run: docker version && docker compose version && jq --version
+      - name: Container-level RPP smoke
+        env:
+          RPP_E2E_RUN_DIR: rpp-remote-e2e
+        run: bash scripts/rpp-remote-e2e.sh
+      - name: Upload the step-by-step NDJSON record
+        # `always()`: the failing run is the one whose NDJSON is worth
+        # reading, and a red step is exactly when the tail matters.
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: rpp-remote-e2e-ndjson
+          path: |
+            rpp-remote-e2e/e2e.ndjson
+            rpp-remote-e2e/logs/
+          retention-days: 7
+
   provenance-gate:
     name: Provenance gate (ADR-052 §I9)
     runs-on: ubuntu-latest

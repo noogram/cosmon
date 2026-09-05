@@ -243,6 +243,45 @@ cosmon-remote healthz
 cosmon-remote auth me
 ```
 
+### Signing in from inside a container
+
+`cosmon-remote login` runs the browser half of the OAuth flow: it opens a
+one-shot listener for the redirect, sends you to the identity provider, and
+catches the `?code=…` the browser is bounced back with. By default that
+listener binds `127.0.0.1:7777`, and the URL registered with the provider —
+the one the browser is told to come back to — is `http://127.0.0.1:7777/callback`.
+On a laptop the two are the same machine and there is nothing to arrange.
+
+Inside a container or a VM they are not the same machine. The browser is on
+your desktop; `cosmon-remote` is in the box. The browser dials *its own*
+`127.0.0.1:7777` and the redirect never crosses the boundary. The fix is a
+port-forward plus a listener that will answer on the forwarded interface:
+
+```sh
+# On your desktop: forward its 127.0.0.1:7777 into the container/VM.
+ssh -L 7777:localhost:7777 you@the-vm
+# ...or, for a container, publish the port at run time:
+docker run -p 127.0.0.1:7777:7777 … your-image
+
+# Inside the container/VM, listen on every interface for this one login:
+cosmon-remote login --bind 0.0.0.0
+```
+
+`--bind` moves the **listener** only. The advertised `redirect_uri` stays
+`http://127.0.0.1:7777/callback` — it is registered with the provider by exact
+match, so changing it would simply be rejected, and it is the address your
+browser must dial for the forward to pick the redirect up. The port is not
+part of the flag: it stays the redirect port, so the listener and the
+advertised URI cannot disagree about it.
+
+A non-loopback bind is announced on stderr, once, before the browser opens. It
+widens who can *connect* to the catcher for the length of one login. What
+bounds that: only a request echoing this flow's high-entropy `state` can end
+the wait — everything else is answered `404` and discarded — and a captured
+code is useless without the PKCE verifier, which never leaves the process.
+Prefer forwarding from `127.0.0.1` on the desktop side (as above) so the
+forwarded port is not itself exposed to the desktop's network.
+
 ## Step 5: Drive the measured golden path
 
 From the thin client, create a molecule, dispatch it, wait for its detached
@@ -297,6 +336,82 @@ scopes with `trusted-issuers.toml` and the rendered nucleon binding.
 six-tool, shell-free registry rather than host-shell access; a toolchain
 preflight runs before work; and each molecule has a wall-clock limit. It cannot
 use that worker interface to scan the host or read outside its worktree.
+
+## Smoke the whole stack locally before you trust it
+
+Everything above is a sequence of gestures you perform once, by hand, and then
+have to believe about your next deployment. One command re-performs the whole
+thing against real containers and tells you which step broke:
+
+```sh
+bash scripts/rpp-remote-e2e.sh
+```
+
+It builds both images from `crates/cosmon-rpp-adapter/deploy/docker-compose.yml`,
+waits on the two healthchecks that file already declares, and then drives the
+stack with the compiled `cosmon-remote` binary over the published loopback
+ports — `login` (the real authorization-code + PKCE flow against the mock IdP,
+headless), `auth me`, `nucleate`, `observe`, and a `land` that must come back
+with its named refusal. Each step is one line of `{step, rc, ms, evidence}` in
+`.rpp-remote-e2e/<stamp>/e2e.ndjson`; the first red step ends the run.
+
+Nothing of yours is touched. The tracked `deploy/` tree is copied, not written
+to; the nucleon binding is materialised into the copy; the tenant galaxy is a
+throwaway tree destroyed with the stack; `$HOME` is redirected so the run reads
+neither your `cosmon-remote` profiles nor your OS keychain; the containers carry
+a name suffix and non-default ports so a live deployment on 8443/8444 keeps
+running beside it. Pass `--keep` to leave the stack up and poke at it.
+
+If `docker` or `jq` is missing the script exits 2 and says so. It has no skip
+path on purpose: a smoke that prints green without running is how an absent
+prerequisite becomes a passing nightly.
+
+### The `tackle` leg, and why it is the interesting one
+
+The scenario ends by dispatching a real worker: `tackle`, then a wait for the
+molecule to reach `completed`, then `land`.
+
+That leg is worth more than the rest put together, because it is the one thing
+no in-process test can tell you. Until issue #54, the adapter reached `tackle`,
+`run` and `land` by running the `cs` binary — which its own Dockerfile has
+never contained. Every unit and route suite was green; all three routes failed
+against the image you actually deploy. The routes now dispatch in-process, and
+this step is the only place that claim is checked where it matters: inside the
+container, with a worker pane really opened, a git worktree really cut, and the
+briefing really pasted into it.
+
+The worker is a dummy, and it is **not** in the image you deploy.
+`deploy/docker-compose.e2e.yml` builds the adapter from the Dockerfile's `e2e`
+target — a `FROM runtime` layer that adds `tests/fakes/fake-claude` under the
+name `claude` plus a worker-side `cs`, so the worker can finish its molecule.
+The shipped stage still carries no `cs` and no agent CLI. A smoke that
+provisioned the tenant-facing image would be proving the claim about an image
+nobody runs.
+
+`land` is still asserted as a *named* refusal, but no longer because a binary
+is missing. The script arms the harvest door in the throwaway galaxy
+(`[harvest_authority] required`), so the door's decision half admits the
+harvest and the refusal comes from the effect half:
+`501 land_effect_unavailable`. The sealed `cs done` transaction has exactly one
+implementation and it is not callable as a library yet — ADR-176 §12. When it
+becomes callable, this pinned label goes red, which is the point.
+
+To watch the pre-issue-54 failure for yourself, point the build at a checkout
+that predates the cut-over and name the refusal you expect:
+
+```sh
+git worktree add /tmp/pre-u6 <commit-before-the-cut-over>
+RPP_E2E_BUILD_ROOT=/tmp/pre-u6 \
+RPP_E2E_E2E_STAGE=0 \
+RPP_E2E_EXPECT_TACKLE_LABEL=tackle_unavailable \
+  bash scripts/rpp-remote-e2e.sh
+```
+
+The run stops after `tackle` — a refused dispatch has no worker to wait for —
+and records the refusal it observed.
+
+The same script runs nightly in CI as the non-blocking `rpp-remote-e2e` job,
+which uploads `e2e.ndjson` as an artifact.
 
 ## See also
 
