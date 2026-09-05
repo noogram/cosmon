@@ -22,6 +22,25 @@
 #   COSMON_GALAXIES_HOST     — host path bind-mounted as
 #                              `/cosmon/galaxies` inside the adapter.
 #                              Default: "$HOME/galaxies".
+#   COSMON_RPP_ISSUER        — `iss` the mock IdP mints and the URL a
+#                              login client fetches its OIDC discovery
+#                              document from. Default
+#                              "http://oidc-mock:8444", right whenever
+#                              the client runs on `rpp-net`. A client on
+#                              the HOST cannot resolve that name and must
+#                              be given the published port instead
+#                              ("http://127.0.0.1:<COSMON_OIDC_HOST_PORT>")
+#                              — see scripts/rpp-remote-e2e.sh. The
+#                              adapter is indifferent either way: it pins
+#                              the JWKS from disk and never dials the IdP.
+#   COSMON_RPP_HOST_PORT     — host port published for the adapter.
+#                              Default 8443.
+#   COSMON_OIDC_HOST_PORT    — host port published for the mock IdP.
+#                              Default 8444.
+#   COSMON_RPP_NAME_SUFFIX   — suffix appended to both container names.
+#                              Empty by default; a second stack (the
+#                              e2e smoke) sets it so its containers do
+#                              not collide with a live deployment's.
 #
 # Tailscale serve (out of compose, see dist/rpp-live/start.sh) wires
 # port 8443 to a public-on-tailnet URL distinct from the brew-tap
@@ -35,14 +54,14 @@ services:
       context: ../../..
       dockerfile: crates/cosmon-oidc-testkit/Dockerfile
     image: cs-oidc-mock:v0
-    container_name: cs-oidc-mock
+    container_name: cs-oidc-mock${COSMON_RPP_NAME_SUFFIX:-}
     restart: unless-stopped
     ports:
       # Operator-side cURL (`POST /issue`) goes here. tenant_auditor reaches
       # the same endpoint over Tailscale serve if the operator decides
       # to expose JWT issuance remotely (V0 demo: usually issue locally
       # then hand the token over).
-      - "127.0.0.1:8444:8444"
+      - "127.0.0.1:${COSMON_OIDC_HOST_PORT:-8444}:8444"
     networks:
       rpp-net:
         aliases:
@@ -63,7 +82,7 @@ services:
       # The rpp-adapter pins JWKS by `iss`, so the URL we put in JWTs
       # MUST match what the adapter has in its disk-pinned JWKS file.
       - "--issuer"
-      - "http://oidc-mock:8444"
+      - "${COSMON_RPP_ISSUER:-http://oidc-mock:8444}"
       # Repeat --audience per nucleon binding the adapter accepts. The
       # first entry is the default `aud` claim when `POST /issue` is
       # called without `?aud=`. Add more in lock-step with new entries
@@ -89,7 +108,7 @@ services:
       context: ../../..
       dockerfile: crates/cosmon-rpp-adapter/Dockerfile
     image: cs-rpp-adapter:v0
-    container_name: cs-rpp-adapter
+    container_name: cs-rpp-adapter${COSMON_RPP_NAME_SUFFIX:-}
     restart: unless-stopped
     depends_on:
       oidc-mock:
@@ -97,7 +116,7 @@ services:
     ports:
       # Bound on 127.0.0.1 — Tailscale serve relays from here to the
       # tailnet so the public surface is auditable in one place.
-      - "127.0.0.1:8443:8443"
+      - "127.0.0.1:${COSMON_RPP_HOST_PORT:-8443}:8443"
     networks:
       rpp-net:
         aliases:
@@ -133,7 +152,17 @@ services:
       - ${COSMON_GALAXIES_HOST:-${HOME}/galaxies}:/cosmon/galaxies
     environment:
       RUST_LOG: ${RUST_LOG:-info}
-      COSMON_RPP_CS: /usr/local/bin/cs
+      # No COSMON_RPP_CS here on purpose. The image has been
+      # library-direct since T-RPP-LIB-DIRECT (`task-20260504-6ad4`) —
+      # its Dockerfile ships no `cs` — so the variable this file used to
+      # export pointed at a path that does not exist inside the
+      # container. It read as configuration and was a fossil: the two
+      # routes that still shell out (`tackle`, `land`) fail
+      # `subprocess_spawn_failed` here whether it is set or not, and
+      # setting it made that failure look like a mis-set path rather
+      # than the missing binary it is. Issue #54 owns making those two
+      # routes library-direct; when it does, nothing here needs to
+      # change.
     # Mirrors the oidc-mock probe shape so `docker compose ps` reports
     # both services with the same healthcheck semantics. The `/healthz`
     # route is excluded from the §8p frozen API surface (it is

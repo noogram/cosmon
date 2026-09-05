@@ -21,6 +21,48 @@ this stage.
 
 ### Added
 
+- **`scripts/rpp-remote-e2e.sh` — a container-level smoke of the Remote Pilot
+  Port, and a nightly CI job that runs it.** The third part of GitHub issue #53.
+  Every other test of this surface runs the adapter in-process against test
+  doubles: that proves the handlers and can prove nothing about the *deployment*
+  — that the two images boot, that the JWKS hand-off between them lands where
+  the adapter looks for it, that the nucleon binding an operator materialises is
+  the shape the loader reads, or that a tenant's `cosmon-remote login` walks the
+  mock IdP's authorization-code flow to a persisted credential. The script boots
+  the real `crates/cosmon-rpp-adapter/deploy/` stack with `docker compose up
+  --wait` (both healthchecks were already declared there; `--wait` is what makes
+  them load-bearing) and drives it with the compiled `cosmon-remote` over the
+  published loopback ports: `login` → `auth me` → `nucleate` → `observe` →
+  `land`. Each step is one NDJSON line `{step, rc, ms, evidence}`; the first red
+  step ends the run. It never edits the tracked `deploy/` tree — it copies it,
+  materialises the nucleon binding into the copy, and points the stack at a
+  throwaway galaxy destroyed with it; `$HOME` is redirected and the credential
+  backend named explicitly so the run touches neither the operator's profiles
+  nor their OS keychain. A missing `docker` is exit 2 with a sentence, never a
+  skip that prints green — that is how an absent prerequisite becomes a passing
+  nightly. `tackle` and `done` are deliberately absent: those routes still shell
+  out to `cs`, the adapter image has shipped none since it went library-direct,
+  and issue #54 owns both the fix and that leg of this scenario. `land` shells
+  out too, so the script pins the *name* of the refusal it returns today
+  (`subprocess_spawn_failed`) rather than asserting a harvest — when #54 makes
+  the door library-direct, the pin goes red and says so, instead of passing for
+  a new reason. The compose file gained the four variables the second stack
+  needs (`COSMON_RPP_ISSUER`, `COSMON_RPP_HOST_PORT`, `COSMON_OIDC_HOST_PORT`,
+  `COSMON_RPP_NAME_SUFFIX`), each defaulting to its previous literal so the
+  rendered configuration of the reference deployment is unchanged.
+
+### Fixed
+
+- **The `COSMON_RPP_CS` line in `deploy/docker-compose.yml` was a fossil.** It
+  pointed the adapter at `/usr/local/bin/cs` inside an image that has shipped no
+  `cs` binary since it went library-direct (`task-20260504-6ad4`). It read as
+  configuration and configured nothing: the two routes that still shell out
+  (`tackle`, `land`) fail `subprocess_spawn_failed` there whether it is set or
+  not, and setting it made that failure look like a mis-set path rather than the
+  missing binary it is. Removed, with the reason and the issue that will retire
+  the shell-out (#54) written where the line used to be. No `cs` was added to
+  the image.
+
 - **Headless `cosmon-remote login`, and a `cs-oidc-mock` that can actually be
   logged into.** GitHub issue #53 asks for a container smoke that "uses login,
   then …". Neither half existed. The mock IdP served only `/jwks` and `/issue`,
