@@ -48,7 +48,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cosmon_core::harvest_door::{DoorRefusal, ALL_REFUSALS};
+use cosmon_core::harvest_door::DoorRefusal;
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_remote::client::{Client, NucleateRequest};
 use cosmon_remote::config::Profile;
@@ -455,30 +455,63 @@ async fn nucleate_and_observe_deserialize_into_the_remote_client_type() {
     );
 }
 
-// ── /v1/molecules/:id/land — the harvest door (#51) ────────────────────────
+// ── /v1/molecules/:id/land — the harvest door (#51, #54 U3/U6) ────────────
+//
+// Rewritten for the in-process door (issue #54). These cases used to pin a
+// fake `cs`'s exit code in the tenant's molecule directory and read the
+// label back off the wire. That subprocess is gone: the decision half runs
+// in `cosmon_filestore::harvest_door::decide` over the tenant's own state
+// files, and the effect half answers a typed refusal. So each case now
+// PLANTS THE STATE that owns its answer — which is a stronger mirror, not a
+// weaker one: an exit code is a number the test chose, while a molecule with
+// `status: running` is the thing the door is actually about.
 
-/// The success envelope: `{request_id, harvest: {molecule, outcome}}`.
+/// Arm `[harvest_authority] required` — the second key the decision half
+/// reads (ADR-176 D1). Without it the door refuses `not_authorized` before
+/// it has even loaded the molecule, and every case below would pass for the
+/// wrong reason.
+fn arm_harvest_authority(tenant: &cosmon_oidc_testkit::TenantPath) {
+    let cosmon_dir = tenant.root.join(".cosmon");
+    std::fs::create_dir_all(&cosmon_dir).unwrap();
+    std::fs::write(
+        cosmon_dir.join("config.toml"),
+        "[harvest_authority]\nrequired = true\n",
+    )
+    .unwrap();
+}
+
+/// The effect half, as the CLIENT sees it: `501 land_effect_unavailable`.
 ///
-/// `LandEnvelope` has no `extra` catch-all and no `#[serde(default)]`, so
-/// every field here is load-bearing on the parse.
+/// This replaces a `land_success` case that can no longer happen. The sealed
+/// `cs done` transaction has one implementation and it is not callable as a
+/// library yet (ADR-176 §12), so a molecule whose harvest the decision half
+/// ADMITS gets the typed refusal rather than a merge. Asserting it here, at
+/// the client, is what stops the day it becomes a real harvest from being a
+/// silent change of contract for every tenant.
 #[tokio::test]
-async fn land_success_deserializes_into_the_remote_client_type() {
+async fn the_unavailable_sealed_effect_reaches_the_client_as_a_named_refusal() {
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add(NOYAU);
+    arm_harvest_authority(&tenant);
+    // Completed and unmerged: the one shape that survives the whole
+    // decision half, so the answer below is the effect half's and nothing
+    // else's.
     tenant
-        .insert_molecule("task-20260904-wire", &json!({}))
+        .insert_molecule("task-20260904-wire", &json!({"status": "completed"}))
         .unwrap();
     let dep = Deployment::start(tenants).await;
 
     let client = dep.client(&["cosmon:molecule:write"], "jti-wire-land");
-    let landed = client
+    let err = client
         .land("task-20260904-wire")
         .await
-        .expect("client must parse POST /v1/molecules/:id/land");
+        .expect_err("the sealed effect has no library implementation yet");
 
-    assert!(!landed.request_id.is_empty());
-    assert_eq!(landed.harvest.molecule, "task-20260904-wire");
-    assert_eq!(landed.harvest.outcome, "landed");
+    let Error::Api { status, body } = err else {
+        panic!("the effect refusal reached the client as {err:?}, not a structured API error");
+    };
+    assert_eq!(status, 501);
+    assert_eq!(body["error"], "land_effect_unavailable");
 }
 
 /// Idempotence as the client sees it: a repeat lands in the same typed
@@ -486,62 +519,80 @@ async fn land_success_deserializes_into_the_remote_client_type() {
 ///
 /// A client that treated the second call as a failure would make a retry over
 /// a lossy network unsafe — which is the reason the door reports it as
-/// success in the first place.
+/// success in the first place. Post-U6 the `merged_at` stamp on the tenant's
+/// own molecule is what says so, in-process.
 #[tokio::test]
 async fn already_landed_is_still_a_success_envelope_for_the_client() {
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add(NOYAU);
+    arm_harvest_authority(&tenant);
     tenant
-        .insert_molecule("task-20260904-again", &json!({}))
+        .insert_molecule(
+            "task-20260904-again",
+            &json!({
+                "status": "completed",
+                "merged_at": "2026-09-04T00:00:00Z",
+            }),
+        )
         .unwrap();
     let dep = Deployment::start(tenants).await;
-    std::fs::write(
-        dep.molecule_dir("task-20260904-again").join("land-outcome"),
-        "already_landed",
-    )
-    .unwrap();
 
     let client = dep.client(&["cosmon:molecule:write"], "jti-wire-again");
     let landed = client.land("task-20260904-again").await.expect("200");
     assert_eq!(landed.harvest.outcome, "already_landed");
 }
 
-/// The seven named refusals, walked end to end across three crates.
+/// The pre-effect refusals, walked end to end across three crates.
 ///
-/// The exit code is pinned in the tenant's molecule dir; `cosmon-core` owns
-/// the code→label bijection; the adapter maps the label to a status; the
-/// client surfaces both in `Error::Api`. Asserting the label *at the client*
-/// is what makes this different from `v1_land.rs`: there, the label is read
-/// out of a `Value` on the server's own side of the boundary.
+/// `cosmon-core` owns the label; the adapter maps it to a status; the client
+/// surfaces both in `Error::Api`. Asserting the label *at the client* is what
+/// makes this different from `v1_land.rs`, where it is read out of a `Value`
+/// on the server's own side of the boundary.
 ///
-/// Walking `ALL_REFUSALS` rather than a hand-written list means a new variant
-/// joins this test by existing — and a variant that loses its name reaches
-/// the tenant as an anonymous 500, the unnamed refusal ADR-110 I4 forbids.
+/// Only the refusals the in-process decision half can still produce are
+/// walked. The rest of `ALL_REFUSALS` belongs to the sealed effect, which no
+/// longer runs — and a test that pretended to provoke them would be asserting
+/// its own fixture rather than the door. `ALL_REFUSALS` keeps its own
+/// bijection test in `cosmon-core`; what is checked here is that a refusal
+/// which DOES reach the wire keeps its name and its side of the 4xx/5xx line.
 #[tokio::test]
 async fn every_named_refusal_reaches_the_client_with_its_name_and_status() {
     let mut tenants = TenantWorkspaces::new();
     let tenant = tenants.add(NOYAU);
+    arm_harvest_authority(&tenant);
+    // not_completed: work still in flight.
     tenant
-        .insert_molecule("task-20260904-refuse", &json!({}))
+        .insert_molecule("task-20260904-flight", &json!({"status": "running"}))
+        .unwrap();
+    // reservation_requires_seal: a condition only a human lifts.
+    tenant
+        .insert_molecule(
+            "task-20260904-held",
+            &json!({"status": "completed", "tags": ["needs-review"]}),
+        )
         .unwrap();
     let dep = Deployment::start(tenants).await;
-    let dir = dep.molecule_dir("task-20260904-refuse");
 
     let client = dep.client(&["cosmon:molecule:write"], "jti-wire-refuse");
 
-    for refusal in ALL_REFUSALS {
+    for (id, refusal) in [
+        ("task-20260904-flight", DoorRefusal::NotCompleted),
+        (
+            "task-20260904-held",
+            DoorRefusal::ReservationRequiresSeal,
+        ),
+    ] {
+        // The mirror the whole chain rests on: label and code stay a
+        // bijection, so a refusal cannot be read as its neighbour.
         let code = refusal.exit_code();
         assert!(
             (70..=76).contains(&code),
-            "{refusal:?} left the door's 70–76 block with {code}",
+            "{refusal:?} left the door's 70-76 block with {code}",
         );
-        // The mirror the whole chain rests on: the route reads the code, not
-        // stderr, so a code that stopped resolving would rename the refusal.
-        assert_eq!(DoorRefusal::from_exit_code(code), Some(*refusal));
-        std::fs::write(dir.join("land-exit"), code.to_string()).unwrap();
+        assert_eq!(DoorRefusal::from_exit_code(code), Some(refusal));
 
         let err = client
-            .land("task-20260904-refuse")
+            .land(id)
             .await
             .expect_err("a refusal must not decode as a success envelope");
 
@@ -561,4 +612,32 @@ async fn every_named_refusal_reaches_the_client_with_its_name_and_status() {
             "{refusal:?} reached the client on the wrong side of the 4xx/5xx line ({status})",
         );
     }
+}
+
+/// `not_authorized`, fail-closed: a galaxy whose operator never armed
+/// `[harvest_authority] required` refuses every harvest, and the client sees
+/// the name.
+///
+/// The one case that must NOT arm the door — which is why it is its own test
+/// rather than a row in the loop above.
+#[tokio::test]
+async fn an_unarmed_galaxy_refuses_not_authorized_at_the_client() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant = tenants.add(NOYAU);
+    tenant
+        .insert_molecule("task-20260904-unarmed", &json!({"status": "completed"}))
+        .unwrap();
+    let dep = Deployment::start(tenants).await;
+
+    let client = dep.client(&["cosmon:molecule:write"], "jti-wire-unarmed");
+    let err = client
+        .land("task-20260904-unarmed")
+        .await
+        .expect_err("an unarmed galaxy has granted nobody anything");
+
+    let Error::Api { status, body } = err else {
+        panic!("not_authorized reached the client as {err:?}, not a structured API error");
+    };
+    assert_eq!(body["error"], DoorRefusal::NotAuthorized.as_str());
+    assert_eq!(status, 403);
 }

@@ -476,7 +476,9 @@ echo "==> docker compose up --wait (building images; this takes several minutes)
 # The adapter Dockerfile COPYs the dist-binaries directory, which is
 # gitignored and absent on a clean checkout. An empty one is a valid
 # (and honest) input: the /dist route 404s with its own hint.
-mkdir -p "$REPO_ROOT/crates/cosmon-rpp-adapter/assets/binaries"
+# BUILD_ROOT, not REPO_ROOT: the images are built from that tree, and
+# creating the directory here would satisfy the COPY in the wrong one.
+mkdir -p "$BUILD_ROOT/crates/cosmon-rpp-adapter/assets/binaries"
 if ! compose up -d --build --wait >"$LOGS/compose-up.log" 2>&1; then
   compose ps >>"$LOGS/compose-up.log" 2>&1 || true
   fail compose-up "$t0" "compose up --wait failed; see logs/compose-up.log"
