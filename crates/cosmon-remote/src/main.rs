@@ -156,7 +156,7 @@ enum Cmd {
     /// Distinct from the Claude/Anthropic device flow reached by "auth login".
     /// After this, every command refreshes the 15-minute access token silently
     /// — no re-auth until the roughly monthly refresh token lapses.
-    #[command(display_order = 3)]
+    #[command(display_order = 3, after_long_help = root_help::LOGIN_AFTER_LONG_HELP)]
     #[allow(clippy::doc_markdown)] // prose is shown verbatim in --help; no backticks
     Login {
         /// Interface the OAuth redirect catcher listens on (default 127.0.0.1,
@@ -1976,6 +1976,13 @@ async fn run_login(
     use cosmon_remote::oidc;
 
     profile.check_ready()?;
+
+    // Resolve the opener BEFORE any network or listener: a malformed
+    // $COSMON_REMOTE_BROWSER must fail here, not at the moment the browser
+    // should have appeared — by then the callback listener is bound and the
+    // only remaining event is the five-minute timeout.
+    let opener = oidc::Opener::from_env()?;
+
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(profile.timeout_secs))
         .build()?;
@@ -2011,7 +2018,7 @@ async fn run_login(
         &endpoints,
         &profile.sub,
         timeout,
-        oidc::open_browser,
+        |url| opener.open(url),
     )
     .await?;
 

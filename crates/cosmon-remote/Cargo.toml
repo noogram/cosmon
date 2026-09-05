@@ -133,6 +133,13 @@ wiremock = "0.6"
 # Dev-only — the registry stubs do not ship inside the binary; the
 # canon fold (build.rs) is the shipped projection.
 cosmon-thin-cli = { path = "../cosmon-thin-cli" }
+# The REAL `cs-oidc-mock` IdP, served in-process (issue #53). Cargo exports
+# `CARGO_BIN_EXE_<name>` only to the defining crate's tests, so the binary
+# cannot be located by path from here; the testkit publishes its router
+# instead, and `login_headless.rs` drives the same handlers a container smoke
+# drives. A second hand-written mock is exactly the fixture that stays green
+# while the shipped IdP drifts.
+cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
 
 [lints]
 workspace = true
