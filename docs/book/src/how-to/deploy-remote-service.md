@@ -337,6 +337,44 @@ six-tool, shell-free registry rather than host-shell access; a toolchain
 preflight runs before work; and each molecule has a wall-clock limit. It cannot
 use that worker interface to scan the host or read outside its worktree.
 
+## Smoke the whole stack locally before you trust it
+
+Everything above is a sequence of gestures you perform once, by hand, and then
+have to believe about your next deployment. One command re-performs the whole
+thing against real containers and tells you which step broke:
+
+```sh
+bash scripts/rpp-remote-e2e.sh
+```
+
+It builds both images from `crates/cosmon-rpp-adapter/deploy/docker-compose.yml`,
+waits on the two healthchecks that file already declares, and then drives the
+stack with the compiled `cosmon-remote` binary over the published loopback
+ports — `login` (the real authorization-code + PKCE flow against the mock IdP,
+headless), `auth me`, `nucleate`, `observe`, and a `land` that must come back
+with its named refusal. Each step is one line of `{step, rc, ms, evidence}` in
+`.rpp-remote-e2e/<stamp>/e2e.ndjson`; the first red step ends the run.
+
+Nothing of yours is touched. The tracked `deploy/` tree is copied, not written
+to; the nucleon binding is materialised into the copy; the tenant galaxy is a
+throwaway tree destroyed with the stack; `$HOME` is redirected so the run reads
+neither your `cosmon-remote` profiles nor your OS keychain; the containers carry
+a name suffix and non-default ports so a live deployment on 8443/8444 keeps
+running beside it. Pass `--keep` to leave the stack up and poke at it.
+
+If `docker` or `jq` is missing the script exits 2 and says so. It has no skip
+path on purpose: a smoke that prints green without running is how an absent
+prerequisite becomes a passing nightly.
+
+Two legs are deliberately not in it. `tackle` and `land` still shell out to
+`cs`, and the adapter image has shipped no `cs` since it went library-direct —
+so `tackle` is out of scope here and `land` is asserted on the *name* of the
+refusal it does return. Issue #54 owns making those two routes library-direct;
+when it does, this script's pinned label goes red, which is the point.
+
+The same script runs nightly in CI as the non-blocking `rpp-remote-e2e` job,
+which uploads `e2e.ndjson` as an artifact.
+
 ## See also
 
 - [Agent adapters: a harness over harnesses](../explanation/adapter.md): how
