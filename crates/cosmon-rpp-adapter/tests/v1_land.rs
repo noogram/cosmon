@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
 //! The harvest door — `POST /v1/molecules/:id/land` integration tests
-//! (ADR-176, issue #51).
+//! (ADR-176, issue #51; library-direct decision half, issue #54 U3).
 //!
 //! Each test pins one property the deliberation made non-negotiable, and
 //! each is written so that it fails for the *reason* it exists rather than
@@ -11,8 +11,14 @@
 //!    that may integrate nothing rebuilds the defect issue #51 reports.
 //! 2. The body carries **no options**. A request with any body at all is
 //!    refused `unsupported_parameter`.
-//! 3. Every one of the seven named refusals survives the exit-code →
-//!    label mirror intact, and `base_not_fast_forward` alone answers 5xx.
+//! 3. Every one of the seven named refusals reaches the wire under its own
+//!    label, and `base_not_fast_forward` alone answers 5xx. Since issue #54
+//!    U3 the four **pre-effect** refusals — and `already_landed`
+//!    idempotence — are decided in-process from the tenant's own state
+//!    files, with **no `cs` binary involved**: those tests plant real state
+//!    and write no fake-`cs` pin. The three **execution** refusals still
+//!    cross the subprocess seam (the U6 cut-over point) and are exercised
+//!    through the child's exit code.
 //! 4. The door needs `cosmon:molecule:write` and **not** the
 //!    `worker:spawn` composition that `tackle` and `run` carry — because
 //!    auto-propel is disarmed here, so no agent budget is spent.
@@ -24,7 +30,9 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use cosmon_core::harvest_door::{DoorRefusal, ALL_REFUSALS};
-use cosmon_oidc_testkit::{fake_cs_path, IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
+use cosmon_oidc_testkit::{
+    fake_cs_path, IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces,
+};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
@@ -110,6 +118,26 @@ async fn oidc_mock() -> OidcMock {
     .await
 }
 
+/// Arm `[harvest_authority] required` in the tenant's tracked config —
+/// the second key the in-process decision half reads (ADR-176 D1).
+fn arm_harvest_authority(tenant: &TenantPath) {
+    let cosmon_dir = tenant.root.join(".cosmon");
+    std::fs::create_dir_all(&cosmon_dir).unwrap();
+    std::fs::write(
+        cosmon_dir.join("config.toml"),
+        "[harvest_authority]\nrequired = true\n",
+    )
+    .unwrap();
+}
+
+/// Plant a `Completed`, unmerged molecule — the one shape whose harvest is
+/// admissible past the whole in-process decision half.
+fn plant_completed(tenant: &TenantPath, id: &str) {
+    tenant
+        .insert_molecule(id, &json!({"status": "completed"}))
+        .unwrap();
+}
+
 /// Path of the molecule directory the fake `cs` reads its pins from.
 fn molecule_dir(tenants: &TenantWorkspaces, id: &str) -> std::path::PathBuf {
     tenants
@@ -134,9 +162,8 @@ fn molecule_dir(tenants: &TenantWorkspaces, id: &str) -> std::path::PathBuf {
 async fn never_202_on_a_transaction_that_may_integrate_nothing() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    tenant_a
-        .insert_molecule("task-20260901-land", &json!({}))
-        .unwrap();
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-land");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
@@ -213,9 +240,8 @@ async fn a_request_body_is_refused_as_an_unsupported_parameter() {
 async fn an_empty_json_object_is_still_no_parameter() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    tenant_a
-        .insert_molecule("task-20260901-empty", &json!({}))
-        .unwrap();
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-empty");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
@@ -229,19 +255,141 @@ async fn an_empty_json_object_is_still_no_parameter() {
     assert_eq!(resp.status(), StatusCode::OK);
 }
 
-/// The exit-code → label mirror, walked over the whole closed set.
+/// The four pre-effect refusals, decided **in-process** from the tenant's
+/// own state files — issue #54 U3.
 ///
-/// A refusal that lost its name between the CLI and the wire would reach
-/// the tenant as an anonymous 500, which is the unnamed refusal ADR-110 I4
-/// forbids. Walking `ALL_REFUSALS` rather than a hand-written list means a
-/// new variant joins this test by existing.
+/// No `land-exit` pin is written anywhere in this test: the fake `cs`
+/// would answer success if it were reached, so a refusal arriving on the
+/// wire proves the library decision half produced it without a subprocess.
+/// Each case plants the real state shape that owns the refusal.
 #[tokio::test]
-async fn every_named_refusal_survives_the_exit_code_mirror() {
+async fn the_pre_effect_refusals_are_decided_in_process_from_real_state() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+
+    // not_completed: work still in flight.
     tenant_a
-        .insert_molecule("task-20260901-refuse", &json!({}))
+        .insert_molecule("task-20260901-flight", &json!({"status": "running"}))
         .unwrap();
+    // reservation_requires_seal: a condition only a human lifts.
+    tenant_a
+        .insert_molecule(
+            "task-20260901-held",
+            &json!({"status": "completed", "tags": ["needs-review"]}),
+        )
+        .unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let app = router(make_state(&oidc, &tenants, security_dir.path()));
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-inproc");
+
+    for (id, label, status) in [
+        (
+            "task-20260901-flight",
+            "not_completed",
+            StatusCode::CONFLICT,
+        ),
+        (
+            "task-20260901-held",
+            "reservation_requires_seal",
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(land_request(&jwt, id, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), status, "{id} answered the wrong status");
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], label, "{id} lost its refusal name");
+    }
+}
+
+/// `not_authorized`, fail-closed and in-process: a tenant galaxy that has
+/// not armed `[harvest_authority] required` refuses every harvest — the
+/// bearer token authenticates, it never authorises (ADR-176 D1).
+#[tokio::test]
+async fn an_unarmed_tenant_galaxy_refuses_not_authorized_in_process() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    // Deliberately NOT armed, and the molecule is otherwise landable.
+    plant_completed(&tenant_a, "task-20260901-cold");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let app = router(make_state(&oidc, &tenants, security_dir.path()));
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-cold");
+
+    let resp = app
+        .oneshot(land_request(&jwt, "task-20260901-cold", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_authorized");
+}
+
+/// `backlog_full`, in-process: past the sealed ceiling of
+/// closed-but-unintegrated molecules the door refuses by name — a bounded,
+/// refusing queue beats a silent block (ADR-176 D7, ADR-110 I4).
+#[tokio::test]
+async fn a_full_backlog_refuses_in_process() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    let ceiling = cosmon_core::config::HarvestAuthorityConfig::DEFAULT_BACKLOG_CEILING;
+    for i in 0..ceiling {
+        tenant_a
+            .insert_molecule(
+                &format!("task-20260901-b{i:03}"),
+                &json!({
+                    "status": "completed",
+                    "non_integration": {
+                        "reason": "pre-done-refused",
+                        "at": chrono::Utc::now().to_rfc3339(),
+                        "base_branch": "main",
+                        "detail": null,
+                    },
+                }),
+            )
+            .unwrap();
+    }
+    plant_completed(&tenant_a, "task-20260901-ninth");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let app = router(make_state(&oidc, &tenants, security_dir.path()));
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-full");
+
+    let resp = app
+        .oneshot(land_request(&jwt, "task-20260901-ninth", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "backlog_full");
+}
+
+/// The exit-code → label mirror, for the three refusals only the effect
+/// can produce.
+///
+/// The other four are pre-effect decisions and never reach the subprocess
+/// since issue #54 U3 — they are covered above from real state. This walk
+/// stays exhaustive over [`ALL_REFUSALS`] through the match below, so a
+/// new variant added to the closed set fails this test at compile time
+/// rather than silently joining neither half.
+#[tokio::test]
+async fn every_execution_refusal_survives_the_exit_code_mirror() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-refuse");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
@@ -250,6 +398,20 @@ async fn every_named_refusal_survives_the_exit_code_mirror() {
     let dir = molecule_dir(&tenants, "task-20260901-refuse");
 
     for refusal in ALL_REFUSALS {
+        // Exhaustive on purpose: a new DoorRefusal variant must be filed
+        // into one of the two halves by whoever adds it.
+        let execution_side = match refusal {
+            DoorRefusal::MergeConflict
+            | DoorRefusal::BaseNotFastForward
+            | DoorRefusal::PreDoneRefused => true,
+            DoorRefusal::NotCompleted
+            | DoorRefusal::NotAuthorized
+            | DoorRefusal::ReservationRequiresSeal
+            | DoorRefusal::BacklogFull => false,
+        };
+        if !execution_side {
+            continue;
+        }
         std::fs::write(dir.join("land-exit"), refusal.exit_code().to_string()).unwrap();
 
         let resp = app
@@ -290,9 +452,8 @@ async fn every_named_refusal_survives_the_exit_code_mirror() {
 async fn an_unknown_exit_code_stays_anonymous() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    tenant_a
-        .insert_molecule("task-20260901-weird", &json!({}))
-        .unwrap();
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-weird");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
@@ -327,9 +488,8 @@ async fn an_unknown_exit_code_stays_anonymous() {
 async fn write_scope_alone_opens_the_door() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    tenant_a
-        .insert_molecule("task-20260901-scope", &json!({}))
-        .unwrap();
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-scope");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
@@ -361,27 +521,84 @@ async fn write_scope_alone_opens_the_door() {
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
-/// Idempotence, which is what makes a retry over a lossy network safe.
+/// Idempotence, decided **in-process** from the molecule's own record —
+/// no fake-`cs` pin, no subprocess.
 ///
 /// The second request must report the same success as the first and mutate
 /// nothing — `already_landed` rather than a second merge or a refusal.
 #[tokio::test]
-async fn a_repeat_request_reports_already_landed() {
+async fn a_repeat_request_reports_already_landed_in_process() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
     tenant_a
-        .insert_molecule("task-20260901-again", &json!({}))
+        .insert_molecule(
+            "task-20260901-again",
+            &json!({
+                "status": "completed",
+                "merged_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
         .unwrap();
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
     let app = router(make_state(&oidc, &tenants, security_dir.path()));
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-again");
-    let dir = molecule_dir(&tenants, "task-20260901-again");
-    std::fs::write(dir.join("land-outcome"), "already_landed").unwrap();
 
     let resp = app
         .oneshot(land_request(&jwt, "task-20260901-again", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["harvest"]["outcome"], "already_landed");
+}
+
+/// The issue #54 claim itself: the decision half and idempotence answer
+/// correctly against an image that carries **no `cs` binary at all**.
+///
+/// `cs_path` points at a path that does not exist, so any code path that
+/// still shells out fails loudly — a refusal or an `already_landed` success
+/// arriving on the wire can only have been produced in-process.
+#[tokio::test]
+async fn the_decision_half_needs_no_cs_binary_at_all() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    tenant_a
+        .insert_molecule("task-20260901-nobin", &json!({"status": "running"}))
+        .unwrap();
+    tenant_a
+        .insert_molecule(
+            "task-20260901-nobin2",
+            &json!({
+                "status": "completed",
+                "merged_at": chrono::Utc::now().to_rfc3339(),
+            }),
+        )
+        .unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.cs_path = std::path::PathBuf::from("/nonexistent/cs-binary");
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-nobin");
+
+    let resp = app
+        .clone()
+        .oneshot(land_request(&jwt, "task-20260901-nobin", Body::empty()))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_completed");
+
+    let resp = app
+        .oneshot(land_request(&jwt, "task-20260901-nobin2", Body::empty()))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -394,23 +611,29 @@ async fn a_repeat_request_reports_already_landed() {
 ///
 /// The §8p boundary offers no existence oracle: "no such molecule" and
 /// "not yours" must be indistinguishable, or the route becomes an
-/// enumeration channel across tenants.
+/// enumeration channel across tenants. Covered for both a malformed id and
+/// a well-formed id the tenant's store has never seen — the latter is
+/// decided in-process by the library door since issue #54 U3.
 #[tokio::test]
 async fn an_unknown_molecule_is_not_an_existence_oracle() {
     let mut tenants = TenantWorkspaces::new();
-    tenants.add("a");
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
     let app = router(make_state(&oidc, &tenants, security_dir.path()));
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-404");
 
-    let resp = app
-        .oneshot(land_request(&jwt, "not-a-molecule-id", Body::empty()))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"], "not_found");
+    for id in ["not-a-molecule-id", "task-20260901-ghost"] {
+        let resp = app
+            .clone()
+            .oneshot(land_request(&jwt, id, Body::empty()))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "not_found", "{id}");
+    }
 }
