@@ -680,10 +680,15 @@ jobs:
     # real `crates/cosmon-rpp-adapter/deploy/` compose stack, waits on
     # both declared healthchecks, and drives it with the compiled
     # `cosmon-remote` over the published loopback ports —
-    # login -> auth me -> nucleate -> observe -> the named `land`
-    # refusal. Both images do a full `cargo build --release --locked`,
-    # so this is minutes of work and belongs on the schedule, not on
-    # every push.
+    # login -> auth me -> nucleate -> observe -> tackle -> the worker's
+    # own completion -> the named `land` refusal. Both images do a full
+    # `cargo build --release --locked`, so this is minutes of work and
+    # belongs on the schedule, not on every push.
+    #
+    # The `tackle` leg (issue #54 U7) is the one that cannot be moved
+    # in-process: it asserts that the SHIPPED adapter image spawns a real
+    # worker with no `cs` binary of its own. Its dummy agent lives in a
+    # test-only Dockerfile stage the deployment never builds.
     #
     # `continue-on-error` is about blast radius, not confidence: the
     # script itself has no SKIP path and exits 2 rather than report a
@@ -692,7 +697,10 @@ jobs:
     continue-on-error: true
     if: ${{ github.event_name == 'schedule' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 90, not 60, since issue #54 U7: the adapter image is built from the
+    # Dockerfile's `e2e` stage, which adds a second full `cargo build
+    # --release --locked` (the worker-side `cs`) on top of the adapter's.
+    timeout-minutes: 90
     permissions:
       contents: read
     steps:

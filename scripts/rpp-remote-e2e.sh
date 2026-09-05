@@ -23,17 +23,40 @@
 #   auth-me      GET /v1/auth/me — the token the server actually sees
 #   nucleate     POST /v1/molecules — library-direct, writes the tenant tree
 #   observe      GET /v1/molecules/:id — the molecule reads back
+#   tackle       POST /v1/molecules/:id/tackle — a REAL worker, spawned by
+#                the shipped image, with no `cs` binary in it
+#   worker       the worker finishes: the molecule reaches `completed`
 #   land         POST /v1/molecules/:id/land — the NAMED refusal (below)
 #
-# `tackle` and `done` are deliberately absent. The adapter image is
-# library-direct (its Dockerfile ships no `cs`), and `POST …/tackle`
-# still shells out; issue #54 owns making that leg library-direct and
-# owns adding it here. `land` shells out too, which is why this script
-# pins its refusal LABEL rather than asserting a harvest: today the door
-# refuses `subprocess_spawn_failed` in-container, and when #54 lands the
-# refusal becomes a harvest-door one. Pinning the label is what makes
-# that change announce itself here instead of passing silently — see
-# RPP_E2E_EXPECT_LAND_LABEL below.
+# The `tackle` leg is what issue #54 U7 adds, and it is the reason the
+# rest of the scenario exists. Until U6 the adapter reached `tackle`,
+# `run` and `land` by shelling out to `cs` — a binary its own Dockerfile
+# has never shipped — so all three failed against the image an operator
+# actually deploys, while every in-process suite stayed green. U6 cut
+# dispatch over to `cosmon_runtime::LibraryExecutor` over the tmux
+# transport port. Whether that is *true of the image* is not a claim any
+# in-process test can make, and it is the only claim this step makes:
+# the adapter, in the container, spawns a worker pane, hands it its
+# briefing, and the worker drives `cs` against the tenant store until
+# the molecule is `completed`.
+#
+# The worker is a dummy — `tests/fakes/fake-claude` in its
+# `complete-molecule` mode — and it, together with the worker-side `cs`
+# it runs, is provisioned in a Dockerfile stage the deployment never
+# builds (`target: e2e`, selected by `deploy/docker-compose.e2e.yml`).
+# The SHIPPED stage still contains no `cs` and no agent CLI. That
+# separation is load-bearing: a smoke that provisioned the tenant-facing
+# image would be proving the claim against an image nobody runs.
+#
+# `land` is still asserted as a NAMED refusal, but the name has changed
+# and the reason is different. It is no longer "the binary is missing":
+# the door's decision half runs in-process and this script now ARMS it
+# (`[harvest_authority] required` in the throwaway galaxy), so the
+# decision admits the harvest and the refusal comes from the effect
+# half, which has no library implementation yet — `501
+# land_effect_unavailable`, ADR-176 §12. Pinning the label is what makes
+# the day it becomes a real harvest announce itself here instead of
+# passing silently — see RPP_E2E_EXPECT_LAND_LABEL below.
 #
 # Usage (from anywhere in the repo):
 #
@@ -64,6 +87,33 @@
 #   RPP_E2E_EXPECT_SUB       falsifier: what `auth-me` must observe
 #   RPP_E2E_CLIENT_AUDIENCE  falsifier: the audience the CLIENT asks for
 #   RPP_E2E_EXPECT_LAND_LABEL  falsifier: the refusal label `land` returns
+#   RPP_E2E_EXPECT_TACKLE_LABEL
+#                            falsifier: run the scenario against an image
+#                            whose `tackle` is expected to REFUSE, and
+#                            name the refusal. Empty (the default) means
+#                            tackle must succeed. This is how the pre-U6
+#                            claim is falsified without a second script:
+#                            build from a checkout that predates the
+#                            library cut-over (RPP_E2E_BUILD_ROOT) and
+#                            pin `tackle_unavailable` here — the run ends
+#                            after `tackle`, because a refused dispatch
+#                            has no worker to wait for.
+#   RPP_E2E_BUILD_ROOT       workspace the two images are BUILT from.
+#                            Default `<repo>` — this checkout. The staged
+#                            compose file's build context is rewritten to
+#                            this absolute path, so the compose file can
+#                            come from here while the source tree comes
+#                            from somewhere else (the falsifier above).
+#   RPP_E2E_E2E_STAGE        `1` (default) layers
+#                            `deploy/docker-compose.e2e.yml` on top of
+#                            the deployment compose file: the adapter
+#                            image is built from the Dockerfile's `e2e`
+#                            target, which adds the dummy agent and the
+#                            worker-side `cs`. Set `0` for a build root
+#                            that has no such stage.
+#   RPP_E2E_WORKER_TIMEOUT   seconds to wait for the spawned worker to
+#                            drive the molecule to `completed`
+#                            (default 120).
 #   COSMON_REMOTE_BIN        skip the cargo build, use this binary
 
 set -euo pipefail
@@ -75,7 +125,7 @@ KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    --help|-h) sed -n '2,67p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,117p' "$0"; exit 0 ;;
     *) echo "error: unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -148,7 +198,20 @@ IDP_SUB="${RPP_E2E_IDP_SUB:-cs-oidc-mock-user}"
 #   RPP_E2E_EXPECT_LAND_LABEL  → `land`    (the named refusal)
 EXPECT_SUB="${RPP_E2E_EXPECT_SUB:-$IDP_SUB}"
 CLIENT_AUDIENCE="${RPP_E2E_CLIENT_AUDIENCE:-$AUDIENCE}"
-EXPECT_LAND_LABEL="${RPP_E2E_EXPECT_LAND_LABEL:-subprocess_spawn_failed}"
+#   RPP_E2E_EXPECT_TACKLE_LABEL → `tackle`  (empty = must succeed)
+#
+# `land` no longer refuses for want of a binary. The door's decision
+# half runs in-process (issue #54 U3) and this script arms it, so the
+# decision ADMITS and the refusal is the effect half's: `501
+# land_effect_unavailable` (ADR-176 §12). The label is deliberately
+# outside the closed seven-refusal set — it names a missing
+# implementation, not a verdict about this molecule.
+EXPECT_LAND_LABEL="${RPP_E2E_EXPECT_LAND_LABEL:-land_effect_unavailable}"
+EXPECT_TACKLE_LABEL="${RPP_E2E_EXPECT_TACKLE_LABEL:-}"
+BUILD_ROOT="${RPP_E2E_BUILD_ROOT:-$REPO_ROOT}"
+BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd)"
+E2E_STAGE="${RPP_E2E_E2E_STAGE:-1}"
+WORKER_TIMEOUT="${RPP_E2E_WORKER_TIMEOUT:-120}"
 NOYAU="e2e-noyau"
 # The issuer MUST be a URL the *client* can reach: it is where
 # cosmon-remote fetches `/.well-known/openid-configuration`. In the
@@ -159,6 +222,12 @@ ISSUER="http://127.0.0.1:$OIDC_PORT"
 HOST_URL="http://127.0.0.1:$RPP_PORT"
 
 COMPOSE_FILE="$RUN_DIR/deploy/docker-compose.yml"
+# Layered on top of COMPOSE_FILE when RPP_E2E_E2E_STAGE=1: the test-only
+# override that builds the adapter from the Dockerfile's `e2e` target.
+# Kept a SEPARATE file rather than a flag on the deployment one, so the
+# compose configuration an operator reads renders identically whether or
+# not a smoke ever ran.
+COMPOSE_E2E_FILE="$RUN_DIR/deploy/docker-compose.e2e.yml"
 
 # Three ports must be free before anything is built: the two the stack
 # publishes, and the fixed one `cosmon-remote login` binds its OAuth
@@ -216,7 +285,7 @@ cleanup() {
   local rc=$?
   if [[ $KEEP -eq 1 ]]; then
     echo "==> --keep: leaving project '$PROJECT' up (down with:"
-    echo "    docker compose -p $PROJECT -f $COMPOSE_FILE down -v)"
+    echo "    docker compose -p $PROJECT ${COMPOSE_ARGS[*]} down -v)"
   elif [[ -f "$COMPOSE_FILE" ]]; then
     echo "==> tearing down '$PROJECT'"
     compose logs >"$LOGS/compose.log" 2>&1 || true
@@ -227,6 +296,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# The `-f` list, built once. `up` and `down` MUST see the same set: a
+# teardown that forgot the override would leave the e2e-tagged image's
+# containers behind, and the next run would meet them as "port already
+# allocated".
+COMPOSE_ARGS=(-f "$COMPOSE_FILE")
+if [[ "$E2E_STAGE" == "1" ]]; then
+  COMPOSE_ARGS+=(-f "$COMPOSE_E2E_FILE")
+fi
+
 compose() {
   COSMON_GALAXIES_HOST="$RUN_DIR/galaxies" \
   COSMON_RPP_AUDIENCE="$AUDIENCE" \
@@ -234,7 +312,7 @@ compose() {
   COSMON_RPP_HOST_PORT="$RPP_PORT" \
   COSMON_OIDC_HOST_PORT="$OIDC_PORT" \
   COSMON_RPP_NAME_SUFFIX="-e2e-$$" \
-  docker compose -p "$PROJECT" -f "$COMPOSE_FILE" "$@"
+  docker compose -p "$PROJECT" "${COMPOSE_ARGS[@]}" "$@"
 }
 
 # ---------------------------------------------------------------------------
@@ -268,7 +346,28 @@ t0=$(now_ms)
 DEPLOY_SRC="$REPO_ROOT/crates/cosmon-rpp-adapter/deploy"
 mkdir -p "$RUN_DIR/deploy"
 cp "$DEPLOY_SRC/docker-compose.yml" "$DEPLOY_SRC/rpp.toml" "$RUN_DIR/deploy/"
+if [[ "$E2E_STAGE" == "1" ]]; then
+  cp "$DEPLOY_SRC/docker-compose.e2e.yml" "$RUN_DIR/deploy/"
+fi
 mkdir -p "$RUN_DIR/deploy/state/nucleons/nuc-$NOYAU"
+
+# Pin the build context to an absolute path.
+#
+# The tracked files say `context: ../../..`, which is right where they
+# live and wrong everywhere else — it resolved correctly here only
+# because RUN_DIR defaulted to exactly two levels under the repo, a
+# coincidence one `RPP_E2E_RUN_DIR` away from silently building the
+# wrong tree. Rewriting it in the COPY makes the source tree an explicit
+# input, which is also what lets the falsifier build the images from a
+# pre-U6 checkout while using this checkout's compose files.
+for f in "$RUN_DIR/deploy/docker-compose.yml" "$RUN_DIR/deploy/docker-compose.e2e.yml"; do
+  [[ -f "$f" ]] || continue
+  # `|` as the sed delimiter: BUILD_ROOT is a path and contains `/`.
+  sed -i.bak "s|context: \.\./\.\./\.\.|context: $BUILD_ROOT|" "$f"
+  rm -f "$f.bak"
+done
+grep -q "context: $BUILD_ROOT" "$RUN_DIR/deploy/docker-compose.yml" \
+  || fail stage "$t0" "could not pin the build context to $BUILD_ROOT in the staged compose file"
 
 cat >"$RUN_DIR/deploy/state/nucleons/nuc-$NOYAU/oidc-identity.toml" <<TOML
 # Materialised from oidc-identity.toml.example for one e2e run.
@@ -309,10 +408,40 @@ TOML
 GALAXY="$RUN_DIR/galaxies/$NOYAU"
 mkdir -p "$GALAXY/.cosmon/state" "$GALAXY/.cosmon/formulas"
 cp "$REPO_ROOT/.cosmon/formulas/task-work.formula.toml" "$GALAXY/.cosmon/formulas/"
+
+# Arm the harvest door.
+#
+# `harvest_door::decide` fails closed on a galaxy that has not armed
+# `[harvest_authority] required` — it refuses `not_authorized` before it
+# has even loaded the molecule. Leaving it unarmed would make the `land`
+# step green for the wrong reason: the label under test
+# (`land_effect_unavailable`) belongs to the EFFECT half, and it is only
+# reached by a decision that admitted the harvest. Arming is the
+# operator gesture the tenant cannot make, which is the point of the
+# second key — so it is done here, on the host, in a galaxy that lives
+# for one run. No seal is minted and none is ever committed.
+cat >"$GALAXY/.cosmon/config.toml" <<'TOML'
+# Throwaway e2e galaxy. Arms the ADR-176 harvest door so its decision
+# half admits and the refusal under test comes from the effect half.
+[harvest_authority]
+required = true
+TOML
+
+# The tenant root must be a git repository: the library tackle executor
+# resolves the repo root from it and cuts the worker's worktree with
+# `git worktree add`. `ensure_base_commit` covers a commit-less repo, so
+# `git init` alone is enough — but a plain directory is not, and the
+# failure without this is a `tackle_unavailable` whose cause is three
+# layers down in the adapter log.
+git init -q "$GALAXY" 2>>"$LOGS/stage.log" \
+  || fail stage "$t0" "git init of the throwaway galaxy failed; see logs/stage.log"
+
 # The adapter runs as uid 10000; on a Linux runner the bind-mounted tree
-# is owned by the runner's uid and nucleate needs to write into it.
+# is owned by the runner's uid and nucleate needs to write into it. The
+# worker's worktree and its branch are cut inside this tree too, so the
+# permission has to survive the `.git` directory `git init` just made.
 chmod -R 0777 "$RUN_DIR/galaxies"
-record stage 0 "$(( $(now_ms) - t0 ))" "staged deploy copy, nucleon binding for ($ISSUER, $IDP_SUB, $AUDIENCE) → $NOYAU"
+record stage 0 "$(( $(now_ms) - t0 ))" "staged deploy copy (build context $BUILD_ROOT, e2e stage=$E2E_STAGE), nucleon binding for ($ISSUER, $IDP_SUB, $AUDIENCE) → $NOYAU, harvest door armed, galaxy git-initialised"
 
 # ---------------------------------------------------------------------------
 # Step 2 — build the images and wait on BOTH healthchecks.
@@ -446,7 +575,107 @@ obs_status="$(printf '%s' "$OBS" | jq -r '.molecule.status // "unknown"')"
 record observe 0 "$(( $(now_ms) - t0 ))" "molecule $MOL_ID reads back, status=$obs_status"
 
 # ---------------------------------------------------------------------------
-# Step 8 — land. The harvest door on a molecule nobody armed a grant for.
+# Step 8 — tackle. The claim issue #54 exists to make, asserted against
+# the image rather than against a tower of in-process doubles.
+#
+# What has to be true for this to pass, and was not true before U6:
+# the adapter resolves the molecule and its formula in-process, cuts a
+# git worktree, writes the dispatch ledger entry BEFORE the spawn, opens
+# a tmux session running the resolved adapter command under the worker
+# envelope's `env -i`, and pastes the briefing into it — all with no
+# `cs` binary anywhere in its own image.
+#
+# The assertion is the worker SESSION NAME, not the HTTP status. A 200
+# carrying no session would satisfy "it did not fail" while describing a
+# dispatch that spawned nothing, and that is precisely the shape of the
+# lie this whole script exists to catch.
+# ---------------------------------------------------------------------------
+t0=$(now_ms)
+set +e
+TACKLE="$(cs_remote --json molecule tackle "$MOL_ID" 2>"$LOGS/tackle.err")"
+tackle_rc=$?
+set -e
+printf '%s' "$TACKLE" >"$LOGS/tackle.out"
+
+if [[ -n "$EXPECT_TACKLE_LABEL" ]]; then
+  # Falsifier mode. The scenario is pointed at an image whose `tackle`
+  # must REFUSE, and the refusal is named. Everything downstream (a
+  # worker, a completion, the door's effect half) is unreachable by
+  # construction, so the run ends here rather than reporting a cascade
+  # of failures that all say the same thing once.
+  [[ $tackle_rc -ne 0 ]] \
+    || fail tackle "$t0" "tackle SUCCEEDED, but RPP_E2E_EXPECT_TACKLE_LABEL pinned the refusal '$EXPECT_TACKLE_LABEL'"
+  tackle_label="$(grep -o '"error":"[a-z_]*"' "$LOGS/tackle.err" | head -1 | cut -d'"' -f4)"
+  [[ -n "$tackle_label" ]] || tackle_label="$(grep -o '"label":"[a-z_]*"' "$LOGS/tackle.err" | head -1 | cut -d'"' -f4)"
+  [[ "$tackle_label" == "$EXPECT_TACKLE_LABEL" ]] \
+    || fail tackle "$t0" "tackle refused '${tackle_label:-<unnamed>}' (exit $tackle_rc), expected '$EXPECT_TACKLE_LABEL'"
+  record tackle 0 "$(( $(now_ms) - t0 ))" "named refusal '$tackle_label', cosmon-remote exit $tackle_rc (falsifier mode: this image cannot dispatch)"
+  echo
+  echo "==> falsifier run complete — $(wc -l <"$NDJSON" | tr -d ' ') steps recorded"
+  exit 0
+fi
+
+[[ $tackle_rc -eq 0 ]] \
+  || fail tackle "$t0" "POST /v1/molecules/$MOL_ID/tackle failed (exit $tackle_rc): $(tail -2 "$LOGS/tackle.err" | tr '\n' ' ')"
+# `.tackle.worker_session`, spelled once. See the nucleate step for why
+# there is no `//` fallback chain here.
+WORKER_SESSION="$(printf '%s' "$TACKLE" | jq -r '.tackle.worker_session // empty')"
+[[ -n "$WORKER_SESSION" ]] \
+  || fail tackle "$t0" "tackle answered 200 with no worker_session: $(printf '%s' "$TACKLE" | head -c 200)"
+# The worktree is the other half of the dispatch, and it lands on the
+# bind mount — so the host can see it. A session name with no worktree
+# beside it would mean the ledger and the pane disagree about what was
+# dispatched.
+[[ -d "$GALAXY/.worktrees/$MOL_ID" ]] \
+  || fail tackle "$t0" "no worktree at galaxies/$NOYAU/.worktrees/$MOL_ID — the dispatch spawned a session without cutting one"
+record tackle 0 "$(( $(now_ms) - t0 ))" "worker session '$WORKER_SESSION' spawned by the image, worktree cut at .worktrees/$MOL_ID"
+
+# ---------------------------------------------------------------------------
+# Step 9 — the worker does its job.
+#
+# The dummy agent (`fake-claude` in `complete-molecule` mode, staged into
+# the e2e image only) reads the briefing the adapter pasted into its
+# pane, takes the molecule id out of it, and runs `cs complete`. So this
+# step proves three things the tackle step alone cannot: the BRIEFING
+# reached the pane, the worker's own environment is usable (`PATH`,
+# `COSMON_STATE_DIR` pinned by the envelope), and the tenant store the
+# worker writes is the same one the API reads.
+#
+# Polled through the API, not off the disk: the question is what a
+# tenant can observe.
+# ---------------------------------------------------------------------------
+t0=$(now_ms)
+worker_status=""
+deadline=$(( $(now_ms) + WORKER_TIMEOUT * 1000 ))
+while [[ $(now_ms) -lt $deadline ]]; do
+  OBS="$(cs_remote --json molecule get "$MOL_ID" 2>>"$LOGS/worker.log" || true)"
+  worker_status="$(printf '%s' "$OBS" | jq -r '.molecule.status // empty')"
+  [[ "$worker_status" == "completed" ]] && break
+  sleep 2
+done
+if [[ "$worker_status" != "completed" ]]; then
+  # The pane is the diagnosis when this fails, and it dies with the
+  # stack — capture it while it still exists.
+  compose exec -T rpp-adapter tmux capture-pane -p -t "$WORKER_SESSION" \
+    >"$LOGS/worker-pane.log" 2>&1 || true
+  fail worker "$t0" "molecule $MOL_ID is '${worker_status:-<unreadable>}' after ${WORKER_TIMEOUT}s, not 'completed' — see logs/worker-pane.log"
+fi
+record worker 0 "$(( $(now_ms) - t0 ))" "the spawned worker drove $MOL_ID to 'completed' through the tenant store"
+
+# ---------------------------------------------------------------------------
+# Step 10 — land. The harvest door on a molecule that is now genuinely
+# harvestable: completed by a real worker, in a galaxy whose operator
+# armed `[harvest_authority] required` at stage time.
+#
+# That is what makes this step reach the EFFECT half. Every pre-effect
+# refusal — `not_authorized`, `not_completed`, `reservation_requires_seal`,
+# `backlog_full` — has been made inapplicable on purpose, so the only
+# thing left to answer is the transaction itself, and it answers
+# `501 land_effect_unavailable`: the sealed `cs done` path has exactly
+# one implementation and it is not callable as a library yet (ADR-176
+# §12, the enumerated U6 follow-up). The refusal is the CONTRACT here,
+# not a defect to route around — a `202` that integrated nothing is the
+# defect issue #51 reported, and a `cs` fallback is what U6 retired.
 #
 # The assertion is the NAME of the refusal and the CLI's exit code, not
 # merely "it failed": a door that refuses for an unnamed reason is the
@@ -458,12 +687,12 @@ set +e
 cs_remote --json molecule land "$MOL_ID" >"$LOGS/land.out" 2>"$LOGS/land.err"
 land_rc=$?
 set -e
-[[ $land_rc -ne 0 ]] || fail land "$t0" "land SUCCEEDED on a molecule with no operator grant"
+[[ $land_rc -ne 0 ]] || fail land "$t0" "land SUCCEEDED — the sealed effect half has no library implementation, so a success here means the door integrated nothing and said otherwise"
 land_label="$(grep -o '"error":"[a-z_]*"' "$LOGS/land.err" | head -1 | cut -d'"' -f4)"
 [[ -n "$land_label" ]] || land_label="$(grep -o '"label":"[a-z_]*"' "$LOGS/land.err" | head -1 | cut -d'"' -f4)"
 [[ "$land_label" == "$EXPECT_LAND_LABEL" ]] \
-  || fail land "$t0" "land refused '${land_label:-<unnamed>}' (exit $land_rc), expected '$EXPECT_LAND_LABEL' — if #54 made the door library-direct, update RPP_E2E_EXPECT_LAND_LABEL"
-record land 0 "$(( $(now_ms) - t0 ))" "named refusal '$land_label', cosmon-remote exit $land_rc"
+  || fail land "$t0" "land refused '${land_label:-<unnamed>}' (exit $land_rc), expected '$EXPECT_LAND_LABEL' — if SealedHarvestEffect grew a library implementation, this is where it announces itself (ADR-176 §12)"
+record land 0 "$(( $(now_ms) - t0 ))" "decision half admitted, effect half refused '$land_label' (ADR-176 §12), cosmon-remote exit $land_rc"
 
 echo
 echo "==> all steps green — $(wc -l <"$NDJSON" | tr -d ' ') recorded"

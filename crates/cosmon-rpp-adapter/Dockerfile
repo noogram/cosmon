@@ -197,3 +197,71 @@ EXPOSE 8443
 # active` while keeping the bind/posture defaults stable.
 ENTRYPOINT ["cs-rpp-adapter"]
 CMD ["--bind", "0.0.0.0:8443", "--config", "/cosmon/.config/cosmon/rpp.toml"]
+
+# ----- e2e test stage — NOT the shipped image -------------------------
+#
+# `runtime` above is what a release ships and what the `image:` in
+# `deploy/docker-compose.yml` builds: no `cs`, no agent CLI. That is the
+# whole claim issue #54 makes, so nothing below may reach it — these
+# stages are selected only by `deploy/docker-compose.e2e.yml`
+# (`target: e2e`), which the container smoke uses and no deployment does.
+#
+# What the smoke needs that the shipped image deliberately lacks:
+#
+#   * a **dummy agent CLI** on `PATH` under the name the adapter spawns
+#     (`claude`). A deployment provisions the real one; the smoke must
+#     not, and must not need network or credentials either.
+#   * a **`cs` binary**, because the worker's job is `cs complete` —
+#     that is what a worker does, and a smoke whose worker cannot run it
+#     proves the spawn and nothing after it. The shipped stage still has
+#     none: the claim is that the *adapter* spawns no `cs`, not that no
+#     `cs` exists anywhere in the world.
+#
+# Both are additions to a `FROM runtime` layer, so the shipped stage is
+# byte-identical whether or not this one is built.
+FROM builder AS e2e-builder
+
+# The worker's `cs`, built from the same workspace and lockfile as the
+# adapter. A host-built binary copied in would be the wrong architecture
+# half the time and unpinned the other half.
+RUN cargo build --release --locked -p cosmon-cli --bin cs
+
+FROM runtime AS e2e
+
+USER root
+
+COPY --from=e2e-builder /work/target/release/cs /usr/local/bin/cs
+COPY --from=builder /work/tests/fakes/fake-claude/claude /usr/local/bin/fake-claude
+
+# The adapter spawns `<adapter-name>` verbatim — `claude` — and the
+# worker envelope runs it under `env -i` with the §3.5 allow-list, which
+# `FAKE_CLAUDE_MODE` is not on and must not be: an allow-list that grows
+# a hole for a test fixture is no longer the thing under test. So the
+# mode is baked into the wrapper instead of exported into the worker.
+RUN printf '%s\n' \
+        '#!/bin/sh' \
+        '# e2e stage only: the dummy agent the rpp-adapter dispatches.' \
+        'FAKE_CLAUDE_MODE=complete-molecule' \
+        'export FAKE_CLAUDE_MODE' \
+        'exec /usr/local/bin/fake-claude "$@"' \
+        >/usr/local/bin/claude \
+ && chmod 0755 /usr/local/bin/cs /usr/local/bin/fake-claude /usr/local/bin/claude
+
+# The tenant galaxy is a bind mount from the host, so its files carry the
+# HOST's uid — not this image's 10000. `git worktree add` refuses a
+# repository it considers to be someone else's ("dubious ownership"), and
+# the library executor's first act is exactly that call. Waiving the
+# check is safe *here* because the only repository this container ever
+# meets is the throwaway galaxy the smoke created for it.
+#
+# This is test-stage provisioning of a real deployment concern: an
+# operator bind-mounting a galaxy owned by another uid needs the same
+# waiver, or matching ownership. Named in the CHANGELOG rather than
+# silently baked into the shipped stage.
+RUN printf '%s\n' \
+        '[safe]' \
+        '\tdirectory = *' \
+        >/cosmon/.gitconfig \
+ && chown cosmon:cosmon /cosmon/.gitconfig
+
+USER cosmon

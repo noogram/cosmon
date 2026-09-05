@@ -51,6 +51,54 @@ this stage.
 
 ### Added
 
+- **The container smoke now dispatches a real worker — the `tackle` leg that
+  proves the shipped image is library-direct** (issue #54 U7). Until U6 the
+  adapter reached `tackle`, `run` and `land` by running the `cs` binary, which
+  its own Dockerfile has never shipped: every in-process suite was green while
+  all three routes failed against the image an operator deploys. U6 cut
+  dispatch over to the library executor; whether that is true *of the image* is
+  not a claim any in-process test can make. `scripts/rpp-remote-e2e.sh` now
+  makes it, in the container: `tackle` (a worker pane really opened, a git
+  worktree really cut, the briefing really pasted in), a wait for the molecule
+  to reach `completed`, then `land`. The falsifier is one knob, not a second
+  script — `RPP_E2E_BUILD_ROOT` points the image build at a checkout that
+  predates the cut-over and `RPP_E2E_EXPECT_TACKLE_LABEL` names the refusal it
+  must return, so the same scenario walks both sides of the change.
+  `RPP_E2E_EXPECT_LAND_LABEL` moves with it: the script now arms
+  `[harvest_authority] required` in its throwaway galaxy, so the door's
+  decision half *admits* the harvest and the pinned refusal is the effect
+  half's `land_effect_unavailable` ([ADR-176
+  §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)) — no
+  longer `subprocess_spawn_failed`, which named a missing binary rather than a
+  missing implementation. Two staging steps became load-bearing and are now
+  explicit: the tenant galaxy is `git init`-ed (the library executor resolves a
+  repo root from it before cutting the worktree) and the staged compose file's
+  build context is rewritten to an absolute path, which also removes the
+  `context: ../../..` that only resolved because the run directory happened to
+  sit two levels under the repo.
+
+  **Nothing of this is in the image you deploy.** The dummy agent and the
+  worker-side `cs` live in a new `e2e` Dockerfile stage — a `FROM runtime`
+  layer, tagged `cs-rpp-adapter:e2e`, selected only by the new
+  `crates/cosmon-rpp-adapter/deploy/docker-compose.e2e.yml` (`target: e2e`,
+  `COSMON_DEFAULT_ADAPTER=claude`). The shipped `runtime` stage is byte-identical
+  whether or not the test stage is built, and still contains no `cs` and no
+  agent CLI. The stage adds three things and each is named for a reason: a
+  `cs` built from the same workspace and lockfile (the worker's job *is*
+  `cs complete`; the claim is that the adapter spawns no `cs`, not that none
+  exists anywhere), `tests/fakes/fake-claude` installed as `claude` behind a
+  wrapper that bakes its mode in (`FAKE_CLAUDE_MODE` is not on the §3.5
+  allow-list and must not be — an allow-list with a hole for a test fixture is
+  no longer the thing under test), and a `safe.directory` waiver for git. That
+  last one is test-stage provisioning of a real deployment concern: a
+  bind-mounted galaxy carries the *host's* uid, and `git worktree add` refuses a
+  repository it considers someone else's — an operator mounting a galaxy owned
+  by another uid needs the same waiver, or matching ownership.
+  `tests/fakes/fake-claude` gained the `complete-molecule` mode this needs: the
+  only mode that succeeds at the job rather than reproducing a way of failing
+  at it, reading the briefing off the pane and running `cs complete` on the id
+  it finds.
+
 - **`scripts/rpp-remote-e2e.sh` — a container-level smoke of the Remote Pilot
   Port, and a nightly CI job that runs it.** The third part of GitHub issue #53.
   Every other test of this surface runs the adapter in-process against test

@@ -366,11 +366,49 @@ If `docker` or `jq` is missing the script exits 2 and says so. It has no skip
 path on purpose: a smoke that prints green without running is how an absent
 prerequisite becomes a passing nightly.
 
-Two legs are deliberately not in it. `tackle` and `land` still shell out to
-`cs`, and the adapter image has shipped no `cs` since it went library-direct —
-so `tackle` is out of scope here and `land` is asserted on the *name* of the
-refusal it does return. Issue #54 owns making those two routes library-direct;
-when it does, this script's pinned label goes red, which is the point.
+### The `tackle` leg, and why it is the interesting one
+
+The scenario ends by dispatching a real worker: `tackle`, then a wait for the
+molecule to reach `completed`, then `land`.
+
+That leg is worth more than the rest put together, because it is the one thing
+no in-process test can tell you. Until issue #54, the adapter reached `tackle`,
+`run` and `land` by running the `cs` binary — which its own Dockerfile has
+never contained. Every unit and route suite was green; all three routes failed
+against the image you actually deploy. The routes now dispatch in-process, and
+this step is the only place that claim is checked where it matters: inside the
+container, with a worker pane really opened, a git worktree really cut, and the
+briefing really pasted into it.
+
+The worker is a dummy, and it is **not** in the image you deploy.
+`deploy/docker-compose.e2e.yml` builds the adapter from the Dockerfile's `e2e`
+target — a `FROM runtime` layer that adds `tests/fakes/fake-claude` under the
+name `claude` plus a worker-side `cs`, so the worker can finish its molecule.
+The shipped stage still carries no `cs` and no agent CLI. A smoke that
+provisioned the tenant-facing image would be proving the claim about an image
+nobody runs.
+
+`land` is still asserted as a *named* refusal, but no longer because a binary
+is missing. The script arms the harvest door in the throwaway galaxy
+(`[harvest_authority] required`), so the door's decision half admits the
+harvest and the refusal comes from the effect half:
+`501 land_effect_unavailable`. The sealed `cs done` transaction has exactly one
+implementation and it is not callable as a library yet — ADR-176 §12. When it
+becomes callable, this pinned label goes red, which is the point.
+
+To watch the pre-issue-54 failure for yourself, point the build at a checkout
+that predates the cut-over and name the refusal you expect:
+
+```sh
+git worktree add /tmp/pre-u6 <commit-before-the-cut-over>
+RPP_E2E_BUILD_ROOT=/tmp/pre-u6 \
+RPP_E2E_E2E_STAGE=0 \
+RPP_E2E_EXPECT_TACKLE_LABEL=tackle_unavailable \
+  bash scripts/rpp-remote-e2e.sh
+```
+
+The run stops after `tackle` — a refused dispatch has no worker to wait for —
+and records the refusal it observed.
 
 The same script runs nightly in CI as the non-blocking `rpp-remote-e2e` job,
 which uploads `e2e.ndjson` as an artifact.
