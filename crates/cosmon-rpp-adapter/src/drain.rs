@@ -199,7 +199,9 @@ where
             // The one reason with a subject: name the refused molecule and
             // step kind in the event body, so the tenant reads the cause
             // instead of a bare token.
-            detail: report.refusal.map(|r| format!("{}: {}", r.molecule, r.reason)),
+            detail: report
+                .refusal
+                .map(|r| format!("{}: {}", r.molecule, r.reason)),
         },
         Err(_) => DrainOutcome::bare(token::ERROR),
     }

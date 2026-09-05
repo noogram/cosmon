@@ -138,8 +138,7 @@ title = "never reached"
 
     // The same loop shape `run_drain` builds: compiled plan → DagPolicy →
     // Runtime over the library executor.
-    let (plan, edges) =
-        compile_plan(&store, std::slice::from_ref(&mol.id)).expect("compile plan");
+    let (plan, edges) = compile_plan(&store, std::slice::from_ref(&mol.id)).expect("compile plan");
     let policy = DagPolicy::new(plan, edges);
     let config = RuntimeConfig {
         poll_interval: Duration::from_millis(50),

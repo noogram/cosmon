@@ -606,7 +606,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if report.reason == ShutdownReason::DispatchRefused {
         if !ctx.json {
             if let Some(refusal) = &report.refusal {
-                eprintln!("✗ dispatch refused: {}: {}", refusal.molecule, refusal.reason);
+                eprintln!(
+                    "✗ dispatch refused: {}: {}",
+                    refusal.molecule, refusal.reason
+                );
             }
         }
         std::process::exit(94);

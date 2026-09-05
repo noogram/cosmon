@@ -536,25 +536,27 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
     }
 
     fn dispatch_with_pin(&self, id: &MoleculeId, pin: &DispatchPin) -> Result<(), RuntimeError> {
-        self.tackle(id, pin).map(|_receipt| ()).map_err(|e| match e {
-            // An unsupported step kind is a PERMANENT condition: the formula
-            // does not change between ticks, so an identical retry reproduces
-            // the refusal exactly. Mapping it to the retryable `Dispatch`
-            // class made `Runtime::run` re-dispatch it every poll interval
-            // until `max_runtime` and report the known-at-first-tick refusal
-            // as a timeout. The non-retryable class stops the loop with a
-            // typed reason instead ([`RuntimeError::DispatchRefused`]).
-            refusal @ TackleExecError::UnsupportedStep { .. } => {
-                RuntimeError::DispatchRefused {
-                    id: id.clone(),
-                    reason: refusal.to_string(),
+        self.tackle(id, pin)
+            .map(|_receipt| ())
+            .map_err(|e| match e {
+                // An unsupported step kind is a PERMANENT condition: the formula
+                // does not change between ticks, so an identical retry reproduces
+                // the refusal exactly. Mapping it to the retryable `Dispatch`
+                // class made `Runtime::run` re-dispatch it every poll interval
+                // until `max_runtime` and report the known-at-first-tick refusal
+                // as a timeout. The non-retryable class stops the loop with a
+                // typed reason instead ([`RuntimeError::DispatchRefused`]).
+                refusal @ TackleExecError::UnsupportedStep { .. } => {
+                    RuntimeError::DispatchRefused {
+                        id: id.clone(),
+                        reason: refusal.to_string(),
+                    }
                 }
-            }
-            other => RuntimeError::Dispatch {
-                id: id.clone(),
-                reason: other.to_string(),
-            },
-        })
+                other => RuntimeError::Dispatch {
+                    id: id.clone(),
+                    reason: other.to_string(),
+                },
+            })
     }
 }
 
