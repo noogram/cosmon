@@ -1028,6 +1028,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "true".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let _ = backend.spawn(&agent, &RuntimeConfig::default());
     }

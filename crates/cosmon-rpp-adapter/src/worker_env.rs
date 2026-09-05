@@ -308,6 +308,10 @@ impl<B: TransportBackend> TransportBackend for EnvelopedBackend<B> {
             role: agent.role,
             command: "/usr/bin/env".to_owned(),
             args,
+            // The decorator rewrites the *command*, never the working
+            // directory: the ADR-079 §5 obligation-3 cwd must reach the inner
+            // backend unchanged.
+            cwd: agent.cwd.clone(),
         };
         self.inner.spawn(&enveloped, config)
     }

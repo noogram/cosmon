@@ -277,6 +277,7 @@ fn spawn_crosses_the_port_behind_env_i() {
         role: AgentRole::Implementation,
         command: "claude".to_owned(),
         args: vec!["--dangerously-skip-permissions".to_owned()],
+        cwd: Some(tmp.path().join("worktree")),
     };
     enveloped
         .spawn(&agent, &RuntimeConfig::default())
@@ -295,6 +296,13 @@ fn spawn_crosses_the_port_behind_env_i() {
         "-i must come first so nothing but the compiled set survives"
     );
     // The original command + args survive at the tail, after the pairs.
+    // The decorator rewrites the command, never the working directory: the
+    // ADR-079 §5 obligation-3 cwd must reach the inner backend intact.
+    assert_eq!(
+        spawned.cwd.as_deref(),
+        Some(tmp.path().join("worktree").as_path()),
+        "the envelope must carry the worker cwd through unchanged"
+    );
     let n = spawned.args.len();
     assert_eq!(spawned.args[n - 2], "claude");
     assert_eq!(spawned.args[n - 1], "--dangerously-skip-permissions");

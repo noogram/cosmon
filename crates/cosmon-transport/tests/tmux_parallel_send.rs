@@ -92,6 +92,7 @@ fn capture_agent(index: usize) -> AgentDefinition {
             "-c".to_owned(),
             format!("awk '{{ print; fflush() }}' > {}", path.display()),
         ],
+        cwd: None,
     }
 }
 

@@ -407,6 +407,12 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                 .unwrap_or(cosmon_core::agent::AgentRole::Implementation),
             command: plan.adapter.as_str().to_owned(),
             args: Vec::new(),
+            // ADR-079 §5 obligation 3: the worker runs *in* the molecule
+            // worktree. Creating the worktree above is not enough — a backend
+            // that spawns a bare session inherits this process's cwd (in the
+            // RPP image, `/cosmon`), and the worker's `cs` walk-up then
+            // resolves to the wrong project.
+            cwd: Some(worktree_path.clone()),
         };
         let spawn_result = self
             .backend

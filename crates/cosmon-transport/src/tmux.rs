@@ -915,7 +915,26 @@ impl TransportBackend for TmuxBackend {
         // Same UTF-8 floor as `spawn_worker` — a pane spawned through the
         // generic port renders the same glyphs to the same human eye.
         let full_cmd = crate::locale::with_utf8_floor_from_env(&full_cmd);
-        self.tmux_cmd(&["new-session", "-d", "-s", &session, &full_cmd])
+
+        // ADR-079 §5 obligation 3: when the caller states a working
+        // directory, the pane starts there. Without `-c`, tmux gives the new
+        // session the *server's* cwd — the dispatching process's, which in
+        // the RPP image is `/cosmon` and not the molecule worktree, so the
+        // worker's `cs` walk-up would resolve to the wrong project.
+        let mut argv: Vec<&str> = vec!["new-session", "-d", "-s", &session];
+        let cwd_arg;
+        if let Some(cwd) = &agent.cwd {
+            cwd_arg = cwd.to_str().ok_or_else(|| {
+                TransportError::SpawnFailed(format!(
+                    "worker cwd is not valid UTF-8: {}",
+                    cwd.display()
+                ))
+            })?;
+            argv.push("-c");
+            argv.push(cwd_arg);
+        }
+        argv.push(&full_cmd);
+        self.tmux_cmd(&argv)
             .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
 
         Ok(SpawnHandle {
@@ -1773,6 +1792,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "sleep".to_owned(),
             args: vec!["300".to_owned()],
+            cwd: None,
         }
     }
 
@@ -1806,6 +1826,52 @@ mod tests {
         cleanup(sock);
     }
 
+    /// ADR-079 §5 obligation 3: a worker spawned through the generic port
+    /// runs in the directory the caller stated, not in the tmux server's.
+    ///
+    /// Written as a filesystem observation rather than an argv assertion —
+    /// argv is the mechanism, the working directory is the claim. Drop the
+    /// `-c` from `spawn` and the pane writes its `pwd` somewhere else, so the
+    /// probe file never appears.
+    #[test]
+    fn spawn_starts_the_worker_in_the_stated_cwd() {
+        let sock = "cosmon-test-spawn-cwd";
+        cleanup(sock);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = TmuxBackend::new(sock);
+        let config = test_config(sock);
+        let agent = AgentDefinition {
+            id: AgentId::new("cwd-agent").unwrap(),
+            role: AgentRole::Implementation,
+            command: "sh".to_owned(),
+            args: vec![
+                "-c".to_owned(),
+                "pwd > pwd-probe.txt && sleep 300".to_owned(),
+            ],
+            cwd: Some(dir.path().to_path_buf()),
+        };
+
+        let worker = backend.spawn(&agent, &config).expect("spawn failed");
+        std::thread::sleep(std::time::Duration::from_secs(1));
+
+        let probe = dir.path().join("pwd-probe.txt");
+        let observed = std::fs::read_to_string(&probe);
+
+        let _ = backend.terminate(&worker.id);
+        cleanup(sock);
+
+        let observed = observed.unwrap_or_else(|e| {
+            panic!("the worker must have run in {}: {e}", dir.path().display())
+        });
+        let observed = std::fs::canonicalize(observed.trim()).expect("observed cwd resolves");
+        let expected = std::fs::canonicalize(dir.path()).expect("stated cwd resolves");
+        assert_eq!(
+            observed, expected,
+            "the pane's cwd must be the one the caller stated"
+        );
+    }
+
     #[test]
     fn test_capture_output() {
         let sock = "cosmon-test-capture";
@@ -1820,6 +1886,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "sh".to_owned(),
             args: vec!["-c".to_owned(), "echo hello-cosmon && sleep 300".to_owned()],
+            cwd: None,
         };
 
         let worker = backend.spawn(&agent, &config).expect("spawn failed");
@@ -1876,6 +1943,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "cat".to_owned(),
             args: vec![],
+            cwd: None,
         };
 
         let worker = backend.spawn(&agent, &config).expect("spawn failed");
@@ -1945,6 +2013,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), script],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).expect("spawn probe TUI");
         // Turn the hostile server option on *for this socket only*, so the test
@@ -1995,6 +2064,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "/bin/sh".to_owned(),
             args: vec!["-c".to_owned(), script],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).expect("spawn probe TUI");
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -2323,6 +2393,7 @@ mod tests {
                 "-c".to_owned(),
                 "printf '\\342\\235\\257 [Pasted text #1 +86 lines]\\n'; sleep 300".to_owned(),
             ],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).expect("spawn failed");
         std::thread::sleep(std::time::Duration::from_millis(500));
@@ -2358,6 +2429,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "sh".to_owned(),
             args: vec![],
+            cwd: None,
         };
 
         let worker = backend.spawn(&agent, &config).expect("spawn failed");
