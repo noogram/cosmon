@@ -138,7 +138,10 @@ impl OidcEndpoints {
     #[must_use]
     pub fn with_redirect_uri(mut self, redirect_uri: impl Into<String>) -> Self {
         self.redirect_uri = redirect_uri.into();
-        self.bind = LoopbackBind::new(self.bind.addr, redirect_port(&self.redirect_uri));
+        self.bind = LoopbackBind {
+            addr: self.bind.addr,
+            port: redirect_port(&self.redirect_uri),
+        };
         self
     }
 
@@ -153,7 +156,10 @@ impl OidcEndpoints {
     /// without the PKCE verifier that never leaves this process.
     #[must_use]
     pub fn with_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
-        self.bind = LoopbackBind::new(addr, self.bind.port);
+        self.bind = LoopbackBind {
+            addr,
+            port: self.bind.port,
+        };
         self
     }
 

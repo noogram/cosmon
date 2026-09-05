@@ -2161,10 +2161,10 @@ mod tests {
     #[test]
     fn non_loopback_notice_names_the_interface_and_keeps_the_redirect_uri() {
         use cosmon_remote::oidc::LoopbackBind;
-        let notice = non_loopback_bind_notice(&LoopbackBind::new(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            7777,
-        ));
+        let notice = non_loopback_bind_notice(&LoopbackBind {
+            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            port: 7777,
+        });
         // The exposure is named, with its bound...
         assert!(notice.contains("0.0.0.0:7777"), "{notice}");
         assert!(notice.contains("not loopback"), "{notice}");

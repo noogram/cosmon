@@ -108,7 +108,13 @@ pub fn redirect_uri(port: u16) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LoopbackBind {
     /// The interface the listener binds. [`LOOPBACK_IP`] unless an operator
-    /// opted out explicitly (`login --bind`).
+    /// opted out explicitly (`login --bind`). A non-loopback value is an
+    /// opt-in: the authorization code will transit that interface. What still
+    /// protects the exchange is the `state` check [`LoopbackServer::accept`]
+    /// performs on every request, plus PKCE — no request that cannot echo the
+    /// per-flow nonce can end the flow. Construct directly with the struct
+    /// literal (`LoopbackBind { addr, port }`) — there is deliberately no
+    /// second constructor alongside [`LoopbackBind::loopback`].
     pub addr: IpAddr,
     /// The port, shared with the advertised `redirect_uri`. `0` asks the OS for
     /// an ephemeral port (tests); read the real one back with
@@ -124,16 +130,6 @@ impl LoopbackBind {
             addr: IpAddr::V4(LOOPBACK_IP),
             port,
         }
-    }
-
-    /// Bind an explicit interface on `port`. A non-loopback `addr` is an
-    /// opt-in: the authorization code will transit that interface. What still
-    /// protects the exchange is the `state` check [`LoopbackServer::accept`]
-    /// performs on every request, plus PKCE — no request that cannot echo the
-    /// per-flow nonce can end the flow.
-    #[must_use]
-    pub const fn new(addr: IpAddr, port: u16) -> Self {
-        Self { addr, port }
     }
 
     /// Whether this bind stays on a loopback interface (the secure default).
@@ -332,9 +328,11 @@ impl LoopbackServer {
     /// let the OS pick an ephemeral port (used by tests); read it back with
     /// [`LoopbackServer::port`].
     ///
-    /// The bound address does **not** change what [`LoopbackServer::redirect_uri`]
+    /// The bound address does **not** change what [`OidcEndpoints::redirect_uri`]
     /// advertises: that stays the registered `127.0.0.1` literal whatever
     /// interface is listening.
+    ///
+    /// [`OidcEndpoints::redirect_uri`]: super::flow::OidcEndpoints::redirect_uri
     pub async fn bind(bind: LoopbackBind) -> Result<Self> {
         let addr = bind.socket_addr();
         let listener = TcpListener::bind(addr)
@@ -354,11 +352,6 @@ impl LoopbackServer {
     /// The port actually bound (meaningful after `bind(0)`).
     pub fn port(&self) -> u16 {
         self.port
-    }
-
-    /// The exact `redirect_uri` this server listens on.
-    pub fn redirect_uri(&self) -> String {
-        redirect_uri(self.port)
     }
 
     /// Accept connections **in a loop** until one is a `GET /callback` whose
@@ -712,19 +705,33 @@ mod tests {
         // The container case (issue #52): the catcher listens on 0.0.0.0 so a
         // redirect forwarded into the container lands, while the advertised
         // redirect_uri stays the registered 127.0.0.1 literal.
-        let bind = LoopbackBind::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0);
+        let bind = LoopbackBind {
+            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 0,
+        };
         let server = LoopbackServer::bind(bind).await.unwrap();
         let port = server.port();
-        // The advertised URI does not follow the listener off loopback.
+        // The advertised URI does not follow the listener off loopback. The
+        // advertised URI is owned by `OidcEndpoints`; here we only check that
+        // the free-standing `redirect_uri` builder — the one it delegates to —
+        // still names the loopback literal for this port.
         assert_eq!(
-            server.redirect_uri(),
+            redirect_uri(port),
             format!("http://127.0.0.1:{port}/callback")
         );
 
         // Dial a *non-loopback* local address if the host has one; otherwise
         // reach the same wildcard listener through 127.0.0.1.
-        let dial: IpAddr =
-            routable_local_ipv4().map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V4);
+        let dial: IpAddr = match routable_local_ipv4() {
+            Some(v4) => IpAddr::V4(v4),
+            None => {
+                eprintln!(
+                    "SKIP: no routable local IPv4 interface — dialling the wildcard \
+                     listener through 127.0.0.1 instead of a genuinely off-loopback address"
+                );
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            }
+        };
         let state = Nonce::from_string("real-state");
         let client = tokio::spawn(async move {
             let mut s = TcpStream::connect((dial, port)).await.unwrap();
@@ -751,6 +758,10 @@ mod tests {
         // interface cannot reach a 127.0.0.1-bound catcher through it. Skipped
         // (vacuously passing) on a box with no routable interface to try.
         let Some(routable) = routable_local_ipv4() else {
+            eprintln!(
+                "SKIP: no routable local IPv4 interface — cannot exercise off-loopback \
+                 unreachability, vacuously passing"
+            );
             return;
         };
         let server = LoopbackServer::bind(LoopbackBind::loopback(0))
@@ -768,13 +779,12 @@ mod tests {
     #[test]
     fn bind_reports_whether_it_stays_on_loopback() {
         assert!(LoopbackBind::loopback(7777).is_loopback());
-        assert!(!LoopbackBind::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7777).is_loopback());
-        assert_eq!(
-            LoopbackBind::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7777)
-                .socket_addr()
-                .to_string(),
-            "0.0.0.0:7777"
-        );
+        let wildcard = LoopbackBind {
+            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+            port: 7777,
+        };
+        assert!(!wildcard.is_loopback());
+        assert_eq!(wildcard.socket_addr().to_string(), "0.0.0.0:7777");
     }
 
     #[tokio::test]
