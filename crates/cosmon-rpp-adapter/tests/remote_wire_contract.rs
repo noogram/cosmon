@@ -133,7 +133,10 @@ struct Deployment {
     /// `http://127.0.0.1:<port>` — what a tenant would put in `host`.
     base: String,
     oidc: OidcMock,
-    tenants: TenantWorkspaces,
+    /// Held, never read: dropping the workspaces would delete the tenant
+    /// tree out from under the still-running server, and the resulting 404
+    /// would read as a route bug.
+    _tenants: TenantWorkspaces,
     _security_dir: tempfile::TempDir,
 }
 
@@ -161,7 +164,7 @@ impl Deployment {
         Self {
             base: format!("http://{addr}"),
             oidc,
-            tenants,
+            _tenants: tenants,
             _security_dir: security_dir,
         }
     }
@@ -199,19 +202,6 @@ impl Deployment {
             jti: Some(jti),
         });
         Client::new(&self.profile(), Some(jwt)).expect("profile is ready")
-    }
-
-    /// `<tenant>/.cosmon/state/fleets/default/molecules/<id>` — where the
-    /// fake door reads its pinned exit code from.
-    fn molecule_dir(&self, id: &str) -> std::path::PathBuf {
-        self.tenants
-            .tenant(NOYAU)
-            .expect("tenant a")
-            .state_dir
-            .join("fleets")
-            .join("default")
-            .join("molecules")
-            .join(id)
     }
 }
 
