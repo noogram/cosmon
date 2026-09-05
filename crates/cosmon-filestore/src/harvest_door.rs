@@ -573,7 +573,10 @@ mod tests {
         let outcome = land(&w.store, &armed(), &id, &mut probe);
         std::env::remove_var("COSMON_TRUNK_LOCK_NONBLOCKING");
         assert!(
-            !matches!(outcome, Err(LandError::Fault(CosmonError::LockFailed { .. }))),
+            !matches!(
+                outcome,
+                Err(LandError::Fault(CosmonError::LockFailed { .. }))
+            ),
             "the panicked effect's guard was not released: {outcome:?}",
         );
     }
