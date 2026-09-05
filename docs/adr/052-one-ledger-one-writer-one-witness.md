@@ -721,6 +721,79 @@ The consequence worth carrying: **do not cite a green
 terminal state.** On a team residence it is evidence about the subject
 line and nothing more.
 
+#### D5-quater. Amendment (2026-09-05) — the external-issue integration branch
+
+Since 2026-09-02, work answering an external GitHub issue no longer
+lands on main straight out of `cs done`. It lands on a local
+integration branch `feat/issue-<N>` — molecules tackle with
+`--base feat/issue-<N>`, and `cs done` merges each into that
+branch — and reaches main only through a pull request, opened when the
+branch is ready. That interposes a merge shape the gate had never seen:
+GitHub writes the PR's merge-commit subject itself,
+
+    Merge pull request #<N> from <owner>/feat/issue-<N>
+
+and the equivalent landing without GitHub's wrapper writes
+
+    Merge branch 'feat/issue-<N>'
+
+Neither matched any pattern in `PATTERNS`, so every such merge would
+have FAILed the gate — not because it carries ungated material, but
+because the gate had no notion of a branch that is itself made of
+gated merges. Two more shapes follow from the same practice: a
+base-sync run inside the integration branch (`Merge branch 'main' into
+feat/issue-<N>`, unrecognised because `BASE_SYNC_RE` only named
+`feat/<mol_id>`), and a stacked integration branch, where issue N's
+work depends on issue M's before M's own PR has merged
+(`Merge branch 'feat/issue-<M>' into feat/issue-<N>`).
+
+**The property to preserve.** §I9 says no code reaches main except
+through a molecule's `cs done`. An integration branch does not weaken
+that if, and only if, every merge it ever carried was itself gated —
+by an existing molecule-merge pattern, by the base-sync structural
+check, or (recursively) by being another integration-branch landing
+built the same way. So the PR-merge and local-integration-merge shapes
+are accepted **iff every merge commit reachable on the landing
+commit's second parent since the merge-base with its first parent
+satisfies the gate's existing rules**, walked recursively so a stacked
+branch is checked two (or more) levels deep. A single non-clean inner
+merge fails the whole landing, and the failure names that inner
+commit — never a widened pattern, never a shrug.
+
+This is the same discipline D5-bis already established for the plain
+base-sync: **do not trust the subject alone.** A subject is written by
+whoever runs the merge; what makes a base-sync safe is that its
+incoming side sits on main's own first-parent chain, verified
+structurally. Here the equivalent structural fact is that the
+integration branch's own merge history, walked commit by commit, is
+made of nothing but already-gated shapes. The PR number and the
+branch's issue number are required to agree (`#<N>` from
+`feat/issue-<N>`) so the one thing the match depends on — which branch
+the second-parent walk inspects — cannot be forged by a mismatched PR
+number; a mismatch falls through to the ordinary "subject does not
+match" refusal, same as any other unrecognised shape.
+
+The ledger check does not apply to the landing commit itself: there is
+no single mol_id to look up for "the integration branch as a whole",
+and demanding one would be incoherent — the branch's inner molecule
+merges are each already ledger-checked when the gate scans them
+directly (or, being base-sync/nested-integration shapes, never carried
+one in the first place, per D5-bis). The recursive walk checks subject
+shape only, which is exactly what "the existing patterns" means here.
+
+`scripts/check-provenance.sh`'s header comment and `BASE_SYNC_RE`/
+`BASE_SYNC_ISSUE_RE`/`PR_MERGE_RE`/`LOCAL_INTEGRATION_MERGE_RE`/
+`STACKED_INTEGRATION_RE` name these five shapes precisely; the
+recursion lives in `is_clean_merge` / `verify_integration_clean`.
+Covered by `tests/harness/provenance-integration-branch-test.sh`: a
+clean integration branch landed both ways (PR-wrapped and local), the
+same branch with one non-clean inner merge (rejected, naming it), a
+two-level stacked branch, a base-sync targeting `feat/issue-<N>`, and
+a PR/issue number mismatch (rejected as an ordinary bad subject, not
+silently accepted as this shape) — plus a re-run of the three prior
+provenance harnesses, so this file also certifies that the shapes it
+did not touch still PASS/FAIL exactly as before.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,

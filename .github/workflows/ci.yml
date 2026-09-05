@@ -707,6 +707,8 @@ jobs:
         run: bash tests/harness/provenance-base-sync-test.sh
       - name: Self-test ledger coverage vs residence (ADR-055)
         run: bash tests/harness/provenance-residence-test.sh
+      - name: Self-test the external-issue integration-branch shapes (ADR-052 §D7)
+        run: bash tests/harness/provenance-integration-branch-test.sh
 
   license-partition:
     # Living per-crate license table gate. The script in
