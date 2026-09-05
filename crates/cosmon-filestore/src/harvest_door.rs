@@ -564,7 +564,10 @@ mod tests {
         assert!(crashed.is_err(), "the probe effect must actually panic");
 
         // A held lock would block this second call forever; the nonblocking
-        // probe turns "forever" into a readable failure.
+        // probe turns "forever" into a readable failure. The guard
+        // serialises the process-global toggle against the blocking
+        // trunk-lock tests (see `crate::trunk_lock_env_serial`).
+        let _env = crate::trunk_lock_env_serial();
         std::env::set_var("COSMON_TRUNK_LOCK_NONBLOCKING", "1");
         let mut probe = OverlapProbe {
             inside: Arc::new(AtomicUsize::new(0)),
@@ -609,6 +612,9 @@ mod tests {
         let id = mol("task-20260904-bind");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
+        // Serialise the process-global toggle the effect flips (see
+        // `crate::trunk_lock_env_serial`).
+        let _env = crate::trunk_lock_env_serial();
         let mut effect = SelfBinding { store: &w.store };
         let out = land(&w.store, &armed(), &id, &mut effect);
         match out {
