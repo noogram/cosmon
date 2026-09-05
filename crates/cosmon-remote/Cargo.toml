@@ -124,6 +124,10 @@ cosmon-surface-canon = { path = "../cosmon-surface-canon" }
 
 [dev-dependencies]
 tempfile.workspace = true
+# Compute the same `<config_dir>/cosmon-remote/` path `ProfileStore::default_location`
+# resolves, so `login_bind.rs` can plant a profile under a scratch `$HOME` before
+# spawning the real binary.
+dirs.workspace = true
 # Property-based tests for the credential-store invariants (delib-20260710-33b7 C9):
 # roundtrip, audience-isolation keying, expiry monotone, storage-id injectivity.
 proptest.workspace = true
