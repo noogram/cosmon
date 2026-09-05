@@ -68,14 +68,16 @@ use cosmon_state::StateStore;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
+use cosmon_runtime::tackle_exec::TackleExecError;
+use cosmon_runtime::{DispatchPin, LibraryExecutor};
+
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
+use crate::drain;
 use crate::error::{ApiError, RppRejectReason};
 use crate::events_bus::MoleculeEvent;
 use crate::jwt::{JwtVerifier, ValidatedJwt};
-use crate::subprocess::{
-    land_molecule_args, parse_cs_json, run_molecule_args, tackle_molecule_args, SystemInvoker,
-};
+use crate::worker_env::{EnvelopedBackend, SharedBackend, WorkerEnvelope};
 use crate::AppState;
 
 // Scope catalog lives in `crate::auth::scopes` (since v1.0.0-rc,
@@ -1310,55 +1312,52 @@ pub async fn stuck_molecule(
 }
 
 // ---------------------------------------------------------------------------
-// T9 remote-tackle V2 — tackle (`POST /v1/molecules/:id/tackle`)
+// Tackle (`POST /v1/molecules/:id/tackle`) — library-direct (issue #54 U6)
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/molecules/:id/tackle` — V1 dispatch cut (T9 remote-tackle V2).
+/// `POST /v1/molecules/:id/tackle` — the dispatch cut, library-direct.
 ///
-/// Unlike the other §8p verbs, tackle is **not** library-direct: it
-/// shells out to `cs tackle <id>` inside the per-tenant container,
-/// which in turn launches Claude Code via tmux. The original §3.5
-/// subprocess envelope is reinstated for this single verb (it was
-/// dormant since T-RPP-LIB-DIRECT; the [`SystemInvoker`] machinery
-/// is untouched and we reuse it here).
+/// Since issue #54 U6 the route performs the dispatch **in-process**:
+/// [`cosmon_runtime::LibraryExecutor`] runs the `plan → execute`
+/// sequence (`cosmon_core::tackle_plan` decision half, worktree +
+/// ledger-before-spawn effect half) and spawns the worker through the
+/// adapter's [`crate::worker_env::EnvelopedBackend`] — the transport
+/// port clamped with the §3.5 env allow-list. No `cs` binary is
+/// involved; the ADR-080 §3.5 clause (e) subprocess envelope is
+/// retired (see the ADR's U6 amendment).
 ///
 /// Pipeline:
 ///
 /// 1. Extract + validate JWT.
-/// 2. Require `cosmon:molecule:write` scope; emit
+/// 2. Require `cosmon:molecule:write` AND `cosmon:worker:spawn`; emit
 ///    `AuthzDecisionEvaluated{verb=tackle, decision=Allow|Absent}`.
 /// 3. Admission boundary (`http_request_to_spark`).
-/// 4. Subprocess invocation: `cs --json tackle <id> --force` against the
-///    per-tenant `cwd` (`<galaxies_root>/<noyau>`).
-/// 5. Parse the `cs --json tackle` stdout into a wire-stable
-///    `{ molecule_id, worker_session, spawned_at }` triple.
+/// 4. Library-direct existence check + live-worker idempotence check +
+///    per-noyau ceiling.
+/// 5. In-process dispatch via the library executor; the worker session
+///    metadata comes back as a typed [`cosmon_runtime::TackleReceipt`].
 ///
 /// Errors mapped to:
 /// - **404 `not_found`** — molecule id malformed or absent from store
 ///   (turing §8.2.3 — no existence oracle).
-/// - **409 `already_active`** — `cs tackle` refused because a worker
-///   session is already attached (idempotency check inside the CLI).
-/// - **503 `subprocess_spawn_failed`** — the `cs` binary could not be
-///   spawned at the OS level (binary missing or not executable in the
-///   container).
-/// - **503 `adapter_backend_unreachable`** — the local adapter backend
-///   (e.g. Ollama) is not reachable or cannot serve the resolved model.
-///   Detected by `cs tackle`'s preflight; the molecule is untouched.
-/// - **503 `worker_credential_missing`** — `cs tackle` refused because
-///   the Claude Code credential needed to start an interactive worker is
-///   absent (no OAuth token, no keychain item, no credentials file).
-/// - **503 `tackle_unavailable`** — generic 503 for any other non-zero
-///   `cs tackle` exit whose stderr does not match a more specific code.
-///   Persists as the stable fallback; it is not deprecated.
-/// - **504 `subprocess_timeout`** — `cs tackle` exceeded the per-call
-///   subprocess deadline (default 30s; tackle should return in <5s
-///   after the tmux session is detached).
+/// - **409 `already_active`** — the molecule already carries a live
+///   worker process record (idempotence guard, checked in-process).
+/// - **409 `not_tackleable`** — the molecule is in a terminal state.
+/// - **429 `tackle_ceiling`** — the per-noyau live-worker ceiling.
+/// - **501 `tackle_unsupported_step`** — the molecule's current formula
+///   step is an execution kind the library executor does not cover yet
+///   (gate / native / query / llm). The refusal is TYPED and names the
+///   step kind in the body — never a silent fallback to a subprocess.
+/// - **503 `worker_spawn_failed`** — the transport backend could not
+///   open the worker session (the ledger has been rolled back).
+/// - **503 `tackle_unavailable`** — stable fallback for any other
+///   dispatch failure (store fault, git fault, unknown adapter).
 #[allow(clippy::too_many_lines)] // Authentication, admission, and spawn stay auditable in order.
 pub async fn tackle_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(molecule_id_str): AxumPath<String>,
-) -> Result<Json<Value>, ApiError> {
+) -> Result<Response, ApiError> {
     // 1. Authorization header → JWT validation.
     let token = extract_bearer(&headers).map_err(|e| state.reject(e))?;
     let jwt = JwtVerifier::validate(&state.jwks.load(), token, state.posture)
@@ -1411,11 +1410,29 @@ pub async fn tackle_molecule(
         }
     })?;
 
-    // Resolve the molecule through the same store path as GET before spawning
-    // `cs`. A subprocess error may mention "not found" for unrelated reasons
-    // (for example a Git worktree collision); once this lookup succeeds that
-    // text cannot be used as the API's molecule-existence oracle.
-    let _molecule = run_observe(&state, &spark, &jwt, &molecule_id)?;
+    // Resolve the molecule through the same store path as GET before
+    // dispatching. A dispatch error may mention "not found" for unrelated
+    // reasons (for example a Git worktree collision); once this lookup
+    // succeeds that text cannot be used as the API's molecule-existence
+    // oracle.
+    let molecule = run_observe(&state, &spark, &jwt, &molecule_id)?;
+
+    // Idempotence guard, in-process: a molecule already carrying a LIVE
+    // worker process record is not re-dispatched. This is the same
+    // witness the ceiling below counts (active record + external PID
+    // identity), so the two guards cannot disagree about liveness.
+    if molecule
+        .data
+        .process
+        .as_ref()
+        .is_some_and(|p| p.is_active() && recorded_process_is_live(p.pid, p.pid_start_time))
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            label: "already_active",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
 
     let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
     if !tenant_root.exists() {
@@ -1457,47 +1474,86 @@ pub async fn tackle_molecule(
         });
     }
 
-    // 5. Subprocess invocation. The §3.5 envelope (`COSMON_API_REQUEST=1`,
-    //    request-id correlation, resolved nucleon, per-tenant cwd,
-    //    hard timeout) is set inside `SystemInvoker::invoke_owned`.
-    //    `with_artifact_root` (e653 spec, task-20260522-ef4f)
-    //    materialises `<artifact_root>/<noyau>/<molecule_id>/` and
-    //    exports it as `COSMON_ARTIFACT_DIR` so the worker writes its
-    //    outputs at the canonical path the GET `/artifacts` route
-    //    later reads from.
-    let invoker = SystemInvoker::new(
-        state.cs_path.clone(),
-        state.galaxies_root.clone(),
-        state.subprocess_timeout,
-    )
-    .with_anthropic_key(state.anthropic_api_key.clone())
-    .with_artifact_root(Some(state.artifact_root.clone()));
-    let args = tackle_molecule_args(&molecule_id_str);
-    let invocation = invoker.invoke_owned(&spark, &args).await.map_err(|e| {
-        trace_tackle_subprocess_rejection(&spark, &molecule_id_str, &e);
-        tackle_subprocess_error_to_api(&e, &spark.request_id)
+    // 5. In-process dispatch. The worker envelope (allow-list env +
+    //    tenant state-dir pin + artifact dir + key/model, ADR-080 §3.5
+    //    as amended by U6) is clamped onto the spawn by
+    //    `EnvelopedBackend`; the executor performs plan → worktree →
+    //    ledger-before-spawn → spawn, with rollback symmetry on
+    //    failure. `TackledBy::Human`: the dispatch answers a tenant's
+    //    direct gesture, so the anti-preemption lease is sticky exactly
+    //    as a CLI `cs tackle` would be.
+    let artifact_dir = state
+        .artifact_root
+        .join(spark.noyau.as_str())
+        .join(&molecule_id_str);
+    // Best-effort mkdir (e653 spec): a failed mkdir does not abort the
+    // dispatch — the worker fails later with a clearer error if the dir
+    // truly cannot exist.
+    let _ = std::fs::create_dir_all(&artifact_dir);
+    let envelope = WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: Some(artifact_dir),
+        anthropic_api_key: state.anthropic_api_key.clone(),
+        claude_model: state.claude_model.clone(),
+    };
+    let backend = EnvelopedBackend::new(state.worker_backend.clone(), &envelope);
+    let executor = LibraryExecutor::new(&tenant_root, backend)
+        .with_tackled_by(cosmon_core::tackle::TackledBy::Human);
+    let dispatch_id = molecule_id.clone();
+    // `Box` the typed error across the join so clippy's large-Err bound
+    // holds; unboxed again at the match below.
+    let dispatched = tokio::task::spawn_blocking(move || {
+        executor
+            .tackle(&dispatch_id, &DispatchPin::default())
+            .map_err(Box::new)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "tackle_unavailable",
+        request_id: Some(spark.request_id.clone()),
     })?;
+    let receipt = match dispatched.map_err(|boxed| *boxed) {
+        Ok(receipt) => receipt,
+        // The typed parity refusal names what it refuses: the step kind
+        // (`gate` / `native` / `query` / `llm`) and the step id are
+        // first-party static/formula tokens, safe on the wire — and a
+        // caller can route the molecule through an operator-side
+        // `cs tackle` from the label alone.
+        Err(TackleExecError::UnsupportedStep { step_id, kind, .. }) => {
+            tracing::warn!(
+                request_id = %spark.request_id,
+                molecule_id = %molecule_id_str,
+                step_id = %step_id,
+                step_kind = kind,
+                "tackle refused: step kind unsupported by the library executor"
+            );
+            return Ok((
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({
+                    "error": "tackle_unsupported_step",
+                    "step_kind": kind,
+                    "step_id": step_id,
+                    "request_id": spark.request_id,
+                })),
+            )
+                .into_response());
+        }
+        Err(e) => {
+            trace_tackle_dispatch_rejection(&spark, &molecule_id_str, &e);
+            return Err(tackle_exec_error_to_response(&e, &spark.request_id));
+        }
+    };
 
-    // 6. Parse the `cs --json tackle` stdout. We accept either the
-    //    canonical multi-line JSON object or NDJSON (last non-empty
-    //    line wins) — the same shape acceptance applied by observe and
-    //    nucleate.
-    let parsed = parse_cs_json(&invocation.stdout).map_err(|e| {
-        tracing::debug!(
-            request_id = %spark.request_id,
-            molecule_id = %molecule_id_str,
-            reason = %e,
-            "tackle subprocess returned unparsable output"
-        );
-        tackle_subprocess_error_to_api(&e, &spark.request_id)
-    })?;
-
-    let body = build_tackle_response(&molecule_id_str, &parsed);
+    let body = json!({
+        "molecule_id": molecule_id_str,
+        "worker_session": receipt.session_name,
+        "spawned_at": chrono::Utc::now().to_rfc3339(),
+    });
 
     // tackle drives the molecule into `Running`. The previous status
-    // is "pending" by §8j construction (the cs CLI rejects tackle on
-    // already-running molecules with `already running`, mapped to 409
-    // before we get here).
+    // is "pending" by §8j construction (a molecule with a live worker
+    // was refused 409 above).
     state.events.publish(MoleculeEvent::state_changed(
         spark.noyau.as_str(),
         &molecule_id_str,
@@ -1508,120 +1564,46 @@ pub async fn tackle_molecule(
     Ok(Json(json!({
         "request_id": spark.request_id,
         "tackle": body,
-    })))
+    }))
+    .into_response())
 }
 
-/// Project the `cs --json tackle` stdout into the wire-stable
-/// `{ molecule_id, worker_session, spawned_at }` triple.
+/// Map a library-dispatch failure onto the wire.
 ///
-/// `cs --json tackle` today emits the worker session under the
-/// `tmux_session` key (see `crates/cosmon-cli/src/cmd/tackle.rs`); the
-/// projection reads that key first and keeps `session_name` / `session`
-/// / `worker_id` as forward/backward-compat fallbacks for older or
-/// future CLI shapes. `spawned_at` is read from the CLI output when
-/// present, otherwise derived from the current wall clock. The
-/// conservative projection keeps the wire body shallow rather than
-/// forwarding every CLI-internal field (mirrors the
-/// `ObserveJson::from_view` discipline on the read path).
-fn build_tackle_response(molecule_id: &str, parsed: &Value) -> Value {
-    let worker_session = parsed
-        .get("tmux_session")
-        .or_else(|| parsed.get("session_name"))
-        .or_else(|| parsed.get("session"))
-        .or_else(|| parsed.get("worker_id"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    let spawned_at = parsed
-        .get("spawned_at")
-        .or_else(|| parsed.get("tackled_at"))
-        .cloned()
-        .unwrap_or_else(|| {
-            let now = chrono::Utc::now().to_rfc3339();
-            Value::String(now)
-        });
-    json!({
-        "molecule_id": molecule_id,
-        "worker_session": worker_session,
-        "spawned_at": spawned_at,
-    })
-}
-
-/// Map a subprocess-side rejection into the wire-stable
-/// [`ApiError`] for the tackle route.
+/// Every outcome is a stable label; no store/git/transport detail
+/// crosses the HTTP boundary (turing G9) — the diagnosis lives in the
+/// server log ([`trace_tackle_dispatch_rejection`]).
 ///
-/// # Taxonomy
-///
-/// Stderr substring detection is used for [`RppRejectReason::SubprocessExitNonZero`]
-/// because the subprocess exit code alone cannot distinguish failure modes
-/// (both a missing credential and an unreachable backend exit 1). The substrings
-/// are stable fragments of messages emitted by `cs tackle` itself (not the
-/// worker process), so they are first-party.
-///
-/// - `"already running"` / `"already tackled"` / `"worker already"` →
-///   **409 `already_active`** — idempotency guard inside the CLI.
-/// - `"refusing to spawn a claude worker"` →
-///   **503 `worker_credential_missing`** — emitted by `check_tui_credentials`
-///   when no usable Claude Code credential is found.
-/// - `"refusing to dispatch"` →
-///   **503 `adapter_backend_unreachable`** — emitted by the local-adapter
-///   preflight when the backend is unreachable or cannot serve the model.
-/// - Everything else → **503 `tackle_unavailable`** — generic fallback;
-///   persists as the stable fallback, not deprecated.
-///
-/// [`RppRejectReason::SubprocessSpawnFailed`] maps to
-/// **503 `subprocess_spawn_failed`** (OS-level spawn failure, e.g. binary
-/// missing) rather than the generic `tackle_unavailable` — the label comes
-/// from the existing [`RppRejectReason::label`] taxonomy.
-///
-/// No stderr content crosses the wire — the labels are the only error
-/// identifiers on the response body (turing G9).
-fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) -> ApiError {
-    match reason {
-        RppRejectReason::SubprocessTimeout(_) => ApiError {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            label: "subprocess_timeout",
+/// The one refusal that carries structure is
+/// [`TackleExecError::UnsupportedStep`]: the current formula step is an
+/// execution kind the library executor does not cover yet (issue #54
+/// U6, option (b) — the enumerated parity gap of the ADR-080
+/// amendment). It answers **501 `tackle_unsupported_step`** with the
+/// step kind NAMED in the body — a typed refusal, never a silent
+/// fallback to a subprocess. The kind is a static token (`gate` /
+/// `native` / `query` / `llm`), first-party by construction.
+fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> ApiError {
+    match err {
+        TackleExecError::NotTackleable { .. } => ApiError {
+            status: StatusCode::CONFLICT,
+            label: "not_tackleable",
             request_id: Some(request_id.to_owned()),
         },
-        RppRejectReason::SubprocessSpawnFailed(_) => ApiError {
+        TackleExecError::UnsupportedStep { .. } => ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "tackle_unsupported_step",
+            request_id: Some(request_id.to_owned()),
+        },
+        TackleExecError::Spawn { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "subprocess_spawn_failed",
+            label: "worker_spawn_failed",
             request_id: Some(request_id.to_owned()),
         },
-        RppRejectReason::SubprocessExitNonZero { stderr_excerpt, .. } => {
-            // The cs CLI signals distinct failure modes through stderr.
-            // Substring match is intentionally tolerant — a tighter
-            // contract is a §10 amendment.
-            let lower = stderr_excerpt.to_ascii_lowercase();
-            if lower.contains("already running")
-                || lower.contains("already tackled")
-                || lower.contains("worker already")
-            {
-                ApiError {
-                    status: StatusCode::CONFLICT,
-                    label: "already_active",
-                    request_id: Some(request_id.to_owned()),
-                }
-            } else if lower.contains("refusing to spawn a claude worker") {
-                ApiError {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    label: "worker_credential_missing",
-                    request_id: Some(request_id.to_owned()),
-                }
-            } else if lower.contains("refusing to dispatch") {
-                ApiError {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    label: "adapter_backend_unreachable",
-                    request_id: Some(request_id.to_owned()),
-                }
-            } else {
-                ApiError {
-                    status: StatusCode::SERVICE_UNAVAILABLE,
-                    label: "tackle_unavailable",
-                    request_id: Some(request_id.to_owned()),
-                }
-            }
-        }
-        _ => ApiError {
+        TackleExecError::State(_)
+        | TackleExecError::Id(_)
+        | TackleExecError::Ledger(_)
+        | TackleExecError::UnknownAdapter(_)
+        | TackleExecError::Git(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tackle_unavailable",
             request_id: Some(request_id.to_owned()),
@@ -1629,37 +1611,24 @@ fn tackle_subprocess_error_to_api(reason: &RppRejectReason, request_id: &str) ->
     }
 }
 
-/// Record the child-process evidence needed to diagnose a tackle rejection
+/// Record the dispatch evidence needed to diagnose a tackle rejection
 /// without leaking it into the HTTP response.
 ///
-/// Emitted at **`warn`**, not `debug`. A tackle that fails is an operational
-/// event, not trace noise: `tackle_unavailable` is a catch-all — every
-/// non-zero `cs` exit that is not "already active" lands there — so the
-/// response alone cannot tell an unreachable adapter backend from a missing
-/// worker credential from a spawn failure. The `stderr_excerpt` captured here
-/// is the only thing that can, and at `debug` it is unreachable in practice:
-/// a production deployment runs at `info`, where a failed tackle leaves
-/// nothing behind but the `tower_http` `on_failure` line.
-///
-/// This is the server-side half of the diagnosis. The excerpt still does not
-/// cross the HTTP boundary — the caller gets a label and a `request_id`, and
-/// whoever holds the logs can correlate the two.
-fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &RppRejectReason) {
-    if let RppRejectReason::SubprocessExitNonZero { stderr_excerpt, .. } = reason {
-        tracing::warn!(
-            request_id = %spark.request_id,
-            molecule_id,
-            stderr_excerpt,
-            "tackle subprocess rejected"
-        );
-    } else {
-        tracing::warn!(
-            request_id = %spark.request_id,
-            molecule_id,
-            reason = %reason,
-            "tackle subprocess rejected"
-        );
-    }
+/// Emitted at **`warn`**, not `debug`. A tackle that fails is an
+/// operational event, not trace noise: `tackle_unavailable` is a
+/// catch-all, so the response alone cannot tell a git fault from a
+/// store fault from a transport failure. The typed error rendered here
+/// is the only thing that can, and at `debug` it is unreachable in
+/// practice (production runs at `info`). The detail still does not
+/// cross the HTTP boundary — the caller gets a label and a
+/// `request_id`, and whoever holds the logs can correlate the two.
+fn trace_tackle_dispatch_rejection(spark: &Spark, molecule_id: &str, err: &TackleExecError) {
+    tracing::warn!(
+        request_id = %spark.request_id,
+        molecule_id,
+        error = %err,
+        "tackle dispatch rejected"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1667,7 +1636,8 @@ fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &
 // ---------------------------------------------------------------------------
 
 /// `POST /v1/molecules/:id/run` — start the resident drain loop on the
-/// DAG rooted at `:id` (B2 bounded drain, ADR-124).
+/// DAG rooted at `:id` (B2 bounded drain, ADR-124; in-process since
+/// issue #54 U6).
 ///
 /// The client DEMANDS, the server DECIDES: the request
 /// carries only the root molecule id; everything that governs the
@@ -1675,10 +1645,12 @@ fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &
 /// server-side. The B1/B2/B3 bounds come from the tenant's sealed
 /// binding ([`crate::nucleon_map::DrainBounds`], operator-written,
 /// readable via `GET /v1/quota`, never writable through any §8p
-/// route) and are turned into `cs run` flags by
-/// [`run_molecule_args`]. The loop runs INSIDE the tenant container,
-/// co-located with the `StateStore` and `trunk.lock` (design (a) —
-/// an advisory flock only binds holders on the same filesystem).
+/// route) and land on the in-process loop as
+/// [`cosmon_runtime::RunBounds`] plus the pre-loop depth check (see
+/// [`crate::drain::run_drain`]). The loop runs INSIDE the tenant
+/// container, co-located with the `StateStore` and `trunk.lock`
+/// (design (a) — an advisory flock only binds holders on the same
+/// filesystem).
 ///
 /// The route returns **202 Accepted** as soon as the loop is spawned:
 /// a drain dispatches real Claude workers and is hours-shaped, so the
@@ -1686,9 +1658,11 @@ fn trace_tackle_subprocess_rejection(spark: &Spark, molecule_id: &str, reason: &
 /// spawn publishes `drain.started` on the events bus; the detached
 /// task publishes `drain.terminated` with the NAMED reason token
 /// (I4) when the loop exits — `drained`, `budget_exhausted`,
-/// `molecule_quota_exceeded`, `max_depth_exceeded`, `teardown_failed`,
-/// `timeout`, or
-/// `error` (see [`drain_exit_reason`]).
+/// `molecule_quota_exceeded`, `max_depth_exceeded`, `timeout`, or
+/// `error` (see [`crate::drain::exit_token`]). `teardown_failed` is
+/// reserved for an attempted harvest a sealed `cs done` refused; the
+/// library drain does not attempt harvest yet (the ADR-080 U6
+/// amendment enumerates that follow-up).
 ///
 /// Errors mapped to:
 /// - **404 `not_found`** — molecule id malformed or tenant root
@@ -1731,7 +1705,7 @@ pub async fn run_molecule(
 
     // 4. Malformed root id collapses to 404 (turing §8.2.3 — no
     //    existence oracle), same boundary as tackle.
-    let _molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
+    let root_molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
@@ -1773,20 +1747,15 @@ pub async fn run_molecule(
         });
     }
 
-    // 7. Spawn the resident loop, detached. The invoker timeout gets
-    //    a one-minute grace over the `--timeout` handed to `cs run`,
-    //    so the loop's own NAMED deadline exit (124 → `timeout`)
-    //    always wins over the envelope's anonymous kill.
-    let drain_timeout_secs = crate::DEFAULT_DRAIN_TIMEOUT.as_secs();
-    let invoker = SystemInvoker::new(
-        state.cs_path.clone(),
-        state.galaxies_root.clone(),
-        crate::DEFAULT_DRAIN_TIMEOUT + std::time::Duration::from_secs(60),
-    )
-    .with_anthropic_key(state.anthropic_api_key.clone())
-    .with_claude_model(state.claude_model.clone())
-    .with_artifact_root(Some(state.artifact_root.clone()));
-    let args = run_molecule_args(&molecule_id_str, &bounds, drain_timeout_secs);
+    // 7. Spawn the resident loop, detached — in-process since issue
+    //    #54 U6: the same DAG loop `cs run <root>` executes
+    //    ([`crate::drain::run_drain`]), with the library executor as
+    //    its dispatch seam and the worker envelope clamped onto every
+    //    spawn. The loop's deadline stays a NAMED exit (I4 —
+    //    `timeout`), now as [`cosmon_runtime::ShutdownReason::Deadline`]
+    //    instead of exit code 124.
+    let drain_timeout = state.drain_timeout;
+    let drain_timeout_secs = drain_timeout.as_secs();
 
     let bounds_json = json!({
         "budget": bounds.budget,
@@ -1800,11 +1769,28 @@ pub async fn run_molecule(
     ));
 
     let started_at = chrono::Utc::now().to_rfc3339();
+    let root_artifact_dir = state
+        .artifact_root
+        .join(spark.noyau.as_str())
+        .join(&molecule_id_str);
+    let _ = std::fs::create_dir_all(&root_artifact_dir);
+    let envelope = WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: Some(root_artifact_dir),
+        anthropic_api_key: state.anthropic_api_key.clone(),
+        claude_model: state.claude_model.clone(),
+    };
+    let backend = EnvelopedBackend::new(state.worker_backend.clone(), &envelope);
+    // Default actor class: `runtime:<pid>` — the drain's dispatches are
+    // runtime claims (never sticky), exactly as `cs run`'s were.
+    let executor = LibraryExecutor::new(&tenant_root, backend);
     spawn_resident_drain(
         Arc::clone(&state),
-        invoker,
-        spark.clone(),
-        args,
+        tenant_root,
+        root_molecule_id,
+        bounds,
+        drain_timeout,
+        executor,
         noyau,
         molecule_id_str.clone(),
     );
@@ -1825,13 +1811,6 @@ pub async fn run_molecule(
 // ---------------------------------------------------------------------------
 // The harvest door — land (`POST /v1/molecules/:id/land`)
 // ---------------------------------------------------------------------------
-
-/// How long the door waits on `cs land`.
-///
-/// A harvest is a merge and a teardown, not an agent run: seconds, not hours.
-/// The short deadline is what lets this route stay synchronous, and staying
-/// synchronous is the decision — see [`land_molecule`].
-const LAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 
 /// `POST /v1/molecules/:id/land` — the harvest door (ADR-176, issue #51).
 ///
@@ -1871,26 +1850,21 @@ const LAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 /// it to the requester as a 4xx would convert the operator's
 /// misconfiguration into the tenant's failure class.
 ///
-/// # Library-direct decision, subprocess effect (issue #54 U3)
+/// # Library-direct decision, typed-refusal effect (issue #54 U3 → U6)
 ///
 /// Since issue #54 U3 the door's **decision half** runs in-process through
 /// [`cosmon_filestore::harvest_door::decide`] — the same library body `cs
 /// land` executes, so the two doors cannot drift — and every pre-effect
 /// refusal, plus `already_landed` idempotence, answers without any `cs`
-/// binary present. The **effect half** (the sealed `cs done` transaction:
-/// merge with lineage trailers, provenance gates, teardown) still crosses
-/// the ADR-080 §3.5 clause (e) envelope, because its one implementation is
-/// `cmd/done.rs` and duplicating it in a library would fork the door. That
-/// subprocess is the U6 seam: cutting it over means implementing the
-/// [`SealedHarvestEffect`] port in a library, not touching this decision
-/// half again. Execution refusals from the effect are still read back from
-/// the child's **exit code** rather than parsed out of stderr.
-///
-/// The trunk-lock discipline across that seam is the ADR-176 §-amendment:
-/// the effect binds the `trunk.lock` flock at its own boundary (the child
-/// `cs` flocks the same file on the same filesystem the adapter reads), so
-/// the in-process half must not hold it across the call — `flock(2)` does
-/// not nest across the parent/child pair.
+/// binary present. U6 retired the subprocess that used to carry the
+/// **effect half** (the sealed `cs done` transaction: merge with lineage
+/// trailers, provenance gates, teardown) along with the rest of the
+/// ADR-080 §3.5 clause (e) envelope. Its one implementation is still
+/// `cmd/done.rs`, and duplicating it in a library would fork the door —
+/// so until the [`SealedHarvestEffect`] port grows a library
+/// implementation (the enumerated ADR-176 §11 follow-up), a harvest the
+/// decision half ADMITS is answered with the typed refusal
+/// **501 `land_effect_unavailable`** rather than a subprocess or a lie.
 ///
 /// [`DoorRefusal`]: cosmon_core::harvest_door::DoorRefusal
 /// [`SealedHarvestEffect`]: cosmon_filestore::harvest_door::SealedHarvestEffect
@@ -1972,49 +1946,32 @@ pub async fn land_molecule(
         harvest_door::DoorDecision::Proceed => {}
     }
 
-    // 7. The effect, synchronously, through the one subprocess this route
-    //    still owns — the U6 seam (see the handler docs). The child `cs`
-    //    binds the trunk flock at its own effect boundary, which is why the
-    //    in-process half above holds no lock across this call.
-    let invoker = SystemInvoker::new(
-        state.cs_path.clone(),
-        state.galaxies_root.clone(),
-        LAND_TIMEOUT,
-    )
-    .with_artifact_root(Some(state.artifact_root.clone()));
-    let args = land_molecule_args(&molecule_id_str);
-
-    match invoker.invoke_owned(&spark, &args).await {
-        Ok(result) => {
-            let outcome = parse_cs_json(&result.stdout)
-                .ok()
-                .and_then(|v| {
-                    v.get("outcome")
-                        .and_then(Value::as_str)
-                        .map(ToOwned::to_owned)
-                })
-                .unwrap_or_else(|| "landed".to_owned());
-            let body = json!({
-                "request_id": spark.request_id,
-                "harvest": {
-                    "molecule": molecule_id_str,
-                    "outcome": outcome,
-                },
-            });
-            // 200, never 202: by the time this line runs, the merge either
-            // happened or it did not, and the answer says which.
-            Ok((StatusCode::OK, Json(body)).into_response())
-        }
-        Err(RppRejectReason::SubprocessTimeout(_)) => Err(ApiError {
-            status: StatusCode::GATEWAY_TIMEOUT,
-            label: "harvest_timeout",
-            request_id: Some(spark.request_id),
-        }),
-        Err(RppRejectReason::SubprocessExitNonZero { code, .. }) => {
-            Err(refusal_to_api_error(code, &spark.request_id))
-        }
-        Err(reason) => Err(state.reject(reason)),
-    }
+    // 7. The effect half — a TYPED refusal since issue #54 U6.
+    //
+    //    The sealed harvest transaction (merge with lineage trailers,
+    //    provenance gates, teardown) has exactly one implementation,
+    //    `cmd/done.rs`'s sealed-door path, and it is not yet callable
+    //    as a library (ADR-176 §11: the `SealedHarvestEffect` port is
+    //    the seam; its library implementation is the enumerated
+    //    follow-up). The subprocess that used to reach it is retired
+    //    with the rest of the §3.5 clause (e) envelope, and the door
+    //    refuses honestly instead of pretending: `501
+    //    land_effect_unavailable`, never a silent `cs` fallback and
+    //    never a 202 that integrates nothing (the defect issue #51
+    //    reports). Every pre-effect refusal and the `already_landed`
+    //    idempotence above still answer in full, in-process.
+    tracing::warn!(
+        request_id = %spark.request_id,
+        molecule_id = %molecule_id_str,
+        "land decision half admitted the harvest, but the sealed effect \
+         has no library implementation yet (ADR-176 §11) — refusing \
+         land_effect_unavailable"
+    );
+    Err(ApiError {
+        status: StatusCode::NOT_IMPLEMENTED,
+        label: "land_effect_unavailable",
+        request_id: Some(spark.request_id),
+    })
 }
 
 /// Run the door's in-process decision half over the tenant's own state
@@ -2065,28 +2022,6 @@ async fn decide_land_in_process(
     })
 }
 
-/// Map the harvest door's exit code to its named §8p refusal.
-///
-/// The label comes from [`cosmon_core::harvest_door::DoorRefusal`] — the one
-/// spelling shared by the CLI, this route and the operator's log — so a
-/// refusal cannot acquire a second name on the way out.
-///
-/// An exit code the door does not own becomes an anonymous 500. That is
-/// deliberate: inventing a name for an outcome the closed set does not
-/// contain would be the unnamed refusal in disguise.
-fn refusal_to_api_error(code: i32, request_id: &str) -> ApiError {
-    use cosmon_core::harvest_door::DoorRefusal;
-
-    let Some(refusal) = DoorRefusal::from_exit_code(code) else {
-        return ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            label: "harvest_failed",
-            request_id: Some(request_id.to_owned()),
-        };
-    };
-    door_refusal_to_api_error(refusal, request_id)
-}
-
 /// Map a named door refusal to its wire status and label.
 ///
 /// One mapping for both arrival paths — the in-process decision half and
@@ -2123,26 +2058,32 @@ fn door_refusal_to_api_error(
     }
 }
 
-/// Detach the resident drain: run the `cs run` subprocess to its
-/// named exit, publish `drain.terminated` with the stable reason
-/// token, and release the noyau's drain slot. The route returns 202
-/// while this lives on.
+/// Detach the resident drain: run the in-process DAG loop
+/// ([`crate::drain::run_drain`]) to its named termination, publish
+/// `drain.terminated` with the stable reason token, and release the
+/// noyau's drain slot. The route returns 202 while this lives on.
+///
+/// `spawn_blocking` because the runtime loop is synchronous (it sleeps
+/// between ticks); the drain slot is released on EVERY exit path,
+/// including a panicking loop (the `JoinError` arm), so a wedged drain
+/// can never brick the noyau's slot for the life of the process.
+#[allow(clippy::too_many_arguments)] // The drain's inputs are exactly these; a struct would rename, not reduce.
 fn spawn_resident_drain(
     state: Arc<AppState>,
-    invoker: SystemInvoker,
-    spark: Spark,
-    args: Vec<String>,
+    tenant_root: std::path::PathBuf,
+    root_molecule_id: MoleculeId,
+    bounds: crate::nucleon_map::DrainBounds,
+    timeout: std::time::Duration,
+    executor: LibraryExecutor<EnvelopedBackend<SharedBackend>>,
     noyau: String,
     root_id: String,
 ) {
     tokio::spawn(async move {
-        let outcome = invoker.invoke_owned(&spark, &args).await;
-        let reason = match &outcome {
-            Ok(_) => drain_exit_reason(0),
-            Err(RppRejectReason::SubprocessExitNonZero { code, .. }) => drain_exit_reason(*code),
-            Err(RppRejectReason::SubprocessTimeout(_)) => "timeout",
-            Err(_) => "error",
-        };
+        let outcome = tokio::task::spawn_blocking(move || {
+            drain::run_drain(&tenant_root, &root_molecule_id, &bounds, timeout, executor)
+        })
+        .await;
+        let reason = outcome.unwrap_or(drain::token::ERROR);
         tracing::info!(
             target: "cosmon_rpp_adapter::drain",
             noyau = %noyau,
@@ -2155,34 +2096,6 @@ fn spawn_resident_drain(
             .publish(MoleculeEvent::drain_terminated(&noyau, &root_id, reason));
         state.drains.release(&noyau);
     });
-}
-
-/// Map a `cs run` exit code to the stable drain-termination reason
-/// token published in `drain.terminated` events.
-///
-/// The non-zero tokens are the SAME strings as the
-/// [`RppRejectReason::DrainBudgetExhausted`] /
-/// [`RppRejectReason::DrainMoleculeQuotaExceeded`] /
-/// [`RppRejectReason::DrainMaxDepthExceeded`] labels (B1 moussage)
-/// — the client learns the bound by the
-/// documented token without being able to lift it. The mirror is
-/// pinned by `drain_exit_reason_mirrors_reject_labels` below.
-#[must_use]
-pub fn drain_exit_reason(code: i32) -> &'static str {
-    match code {
-        0 => "drained",
-        90 => "budget_exhausted",
-        91 => "molecule_quota_exceeded",
-        92 => "max_depth_exceeded",
-        // Post-drain integration failure (task-20260831-74d1): the loop
-        // itself drained, but `cs done` refused to tear a completed
-        // molecule down, so its branch is unmerged and its session still
-        // stands. Distinct from `error` because it names *what* is left
-        // undone rather than "something went wrong".
-        93 => "teardown_failed",
-        124 => "timeout",
-        _ => "error",
-    }
 }
 
 /// Extract a `Vec<(key, value)>` from the JSON `variables` field.
@@ -2238,30 +2151,6 @@ mod tests {
         assert!(matches!(err, RppRejectReason::MalformedJwt));
     }
 
-    /// The drain-termination tokens published in `drain.terminated`
-    /// events must be byte-identical to the B1 reject-reason labels
-    /// — one vocabulary for the bound, whether
-    /// the client meets it as an HTTP refusal or as an event token.
-    #[test]
-    fn drain_exit_reason_mirrors_reject_labels() {
-        assert_eq!(
-            drain_exit_reason(90),
-            RppRejectReason::DrainBudgetExhausted.label()
-        );
-        assert_eq!(
-            drain_exit_reason(91),
-            RppRejectReason::DrainMoleculeQuotaExceeded.label()
-        );
-        assert_eq!(
-            drain_exit_reason(92),
-            RppRejectReason::DrainMaxDepthExceeded.label()
-        );
-        assert_eq!(drain_exit_reason(0), "drained");
-        assert_eq!(drain_exit_reason(93), "teardown_failed");
-        assert_eq!(drain_exit_reason(124), "timeout");
-        assert_eq!(drain_exit_reason(1), "error");
-    }
-
     /// The drain slot is one-per-noyau and reusable after release.
     #[test]
     fn drain_registry_single_slot_per_noyau() {
@@ -2307,147 +2196,63 @@ mod tests {
         assert_eq!(err, "variables_not_object");
     }
 
-    /// `build_tackle_response` must read the worker session from the
-    /// real `cs --json tackle` shape, which emits it under
-    /// `tmux_session` — not `session_name` / `session` / `worker_id`.
-    /// Regression guard for Gap 6 (smithy V2 E2E, 2026-05-14): the
-    /// projection used to return `worker_session: null` because none
-    /// of the looked-up keys matched the actual CLI output. Mirrors
-    /// the `parse_cs_json` pretty-multiline test added after a fixture
-    /// masked a divergence.
+    /// Transport-level spawn failure maps to `worker_spawn_failed` —
+    /// the ledger has already been rolled back when this surfaces.
     #[test]
-    fn build_tackle_response_reads_tmux_session_from_real_cli_shape() {
-        let parsed = json!({
-            "command": "tackle",
-            "molecule_id": "task-20260514-f02f",
-            "status": "Running",
-            "tmux_session": "cosmon-task-20260514-f02f",
-            "worktree": "~/galaxies/cosmon/.worktrees/task-20260514-f02f",
-            "branch": "feat/task-20260514-f02f",
-            "attach": "tmux -L cosmon attach -t cosmon-task-20260514-f02f",
-            "spawned_at": "2026-05-14T12:00:00+00:00",
-        });
-        let body = build_tackle_response("task-20260514-f02f", &parsed);
-        assert_eq!(body["molecule_id"], "task-20260514-f02f");
-        assert_eq!(body["worker_session"], "cosmon-task-20260514-f02f");
-        assert!(
-            !body["worker_session"].is_null(),
-            "worker_session must not be null for the real CLI shape"
-        );
-        assert_eq!(body["spawned_at"], "2026-05-14T12:00:00+00:00");
-    }
-
-    /// The legacy fallback keys remain honoured: if a future or older
-    /// CLI emits `session_name` instead of `tmux_session`, the
-    /// projection still resolves it rather than returning null.
-    #[test]
-    fn build_tackle_response_falls_back_to_legacy_session_keys() {
-        let parsed = json!({ "session_name": "legacy-session" });
-        let body = build_tackle_response("mol-x", &parsed);
-        assert_eq!(body["worker_session"], "legacy-session");
-    }
-
-    #[test]
-    fn tackle_subprocess_not_found_text_is_not_an_existence_oracle() {
-        let api = tackle_subprocess_error_to_api(
-            &RppRejectReason::SubprocessExitNonZero {
-                code: 1,
-                stderr_excerpt: "fatal: worktree path not found".to_owned(),
+    fn spawn_failure_maps_to_worker_spawn_failed() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::Spawn {
+                id: Box::new(MoleculeId::new("task-20260905-0001").unwrap()),
+                reason: "tmux new-session failed".to_owned(),
             },
-            "req-test",
-        );
-        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "tackle_unavailable");
-    }
-
-    /// OS-level spawn failure (binary missing) maps to `subprocess_spawn_failed`,
-    /// not the generic `tackle_unavailable` — the label comes from the existing
-    /// [`RppRejectReason::SubprocessSpawnFailed`] taxonomy.
-    #[test]
-    fn spawn_failed_maps_to_subprocess_spawn_failed() {
-        let api = tackle_subprocess_error_to_api(
-            &RppRejectReason::SubprocessSpawnFailed("No such file or directory".to_owned()),
             "req-spawn",
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "subprocess_spawn_failed");
+        assert_eq!(api.label, "worker_spawn_failed");
     }
 
-    /// The exact stderr fragment emitted by `check_tui_credentials` when the
-    /// Claude Code credential is absent maps to `worker_credential_missing`.
+    /// A terminal molecule is a 409 with its own name — not the old
+    /// stderr-derived `already_active`, which now means "live worker".
     #[test]
-    fn credential_refusal_maps_to_worker_credential_missing() {
-        let api = tackle_subprocess_error_to_api(
-            &RppRejectReason::SubprocessExitNonZero {
-                code: 1,
-                stderr_excerpt:
-                    "cs tackle: refusing to spawn a claude worker for molecule task-1: \
-                     no usable Claude Code credential for the interactive worker"
-                        .to_owned(),
+    fn terminal_molecule_maps_to_not_tackleable() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::NotTackleable {
+                id: Box::new(MoleculeId::new("task-20260905-0002").unwrap()),
+                status: "completed".to_owned(),
             },
-            "req-cred",
+            "req-terminal",
+        );
+        assert_eq!(api.status, StatusCode::CONFLICT);
+        assert_eq!(api.label, "not_tackleable");
+    }
+
+    /// The parity refusal is 501, and stays typed: the caller can tell
+    /// "this adapter build does not cover this step kind" apart from
+    /// every operational 503.
+    #[test]
+    fn unsupported_step_maps_to_501_typed_refusal() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::UnsupportedStep {
+                id: Box::new(MoleculeId::new("task-20260905-0003").unwrap()),
+                step_id: "verify".to_owned(),
+                kind: "gate",
+            },
+            "req-unsupported",
+        );
+        assert_eq!(api.status, StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(api.label, "tackle_unsupported_step");
+    }
+
+    /// Everything else (git fault, store fault, unknown adapter) stays
+    /// the generic `tackle_unavailable` — the stable fallback, with the
+    /// diagnosis in the server log rather than on the wire (turing G9).
+    #[test]
+    fn unclassified_dispatch_failure_stays_tackle_unavailable() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::Git("not a git repository".to_owned()),
+            "req-git",
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "worker_credential_missing");
-    }
-
-    /// The exact stderr fragment emitted by `preflight_local_adapter_model` when
-    /// the local backend is unreachable maps to `adapter_backend_unreachable`.
-    #[test]
-    fn local_backend_unreachable_maps_to_adapter_backend_unreachable() {
-        let api = tackle_subprocess_error_to_api(
-            &RppRejectReason::SubprocessExitNonZero {
-                code: 1,
-                stderr_excerpt: "refusing to dispatch: the local adapter's backend at \
-                     http://localhost:11434 is not reachable (connection refused). \
-                     Start it (`ollama serve`)"
-                    .to_owned(),
-            },
-            "req-backend",
-        );
-        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "adapter_backend_unreachable");
-    }
-
-    /// The `ModelNotServed` preflight variant (backend reachable but model not
-    /// pulled) also maps to `adapter_backend_unreachable` — from the tenant's
-    /// perspective the adapter cannot serve the request.
-    #[test]
-    fn model_not_served_maps_to_adapter_backend_unreachable() {
-        let api = tackle_subprocess_error_to_api(
-            &RppRejectReason::SubprocessExitNonZero {
-                code: 1,
-                stderr_excerpt: "refusing to dispatch: the local adapter resolved to model \
-                     'qwen3:8b', but the backend at http://localhost:11434 cannot \
-                     serve it — it serves no models at all"
-                    .to_owned(),
-            },
-            "req-model",
-        );
-        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "adapter_backend_unreachable");
-    }
-
-    /// Unrecognised stderr (worktree path, git errors, …) stays as the
-    /// generic `tackle_unavailable` — it is the stable fallback, not deprecated.
-    #[test]
-    fn unclassified_stderr_stays_tackle_unavailable() {
-        for excerpt in [
-            "fatal: worktree path not found",
-            "some unexpected error from cs",
-            "",
-        ] {
-            let api = tackle_subprocess_error_to_api(
-                &RppRejectReason::SubprocessExitNonZero {
-                    code: 1,
-                    stderr_excerpt: excerpt.to_owned(),
-                },
-                "req-unclassified",
-            );
-            assert_eq!(
-                api.label, "tackle_unavailable",
-                "excerpt {excerpt:?} should remain tackle_unavailable"
-            );
-        }
+        assert_eq!(api.label, "tackle_unavailable");
     }
 }

@@ -1,24 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! Regression test: a tackle rejected by the `cs` subprocess must leave
-//! the captured `stderr_excerpt` in the server log at **`warn`**.
+//! Regression test: a rejected in-process tackle dispatch must leave
+//! the typed error rendered in the server log at **`warn`**.
 //!
 //! Why this deserves a test of its own.
 //!
-//! `503 tackle_unavailable` is a catch-all: every non-zero `cs` exit that
-//! is not "already active" maps to it. An unreachable adapter backend, a
-//! missing worker credential and a spawn failure are therefore
-//! indistinguishable from the response alone. The one thing that CAN tell
-//! them apart is the subprocess stderr, which the route already captures
-//! into [`RppRejectReason::SubprocessExitNonZero`].
+//! `503 tackle_unavailable` is a catch-all: a git fault, a store fault
+//! and an unknown adapter are indistinguishable from the response
+//! alone. The one thing that CAN tell them apart is the typed
+//! `TackleExecError` the route captures at the dispatch seam (issue
+//! #54 U6 — the successor of the old subprocess `stderr_excerpt`).
 //!
-//! Emitting it at `debug` made it unreachable in practice: a deployment
-//! runs at `info`, where a failed tackle leaves behind nothing but the
-//! `tower_http` `on_failure` line. A hardened instance exposes neither
-//! Docker nor logs, so raising the level was the difference between a
-//! diagnosable failure and a three-week blind hunt.
+//! Emitting it at `debug` made the predecessor unreachable in
+//! practice: a deployment runs at `info`, where a failed tackle leaves
+//! behind nothing but the `tower_http` `on_failure` line. A hardened
+//! instance exposes neither Docker nor logs, so the level is the
+//! difference between a diagnosable failure and a blind hunt.
 //!
-//! The excerpt still does not cross the HTTP boundary — that is
+//! The detail still does not cross the HTTP boundary — that is
 //! deliberate, and this test asserts it too: the caller gets a stable
 //! label plus a `request_id`, and whoever holds the logs correlates the
 //! two.
@@ -28,7 +27,6 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use cosmon_oidc_testkit::fake_cs_path;
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
@@ -50,31 +48,31 @@ use tracing_subscriber::Registry;
 struct Captured {
     level: Level,
     message: String,
-    stderr_excerpt: Option<String>,
+    error_detail: Option<String>,
 }
 
 #[derive(Default)]
 struct FieldGrab {
     message: String,
-    stderr_excerpt: Option<String>,
+    error_detail: Option<String>,
 }
 
 impl Visit for FieldGrab {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
             "message" => value.clone_into(&mut self.message),
-            "stderr_excerpt" => self.stderr_excerpt = Some(value.to_owned()),
+            "error" => self.error_detail = Some(value.to_owned()),
             _ => {}
         }
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
         let rendered = format!("{value:?}");
-        // `tracing` renders a bare `stderr_excerpt` field through `Debug`
-        // when it is recorded as a `&String`, so both arms must look.
+        // `tracing` renders a `%err` display field through `Debug` in
+        // some shapes, so both arms must look.
         match field.name() {
             "message" => self.message = rendered,
-            "stderr_excerpt" => self.stderr_excerpt = Some(rendered),
+            "error" => self.error_detail = Some(rendered),
             _ => {}
         }
     }
@@ -90,7 +88,7 @@ impl<S: tracing::Subscriber> Layer<S> for CaptureLayer {
         self.0.lock().unwrap().push(Captured {
             level: *event.metadata().level(),
             message: grab.message,
-            stderr_excerpt: grab.stderr_excerpt,
+            error_detail: grab.error_detail,
         });
     }
 }
@@ -121,7 +119,9 @@ fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-        cs_path: fake_cs_path(),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -130,7 +130,7 @@ fn make_state(
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),
@@ -149,11 +149,11 @@ fn make_state(
     }
 }
 
-/// `fake-cs` has no `tackle` verb: it prints `fake-cs: unknown invocation …`
-/// on stderr and exits 2. That is exactly the shape this test needs — a
-/// non-zero exit carrying a diagnosable stderr.
+/// The tenant workspace is not a git repository, so the library
+/// executor's dispatch fails with a typed git error — exactly the shape
+/// this test needs: a rejection carrying a diagnosable detail.
 #[tokio::test(flavor = "current_thread")]
-async fn rejected_tackle_logs_stderr_excerpt_at_warn() {
+async fn rejected_tackle_logs_typed_error_at_warn() {
     let captured = Arc::new(Mutex::new(Vec::new()));
     let subscriber = Registry::default().with(CaptureLayer(Arc::clone(&captured)));
 
@@ -209,13 +209,13 @@ async fn rejected_tackle_logs_stderr_excerpt_at_warn() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "a non-zero `cs` exit must map to 503; body: {body}"
+        "a failed library dispatch must map to 503; body: {body}"
     );
 
     let events = captured.lock().unwrap().clone();
     let rejection = events
         .iter()
-        .find(|e| e.message.contains("tackle subprocess rejected"))
+        .find(|e| e.message.contains("tackle dispatch rejected"))
         .unwrap_or_else(|| {
             panic!(
                 "no rejection event recorded; captured messages: {:?}",
@@ -230,13 +230,13 @@ async fn rejected_tackle_logs_stderr_excerpt_at_warn() {
          to a deployment running at `info`, which is the whole point"
     );
 
-    let excerpt = rejection
-        .stderr_excerpt
+    let detail = rejection
+        .error_detail
         .as_deref()
-        .expect("the rejection event must carry the captured subprocess stderr");
+        .expect("the rejection event must carry the rendered typed error");
     assert!(
-        !excerpt.trim().is_empty(),
-        "an empty excerpt diagnoses nothing; got {excerpt:?}"
+        !detail.trim().is_empty(),
+        "an empty detail diagnoses nothing; got {detail:?}"
     );
 
     // The other half of the contract: the excerpt stays server-side.
@@ -246,7 +246,7 @@ async fn rejected_tackle_logs_stderr_excerpt_at_warn() {
     );
     assert!(
         body.get("detail").is_none() && body.get("stderr_excerpt").is_none(),
-        "subprocess stderr must NOT cross the HTTP boundary; body: {body}"
+        "dispatch detail must NOT cross the HTTP boundary; body: {body}"
     );
     assert!(
         body.get("request_id").is_some(),

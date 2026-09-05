@@ -53,7 +53,6 @@ fn make_state(state_dir: &std::path::Path, seal: AdminSeal) -> (AppState, Shared
     let image_init = ImageInit {
         inbox_root: state_dir.join("whispers/inbox"),
         galaxies_root: galaxies_root.clone(),
-        cs_path: state_dir.join("nonexistent-cs"),
         claude_home: state_dir.join("home"),
         formulas_seed_dir: None,
     };
@@ -72,7 +71,9 @@ fn make_state(state_dir: &std::path::Path, seal: AdminSeal) -> (AppState, Shared
     let deny_list = DenyList::new(state_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     let state = AppState {
-        cs_path: state_dir.join("nonexistent-cs"),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: state_dir.to_path_buf(),
         inbox_root: state_dir.join("whispers/inbox"),
         galaxies_root,
@@ -81,7 +82,7 @@ fn make_state(state_dir: &std::path::Path, seal: AdminSeal) -> (AppState, Shared
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),

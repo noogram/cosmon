@@ -139,7 +139,9 @@ fn make_state(security_dir: &Path, home_dir: &Path, token_url: String) -> AppSta
     let auth_claude = Some(Arc::new(AuthClaudeState::new(config, store)));
 
     AppState {
-        cs_path: std::path::PathBuf::from("/bin/false"),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -148,7 +150,7 @@ fn make_state(security_dir: &Path, home_dir: &Path, token_url: String) -> AppSta
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(5),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),
@@ -636,7 +638,9 @@ async fn auth_claude_disabled_returns_503() {
     let deny_list = DenyList::new(security.path().to_path_buf()).with_ttl(Duration::from_secs(0));
     let jwks = JwksStore::load(security.path()).unwrap();
     let state = AppState {
-        cs_path: std::path::PathBuf::from("/bin/false"),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security.path().to_path_buf(),
         inbox_root: security.path().join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -645,7 +649,7 @@ async fn auth_claude_disabled_returns_503() {
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(5),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),
@@ -685,7 +689,9 @@ async fn molecule_routes_unaffected_by_auth_claude_addition() {
     let deny_list = DenyList::new(security.path().to_path_buf()).with_ttl(Duration::from_secs(0));
     let jwks = JwksStore::load(security.path()).unwrap();
     let state = AppState {
-        cs_path: std::path::PathBuf::from("/bin/false"),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security.path().to_path_buf(),
         inbox_root: security.path().join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -694,7 +700,7 @@ async fn molecule_routes_unaffected_by_auth_claude_addition() {
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(5),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),

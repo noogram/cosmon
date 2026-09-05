@@ -28,13 +28,13 @@
 //! The RPP is a *Layer B port adapter* (ADR-023 hexagonal): a long-lived
 //! `axum` server that admits remote pilot requests through a five-clause
 //! admission boundary (identity, causal closure, rate limit, one-way
-//! topology, subprocess envelope) and shells out to the real `cs` binary
-//! for every admitted request. The adapter holds **no** in-RAM business
-//! state — JWKS, rate-limiter, deny-list are idempotent projections of
-//! the filesystem.
-//!
-//! V0 surface (this crate): a single read-only route
-//! `GET /v1/molecules/:id` that proxies to `cs observe :id --json`.
+//! topology, worker envelope) and executes every admitted request
+//! **library-direct** — the cosmon ops/runtime crates in-process, no
+//! `cs` binary anywhere on the request path (issue #54; the ADR-080
+//! §3.5 clause (e) subprocess envelope is retired, its env hygiene
+//! re-homed at the worker-spawn seam in [`worker_env`]). The adapter
+//! holds **no** in-RAM business state — JWKS, rate-limiter, deny-list
+//! are idempotent projections of the filesystem.
 //!
 //! See [ADR-117] for the secure-delivery framing, [ADR-080] for the
 //! architectural framing, [§8j] for the parent invariant, and [§8p] for
@@ -69,6 +69,7 @@ pub mod auth_claude;
 pub mod backend_health;
 pub mod config;
 pub mod deny_list;
+pub mod drain;
 pub mod error;
 pub mod events_bus;
 pub mod image_init;
@@ -84,9 +85,9 @@ pub mod rate_limit;
 pub mod reload;
 pub mod routes;
 pub mod scope_badge;
-pub mod subprocess;
 pub mod surface_events;
 pub mod trust_bootstrap;
+pub mod worker_env;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -118,15 +119,10 @@ pub use scope_badge::{
 /// exhaustion via crafted bodies.
 pub const DEFAULT_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
-/// Default per-subprocess timeout — a `cs observe` call is bounded
-/// well under a second; 30 s is an order-of-magnitude headroom that
-/// also forms the upper bound on pilot-perceived latency.
-pub const DEFAULT_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Default wall-clock deadline for one resident drain
-/// (`POST /v1/molecules/{id}/run`, B2). Passed
-/// to `cs run` as `--timeout` so the loop's deadline is a NAMED exit
-/// (I4 — `timeout`, exit 124), never a stall. One hour: a drain
+/// (`POST /v1/molecules/{id}/run`, B2). Handed to the in-process DAG
+/// loop as its `max_runtime` so the loop's deadline is a NAMED exit
+/// (I4 — the `timeout` token), never a stall. One hour: a drain
 /// dispatches real Claude workers, so the bound is hours-shaped, not
 /// request-shaped; the B3 budget (binding-resolved, obligatory) is the
 /// well-founded measure that forces termination — this deadline is the
@@ -210,9 +206,13 @@ pub enum Posture {
 /// rate-limiter, deny-list) — never any per-request business state.
 #[derive(Clone, Debug)]
 pub struct AppState {
-    /// Absolute path to the `cs` binary that will be invoked per
-    /// request (clause (e), subprocess envelope).
-    pub cs_path: PathBuf,
+    /// Transport port workers are spawned through (issue #54 U6 —
+    /// production wires `cosmon_transport::TmuxBackend`, tests an
+    /// in-memory mock). Every spawn is clamped by the
+    /// [`worker_env::EnvelopedBackend`] decorator before it reaches
+    /// this backend, so the §3.5 env allow-list holds regardless of
+    /// which backend the deployment picked.
+    pub worker_backend: worker_env::SharedBackend,
     /// Cosmon state directory (`.cosmon/state/`). Used to resolve
     /// nucleon mappings, JWKS, deny-list, rate-limiter on-disk.
     pub state_dir: PathBuf,
@@ -246,22 +246,25 @@ pub struct AppState {
     pub deny_list: Arc<deny_list::DenyList>,
     /// Adapter posture (`prepared` / `active`).
     pub posture: Posture,
-    /// Per-subprocess timeout (default [`DEFAULT_SUBPROCESS_TIMEOUT`]).
-    pub subprocess_timeout: Duration,
+    /// Wall-clock deadline of one resident drain (default
+    /// [`DEFAULT_DRAIN_TIMEOUT`]); tests pin it low so a drain that
+    /// cannot progress reaches its NAMED `timeout` token quickly.
+    pub drain_timeout: Duration,
     /// Anthropic API key resolved at boot from the ladder
     /// (docker-secret → operator-file → env, see
-    /// [`image_init::resolve_anthropic_key`]). Injected into the env of
-    /// every `cs` subprocess spawn so the worker `claude` inherits it
-    /// (step 3c — the binary equivalent of the script's `export`).
-    /// `None` when no key resolved; `cs tackle` then fails with the
-    /// upstream `ANTHROPIC_API_KEY not set` rather than a silent stall.
+    /// [`image_init::resolve_anthropic_key`]). Set into the env of
+    /// every worker spawn by the [`worker_env`] envelope so the worker
+    /// `claude` inherits it (step 3c — the binary equivalent of the
+    /// script's `export`). `None` when no key resolved; the worker then
+    /// fails with the upstream `ANTHROPIC_API_KEY not set` rather than
+    /// a silent stall.
     pub anthropic_api_key: Option<String>,
     /// Model pin for tenant claude worker sessions (avatar-surface
     /// D1), resolved at boot from the instance config
     /// ([`config::RppConfig::resolved_claude_model`]) — operator
     /// binding, readable by the tenant, never written by it. Exported
-    /// as `ANTHROPIC_MODEL` into every `cs tackle` subprocess spawn so
-    /// the worker `claude` runs the pinned model. `None` is the
+    /// as `ANTHROPIC_MODEL` into every worker spawn env so the worker
+    /// `claude` runs the pinned model. `None` is the
     /// explicit opt-out (`claude_model = ""` in `rpp.toml`): nothing
     /// is exported and the claude CLI resolves its own default. The
     /// value is carried opaquely — no model-id literal lives outside
