@@ -2082,18 +2082,26 @@ fn spawn_resident_drain(
         let outcome = tokio::task::spawn_blocking(move || {
             drain::run_drain(&tenant_root, &root_molecule_id, &bounds, timeout, executor)
         })
-        .await;
-        let reason = outcome.unwrap_or(drain::token::ERROR);
+        .await
+        .unwrap_or(drain::DrainOutcome {
+            token: drain::token::ERROR,
+            detail: None,
+        });
+        let reason = outcome.token;
         tracing::info!(
             target: "cosmon_rpp_adapter::drain",
             noyau = %noyau,
             root = %root_id,
             reason,
+            detail = outcome.detail.as_deref(),
             "resident drain terminated"
         );
-        state
-            .events
-            .publish(MoleculeEvent::drain_terminated(&noyau, &root_id, reason));
+        state.events.publish(MoleculeEvent::drain_terminated(
+            &noyau,
+            &root_id,
+            reason,
+            outcome.detail.as_deref(),
+        ));
         state.drains.release(&noyau);
     });
 }

@@ -65,7 +65,7 @@
 //! of the dispatch to the HTTP request lives in the adapter's own
 //! audit inbox and the `WorkerSpawned` event, not in the worker's env.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use cosmon_core::id::WorkerId;
 use cosmon_core::injection::InjectionProvenance;
@@ -130,6 +130,9 @@ pub const PASSTHROUGH_VARS: &[&str] = &[
     "LOGNAME",
     "SHELL",
     "TMPDIR",
+    // Allow-listed but never *inherited* as-is: [`EnvelopedBackend::spawn`]
+    // replaces the value with the worker's own cwd (the worktree), because
+    // an inherited `PWD` names the adapter's directory, not the pane's.
     "PWD",
     // Terminal / locale — workers live in tmux panes, and UTF-8 paths
     // round-trip only with a sane locale.
@@ -170,6 +173,35 @@ pub const PASSTHROUGH_VARS: &[&str] = &[
     "RUST_LOG",
     "RUST_BACKTRACE",
 ];
+
+/// The tenant's state directory, joined **deterministically** from the
+/// tenant root: `<tenant_root>/.cosmon/state`.
+///
+/// The one spelling of that path in this crate — the drain, the envelope's
+/// `COSMON_STATE_DIR` pin, and any future tenant-store consumer must agree
+/// byte-for-byte or they read different stores. Deliberately NOT
+/// `cosmon_filestore::resolve_state_dir_from`: the ambient resolvers give
+/// the *adapter process's* `COSMON_STATE_DIR` precedence over the walk-up,
+/// and on a multi-tenant server one inherited value would silently redirect
+/// EVERY tenant's store to a single directory. The tenant path is the
+/// server's decision, computed from the sealed binding's root — never from
+/// this process's environment (the same "an inherited adapter value must
+/// never win" rule [`WorkerEnvelope::build_env`] enforces on the workers).
+#[must_use]
+pub fn tenant_state_dir(tenant_root: &Path) -> PathBuf {
+    tenant_root
+        .join(cosmon_filestore::resolve::COSMON_DIR_NAME)
+        .join("state")
+}
+
+/// The tenant's formulas directory, `<tenant_root>/.cosmon/formulas` —
+/// [`tenant_state_dir`]'s sibling, same determinism rationale.
+#[must_use]
+pub fn tenant_formulas_dir(tenant_root: &Path) -> PathBuf {
+    tenant_root
+        .join(cosmon_filestore::resolve::COSMON_DIR_NAME)
+        .join("formulas")
+}
 
 /// Whether `key` is allowed to be inherited by a spawned worker.
 ///
@@ -231,11 +263,9 @@ impl WorkerEnvelope {
         // exposed multi-tenant, fail-closed. See the module docs for
         // why this is the dedicated knob and not `COSMON_API_REQUEST`.
         set(cosmon_core::egress::EXPOSED_MULTITENANT_ENV, "1".to_owned());
-        // Deterministic tenant-store pin (B1 moussage resident).
-        let state_dir = self
-            .tenant_root
-            .join(cosmon_filestore::resolve::COSMON_DIR_NAME)
-            .join("state");
+        // Deterministic tenant-store pin (B1 moussage resident) — the same
+        // path the drain reads, by construction.
+        let state_dir = tenant_state_dir(&self.tenant_root);
         set("COSMON_STATE_DIR", state_dir.to_string_lossy().into_owned());
         if let Some(dir) = &self.artifact_dir {
             set("COSMON_ARTIFACT_DIR", dir.to_string_lossy().into_owned());
@@ -296,10 +326,22 @@ impl<B: TransportBackend> TransportBackend for EnvelopedBackend<B> {
         agent: &AgentDefinition,
         config: &RuntimeConfig,
     ) -> Result<SpawnHandle, TransportError> {
-        let mut args: Vec<String> = Vec::with_capacity(2 + self.env.len() + agent.args.len());
+        let mut args: Vec<String> = Vec::with_capacity(3 + self.env.len() + agent.args.len());
         args.push("-i".to_owned());
         for (k, v) in &self.env {
+            // `PWD` names the process's OWN working directory; an inherited
+            // value is the *adapter's* cwd, which is a lie the moment the
+            // backend honours [`AgentDefinition::cwd`] (tmux `-c` starts the
+            // pane in the worktree). Drop the inherited value here and
+            // re-state it from the per-spawn cwd below — the envelope's
+            // compiled set is per-process, only the spawn knows the truth.
+            if k == "PWD" {
+                continue;
+            }
             args.push(format!("{k}={v}"));
+        }
+        if let Some(cwd) = &agent.cwd {
+            args.push(format!("PWD={}", cwd.to_string_lossy()));
         }
         args.push(agent.command.clone());
         args.extend(agent.args.iter().cloned());
@@ -591,6 +633,108 @@ mod tests {
     fn unpinned_envelope_lets_inherited_model_through() {
         let env = build(&[(env::ANTHROPIC_MODEL, "ambient-model")]);
         assert_eq!(value(&env, env::ANTHROPIC_MODEL), Some("ambient-model"));
+    }
+
+    // ── per-spawn PWD re-statement ───────────────────────────────────────
+
+    /// Minimal recording port for the decorator's spawn rewrite.
+    #[derive(Clone, Default)]
+    struct RecordingBackend {
+        spawns: std::sync::Arc<std::sync::Mutex<Vec<AgentDefinition>>>,
+    }
+
+    impl TransportBackend for RecordingBackend {
+        fn spawn(
+            &self,
+            agent: &AgentDefinition,
+            config: &RuntimeConfig,
+        ) -> Result<SpawnHandle, TransportError> {
+            self.spawns.lock().unwrap().push(agent.clone());
+            let id = cosmon_core::id::WorkerId::new(agent.id.as_str())
+                .map_err(|e| TransportError::SpawnFailed(e.to_string()))?;
+            Ok(SpawnHandle {
+                session_name: format!("{}{}", config.session_prefix, id.name()),
+                id,
+                pid: None,
+            })
+        }
+        fn terminate(&self, _id: &WorkerId) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn is_alive(&self, _id: &WorkerId) -> Result<bool, TransportError> {
+            Ok(true)
+        }
+        fn send_input(&self, _id: &WorkerId, _input: &str) -> Result<(), TransportError> {
+            Ok(())
+        }
+        fn capture_output(&self, _id: &WorkerId, _lines: usize) -> Result<String, TransportError> {
+            Ok(String::new())
+        }
+        fn list_sessions(&self) -> Result<Vec<SessionInfo>, TransportError> {
+            Ok(Vec::new())
+        }
+        fn graceful_exit(
+            &self,
+            _id: &WorkerId,
+            _timeout: std::time::Duration,
+        ) -> Result<bool, TransportError> {
+            Ok(true)
+        }
+    }
+
+    fn spawn_through_envelope(cwd: Option<std::path::PathBuf>) -> Vec<String> {
+        let inner = RecordingBackend::default();
+        let envelope = envelope(std::path::Path::new("/galaxies"));
+        // Bypass `EnvelopedBackend::new` (it reads the real process env):
+        // compile the same shape from a controlled parent that carries a
+        // poisoned adapter PWD.
+        let backend = EnvelopedBackend {
+            inner: inner.clone(),
+            env: envelope.build_env(
+                [
+                    ("PATH".to_owned(), "/bin".to_owned()),
+                    ("PWD".to_owned(), "/adapters/own/cwd".to_owned()),
+                ]
+                .into_iter(),
+            ),
+        };
+        let agent = AgentDefinition {
+            id: cosmon_core::id::AgentId::new("pwd-probe").unwrap(),
+            role: cosmon_core::agent::AgentRole::Implementation,
+            command: "true".to_owned(),
+            args: Vec::new(),
+            cwd,
+        };
+        backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
+        let spawns = inner.spawns.lock().unwrap();
+        spawns[0].args.clone()
+    }
+
+    #[test]
+    fn pwd_is_restated_from_the_workers_own_cwd() {
+        // The adapter's inherited PWD would name the adapter's directory
+        // while tmux `-c` starts the pane in the worktree — the envelope
+        // must state the pane's truth, not the parent's.
+        let args = spawn_through_envelope(Some(std::path::PathBuf::from("/repo/.worktrees/m1")));
+        assert!(
+            args.contains(&"PWD=/repo/.worktrees/m1".to_owned()),
+            "PWD must be re-stated from AgentDefinition::cwd: {args:?}"
+        );
+        assert!(
+            !args.iter().any(|a| a == "PWD=/adapters/own/cwd"),
+            "the adapter's own PWD must never reach the worker: {args:?}"
+        );
+    }
+
+    #[test]
+    fn stale_pwd_is_dropped_when_no_cwd_is_stated() {
+        // With no stated cwd there is no truthful value to state — a stale
+        // inherited one is worse than none.
+        let args = spawn_through_envelope(None);
+        assert!(
+            !args.iter().any(|a| a.starts_with("PWD=")),
+            "no PWD may be exported when the spawn states no cwd: {args:?}"
+        );
     }
 
     #[test]

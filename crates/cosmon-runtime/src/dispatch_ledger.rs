@@ -52,11 +52,15 @@
 //! # Enforced by the type system, not by comment
 //!
 //! [`DispatchRecorded`] is a token with no public constructor: the only way
-//! to obtain one is [`commit_dispatch`], and the CLI's `spawn_and_prompt`
-//! requires one by reference. A future edit that reintroduces
-//! spawn-then-record does not compile. This is the typestate discipline
-//! `CLAUDE.md` asks for, applied to the one transition where getting the
-//! order wrong loses work silently.
+//! to obtain one is [`commit_dispatch`], and both spawn seams — the CLI's
+//! `spawn_and_prompt` and the library executor's `spawn_recorded`
+//! ([`crate::tackle_exec`]) — require one by reference. A future edit that
+//! reintroduces spawn-then-record through either seam does not compile.
+//! (The guarantee is per-seam, not global: a caller that ignores both seams
+//! and talks to the transport port directly is outside it — which is why
+//! the executor routes its one spawn through `spawn_recorded`.) This is the
+//! typestate discipline `CLAUDE.md` asks for, applied to the one transition
+//! where getting the order wrong loses work silently.
 //!
 //! # Why this lives in `cosmon-runtime`
 //!

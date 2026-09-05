@@ -48,8 +48,9 @@
 //! 1. selection + attribution events (before any filesystem side effect);
 //! 2. worktree + branch creation;
 //! 3. **ledger record before spawn** ([`dispatch_ledger::commit_dispatch`]
-//!    — the token is required by the spawn step, so spawn-then-record does
-//!    not compile);
+//!    — the executor's one spawn seam, `spawn_recorded`, takes the returned
+//!    token by reference, so spawn-then-record does not compile on this
+//!    path);
 //! 4. spawn + prompt injection through the transport port;
 //! 5. on spawn failure: ledger rollback, `WorkerSpawnRolledBack` emission,
 //!    worktree/branch cleanup — the same symmetry `cs tackle` guarantees.
@@ -354,6 +355,15 @@ impl<B: TransportBackend> LibraryExecutor<B> {
 
     /// The effect half proper: worktree → ledger → spawn, with the
     /// rollback symmetry on failure.
+    ///
+    /// The worktree cleanup lives HERE, on the single exit seam around
+    /// [`Self::dispatch_in_worktree`], so **every** post-worktree error path
+    /// — a malformed identifier, a refused ledger commit, a failed spawn —
+    /// removes the worktree and branch just created. When each error path
+    /// carried its own cleanup, the ones that arrived later (`WorkerId::new`,
+    /// `commit_dispatch`, `AgentId::new`) simply had none, and the worktree
+    /// leaked in contradiction of the rollback contract documented on
+    /// [`Self::tackle`].
     fn execute(
         &self,
         store: &FileStore,
@@ -373,9 +383,38 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             plan.base_branch.as_deref(),
         )?;
 
+        match self.dispatch_in_worktree(store, state_dir, repo_root, mol, plan, &worktree_path) {
+            Ok(receipt) => Ok(receipt),
+            Err(e) => {
+                remove_worktree_and_branch(repo_root, &worktree_path, &plan.branch_name);
+                Err(e)
+            }
+        }
+    }
+
+    /// Ledger → spawn inside an already-created worktree.
+    ///
+    /// Split from [`Self::execute`] so the caller owns the worktree cleanup
+    /// on ANY error returned from here (see `execute`'s docs). This function
+    /// still owns the ledger rollback, because only it knows whether the
+    /// commit landed.
+    fn dispatch_in_worktree(
+        &self,
+        store: &FileStore,
+        state_dir: &Path,
+        repo_root: &Path,
+        mol: &MoleculeData,
+        plan: &TacklePlan,
+        worktree_path: &Path,
+    ) -> Result<TackleReceipt, TackleExecError> {
         let session_name =
             cosmon_core::slugify::session_name_for(mol.display_topic(), plan.molecule_id.as_str());
         let wid = WorkerId::new(&session_name)?;
+        // Identifier derivation is pure and fallible — do ALL of it before
+        // the ledger commit, so a malformed id can never strand a committed
+        // ledger entry (it used to sit between commit and spawn, where its
+        // `?` skipped the rollback).
+        let agent_id = AgentId::new(&session_name)?;
 
         // Ledger BEFORE spawn — the token is what authorises the spawn
         // below; see `crate::dispatch_ledger` for the six molecules lost to
@@ -391,17 +430,14 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                 loop_ownership: plan.loop_ownership,
                 model: plan.preferred_model.as_deref(),
                 tackled_by: self.by.clone(),
-                worktree_path: &worktree_path,
+                worktree_path,
                 repo_root,
             },
         )?;
         debug_assert_eq!(recorded.molecule(), &plan.molecule_id);
 
-        // Spawn through the port, then hand the worker its briefing. Any
-        // failure in either step rolls the ledger back and removes the
-        // partial worktree — `cs tackle`'s symmetry contract, kept.
         let agent = AgentDefinition {
-            id: AgentId::new(&session_name)?,
+            id: agent_id,
             role: mol
                 .assigned_role
                 .unwrap_or(cosmon_core::agent::AgentRole::Implementation),
@@ -412,22 +448,12 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             // that spawns a bare session inherits this process's cwd (in the
             // RPP image, `/cosmon`), and the worker's `cs` walk-up then
             // resolves to the wrong project.
-            cwd: Some(worktree_path.clone()),
+            cwd: Some(worktree_path.to_path_buf()),
         };
-        let spawn_result = self
-            .backend
-            .spawn(&agent, &RuntimeConfig::default())
-            .map_err(|e| e.to_string())
-            .and_then(|_handle| {
-                let provenance = InjectionProvenance::new(
-                    InjectionOrigin::TackleBriefing,
-                    "library-executor briefing delivery",
-                );
-                self.backend
-                    .send_input_observed(&wid, &plan.prompt, &provenance)
-                    .map_err(|e| e.to_string())
-            });
-        if let Err(reason) = spawn_result {
+        // Any failure inside the spawn rolls the ledger back; the caller
+        // removes the partial worktree — `cs tackle`'s symmetry contract,
+        // kept.
+        if let Err(reason) = self.spawn_recorded(store, &agent, &recorded, &plan.prompt) {
             dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
             emit_worker_spawn_rolled_back(
                 state_dir,
@@ -436,7 +462,6 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                 plan.adapter.as_str(),
                 "spawn",
             );
-            remove_worktree_and_branch(repo_root, &worktree_path, &plan.branch_name);
             return Err(TackleExecError::Spawn {
                 id: Box::new(plan.molecule_id.clone()),
                 reason,
@@ -448,8 +473,60 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             worker: wid,
             session_name,
             branch_name: plan.branch_name.clone(),
-            worktree_path,
+            worktree_path: worktree_path.to_path_buf(),
         })
+    }
+
+    /// Spawn through the port and deliver the briefing — reachable only with
+    /// a [`dispatch_ledger::DispatchRecorded`] token in hand.
+    ///
+    /// This is the library path's spawn seam, the sibling of the CLI's
+    /// `spawn_and_prompt`: the token parameter is what makes
+    /// spawn-before-record fail to compile here too (the `dispatch_ledger`
+    /// module docs make that claim for both paths). The injection target is
+    /// taken from the token itself — [`DispatchRecorded::worker`] — so a
+    /// commit for one molecule cannot be paired with a prompt delivery to
+    /// another.
+    ///
+    /// On success, the PID the backend witnessed for the spawned session
+    /// (when it surfaces one — see [`cosmon_core::transport::SpawnHandle::pid`])
+    /// is stamped on the ledger entry with its launch fingerprint, exactly as
+    /// `cs tackle` step 9 does: without it, `orphan_scan`'s PID liveness axis
+    /// is blind for every adapter-dispatched molecule. Best-effort by the
+    /// same contract — a failed stamp costs the PID axis, never the dispatch.
+    ///
+    /// [`DispatchRecorded::worker`]: dispatch_ledger::DispatchRecorded::worker
+    fn spawn_recorded(
+        &self,
+        store: &FileStore,
+        agent: &AgentDefinition,
+        recorded: &dispatch_ledger::DispatchRecorded,
+        prompt: &str,
+    ) -> Result<(), String> {
+        let handle = self
+            .backend
+            .spawn(agent, &RuntimeConfig::default())
+            .map_err(|e| e.to_string())?;
+        let provenance = InjectionProvenance::new(
+            InjectionOrigin::TackleBriefing,
+            "library-executor briefing delivery",
+        );
+        self.backend
+            .send_input_observed(recorded.worker(), prompt, &provenance)
+            .map_err(|e| e.to_string())?;
+
+        if let Some(pid) = handle.pid {
+            let start_time = cosmon_process_witness::process_start_time(pid);
+            if !dispatch_ledger::stamp_pid_witness(store, recorded.molecule(), pid, start_time) {
+                eprintln!(
+                    "library executor: warning — could not stamp the PID witness \
+                     for {}; the dispatch is recorded and supervised, but the \
+                     PID liveness axis falls back to the session probe alone.",
+                    recorded.molecule()
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -461,9 +538,24 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
     fn dispatch_with_pin(&self, id: &MoleculeId, pin: &DispatchPin) -> Result<(), RuntimeError> {
         self.tackle(id, pin)
             .map(|_receipt| ())
-            .map_err(|e| RuntimeError::Dispatch {
-                id: id.clone(),
-                reason: e.to_string(),
+            .map_err(|e| match e {
+                // An unsupported step kind is a PERMANENT condition: the formula
+                // does not change between ticks, so an identical retry reproduces
+                // the refusal exactly. Mapping it to the retryable `Dispatch`
+                // class made `Runtime::run` re-dispatch it every poll interval
+                // until `max_runtime` and report the known-at-first-tick refusal
+                // as a timeout. The non-retryable class stops the loop with a
+                // typed reason instead ([`RuntimeError::DispatchRefused`]).
+                refusal @ TackleExecError::UnsupportedStep { .. } => {
+                    RuntimeError::DispatchRefused {
+                        id: id.clone(),
+                        reason: refusal.to_string(),
+                    }
+                }
+                other => RuntimeError::Dispatch {
+                    id: id.clone(),
+                    reason: other.to_string(),
+                },
             })
     }
 }

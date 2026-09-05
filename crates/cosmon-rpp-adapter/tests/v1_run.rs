@@ -232,7 +232,7 @@ async fn pinned_budget_exit_surfaces_stable_token() {
     .await
     .unwrap();
     assert_eq!(
-        token, "budget_exhausted",
+        token.token, "budget_exhausted",
         "B3 = 0 must surface as the stable budget token",
     );
 }
@@ -278,7 +278,90 @@ async fn depth_bound_surfaces_stable_token() {
     })
     .await
     .unwrap();
-    assert_eq!(token, "max_depth_exceeded");
+    assert_eq!(token.token, "max_depth_exceeded");
+}
+
+/// PR #57 review, finding 1 (adapter half): a drain whose ready node is a
+/// gate step must terminate with the NAMED `unsupported_step` token on the
+/// first tick — not busy-loop the permanent refusal to `timeout` — and the
+/// outcome's detail must name the molecule and step kind for the
+/// `drain.terminated` event body.
+#[tokio::test]
+async fn unsupported_step_surfaces_stable_token_not_timeout() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    tenant_a
+        .insert_molecule("task-20260905-gate", &json!({}))
+        .unwrap();
+    // The default envelope binds the molecule to `task-work`; plant that
+    // formula with a GATE first step — the execution kind the library
+    // executor refuses.
+    tenant_a
+        .insert_formula(
+            "task-work",
+            r#"formula = "task-work"
+version = 1
+description = "opens on a gate step"
+
+[[steps]]
+id = "gate"
+title = "a gate step the library executor refuses"
+command = "true"
+"#,
+        )
+        .unwrap();
+    let tenant_root = tenants.galaxies_root().join("a");
+    // The walk-up project marker a real tenant galaxy carries: without it
+    // the library executor's state-dir discovery cannot land on the tenant
+    // store, and the dispatch fails for a reason unrelated to this test.
+    std::fs::write(tenant_root.join(".cosmon").join("config.toml"), "").unwrap();
+    let root_id = cosmon_core::id::MoleculeId::new("task-20260905-gate").unwrap();
+
+    let envelope = cosmon_rpp_adapter::worker_env::WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: None,
+        anthropic_api_key: None,
+        claude_model: None,
+    };
+    let bounds = cosmon_rpp_adapter::nucleon_map::DrainBounds {
+        budget: 16,
+        max_depth: 8,
+        max_molecules: 256,
+    };
+    let executor = cosmon_runtime::LibraryExecutor::new(
+        &tenant_root,
+        cosmon_rpp_adapter::worker_env::EnvelopedBackend::new(
+            cosmon_transport::MockBackend::new(),
+            &envelope,
+        ),
+    );
+    let started = std::time::Instant::now();
+    let outcome = tokio::task::spawn_blocking(move || {
+        cosmon_rpp_adapter::drain::run_drain(
+            &tenant_root,
+            &root_id,
+            &bounds,
+            // Generous on purpose: before the fix the refusal was retried
+            // for this whole window and reported as `timeout`.
+            Duration::from_secs(30),
+            executor,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        outcome.token, "unsupported_step",
+        "a permanent refusal is a named exit, never `timeout`"
+    );
+    let detail = outcome.detail.expect("the outcome names the refusal");
+    assert!(
+        detail.contains("task-20260905-gate") && detail.contains("gate"),
+        "the detail names the molecule and step kind: {detail}"
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "the refusal must surface on its first tick, not at the deadline"
+    );
 }
 
 #[tokio::test]

@@ -937,9 +937,20 @@ impl TransportBackend for TmuxBackend {
         self.tmux_cmd(&argv)
             .map_err(|e| TransportError::SpawnFailed(format!("tmux new-session failed: {e}")))?;
 
+        // Witness the pane's root PID for the dispatch ledger
+        // ([`SpawnHandle::pid`]). Best-effort: the session exists (the
+        // command above succeeded), so a failed probe degrades the PID
+        // liveness axis, it never fails the spawn.
+        let pid = self
+            .tmux_cmd(&["list-panes", "-t", &session, "-F", "#{pane_pid}"])
+            .ok()
+            .and_then(|out| out.lines().next().map(str::trim).map(str::to_owned))
+            .and_then(|line| line.parse::<u32>().ok());
+
         Ok(SpawnHandle {
             id: worker_id,
             session_name: session,
+            pid,
         })
     }
 

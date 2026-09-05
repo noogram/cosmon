@@ -219,6 +219,7 @@ impl TransportBackend for RecordingBackend {
         Ok(SpawnHandle {
             session_name: format!("{}{}", config.session_prefix, id.name()),
             id,
+            pid: None,
         })
     }
 

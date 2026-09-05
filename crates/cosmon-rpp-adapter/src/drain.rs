@@ -63,12 +63,47 @@ pub mod token {
     pub const MAX_DEPTH_EXCEEDED: &str = "max_depth_exceeded";
     /// The wall-clock deadline fired (was exit 124) — a NAMED exit, I4.
     pub const TIMEOUT: &str = "timeout";
+    /// A ready molecule's current formula step is an execution kind the
+    /// library executor does not cover (gate / native / query / llm) — the
+    /// ADR-080 §3.5.3 parity gap, met mid-drain instead of at admission.
+    /// A permanent refusal, reported on the first tick that observes it
+    /// (never run to `timeout`); the event body names the molecule and the
+    /// step kind. The tackle route's sibling is `501
+    /// tackle_unsupported_step`.
+    pub const UNSUPPORTED_STEP: &str = "unsupported_step";
     /// Anything else: the loop could not run (store fault, bad root).
     pub const ERROR: &str = "error";
 }
 
+/// How a drain ended: the stable wire token, plus the refusal detail when
+/// the token alone would hide the cause.
+///
+/// [`token::UNSUPPORTED_STEP`] is the one token that names a *specific*
+/// molecule rather than a property of the whole drain, so it carries the
+/// refused molecule id and step kind for the `drain.terminated` event body.
+#[derive(Debug, Clone)]
+pub struct DrainOutcome {
+    /// The stable termination token (see [`token`]).
+    pub token: &'static str,
+    /// Human-readable refusal detail (molecule id + step kind) when the
+    /// token is [`token::UNSUPPORTED_STEP`]; `None` otherwise.
+    pub detail: Option<String>,
+}
+
+impl DrainOutcome {
+    /// A detail-less outcome for the tokens that describe the whole drain.
+    #[must_use]
+    fn bare(token: &'static str) -> Self {
+        Self {
+            token,
+            detail: None,
+        }
+    }
+}
+
 /// Run the bounded drain over the tenant's own store and return the
-/// stable termination token for the `drain.terminated` event.
+/// stable termination token (plus refusal detail) for the
+/// `drain.terminated` event.
 ///
 /// Blocking (the runtime loop sleeps between ticks) — the route runs it
 /// inside `spawn_blocking`, detached, exactly as it detached the old
@@ -81,16 +116,22 @@ pub fn run_drain<B>(
     bounds: &DrainBounds,
     timeout: Duration,
     executor: LibraryExecutor<B>,
-) -> &'static str
+) -> DrainOutcome
 where
     B: cosmon_core::transport::TransportBackend + 'static,
 {
-    let state_dir = tenant_root.join(".cosmon").join("state");
+    // One spelling of the tenant paths, shared with the envelope's
+    // `COSMON_STATE_DIR` pin ([`crate::worker_env::tenant_state_dir`]) so
+    // the drain and the workers it dispatches cannot disagree about which
+    // store they read. Deliberately deterministic, not the ambient
+    // `cosmon_filestore` resolvers — see that helper's docs for why an
+    // env-first resolver is wrong on a multi-tenant path.
+    let state_dir = crate::worker_env::tenant_state_dir(tenant_root);
     let store = cosmon_filestore::FileStore::new(&state_dir);
 
     // Compile the DAG once — the same one-shot walk `cs run` performs.
     let Ok((plan, edges)) = compile_plan(&store, std::slice::from_ref(root_id)) else {
-        return token::ERROR;
+        return DrainOutcome::bare(token::ERROR);
     };
     let mut dag_ids: std::collections::HashSet<MoleculeId> =
         std::collections::HashSet::from([root_id.clone()]);
@@ -103,15 +144,15 @@ where
     // before the loop starts. Named failure, never a stall (I4).
     let depth = dag_depth(&edges).max(1);
     if depth > usize::try_from(bounds.max_depth).unwrap_or(usize::MAX) {
-        return token::MAX_DEPTH_EXCEEDED;
+        return DrainOutcome::bare(token::MAX_DEPTH_EXCEEDED);
     }
     // B2 at compile time — the in-loop tick check covers mid-run growth.
     if dag_ids.len() > usize::try_from(bounds.max_molecules).unwrap_or(usize::MAX) {
-        return token::MOLECULE_QUOTA_EXCEEDED;
+        return DrainOutcome::bare(token::MOLECULE_QUOTA_EXCEEDED);
     }
 
     // ADR-043 parallel limits from every formula the DAG references.
-    let formulas_dir = tenant_root.join(".cosmon").join("formulas");
+    let formulas_dir = crate::worker_env::tenant_formulas_dir(tenant_root);
     let mut formula_ids: Vec<cosmon_core::id::FormulaId> = Vec::new();
     {
         let mut seen = std::collections::HashSet::new();
@@ -153,8 +194,16 @@ where
         .with_run_bounds(run_bounds);
 
     match runtime.run() {
-        Ok(report) => exit_token(report.reason),
-        Err(_) => token::ERROR,
+        Ok(report) => DrainOutcome {
+            token: exit_token(report.reason),
+            // The one reason with a subject: name the refused molecule and
+            // step kind in the event body, so the tenant reads the cause
+            // instead of a bare token.
+            detail: report
+                .refusal
+                .map(|r| format!("{}: {}", r.molecule, r.reason)),
+        },
+        Err(_) => DrainOutcome::bare(token::ERROR),
     }
 }
 
@@ -166,6 +215,7 @@ pub fn exit_token(reason: ShutdownReason) -> &'static str {
         ShutdownReason::BudgetExhausted => token::BUDGET_EXHAUSTED,
         ShutdownReason::MoleculeQuotaExceeded => token::MOLECULE_QUOTA_EXCEEDED,
         ShutdownReason::Deadline => token::TIMEOUT,
+        ShutdownReason::DispatchRefused => token::UNSUPPORTED_STEP,
         ShutdownReason::SignalTripped => token::ERROR,
     }
 }
@@ -175,9 +225,16 @@ mod tests {
     use super::*;
     use crate::error::RppRejectReason;
 
-    /// The drain-termination tokens must be byte-identical to the B1
+    /// The B1/B2/B3 drain-termination tokens must be byte-identical to the
     /// reject-reason labels — one vocabulary for the bound, whether the
     /// client meets it as an HTTP refusal or as an event token.
+    ///
+    /// [`token::UNSUPPORTED_STEP`] is deliberately NOT in this mirror: it is
+    /// not a bound but the §3.5.3 parity gap met mid-drain, so its HTTP
+    /// sibling is the tackle route's `501 tackle_unsupported_step` (the
+    /// route-prefixed spelling), not a B1 reject label. It shares the
+    /// `unsupported_step` stem with that label so the two surfaces read as
+    /// one condition.
     #[test]
     fn tokens_mirror_reject_labels() {
         assert_eq!(
@@ -191,6 +248,11 @@ mod tests {
         assert_eq!(
             token::MAX_DEPTH_EXCEEDED,
             RppRejectReason::DrainMaxDepthExceeded.label()
+        );
+        assert_eq!(
+            format!("tackle_{}", token::UNSUPPORTED_STEP),
+            "tackle_unsupported_step",
+            "the drain token and the tackle route's 501 label share the stem"
         );
     }
 
@@ -206,6 +268,10 @@ mod tests {
             "molecule_quota_exceeded"
         );
         assert_eq!(exit_token(ShutdownReason::Deadline), "timeout");
+        assert_eq!(
+            exit_token(ShutdownReason::DispatchRefused),
+            "unsupported_step"
+        );
         assert_eq!(exit_token(ShutdownReason::SignalTripped), "error");
     }
 }
