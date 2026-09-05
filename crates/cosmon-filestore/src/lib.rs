@@ -38,6 +38,9 @@ pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;
 pub mod presence_store;
+// Project materialization (`cs init --upgrade` as a library) — see the
+// module docs for why it left the CLI.
+pub mod project_upgrade;
 pub mod resolve;
 
 pub use harvest_authority::{
