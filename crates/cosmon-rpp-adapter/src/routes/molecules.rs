@@ -1955,26 +1955,9 @@ pub async fn land_molecule(
     // 6. The decision half, in-process (issue #54 U3): the same library body
     //    `cs land` runs, over the tenant's own state files. Every pre-effect
     //    refusal — and the `already_landed` idempotent success — answers
-    //    here without the `cs` binary existing at all. `spawn_blocking`
-    //    because the store reads are synchronous filesystem work.
-    let tenant_state_dir = tenant_root.join(".cosmon").join("state");
-    let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
-    let decision_molecule = molecule_id.clone();
-    let decision = tokio::task::spawn_blocking(move || {
-        let store = FileStore::new(&tenant_state_dir);
-        let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
-            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
-        harvest_door::decide(&store, &cfg, &decision_molecule)
-    })
-    .await
-    .map_err(|_| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        label: "harvest_failed",
-        request_id: Some(spark.request_id.clone()),
-    })?;
-
-    match decision {
-        Ok(harvest_door::DoorDecision::AlreadyLanded) => {
+    //    here without the `cs` binary existing at all.
+    match decide_land_in_process(&tenant_root, &molecule_id, &spark.request_id).await? {
+        harvest_door::DoorDecision::AlreadyLanded => {
             // Idempotence answered in-process: the same success as the first
             // call, nothing mutated, no subprocess spawned.
             let body = json!({
@@ -1986,31 +1969,7 @@ pub async fn land_molecule(
             });
             return Ok((StatusCode::OK, Json(body)).into_response());
         }
-        Ok(harvest_door::DoorDecision::Proceed) => {}
-        Err(harvest_door::LandError::Refused(refused)) => {
-            return Err(door_refusal_to_api_error(
-                refused.refusal,
-                &spark.request_id,
-            ));
-        }
-        Err(harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(
-            _,
-        ))) => {
-            // The no-existence-oracle boundary again: "no such molecule" and
-            // "not yours" must stay indistinguishable.
-            return Err(ApiError {
-                status: StatusCode::NOT_FOUND,
-                label: "not_found",
-                request_id: Some(spark.request_id.clone()),
-            });
-        }
-        Err(_) => {
-            return Err(ApiError {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                label: "harvest_failed",
-                request_id: Some(spark.request_id.clone()),
-            });
-        }
+        harvest_door::DoorDecision::Proceed => {}
     }
 
     // 7. The effect, synchronously, through the one subprocess this route
@@ -2056,6 +2015,54 @@ pub async fn land_molecule(
         }
         Err(reason) => Err(state.reject(reason)),
     }
+}
+
+/// Run the door's in-process decision half over the tenant's own state
+/// (issue #54 U3) and map its typed answers onto the wire.
+///
+/// `spawn_blocking` because the store reads are synchronous filesystem
+/// work. A refused decision becomes its named [`ApiError`]; a
+/// `MoleculeNotFound` fault collapses to `404 not_found` — the same
+/// no-existence-oracle boundary the rest of the surface holds; any other
+/// fault stays an anonymous `harvest_failed`.
+async fn decide_land_in_process(
+    tenant_root: &std::path::Path,
+    molecule_id: &MoleculeId,
+    request_id: &str,
+) -> Result<harvest_door::DoorDecision, ApiError> {
+    let tenant_state_dir = tenant_root.join(".cosmon").join("state");
+    let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
+    let decision_molecule = molecule_id.clone();
+    let decision = tokio::task::spawn_blocking(move || {
+        let store = FileStore::new(&tenant_state_dir);
+        let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
+            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
+        harvest_door::decide(&store, &cfg, &decision_molecule)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "harvest_failed",
+        request_id: Some(request_id.to_owned()),
+    })?;
+
+    decision.map_err(|err| match err {
+        harvest_door::LandError::Refused(refused) => {
+            door_refusal_to_api_error(refused.refusal, request_id)
+        }
+        harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => {
+            ApiError {
+                status: StatusCode::NOT_FOUND,
+                label: "not_found",
+                request_id: Some(request_id.to_owned()),
+            }
+        }
+        _ => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "harvest_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+    })
 }
 
 /// Map the harvest door's exit code to its named §8p refusal.
