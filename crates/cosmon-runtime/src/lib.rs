@@ -55,8 +55,10 @@ use cosmon_core::molecule::MoleculeStatus;
 use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 
 mod dag_policy;
+pub mod dispatch_ledger;
 pub mod guard;
 pub mod resident;
+pub mod tackle_exec;
 pub mod witness;
 
 pub use dag_policy::{
@@ -73,6 +75,7 @@ pub use resident::{
     ResidentError, ResidentScheduler, RunSummary, RuntimeLoop, RuntimeLoopConfig,
     TEARDOWN_ATTEMPT_CEILING, TEARDOWN_BACKOFF_BASE, TEARDOWN_BACKOFF_CAP,
 };
+pub use tackle_exec::{LibraryExecutor, TackleExecError, TackleReceipt};
 pub use witness::{
     canonical_attestation_record, compute_attestation_b3, refuse_if_same_session,
     resolve_witness_id, resolve_witness_id_from, SameSessionRefusal, ATTESTATION_RECORD_SCHEMA,
@@ -349,6 +352,18 @@ pub trait Executor {
 /// fleet worker entry for the molecule, then returns immediately. The worker
 /// runs independently; the runtime observes its progress through the shared
 /// [`StateStore`] on subsequent ticks.
+///
+/// # Deprecation path (issue #54 / U5)
+///
+/// The subprocess envelope this executor embodies (ADR-080 §3.5 clause (e))
+/// is being retired: [`tackle_exec::LibraryExecutor`] performs the same
+/// `plan → execute` sequence in-process over an injectable transport
+/// backend, with no `cs` binary on `PATH`. This executor remains the
+/// default for one more release because `cs tackle` still owns the
+/// execution kinds the library path refuses (gate / native / query / llm
+/// steps and the per-adapter spawn arms); once the U6 cut-over closes that
+/// parity gap, the library executor becomes the default and this one stays
+/// available behind this explicit constructor only.
 ///
 /// The [`quiet`](Self::quiet) flag silences child stdout/stderr so callers
 /// like `cs run` that render their own event log aren't flooded by the

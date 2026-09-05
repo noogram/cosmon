@@ -19,11 +19,12 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use chrono::Utc;
-use cosmon_core::agent::AgentRole;
 use cosmon_core::clearance::Clearance;
 use cosmon_core::config::{AdapterEntry, AdaptersConfig, BUILTIN_FLOOR_ADAPTER};
 // Only the test-only wrappers around `cosmon_core::tackle_plan` (and the
 // prompt regression tests) still name these types directly.
+#[cfg(test)]
+use cosmon_core::agent::AgentRole;
 #[cfg(test)]
 use cosmon_core::config::{OnComplete, ProjectConfig};
 #[cfg(test)]
@@ -31,18 +32,22 @@ use cosmon_core::event_v2::AdapterSelectionSource;
 use cosmon_core::event_v2::{CeilingAction, ModelSelectionSource};
 use cosmon_core::fleet::FleetSpec;
 use cosmon_core::formula::Formula;
-use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
+use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
-use cosmon_core::spawn_seam::{validate_adapter_name, LoopOwnership, ValidatedAdapterName};
+#[cfg(test)]
+use cosmon_core::spawn_seam::LoopOwnership;
+use cosmon_core::spawn_seam::{validate_adapter_name, ValidatedAdapterName};
 use cosmon_core::transport::TransportBackend;
-use cosmon_core::worker::{DesiredState, WorkerStatus};
+#[cfg(test)]
+use cosmon_core::worker::DesiredState;
+use cosmon_core::worker::WorkerStatus;
 use cosmon_filestore::FileStore;
 use cosmon_process_witness::process_start_time;
 use cosmon_state::events::worker_spawn::{
     emit_adapter_selected, emit_model_ceiling_hit, emit_model_selected,
     emit_worker_spawn_rolled_back,
 };
-use cosmon_state::{MoleculeData, MoleculeFilter, StateStore, WorkerData};
+use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
 use super::dispatch_ledger;
@@ -3697,269 +3702,29 @@ pub(super) fn create_worktree(
     branch: &str,
     start_point: Option<&str>,
 ) -> anyhow::Result<()> {
-    // If worktree already exists, reuse it.
-    if worktree_path.exists() {
-        return Ok(());
-    }
-
-    // Newcomer first-run guard (task-20260722-44ce, reported by external tester
-    // Matteo Cacciari / LPTHE). When the branch is cut from HEAD (no blocker
-    // start-point) and the repo has NO commits — an unborn HEAD, the state a
-    // fresh `git init` leaves behind — `git branch feat/<mol>` fails with
-    // `fatal: not a valid object name: 'main'` (git resolves the symbolic HEAD
-    // to its unborn target). That was a hard first-run wall for the documented
-    // `cs init` → `git init` → `cs demo` path. Materialize the base branch with
-    // one empty seed commit so the branch cut below just works. This fires
-    // *only* on a genuinely commit-less repo — never over existing history.
-    if start_point.is_none() {
-        ensure_base_commit(repo_root)?;
-    }
-
-    // Create branch from start_point (blocker's branch) or HEAD (main).
-    // Pre-fix (task-20260416-ef31): the result of `git branch` was
-    // silently discarded. A disk-full / permission / corrupt-repo failure
-    // would fall through, `git worktree add` would then also fail
-    // confusingly, and the tmux session still got written with a surface
-    // "Running" row — one of the mechanisms behind the surface-lie class.
-    // We now check every non-"already exists" failure and surface it.
-    let lossy = repo_root.to_string_lossy();
-    let mut args: Vec<String> = vec![
-        "-C".to_owned(),
-        lossy.into_owned(),
-        "branch".to_owned(),
-        branch.to_owned(),
-    ];
-    if let Some(sp) = start_point {
-        args.push(sp.to_owned());
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // `LC_ALL=C` pins git's stderr to the English locale so the
-    // "already exists" idempotence probe below survives non-English
-    // operator locales. See done.rs::try_merge_branch for the structural
-    // rationale and the 2026-05-22 (drain-worker f877) discovery.
-    let branch_out = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args(refs)
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git branch: {e}"))?;
-    if !branch_out.status.success() {
-        let stderr = String::from_utf8_lossy(&branch_out.stderr);
-        // The ONLY tolerated failure is "branch already exists" — tackle is
-        // idempotent when re-invoked on the same molecule, so the branch
-        // may legitimately predate this call (e.g. `--force` respawn,
-        // partial prior tackle, manual `git branch`). Any other failure is
-        // unexpected and MUST surface: proceeding would silently paper
-        // over a disk-full / corrupt-repo / permission problem and then
-        // cascade into a surface lie downstream.
-        if !stderr.contains("already exists") {
-            return Err(anyhow::anyhow!(
-                "git branch {branch} failed: {}",
-                stderr.trim()
-            ));
-        }
-    }
-
-    // Create worktree directory parent.
-    if let Some(parent) = worktree_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // `LC_ALL=C` pins git's stderr to the English locale so the
-    // "already checked out" / "already exists" idempotence probe below
-    // survives non-English operator locales (drain-worker f877,
-    // 2026-05-22).
-    let output = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "worktree",
-            "add",
-            &worktree_path.to_string_lossy(),
-            branch,
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If worktree already checked out, that's fine.
-        if stderr.contains("already checked out") || stderr.contains("already exists") {
-            pin_operator_identity(repo_root, worktree_path);
-            return Ok(());
-        }
-        return Err(anyhow::anyhow!(
-            "git worktree add failed: {}",
-            stderr.trim()
-        ));
-    }
-
-    // Pin the operator identity at the worktree seam (delib-20260717-194b, F2).
-    // This is the single choke point every adapter passes through, so feature
-    // commits are BORN operator-authored — no post-hoc rewrite, no SHA churn,
-    // no ancestry-guard breakage. The `cs done` author-slot assertion (F4) is
-    // the backstop for when this silently no-ops (env precedence, a late
-    // amend); pinning here reduces the failure *rate*, the assertion *closes*
-    // the hole. Best-effort: a failure to resolve or set identity never blocks
-    // tackle (the assertion catches the residue).
-    pin_operator_identity(repo_root, worktree_path);
-
-    Ok(())
+    // The implementation moved to `cosmon_runtime::tackle_exec` (issue #54 /
+    // U5) so the library executor and this CLI share one worktree seam — a
+    // second copy of the idempotence probes is a first copy that will one
+    // day disagree. Behaviour (idempotence, unborn-HEAD seeding, operator
+    // identity pinning) is unchanged; only the error type is adapted.
+    cosmon_runtime::tackle_exec::create_worktree(repo_root, worktree_path, branch, start_point)
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Materialize the base branch when the repository has no commits yet.
-///
-/// A freshly `git init`'d repository has an *unborn HEAD*: the symbolic ref
-/// `HEAD` points at `refs/heads/main` (or whatever `init.defaultBranch` names),
-/// but that ref does not resolve to any object because no commit exists. In
-/// that state `git branch feat/<mol>` fails with
-/// `fatal: not a valid object name: 'main'` — the exact wall an external tester
-/// (Matteo Cacciari, LPTHE) hit twice on the documented
-/// `cs init` → `git init` → `cs demo` first-run path.
-///
-/// We detect that case *specifically* — `git rev-parse --verify HEAD` returning
-/// non-zero means the repo has no commits — and seed a single empty commit so
-/// the base branch resolves and the feature branch can be cut from it. A repo
-/// that already has history returns early untouched: cosmon MUST NEVER fabricate
-/// a commit over existing work.
-///
-/// The seed commit is authored with the operator's configured git identity when
-/// one is present (walking local → global → system); if none is configured — a
-/// bare CI checkout with no `user.*` — a neutral fallback identity is supplied
-/// via `-c` so the commit still succeeds instead of failing the newcomer's very
-/// first command with a git-identity error.
-fn ensure_base_commit(repo_root: &std::path::Path) -> anyhow::Result<()> {
-    // Probe for an unborn HEAD. `rev-parse --verify HEAD` exits non-zero with an
-    // unborn HEAD and zero once any commit exists. `--quiet` suppresses the
-    // "Needed a single revision" noise on the expected miss.
-    let head = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "rev-parse",
-            "--quiet",
-            "--verify",
-            "HEAD",
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git rev-parse: {e}"))?;
-    if head.status.success() {
-        // The repo already has at least one commit — leave history untouched.
-        return Ok(());
-    }
+/// See [`cosmon_runtime::tackle_exec::ensure_base_commit`] — moved with
+/// `create_worktree` (issue #54 / U5); this alias keeps the historical
+/// call sites and tests in place.
+#[cfg(test)]
+use cosmon_runtime::tackle_exec::ensure_base_commit;
+/// See [`cosmon_runtime::tackle_exec::git_config_value`] — moved with
+/// `create_worktree` (issue #54 / U5).
+use cosmon_runtime::tackle_exec::git_config_value;
 
-    // Unborn HEAD confirmed: seed one empty commit. Supply an author identity
-    // only when the repo config has none, so a configured operator keeps their
-    // own identity and a bare checkout still commits cleanly.
-    let mut args: Vec<String> = vec!["-C".to_owned(), repo_root.to_string_lossy().into_owned()];
-    if git_config_value(repo_root, "user.name").is_none()
-        || git_config_value(repo_root, "user.email").is_none()
-    {
-        args.push("-c".to_owned());
-        args.push("user.name=cosmon".to_owned());
-        args.push("-c".to_owned());
-        args.push("user.email=cosmon@localhost".to_owned());
-    }
-    args.extend([
-        "commit".to_owned(),
-        "--allow-empty".to_owned(),
-        "-m".to_owned(),
-        "cosmon: initial commit".to_owned(),
-    ]);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args(refs)
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git commit: {e}"))?;
-    if !out.status.success() {
-        return Err(anyhow::anyhow!(
-            "cs tackle: the repository has no commits and cosmon could not create \
-             an initial commit to branch from: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
-}
+// Fleet registration (`register_tackle_worker`) moved to
+// `cosmon_runtime::dispatch_ledger` with the rest of the ledger
+// (issue #54 / U5) — it was the ledger's only fallible post-write step and
+// the two are one act.
 
-/// Pin the operator's git identity onto a freshly-created worktree
-/// (delib-20260717-194b, F2).
-///
-/// Resolves the operator identity from `repo_root`'s effective git config
-/// (`user.name` / `user.email`, which walks local → global → system) and writes
-/// it into the worktree so every worker git process — claude, codex, aider,
-/// gemini — commits with the operator in the author AND committer slots. The
-/// maker (Noogram) and the real adapter are credited ONLY on `Co-Authored-By:`
-/// trailers, never in the author slot (direction-of-control, tolnay Q3).
-///
-/// Best-effort and non-fatal: when no identity is configured (a bare CI
-/// checkout) nothing is written and the worktree inherits whatever the repo
-/// config already carries. The `cs done` author-slot assertion is the
-/// load-bearing backstop; this is defense-in-depth that lowers the failure
-/// rate at the source.
-fn pin_operator_identity(repo_root: &std::path::Path, worktree_path: &std::path::Path) {
-    for key in ["user.name", "user.email"] {
-        if let Some(value) = git_config_value(repo_root, key) {
-            let _ = std::process::Command::new("git")
-                .args([
-                    "-C",
-                    &worktree_path.to_string_lossy(),
-                    "config",
-                    key,
-                    &value,
-                ])
-                .output();
-        }
-    }
-}
-
-/// Read a single git config value from `repo_root`'s effective config.
-///
-/// Returns `None` when the key is unset or the probe fails, so the caller can
-/// fall back cleanly rather than inventing a value.
-fn git_config_value(repo_root: &std::path::Path, key: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &repo_root.to_string_lossy(), "config", key])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Fleet registration
-// ---------------------------------------------------------------------------
-
-/// Register a tackle-created worker in the fleet.
-///
-/// Tackle workers are bound 1-to-1 to a tmux session (`cosmon-{mol_id}`)
-/// and a molecule. Registering them in fleet.json lets `cs patrol`,
-/// `cs patrol --propel`, `cs resume`, and `cs ensemble` see and manage
-/// them uniformly with spawn/deploy workers.
-///
-/// `adapter` is the Worker-Spawn Port Adapter that actually produced the
-/// worker (ADR-097 / C8). Pre-TS-0 (ADR-099) this was a `&str`; the
-/// [`ValidatedAdapterName`] newtype now forces every caller to thread
-/// the value through `validate_adapter_name`, so the byte sequence
-/// carried by the emitted `EventV2::WorkerSpawned` is the same one
-/// that traversed the validation gate — the cat-test cross-reference
-/// `adapter_selected.adapter_name == worker_spawned.adapter_name` is
-/// satisfied by construction, not by convention.
-///
-/// `loop_ownership` is the per-Adapter axis carried jointly with the
-/// validated name (ADR-103). The emitted `EventV2::WorkerSpawned`
-/// carries the wire-string projection so the cat-test extends to a
-/// second invariant: `adapter_selected.loop_ownership ==
-/// worker_spawned.loop_ownership`.
-///
-/// Idempotent: overwrites an existing entry with the same `worker_id`.
 /// Detach a `cs realized-watch` child for this dispatch (round-4 / COND-1).
 ///
 /// Re-execs the current binary so the watcher and the dispatcher can never
@@ -4060,89 +3825,6 @@ fn arm_briefing_backstop(
     cosmon_cli::briefing_backstop::detach(&cosmon_cli::briefing_backstop::backstop_argv(
         mol_state_dir,
     ))
-}
-
-pub(super) fn register_tackle_worker(
-    store: &FileStore,
-    wid: &WorkerId,
-    worktree_path: &Path,
-    repo_root: &Path,
-    mol: &MoleculeData,
-    adapter: &ValidatedAdapterName,
-    loop_ownership: LoopOwnership,
-) -> anyhow::Result<()> {
-    let mut fleet = store.load_fleet().unwrap_or_default();
-    let agent_id = AgentId::new("tackle")?;
-    let role = mol.assigned_role.unwrap_or(AgentRole::Implementation);
-    let mut worker = WorkerData::new(
-        wid.clone(),
-        agent_id,
-        role,
-        Clearance::Write,
-        WorkerStatus::Active,
-    );
-    worker.desired = DesiredState::Running;
-    worker.repo = Some(cosmon_filestore::make_relative(worktree_path, repo_root));
-    worker.current_molecule = Some(mol.id.clone());
-    fleet.workers.insert(wid.clone(), worker);
-    store.save_fleet(&fleet)?;
-
-    // Emit EventV2::WorkerSpawned. This event IS the passive "worker created
-    // at ..." metadata — its envelope timestamp is the authoritative
-    // spawned_at for the worker.
-    //
-    // Since task-20260727-198f this fires just *before* the spawn rather
-    // than ~98 s after it: the dispatch record and this event are now one
-    // act, written on the near side of the process creation (see
-    // `super::dispatch_ledger`). The timestamp therefore marks the moment
-    // cosmon committed to the worker, not the moment the readiness pipeline
-    // finished with it — which is the boundary the energy probe and the
-    // attribution cat-test actually want, and the only one that exists
-    // before a crash can swallow it. A dispatch that then fails to spawn
-    // emits `WorkerSpawnRolledBack` and removes the fleet entry.
-    //
-    // We deliberately do NOT also emit a seed
-    // WorkerHeartbeat here: a heartbeat means "the live process just proved
-    // it exists" (1 bit of real entropy). Emitting one from the spawner
-    // impersonates liveness — it produced the exact failure mode diagnosed
-    // in task-4046 (silent exec failure, heartbeat still on the wire). The
-    // only legitimate heartbeat emitters are the worker process itself and
-    // its bridge (`cs heartbeat`).
-    // The store's own state root, not `resolve_state_dir(None)`. The ambient
-    // resolver answers about the process's environment; every write above this
-    // line went through `store`. In production they are the same directory and
-    // in a test they are not, which meant the event landed in a different tree
-    // than the fleet entry it describes.
-    let events_path = store.state_root().join("events.jsonl");
-    // Propagated, not discarded. The comment above claims this event and the
-    // dispatch record are one act; a `let _ =` here made that false, and the
-    // falsity had teeth: "no `worker_spawned` on the wire" is the exact
-    // forensic signature `d62ba58` used to identify six lost molecules, so a
-    // dropped error made that signature reachable from a healthy, fully
-    // recorded dispatch. `commit_dispatch` is the only caller and it runs
-    // before the spawn — its own contract is that "in every error case nothing
-    // has been spawned" — so failing here costs a dispatch that has not
-    // started and keeps the signature meaning what the forensics assume.
-    cosmon_state::event_log::emit_one(
-        &events_path,
-        cosmon_core::event_v2::EventV2::WorkerSpawned {
-            worker_id: wid.clone(),
-            molecule: Some(mol.id.clone()),
-            session_name: wid.as_str().to_owned(),
-            role: role.to_string(),
-            adapter_name: adapter.as_str().to_owned(),
-            loop_ownership: cosmon_core::event_v2::LoopOwnershipTag::from(loop_ownership),
-        },
-        None,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to record WorkerSpawned for {wid} at {}: {e}",
-            events_path.display()
-        )
-    })?;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -9096,6 +8778,7 @@ mod tests {
     use cosmon_core::kind::MoleculeKind;
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_filestore::FileStore;
+    use cosmon_runtime::dispatch_ledger::register_tackle_worker;
     use cosmon_state::{MoleculeData, StateStore};
     use cosmon_transport::demote_provisioning::{path_usable_by_uid, RequiredAccess};
     use tempfile::TempDir;

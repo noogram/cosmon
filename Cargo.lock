@@ -1445,6 +1445,7 @@ dependencies = [
  "cosmon-hash",
  "cosmon-process-witness",
  "cosmon-state",
+ "cosmon-transport",
  "notify",
  "proptest",
  "rand 0.8.5",
@@ -1452,6 +1453,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.23",
 ]
 
 [[package]]
