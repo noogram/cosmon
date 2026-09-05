@@ -270,8 +270,30 @@ fn runtime_loop_dispatches_through_the_library_executor_with_no_cs_on_path() {
     assert!(
         calls
             .iter()
-            .any(|c| matches!(c, MockCall::Spawn { agent_id } if agent_id == mol.id.as_str())),
+            .any(|c| matches!(c, MockCall::Spawn { agent_id, .. } if agent_id == mol.id.as_str())),
         "the backend must have spawned the worker: {calls:?}"
+    );
+
+    // ADR-079 §5 obligation 3: the worker runs *in* the molecule worktree.
+    // Asserting the directory exists is not the same claim — a backend that
+    // spawns without a stated cwd starts the worker wherever the dispatching
+    // process happened to be, and only the recorded spawn cwd falsifies that.
+    let worktree = project.join(".worktrees").join(mol.id.as_str());
+    let spawn_cwd = calls
+        .iter()
+        .find_map(|c| match c {
+            MockCall::Spawn { agent_id, cwd } if agent_id == mol.id.as_str() => Some(cwd.clone()),
+            _ => None,
+        })
+        .expect("the spawn call must be recorded");
+    let spawn_cwd = spawn_cwd.expect("the spawn must state a working directory, not inherit one");
+    // Canonicalised on both sides: on macOS the fixture's `/var/folders/…`
+    // tempdir is a symlink to `/private/var/…`, and the executor resolves the
+    // repo root. The claim is "the same directory", not "the same spelling".
+    assert_eq!(
+        std::fs::canonicalize(&spawn_cwd).expect("spawn cwd resolves"),
+        std::fs::canonicalize(&worktree).expect("worktree resolves"),
+        "the spawn must carry the molecule worktree as the worker's cwd: {calls:?}"
     );
     assert!(
         calls.iter().any(|c| matches!(

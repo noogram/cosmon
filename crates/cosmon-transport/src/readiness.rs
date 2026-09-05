@@ -1882,6 +1882,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).unwrap();
 
@@ -1952,6 +1953,7 @@ mod tests {
                 role: cosmon_core::agent::AgentRole::Implementation,
                 command: "echo".to_owned(),
                 args: vec![],
+                cwd: None,
             };
             let worker = backend.spawn(&agent, &config).unwrap();
             backend.set_canned_output(pane);
@@ -1990,6 +1992,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).unwrap();
         backend.set_canned_output(TRUST_PANE);
@@ -2104,6 +2107,7 @@ mod tests {
                 role: cosmon_core::agent::AgentRole::Implementation,
                 command: "echo".to_owned(),
                 args: vec![],
+                cwd: None,
             };
             let worker = backend
                 .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2140,6 +2144,7 @@ mod tests {
                 role: cosmon_core::agent::AgentRole::Implementation,
                 command: "echo".to_owned(),
                 args: vec![],
+                cwd: None,
             };
             let worker = backend
                 .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2196,6 +2201,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2510,6 +2516,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2553,6 +2560,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2631,6 +2639,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend.spawn(&agent, &config).unwrap();
 
@@ -2717,6 +2726,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2833,6 +2843,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "aider".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2868,6 +2879,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "aider".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2946,6 +2958,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "codex".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -2981,6 +2994,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "codex".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -3045,6 +3059,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "opencode".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())
@@ -3080,6 +3095,7 @@ mod tests {
             role: cosmon_core::agent::AgentRole::Implementation,
             command: "opencode".to_owned(),
             args: vec![],
+            cwd: None,
         };
         let worker = backend
             .spawn(&agent, &cosmon_core::transport::RuntimeConfig::default())

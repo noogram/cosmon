@@ -113,7 +113,10 @@ pub struct NoyauReport {
     pub noyau: String,
     /// Step 2 — `.cosmon/state/{events,molecules,fleets/default}`.
     pub state_dirs: StepOutcome,
-    /// Step 2a — `cs init --upgrade` (shell-out).
+    /// Step 2a — the `cs init --upgrade` materialization, run in-process
+    /// via [`cosmon_filestore::project_upgrade::upgrade_project`]. It was a
+    /// `cs` shell-out until issue #54; the image ships no `cs` binary, so
+    /// the subprocess failed on every boot.
     pub cs_init: StepOutcome,
     /// Step 2b — `git init` + initial commit (shell-out).
     pub git_init: StepOutcome,

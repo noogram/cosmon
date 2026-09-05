@@ -13,13 +13,31 @@ use cosmon_core::transport::{
 /// Recorded call to the mock backend (for assertions in tests).
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    Spawn { agent_id: String },
-    Terminate { worker_id: String },
-    IsAlive { worker_id: String },
-    SendInput { worker_id: String, input: String },
-    CaptureOutput { worker_id: String, lines: usize },
+    Spawn {
+        agent_id: String,
+        /// The working directory the spawn was asked to use, recorded so a
+        /// test can assert the ADR-079 §5 obligation-3 cwd actually reached
+        /// the port rather than merely being computed by the caller.
+        cwd: Option<std::path::PathBuf>,
+    },
+    Terminate {
+        worker_id: String,
+    },
+    IsAlive {
+        worker_id: String,
+    },
+    SendInput {
+        worker_id: String,
+        input: String,
+    },
+    CaptureOutput {
+        worker_id: String,
+        lines: usize,
+    },
     ListSessions,
-    GracefulExit { worker_id: String },
+    GracefulExit {
+        worker_id: String,
+    },
 }
 
 /// Mutable state shared across clones of a `MockBackend`.
@@ -89,6 +107,7 @@ impl TransportBackend for MockBackend {
 
         state.calls.push(MockCall::Spawn {
             agent_id: agent.id.to_string(),
+            cwd: agent.cwd.clone(),
         });
 
         if let Some(ref msg) = state.spawn_error {
@@ -207,6 +226,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec!["hello".to_owned()],
+            cwd: None,
         }
     }
 

@@ -690,6 +690,7 @@ mod tests {
                     role: cosmon_core::agent::AgentRole::Implementation,
                     command: "claude".to_owned(),
                     args: Vec::new(),
+                    cwd: None,
                 },
                 &cosmon_core::transport::RuntimeConfig::default(),
             )
