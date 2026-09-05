@@ -38,7 +38,7 @@ use chrono::{DateTime, Utc};
 use super::discovery::{ClientRegistry, ProviderMetadata};
 use super::error::OidcError;
 use super::exchange::{self, TokenResponse};
-use super::loopback::{self, LoopbackServer};
+use super::loopback::{self, LoopbackBind, LoopbackServer};
 use super::pkce_s256::{CodeVerifier, Nonce};
 use crate::credential::{
     BackendKind, CredentialKey, CredentialStore, SecretToken, StoreOutcome, StoredCredential,
@@ -67,10 +67,24 @@ pub struct OidcEndpoints {
     pub token_endpoint: String,
     /// The provisioned `client_id` (`== aud`).
     pub client_id: String,
-    /// The exact `redirect_uri` (loopback), matched byte-for-byte by the server.
-    pub redirect_uri: String,
     /// The scopes to request.
     pub scopes: Vec<String>,
+    /// The exact `redirect_uri` (loopback), matched byte-for-byte by the
+    /// server. **Private on purpose** — see [`Self::bind`].
+    redirect_uri: String,
+    /// Where the callback catcher listens: the advertised URI's port, on the
+    /// loopback literal unless [`Self::with_bind_addr`] moved the address.
+    ///
+    /// This and [`Self::redirect_uri`] are private because they are **one
+    /// invariant, not two fields**: the listener and the advertised URI must
+    /// name the same port. Every constructor and every setter re-establishes
+    /// that together ([`Self::new`], [`Self::with_redirect_uri`]), so no caller
+    /// can move one and leave the other behind. An earlier revision of this
+    /// change left both public and seeded `bind` once at construction; a test
+    /// that assigned `redirect_uri` afterwards then bound the wrong port and
+    /// hung until the login timeout. Read them with [`Self::redirect_uri`] and
+    /// [`Self::bind`].
+    bind: LoopbackBind,
 }
 
 impl OidcEndpoints {
@@ -83,14 +97,60 @@ impl OidcEndpoints {
         redirect_uri: impl Into<String>,
         scopes: Vec<String>,
     ) -> Self {
+        let redirect_uri = redirect_uri.into();
+        let bind = LoopbackBind::loopback(redirect_port(&redirect_uri));
         Self {
             issuer: issuer.into(),
             authorization_endpoint: authorization_endpoint.into(),
             token_endpoint: token_endpoint.into(),
             client_id: client_id.into(),
-            redirect_uri: redirect_uri.into(),
+            redirect_uri,
             scopes,
+            bind,
         }
+    }
+
+    /// The exact `redirect_uri` advertised to the provider — the value matched
+    /// byte-for-byte against its registered redirect set.
+    #[must_use]
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
+    /// Where the callback catcher listens. Its port always equals
+    /// [`Self::redirect_uri`]'s; only its address can differ, and only if
+    /// [`Self::with_bind_addr`] was called.
+    #[must_use]
+    pub fn bind(&self) -> LoopbackBind {
+        self.bind
+    }
+
+    /// Replace the advertised `redirect_uri`, moving the listener's **port**
+    /// with it and keeping whatever address [`Self::with_bind_addr`] set.
+    ///
+    /// This is the only way to change the URI, which is why the field is
+    /// private: assigning it directly would leave the listener on the old port,
+    /// where no redirect will ever arrive.
+    #[must_use]
+    pub fn with_redirect_uri(mut self, redirect_uri: impl Into<String>) -> Self {
+        self.redirect_uri = redirect_uri.into();
+        self.bind = LoopbackBind::new(self.bind.addr, redirect_port(&self.redirect_uri));
+        self
+    }
+
+    /// Move the callback listener to `addr`, keeping the port and leaving
+    /// [`Self::redirect_uri`] untouched.
+    ///
+    /// The default (`127.0.0.1`) is the secure one and needs no call. A
+    /// non-loopback address widens who can reach the catcher for the duration
+    /// of one login; the flow stays sound because
+    /// [`super::loopback::LoopbackServer::accept`] refuses to terminate on any
+    /// request that cannot echo the per-flow `state`, and the code is useless
+    /// without the PKCE verifier that never leaves this process.
+    #[must_use]
+    pub fn with_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
+        self.bind = LoopbackBind::new(addr, self.bind.port);
+        self
     }
 
     /// The credential key `(issuer, sub, aud=client_id)` this login persists to.
@@ -317,7 +377,7 @@ pub fn build_authorize_url(
     url.query_pairs_mut()
         .append_pair("response_type", "code")
         .append_pair("client_id", &endpoints.client_id)
-        .append_pair("redirect_uri", &endpoints.redirect_uri)
+        .append_pair("redirect_uri", endpoints.redirect_uri())
         .append_pair("scope", &endpoints.scopes.join(" "))
         .append_pair("state", state)
         .append_pair("code_challenge", code_challenge)
@@ -364,8 +424,9 @@ pub async fn login(
     let state = Nonce::generate();
 
     // 2. Bind the loopback listener BEFORE opening the browser (C7 ordering).
-    let port = redirect_port(&endpoints.redirect_uri);
-    let server = LoopbackServer::bind(port).await?;
+    // The address+port come from the carried `bind`, not from re-parsing the
+    // redirect_uri string: one source of truth for where we listen.
+    let server = LoopbackServer::bind(endpoints.bind()).await?;
 
     // 3. Build the authorize URL and open the browser.
     let authorize_url = build_authorize_url(endpoints, state.as_str(), &challenge)?;
@@ -382,7 +443,7 @@ pub async fn login(
         &endpoints.client_id,
         &callback.code,
         verifier.as_str(),
-        &endpoints.redirect_uri,
+        endpoints.redirect_uri(),
     )
     .await?;
 
@@ -619,7 +680,9 @@ async fn rotate(
 // --- small helpers -------------------------------------------------------
 
 /// The port the loopback listener must bind to match `redirect_uri` exactly.
-/// Falls back to the default when the URI has no explicit port.
+/// Falls back to the default when the URI has no explicit port. Called **once**,
+/// in [`OidcEndpoints::new`], to seed [`OidcEndpoints::bind`]; the login path
+/// then reads the carried value rather than re-parsing the string.
 fn redirect_port(redirect_uri: &str) -> u16 {
     url::Url::parse(redirect_uri)
         .ok()
@@ -987,6 +1050,77 @@ mod tests {
         assert_eq!(redirect_port("http://127.0.0.1:7777/callback"), 7777);
         assert_eq!(redirect_port("http://127.0.0.1:9000/callback"), 9000);
         assert_eq!(redirect_port("not a url"), loopback::DEFAULT_REDIRECT_PORT);
+    }
+
+    #[test]
+    fn endpoints_carry_a_loopback_bind_on_the_redirect_uri_port() {
+        // The listener's port is seeded from the advertised URI once, at
+        // construction — so the two can never disagree about it.
+        let e = OidcEndpoints::new(
+            "https://idp.example",
+            "https://idp.example/authorize",
+            "https://idp.example/token",
+            "client",
+            "http://127.0.0.1:31337/callback",
+            vec!["openid".into()],
+        );
+        assert_eq!(e.bind(), LoopbackBind::loopback(31337));
+        assert!(e.bind().is_loopback());
+    }
+
+    #[test]
+    fn with_bind_addr_moves_the_listener_and_never_the_redirect_uri() {
+        let e = endpoints().with_bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let plain = endpoints();
+        // The advertised URI — the byte-for-byte registered value — is untouched.
+        assert_eq!(e.redirect_uri(), plain.redirect_uri());
+        // Only the address half moved; the port still matches the URI.
+        assert_eq!(e.bind().port, plain.bind().port);
+        assert!(!e.bind().is_loopback());
+    }
+
+    #[test]
+    fn changing_the_redirect_uri_moves_the_listener_port_with_it() {
+        // The regression this encapsulation exists for. An earlier revision
+        // seeded `bind` once at construction and left both fields public; a
+        // caller that then assigned `redirect_uri` bound the OLD port and
+        // waited for a redirect that could never arrive. Caught by
+        // `oidc_flow::login_and_refresh_carry_identity_against_a_provider_that_gates_on_openid`,
+        // which hung to its login timeout rather than failing on an assertion.
+        let e = endpoints().with_redirect_uri("http://127.0.0.1:45678/callback");
+        assert_eq!(e.bind().port, 45678);
+        assert_eq!(e.redirect_uri(), "http://127.0.0.1:45678/callback");
+    }
+
+    #[test]
+    fn changing_the_redirect_uri_keeps_a_deliberately_moved_bind_address() {
+        // The two setters compose in either order: a non-loopback address
+        // survives a later URI change, and the port still follows the URI.
+        let addr = std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
+        let a = endpoints()
+            .with_bind_addr(addr)
+            .with_redirect_uri("http://127.0.0.1:45678/callback");
+        let b = endpoints()
+            .with_redirect_uri("http://127.0.0.1:45678/callback")
+            .with_bind_addr(addr);
+        for e in [&a, &b] {
+            assert_eq!(e.bind().port, 45678);
+            assert_eq!(e.bind().addr, addr);
+            assert_eq!(e.redirect_uri(), "http://127.0.0.1:45678/callback");
+        }
+    }
+
+    #[test]
+    fn with_bind_addr_leaves_the_authorize_url_byte_identical() {
+        // Falsifier 2: moving the listener must not perturb what the browser is
+        // sent — the authorize URL is built from redirect_uri alone.
+        let plain = endpoints();
+        let moved =
+            endpoints().with_bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            build_authorize_url(&plain, "st", "ch").unwrap(),
+            build_authorize_url(&moved, "st", "ch").unwrap()
+        );
     }
 
     #[test]

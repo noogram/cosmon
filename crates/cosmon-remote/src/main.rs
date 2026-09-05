@@ -158,7 +158,18 @@ enum Cmd {
     /// — no re-auth until the roughly monthly refresh token lapses.
     #[command(display_order = 3)]
     #[allow(clippy::doc_markdown)] // prose is shown verbatim in --help; no backticks
-    Login,
+    Login {
+        /// Interface the OAuth redirect catcher listens on (default 127.0.0.1,
+        /// right whenever the browser runs on this machine). Use 0.0.0.0 when
+        /// cosmon-remote runs inside a container or VM and the browser is
+        /// outside it: the browser still dials the registered
+        /// http://127.0.0.1:<port>/callback, so pair this with a port-forward
+        /// into the container (ssh -L, or a published port). The advertised
+        /// redirect URI never changes; a non-loopback value is announced on
+        /// stderr before the browser opens
+        #[arg(long, value_name = "IP")]
+        bind: Option<std::net::IpAddr>,
+    },
     /// Forget the persisted cosmon credential for the active profile (the
     /// reverse of "login"). Idempotent — logging out when already signed out is
     /// a no-op. Does not touch the Claude/Anthropic session.
@@ -842,9 +853,9 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             run_auth(&profile, sub, cli.token, cli.json).await
         }
-        Cmd::Login => {
+        Cmd::Login { bind } => {
             let (name, profile) = store.resolve(cli.profile.as_deref())?;
-            run_login(store, &name, &profile, cli.json).await
+            run_login(store, &name, &profile, bind, cli.json).await
         }
         Cmd::Logout => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
@@ -1954,7 +1965,13 @@ async fn ensure_persisted_token(profile: &Profile) -> Result<(String, ReactiveRe
 /// `login` — run the real OAuth2-PKCE browser flow, persist the credential, and
 /// record the resolved `issuer` + `client_id` back into the profile so
 /// subsequent commands refresh silently offline.
-async fn run_login(store: &ProfileStore, name: &str, profile: &Profile, json: bool) -> Result<()> {
+async fn run_login(
+    store: &ProfileStore,
+    name: &str,
+    profile: &Profile,
+    bind: Option<std::net::IpAddr>,
+    json: bool,
+) -> Result<()> {
     use cosmon_remote::credential::CredentialStore;
     use cosmon_remote::oidc;
 
@@ -1973,6 +1990,18 @@ async fn run_login(store: &ProfileStore, name: &str, profile: &Profile, json: bo
         profile.scopes.clone(),
     )
     .await?;
+
+    // `--bind` moves the *listener*, never the advertised redirect_uri. A
+    // non-loopback interface is an opt-in the operator sees stated once, before
+    // the browser opens — the notice names the exposure and its bound, and
+    // carries no secret (no state, no code, no token).
+    let endpoints = match bind {
+        Some(addr) => endpoints.with_bind_addr(addr),
+        None => endpoints,
+    };
+    if !endpoints.bind().is_loopback() {
+        eprintln!("{}", non_loopback_bind_notice(&endpoints.bind()));
+    }
 
     let cred_store = CredentialStore::detect()?;
     let timeout = std::time::Duration::from_secs(oidc::LOGIN_TIMEOUT_SECS);
@@ -2029,6 +2058,26 @@ async fn run_login(store: &ProfileStore, name: &str, profile: &Profile, json: bo
         );
     }
     Ok(())
+}
+
+/// The one-line stderr notice printed when `login --bind` moves the redirect
+/// catcher off loopback. Pure, so the exact wording is testable.
+///
+/// It states the widened exposure and the bound on it: for the length of one
+/// login anyone able to reach that interface can *connect* to the catcher, but
+/// only a request echoing the per-flow high-entropy `state` can end the flow
+/// (`classify_request` in `oidc::loopback`), and a captured code is unusable
+/// without the PKCE verifier that never leaves this process. It carries no
+/// secret — no `state`, no code, no token.
+fn non_loopback_bind_notice(bind: &cosmon_remote::oidc::LoopbackBind) -> String {
+    format!(
+        "note: the OAuth redirect catcher is listening on {} (not loopback) for this login. \
+         The authorization code will transit that interface; only a redirect echoing this \
+         flow's state can complete it, and the code is unusable without the PKCE verifier \
+         held in this process. The advertised redirect URI is unchanged: {}",
+        bind.socket_addr(),
+        cosmon_remote::oidc::redirect_uri(bind.port),
+    )
 }
 
 /// Render the human `login` report — pure, so what the operator reads is
@@ -2100,6 +2149,25 @@ mod tests {
 
     fn view(json: serde_json::Value) -> cosmon_remote::client::MoleculeView {
         serde_json::from_value(json).unwrap()
+    }
+
+    #[test]
+    fn non_loopback_notice_names_the_interface_and_keeps_the_redirect_uri() {
+        use cosmon_remote::oidc::LoopbackBind;
+        let notice = non_loopback_bind_notice(&LoopbackBind::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            7777,
+        ));
+        // The exposure is named, with its bound...
+        assert!(notice.contains("0.0.0.0:7777"), "{notice}");
+        assert!(notice.contains("not loopback"), "{notice}");
+        assert!(notice.contains("state"), "{notice}");
+        assert!(notice.contains("PKCE"), "{notice}");
+        // ...and the advertised URI is restated as unchanged.
+        assert!(
+            notice.contains("http://127.0.0.1:7777/callback"),
+            "{notice}"
+        );
     }
 
     fn identity(sub: &str) -> BearerIdentity {

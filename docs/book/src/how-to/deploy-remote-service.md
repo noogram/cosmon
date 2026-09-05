@@ -243,6 +243,45 @@ cosmon-remote healthz
 cosmon-remote auth me
 ```
 
+### Signing in from inside a container
+
+`cosmon-remote login` runs the browser half of the OAuth flow: it opens a
+one-shot listener for the redirect, sends you to the identity provider, and
+catches the `?code=…` the browser is bounced back with. By default that
+listener binds `127.0.0.1:7777`, and the URL registered with the provider —
+the one the browser is told to come back to — is `http://127.0.0.1:7777/callback`.
+On a laptop the two are the same machine and there is nothing to arrange.
+
+Inside a container or a VM they are not the same machine. The browser is on
+your desktop; `cosmon-remote` is in the box. The browser dials *its own*
+`127.0.0.1:7777` and the redirect never crosses the boundary. The fix is a
+port-forward plus a listener that will answer on the forwarded interface:
+
+```sh
+# On your desktop: forward its 127.0.0.1:7777 into the container/VM.
+ssh -L 7777:localhost:7777 you@the-vm
+# ...or, for a container, publish the port at run time:
+docker run -p 127.0.0.1:7777:7777 … your-image
+
+# Inside the container/VM, listen on every interface for this one login:
+cosmon-remote login --bind 0.0.0.0
+```
+
+`--bind` moves the **listener** only. The advertised `redirect_uri` stays
+`http://127.0.0.1:7777/callback` — it is registered with the provider by exact
+match, so changing it would simply be rejected, and it is the address your
+browser must dial for the forward to pick the redirect up. The port is not
+part of the flag: it stays the redirect port, so the listener and the
+advertised URI cannot disagree about it.
+
+A non-loopback bind is announced on stderr, once, before the browser opens. It
+widens who can *connect* to the catcher for the length of one login. What
+bounds that: only a request echoing this flow's high-entropy `state` can end
+the wait — everything else is answered `404` and discarded — and a captured
+code is useless without the PKCE verifier, which never leaves the process.
+Prefer forwarding from `127.0.0.1` on the desktop side (as above) so the
+forwarded port is not itself exposed to the desktop's network.
+
 ## Step 5: Drive the measured golden path
 
 From the thin client, create a molecule, dispatch it, wait for its detached
