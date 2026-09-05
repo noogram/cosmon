@@ -577,10 +577,7 @@ async fn every_named_refusal_reaches_the_client_with_its_name_and_status() {
 
     for (id, refusal) in [
         ("task-20260904-flight", DoorRefusal::NotCompleted),
-        (
-            "task-20260904-held",
-            DoorRefusal::ReservationRequiresSeal,
-        ),
+        ("task-20260904-held", DoorRefusal::ReservationRequiresSeal),
     ] {
         // The mirror the whole chain rests on: label and code stay a
         // bijection, so a refusal cannot be read as its neighbour.
