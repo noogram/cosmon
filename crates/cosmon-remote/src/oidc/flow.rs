@@ -72,8 +72,12 @@ pub struct OidcEndpoints {
     /// The exact `redirect_uri` (loopback), matched byte-for-byte by the
     /// server. **Private on purpose** — see [`Self::bind`].
     redirect_uri: String,
-    /// Where the callback catcher listens: the advertised URI's port, on the
-    /// loopback literal unless [`Self::with_bind_addr`] moved the address.
+    /// Where the callback catcher listens: the advertised URI's port — its
+    /// explicit port if it has one, else its scheme's well-known default
+    /// (`http` → 80, `https` → 443, matching what a browser resolves the same
+    /// portless URI to; [`loopback::DEFAULT_REDIRECT_PORT`] applies only when
+    /// the URI fails to parse at all) — on the loopback literal unless
+    /// [`Self::with_bind_addr`] moved the address.
     ///
     /// This and [`Self::redirect_uri`] are private because they are **one
     /// invariant, not two fields**: the listener and the advertised URI must
@@ -680,13 +684,20 @@ async fn rotate(
 // --- small helpers -------------------------------------------------------
 
 /// The port the loopback listener must bind to match `redirect_uri` exactly.
-/// Falls back to the default when the URI has no explicit port. Called **once**,
-/// in [`OidcEndpoints::new`], to seed [`OidcEndpoints::bind`]; the login path
-/// then reads the carried value rather than re-parsing the string.
+///
+/// An explicit port wins outright. Absent that, the scheme's well-known
+/// default applies — `http://127.0.0.1/callback` means port 80 to any
+/// browser that follows it, not [`loopback::DEFAULT_REDIRECT_PORT`], so
+/// binding anywhere else would silently miss the redirect. The constant is
+/// reached only when `redirect_uri` cannot be parsed as a URL at all, which
+/// [`OidcEndpoints::new`]'s callers avoid by always seeding a real URI.
+/// Called **once**, in [`OidcEndpoints::new`], to seed [`OidcEndpoints::bind`];
+/// the login path then reads the carried value rather than re-parsing the
+/// string.
 fn redirect_port(redirect_uri: &str) -> u16 {
     url::Url::parse(redirect_uri)
         .ok()
-        .and_then(|u| u.port())
+        .and_then(|u| u.port_or_known_default())
         .unwrap_or(loopback::DEFAULT_REDIRECT_PORT)
 }
 
@@ -1050,6 +1061,20 @@ mod tests {
         assert_eq!(redirect_port("http://127.0.0.1:7777/callback"), 7777);
         assert_eq!(redirect_port("http://127.0.0.1:9000/callback"), 9000);
         assert_eq!(redirect_port("not a url"), loopback::DEFAULT_REDIRECT_PORT);
+    }
+
+    /// Review finding (task-20260904-6c5f, verdict.json #3): the doc comment on
+    /// `OidcEndpoints` promises the listener and the advertised `redirect_uri`
+    /// agree on the port. A URI with no explicit port means the *scheme's*
+    /// well-known port to any browser that follows it — `http` implies 80,
+    /// `https` implies 443 — never [`loopback::DEFAULT_REDIRECT_PORT`]. Before
+    /// the fix this asserted 7777 and passed; a real deployment advertising a
+    /// portless `http://127.0.0.1/callback` would then listen on the wrong
+    /// port and never see the redirect.
+    #[test]
+    fn redirect_port_of_a_portless_uri_is_the_scheme_default() {
+        assert_eq!(redirect_port("http://127.0.0.1/callback"), 80);
+        assert_eq!(redirect_port("https://127.0.0.1/callback"), 443);
     }
 
     #[test]
