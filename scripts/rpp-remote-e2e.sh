@@ -23,6 +23,7 @@
 #   auth-me      GET /v1/auth/me — the token the server actually sees
 #   nucleate     POST /v1/molecules — library-direct, writes the tenant tree
 #   observe      GET /v1/molecules/:id — the molecule reads back
+#   shipped-image the `runtime` stage carries no `cs` and no `claude`
 #   tackle       POST /v1/molecules/:id/tackle — a REAL worker, spawned by
 #                the shipped image, with no `cs` binary in it
 #   worker       the worker finishes: the molecule reaches `completed`
@@ -385,8 +386,21 @@ sealed_at = "$STAMP"
 # The mock IdP mints whatever scopes /authorize was asked for; the
 # binding grants the same set explicitly so admission does not depend on
 # the IdP being generous (T23).
+#
+# cosmon:worker:spawn is a THIRD grant, not a synonym for the write
+# scope. tackle requires the pair by composition (AND), so a tenant
+# holding only :write cannot burn the operator's model budget by
+# dispatching workers. Granting it here is the operator gesture the
+# tackle leg depends on — and its absence is a 403 forbidden that looks
+# nothing like a scope problem from the client side.
+# (This heredoc is unquoted, so the shell expands what it contains.
+# Keep backticks and dollar signs out of the prose below.)
 [scopes]
-allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
+allowed = [
+  "cosmon:molecule:read",
+  "cosmon:molecule:write",
+  "cosmon:worker:spawn",
+]
 TOML
 
 # The OAuth client registry the adapter publishes at
@@ -400,7 +414,12 @@ issuer = "$ISSUER"
 [[clients]]
 audience = "$AUDIENCE"
 client_id = "$AUDIENCE"
-scopes = ["openid", "cosmon:molecule:read", "cosmon:molecule:write"]
+scopes = [
+  "openid",
+  "cosmon:molecule:read",
+  "cosmon:molecule:write",
+  "cosmon:worker:spawn",
+]
 TOML
 
 # The throwaway galaxy. `galaxies_root` is bind-mounted; the
@@ -573,6 +592,37 @@ obs_id="$(printf '%s' "$OBS" | jq -r '.molecule.id // empty')"
 [[ "$obs_id" == "$MOL_ID" ]] || fail observe "$t0" "observe returned id=${obs_id:-<absent>}, expected $MOL_ID"
 obs_status="$(printf '%s' "$OBS" | jq -r '.molecule.status // "unknown"')"
 record observe 0 "$(( $(now_ms) - t0 ))" "molecule $MOL_ID reads back, status=$obs_status"
+
+# ---------------------------------------------------------------------------
+# Step 7b — the shipped stage, inspected.
+#
+# The other half of the claim, and the one the `tackle` step cannot make
+# on its own: the image running above is `cs-rpp-adapter:e2e`, which
+# carries a dummy agent and a worker-side `cs` on purpose. That is only
+# honest if the stage a release ships carries NEITHER — otherwise the
+# smoke would be proving "an image with `cs` in it can tackle", which is
+# what the whole issue is about not doing.
+#
+# So build the `runtime` target (every layer is already cached from the
+# e2e build, which is a `FROM runtime`) and look inside it. `command -v`
+# on the two names, and the exit code says which way it went: finding
+# either is the failure.
+# ---------------------------------------------------------------------------
+if [[ "$E2E_STAGE" == "1" ]]; then
+  t0=$(now_ms)
+  SHIPPED_TAG="cs-rpp-adapter:shipped-probe-$$"
+  if ! docker build --target runtime -t "$SHIPPED_TAG" \
+       -f "$BUILD_ROOT/crates/cosmon-rpp-adapter/Dockerfile" "$BUILD_ROOT" \
+       >"$LOGS/shipped-build.log" 2>&1; then
+    fail shipped-image "$t0" "could not build the shipped \`runtime\` target; see logs/shipped-build.log"
+  fi
+  LEAKED="$(docker run --rm --entrypoint sh "$SHIPPED_TAG" \
+              -c 'command -v cs; command -v claude; true' 2>>"$LOGS/shipped-probe.log")"
+  docker image rm -f "$SHIPPED_TAG" >/dev/null 2>&1 || true
+  [[ -z "$LEAKED" ]] \
+    || fail shipped-image "$t0" "the SHIPPED runtime stage contains: $(printf '%s' "$LEAKED" | tr '\n' ' ') — the e2e stage leaked into it"
+  record shipped-image 0 "$(( $(now_ms) - t0 ))" "the shipped \`runtime\` stage carries neither \`cs\` nor \`claude\`; only the e2e stage does"
+fi
 
 # ---------------------------------------------------------------------------
 # Step 8 — tackle. The claim issue #54 exists to make, asserted against

@@ -1,6 +1,13 @@
 # Build cache + worktrees — never sent to Docker daemon
 target/
 .worktrees/
+# Evidence of a `scripts/rpp-remote-e2e.sh` run. Its default run directory
+# lives inside the repo (it must: the container engine bind-mounts the
+# throwaway galaxy from it, and colima/Docker Desktop share $HOME, not
+# /var/folders). Sending it as build context changes the context on every
+# run, so every run rebuilt both images from scratch — twenty minutes of
+# cargo per iteration, for a directory the image has no use for.
+.rpp-remote-e2e/
 **/target/
 **/.cosmon/state/
 **/.cosmon/archive/

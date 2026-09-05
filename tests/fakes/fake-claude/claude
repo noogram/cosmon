@@ -25,7 +25,9 @@
 #                   state dir (COSMON_STATE_DIR, which the adapter's worker
 #                   envelope pins). Knobs: FAKE_CLAUDE_READ_TIMEOUT (default
 #                   120s of silence before giving up), FAKE_CLAUDE_DONE_FILE
-#                   (a breadcrumb written with the id it acted on).
+#                   (a breadcrumb written with the id it acted on),
+#                   FAKE_CLAUDE_LINGER (seconds to stay alive after
+#                   completing, default 120 — see the mode's own comment).
 #
 # ── Debug hooks ────────────────────────────────────────────────────────────
 #   PROMPT_ECHO=1            tee stdin + argv to $FAKE_CLAUDE_LOG before acting
@@ -133,16 +135,34 @@ EOF
             echo "fake-claude: no molecule id in the briefing (or none arrived)" >&2
             exit 3
         fi
-        # One shot, and its outcome is the exit code. A fake that swallowed
-        # a failing `cs complete` would let the e2e's observe step report
-        # "still running" with no cause named anywhere.
-        if ! cs complete "$id" --reason "fake-claude complete-molecule"; then
-            echo "fake-claude: cs complete $id failed" >&2
+        # One shot, then CHECK. The exit code alone is not enough:
+        # `cs complete` on an id it cannot find prints
+        # "error completing <id>: molecule not found" and still exits 0,
+        # so a fake that trusted the status would report success for a
+        # molecule it never touched — and the e2e would then blame the
+        # spawn for a completion that never happened.
+        cs complete "$id" --reason "fake-claude complete-molecule" || true
+        if ! cs --json observe "$id" | grep -q '"status": *"completed"'; then
+            echo "fake-claude: $id is not completed after cs complete" >&2
             exit 4
         fi
         if [ -n "${FAKE_CLAUDE_DONE_FILE:-}" ]; then
             printf '%s\n' "$id" >"$FAKE_CLAUDE_DONE_FILE"
         fi
+        # Then STAY ALIVE, like the agent this stands in for.
+        #
+        # Not cosmetic. The transport delivers a briefing as
+        # load-buffer -> paste-buffer -> a trailing submit key, and a
+        # worker that exits the instant it reads the paste takes its tmux
+        # session — and, if it is the only one, the whole tmux server —
+        # down between the paste and the submit. The submit then fails,
+        # the dispatch is reported as a SPAWN failure, and its ledger
+        # entry and worktree are rolled back under a molecule that is by
+        # then already `completed`. Every part of that is a real
+        # sequence, observed in the container smoke; none of it is what
+        # the smoke is trying to measure. A real `claude` never
+        # disappears mid-briefing, so neither does this.
+        sleep "${FAKE_CLAUDE_LINGER:-120}"
         exit 0
         ;;
     echo-prompt)

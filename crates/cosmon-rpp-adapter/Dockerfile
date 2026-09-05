@@ -183,6 +183,24 @@ RUN install -d -o cosmon -g cosmon -m 0755 \
         /cosmon/.claude \
  && install -o cosmon -g cosmon -m 0644 /dev/null /cosmon/.claude.json
 
+# tmux must be told which shell to run a pane's command with.
+#
+# It uses the account's login shell, and this account's is
+# `/usr/sbin/nologin` on purpose — the service user must not be
+# loggable-into. `nologin` prints a line and exits, so EVERY worker pane
+# died the instant it was created: `new-session` returned 0, the tmux
+# server exited with it, and the dispatch failed one step later with
+# `worker not found` — a message about the session, not about the reason.
+# Found by the issue #54 container smoke, which is the only test that
+# runs a worker in this image.
+#
+# `default-shell` is the narrow fix: it moves what tmux EXECS without
+# touching what `/etc/passwd` says the account may log in as, so the
+# hardening the `nologin` line exists for is unchanged. `/bin/sh` rather
+# than bash — a pane here runs one command, never an interactive shell.
+RUN printf 'set -g default-shell /bin/sh\n' >/cosmon/.tmux.conf \
+ && chown cosmon:cosmon /cosmon/.tmux.conf
+
 USER cosmon
 ENV HOME=/cosmon
 WORKDIR /cosmon
@@ -221,6 +239,14 @@ CMD ["--bind", "0.0.0.0:8443", "--config", "/cosmon/.config/cosmon/rpp.toml"]
 # byte-identical whether or not this one is built.
 FROM builder AS e2e-builder
 
+# `cs` links the Linux keyring backend, whose `libdbus-sys` build script
+# panics outright when pkg-config finds no `dbus-1` — the adapter never
+# reaches that dependency, which is why the shipped builder stage does
+# not carry it and does not grow it here.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libdbus-1-dev \
+ && rm -rf /var/lib/apt/lists/*
+
 # The worker's `cs`, built from the same workspace and lockfile as the
 # adapter. A host-built binary copied in would be the wrong architecture
 # half the time and unpinned the other half.
@@ -229,6 +255,14 @@ RUN cargo build --release --locked -p cosmon-cli --bin cs
 FROM runtime AS e2e
 
 USER root
+
+# `cs` links libdbus (the Linux keyring backend), so the shared library
+# has to be present for it to start at all — a `cs` that cannot exec is
+# a worker that cannot finish its molecule, and the symptom would be a
+# silent pane. The shipped stage installs none of this: it has no `cs`.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libdbus-1-3 \
+ && rm -rf /var/lib/apt/lists/*
 
 COPY --from=e2e-builder /work/target/release/cs /usr/local/bin/cs
 COPY --from=builder /work/tests/fakes/fake-claude/claude /usr/local/bin/fake-claude
@@ -258,10 +292,8 @@ RUN printf '%s\n' \
 # operator bind-mounting a galaxy owned by another uid needs the same
 # waiver, or matching ownership. Named in the CHANGELOG rather than
 # silently baked into the shipped stage.
-RUN printf '%s\n' \
-        '[safe]' \
-        '\tdirectory = *' \
-        >/cosmon/.gitconfig \
+RUN printf '[safe]\n\tdirectory = *\n' >/cosmon/.gitconfig \
+ && git config --file /cosmon/.gitconfig --get safe.directory \
  && chown cosmon:cosmon /cosmon/.gitconfig
 
 USER cosmon

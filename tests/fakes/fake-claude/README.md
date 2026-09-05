@@ -33,8 +33,18 @@ It needs `cs` on `PATH` and a resolvable state dir; inside the e2e image
 the adapter's worker envelope pins `COSMON_STATE_DIR`. Knobs:
 `FAKE_CLAUDE_READ_TIMEOUT` (seconds of silence before it gives up, default
 120 — a briefing that never arrives must end as a named failure, not a
-pane that idles forever) and `FAKE_CLAUDE_DONE_FILE` (a breadcrumb file
-written with the id it acted on).
+pane that idles forever), `FAKE_CLAUDE_DONE_FILE` (a breadcrumb file
+written with the id it acted on), and `FAKE_CLAUDE_LINGER` (seconds to
+stay alive after completing, default 120).
+
+That last one is not padding. A briefing is delivered as `load-buffer` →
+`paste-buffer` → a trailing submit key, so a worker that exits the instant
+it reads the paste takes its tmux session — and, when it is the only one,
+the tmux server — down *between* the paste and the submit. The submit then
+fails and the dispatch is reported as a spawn failure, with its ledger
+entry and worktree rolled back under a molecule that is already
+`completed`. A real agent never disappears mid-briefing; neither does
+this.
 
 ## Debug
 

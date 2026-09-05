@@ -131,6 +131,20 @@ this stage.
 
 ### Fixed
 
+- **No worker could ever start in the adapter image: tmux ran every pane
+  command through `/usr/sbin/nologin`.** The service account's login shell is
+  `nologin` on purpose, and tmux runs a pane's command with the account's login
+  shell — so `new-session` returned 0, `nologin` printed its line and exited,
+  the tmux server exited with it, and the dispatch failed one step later with
+  `worker not found`: a message about the missing session, not about why it was
+  missing. Every route-level suite was green throughout, because they inject an
+  in-memory backend; the only test that runs a worker in this image is the
+  container smoke, and it found this on its first honest run. The fix is
+  `set -g default-shell /bin/sh` in the image's `tmux.conf`, which moves what
+  tmux *execs* without touching what `/etc/passwd` says the account may log in
+  as — the hardening the `nologin` line exists for is unchanged. Shipped in the
+  `runtime` stage, not the test stage: the defect is the deployed image's.
+
 - **The `COSMON_RPP_CS` line in `deploy/docker-compose.yml` was a fossil.** It
   pointed the adapter at `/usr/local/bin/cs` inside an image that has shipped no
   `cs` binary since it went library-direct (`task-20260504-6ad4`). It read as
