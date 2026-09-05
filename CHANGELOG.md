@@ -21,6 +21,34 @@ this stage.
 
 ### Added
 
+- **Headless `cosmon-remote login`, and a `cs-oidc-mock` that can actually be
+  logged into.** GitHub issue #53 asks for a container smoke that "uses login,
+  then …". Neither half existed. The mock IdP served only `/jwks` and `/issue`,
+  so there was no `/authorize` for a client to visit and no `/token` to redeem
+  a code at; and `login` hard-coded the system browser as the thing that opens
+  the authorize URL, which a container has none of. Both halves are now real.
+  `cs-oidc-mock` gained `GET /.well-known/openid-configuration` (S256 only —
+  `plain` is a PKCE downgrade and is not advertised), a `GET /authorize` that
+  auto-approves and 302s back with `code` + the caller's `state` verbatim, and a
+  `POST /token` that redeems a **single-use, 60-second** code bound to its
+  `client_id` and `redirect_uri`, refusing any request whose PKCE verifier does
+  not digest to the challenge presented at `/authorize`. Its V0 endpoints are
+  untouched. `cosmon-remote login` gained one seam, not a second CLI surface:
+  `$COSMON_REMOTE_BROWSER` names a command that opens the sign-in URL (appended
+  as its last argument, run directly, no shell), so
+  `COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login`
+  completes a full login with no display attached. Setting it empty is an error
+  raised **before** the listener binds, not a silent fallback — the alternative
+  is a `login` that opens nothing and then waits five minutes without saying
+  why. The default (system browser) is unchanged. `login --help` and
+  `man cosmon-remote` were re-blessed to carry the new `NO BROWSER?` block; the
+  root `--help` line is byte-identical, because a paragraph about a headless
+  environment variable does not belong in a command index. The whole IdP now
+  lives in `cosmon-oidc-testkit`'s library as a router, so
+  `crates/cosmon-remote/tests/login_headless.rs` drives the **shipped**
+  handlers in-process rather than a second mock that would stay green while the
+  binary drifted.
+
 - **`cosmon-remote login --bind <IP>` — a configurable bind address for the
   OIDC loopback callback.** The answer to GitHub issue #52: the login flow's
   one-shot redirect catcher bound `127.0.0.1` and advertised

@@ -123,6 +123,22 @@ pub enum OidcError {
         reason: String,
     },
 
+    /// `$COSMON_REMOTE_BROWSER` is set but does not name a command to run
+    /// (it is empty or only whitespace). Raised **before** the loopback
+    /// listener binds and before any network call, because the alternative is
+    /// worse than an error: `login` would open no browser at all and then sit
+    /// on the callback listener until the five-minute timeout, with nothing on
+    /// screen to say why. Carries the offending variable's name, never its
+    /// value. Unset it to fall back to the system browser.
+    #[error(
+        "${var} is set but names no command to run — unset it to open the \
+         system browser, or set it to a command such as `xdg-open`"
+    )]
+    BrowserCommand {
+        /// The environment variable that was set to an unusable value.
+        var: &'static str,
+    },
+
     /// An opaque transport / encoding failure (a `reqwest::Error`, a
     /// `url::ParseError`). Boxed so no foreign error type leaks into
     /// `cosmon-remote`'s public API (the semver surface stays closed).
