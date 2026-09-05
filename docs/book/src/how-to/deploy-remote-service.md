@@ -254,16 +254,19 @@ On a laptop the two are the same machine and there is nothing to arrange.
 
 Inside a container or a VM they are not the same machine. The browser is on
 your desktop; `cosmon-remote` is in the box. The browser dials *its own*
-`127.0.0.1:7777` and the redirect never crosses the boundary. The fix is a
-port-forward plus a listener that will answer on the forwarded interface:
+`127.0.0.1:7777` and the redirect never crosses the boundary. The fix depends
+on how the box is reached:
 
 ```sh
-# On your desktop: forward its 127.0.0.1:7777 into the container/VM.
+# SSH into a VM: the tunnel's far end is opened on the VM's OWN loopback, so
+# the default bind already answers there — no --bind needed.
 ssh -L 7777:localhost:7777 you@the-vm
-# ...or, for a container, publish the port at run time:
-docker run -p 127.0.0.1:7777:7777 … your-image
+cosmon-remote login
 
-# Inside the container/VM, listen on every interface for this one login:
+# A container reached by a PUBLISHED port is different: sshd is not in the
+# loop, so the port lands on the container's external interface, not its
+# loopback. Publish the port at run time and bind the listener to match:
+docker run -p 127.0.0.1:7777:7777 … your-image
 cosmon-remote login --bind 0.0.0.0
 ```
 

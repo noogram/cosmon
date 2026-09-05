@@ -97,7 +97,12 @@ this stage.
   repo root from it before cutting the worktree) and the staged compose file's
   build context is rewritten to an absolute path, which also removes the
   `context: ../../..` that only resolved because the run directory happened to
-  sit two levels under the repo.
+  sit two levels under the repo. The run binding is still materialised from the
+  tracked `oidc-identity.toml.example` (issue #53's review fix); what the smoke
+  adds on top of it is the third grant `tackle` needs,
+  `cosmon:worker:spawn`, applied to its own throwaway binding and asserted
+  there. The template keeps the least-privilege pair, because an operator who
+  copies it untrimmed must not thereby hand out worker dispatch.
 
   **Nothing of this is in the image you deploy.** The dummy agent and the
   worker-side `cs` live in a new `e2e` Dockerfile stage — a `FROM runtime`
@@ -166,6 +171,49 @@ this stage.
   tmux *execs* without touching what `/etc/passwd` says the account may log in
   as — the hardening the `nologin` line exists for is unchanged. Shipped in the
   `runtime` stage, not the test stage: the defect is the deployed image's.
+
+- **Pre-merge review of the issue-#53 work: the container smoke now provisions
+  from the operator's own artefact, and the mock IdP requires what RFC 6749
+  says is required.** Four findings from an independent adversarial review,
+  fixed at their causes.
+
+  `scripts/rpp-remote-e2e.sh` claimed to materialise the nucleon binding "from
+  the `.example`" and did not — it wrote its own TOML from an inline heredoc and
+  never opened
+  `crates/cosmon-rpp-adapter/deploy/state/nucleons/nuc-tenant-demo/oidc-identity.toml.example`,
+  which held a single `sub = "…"` line. So the file a fresh operator actually
+  provisions from could not produce a binding the loader resolves a noyau from,
+  and the smoke stayed green straight through that. The `.example` is now a
+  complete template — every key `HabilitationMap::load` reads, each with a
+  `REPLACE_ME_*` placeholder and a comment saying what it is — and the script
+  `cp`s it and substitutes the run-specific values instead of authoring TOML of
+  its own. The `stage` step then asserts, on the materialised file, that no
+  placeholder survived and that every required key is present, so a template
+  that has lost a key turns `stage` red with the key named rather than passing
+  on a private copy the operator will never have.
+
+  `cs-oidc-mock`'s `POST /token` checked `client_id` and `redirect_uri` only
+  when the client sent them, which made the code's binding to both opt-in: a
+  client that simply omitted a field skipped the check. RFC 6749 §4.1.3 makes
+  `redirect_uri` REQUIRED at redemption whenever it was sent at authorization,
+  and `/authorize` here refuses a request without one, so it always was. Both
+  are now mandatory; absent is `invalid_request` (malformed), distinct from the
+  present-but-wrong refusals that follow.
+
+  The nightly CI job set `RPP_E2E_RUN_DIR: rpp-remote-e2e` while `.gitignore`
+  ignores `.rpp-remote-e2e/`, so the run's staged deploy tree, throwaway galaxy
+  and logs landed untracked-but-visible under the repo root. Both now spell the
+  dotted name the script defaults to, and the artifact upload passes
+  `include-hidden-files: true` — without it the step would have succeeded while
+  uploading nothing.
+
+  Finally the script's teardown trapped `EXIT` only, so a CI cancel (`SIGTERM`)
+  left the compose stack up for the next run to meet as "port already
+  allocated"; it now traps `INT` and `TERM` as well, idempotently. `observe`
+  asserts the recorded lifecycle status, not just the molecule id — a molecule
+  that reads back while reporting a status nucleation never produces is exactly
+  the envelope drift this smoke exists to notice — and a dead `FAILED_STEP`
+  variable is gone.
 
 - **The `COSMON_RPP_CS` line in `deploy/docker-compose.yml` was a fossil.** It
   pointed the adapter at `/usr/local/bin/cs` inside an image that has shipped no

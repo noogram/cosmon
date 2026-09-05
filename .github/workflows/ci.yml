@@ -714,7 +714,12 @@ jobs:
         run: docker version && docker compose version && jq --version
       - name: Container-level RPP smoke
         env:
-          RPP_E2E_RUN_DIR: rpp-remote-e2e
+          # Dotted, exactly as `.gitignore` spells it and as the
+          # script defaults: an undotted run dir left the run's staged
+          # deploy tree, tenant galaxy and logs untracked-but-visible
+          # under the repo root, where a `git status` gate would have
+          # seen them.
+          RPP_E2E_RUN_DIR: .rpp-remote-e2e
         run: bash scripts/rpp-remote-e2e.sh
       - name: Upload the step-by-step NDJSON record
         # `always()`: the failing run is the one whose NDJSON is worth
@@ -723,9 +728,13 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: rpp-remote-e2e-ndjson
+          # The run dir is dotted (it must be, to stay ignored), and
+          # upload-artifact v4 skips hidden paths unless told otherwise
+          # — without this the step succeeds while uploading nothing.
+          include-hidden-files: true
           path: |
-            rpp-remote-e2e/e2e.ndjson
-            rpp-remote-e2e/logs/
+            .rpp-remote-e2e/e2e.ndjson
+            .rpp-remote-e2e/logs/
           retention-days: 7
 
   provenance-gate:
