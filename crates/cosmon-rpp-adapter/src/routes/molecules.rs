@@ -2083,7 +2083,7 @@ fn spawn_resident_drain(
             drain::run_drain(&tenant_root, &root_molecule_id, &bounds, timeout, executor)
         })
         .await
-        .unwrap_or_else(|_| drain::DrainOutcome {
+        .unwrap_or(drain::DrainOutcome {
             token: drain::token::ERROR,
             detail: None,
         });
