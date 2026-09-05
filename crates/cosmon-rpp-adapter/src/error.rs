@@ -145,23 +145,6 @@ pub enum RppRejectReason {
     #[error("bidirectional forbidden")]
     BidirectionalForbidden,
 
-    // ---- Subprocess envelope (clause e) ----
-    /// `cs` could not be spawned.
-    #[error("subprocess spawn failed: {0}")]
-    SubprocessSpawnFailed(String),
-    /// `cs` exceeded the configured timeout.
-    #[error("subprocess timeout after {0:?}")]
-    SubprocessTimeout(Duration),
-    /// `cs` exited non-zero.
-    #[error("subprocess exit non-zero (code={code})")]
-    SubprocessExitNonZero {
-        /// Process exit code as reported by the OS.
-        code: i32,
-        /// Short stderr excerpt for operator logs (never echoed in
-        /// wire response).
-        stderr_excerpt: String,
-    },
-
     // ---- Substrate (clause b) ----
     /// Materialisation of the inbox file failed.
     #[error("inbox materialisation failed: {0}")]
@@ -199,9 +182,6 @@ impl RppRejectReason {
             Self::NoyauKilled(_) => "noyau_killed",
             Self::GlobalKill => "global_kill",
             Self::BidirectionalForbidden => "bidirectional_forbidden",
-            Self::SubprocessSpawnFailed(_) => "subprocess_spawn_failed",
-            Self::SubprocessTimeout(_) => "subprocess_timeout",
-            Self::SubprocessExitNonZero { .. } => "subprocess_exit_non_zero",
             Self::InboxMaterializationFailed(_) => "inbox_materialization_failed",
         }
     }
@@ -236,10 +216,7 @@ impl RppRejectReason {
             | Self::DrainMoleculeQuotaExceeded => StatusCode::TOO_MANY_REQUESTS,
             Self::DrainMaxDepthExceeded => StatusCode::CONFLICT,
             Self::BidirectionalForbidden => StatusCode::METHOD_NOT_ALLOWED,
-            Self::SubprocessSpawnFailed(_)
-            | Self::SubprocessExitNonZero { .. }
-            | Self::InboxMaterializationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::SubprocessTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            Self::InboxMaterializationFailed(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -316,10 +293,6 @@ mod tests {
         assert_eq!(
             RppRejectReason::OperatorOnlyVerb("done").label(),
             "operator_only_verb"
-        );
-        assert_eq!(
-            RppRejectReason::SubprocessTimeout(Duration::from_secs(30)).label(),
-            "subprocess_timeout",
         );
     }
 

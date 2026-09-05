@@ -182,25 +182,16 @@ fn log_step(event: &str, outcome: &StepOutcome) {
     }
 }
 
-/// Boot-time state-tree materializer. Holds the resolved roots and the
-/// `cs` binary path; [`Self::run`] does the work for a list of noyaux.
+/// Boot-time state-tree materializer. Holds the resolved roots;
+/// [`Self::run`] does the work for a list of noyaux.
 #[derive(Clone, Debug)]
 pub struct ImageInit {
     /// Whispers ingestion dropbox (instance-level, step 1).
     pub inbox_root: PathBuf,
     /// Tenant galaxy root; the per-noyau dir is `galaxies_root/<noyau>`,
-    /// the same path [`crate::subprocess::SystemInvoker::cwd_for_spark`]
-    /// pins as the subprocess `cwd` (ADR-080 §3.5).
+    /// the same tenant root the library-direct routes resolve their
+    /// store and worker envelope from (ADR-080 §3.5 as amended, U6).
     pub galaxies_root: PathBuf,
-    /// Path to the `cs` binary.
-    ///
-    /// No longer read by this module: state materialization went
-    /// library-direct in issue #54 (U2) and no step here spawns `cs`.
-    /// The field survives because the adapter's other `cs` call sites
-    /// (tackle / run / land, ADR-080 §3.5 clause (e)) are retired by a
-    /// later unit of the same mission, and every construction site of
-    /// this struct still supplies it. It goes away with the envelope.
-    pub cs_path: PathBuf,
     /// `$HOME` whose `.claude.json` / `.claude/settings.json` the
     /// spawned worker reads (Famille B, steps 3a/3b).
     pub claude_home: PathBuf,

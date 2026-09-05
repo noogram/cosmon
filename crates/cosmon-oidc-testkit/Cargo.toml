@@ -8,20 +8,12 @@ version.workspace = true
 edition = "2021"
 rust-version.workspace = true
 license.workspace = true
-description = "Test infrastructure for §8j HTTPS+OIDC adapters: in-memory JWKS endpoint, JWT issuance, tenant-cwd workspace fixtures (ADR-080 §3.5 clause (e))."
+description = "Test infrastructure for §8j HTTPS+OIDC adapters: in-memory JWKS endpoint, JWT issuance, tenant-cwd workspace fixtures (ADR-080)."
 
-# `fake-cs` is a stand-in for the real `cs` binary, mirroring the
-# subset of `cs --json observe <id>` that the RPP route exercises so a
-# tenant subprocess isolation test can run without rebuilding the full
-# cosmon-cli. It is compiled once by `build.rs` directly via rustc and
-# placed in `OUT_DIR/fake-cs`; downstream crates retrieve the path via
-# [`fake_cs_path`]. We deliberately avoid `[[bin]]` for `fake-cs`
-# because Cargo only sets `CARGO_BIN_EXE_<name>` for the *defining*
-# crate's integration tests, which would prevent
-# `cosmon-rpp-adapter`'s tests from locating the binary. The
-# standalone `cs-oidc-mock` binary below has no such constraint — it
-# is never consumed via env-var path discovery, only by `docker run`.
-build = "build.rs"
+# The `fake-cs` stand-in binary and its `build.rs` were retired with the
+# ADR-080 §3.5 clause (e) subprocess envelope (issue #54 U6): the
+# adapter no longer spawns `cs`, so the tests exercise the library seam
+# (`cosmon_transport::MockBackend` / the worker envelope) instead.
 
 # `cs-oidc-mock` — V0 demo IdP shipped as a runnable binary. Promoted
 # from the dev-only [`OidcMock`] axum harness so the §8j HTTPS+OIDC

@@ -11,9 +11,6 @@
 //! # Posture: "prepared" (V0 default, warns) or "active".
 //! posture = "prepared"
 //!
-//! # Optional explicit path to the `cs` binary; falls back to PATH.
-//! cs_path = "/usr/local/bin/cs"
-//!
 //! # Cosmon state directory. Overridable by `COSMON_STATE_DIR` in the
 //! # environment (env > rpp.toml > default) so a per-deployment compose
 //! # that mounts its persistent volume elsewhere wins over this baked
@@ -26,9 +23,6 @@
 //!
 //! # Galaxy root for tenant routing.
 //! galaxies_root = "~/galaxies"
-//!
-//! # Per-subprocess timeout in seconds.
-//! subprocess_timeout_sec = 30
 //!
 //! # JWKS HTTP-fetch refresh interval, seconds (default 3600 = 1 h).
 //! # The trusted-issuer allowlist itself lives in
@@ -60,15 +54,15 @@ pub struct RppConfig {
     pub bind_addr: Option<String>,
     /// Posture switch — `prepared` (default) or `active`.
     pub posture: Option<Posture>,
-    /// Override the `cs` binary path.
-    pub cs_path: Option<PathBuf>,
     /// Override the cosmon state directory.
     pub state_dir: Option<PathBuf>,
     /// Override the whisper inbox root.
     pub whispers_inbox_root: Option<PathBuf>,
     /// Override the galaxies root.
     pub galaxies_root: Option<PathBuf>,
-    /// Subprocess timeout, seconds.
+    /// Retired subprocess-timeout knob (issue #54 U6): accepted and
+    /// ignored so an existing `rpp.toml` keeps parsing across the
+    /// library-direct cut-over. Removal is a config-major follow-up.
     pub subprocess_timeout_sec: Option<u64>,
     /// JWKS HTTP-fetch refresh interval, seconds. Default
     /// [`crate::jwks_fetch::DEFAULT_REFRESH_TTL`] (1 h). The TTL is only
@@ -110,11 +104,10 @@ pub struct RppConfig {
     /// HERE — operator binding, readable by the tenant, never written
     /// by it — and nowhere else: not in code, not in a formula, not in
     /// the client CLAUDE.md (the copy nobody re-syncs at
-    /// the next model). Read at worker-spawn time by the §3.5
-    /// subprocess envelope ([`crate::subprocess::SystemInvoker`]) and
-    /// exported as `ANTHROPIC_MODEL` into the `cs tackle` child, which
-    /// threads it across the tmux boundary into the worker `claude`
-    /// command. Absent → [`DEFAULT_CLAUDE_MODEL`]. Explicit `""` →
+    /// the next model). Read at worker-spawn time by the worker
+    /// envelope ([`crate::worker_env::WorkerEnvelope`]) and exported
+    /// as `ANTHROPIC_MODEL` into the spawned worker's environment,
+    /// where the claude CLI reads it as its model setting. Absent → [`DEFAULT_CLAUDE_MODEL`]. Explicit `""` →
     /// opt-out (no export; the claude CLI uses its own default).
     /// Changing the fleet's model is a one-line diff of this key.
     pub claude_model: Option<String>,
@@ -233,7 +226,6 @@ impl RppConfig {
 
     /// Expand every path-typed field against `$HOME`.
     fn expand_paths(&mut self) {
-        self.cs_path = self.cs_path.take().map(expand_tilde);
         self.state_dir = self.state_dir.take().map(expand_tilde);
         self.whispers_inbox_root = self.whispers_inbox_root.take().map(expand_tilde);
         self.galaxies_root = self.galaxies_root.take().map(expand_tilde);
@@ -328,16 +320,6 @@ impl RppConfig {
     #[must_use]
     pub fn resolved_posture(&self) -> Posture {
         self.posture.unwrap_or_default()
-    }
-
-    /// Resolved subprocess timeout (default
-    /// [`crate::DEFAULT_SUBPROCESS_TIMEOUT`]).
-    #[must_use]
-    pub fn resolved_subprocess_timeout(&self) -> std::time::Duration {
-        self.subprocess_timeout_sec.map_or(
-            crate::DEFAULT_SUBPROCESS_TIMEOUT,
-            std::time::Duration::from_secs,
-        )
     }
 
     /// Resolved backend list — empty by default.

@@ -19,7 +19,38 @@ this stage.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Remote Pilot Port no longer spawns the `cs` binary — the ADR-080
+  §3.5 clause (e) subprocess envelope is retired** (issue #54 U6,
+  [ADR-080 §3.5.3](docs/adr/080-remote-pilot-port-https-oidc.md)). `POST
+  /v1/molecules/{id}/tackle` dispatches **in-process** through the library
+  tackle executor over the tmux transport port; `POST /v1/molecules/{id}/run`
+  drains through the same in-process DAG loop `cs run <root>` executes, with
+  the identical named termination tokens; the `land` route's decision half is
+  unchanged and its sealed effect answers the typed
+  `501 land_effect_unavailable` until the harvest transaction is
+  library-callable ([ADR-176 §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)).
+  A formula step kind the library executor does not cover yet answers the
+  typed `501 tackle_unsupported_step` with the step kind named — never a
+  silent subprocess fallback. The env-hygiene allow-list survives at the new
+  boundary: every worker spawn is clamped to the §3.5 allow-list plus the
+  set-half (`COSMON_STATE_DIR` tenant pin, `COSMON_ARTIFACT_DIR`, the
+  Anthropic key/model, and `COSMON_EGRESS_EXPOSED=1` — the ADR-155 exposed
+  posture, re-homed off the retired `COSMON_API_REQUEST` marker). Wire
+  changes: `subprocess_timeout` / `subprocess_spawn_failed` /
+  `worker_credential_missing` / `adapter_backend_unreachable` labels are
+  retired on the tackle route (`worker_spawn_failed`, `not_tackleable` and
+  the two 501 labels replace them; `tackle_unavailable` remains the stable
+  fallback); the drain's `teardown_failed` token is not emitted by the
+  library drain (harvest is not attempted — the enumerated follow-up). The
+  `COSMON_RPP_CS` env knob and the `cs_path` / `subprocess_timeout_sec`
+  config keys are retired (the latter is still parsed and ignored). The
+  container image now carries `git` and `tmux` (the dispatch substrate) and
+  its "no `cs` binary" header is a statement of fact.
+
 ### Added
+
 
 - **A harvest door on the Remote Pilot Port — `cs land` and
   `POST /v1/molecules/{id}/land`.** The answer to GitHub issue #51: a tenant

@@ -3,14 +3,21 @@
 //! B2 bounded drain — `POST /v1/molecules/:id/run` integration tests
 //! (ADR-124).
 //!
+//! Since issue #54 U6 the drain runs **in-process**
+//! ([`cosmon_rpp_adapter::drain::run_drain`] — the same DAG loop `cs
+//! run <root>` executes, with the library executor as its dispatch
+//! seam); no `cs` binary is involved anywhere.
+//!
 //! Scenarios:
 //!
 //! 1. Happy path: JWT with `write+spawn` → 202, body carries the
 //!    server-resolved bounds (defaults — never unbounded), and the
 //!    detached loop publishes `drain.started` then `drain.terminated`
 //!    with reason `drained` on the events bus.
-//! 2. Named bound exit: a pinned `cs run` exit 90 surfaces as the
-//!    stable `budget_exhausted` token (B3 mirror).
+//! 2. Named bound exits: the B3/B1 bounds surface as the stable
+//!    `budget_exhausted` / `max_depth_exceeded` tokens, produced by
+//!    the in-process loop (exercised through `run_drain` directly so
+//!    the bounds are pinned without a binding fixture).
 //! 3. Single slot per noyau: a second `run` while the loop is held
 //!    open → 409 `drain_already_active`; after termination the slot
 //!    is reusable.
@@ -22,7 +29,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use cosmon_oidc_testkit::{fake_cs_path, IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
+use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
@@ -54,7 +61,9 @@ fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-        cs_path: fake_cs_path(),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -63,7 +72,7 @@ fn make_state(
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),
@@ -118,8 +127,10 @@ async fn await_event(
 async fn run_returns_202_and_terminates_drained() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
+    // A terminal root: the in-process loop pre-seeds it and drains at
+    // tick 0 — the deterministic happy path with no worker to spawn.
     tenant_a
-        .insert_molecule("task-20260610-root", &json!({}))
+        .insert_molecule("task-20260610-root", &json!({"status": "completed"}))
         .unwrap();
 
     let oidc = OidcMock::start_with(OidcMockConfig {
@@ -178,61 +189,109 @@ async fn run_returns_202_and_terminates_drained() {
 
 #[tokio::test]
 async fn pinned_budget_exit_surfaces_stable_token() {
+    // Exercised through `run_drain` directly: the route always resolves
+    // bounds from the sealed binding, so pinning budget = 0 needs the
+    // function seam rather than a binding fixture. The pending root
+    // makes the loop want to dispatch, and B3 refuses the very first
+    // action with its named token.
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    let state_json = tenant_a
+    tenant_a
         .insert_molecule("task-20260610-b3", &json!({}))
         .unwrap();
-    // Pin the fake-cs drain to the B3 exit (90 → budget_exhausted).
-    std::fs::write(state_json.parent().unwrap().join("drain-exit"), "90").unwrap();
+    let tenant_root = tenants.galaxies_root().join("a");
+    let root_id = cosmon_core::id::MoleculeId::new("task-20260610-b3").unwrap();
 
-    let oidc = OidcMock::start_with(OidcMockConfig {
-        audiences: vec!["cosmon-rpp-a".to_owned()],
-        ..OidcMockConfig::default()
+    let envelope = cosmon_rpp_adapter::worker_env::WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: None,
+        anthropic_api_key: None,
+        claude_model: None,
+    };
+    let bounds = cosmon_rpp_adapter::nucleon_map::DrainBounds {
+        budget: 0,
+        max_depth: 8,
+        max_molecules: 256,
+    };
+    let executor = cosmon_runtime::LibraryExecutor::new(
+        &tenant_root,
+        cosmon_rpp_adapter::worker_env::EnvelopedBackend::new(
+            cosmon_transport::MockBackend::new(),
+            &envelope,
+        ),
+    );
+    let token = tokio::task::spawn_blocking(move || {
+        cosmon_rpp_adapter::drain::run_drain(
+            &tenant_root,
+            &root_id,
+            &bounds,
+            Duration::from_secs(30),
+            executor,
+        )
     })
-    .await;
-
-    let security_dir = tempfile::tempdir().unwrap();
-    let state = make_state(
-        &oidc,
-        &tenants,
-        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
-        security_dir.path(),
-    );
-    let mut rx = state.events.subscribe();
-    let app = router(state);
-
-    let jwt = oidc.issue(&IssueJwt {
-        subject: "sub-a",
-        audience: Some("cosmon-rpp-a"),
-        scopes: &["cosmon:molecule:write", "cosmon:worker:spawn"],
-        lifetime_secs: Some(60),
-        jti: Some("jti-run-b3"),
-    });
-
-    let resp = app
-        .oneshot(run_request(&jwt, "task-20260610-b3"))
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-    let terminated = await_event(&mut rx, "drain.terminated").await;
+    .await
+    .unwrap();
     assert_eq!(
-        terminated.data["reason"], "budget_exhausted",
-        "exit 90 must surface as the stable B3 token",
+        token, "budget_exhausted",
+        "B3 = 0 must surface as the stable budget token",
     );
+}
+
+/// B1 mirror: a depth bound smaller than the plan refuses before the
+/// loop starts, with its own named token.
+#[tokio::test]
+async fn depth_bound_surfaces_stable_token() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    tenant_a
+        .insert_molecule("task-20260610-b1", &json!({}))
+        .unwrap();
+    let tenant_root = tenants.galaxies_root().join("a");
+    let root_id = cosmon_core::id::MoleculeId::new("task-20260610-b1").unwrap();
+
+    let envelope = cosmon_rpp_adapter::worker_env::WorkerEnvelope {
+        tenant_root: tenant_root.clone(),
+        artifact_dir: None,
+        anthropic_api_key: None,
+        claude_model: None,
+    };
+    let bounds = cosmon_rpp_adapter::nucleon_map::DrainBounds {
+        budget: 16,
+        max_depth: 0,
+        max_molecules: 256,
+    };
+    let executor = cosmon_runtime::LibraryExecutor::new(
+        &tenant_root,
+        cosmon_rpp_adapter::worker_env::EnvelopedBackend::new(
+            cosmon_transport::MockBackend::new(),
+            &envelope,
+        ),
+    );
+    let token = tokio::task::spawn_blocking(move || {
+        cosmon_rpp_adapter::drain::run_drain(
+            &tenant_root,
+            &root_id,
+            &bounds,
+            Duration::from_secs(30),
+            executor,
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(token, "max_depth_exceeded");
 }
 
 #[tokio::test]
 async fn second_run_while_active_is_409_then_slot_reusable() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
-    let state_json = tenant_a
+    // A pending root whose dispatch cannot succeed (the tenant root is
+    // not a git repository) holds the loop open: every tick fails,
+    // rolls back, retries — until the wall-clock deadline names the
+    // exit `timeout`. That is the hold window this test needs.
+    tenant_a
         .insert_molecule("task-20260610-hold", &json!({}))
         .unwrap();
-    let mol_dir = state_json.parent().unwrap().to_path_buf();
-    // Hold the drain open so the slot stays claimed.
-    std::fs::write(mol_dir.join("drain-hold"), "1").unwrap();
 
     let oidc = OidcMock::start_with(OidcMockConfig {
         audiences: vec!["cosmon-rpp-a".to_owned()],
@@ -241,14 +300,17 @@ async fn second_run_while_active_is_409_then_slot_reusable() {
     .await;
 
     let security_dir = tempfile::tempdir().unwrap();
-    let state = make_state(
+    let mut state = make_state(
         &oidc,
         &tenants,
         vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
         security_dir.path(),
     );
+    // A short deadline so the held slot frees within the test budget.
+    state.drain_timeout = Duration::from_secs(3);
     let mut rx = state.events.subscribe();
-    let app = router(state.clone());
+    let state = std::sync::Arc::new(state);
+    let app = router((*state).clone());
 
     let jwt = oidc.issue(&IssueJwt {
         subject: "sub-a",
@@ -277,10 +339,9 @@ async fn second_run_while_active_is_409_then_slot_reusable() {
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(body["error"], "drain_already_active");
 
-    // Release the hold; the loop exits and the slot frees up.
-    std::fs::remove_file(mol_dir.join("drain-hold")).unwrap();
+    // The deadline releases the slot with its NAMED exit (I4).
     let terminated = await_event(&mut rx, "drain.terminated").await;
-    assert_eq!(terminated.data["reason"], "drained");
+    assert_eq!(terminated.data["reason"], "timeout");
     assert!(
         !state.drains.is_active("a"),
         "slot must be released after termination",

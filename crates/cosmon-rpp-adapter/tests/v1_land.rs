@@ -11,14 +11,13 @@
 //!    that may integrate nothing rebuilds the defect issue #51 reports.
 //! 2. The body carries **no options**. A request with any body at all is
 //!    refused `unsupported_parameter`.
-//! 3. Every one of the seven named refusals reaches the wire under its own
-//!    label, and `base_not_fast_forward` alone answers 5xx. Since issue #54
-//!    U3 the four **pre-effect** refusals — and `already_landed`
+//! 3. The four **pre-effect** refusals — and `already_landed`
 //!    idempotence — are decided in-process from the tenant's own state
-//!    files, with **no `cs` binary involved**: those tests plant real state
-//!    and write no fake-`cs` pin. The three **execution** refusals still
-//!    cross the subprocess seam (the U6 cut-over point) and are exercised
-//!    through the child's exit code.
+//!    files, with **no `cs` binary involved** (issue #54 U3), each under
+//!    its own label. Since U6 the subprocess effect is retired: a harvest
+//!    the decision half ADMITS answers the typed refusal
+//!    `501 land_effect_unavailable` until the sealed transaction grows a
+//!    library implementation (ADR-176 §11).
 //! 4. The door needs `cosmon:molecule:write` and **not** the
 //!    `worker:spawn` composition that `tackle` and `run` carry — because
 //!    auto-propel is disarmed here, so no agent budget is spent.
@@ -29,10 +28,8 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use cosmon_core::harvest_door::{DoorRefusal, ALL_REFUSALS};
-use cosmon_oidc_testkit::{
-    fake_cs_path, IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces,
-};
+use cosmon_core::harvest_door::ALL_REFUSALS;
+use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
@@ -62,7 +59,9 @@ fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-        cs_path: fake_cs_path(),
+        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -71,7 +70,7 @@ fn make_state(
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),
@@ -138,18 +137,6 @@ fn plant_completed(tenant: &TenantPath, id: &str) {
         .unwrap();
 }
 
-/// Path of the molecule directory the fake `cs` reads its pins from.
-fn molecule_dir(tenants: &TenantWorkspaces, id: &str) -> std::path::PathBuf {
-    tenants
-        .tenant("a")
-        .expect("tenant a")
-        .state_dir
-        .join("fleets")
-        .join("default")
-        .join("molecules")
-        .join(id)
-}
-
 /// The load-bearing status assertion of this route.
 ///
 /// `/run` answers 202 because a drain is hours-shaped and the HTTP boundary
@@ -175,18 +162,20 @@ async fn never_202_on_a_transaction_that_may_integrate_nothing() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    // U6: an ADMITTED harvest is answered with the typed effect refusal —
+    // synchronously, with the truth. Anything but a 202 keeps the issue
+    // #51 property; a 202 would claim acceptance of a transaction that
+    // integrates nothing.
     assert_ne!(
         resp.status(),
         StatusCode::ACCEPTED,
         "a 202 here rebuilds the silent failure of issue #51",
     );
-
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("request_id").is_some());
-    assert_eq!(body["harvest"]["molecule"], "task-20260901-land");
-    assert_eq!(body["harvest"]["outcome"], "landed");
+    assert_eq!(body["error"], "land_effect_unavailable");
 }
 
 /// ADR-176 D4 on the wire: the body is inert.
@@ -252,7 +241,10 @@ async fn an_empty_json_object_is_still_no_parameter() {
         .oneshot(land_request(&jwt, "task-20260901-empty", Body::from("{}")))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Past the parameter gate: the empty object reaches the effect
+    // boundary (whose U6 answer is the typed refusal), never a 400.
+    assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 }
 
 /// The four pre-effect refusals, decided **in-process** from the tenant's
@@ -376,16 +368,15 @@ async fn a_full_backlog_refuses_in_process() {
     assert_eq!(body["error"], "backlog_full");
 }
 
-/// The exit-code → label mirror, for the three refusals only the effect
-/// can produce.
-///
-/// The other four are pre-effect decisions and never reach the subprocess
-/// since issue #54 U3 — they are covered above from real state. This walk
-/// stays exhaustive over [`ALL_REFUSALS`] through the match below, so a
-/// new variant added to the closed set fails this test at compile time
-/// rather than silently joining neither half.
+/// The effect half is a TYPED refusal (issue #54 U6): a harvest the
+/// decision half admits answers `501 land_effect_unavailable` — never a
+/// silent subprocess fallback, never an invented outcome. The three
+/// execution refusals (`merge_conflict`, `base_not_fast_forward`,
+/// `pre_done_refused`) belong to the sealed transaction and return with
+/// its library implementation (ADR-176 §11); until then this label is
+/// the one honest answer past the decision half.
 #[tokio::test]
-async fn every_execution_refusal_survives_the_exit_code_mirror() {
+async fn an_admitted_harvest_answers_the_typed_effect_refusal() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
     arm_harvest_authority(&tenant_a);
@@ -395,85 +386,20 @@ async fn every_execution_refusal_survives_the_exit_code_mirror() {
     let security_dir = tempfile::tempdir().unwrap();
     let app = router(make_state(&oidc, &tenants, security_dir.path()));
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-refusals");
-    let dir = molecule_dir(&tenants, "task-20260901-refuse");
-
-    for refusal in ALL_REFUSALS {
-        // Exhaustive on purpose: a new DoorRefusal variant must be filed
-        // into one of the two halves by whoever adds it.
-        let execution_side = match refusal {
-            DoorRefusal::MergeConflict
-            | DoorRefusal::BaseNotFastForward
-            | DoorRefusal::PreDoneRefused => true,
-            DoorRefusal::NotCompleted
-            | DoorRefusal::NotAuthorized
-            | DoorRefusal::ReservationRequiresSeal
-            | DoorRefusal::BacklogFull => false,
-        };
-        if !execution_side {
-            continue;
-        }
-        std::fs::write(dir.join("land-exit"), refusal.exit_code().to_string()).unwrap();
-
-        let resp = app
-            .clone()
-            .oneshot(land_request(&jwt, "task-20260901-refuse", Body::empty()))
-            .await
-            .unwrap();
-
-        let status = resp.status();
-        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
-        let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(
-            body["error"],
-            refusal.as_str(),
-            "{refusal:?} lost its name on the wire",
-        );
-        assert!(
-            status.is_client_error() || status.is_server_error(),
-            "{refusal:?} must not answer a success status",
-        );
-
-        // ADR-176 D7: `base_not_fast_forward` is an operator configuration
-        // fault, decidable at arming time. It is the ONLY refusal the
-        // requester is not charged for.
-        assert_eq!(
-            status.is_server_error(),
-            refusal.is_operator_configuration_fault(),
-            "{refusal:?} is on the wrong side of the 4xx/5xx line",
-        );
-    }
-}
-
-/// An exit code the closed set does not own must not acquire a name.
-///
-/// Inventing one would be the unnamed refusal wearing a label — worse than
-/// an honest 500, because a client would branch on it.
-#[tokio::test]
-async fn an_unknown_exit_code_stays_anonymous() {
-    let mut tenants = TenantWorkspaces::new();
-    let tenant_a = tenants.add("a");
-    arm_harvest_authority(&tenant_a);
-    plant_completed(&tenant_a, "task-20260901-weird");
-
-    let oidc = oidc_mock().await;
-    let security_dir = tempfile::tempdir().unwrap();
-    let app = router(make_state(&oidc, &tenants, security_dir.path()));
-    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-weird");
-    let dir = molecule_dir(&tenants, "task-20260901-weird");
-    std::fs::write(dir.join("land-exit"), "42").unwrap();
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-weird", Body::empty()))
+        .oneshot(land_request(&jwt, "task-20260901-refuse", Body::empty()))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"], "harvest_failed");
-    assert!(
-        DoorRefusal::from_exit_code(42).is_none(),
-        "42 must stay outside the closed set for this test to mean anything",
-    );
+    assert_eq!(body["error"], "land_effect_unavailable");
+    // The label is NOT one of the door's seven named refusals: the
+    // closed set stays closed, and the parity gap has its own name.
+    for refusal in ALL_REFUSALS {
+        assert_ne!(body["error"], refusal.as_str());
+    }
 }
 
 /// The door does not require `cosmon:worker:spawn`.
@@ -505,7 +431,9 @@ async fn write_scope_alone_opens_the_door() {
         ))
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    // Write scope opens the door: the request reaches the effect
+    // boundary (whose U6 answer is the typed refusal), never a 403.
+    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 
     // And read alone does not: landing is a write on the molecule and on
     // the trunk it resolves against.
@@ -557,11 +485,10 @@ async fn a_repeat_request_reports_already_landed_in_process() {
 }
 
 /// The issue #54 claim itself: the decision half and idempotence answer
-/// correctly against an image that carries **no `cs` binary at all**.
-///
-/// `cs_path` points at a path that does not exist, so any code path that
-/// still shells out fails loudly — a refusal or an `already_landed` success
-/// arriving on the wire can only have been produced in-process.
+/// correctly against an image that carries **no `cs` binary at all** —
+/// since U6 the adapter has no `cs` path to configure in the first
+/// place, so a refusal or an `already_landed` success arriving on the
+/// wire can only have been produced in-process.
 #[tokio::test]
 async fn the_decision_half_needs_no_cs_binary_at_all() {
     let mut tenants = TenantWorkspaces::new();
@@ -582,9 +509,7 @@ async fn the_decision_half_needs_no_cs_binary_at_all() {
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
-    let mut state = make_state(&oidc, &tenants, security_dir.path());
-    state.cs_path = std::path::PathBuf::from("/nonexistent/cs-binary");
-    let app = router(state);
+    let app = router(make_state(&oidc, &tenants, security_dir.path()));
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-nobin");
 
     let resp = app

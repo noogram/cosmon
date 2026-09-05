@@ -47,7 +47,12 @@ cosmon-mcp = { workspace = true }
 # (ADR-0023 MVP-B; ADR-0002 mint surface).
 cosmon-notary = { workspace = true }
 cosmon-process-witness = { workspace = true }
+# Library-direct dispatch (issue #54 U6): the in-process tackle
+# executor + DAG drain loop, and the tmux transport port their spawns
+# go through — the replacement of the retired `cs` subprocess envelope.
+cosmon-runtime = { workspace = true }
 cosmon-state = { path = "../cosmon-state" }
+cosmon-transport = { workspace = true }
 # Deterministic CBOR canon for the ScopeBadge (ADR-0023 MVP-B, offline-first).
 ciborium = { workspace = true }
 # Rust→TS contract for the badge schema (ADR-0023 §D8). The TS side never
@@ -81,6 +86,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
 cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
+# The in-memory transport mock the integration tests hand to
+# `AppState.worker_backend` (issue #54 U6) — no tmux, spawn calls
+# recorded for the env-hygiene falsifiers.
+cosmon-transport = { workspace = true, features = ["test-support"] }
 # Client↔server contract net (replay-Dave D1, task-20260610-828e):
 # the auth_claude integration test deserialises the REAL route bytes
 # into the cosmon-remote client structs, so a wire drift between the

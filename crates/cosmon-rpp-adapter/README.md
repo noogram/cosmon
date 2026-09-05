@@ -50,10 +50,10 @@ Proxies to `cs observe :id --json` under the resolved tenant galaxy.
 | Clause | Implementation |
 |--------|----------------|
 | (a) identity mapping | `nucleon_map.rs` — `oidc-identity.toml` BLAKE3-sealed |
-| (b) causal closure   | `audit.rs` — `<inbox>/api/<request_id>.json` written before `cs` |
+| (b) causal closure   | `audit.rs` — `<inbox>/api/<request_id>.json` written before any effect |
 | (c) rate limit       | `rate_limit.rs` — per-`sub` leaky bucket on disk |
 | (d) one-way topology | V0 forbids POST routes outright |
-| (e) subprocess envelope | `subprocess.rs` — `COSMON_API_REQUEST=1` + cwd + timeout |
+| (e) worker envelope | `worker_env.rs` — the §3.5 env allow-list, clamped onto every worker spawn (`env -i K=V…` through the transport port). The `cs` subprocess the clause originally enveloped is retired (issue #54 U6, ADR-080 §3.5.3) |
 
 ## Configuration
 
@@ -64,7 +64,6 @@ bind_addr = "127.0.0.1:8443"
 posture = "prepared"
 state_dir = "~/.cosmon/state"
 galaxies_root = "~/galaxies"
-subprocess_timeout_sec = 30
 ```
 
 ## Forbidden vocabulary (ADR-080 §15)

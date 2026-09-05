@@ -17,9 +17,10 @@
 //! - **(c)** per-`sub` leaky bucket pre-admission rate limit.
 //! - **(d)** one-way topology — V0 forbids POST routes outright; the
 //!   `bidirectional` flag is reserved for V2+.
-//! - **(e)** subprocess envelope — checked here as a list of
-//!   *forbidden verbs* (operator-only, ADR-080 §5); the actual
-//!   spawn happens in [`crate::subprocess`].
+//! - **(e)** worker envelope — checked here as a list of *forbidden
+//!   verbs* (operator-only, ADR-080 §5); the env discipline the clause
+//!   used to attach to a `cs` subprocess now lives at the worker-spawn
+//!   seam in [`crate::worker_env`] (issue #54 U6).
 
 use std::path::Path;
 
