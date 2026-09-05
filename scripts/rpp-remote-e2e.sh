@@ -63,6 +63,7 @@
 #   RPP_E2E_IDP_SUB          `sub` the mock IdP signs in as
 #   RPP_E2E_EXPECT_SUB       falsifier: what `auth-me` must observe
 #   RPP_E2E_CLIENT_AUDIENCE  falsifier: the audience the CLIENT asks for
+#   RPP_E2E_EXPECT_STATUS    falsifier: the status `observe` must report
 #   RPP_E2E_EXPECT_LAND_LABEL  falsifier: the refusal label `land` returns
 #   COSMON_REMOTE_BIN        skip the cargo build, use this binary
 
@@ -75,7 +76,7 @@ KEEP=0
 for arg in "$@"; do
   case "$arg" in
     --keep) KEEP=1 ;;
-    --help|-h) sed -n '2,67p' "$0"; exit 0 ;;
+    --help|-h) sed -n '2,68p' "$0"; exit 0 ;;
     *) echo "error: unknown flag: $arg" >&2; exit 2 ;;
   esac
 done
@@ -145,9 +146,14 @@ IDP_SUB="${RPP_E2E_IDP_SUB:-cs-oidc-mock-user}"
 #
 #   RPP_E2E_EXPECT_SUB         → `auth-me` (what /v1/auth/me must report)
 #   RPP_E2E_CLIENT_AUDIENCE    → `login`   (the audience the CLIENT asks for)
+#   RPP_E2E_EXPECT_STATUS      → `observe` (the recorded lifecycle status)
 #   RPP_E2E_EXPECT_LAND_LABEL  → `land`    (the named refusal)
 EXPECT_SUB="${RPP_E2E_EXPECT_SUB:-$IDP_SUB}"
 CLIENT_AUDIENCE="${RPP_E2E_CLIENT_AUDIENCE:-$AUDIENCE}"
+# A molecule nucleated over the API is assigned to nobody, so it lands
+# in `Pending` (cosmon_core::nucleate: Pending if unassigned, Queued if
+# assigned) and `observe` renders that as the snake_case label.
+EXPECT_OBSERVE_STATUS="${RPP_E2E_EXPECT_STATUS:-pending}"
 EXPECT_LAND_LABEL="${RPP_E2E_EXPECT_LAND_LABEL:-subprocess_spawn_failed}"
 NOYAU="e2e-noyau"
 # The issuer MUST be a URL the *client* can reach: it is where
@@ -184,7 +190,6 @@ echo "==> run dir: $RUN_DIR"
 # `evidence` is a short human sentence naming what was actually observed
 # — never the token, never a response body verbatim.
 # ---------------------------------------------------------------------------
-FAILED_STEP=""
 record() {
   local step="$1" rc="$2" ms="$3" evidence="$4"
   jq -cn --arg step "$step" --argjson rc "$rc" --argjson ms "$ms" \
@@ -194,7 +199,6 @@ record() {
     printf '    [ok]   %-12s %sms — %s\n' "$step" "$ms" "$evidence"
   else
     printf '    [FAIL] %-12s %sms — %s\n' "$step" "$ms" "$evidence" >&2
-    [[ -z "$FAILED_STEP" ]] && FAILED_STEP="$step"
   fi
 }
 
@@ -212,8 +216,14 @@ fail() {
 # Teardown. Registered before the stack exists so an abort during `up`
 # still cleans up.
 # ---------------------------------------------------------------------------
+CLEANED=0
 cleanup() {
   local rc=$?
+  # `exit` from inside the INT/TERM handler re-enters here through the
+  # EXIT trap; a second `compose down` on a torn-down project prints a
+  # confusing error over the real one.
+  if [[ $CLEANED -eq 1 ]]; then exit "$rc"; fi
+  CLEANED=1
   if [[ $KEEP -eq 1 ]]; then
     echo "==> --keep: leaving project '$PROJECT' up (down with:"
     echo "    docker compose -p $PROJECT -f $COMPOSE_FILE down -v)"
@@ -226,6 +236,10 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+# A CI cancel arrives as SIGTERM (SIGINT from a terminal ^C); without
+# these the stack survives the run that owns it and the next run meets
+# "port already allocated".
+trap cleanup INT TERM
 
 compose() {
   COSMON_GALAXIES_HOST="$RUN_DIR/galaxies" \
@@ -270,25 +284,48 @@ mkdir -p "$RUN_DIR/deploy"
 cp "$DEPLOY_SRC/docker-compose.yml" "$DEPLOY_SRC/rpp.toml" "$RUN_DIR/deploy/"
 mkdir -p "$RUN_DIR/deploy/state/nucleons/nuc-$NOYAU"
 
-cat >"$RUN_DIR/deploy/state/nucleons/nuc-$NOYAU/oidc-identity.toml" <<TOML
-# Materialised from oidc-identity.toml.example for one e2e run.
-# Binds the (iss, sub, aud) triple the mock IdP mints to a throwaway noyau.
-nucleon_id = "nuc-$NOYAU"
-phase = "Biological"
-noyau = "$NOYAU"
+# The binding is materialised from the tracked `.example` — never from
+# an inline heredoc. The `.example` IS the artefact a fresh operator
+# provisions from, so the smoke must exercise exactly it: a template
+# that has lost a key the loader reads produces a file that resolves no
+# noyau, and this step goes red instead of the run passing on a private
+# copy the operator will never have.
+BINDING_TEMPLATE="$DEPLOY_SRC/state/nucleons/nuc-tenant-demo/oidc-identity.toml.example"
+BINDING="$RUN_DIR/deploy/state/nucleons/nuc-$NOYAU/oidc-identity.toml"
+[[ -f "$BINDING_TEMPLATE" ]] \
+  || fail stage "$t0" "the tracked binding template is missing at $BINDING_TEMPLATE"
+sed -e "s|REPLACE_ME_NUCLEON_ID|nuc-$NOYAU|g" \
+    -e "s|REPLACE_ME_NOYAU|$NOYAU|g" \
+    -e "s|REPLACE_ME_ISSUER|$ISSUER|g" \
+    -e "s|REPLACE_ME_SUB|$IDP_SUB|g" \
+    -e "s|REPLACE_ME_AUDIENCE|$AUDIENCE|g" \
+    -e "s|REPLACE_ME_SEALED_AT|$STAMP|g" \
+    "$BINDING_TEMPLATE" >"$BINDING"
 
-[oidc]
-issuer = "$ISSUER"
-sub = "$IDP_SUB"
-audience = "$AUDIENCE"
-sealed_at = "$STAMP"
-
-# The mock IdP mints whatever scopes /authorize was asked for; the
-# binding grants the same set explicitly so admission does not depend on
-# the IdP being generous (T23).
-[scopes]
-allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
-TOML
+# Two assertions on the materialised file, both aimed at the template
+# rather than at sed. The first catches a placeholder the template
+# renamed or added; the second catches a key the template dropped —
+# which is the failure that used to hide behind the heredoc.
+# Comment lines are excluded on purpose: the template's own header
+# names the placeholder token to tell the operator what to replace, and
+# a scan that could not tell that sentence from an unsubstituted value
+# would make the header unwritable.
+LEFTOVER="$(grep -v '^[[:space:]]*#' "$BINDING" | grep -o 'REPLACE_ME_[A-Z_]*' | sort -u | tr '\n' ' ' || true)"
+[[ -z "$LEFTOVER" ]] \
+  || fail stage "$t0" "unsubstituted placeholder(s) left by the template: $LEFTOVER"
+for required in \
+    "^nucleon_id = \"nuc-$NOYAU\"$" \
+    "^phase = \"" \
+    "^noyau = \"$NOYAU\"$" \
+    "^\[oidc\]$" \
+    "^issuer = \"$ISSUER\"$" \
+    "^sub = \"$IDP_SUB\"$" \
+    "^audience = \"$AUDIENCE\"$" \
+    "^\[scopes\]$" \
+    "^allowed = \[" ; do
+  grep -Eq "$required" "$BINDING" \
+    || fail stage "$t0" "the binding template does not yield a loadable binding: nothing matches /$required/ in $(basename "$BINDING_TEMPLATE")"
+done
 
 # The OAuth client registry the adapter publishes at
 # /.well-known/cosmon-oauth-clients — what `login` reads to learn its
@@ -312,7 +349,7 @@ cp "$REPO_ROOT/.cosmon/formulas/task-work.formula.toml" "$GALAXY/.cosmon/formula
 # The adapter runs as uid 10000; on a Linux runner the bind-mounted tree
 # is owned by the runner's uid and nucleate needs to write into it.
 chmod -R 0777 "$RUN_DIR/galaxies"
-record stage 0 "$(( $(now_ms) - t0 ))" "staged deploy copy, nucleon binding for ($ISSUER, $IDP_SUB, $AUDIENCE) → $NOYAU"
+record stage 0 "$(( $(now_ms) - t0 ))" "staged deploy copy; binding materialised from oidc-identity.toml.example for ($ISSUER, $IDP_SUB, $AUDIENCE) → $NOYAU"
 
 # ---------------------------------------------------------------------------
 # Step 2 — build the images and wait on BOTH healthchecks.
@@ -442,7 +479,12 @@ OBS="$(cs_remote --json molecule get "$MOL_ID" 2>>"$LOGS/observe.log")" \
   || fail observe "$t0" "GET /v1/molecules/$MOL_ID failed: $(tail -2 "$LOGS/observe.log" | tr '\n' ' ')"
 obs_id="$(printf '%s' "$OBS" | jq -r '.molecule.id // empty')"
 [[ "$obs_id" == "$MOL_ID" ]] || fail observe "$t0" "observe returned id=${obs_id:-<absent>}, expected $MOL_ID"
-obs_status="$(printf '%s' "$OBS" | jq -r '.molecule.status // "unknown"')"
+# The status is asserted, not merely echoed: a molecule that reads back
+# by id while reporting a status the nucleate route never produces is
+# exactly the envelope drift this smoke exists to notice.
+obs_status="$(printf '%s' "$OBS" | jq -r '.molecule.status // empty')"
+[[ "$obs_status" == "$EXPECT_OBSERVE_STATUS" ]] \
+  || fail observe "$t0" "observe reported status=${obs_status:-<absent>}, expected $EXPECT_OBSERVE_STATUS"
 record observe 0 "$(( $(now_ms) - t0 ))" "molecule $MOL_ID reads back, status=$obs_status"
 
 # ---------------------------------------------------------------------------

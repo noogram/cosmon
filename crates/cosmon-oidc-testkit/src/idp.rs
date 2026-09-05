@@ -475,11 +475,18 @@ fn split_space_separated(raw: Option<&str>) -> Vec<String> {
 
 /// The `POST /token` form body (RFC 6749 §4.1.3 + RFC 7636 §4.5).
 #[derive(Debug, Deserialize)]
+///
+/// Every field is `Option` on the wire so a missing one is a named
+/// `invalid_request` refusal rather than a bare 422 from the form
+/// extractor; `post_token` then requires all five.
 struct TokenForm {
     grant_type: Option<String>,
     code: Option<String>,
     code_verifier: Option<String>,
+    /// REQUIRED (RFC 6749 §4.1.3) — `/authorize` never issues a code
+    /// without one, so redemption always has one to present.
     redirect_uri: Option<String>,
+    /// REQUIRED — the code is bound to the client it was issued to.
     client_id: Option<String>,
 }
 
@@ -494,27 +501,81 @@ fn token_error(status: StatusCode, code: &str, description: &str) -> Response {
         .into_response()
 }
 
-async fn post_token(State(state): State<AppState>, Form(form): Form<TokenForm>) -> Response {
-    if form.grant_type.as_deref() != Some("authorization_code") {
-        return token_error(
-            StatusCode::BAD_REQUEST,
-            "unsupported_grant_type",
-            "this IdP serves `authorization_code` only",
-        );
+/// The four parameters a redemption must carry, all present and
+/// non-empty. Constructing one is the entire required-parameter
+/// contract of `POST /token`; nothing downstream re-checks presence.
+struct Redemption {
+    code: String,
+    verifier: String,
+    client_id: String,
+    redirect_uri: String,
+}
+
+/// A named RFC 6749 §5.2 refusal, before it becomes a `Response`.
+/// Small by construction — an `axum` `Response` in an `Err` variant is
+/// 128+ bytes and pays that on every success too.
+struct TokenRefusal {
+    error: &'static str,
+    description: &'static str,
+}
+
+impl TokenRefusal {
+    /// Render the refusal as the wire body a client switches on.
+    fn into_response(self) -> Response {
+        token_error(StatusCode::BAD_REQUEST, self.error, self.description)
     }
-    let Some(code) = form.code.filter(|s| !s.is_empty()) else {
-        return token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "`code` is required",
-        );
+}
+
+/// Validate a [`TokenForm`] into a [`Redemption`], or the refusal naming
+/// the first parameter that is missing.
+///
+/// `redirect_uri` and `client_id` are REQUIRED, not checked-when-present.
+/// RFC 6749 §4.1.3 makes `redirect_uri` required at redemption whenever
+/// one was sent at authorization — and `/authorize` here refuses a
+/// request without it, so it always was; `client_id` is required for the
+/// same reason, since the code is bound to one. Checking them only when
+/// present made that binding opt-in: a client that simply omitted the
+/// field skipped the check, and this module's claim that a code is
+/// "bound to its `client_id` and `redirect_uri`" held only for
+/// well-behaved clients. An absent parameter is `invalid_request`
+/// (malformed), which is a different failure from the present-but-wrong
+/// mismatches `post_token` refuses afterwards.
+fn require_redemption(form: TokenForm) -> Result<Redemption, TokenRefusal> {
+    if form.grant_type.as_deref() != Some("authorization_code") {
+        return Err(TokenRefusal {
+            error: "unsupported_grant_type",
+            description: "this IdP serves `authorization_code` only",
+        });
+    }
+    let required = |value: Option<String>, description: &'static str| {
+        value.filter(|s| !s.is_empty()).ok_or(TokenRefusal {
+            error: "invalid_request",
+            description,
+        })
     };
-    let Some(verifier) = form.code_verifier.filter(|s| !s.is_empty()) else {
-        return token_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
+    Ok(Redemption {
+        code: required(form.code, "`code` is required")?,
+        verifier: required(
+            form.code_verifier,
             "`code_verifier` is required (PKCE is mandatory)",
-        );
+        )?,
+        client_id: required(form.client_id, "`client_id` is required")?,
+        redirect_uri: required(
+            form.redirect_uri,
+            "`redirect_uri` is required (RFC 6749 §4.1.3: it was sent at /authorize)",
+        )?,
+    })
+}
+
+async fn post_token(State(state): State<AppState>, Form(form): Form<TokenForm>) -> Response {
+    let Redemption {
+        code,
+        verifier,
+        client_id,
+        redirect_uri,
+    } = match require_redemption(form) {
+        Ok(r) => r,
+        Err(refusal) => return refusal.into_response(),
     };
 
     // Take the entry out under the lock. Removal *is* the single-use
@@ -545,23 +606,19 @@ async fn post_token(State(state): State<AppState>, Form(form): Form<TokenForm>) 
             "authorization code has expired",
         );
     }
-    if let Some(client_id) = form.client_id.as_deref() {
-        if client_id != entry.client_id {
-            return token_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_client",
-                "client_id does not match the one the code was issued to",
-            );
-        }
+    if client_id != entry.client_id {
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client",
+            "client_id does not match the one the code was issued to",
+        );
     }
-    if let Some(redirect_uri) = form.redirect_uri.as_deref() {
-        if redirect_uri != entry.redirect_uri {
-            return token_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_grant",
-                "redirect_uri does not match the one presented at /authorize",
-            );
-        }
+    if redirect_uri != entry.redirect_uri {
+        return token_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_grant",
+            "redirect_uri does not match the one presented at /authorize",
+        );
     }
     if s256_challenge(&verifier) != entry.code_challenge {
         return token_error(
@@ -828,6 +885,26 @@ mod tests {
         )
     }
 
+    /// The `redirect_uri` [`authorize_uri`] asks for, form-encoded — the
+    /// same bytes `/token` matches against.
+    const TEST_REDIRECT: &str = "http%3A%2F%2F127.0.0.1%3A8123%2Fcallback";
+
+    /// A complete, well-formed `POST /token` body. Every required field
+    /// is present, so a test that wants to probe ONE of them removes or
+    /// corrupts exactly that field and nothing else refuses first.
+    fn token_body(code: &str, verifier: &str) -> String {
+        format!(
+            "grant_type=authorization_code&code={code}&code_verifier={verifier}\
+             &client_id={TEST_CLIENT}&redirect_uri={TEST_REDIRECT}"
+        )
+    }
+
+    /// Drive `/authorize` and return the issued code.
+    async fn issue_code(router: &axum::Router, challenge: &str) -> String {
+        let (_, _, location) = call(router, get(&authorize_uri(challenge, "s"))).await;
+        code_from(&location.expect("Location"))
+    }
+
     /// Pull `code=` out of an `/authorize` `Location` header.
     fn code_from(location: &str) -> String {
         location
@@ -892,9 +969,7 @@ mod tests {
         let (verifier, challenge) = pkce_pair();
         let (_, _, location) = call(&router, get(&authorize_uri(&challenge, "s"))).await;
         let code = code_from(&location.expect("Location"));
-        let body = format!(
-            "grant_type=authorization_code&code={code}&code_verifier={verifier}&client_id={TEST_CLIENT}"
-        );
+        let body = token_body(&code, &verifier);
 
         let (first, _, _) = call(&router, post_form("/token", &body)).await;
         assert_eq!(first, StatusCode::OK, "the first redemption succeeds");
@@ -916,16 +991,8 @@ mod tests {
         let (_, _, location) = call(&router, get(&authorize_uri(&challenge, "s"))).await;
         let code = code_from(&location.expect("Location"));
         let wrong = "b".repeat(64);
-        let (status, body, _) = call(
-            &router,
-            post_form(
-                "/token",
-                &format!(
-                    "grant_type=authorization_code&code={code}&code_verifier={wrong}&client_id={TEST_CLIENT}"
-                ),
-            ),
-        )
-        .await;
+        let (status, body, _) =
+            call(&router, post_form("/token", &token_body(&code, &wrong))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let err: Value = serde_json::from_slice(&body).expect("RFC 6749 error body");
         assert_eq!(err["error"], "invalid_grant");
@@ -991,6 +1058,42 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_token_request_without_redirect_uri_is_refused() {
+        // RFC 6749 §4.1.3: `redirect_uri` is REQUIRED at redemption when
+        // one was sent at authorization — and `/authorize` refuses a
+        // request that omits it, so it always was. Checking the field
+        // only when present made the byte-for-byte binding skippable by
+        // simply not sending it.
+        let router = router(test_state()).expect("router");
+        let (verifier, challenge) = pkce_pair();
+        let code = issue_code(&router, &challenge).await;
+        let body =
+            token_body(&code, &verifier).replace(&format!("&redirect_uri={TEST_REDIRECT}"), "");
+        let (status, body, _) = call(&router, post_form("/token", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: Value = serde_json::from_slice(&body).expect("RFC 6749 error body");
+        assert_eq!(
+            err["error"], "invalid_request",
+            "an absent required parameter is `invalid_request`, not a mismatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_token_request_without_client_id_is_refused() {
+        // The code is bound to the client it was issued to; a redemption
+        // that names no client cannot be checked against that binding,
+        // so it is malformed rather than merely unlucky.
+        let router = router(test_state()).expect("router");
+        let (verifier, challenge) = pkce_pair();
+        let code = issue_code(&router, &challenge).await;
+        let body = token_body(&code, &verifier).replace(&format!("&client_id={TEST_CLIENT}"), "");
+        let (status, body, _) = call(&router, post_form("/token", &body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let err: Value = serde_json::from_slice(&body).expect("RFC 6749 error body");
+        assert_eq!(err["error"], "invalid_request");
+    }
+
+    #[tokio::test]
     async fn authorize_refuses_plain_pkce_and_an_unknown_client() {
         let router = router(test_state()).expect("router");
         let (_, challenge) = pkce_pair();
@@ -1016,16 +1119,8 @@ mod tests {
         let (verifier, challenge) = pkce_pair();
         let (_, _, location) = call(&router, get(&authorize_uri(&challenge, "s"))).await;
         let code = code_from(&location.expect("Location"));
-        let (status, _, _) = call(
-            &router,
-            post_form(
-                "/token",
-                &format!(
-                    "grant_type=authorization_code&code={code}&code_verifier={verifier}&client_id={TEST_CLIENT}"
-                ),
-            ),
-        )
-        .await;
+        let (status, _, _) =
+            call(&router, post_form("/token", &token_body(&code, &verifier))).await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
     }
 

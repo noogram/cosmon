@@ -1,3 +1,40 @@
-# Generic OIDC identity template (release-resync). Copy to oidc-identity.toml
-# and fill with a real binding at deploy time — the real file is gitignored.
-sub = "tenant_auditor@tenant-demo"
+# Nucleon binding TEMPLATE — the §8j posture-(b) root of trust.
+#
+# Copy this file to `oidc-identity.toml` beside it and replace every
+# `REPLACE_ME_*` placeholder with the value your deployment actually
+# uses. The real file is gitignored, as it must be: it is the
+# operator-written pin that admits a JWT `(iss, sub, aud)` triple to one
+# noyau, and a tracked copy would publish a live habilitation.
+#
+# Every key the loader (`HabilitationMap::load`) reads is present below.
+# Removing one does not yield a "partial" binding — it yields a file the
+# loader cannot resolve a noyau from, and admission fails closed.
+#
+# `scripts/rpp-remote-e2e.sh` materialises its run binding from THIS
+# file (cp + substitute), so a template that cannot produce a working
+# binding turns that smoke red rather than passing unnoticed.
+
+# Directory name under `nucleons/` (the habilitation id). Must match the
+# directory this file lives in.
+nucleon_id = "REPLACE_ME_NUCLEON_ID"
+# Cognitive-substrate label (ADR-063): `Biological` | `LlmFrontier`.
+phase = "Biological"
+# Tenant axis. State materialises at `<galaxies_root>/<noyau>/`; a token
+# bound here can never reach another noyau's tree.
+noyau = "REPLACE_ME_NOYAU"
+
+[oidc]
+# JWT `iss` — byte-for-byte equal to the IdP's issuer (wiring contract A).
+issuer = "REPLACE_ME_ISSUER"
+# JWT `sub` — the principal as the IdP signs it.
+sub = "REPLACE_ME_SUB"
+# JWT `aud` — pinned to this RPP instance; also the OAuth `client_id`.
+audience = "REPLACE_ME_AUDIENCE"
+# ISO-8601 provisioning timestamp. Informational; never consulted.
+sealed_at = "REPLACE_ME_SEALED_AT"
+
+# Binding-granted scopes (T23). The upstream IdP may be unable to mint
+# `cosmon:*` scopes; granting them here closes that gap for this
+# `(iss, sub, aud)` alone. Trim the list to what the tenant may do.
+[scopes]
+allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]
