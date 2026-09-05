@@ -19,6 +19,28 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tenant drain whose ready molecule sits on an uncovered step kind
+  terminates with the named `unsupported_step` token instead of busy-looping
+  to `timeout`** (PR #57 review, findings 1–5). The permanent
+  `UnsupportedStep` refusal now maps to the non-retryable
+  `RuntimeError::DispatchRefused`; the runtime loop stops on the tick that
+  observes it (`ShutdownReason::DispatchRefused`, `cs run` exit `94`), and
+  `drain.terminated` names the refused molecule and step kind in its
+  `detail`. Companion fixes from the same review: the library dispatch path
+  now stamps the PID witness on the ledger from the spawn handle's
+  witnessed pane PID (`SpawnHandle::pid`), restoring `orphan_scan`'s PID
+  liveness axis for adapter-dispatched molecules; every post-worktree error
+  path in the library executor rolls the worktree and branch back (the
+  identifier and ledger error paths used to leak them); the executor's one
+  spawn seam now takes the `DispatchRecorded` token by reference, making the
+  documented spawn-before-record claim true on the library path; the worker
+  envelope re-states `PWD` from the worker's own worktree (or drops it)
+  instead of leaking the adapter's; and the drain resolves the tenant
+  state/formulas directories through the same deterministic helper as the
+  envelope's `COSMON_STATE_DIR` pin.
+
 ### Changed
 
 - **The Remote Pilot Port no longer spawns the `cs` binary — the ADR-080

@@ -334,7 +334,16 @@ claude readiness pipeline, adapter/tool preflights, the model-budget ceiling,
 fleet-template briefing injection, committee-posture delivery, base-branch
 validation, or the reviewed-tree pin (`cmd/tackle.rs` arms). A step kind it
 does not cover answers the TYPED `501 tackle_unsupported_step` (step kind
-named in the body) — never a silent `cs` fallback. Likewise the sealed harvest
+named in the body) — never a silent `cs` fallback. The same gap exists on the
+**drain**: `POST /v1/molecules/{id}/run` accepts a DAG at admission (the gap
+is a property of the *current step*, not of the request), so a ready node of
+an uncovered kind is met mid-loop. That refusal is permanent — the formula
+does not change between ticks — and the runtime stops on the tick that
+observes it (`ShutdownReason::DispatchRefused`, PR #57 review finding 1);
+`drain.terminated` then carries the named token `unsupported_step` with the
+refused molecule id and step kind in the event body's `detail`. Before that
+fix the loop retried the refusal every poll interval and reported it as
+`timeout` — a permanent condition disguised as a bound. Likewise the sealed harvest
 transaction (`cmd/done.rs`) has no library form yet: the `land` route's effect
 half answers `501 land_effect_unavailable` (ADR-176 §11), and the in-process
 drain dispatches and drains but does not integrate completed molecules

@@ -128,6 +128,12 @@ impl TransportBackend for MockBackend {
         Ok(SpawnHandle {
             id: worker_id,
             session_name,
+            // The mock's stand-in PID witness is the test process itself:
+            // a real, live PID whose launch fingerprint
+            // (`cosmon_process_witness::process_start_time`) resolves on
+            // every platform, so ledger-stamping tests can assert both the
+            // pid and its start time without spawning anything.
+            pid: Some(std::process::id()),
         })
     }
 

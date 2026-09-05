@@ -69,6 +69,17 @@ pub struct SpawnHandle {
     pub id: WorkerId,
     /// The transport session name (e.g. tmux session).
     pub session_name: String,
+    /// Operating-system PID of the spawned worker process, when the backend
+    /// can witness one (tmux: the pane's root process; a mock: a stand-in).
+    ///
+    /// Exists so a library dispatcher can stamp the PID witness on the
+    /// dispatch ledger the way `cs tackle` does — `orphan_scan`'s PID
+    /// liveness axis reads it back to authenticate a recorded process.
+    /// `None` means the backend has no process to point at (or could not
+    /// observe it); callers must degrade to session-probe liveness, never
+    /// fail the spawn.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// Information about an active session.

@@ -523,6 +523,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             ShutdownReason::MoleculeQuotaExceeded => {
                 "molecule_quota_exceeded (B2)".red().to_string()
             }
+            ShutdownReason::DispatchRefused => "dispatch_refused (permanent)".red().to_string(),
         };
         println!(
             "\n{} {} ticks, {} actions — {}",
@@ -595,6 +596,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
     if report.reason == ShutdownReason::MoleculeQuotaExceeded {
         std::process::exit(91);
+    }
+    // A PERMANENT dispatch refusal (the loop's non-retryable class, e.g. an
+    // unsupported step kind on the library executor). Unreachable through
+    // the default subprocess executor — `cs tackle` covers every step kind —
+    // but the enum is one vocabulary for both executors, so the exit is
+    // named here in the same moussage family rather than falling through as
+    // a success. 94 = permanent dispatch refusal.
+    if report.reason == ShutdownReason::DispatchRefused {
+        if !ctx.json {
+            if let Some(refusal) = &report.refusal {
+                eprintln!("✗ dispatch refused: {}: {}", refusal.molecule, refusal.reason);
+            }
+        }
+        std::process::exit(94);
     }
     // A teardown that failed is a molecule whose branch is NOT integrated and
     // whose worktree / tmux session / fleet entry is still standing. `cs done`

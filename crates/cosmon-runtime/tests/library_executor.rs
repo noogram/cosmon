@@ -340,3 +340,77 @@ fn library_executor_honours_the_dispatch_pin() {
         "a floor pin must reproduce the floor, not an ambient model"
     );
 }
+
+/// PR #57 review, finding 2: the library path must stamp the PID witness
+/// exactly as `cs tackle` step 9 does — without it, `orphan_scan`'s PID
+/// liveness axis is blind for every adapter-dispatched molecule. The mock's
+/// spawn handle witnesses the test process's own PID, so both the pid and
+/// its launch fingerprint must land on the ledger's process record. RED
+/// before the fix (`stamp_pid_witness` had one caller, in the CLI), GREEN
+/// after.
+#[test]
+fn library_dispatch_stamps_the_pid_witness_on_the_ledger() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260905-dddd");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend);
+
+    executor
+        .dispatch(&mol.id)
+        .expect("library dispatch must succeed");
+
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    let process = observed.process.as_ref().expect("process record");
+    assert_eq!(
+        process.pid,
+        Some(std::process::id()),
+        "the spawned session's witnessed PID must be stamped on the ledger"
+    );
+    assert!(
+        process.pid_start_time.is_some(),
+        "the launch fingerprint must be stamped with the PID so the \
+         liveness axis can authenticate, not just match a recycled pid"
+    );
+}
+
+/// PR #57 review, finding 3: EVERY post-worktree error path removes the
+/// worktree and branch — the rollback contract the module docs promise.
+/// The spawn-failure path exercises the new single cleanup seam (the
+/// identifier and ledger error paths used to leak because each path carried
+/// its own cleanup, or none).
+#[test]
+fn failed_spawn_rolls_back_worktree_ledger_and_status() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260905-eeee");
+    let backend = MockBackend::new();
+    backend.set_spawn_error("no seats left");
+    let executor = LibraryExecutor::new(&project, backend);
+
+    let err = executor
+        .dispatch(&mol.id)
+        .expect_err("a failing backend must fail the dispatch");
+    assert!(err.to_string().contains("no seats left"), "{err}");
+
+    // Ledger rolled back: molecule restored, no process binding, no fleet
+    // worker.
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert_eq!(observed.status, MoleculeStatus::Pending);
+    assert!(observed.process.is_none(), "no process record may survive");
+    let fleet = store.load_fleet().unwrap_or_default();
+    assert!(fleet.workers.is_empty(), "no fleet worker may survive");
+
+    // Worktree and branch removed by the outer cleanup seam.
+    assert!(
+        !project.join(".worktrees").join(mol.id.as_str()).exists(),
+        "the partial worktree must be removed on rollback"
+    );
+    let branches = std::process::Command::new("git")
+        .args(["-C", &project.to_string_lossy(), "branch", "--list"])
+        .output()
+        .expect("git branch");
+    let branches = String::from_utf8_lossy(&branches.stdout).into_owned();
+    assert!(
+        !branches.contains(&format!("feat/{}", mol.id.as_str())),
+        "the feature branch must be removed on rollback: {branches}"
+    );
+}
