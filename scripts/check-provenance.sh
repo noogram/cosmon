@@ -20,6 +20,19 @@
 # What it checks:
 #   - Subject matches: Merge branch 'feat/<mol_id>' | evolve(<mol_id>)
 #                     | done(<mol_id>) | auto-merge(<mol_id>)
+#   - Since 2026-09-05 (ADR-052 §D5-quater, external-issue provenance): a merge
+#     that lands a local integration branch `feat/issue-<N>` onto main —
+#     either GitHub's own "Merge pull request #<N> from <owner>/feat/
+#     issue-<N>" or a local "Merge branch 'feat/issue-<N>'" — is accepted
+#     iff EVERY merge commit reachable on its second parent since the
+#     merge-base with the first parent is itself provenance-clean by
+#     this same set of rules, recursively (so a stacked integration
+#     branch, "Merge branch 'feat/issue-<M>' into feat/issue-<N>", is
+#     walked the same way). This preserves the underlying property: no
+#     code reaches main except through a molecule's `cs done`, one level
+#     of PR-wrapping removed.
+#   - The base-sync class (below) also accepts `Merge branch 'main' into
+#     feat/issue-<N>`, not only `feat/<mol_id>`.
 #   - mol_id has a recorded molecule_completed or molecule_collapsed
 #     event in .cosmon/state/events.jsonl AT THE TIP COMMIT of the
 #     scope — WHEN the ledger is tracked in git at all. We check the
@@ -163,6 +176,55 @@ BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
 # recognition, it never relaxes the gate.
 BASE_SYNC_TRAILER_RE="^Base-Sync:[[:space:]]*[^[:space:]]+\.\.feat/${MOL_ID_RE}[[:space:]]*\$"
 
+# Base-sync targeting an external-issue integration branch instead of a
+# molecule branch (ADR-052 §D5-quater, 2026-09-05): `git merge main` run inside
+# `feat/issue-<N>` while the issue is still being worked. Same structural
+# check as BASE_SYNC_RE — the trailer path is unchanged, since `cs sync`
+# only ever stamps a molecule branch name in its trailer.
+BASE_SYNC_ISSUE_RE="^Merge branch [\"']main[\"'] into feat/issue-([0-9]+)\$"
+
+# Integration-branch → main merge shapes (ADR-052 §D5-quater, 2026-09-05).
+# Work on an external GitHub issue lands on a local integration branch
+# `feat/issue-<N>` (molecules tackle with `--base feat/issue-<N>`, `cs
+# done` merges into it) and reaches main through a pull request. GitHub
+# writes the merge-commit subject itself; requiring the same <N> on both
+# sides keeps the match anchored to the branch name the second-parent
+# walk below actually inspects, rather than trusting the PR number alone.
+PR_MERGE_RE="^Merge pull request #([0-9]+) from [^/[:space:]]+/feat/issue-([0-9]+)\$"
+
+# The same landing without GitHub's wrapper — a local
+# `git merge --no-ff feat/issue-<N>` straight onto main.
+LOCAL_INTEGRATION_MERGE_RE="^Merge branch [\"']feat/issue-([0-9]+)[\"']\$"
+
+# Stacked integration branches: issue N's branch pulls in issue M's
+# branch before M's own PR has merged. Recognised the same way, checked
+# by the same recursive rule.
+STACKED_INTEGRATION_RE="^Merge branch [\"']feat/issue-([0-9]+)[\"'] into feat/issue-([0-9]+)\$"
+
+# Does $1 (a commit subject) name an integration-branch landing? Echoes
+# the issue number and returns 0 if so, returns 1 otherwise. A PR-shaped
+# subject only counts when the PR number and the issue number agree —
+# see PR_MERGE_RE above.
+integration_target_n() {
+    local subject="$1"
+    if [[ "$subject" =~ $PR_MERGE_RE ]]; then
+        if [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
+            printf '%s' "${BASH_REMATCH[2]}"
+            return 0
+        fi
+        return 1
+    fi
+    if [[ "$subject" =~ $LOCAL_INTEGRATION_MERGE_RE ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+        return 0
+    fi
+    if [[ "$subject" =~ $STACKED_INTEGRATION_RE ]]; then
+        printf '%s' "${BASH_REMATCH[2]}"
+        return 0
+    fi
+    return 1
+}
+
 # First-parent trunk commits, used to prove a base-sync's incoming side
 # is already-gated trunk material. Built lazily on first use, from the
 # scope head AND the scope base: in a PR scope the head is the feature
@@ -178,6 +240,90 @@ trunk_has() {
         } > "$trunk_fp"
     fi
     grep -qx "$1" "$trunk_fp"
+}
+
+# Shape-only check: is a single merge commit provenance-clean, on its
+# subject/trailer alone (never the ledger — the recursive walk below is
+# what the mission's "existing patterns" refers to, and demanding a
+# completion event of every commit an integration branch has ever
+# contained would forbid syncing against an in-flight molecule).
+# Recurses into nested integration-branch shapes (a stacked branch).
+# On success: prints nothing, returns 0. On failure: prints the single
+# offending commit sha (which may be several levels down), returns 1.
+# Shared between the top-level scope loop (base-sync + molecule-merge
+# shapes are checked there directly) and verify_integration_clean below,
+# so the two can never disagree about what "clean" means.
+is_clean_merge() {
+    local commit="$1" subject re p2 trailer_line n out
+    subject=$(git log -1 --format='%s' "$commit")
+
+    for re in "${PATTERNS[@]}"; do
+        if [[ "$subject" =~ $re ]]; then
+            return 0
+        fi
+    done
+
+    if [[ "$subject" =~ $BASE_SYNC_RE ]] || [[ "$subject" =~ $BASE_SYNC_ISSUE_RE ]]; then
+        p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
+        if [ -n "$p2" ] && trunk_has "$p2"; then
+            return 0
+        fi
+        printf '%s\n' "$commit"
+        return 1
+    fi
+
+    trailer_line=$(git log -1 --format='%(trailers:key=Base-Sync,valueonly)' "$commit" \
+        | head -n 1)
+    [ -n "$trailer_line" ] && trailer_line="Base-Sync: $trailer_line"
+    if [ -n "$trailer_line" ] && [[ "$trailer_line" =~ $BASE_SYNC_TRAILER_RE ]]; then
+        p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
+        if [ -n "$p2" ] && trunk_has "$p2"; then
+            return 0
+        fi
+        printf '%s\n' "$commit"
+        return 1
+    fi
+
+    if n=$(integration_target_n "$subject"); then
+        if out=$(verify_integration_clean "$commit"); then
+            return 0
+        fi
+        printf '%s\n' "$out"
+        return 1
+    fi
+
+    printf '%s\n' "$commit"
+    return 1
+}
+
+# Is $1, an integration-branch-landing merge commit, made entirely of
+# provenance-clean merges? Walks every merge reachable on its second
+# parent since the merge-base with its first parent — i.e. everything
+# the integration branch added that main did not already have — and
+# checks each with is_clean_merge (recursively, for a stacked branch).
+# Prints the offending commit and returns 1 on the first failure;
+# prints nothing and returns 0 if every inner merge is clean.
+verify_integration_clean() {
+    local commit="$1" p1 p2 mb inner out
+    p1=$(git rev-parse --verify "$commit^1" 2>/dev/null || true)
+    p2=$(git rev-parse --verify "$commit^2" 2>/dev/null || true)
+    if [ -z "$p1" ] || [ -z "$p2" ]; then
+        printf '%s\n' "$commit"
+        return 1
+    fi
+    mb=$(git merge-base "$p1" "$p2" 2>/dev/null || true)
+    if [ -z "$mb" ]; then
+        printf '%s\n' "$commit"
+        return 1
+    fi
+    while IFS= read -r inner; do
+        [ -n "$inner" ] || continue
+        if ! out=$(is_clean_merge "$inner"); then
+            printf '%s\n' "$out"
+            return 1
+        fi
+    done < <(git rev-list --merges "$mb..$p2" 2>/dev/null || true)
+    return 0
 }
 
 TMPDIR_PROV="$(mktemp -d -t cosmon-provenance-XXXXXX)"
@@ -237,7 +383,7 @@ while IFS= read -r commit; do
     # structural check below is identical for both, so it cannot weaken the
     # gate.
     base_sync_mol=""
-    if [[ "$subject" =~ $BASE_SYNC_RE ]]; then
+    if [[ "$subject" =~ $BASE_SYNC_RE ]] || [[ "$subject" =~ $BASE_SYNC_ISSUE_RE ]]; then
         base_sync_mol="${BASH_REMATCH[1]}"
     else
         trailer_line=$(git log -1 --format='%(trailers:key=Base-Sync,valueonly)' "$commit" \
@@ -263,6 +409,32 @@ while IFS= read -r commit; do
             echo "      incoming side is not on the trunk's first-parent"
             echo "      chain — this merge carries ungated material"
             echo "      $subject"
+            failed=$((failed + 1))
+        fi
+        continue
+    fi
+
+    # Integration-branch landing: GitHub's PR merge, a local branch
+    # merge of the same shape, or a stacked integration branch. Accepted
+    # iff every merge it carries beyond main's own history is itself
+    # provenance-clean (is_clean_merge, recursively) — see the header
+    # comment and ADR-052 §D5-quater. No ledger check applies here: there is no
+    # single mol_id to look up, and each inner molecule merge either
+    # already went through its own ledger check when scanned directly,
+    # or is a base-sync/nested-integration shape that never carries one.
+    integration_n=""
+    if n=$(integration_target_n "$subject"); then
+        integration_n="$n"
+    fi
+    if [ -n "$integration_n" ]; then
+        if out=$(verify_integration_clean "$commit"); then
+            shape_only=$((shape_only + 1))
+            echo "ok    $commit  (issue-$integration_n)  integration branch, provenance-clean"
+        else
+            echo "FAIL  $commit  (issue-$integration_n)"
+            echo "      integration branch carries a merge that is not"
+            echo "      itself provenance-clean:"
+            echo "      $out"
             failed=$((failed + 1))
         fi
         continue
