@@ -216,7 +216,8 @@ pub fn resolve_selection(req: &SelectionRequest<'_>) -> Result<TackleSelection, 
     let (loop_ownership, ownership_warning) = resolve_loop_ownership(
         adapter.as_str(),
         loop_ownership_from_validator,
-        req.project_adapters.and_then(|cfg| cfg.entry(adapter.as_str())),
+        req.project_adapters
+            .and_then(|cfg| cfg.entry(adapter.as_str())),
     );
 
     let (preferred_model, model_source) = resolve_model_selection(
