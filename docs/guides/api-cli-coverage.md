@@ -286,6 +286,44 @@ whose `cs` counterpart is in either NEVER class.
 
 ---
 
+## Reaching the API: `cosmon-remote login` (the tenant's front door)
+
+Every `V0`/`V1` row above needs a bearer, and `cosmon-remote login` is
+where a tenant gets one: OAuth 2.0 authorization-code + PKCE against the
+deployment's IdP, persisted in the OS keyring (or a `0600` file), then
+silently refreshed. It opens **no route** — it is a client of the IdP,
+not of the RPP — so it has no row in the table above. It is recorded here
+because a reader who cannot authenticate cannot exercise a single row.
+
+**Headless logins.** The default opens the system browser. Set
+`COSMON_REMOTE_BROWSER` to a command and `login` runs that command with
+the sign-in URL appended as its **last argument** instead. The value is
+split on whitespace and executed directly — there is no shell, so no
+quoting, globbing, or `$VAR` expansion. Setting it to an empty value is
+an error, not a fallback: a `login` that quietly opened a browser instead
+would sit on the loopback callback until the five-minute timeout with
+nothing on screen to explain why.
+
+```sh
+COSMON_REMOTE_BROWSER=xdg-open cosmon-remote login
+COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login
+```
+
+The second form is the container smoke (GitHub issue #53). Against the
+`cs-oidc-mock` IdP — which since #53 serves
+`/.well-known/openid-configuration`, an auto-approving `/authorize`, and
+a PKCE-checking `/token` alongside its V0 `/jwks` and `/issue` — `curl`
+follows the redirect straight into the loopback callback `login` is
+already listening on, and the flow completes with no display attached.
+`crates/cosmon-remote/tests/login_headless.rs` drives exactly that, in
+process, against the shipped IdP router.
+
+The redirect catcher's *listener* is moved by `cosmon-remote login
+--bind <IP>` (issue #52) when the browser lives outside the container;
+the advertised `redirect_uri` never moves.
+
+---
+
 ## Re-snapshot cadence
 
 This audit is regenerated **on every CLI verb change** (mirrors the

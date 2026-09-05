@@ -30,9 +30,17 @@ path = "src/lib.rs"
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
+# S256 code-challenge verification and the base64url-nopad encoding of the
+# challenge and of the opaque authorization codes (`idp` module, issue #53).
+base64 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 jsonwebtoken = "9"
+# OS CSPRNG behind the opaque authorization codes. A guessable code is a
+# login anyone on the network can complete on someone else's behalf — a
+# property this mock has no reason to lack.
+rand = { workspace = true }
+sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

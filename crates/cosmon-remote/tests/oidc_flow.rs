@@ -1381,7 +1381,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
         l.local_addr().unwrap().port()
     };
     let http = reqwest::Client::new();
-    let mut endpoints = oidc::discover(
+    let endpoints = oidc::discover(
         &http,
         &server.uri(),
         &server.uri(),
@@ -1392,7 +1392,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
     )
     .await
     .unwrap();
-    endpoints.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+    let endpoints = endpoints.with_redirect_uri(format!("http://127.0.0.1:{port}/callback"));
 
     // The scope the client will actually send leads with `openid`.
     assert_eq!(

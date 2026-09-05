@@ -39,6 +39,15 @@
 //! - [`exchange`] — the code and refresh token grants (C2).
 //! - [`flow`] — [`login`] / [`ensure_token`] / [`refresh_credential`] /
 //!   [`force_refresh`] / [`logout`] (C2, C6, C7).
+//!
+//! # Opening the authorize URL
+//!
+//! [`login`] takes the opener as a parameter, so *what* opens the URL is not
+//! this module's decision. [`Opener`] resolves that decision once, from the
+//! environment: the system browser by default, or the command named by
+//! `$COSMON_REMOTE_BROWSER`. That second form is what makes the flow
+//! scriptable — a headless smoke drives it with `curl -L` against an
+//! auto-approving IdP and never needs a browser at all.
 
 pub mod discovery;
 pub mod error;
@@ -56,10 +65,120 @@ pub use flow::{
     RefreshConfig, RefreshRotation, TokenState, LOGIN_TIMEOUT_SECS, REFRESH_LEEWAY_SECS,
 };
 pub use loopback::{
-    parse_callback_target, redirect_uri, CallbackParams, LoopbackServer, CALLBACK_PATH,
-    DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
+    parse_callback_target, redirect_uri, CallbackParams, LoopbackBind, LoopbackServer,
+    CALLBACK_PATH, DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
 };
 pub use pkce_s256::{CodeVerifier, Nonce};
+
+/// The environment variable naming an external command to open the authorize
+/// URL, in place of the system browser.
+///
+/// The value is a command line: the first whitespace-separated token is the
+/// program, the rest are leading arguments, and the authorize URL is appended
+/// as the final argument. It is **not** a shell line — there is no quoting, no
+/// globbing, and no `$VAR` expansion, because there is no shell.
+///
+/// This is the whole non-browser seam. A container smoke drives the login with
+/// `COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null'`: `curl` follows the
+/// auto-approving IdP's 302 into the loopback callback this process is already
+/// listening on, and the flow completes with no display, no browser, and no
+/// second CLI surface to keep in step.
+pub const BROWSER_COMMAND_ENV: &str = "COSMON_REMOTE_BROWSER";
+
+/// How this invocation opens the authorize URL.
+///
+/// Resolved **once, before `login` runs**, so a malformed
+/// `$COSMON_REMOTE_BROWSER` is refused up front rather than at the moment the
+/// browser should have opened — by then the listener is bound, the operator is
+/// staring at nothing, and the only remaining event is the five-minute timeout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Opener {
+    /// The default: hand the URL to the platform's default browser
+    /// ([`open_browser`]).
+    SystemBrowser,
+    /// Spawn this argv, with the authorize URL appended as the last argument.
+    /// Non-empty by construction — [`Opener::from_raw`] refuses an empty one.
+    Spawn(Vec<String>),
+}
+
+impl Opener {
+    /// Resolve the opener from the process environment
+    /// ([`BROWSER_COMMAND_ENV`]).
+    ///
+    /// # Errors
+    ///
+    /// [`OidcError::BrowserCommand`] when the variable is set but names no
+    /// command.
+    pub fn from_env() -> crate::error::Result<Self> {
+        Self::from_raw(std::env::var(BROWSER_COMMAND_ENV).ok().as_deref())
+    }
+
+    /// The pure half of [`Opener::from_env`]: decide from a raw variable value
+    /// rather than from the live environment, so the decision is unit-testable
+    /// without mutating a process-global.
+    ///
+    /// `None` (unset) is the system browser. A set-but-blank value is an
+    /// **error**, not a silent fallback: an operator who exported the variable
+    /// asked for a command, and quietly opening a browser instead would be a
+    /// different login than the one they requested.
+    ///
+    /// # Errors
+    ///
+    /// [`OidcError::BrowserCommand`] when `raw` is `Some` but contains no
+    /// non-whitespace token.
+    pub fn from_raw(raw: Option<&str>) -> crate::error::Result<Self> {
+        let Some(command_line) = raw else {
+            return Ok(Self::SystemBrowser);
+        };
+        let argv: Vec<String> = command_line.split_whitespace().map(str::to_owned).collect();
+        if argv.is_empty() {
+            return Err(OidcError::BrowserCommand {
+                var: BROWSER_COMMAND_ENV,
+            }
+            .into());
+        }
+        Ok(Self::Spawn(argv))
+    }
+
+    /// Open `url`, by whichever route this opener names.
+    ///
+    /// The URL is always printed to stderr first — it is the safety net when
+    /// the browser does not appear, and the thing a script's log needs when the
+    /// spawned command misbehaves. The URL carries the `state` and the
+    /// `code_challenge`, both public by design (RFC 7636 §4.2: the challenge is
+    /// a digest, and the verifier it protects never leaves this process).
+    ///
+    /// Never fails and never blocks: the spawned command is **not** waited on.
+    /// It cannot be — a `curl` that follows the redirect only returns once this
+    /// process has answered the loopback callback, which happens after `open`
+    /// returns. Waiting here would deadlock the login it is trying to drive.
+    pub fn open(&self, url: &str) {
+        match self {
+            Self::SystemBrowser => open_browser(url),
+            Self::Spawn(argv) => spawn_opener(argv, url),
+        }
+    }
+}
+
+/// Spawn `argv` with `url` appended, reporting a failure on stderr rather than
+/// swallowing it. `argv` is non-empty by [`Opener::from_raw`]'s construction;
+/// an empty one would be a caller-built value, and is reported the same way
+/// instead of panicking.
+fn spawn_opener(argv: &[String], url: &str) {
+    eprintln!("\n  Opening the sign-in URL with `{}`:\n", argv.join(" "));
+    eprintln!("    {url}\n");
+    let Some((program, leading_args)) = argv.split_first() else {
+        eprintln!("  (${BROWSER_COMMAND_ENV} named no command — open the URL above)\n");
+        return;
+    };
+    let spawned = std::process::Command::new(program)
+        .args(leading_args)
+        .arg(url)
+        .spawn();
+    if let Err(err) = spawned {
+        eprintln!("  (could not run `{program}`: {err} — open the URL above)\n");
+    }
+}
 
 /// Best-effort open the operator's default browser at `url`, and always print
 /// the URL to stderr as a fallback (a headless box, an SSH session, or a
@@ -104,5 +223,57 @@ fn browser_command(url: &str) -> Option<std::process::Command> {
     {
         let _ = url;
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::error::Error;
+
+    #[test]
+    fn an_unset_variable_means_the_system_browser() {
+        assert_eq!(Opener::from_raw(None).unwrap(), Opener::SystemBrowser);
+    }
+
+    #[test]
+    fn a_command_line_splits_into_program_and_leading_args() {
+        // The URL is appended by `open`, never baked into the argv here: a
+        // value that already contained the URL would open the wrong login.
+        assert_eq!(
+            Opener::from_raw(Some("curl -sS -L -o /dev/null")).unwrap(),
+            Opener::Spawn(
+                ["curl", "-sS", "-L", "-o", "/dev/null"]
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect()
+            )
+        );
+    }
+
+    #[test]
+    fn a_set_but_blank_variable_is_refused_rather_than_silently_ignored() {
+        // The failure mode this guards: falling back to the browser would make
+        // `login` hang on the callback for five minutes with nothing said.
+        for raw in ["", "   ", "\t\n"] {
+            let err = Opener::from_raw(Some(raw)).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Error::Oidc(OidcError::BrowserCommand {
+                        var: BROWSER_COMMAND_ENV
+                    })
+                ),
+                "{raw:?}: expected BrowserCommand, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn surrounding_whitespace_does_not_produce_an_empty_argument() {
+        assert_eq!(
+            Opener::from_raw(Some("  xdg-open  ")).unwrap(),
+            Opener::Spawn(vec!["xdg-open".to_owned()])
+        );
     }
 }

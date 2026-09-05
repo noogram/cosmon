@@ -3,7 +3,32 @@ Sign in to cosmon via the real OAuth 2.0 PKCE browser flow against the deploymen
 Usage: cosmon-remote login [OPTIONS]
 
 Options:
-      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
-      --json               Render machine-readable JSON instead of human text where applicable
-      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
-  -h, --help               Print help
+      --bind <IP>
+          Interface the OAuth redirect catcher listens on (default 127.0.0.1, right whenever the browser runs on this machine). Use 0.0.0.0 when cosmon-remote runs inside a container or VM and the browser is outside it: the browser still dials the registered http://127.0.0.1:<port>/callback, so pair this with a port-forward into the container (ssh -L, or a published port). The advertised redirect URI never changes; a non-loopback value is announced on stderr before the browser opens
+
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
+      --json
+          Render machine-readable JSON instead of human text where applicable
+
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+NO BROWSER? — set COSMON_REMOTE_BROWSER to the command that should open
+the sign-in URL. The URL is appended as the command's LAST argument; the
+value is split on whitespace and run directly, NOT through a shell (no
+quoting, no globbing, no $VAR expansion). Examples:
+
+  COSMON_REMOTE_BROWSER=xdg-open cosmon-remote login
+  COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login
+
+The second form is the headless smoke: against an auto-approving test
+IdP, curl follows the redirect straight into the loopback callback this
+command is already listening on, and the login completes with no display
+attached. Setting the variable to an empty value is an error, not a
+fallback — a login that silently opened a browser instead would hang on
+the callback until the 5-minute timeout.

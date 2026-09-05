@@ -233,3 +233,9 @@ __pycache__/
 # dangling in any other clone. Resolve java via PATH or $JAVA (see
 # docs/specs/README.md) instead of committing a pointer into one Mac.
 docs/specs/openjdk.jdk
+
+# Evidence of one `scripts/rpp-remote-e2e.sh` run: the staged copy of the
+# deploy tree, the throwaway tenant galaxy, container logs, and the
+# per-step NDJSON. Run-local by construction — the record that matters
+# travels as the CI artifact, never as a tracked file.
+.rpp-remote-e2e/
