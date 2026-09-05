@@ -1744,6 +1744,21 @@ Operator-only verbs (`cs done`, `cs evolve`, `cs complete`,
 subprocess envelope (clause (e)). The list is closed; extending it
 requires a successor ADR (see ADR-080 §5.2).
 
+*(Issue #54 U6, 2026-09-05 — ADR-080 §3.5.3.)* Clause (e) is
+**inapplicable to the in-process substrate**: the adapter no longer
+invokes `cs` for any admitted request — every route executes typed
+library calls (`cosmon_state::ops`, the harvest door's decision half,
+`cosmon_runtime::LibraryExecutor`, the in-process drain), where an
+operator-only verb cannot be expressed at all (a compile-time contract
+replacing the parse-time refusal). The clause's environment discipline
+survives at the one child process still crossing the perimeter — the
+worker spawn — as `cosmon_rpp_adapter::worker_env`'s allow-list
+envelope; the exposed-host marker duty re-homes to
+`COSMON_EGRESS_EXPOSED=1` on the worker env (§8u below). The historical
+clause text above is retained as the record of what the subprocess era
+required, and `cosmon_core::api_envelope`'s second lock stays armed for
+any residual producer of the marker.
+
 This rider is consistent with §8j's *"no §8k / §8l / ... admitted"*
 meta-rule (next sub-section): it does **not** create a new §8 invariant
 letter. The HTTPS+JWT instantiation is an annotated instance of §8j
@@ -2446,6 +2461,20 @@ The exposed axis dominates: `cs tackle` reads
 `deny-external` before creating any worktree. So the current honest state
 of the world is: **you cannot host an exposed multi-tenant cosmon endpoint
 on macOS with strict-local tenants** until native enforcement lands.
+
+*(Issue #54 U6, 2026-09-05 — ADR-155 amendment.)* The RPP subprocess
+envelope is retired: the adapter no longer spawns `cs`, so the marker
+branch of the OR no longer fires on the hosted path. The duty re-homes to
+the dedicated knob: the adapter's worker envelope
+(`cosmon_rpp_adapter::worker_env`) stamps `COSMON_EGRESS_EXPOSED=1` into
+every worker spawn env, so the probe reads *exposed* inside every
+adapter-dispatched worker with zero configuration. The marker cannot ride
+a worker (it would trip the §3.5 second lock on the worker's own
+lifecycle verbs); the OR stays for any residual producer of the envelope.
+`cs tackle`'s dispatch-time refusal is part of the readiness pipeline the
+library executor does not yet carry — the enforcement point on the
+adapter path is the worker-side probe until ADR-080 §3.5.3's follow-up
+(1) lands.
 
 ### The design of native macOS enforcement
 

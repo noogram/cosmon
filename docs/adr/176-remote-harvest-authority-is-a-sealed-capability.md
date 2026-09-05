@@ -584,3 +584,30 @@ latency is that a well-formed molecule id the tenant's store has never
 seen now answers `404 not_found` from the decision half — the same
 no-existence-oracle boundary the rest of the surface holds — where it
 previously fell through to the subprocess's anonymous failure.
+
+## 12 · Amendment — the effect half is a typed refusal until the port has a library implementation (issue #54 U6)
+
+**Status: adopted, 2026-09-05 (`task-20260905-b954`).**
+
+The subprocess §11 named as "the one subprocess this route still owns" is
+retired with the rest of the ADR-080 §3.5 clause (e) envelope. The
+`SealedHarvestEffect` port did **not** gain a library implementation in the
+same unit: the sealed `cs done` path in `cmd/done.rs` is ~1 600 lines whose
+provenance gates, lineage trailers and teardown do not move cleanly behind
+the existing ports without forking the door — the exact drift §11 refuses.
+
+Until the port has its library implementation, a harvest the in-process
+decision half ADMITS answers the typed refusal
+**`501 land_effect_unavailable`** — a new label, deliberately **outside** the
+seven-name closed set (`DoorRefusal` stays closed; the parity gap has its own
+name so no client can mistake "this adapter build cannot integrate yet" for a
+door refusal). Never a silent `cs` fallback, and never a 202: the answer is
+synchronous and true, which is the issue #51 property this route exists for.
+
+What still answers in full, in-process: every pre-effect refusal
+(`not_authorized`, `not_completed`, `reservation_requires_seal`,
+`backlog_full`), the `already_landed` idempotent success, and the
+no-existence-oracle 404. The three execution refusals (`merge_conflict`,
+`base_not_fast_forward`, `pre_done_refused`) belong to the sealed transaction
+and return with its library implementation — the named follow-up, tracked in
+ADR-080 §3.5.3's enumerated parity gap alongside the drain's teardown leg.

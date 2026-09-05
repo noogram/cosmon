@@ -51,6 +51,31 @@ envelope's `COSMON_API_REQUEST` marker (ADR-080 §3.5) is present. This closes
 the fail-open on the hosted path *today*, with zero new platform code, and is
 the load-bearing guard until a native tier below lands.
 
+#### Amendment (2026-09-05) — where the exposed axis comes from after issue #54 U6 *(`task-20260905-b954`)*
+
+The RPP subprocess envelope this section keyed on is retired: the adapter no
+longer spawns `cs`, so no process on the hosted path carries the
+`COSMON_API_REQUEST` marker any more. The exposed-multi-tenant duty the marker
+performed re-homes to the **dedicated knob**: the adapter's worker envelope
+(`cosmon_rpp_adapter::worker_env`) stamps `COSMON_EGRESS_EXPOSED=1` into the
+environment of every worker it spawns, so
+`egress_probe::exposed_multitenant_from_env()` reads *exposed* inside every
+adapter-dispatched worker with zero configuration — the same
+fail-closed-by-default property the marker provided.
+
+Riding the marker itself onto workers was considered and refused: `cs` refuses
+its operator-only verbs (including `evolve` and `complete`, a worker's whole
+job) whenever `COSMON_API_REQUEST=1` (ADR-080 §3.5.2's second lock). The
+`exposed_multitenant_from_env()` OR over both signals stays as-is — the marker
+branch keeps guarding any residual producer of the envelope.
+
+**Enumerated gap:** `cs tackle`'s *dispatch-time* fail-closed refusal (a
+non-enforceable `deny-external` on an exposed host refuses to spawn at all) is
+part of the readiness/preflight pipeline the library executor does not yet
+carry (ADR-080 §3.5.3). Until that lands, the enforcement point on the
+adapter path is the worker-side probe reading the stamped knob, not a
+pre-spawn refusal.
+
 ### Native enforcement — two tiers
 
 Introduce a third enforcement mode, `EnforcementMode::Seatbelt`, resolved by

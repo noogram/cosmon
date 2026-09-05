@@ -56,7 +56,10 @@ itself refuses to run it under the request envelope
 `COSMON_API_REQUEST=1`, at parse time, with exit code 17
 (`cosmon_core::api_envelope`, ADR-080 §3.5 / §3.5.1). The second lock
 existed only on paper until 2026-09-01; a mis-wired route used to
-traverse the whole defence.
+traverse the whole defence. Since issue #54 U6 the adapter itself spawns
+no `cs` at all (ADR-080 §3.5.3) — every route is a typed library call
+where an operator-only verb cannot be expressed; the parse-time lock
+stays armed for any residual producer of the marker.
 
 Verbs are ordered roughly by lifecycle: capture → nucleate → observe →
 advance → terminate → infrastructure → introspection.

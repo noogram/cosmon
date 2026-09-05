@@ -10,13 +10,17 @@
 #   1. builder — full Rust toolchain, cargo build --release.
 #   2. runtime — debian:bookworm-slim + ca-certificates + the binary.
 #
-# Library-direct since T-RPP-LIB-DIRECT (`task-20260504-6ad4`): the
-# container ships ONLY `cs-rpp-adapter`. The legacy `cs` binary that
-# served the §3.5 subprocess envelope was removed after a tenant audit
-# caught the silent shell-out at
-# request time. Routes now call `cosmon_state::ops::*` in-process; no
-# `clone()` / `execve()` per request, no shell, no git, no external
-# dependency.
+# Library-direct since T-RPP-LIB-DIRECT (`task-20260504-6ad4`), and
+# FULLY so since issue #54 U6 (`task-20260905-b954`): the container
+# ships ONLY `cs-rpp-adapter`, and the adapter spawns no `cs` binary
+# for any route — reads and mutations run `cosmon_state::ops::*`
+# in-process; `tackle` dispatches through
+# `cosmon_runtime::LibraryExecutor` over the tmux transport port;
+# `run` drains through the in-process DAG loop. The only processes the
+# adapter creates are the tenant WORKERS themselves (tmux/claude,
+# behind the `worker_env` allow-list envelope) and the git calls their
+# worktrees need — so tmux and git ARE runtime dependencies of the
+# dispatch routes, while the `cs` CLI is not.
 # ----------------------------------------------------------------------
 
 # ----- Builder stage --------------------------------------------------
@@ -63,8 +67,13 @@ FROM debian:bookworm-slim AS runtime
 ARG COSMON_UID=10000
 
 # ca-certificates for any TLS client work (reserved for V1+ JWKS HTTP
-# fetch). No `cs` binary, no `git`, no `bash` shell out — the
-# adapter's request path never spawns a subprocess.
+# fetch). No `cs` binary — the adapter's request path spawns no `cs`
+# subprocess (issue #54 U6). `git` and `tmux` ARE installed: they are
+# the substrate of the dispatch routes (the library executor cuts a
+# worktree with git and opens the worker session through the tmux
+# transport port). The worker agent CLI itself (`claude`/`codex`) is
+# provisioned by the deployment, not baked here — see the issue #54
+# container-smoke unit.
 #
 # `wget` is included strictly for `docker-compose`'s `healthcheck`
 # probe (see `deploy/docker-compose.yml`); the adapter binary itself
@@ -86,6 +95,8 @@ ARG COSMON_UID=10000
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates \
+        git \
+        tmux \
         wget \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid ${COSMON_UID} cosmon \
