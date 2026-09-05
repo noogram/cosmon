@@ -55,7 +55,7 @@ use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::tag::Tag;
-use cosmon_filestore::FileStore;
+use cosmon_filestore::{harvest_door, FileStore};
 use cosmon_process_witness::process_start_time;
 use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
 use cosmon_state::ops::{
@@ -1865,14 +1865,35 @@ const LAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 ///
 /// # Named refusals
 ///
-/// Every outcome is one of the seven [`DoorRefusal`] labels, read back from
-/// the CLI door's **exit code** rather than parsed out of stderr, so the two
-/// sides cannot drift into two vocabularies. `base_not_fast_forward` maps to
-/// 503 alone: ADR-176 D7 classes it an operator *configuration* error,
-/// decidable at arming time, and charging it to the requester as a 4xx would
-/// convert the operator's misconfiguration into the tenant's failure class.
+/// Every outcome is one of the seven [`DoorRefusal`] labels.
+/// `base_not_fast_forward` maps to 503 alone: ADR-176 D7 classes it an
+/// operator *configuration* error, decidable at arming time, and charging
+/// it to the requester as a 4xx would convert the operator's
+/// misconfiguration into the tenant's failure class.
+///
+/// # Library-direct decision, subprocess effect (issue #54 U3)
+///
+/// Since issue #54 U3 the door's **decision half** runs in-process through
+/// [`cosmon_filestore::harvest_door::decide`] — the same library body `cs
+/// land` executes, so the two doors cannot drift — and every pre-effect
+/// refusal, plus `already_landed` idempotence, answers without any `cs`
+/// binary present. The **effect half** (the sealed `cs done` transaction:
+/// merge with lineage trailers, provenance gates, teardown) still crosses
+/// the ADR-080 §3.5 clause (e) envelope, because its one implementation is
+/// `cmd/done.rs` and duplicating it in a library would fork the door. That
+/// subprocess is the U6 seam: cutting it over means implementing the
+/// [`SealedHarvestEffect`] port in a library, not touching this decision
+/// half again. Execution refusals from the effect are still read back from
+/// the child's **exit code** rather than parsed out of stderr.
+///
+/// The trunk-lock discipline across that seam is the ADR-176 §-amendment:
+/// the effect binds the `trunk.lock` flock at its own boundary (the child
+/// `cs` flocks the same file on the same filesystem the adapter reads), so
+/// the in-process half must not hold it across the call — `flock(2)` does
+/// not nest across the parent/child pair.
 ///
 /// [`DoorRefusal`]: cosmon_core::harvest_door::DoorRefusal
+/// [`SealedHarvestEffect`]: cosmon_filestore::harvest_door::SealedHarvestEffect
 pub async fn land_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1917,7 +1938,7 @@ pub async fn land_molecule(
 
     // 5. Malformed id and absent tenant root both collapse to 404 — the same
     //    no-existence-oracle boundary the rest of the surface holds.
-    let _molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
+    let molecule_id = MoleculeId::new(&molecule_id_str).map_err(|_| ApiError {
         status: StatusCode::NOT_FOUND,
         label: "not_found",
         request_id: Some(spark.request_id.clone()),
@@ -1931,9 +1952,30 @@ pub async fn land_molecule(
         });
     }
 
-    // 6. The effect, synchronously, inside the tenant container where the
-    //    advisory `trunk.lock` flock actually binds (the I1 validity
-    //    condition that also made `run` a subprocess).
+    // 6. The decision half, in-process (issue #54 U3): the same library body
+    //    `cs land` runs, over the tenant's own state files. Every pre-effect
+    //    refusal — and the `already_landed` idempotent success — answers
+    //    here without the `cs` binary existing at all.
+    match decide_land_in_process(&tenant_root, &molecule_id, &spark.request_id).await? {
+        harvest_door::DoorDecision::AlreadyLanded => {
+            // Idempotence answered in-process: the same success as the first
+            // call, nothing mutated, no subprocess spawned.
+            let body = json!({
+                "request_id": spark.request_id,
+                "harvest": {
+                    "molecule": molecule_id_str,
+                    "outcome": cosmon_core::harvest_door::DoorOutcome::AlreadyLanded.as_str(),
+                },
+            });
+            return Ok((StatusCode::OK, Json(body)).into_response());
+        }
+        harvest_door::DoorDecision::Proceed => {}
+    }
+
+    // 7. The effect, synchronously, through the one subprocess this route
+    //    still owns — the U6 seam (see the handler docs). The child `cs`
+    //    binds the trunk flock at its own effect boundary, which is why the
+    //    in-process half above holds no lock across this call.
     let invoker = SystemInvoker::new(
         state.cs_path.clone(),
         state.galaxies_root.clone(),
@@ -1975,6 +2017,54 @@ pub async fn land_molecule(
     }
 }
 
+/// Run the door's in-process decision half over the tenant's own state
+/// (issue #54 U3) and map its typed answers onto the wire.
+///
+/// `spawn_blocking` because the store reads are synchronous filesystem
+/// work. A refused decision becomes its named [`ApiError`]; a
+/// `MoleculeNotFound` fault collapses to `404 not_found` — the same
+/// no-existence-oracle boundary the rest of the surface holds; any other
+/// fault stays an anonymous `harvest_failed`.
+async fn decide_land_in_process(
+    tenant_root: &std::path::Path,
+    molecule_id: &MoleculeId,
+    request_id: &str,
+) -> Result<harvest_door::DoorDecision, ApiError> {
+    let tenant_state_dir = tenant_root.join(".cosmon").join("state");
+    let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
+    let decision_molecule = molecule_id.clone();
+    let decision = tokio::task::spawn_blocking(move || {
+        let store = FileStore::new(&tenant_state_dir);
+        let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
+            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
+        harvest_door::decide(&store, &cfg, &decision_molecule)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "harvest_failed",
+        request_id: Some(request_id.to_owned()),
+    })?;
+
+    decision.map_err(|err| match err {
+        harvest_door::LandError::Refused(refused) => {
+            door_refusal_to_api_error(refused.refusal, request_id)
+        }
+        harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(_)) => {
+            ApiError {
+                status: StatusCode::NOT_FOUND,
+                label: "not_found",
+                request_id: Some(request_id.to_owned()),
+            }
+        }
+        _ => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "harvest_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+    })
+}
+
 /// Map the harvest door's exit code to its named §8p refusal.
 ///
 /// The label comes from [`cosmon_core::harvest_door::DoorRefusal`] — the one
@@ -1994,6 +2084,20 @@ fn refusal_to_api_error(code: i32, request_id: &str) -> ApiError {
             request_id: Some(request_id.to_owned()),
         };
     };
+    door_refusal_to_api_error(refusal, request_id)
+}
+
+/// Map a named door refusal to its wire status and label.
+///
+/// One mapping for both arrival paths — the in-process decision half and
+/// the subprocess effect's exit code — so a refusal cannot change status
+/// depending on which half of the door produced it.
+fn door_refusal_to_api_error(
+    refusal: cosmon_core::harvest_door::DoorRefusal,
+    request_id: &str,
+) -> ApiError {
+    use cosmon_core::harvest_door::DoorRefusal;
+
     let status = match refusal {
         // The requester holds a token but no authority, or holds neither —
         // and, for a reservation, a human attached a condition only a human

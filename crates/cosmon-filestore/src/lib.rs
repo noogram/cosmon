@@ -34,6 +34,7 @@
 pub mod cas;
 pub mod event;
 pub mod harvest_authority;
+pub mod harvest_door;
 pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;

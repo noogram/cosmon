@@ -16,6 +16,16 @@
 //! in one sentence — *a derogation requested by its beneficiary is not a
 //! derogation*.
 //!
+//! # Where the body lives
+//!
+//! Since issue #54 U3, the door's body — the ordered refusal checks, the
+//! trunk-lock discipline, the post-effect interpretation — is the library
+//! entry [`cosmon_filestore::harvest_door::land`], shared with the §8p
+//! route so the two doors cannot drift. This module keeps only what is
+//! CLI-shaped: argument parsing, the sealed `cs done` transaction as the
+//! injected [`SealedHarvestEffect`], and the mapping of the library's typed
+//! refusals onto the stable exit codes 70–76 that `main` reads back.
+//!
 //! # Two proofs, two keys
 //!
 //! Over the §8p route the JWT **authenticates the requester**; it carries no
@@ -40,12 +50,12 @@
 //! than parsing stderr.
 //!
 //! [`HarvestGrant`]: cosmon_core::harvest_authorization::HarvestGrant
+//! [`SealedHarvestEffect`]: cosmon_filestore::harvest_door::SealedHarvestEffect
 
 use cosmon_core::config::ProjectConfig;
-use cosmon_core::harvest_door::{reservation_requiring_seal, DoorOutcome, DoorRefusal};
+use cosmon_core::harvest_door::{DoorOutcome, DoorRefusal};
 use cosmon_core::id::MoleculeId;
-use cosmon_core::molecule::MoleculeStatus;
-use cosmon_state::{MoleculeFilter, NonIntegrationReason, StateStore};
+use cosmon_filestore::harvest_door::{self, LandError, SealedHarvestEffect};
 
 use super::Context;
 
@@ -77,15 +87,6 @@ pub struct RefusedHarvest {
     pub detail: Option<String>,
 }
 
-impl RefusedHarvest {
-    fn with(refusal: DoorRefusal, detail: impl Into<String>) -> anyhow::Error {
-        anyhow::Error::new(Self {
-            refusal,
-            detail: Some(detail.into()),
-        })
-    }
-}
-
 /// Recover the door's exit code from an error, if it is a door refusal.
 #[must_use]
 pub fn refusal_exit_code(err: &anyhow::Error) -> Option<i32> {
@@ -93,169 +94,60 @@ pub fn refusal_exit_code(err: &anyhow::Error) -> Option<i32> {
         .map(|r| r.refusal.exit_code())
 }
 
+/// The sealed `cs done` transaction as the door's effect half.
+///
+/// [`super::done::Args::sealed_door`] fixes every field at the type; this
+/// wrapper adds nothing to that argument set, it only adapts the call to the
+/// [`SealedHarvestEffect`] port. It declares `binds_trunk_lock` because the
+/// `cs done` path acquires the trunk flock at its own effect boundary
+/// (ADR-172 D3) — the door holding it too would deadlock, not serialize
+/// (see the port's docs and the ADR-176 §-amendment).
+struct SealedDoneEffect<'a> {
+    ctx: &'a Context,
+}
+
+impl SealedHarvestEffect for SealedDoneEffect<'_> {
+    fn binds_trunk_lock(&self) -> bool {
+        true
+    }
+
+    fn harvest(&mut self, molecule: &MoleculeId) -> Result<(), String> {
+        let done_args = super::done::Args::sealed_door(molecule.as_str().to_owned());
+        super::done::run(self.ctx, &done_args).map_err(|e| format!("{e:#}"))
+    }
+}
+
 /// Execute the `land` command.
 ///
-/// The order of the checks is the order of the cost they avoid: the two that
-/// read only the molecule come first, the backlog census next, and only then
-/// does anything touch git.
+/// The decision half, the trunk-lock discipline and the post-effect
+/// interpretation live in [`cosmon_filestore::harvest_door::land`]; this
+/// function injects the sealed `cs done` transaction as the effect and maps
+/// the typed result onto the CLI's rendering and exit codes.
 ///
 /// # Errors
 ///
 /// [`RefusedHarvest`] for every named refusal; a plain `anyhow` error for a
-/// malformed id or an unreadable store, which are faults of the invocation
-/// rather than outcomes of the door.
+/// malformed id, an unreadable store, or an effect failure that recorded
+/// nothing — faults of the invocation rather than outcomes of the door.
 pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let mol_id = MoleculeId::new(&args.molecule)?;
     let store = ctx.store();
     let cfg = cosmon_filestore::load_project_config(&super::resolve_config_from_context(ctx))
         .unwrap_or_else(|_| ProjectConfig::default());
 
-    // 1. The second key. A galaxy that has not armed harvest authority has
-    //    granted nobody anything, and a door that proceeded anyway would be
-    //    spending an authority that was never issued. Fail-closed, and first:
-    //    it is the cheapest check and the one whose absence is a doctrine
-    //    violation rather than a state fact.
-    if !cfg.harvest_authority.is_required() {
-        return Err(RefusedHarvest::with(
-            DoorRefusal::NotAuthorized,
-            "this galaxy has not armed `[harvest_authority] required`",
-        ));
-    }
-
-    let mol = store.load_molecule(&mol_id)?;
-
-    // 2. Idempotence, before admissibility: a harvest that already landed
-    //    must report the same success on every retry, including a retry sent
-    //    because the network ate the first response. `archived` is the
-    //    disjunct that closes the no-branch molecule's loop — it never stamps
-    //    `merged_at` because it has nothing to merge.
-    if mol.merged_at.is_some() || mol.archived {
-        report(ctx, &mol_id, DoorOutcome::AlreadyLanded, None);
-        return Ok(());
-    }
-
-    // 3. Admissibility. `is_terminal()` is `Completed | Collapsed`, and only
-    //    one of the two is work anyone asked to land — the ADR-176 §1 defect
-    //    stated generally. The molecule's own `--if-completed` gate would
-    //    also catch this, silently; naming it here is what makes the refusal
-    //    readable to a requester who is not watching a terminal.
-    if mol.status != MoleculeStatus::Completed {
-        return Err(RefusedHarvest::with(
-            DoorRefusal::NotCompleted,
-            format!("status is {}", mol.status.as_str()),
-        ));
-    }
-
-    // 4. Reservations. These name a condition somebody attached on purpose,
-    //    and the door has no verdict to offer: the missing input is a human
-    //    judgement. Checked here as well as at the effect boundary because a
-    //    refusal the requester can read beats one buried in a merge log —
-    //    the boundary check under the lock remains the load-bearing one,
-    //    since a tag added after this line is still caught there.
-    let tags: Vec<String> = mol.tags.iter().map(ToString::to_string).collect();
-    if let Some(tag) = reservation_requiring_seal(&tags) {
-        return Err(RefusedHarvest::with(
-            DoorRefusal::ReservationRequiresSeal,
-            format!("reserved by `{tag}`"),
-        ));
-    }
-
-    // 5. The bounded queue (ADR-176 D7). Past the operator's sealed ceiling
-    //    of closed-but-unintegrated molecules, further requests are refused.
-    //    The ceiling is a field of the configuration, never a parameter: a
-    //    queue the requester can lengthen is not a bound.
-    let ceiling = cfg.harvest_authority.backlog_ceiling();
-    let backlog = unintegrated_census(store.as_ref())?;
-    if backlog >= ceiling as usize {
-        return Err(RefusedHarvest::with(
-            DoorRefusal::BacklogFull,
-            format!("{backlog} closed-but-unintegrated molecules, ceiling {ceiling}"),
-        ));
-    }
-
-    // 6. The effect. One argument set, fixed at the type. Everything the
-    //    door may not vary is unreachable from here.
-    let done_args = super::done::Args::sealed_door(args.molecule.clone());
-    match super::done::run(ctx, &done_args) {
-        Ok(()) => {
-            // `cs done` succeeding is not by itself proof that the work
-            // landed: `--if-completed` exits success on a no-op, and a
-            // molecule with no branch archives without a merge. Re-read the
-            // state and let the trunk-side record answer.
-            let after = store.load_molecule(&mol_id)?;
-            match after.non_integration.as_ref() {
-                None if after.merged_at.is_some() || after.archived => {
-                    report(ctx, &mol_id, DoorOutcome::Landed, None);
-                    Ok(())
-                }
-                None => Err(RefusedHarvest::with(
-                    DoorRefusal::NotCompleted,
-                    "the harvest was a no-op and nothing was recorded",
-                )),
-                Some(record) => Err(refusal_from_record(record)),
-            }
+    let mut effect = SealedDoneEffect { ctx };
+    match harvest_door::land(store.as_ref(), &cfg, &mol_id, &mut effect) {
+        Ok(outcome) => {
+            report(ctx, &mol_id, outcome, None);
+            Ok(())
         }
-        Err(err) => {
-            // The refusal reason is read from the trunk-side record rather
-            // than from the error text: `cs done` writes `non_integration`
-            // under the lock on every failure path, and a string match on a
-            // message is a mirror that drifts the first time someone edits
-            // the message.
-            let recorded = store
-                .load_molecule(&mol_id)
-                .ok()
-                .and_then(|m| m.non_integration);
-            match recorded {
-                Some(record) => Err(refusal_from_record(&record)),
-                None => Err(err),
-            }
-        }
+        Err(LandError::Refused(refused)) => Err(anyhow::Error::new(RefusedHarvest {
+            refusal: refused.refusal,
+            detail: refused.detail,
+        })),
+        Err(LandError::Fault(e)) => Err(e.into()),
+        Err(LandError::EffectFailed(message)) => Err(anyhow::anyhow!("{message}")),
     }
-}
-
-/// Map the trunk-side non-integration record to a door refusal.
-///
-/// The two mechanical reasons are the ones ADR-176 D7 calls an *execution
-/// event* and a *configuration error*; `PreDoneRefused` is the *verdict*.
-/// `NoBranch` and `MergeSkipped` cannot arise on this path — the door never
-/// passes `--no-merge`, and a molecule with no branch archives successfully —
-/// so they are mapped to the refusal whose recovery is the same (a human
-/// looks) rather than given a variant that no request can produce.
-fn refusal_from_record(record: &cosmon_state::NonIntegration) -> anyhow::Error {
-    let refusal = match record.reason {
-        NonIntegrationReason::Conflict => DoorRefusal::MergeConflict,
-        NonIntegrationReason::MergeFailed => DoorRefusal::BaseNotFastForward,
-        NonIntegrationReason::PreDoneRefused
-        | NonIntegrationReason::NoBranch
-        | NonIntegrationReason::MergeSkipped => DoorRefusal::PreDoneRefused,
-    };
-    let base = record
-        .base_branch
-        .as_ref()
-        .map_or_else(String::new, |b| format!(" against {b}"));
-    let extra = record
-        .detail
-        .as_ref()
-        .map_or_else(String::new, |d| format!(": {d}"));
-    RefusedHarvest::with(refusal, format!("{}{base}{extra}", record.reason.as_str()))
-}
-
-/// How many molecules in this kernel are closed but not integrated.
-///
-/// The census is the complement `merged_at.is_none()` restricted to
-/// `Completed`, which is exactly the condition ADR-176 D7 bounds. Molecules
-/// that never reached completion are not a debt: nobody is waiting on a
-/// verdict for them.
-fn unintegrated_census(store: &dyn StateStore) -> anyhow::Result<usize> {
-    let filter = MoleculeFilter {
-        status: Some(MoleculeStatus::Completed),
-        ..MoleculeFilter::default()
-    };
-    Ok(store
-        .list_molecules(&filter)?
-        .into_iter()
-        .filter(|m| m.merged_at.is_none() && m.non_integration.is_some())
-        .count())
 }
 
 /// Print the door's success line, in JSON or for a human.
@@ -276,12 +168,19 @@ fn report(ctx: &Context, mol_id: &MoleculeId, outcome: DoorOutcome, detail: Opti
 mod tests {
     use super::*;
 
+    fn refused(refusal: DoorRefusal, detail: &str) -> anyhow::Error {
+        anyhow::Error::new(RefusedHarvest {
+            refusal,
+            detail: Some(detail.to_owned()),
+        })
+    }
+
     #[test]
     fn a_refusal_carries_its_exit_code_through_anyhow() {
         // `main` recovers the code by downcast; if the error is wrapped in a
         // way that loses the type, every refusal exits 1 and the route can no
         // longer tell one from another.
-        let err = RefusedHarvest::with(DoorRefusal::MergeConflict, "src/lib.rs");
+        let err = refused(DoorRefusal::MergeConflict, "src/lib.rs");
         assert_eq!(
             refusal_exit_code(&err),
             Some(DoorRefusal::MergeConflict.exit_code())
@@ -313,31 +212,20 @@ mod tests {
     }
 
     #[test]
-    fn every_non_integration_reason_maps_to_a_named_refusal() {
-        // Exhaustive over the persisted partition, so a sixth reason added
-        // to `cosmon-state` cannot reach the door as an unnamed failure.
-        use NonIntegrationReason as R;
-        let cases = [
-            (R::Conflict, DoorRefusal::MergeConflict),
-            (R::MergeFailed, DoorRefusal::BaseNotFastForward),
-            (R::PreDoneRefused, DoorRefusal::PreDoneRefused),
-            (R::NoBranch, DoorRefusal::PreDoneRefused),
-            (R::MergeSkipped, DoorRefusal::PreDoneRefused),
-        ];
-        for (reason, expected) in cases {
-            let record = cosmon_state::NonIntegration {
-                reason,
-                at: chrono::Utc::now(),
-                base_branch: Some("main".to_owned()),
-                detail: Some("two files".to_owned()),
+    fn every_library_refusal_keeps_its_exit_code_through_the_cli_mapping() {
+        // The library speaks `DoorRefused`; the CLI speaks exit codes. This
+        // walks the closed set through the same conversion `run` performs,
+        // so a refusal cannot lose its code between the two vocabularies.
+        for refusal in cosmon_core::harvest_door::ALL_REFUSALS {
+            let refused = cosmon_filestore::harvest_door::DoorRefused {
+                refusal: *refusal,
+                detail: None,
             };
-            let err = refusal_from_record(&record);
-            assert_eq!(
-                refusal_exit_code(&err),
-                Some(expected.exit_code()),
-                "{reason:?} mapped to the wrong refusal",
-            );
-            assert!(err.to_string().contains("against main"));
+            let err = anyhow::Error::new(RefusedHarvest {
+                refusal: refused.refusal,
+                detail: refused.detail,
+            });
+            assert_eq!(refusal_exit_code(&err), Some(refusal.exit_code()));
         }
     }
 }
