@@ -18,7 +18,7 @@ use cosmon_core::worker::{
 use cosmon_state::{MoleculeData, MoleculeFilter};
 use cosmon_transport::registry::{supervision_mode_for, SupervisionMode};
 
-use super::Context;
+use super::{machine_reading, Context};
 use crate::visual::{classify as visual_classify, RowInputs, RowKind};
 
 /// Probe-freshness window used by `RunState::ghost()` during ensemble
@@ -43,6 +43,15 @@ pub struct Args {
     /// visits every sibling galaxy on disk and prints their workers +
     /// molecule counts. Works in tandem with `--all` (implicitly drops
     /// the project filter because the scope is now the whole cluster).
+    ///
+    /// Also prints one host reading — memory, swap, the kernel's own
+    /// pressure level, CPUs and load, with units — and the machine-wide
+    /// totals derived from the galaxies scanned, including harvests holding
+    /// a galaxy's trunk lock (a `cs done` in its post-merge gate phase has
+    /// no live worker). Observations only: no threshold is applied and
+    /// nothing is refused. A counter that could not be read prints
+    /// `unavailable`, never `0`; if the host cannot be read at all the
+    /// galaxy view still renders and the reason goes to stderr.
     #[arg(long, visible_alias = "cluster")]
     pub cluster: bool,
 
@@ -1275,6 +1284,19 @@ struct ClusterRow {
     frozen: usize,
     completed: usize,
     collapsed: usize,
+    /// The `cs` command holding this galaxy's trunk lock, when one is.
+    ///
+    /// Present so a harvest in its post-merge gate phase — worker already torn
+    /// down, molecule already `completed`, a full workspace `cargo check` still
+    /// running in the main checkout — is visible in the row rather than only in
+    /// the machine total. Without it the busiest moment of the cycle renders as
+    /// an idle galaxy (noogram/cosmon #58, the harvest blind spot).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    harvest_in_flight: Option<String>,
+    /// A trunk-lock hint whose recorded process no longer exists: a harvest
+    /// killed before it could clear the hint. Reported, never counted as work.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stale_harvest_hint: bool,
 }
 
 /// Resolve the cluster root used by `--cluster`.
@@ -1315,6 +1337,11 @@ fn scan_cluster(root: &std::path::Path) -> Vec<ClusterRow> {
         }
         let workers = count_workers(&state);
         let (pending, queued, running, frozen, completed, collapsed) = count_statuses(&state);
+        // Read from `trunk.lock`, which `cs done` already stamps and clears —
+        // no new artifact is created for this (issue #58 addendum).
+        let witness = machine_reading::harvest_witness(&state);
+        let stale_harvest_hint = witness.as_ref().is_some_and(|w| !w.live);
+        let harvest_in_flight = witness.and_then(|w| if w.live { w.cmd } else { None });
         out.push(ClusterRow {
             galaxy: entry.file_name().to_string_lossy().into_owned(),
             path: path.to_string_lossy().into_owned(),
@@ -1325,6 +1352,8 @@ fn scan_cluster(root: &std::path::Path) -> Vec<ClusterRow> {
             frozen,
             completed,
             collapsed,
+            harvest_in_flight,
+            stale_harvest_hint,
         });
     }
     out.sort_by(|a, b| a.galaxy.cmp(&b.galaxy));
@@ -1400,17 +1429,64 @@ fn count_statuses(state: &std::path::Path) -> (usize, usize, usize, usize, usize
     (pending, queued, running, frozen, completed, collapsed)
 }
 
+/// Sum the per-galaxy rows into the machine-wide counts, and fold in the host
+/// reading.
+///
+/// A **derivation**, not a new record: every number comes from state the
+/// galaxies already own (`fleet.json`, molecule `state.json`, `trunk.lock`) and
+/// nothing is persisted. See [`machine_reading`] for why the harvest count is
+/// there and what the scope label covers.
+fn machine_reading_for(
+    rows: &[ClusterRow],
+    probe: &dyn cosmon_core::admission::MachineProbe,
+) -> machine_reading::MachineReading {
+    let activity = machine_reading::CosmonActivity {
+        galaxies: rows.len(),
+        registered_workers: rows.iter().map(|r| r.workers).sum(),
+        running_molecules: rows.iter().map(|r| r.running).sum(),
+        harvests_in_flight: rows
+            .iter()
+            .filter(|r| r.harvest_in_flight.is_some())
+            .count(),
+        stale_harvest_hints: rows.iter().filter(|r| r.stale_harvest_hint).count(),
+    };
+    machine_reading::MachineReading::new(probe.snapshot().map_err(|e| e.to_string()), activity)
+}
+
 /// Render the cluster-wide table. JSON output (`--json`) emits a
 /// structured document; human output prints a single aggregated table
 /// with one row per galaxy and a grand-total footer.
+///
+/// The probe comes from [`Context::machine_probe`] — the seam, not a platform
+/// reader built here — so every branch of the host reading, including the ones
+/// this machine is not currently in, is reachable from a test.
 fn run_cluster(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    run_cluster_with_probe(ctx, args, ctx.machine_probe().as_ref())
+}
+
+/// The testable body of [`run_cluster`], with the port passed in.
+fn run_cluster_with_probe(
+    ctx: &Context,
+    args: &Args,
+    probe: &dyn cosmon_core::admission::MachineProbe,
+) -> anyhow::Result<()> {
     let root = resolve_cluster_root(args);
     let rows = scan_cluster(&root);
+    let machine = machine_reading_for(&rows, probe);
+
+    // A probe that produced no reading at all must not cost the operator the
+    // galaxy view they asked for. The galaxies still render; the reason the
+    // host half is missing goes to stderr, where it does not corrupt a `--json`
+    // document being piped into a parser.
+    if let Some(err) = machine.probe_error() {
+        eprintln!("cosmon: no host reading ({err}); galaxy counts below are unaffected");
+    }
 
     if ctx.json {
         let output = serde_json::json!({
             "cluster_root": root.to_string_lossy(),
             "galaxies": rows,
+            "machine": machine.to_json(),
         });
         println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
@@ -1491,6 +1567,9 @@ fn run_cluster(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         grand.5.to_string().bold(),
         grand.6.to_string().bold(),
     );
+
+    println!();
+    print!("{}", machine.to_human());
 
     Ok(())
 }
@@ -2006,6 +2085,154 @@ mod tests {
         let rows = scan_cluster(tmp.path());
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].completed, 0, "archived excluded");
+    }
+
+    /// A probe returning a canned snapshot, so every branch of the host
+    /// reading is reachable without the machine being in that state.
+    struct CannedProbe(Result<cosmon_core::admission::MachineSnapshot, String>);
+
+    impl cosmon_core::admission::MachineProbe for CannedProbe {
+        fn snapshot(
+            &self,
+        ) -> Result<cosmon_core::admission::MachineSnapshot, cosmon_core::admission::ProbeError>
+        {
+            self.0
+                .clone()
+                .map_err(cosmon_core::admission::ProbeError::Io)
+        }
+    }
+
+    /// Plant one galaxy with `workers` registered and `running` molecules,
+    /// optionally holding its trunk lock.
+    fn plant_galaxy(root: &std::path::Path, name: &str, workers: usize, running: usize) {
+        let state = root.join(name).join(".cosmon/state");
+        std::fs::create_dir_all(&state).unwrap();
+        let mut map = serde_json::Map::new();
+        for i in 0..workers {
+            map.insert(format!("w{i}"), serde_json::json!({"role": "impl"}));
+        }
+        std::fs::write(
+            state.join("fleet.json"),
+            serde_json::json!({"workers": map}).to_string(),
+        )
+        .unwrap();
+        for i in 0..running {
+            let dir = state.join(format!("fleets/default/molecules/task-{name}-{i}"));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("state.json"),
+                serde_json::json!({"id": format!("task-{name}-{i}"), "status": "running"})
+                    .to_string(),
+            )
+            .unwrap();
+        }
+    }
+
+    /// **Falsifier 4** — the machine-wide totals are the sum over the
+    /// galaxies, and no single galaxy's count is presented as the host's.
+    #[test]
+    fn machine_totals_are_the_sum_of_the_galaxies() {
+        let tmp = TempDir::new().unwrap();
+        plant_galaxy(tmp.path(), "alpha", 2, 3);
+        plant_galaxy(tmp.path(), "beta", 5, 1);
+
+        let rows = scan_cluster(tmp.path());
+        assert_eq!(rows.len(), 2);
+        let probe = CannedProbe(Ok(cosmon_core::admission::MachineSnapshot::unread_at(
+            Utc::now(),
+        )));
+        let reading = machine_reading_for(&rows, &probe);
+        let value = reading.to_json();
+
+        assert_eq!(value["cosmon_activity"]["registered_workers"], 2 + 5);
+        assert_eq!(value["cosmon_activity"]["running_molecules"], 3 + 1);
+        assert_eq!(value["cosmon_activity"]["galaxies"], 2);
+        // A per-galaxy ceiling is never the host's: the largest single galaxy
+        // has 5 workers and the machine has 7. A total that equalled the max
+        // would pass a naive sum test and fail here.
+        let per_galaxy_max = rows.iter().map(|r| r.workers).max().unwrap_or(0);
+        assert_ne!(
+            value["cosmon_activity"]["registered_workers"],
+            serde_json::json!(per_galaxy_max)
+        );
+    }
+
+    /// **Falsifier 3 (command half)** — a probe that fails entirely still
+    /// renders the galaxy view and reports why the host reading is missing.
+    /// The exit status is `Ok`: a blind probe is not an error the operator
+    /// asked about.
+    #[test]
+    fn a_failed_probe_still_renders_the_galaxy_view() {
+        let tmp = TempDir::new().unwrap();
+        plant_galaxy(tmp.path(), "alpha", 1, 1);
+        let probe = CannedProbe(Err("sysctl went missing".to_owned()));
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: None,
+        };
+        let args = Args {
+            all: false,
+            cluster: true,
+            cluster_root: Some(tmp.path().to_path_buf()),
+            tags: Vec::new(),
+        };
+        run_cluster_with_probe(&ctx, &args, &probe)
+            .expect("a blind probe is not a command failure");
+
+        // And the document it built carries the reason plus the intact counts.
+        let rows = scan_cluster(tmp.path());
+        let value = machine_reading_for(&rows, &probe).to_json();
+        assert!(value["host"]["probe_error"]
+            .as_str()
+            .is_some_and(|e| e.contains("sysctl went missing")));
+        assert_eq!(value["host"]["total_memory_bytes"], serde_json::Value::Null);
+        assert_eq!(value["cosmon_activity"]["registered_workers"], 1);
+    }
+
+    /// **The harvest blind spot** — a galaxy whose `cs done` is in its
+    /// post-merge gate phase has no live worker and no running molecule, yet
+    /// must not render as idle. The trunk-lock hint is the durable evidence
+    /// that already exists; nothing new is written to find it.
+    #[test]
+    fn a_harvest_in_flight_is_counted_though_no_worker_is_alive() {
+        let tmp = TempDir::new().unwrap();
+        plant_galaxy(tmp.path(), "alpha", 0, 0);
+        let state = tmp.path().join("alpha/.cosmon/state");
+        std::fs::write(
+            state.join("trunk.lock"),
+            format!(
+                "pid={}\ncmd=cs done task-20260906-73be\nstarted_at=2026-09-06T10:00:00Z\nhost=h\n",
+                std::process::id()
+            ),
+        )
+        .unwrap();
+
+        let rows = scan_cluster(tmp.path());
+        assert_eq!(rows[0].workers, 0, "the worker is already torn down");
+        assert_eq!(rows[0].running, 0, "the molecule is already completed");
+        assert_eq!(
+            rows[0].harvest_in_flight.as_deref(),
+            Some("cs done task-20260906-73be"),
+            "the harvest must still be visible"
+        );
+
+        let probe = CannedProbe(Ok(cosmon_core::admission::MachineSnapshot::unread_at(
+            Utc::now(),
+        )));
+        let value = machine_reading_for(&rows, &probe).to_json();
+        assert_eq!(value["cosmon_activity"]["harvests_in_flight"], 1);
+        assert_eq!(value["cosmon_activity"]["stale_harvest_hints"], 0);
+
+        // Released: `cs done` truncates the hint on drop, so the galaxy goes
+        // quiet again rather than staying busy forever.
+        std::fs::write(state.join("trunk.lock"), "").unwrap();
+        let rows = scan_cluster(tmp.path());
+        assert_eq!(rows[0].harvest_in_flight, None);
+        assert_eq!(
+            machine_reading_for(&rows, &probe).to_json()["cosmon_activity"]["harvests_in_flight"],
+            0
+        );
     }
 
     #[test]
