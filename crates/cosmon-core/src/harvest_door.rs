@@ -494,6 +494,46 @@ mod tests {
     use std::collections::BTreeSet;
 
     #[test]
+    /// Falsifier 4 of the D4 reversal: reversing D4 did not break the
+    /// failure surface.
+    ///
+    /// The seven ADR-176 refusals keep their exact labels and their exact
+    /// exit codes 70–76, pinned literally rather than derived, so a
+    /// renumbering that a bijection test would happily accept fails here.
+    /// `missing_reason` is the eighth and takes 77; it displaces nothing.
+    #[test]
+    fn the_seven_adr_176_refusals_keep_their_labels_and_codes() {
+        let pinned: &[(DoorRefusal, &str, i32)] = &[
+            (DoorRefusal::NotCompleted, "not_completed", 70),
+            (DoorRefusal::NotAuthorized, "not_authorized", 71),
+            (
+                DoorRefusal::ReservationRequiresSeal,
+                "reservation_requires_seal",
+                72,
+            ),
+            (DoorRefusal::BacklogFull, "backlog_full", 73),
+            (DoorRefusal::MergeConflict, "merge_conflict", 74),
+            (DoorRefusal::BaseNotFastForward, "base_not_fast_forward", 75),
+            (DoorRefusal::PreDoneRefused, "pre_done_refused", 76),
+        ];
+        for (refusal, label, code) in pinned {
+            assert_eq!(refusal.as_str(), *label, "{label} lost its label");
+            assert_eq!(refusal.exit_code(), *code, "{label} lost its exit code");
+            assert_eq!(DoorRefusal::from_exit_code(*code), Some(*refusal));
+        }
+        assert_eq!(DoorRefusal::MissingReason.exit_code(), 77);
+        assert_eq!(DoorRefusal::MissingReason.as_str(), "missing_reason");
+        // And the operator-configuration classification of D7 is
+        // untouched: exactly one refusal is not charged to the requester.
+        let operator_faults: Vec<&str> = ALL_REFUSALS
+            .iter()
+            .filter(|r| r.is_operator_configuration_fault())
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(operator_faults, vec!["base_not_fast_forward"]);
+    }
+
+    #[test]
     fn harvest_door_labels_and_codes_are_a_bijection() {
         // The §8p route picks its label from the CLI's exit code. Two
         // variants sharing either side would make one refusal readable as

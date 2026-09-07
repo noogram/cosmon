@@ -177,11 +177,7 @@ pub trait SealedHarvestEffect {
     /// derives the named refusal from that record rather than from error
     /// text (a string match on a message is a mirror that drifts the first
     /// time someone edits the message).
-    fn harvest(
-        &mut self,
-        molecule: &MoleculeId,
-        options: &HarvestOptions,
-    ) -> Result<(), String>;
+    fn harvest(&mut self, molecule: &MoleculeId, options: &HarvestOptions) -> Result<(), String>;
 }
 
 /// The door's decision half — the ordered pre-effect refusal checks.
@@ -202,6 +198,7 @@ pub fn decide(
     store: &dyn StateStore,
     cfg: &ProjectConfig,
     molecule: &MoleculeId,
+    options: &HarvestOptions,
 ) -> Result<DoorDecision, LandError> {
     // 1. The second key. A galaxy that has not armed harvest authority has
     //    granted nobody anything, and a door that proceeded anyway would be
@@ -227,7 +224,17 @@ pub fn decide(
     // 3. Admissibility. `is_terminal()` is `Completed | Collapsed`, and only
     //    one of the two is work anyone asked to land — the ADR-176 §1 defect
     //    stated generally.
-    if mol.status != MoleculeStatus::Completed {
+    //
+    //    `force` waives this check and nothing else, because that is exactly
+    //    what `cs done --force` waives ("proceed even if the molecule is not
+    //    in a terminal state"). Since the D4 reversal the flag crosses the
+    //    wire, and a flag that crossed the wire but was silently refused
+    //    here would be worse than one that never crossed: the requester
+    //    would read `not_completed` for a request that named the override.
+    //    It waives no authority: the second key above is checked before
+    //    this, the reservation and backlog checks after it, and `force` is
+    //    invisible to all three.
+    if !options.force && mol.status != MoleculeStatus::Completed {
         return Err(LandError::Refused(DoorRefused::with(
             DoorRefusal::NotCompleted,
             format!("status is {}", mol.status.as_str()),
@@ -288,14 +295,14 @@ pub fn land(
     // 0. The argument set, before anything is read. A harvest with no
     //    stated reason is refused rather than given a fabricated one — the
     //    one gap the reporters of issue #51 named explicitly in `land`.
-    options
-        .validate()
-        .map_err(|refusal| LandError::Refused(DoorRefused::with(
+    options.validate().map_err(|refusal| {
+        LandError::Refused(DoorRefused::with(
             refusal,
             "the request named no reason for closing this molecule",
-        )))?;
+        ))
+    })?;
 
-    match decide(store, cfg, molecule)? {
+    match decide(store, cfg, molecule, options)? {
         DoorDecision::AlreadyLanded => return Ok(DoorOutcome::AlreadyLanded),
         DoorDecision::Proceed => {}
     }
@@ -583,10 +590,10 @@ mod tests {
                 false
             }
             fn harvest(
-            &mut self,
-            _molecule: &MoleculeId,
-            _options: &HarvestOptions,
-        ) -> Result<(), String> {
+                &mut self,
+                _molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 panic!("effect crashed mid-harvest");
             }
         }
@@ -639,10 +646,10 @@ mod tests {
                 true
             }
             fn harvest(
-            &mut self,
-            _molecule: &MoleculeId,
-            _options: &HarvestOptions,
-        ) -> Result<(), String> {
+                &mut self,
+                _molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 std::env::set_var("COSMON_TRUNK_LOCK_NONBLOCKING", "1");
                 let acquired = self.store.acquire_trunk_lock("effect-boundary");
                 std::env::remove_var("COSMON_TRUNK_LOCK_NONBLOCKING");
@@ -693,7 +700,13 @@ mod tests {
         let id = mol("task-20260904-cold");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        let out = land(&w.store, &ProjectConfig::default(), &id, &opts(), &mut InertEffect);
+        let out = land(
+            &w.store,
+            &ProjectConfig::default(),
+            &id,
+            &opts(),
+            &mut InertEffect,
+        );
         match out {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::NotAuthorized);
@@ -749,6 +762,51 @@ mod tests {
         let opts = HarvestOptions::new("the spike answered its question");
         assert_eq!(opts.reason, "the spike answered its question");
         assert!(opts.validate().is_ok());
+    }
+
+    /// `force` changes behaviour on a molecule that is not terminal:
+    /// refused without it, admitted with it.
+    ///
+    /// The falsifier that a parameter which crosses the wire is not inert
+    /// once it gets there. A flag the requester can send and the door
+    /// silently ignores is worse than one they cannot send: they would
+    /// read `not_completed` for a request that named the override.
+    #[test]
+    fn force_waives_the_not_completed_refusal_and_nothing_else() {
+        let w = world();
+        let id = mol("task-20260101-bbbb");
+        plant(&w, &id, MoleculeStatus::Running, |_| {});
+
+        // Without it: the named refusal, as before.
+        match decide(&w.store, &armed(), &id, &opts()) {
+            Err(LandError::Refused(r)) => assert_eq!(r.refusal, DoorRefusal::NotCompleted),
+            other => panic!("a running molecule must refuse not_completed, got {other:?}"),
+        }
+
+        // With it: admitted.
+        let mut forced = opts();
+        forced.force = true;
+        assert_eq!(
+            decide(&w.store, &armed(), &id, &forced).expect("force admits"),
+            DoorDecision::Proceed,
+        );
+
+        // And it waives NOTHING else. The second key is checked before it,
+        // the reservation after it; `force` is invisible to both.
+        match decide(&w.store, &ProjectConfig::default(), &id, &forced) {
+            Err(LandError::Refused(r)) => assert_eq!(r.refusal, DoorRefusal::NotAuthorized),
+            other => panic!("force must not arm an unarmed galaxy, got {other:?}"),
+        }
+        let reserved = mol("task-20260101-cccc");
+        plant(&w, &reserved, MoleculeStatus::Running, |m| {
+            m.tags.insert(cosmon_core::tag::Tag::new("needs-review").expect("tag"));
+        });
+        match decide(&w.store, &armed(), &reserved, &forced) {
+            Err(LandError::Refused(r)) => {
+                assert_eq!(r.refusal, DoorRefusal::ReservationRequiresSeal);
+            }
+            other => panic!("force must not lift a human reservation, got {other:?}"),
+        }
     }
 
     fn a_reservation_names_the_tag_that_fired() {
@@ -833,10 +891,10 @@ mod tests {
                 true
             }
             fn harvest(
-            &mut self,
-            molecule: &MoleculeId,
-            _options: &HarvestOptions,
-        ) -> Result<(), String> {
+                &mut self,
+                molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 // The sealed transaction records why under the lock, then
                 // fails with unrelated prose — the record must win.
                 let mut m = self.w.store.load_molecule(molecule).expect("load");
@@ -855,7 +913,13 @@ mod tests {
         let id = mol("task-20260904-clash");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        match land(&w.store, &armed(), &id, &opts(), &mut FailingEffect { w: &w }) {
+        match land(
+            &w.store,
+            &armed(),
+            &id,
+            &opts(),
+            &mut FailingEffect { w: &w },
+        ) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::MergeConflict);
                 let detail = r.detail.expect("detail");

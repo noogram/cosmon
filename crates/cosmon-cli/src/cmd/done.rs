@@ -1880,7 +1880,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // harvest leaves `non_integration` explaining *what the repository did*
     // and `harvest_reason` explaining *what the caller wanted* — the two
     // halves of the same event.
-    if let Some(reason) = args.reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+    if let Some(reason) = args
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
         match store.load_molecule(&mol_id) {
             Ok(mut latest) => {
                 latest.harvest_reason = Some(reason.to_owned());

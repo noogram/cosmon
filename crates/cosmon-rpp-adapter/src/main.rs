@@ -456,9 +456,9 @@ async fn main() -> anyhow::Result<()> {
             Some(binary) => std::sync::Arc::new(
                 cosmon_rpp_adapter::harvest_effect::CsBinaryHarvestEffect::new(binary),
             ),
-            None => std::sync::Arc::new(
-                cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
-            ),
+            None => {
+                std::sync::Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect)
+            }
         };
 
     let state = AppState {

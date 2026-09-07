@@ -53,9 +53,9 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
+use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::tag::Tag;
-use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_filestore::{harvest_door, FileStore};
 use cosmon_process_witness::process_start_time;
 use cosmon_state::instrumentation::{emit_authz_decision_with_source, AuthzDecision};
@@ -2048,7 +2048,9 @@ pub async fn done_molecule(
     //    always run, over the tenant's own state files. Every pre-effect
     //    refusal — and the `already_landed` idempotent success — answers
     //    here without the `cs` binary existing at all.
-    match decide_harvest_in_process(&tenant_root, &molecule_id, &spark.request_id).await? {
+    match decide_harvest_in_process(&tenant_root, &molecule_id, &options, &spark.request_id)
+        .await?
+    {
         harvest_door::DoorDecision::AlreadyLanded => {
             let body = json!({
                 "request_id": spark.request_id,
@@ -2136,9 +2138,9 @@ async fn run_harvest_effect(
         Err(harvest_door::LandError::Refused(refused)) => {
             Err(door_refusal_to_api_error(refused.refusal, request_id))
         }
-        Err(harvest_door::LandError::Fault(
-            cosmon_core::error::CosmonError::MoleculeNotFound(_),
-        )) => Err(ApiError {
+        Err(harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(
+            _,
+        ))) => Err(ApiError {
             status: StatusCode::NOT_FOUND,
             label: "not_found",
             request_id: Some(request_id.to_owned()),
@@ -2202,16 +2204,18 @@ impl harvest_door::SealedHarvestEffect for PortBackedEffect<'_> {
 async fn decide_harvest_in_process(
     tenant_root: &std::path::Path,
     molecule_id: &MoleculeId,
+    options: &HarvestOptions,
     request_id: &str,
 ) -> Result<harvest_door::DoorDecision, ApiError> {
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
     let decision_molecule = molecule_id.clone();
+    let decision_options = options.clone();
     let decision = tokio::task::spawn_blocking(move || {
         let store = FileStore::new(&tenant_state_dir);
         let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
             .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
-        harvest_door::decide(&store, &cfg, &decision_molecule)
+        harvest_door::decide(&store, &cfg, &decision_molecule, &decision_options)
     })
     .await
     .map_err(|_| ApiError {

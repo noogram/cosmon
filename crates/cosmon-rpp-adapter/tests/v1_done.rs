@@ -31,9 +31,9 @@ use std::time::Duration;
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
 use cosmon_core::harvest_door::{HarvestOptions, ALL_REFUSALS};
-use cosmon_rpp_adapter::harvest_effect::{HarvestEffectError, HarvestEffectPort};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
+use cosmon_rpp_adapter::harvest_effect::{HarvestEffectError, HarvestEffectPort};
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
@@ -71,8 +71,7 @@ impl HarvestEffectPort for SpyEffect {
         // record a landing the way the sealed transaction does, or the
         // door correctly reads it as "a no-op that recorded nothing".
         use cosmon_state::StateStore as _;
-        let store =
-            cosmon_filestore::FileStore::new(tenant_root.join(".cosmon").join("state"));
+        let store = cosmon_filestore::FileStore::new(tenant_root.join(".cosmon").join("state"));
         let mut data = store
             .load_molecule(molecule)
             .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
@@ -111,9 +110,9 @@ fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-         harvest_effect: std::sync::Arc::new(
-             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
-         ),
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
         worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
@@ -221,7 +220,11 @@ async fn never_202_on_a_transaction_that_may_integrate_nothing() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-1");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-land", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-land",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
 
@@ -331,6 +334,70 @@ async fn a_bare_request_gets_the_documented_default_strategy() {
     // escalation is an agent dispatch wearing a merge parameter.
     assert!(seen.no_auto_propel);
     assert_eq!(seen.max_retries, 0);
+}
+
+/// `force` on the wire is not inert: a molecule that is not terminal is
+/// refused without it and admitted with it.
+///
+/// The end-to-end half of the same claim `force_waives_the_not_completed_
+/// refusal_and_nothing_else` makes at the door. A flag a requester can
+/// send and the server silently ignores is worse than one they cannot
+/// send: they would read `not_completed` for a request that named the
+/// override.
+#[tokio::test]
+async fn force_on_the_wire_changes_the_answer_for_a_non_terminal_molecule() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    tenant_a
+        .insert_molecule("task-20260901-flying", &json!({"status": "running"}))
+        .unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-force");
+
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-flying",
+            bare("close it anyway"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_completed");
+    assert!(
+        spy.last().is_none(),
+        "a refused harvest must not reach the effect",
+    );
+
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-flying",
+            Body::from(
+                serde_json::to_string(&json!({
+                    "reason": "close it anyway",
+                    "force": true,
+                }))
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        spy.last().is_some_and(|o| o.force),
+        "--force must reach the effect, not stop at the decision half",
+    );
 }
 
 /// The gap the reporters named: `land` fabricated a generic reason. The
@@ -510,7 +577,11 @@ async fn the_pre_effect_refusals_are_decided_in_process_from_real_state() {
     ] {
         let resp = app
             .clone()
-            .oneshot(done_request(&jwt, id, bare("the test closes this molecule")))
+            .oneshot(done_request(
+                &jwt,
+                id,
+                bare("the test closes this molecule"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), status, "{id} answered the wrong status");
@@ -536,7 +607,11 @@ async fn an_unarmed_tenant_galaxy_refuses_not_authorized_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-cold");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-cold", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-cold",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -578,7 +653,11 @@ async fn a_full_backlog_refuses_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-full");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-ninth", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-ninth",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -607,7 +686,11 @@ async fn an_admitted_harvest_answers_the_typed_effect_refusal() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-refusals");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-refuse", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-refuse",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
@@ -694,7 +777,11 @@ async fn a_repeat_request_reports_already_landed_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-again");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-again", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-again",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -733,7 +820,11 @@ async fn the_decision_half_needs_no_cs_binary_at_all() {
 
     let resp = app
         .clone()
-        .oneshot(done_request(&jwt, "task-20260901-nobin", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-nobin",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -742,7 +833,11 @@ async fn the_decision_half_needs_no_cs_binary_at_all() {
     assert_eq!(body["error"], "not_completed");
 
     let resp = app
-        .oneshot(done_request(&jwt, "task-20260901-nobin2", bare("the test closes this molecule")))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-nobin2",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -772,7 +867,11 @@ async fn an_unknown_molecule_is_not_an_existence_oracle() {
     for id in ["not-a-molecule-id", "task-20260901-ghost"] {
         let resp = app
             .clone()
-            .oneshot(done_request(&jwt, id, bare("the test closes this molecule")))
+            .oneshot(done_request(
+                &jwt,
+                id,
+                bare("the test closes this molecule"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");

@@ -44,9 +44,9 @@ fn make_state(state_dir: &std::path::Path) -> AppState {
     let deny_list = DenyList::new(state_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-         harvest_effect: std::sync::Arc::new(
-             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
-         ),
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
         worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
