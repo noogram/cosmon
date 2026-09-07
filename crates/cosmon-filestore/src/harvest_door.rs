@@ -731,7 +731,6 @@ mod tests {
         }
     }
 
-    #[test]
     /// The gap the reporters of issue #51 named: `land` fabricated a
     /// generic reason where the caller supplied none. The door refuses
     /// instead — before it reads the store, so a caller with nothing to say
@@ -810,6 +809,7 @@ mod tests {
         }
     }
 
+    #[test]
     fn a_reservation_names_the_tag_that_fired() {
         let w = world();
         let id = mol("task-20260904-held");

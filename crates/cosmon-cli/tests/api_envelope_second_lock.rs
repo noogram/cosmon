@@ -20,9 +20,11 @@
 //!    gesture (ADR-124's drain teardown, and a tackled worker) are not
 //!    collaterally bricked by it.
 //!
-//! Point 2 is the falsifier that shaped the design: `cs done`,
-//! `cs evolve` and `cs complete` are all on the closed list, and all
-//! three are invoked, legitimately, downstream of an *exposed* verb.
+//! Point 2 is the falsifier that shaped the design: `cs evolve` and
+//! `cs complete` are on the closed list and are invoked, legitimately,
+//! downstream of an *exposed* verb. `cs done` was the third such case
+//! until issue #51 exposed it under its own name (ADR-080 §5.4); the
+//! hand-off it needed is the same one the other two still need.
 
 use std::path::Path;
 use std::process::Command;
@@ -64,7 +66,6 @@ fn every_operator_only_verb_is_refused_under_the_envelope() {
     // before the gate is consulted; that is still a refusal with no state
     // mutation, but it would make this assertion measure clap.)
     let invocations: &[&[&str]] = &[
-        &["done", "task-20260101-aaaa"],
         &[
             "evolve",
             "task-20260101-aaaa",
@@ -104,7 +105,7 @@ fn every_operator_only_verb_is_refused_under_the_envelope() {
 
 /// The refusal is *parse-time*: nothing on disk moves. Verified on the
 /// event log, which every state-mutating verb writes to — an empty (or
-/// absent) log after a refused `cs done` is the honest witness that the
+/// absent) log after a refused `cs complete` is the honest witness that the
 /// gate sits ahead of the handler, not inside it.
 #[test]
 fn the_refusal_precedes_every_state_mutation() {
@@ -114,7 +115,7 @@ fn the_refusal_precedes_every_state_mutation() {
 
     let out = cs_in(&dir)
         .env(REQUEST_ENV, "1")
-        .args(["done", "task-20260101-aaaa"])
+        .args(["complete", "task-20260101-aaaa"])
         .output()
         .expect("cs spawn");
     assert_eq!(out.status.code(), Some(EXIT_OPERATOR_ONLY_VERB_IN_API));
@@ -136,7 +137,7 @@ fn the_refusal_is_json_when_json_was_asked_for() {
 
     let out = cs_in(&dir)
         .env(REQUEST_ENV, "1")
-        .args(["--json", "done", "task-20260101-aaaa"])
+        .args(["--json", "complete", "task-20260101-aaaa"])
         .output()
         .expect("cs spawn");
     let stderr = String::from_utf8_lossy(&out.stderr);
@@ -181,7 +182,7 @@ fn the_exposed_surface_still_parses_under_the_envelope() {
 /// A local operator is unaffected — the whole closed list still parses
 /// with no envelope in the environment. This is the regression that would
 /// hurt most: the second lock keying on a broader condition than the
-/// marker would brick `cs done` on every developer machine.
+/// marker would brick the closed list on every developer machine.
 #[test]
 fn no_envelope_no_refusal() {
     let tmp = tempfile::tempdir().unwrap();
@@ -193,7 +194,7 @@ fn no_envelope_no_refusal() {
             cmd.env(REQUEST_ENV, v);
         }
         let out = cmd
-            .args(["done", "task-20260101-aaaa"])
+            .args(["complete", "task-20260101-aaaa"])
             .output()
             .expect("cs spawn");
         assert_ne!(
@@ -207,9 +208,10 @@ fn no_envelope_no_refusal() {
 /// THE FALSIFIER (design-shaping). `POST /v1/molecules/{id}/run` is an
 /// exposed verb (ADR-124) whose resident loop calls `cs done` to tear a
 /// completed molecule down, and `POST .../tackle` spawns a worker whose
-/// whole job is `cs evolve` / `cs complete`. All three verbs are on the
-/// closed list, so a naively-inherited envelope would have made the
-/// second lock break both shipped routes.
+/// whole job is `cs evolve` / `cs complete`. `evolve` and `complete` are
+/// still on the closed list (`done` left it on 2026-09-07 — issue #51,
+/// ADR-080 §5.4), so a naively-inherited envelope would still break the
+/// tackle route, and did break the drain before `done` was exposed.
 ///
 /// The hand-off ([`cosmon_core::api_envelope::hand_off_to_local_child`])
 /// is what prevents that, and this pins its two halves at once: the
@@ -228,7 +230,7 @@ fn a_local_hand_off_child_escapes_the_lock_without_losing_its_confinement() {
         .env(REQUEST_ID_ENV, "req-falsifier")
         .env("COSMON_EGRESS_POLICY", "deny-external")
         .env("COSMON_EGRESS_EXPOSED", "1")
-        .args(["done", "task-20260101-aaaa"]);
+        .args(["complete", "task-20260101-aaaa"]);
 
     // Without the hand-off the envelope is inherited and the lock fires…
     let before = child.output().expect("cs spawn");
