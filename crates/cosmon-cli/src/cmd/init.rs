@@ -7,11 +7,11 @@
 //! directory if it does not exist, then populate `.cosmon/{config.toml,
 //! state/, formulas/, …}`. Nothing else — `git init` is git's job, and
 //! `CLAUDE.md` is a formula's job (e.g. the `galaxy-onboarding` formula).
-//! Symmetric undo: `rm -rf <path>/.cosmon/` removes every artifact this
-//! command creates. The only refusal is nested galaxies: if any ancestor
-//! of the target already carries a `.cosmon/`, `cs init` errors out — no
-//! `--force` escape, because nested galaxies silently break walk-up
-//! discovery.
+//! Symmetric undo: deleting the `.cosmon/` directory removes every
+//! artifact this command creates. The only refusal is nested galaxies:
+//! if any ancestor of the target already carries a `.cosmon/`, `cs init`
+//! errors out — no `--force` escape, because nested galaxies silently
+//! break walk-up discovery.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -121,8 +121,9 @@ pub enum ProjectTemplate {
                   \n\
                   Does NOT run `git init` (that is git's job) and does NOT \
                   write `CLAUDE.md` by default — pass `--soft` to generate \
-                  an agent-instruction template. Symmetric undo: \
-                  `rm -rf <path>/.cosmon/`."
+                  an agent-instruction template. Symmetric undo: deleting \
+                  the `.cosmon/` directory it creates removes every artifact \
+                  it wrote."
 )]
 pub struct Args {
     /// Directory to initialize (default: current directory).
@@ -203,7 +204,7 @@ pub struct Args {
 /// This command does **not** run `git init` and does **not** write
 /// `CLAUDE.md`. Those belong to git and to a dedicated formula
 /// respectively (see the `galaxy-onboarding` formula). The symmetric
-/// undo is therefore `rm -rf <path>/.cosmon/`.
+/// undo is therefore to delete the `.cosmon/` directory it created.
 ///
 /// # Errors
 ///
@@ -266,11 +267,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         return Err(anyhow::anyhow!(
             "refusing to nest cosmon projects: ancestor `.cosmon/` exists at {}\n\
              target: {}\n\
-             Pick a path outside that galaxy, or `rm -rf {}` first.\n\
+             Pick a path outside that galaxy, or remove that `.cosmon/` \
+             directory first.\n\
              No `--force` escape — nested galaxies silently break walk-up discovery.",
             ancestor.display(),
             root_requested.display(),
-            ancestor.display(),
         ));
     }
 
@@ -450,8 +451,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
         println!("  4. Orient yourself:  `cs help` (commands) · `cs help guide` (handbook).");
         println!("  5. (optional) Drop a CLAUDE.md for your agent:  `cs init --soft`.");
-        println!();
-        println!("Symmetric undo: rm -rf {}", cosmon_dir.display());
     }
 
     Ok(())
