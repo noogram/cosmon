@@ -799,7 +799,8 @@ mod tests {
         }
         let reserved = mol("task-20260101-cccc");
         plant(&w, &reserved, MoleculeStatus::Running, |m| {
-            m.tags.insert(cosmon_core::tag::Tag::new("needs-review").expect("tag"));
+            m.tags
+                .insert(cosmon_core::tag::Tag::new("needs-review").expect("tag"));
         });
         match decide(&w.store, &armed(), &reserved, &forced) {
             Err(LandError::Refused(r)) => {

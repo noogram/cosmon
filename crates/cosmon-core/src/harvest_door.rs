@@ -340,6 +340,12 @@ impl fmt::Display for MergeStrategy {
 /// [`Self::validate`] answers that with [`DoorRefusal::MissingReason`]
 /// rather than inventing a sentence on their behalf.
 #[derive(Debug, Clone, PartialEq, Eq)]
+// Ten independent bool fields because each mirrors one independent `cs done`
+// opt-out, one-to-one. A bitflag or a nested enum would rename the mapping
+// without reducing it, and the round-trip falsifier
+// (`every_harvest_option_survives_the_argv_round_trip`) is what keeps the
+// list honest — exactly the reasoning `done::Args` already carries.
+#[allow(clippy::struct_excessive_bools)]
 pub struct HarvestOptions {
     /// Why this molecule is being closed. Traced on the molecule; never
     /// fabricated. Empty or whitespace-only is a refusal, not a default.

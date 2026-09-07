@@ -2048,8 +2048,7 @@ pub async fn done_molecule(
     //    always run, over the tenant's own state files. Every pre-effect
     //    refusal — and the `already_landed` idempotent success — answers
     //    here without the `cs` binary existing at all.
-    match decide_harvest_in_process(&tenant_root, &molecule_id, &options, &spark.request_id)
-        .await?
+    match decide_harvest_in_process(&tenant_root, &molecule_id, &options, &spark.request_id).await?
     {
         harvest_door::DoorDecision::AlreadyLanded => {
             let body = json!({

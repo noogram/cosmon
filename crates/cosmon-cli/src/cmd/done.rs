@@ -63,7 +63,6 @@ use std::time::{Duration, Instant};
 use cosmon_core::config::{
     ConfidentialBlocklistConfig, GitRemoteBlocklistConfig, ProjectConfig, PublishIdentityConfig,
 };
-use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
@@ -216,12 +215,25 @@ impl Args {
     /// untouched here.
     ///
     /// The mapping is total in one direction on purpose: every field of
-    /// [`HarvestOptions`] lands on exactly one field of `Args`, so a
+    /// [`HarvestOptions`](cosmon_core::harvest_door::HarvestOptions) lands
+    /// on exactly one field of `Args`, so a
     /// parameter that reaches the door reaches the merge. The two `Args`
     /// fields with no counterpart are named in the module docs and in the
     /// route's own documentation, never dropped silently.
+    ///
+    /// No production caller yet: the adapter's effect port spawns the argv
+    /// [`cs_done_argv`](cosmon_core::harvest_door::HarvestOptions::cs_done_argv)
+    /// builds rather than constructing
+    /// `Args` in-process, because the sealed transaction is not callable as
+    /// a library (ADR-176 §11). This constructor is the *other half* of that
+    /// argv's round-trip falsifier — it is what says the two agree — and it
+    /// is where a library effect will start when the port grows one.
+    #[cfg(test)]
     #[must_use]
-    pub fn from_harvest_options(molecule: String, opts: &HarvestOptions) -> Self {
+    pub fn from_harvest_options(
+        molecule: String,
+        opts: &cosmon_core::harvest_door::HarvestOptions,
+    ) -> Self {
         Self {
             molecule,
             reason: Some(opts.reason.clone()),
@@ -252,12 +264,14 @@ impl Args {
     /// Exposed so the falsifier can assert the value that **arrives at the
     /// merge** rather than the value that parsed off the wire — the two are
     /// only the same while nothing between them re-defaults it.
+    #[cfg(test)]
     #[must_use]
     pub fn merge_strategy(&self) -> MergeStrategy {
         self.strategy
     }
 
     /// The reason this argument set will trace on the molecule, if any.
+    #[cfg(test)]
     #[must_use]
     pub fn harvest_reason(&self) -> Option<&str> {
         self.reason.as_deref()
@@ -6745,6 +6759,7 @@ fn find_repo_root() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmon_core::harvest_door::HarvestOptions;
     use cosmon_core::id::{FleetId, FormulaId};
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_state::MoleculeData;

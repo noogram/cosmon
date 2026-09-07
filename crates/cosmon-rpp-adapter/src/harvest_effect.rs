@@ -11,7 +11,7 @@
 //! confidentiality gates, the `pre_done` gate, the teardown — and it has
 //! exactly one implementation in this repository: `cmd/done.rs`. Rewriting
 //! it here would fork the door, which is the failure the shared
-//! [`DoorRefusal`](cosmon_core::harvest_door::DoorRefusal) vocabulary exists
+//! [`DoorRefusal`] vocabulary exists
 //! to prevent.
 //!
 //! So the effect is a **port**, and the deployment chooses an
