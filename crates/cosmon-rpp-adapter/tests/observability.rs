@@ -46,6 +46,9 @@ async fn make_state_with_metrics(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
     let tenants = TenantWorkspaces::new();
     AppState {
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
         worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),

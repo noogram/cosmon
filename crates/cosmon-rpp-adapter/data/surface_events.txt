@@ -25,6 +25,16 @@
 #   3. NEVER renumber, never bump a count — the test reads the file.
 #   4. A merge of two branches each appending one event yields two
 #      adjacent diff lines and merges cleanly.
+#   5. WITHDRAW: append a line for the same `METHOD PATH` with the
+#      exposure token `withdrawn`, whose blurb says why. The mounting
+#      line stays exactly as it is — the log is history — and
+#      `cosmon_surface_canon::fold_live` subtracts the pair, so the
+#      folded tables (and therefore the router, the help render and the
+#      freeze test) no longer carry the route. First use:
+#      task-20260907-6ddc withdrawing `POST /v1/molecules/{id}/land`,
+#      because two names for one operation is what issue #51 reverses.
+#      A `withdrawn` line naming no live route fails the build: an
+#      append-only log must not accumulate withdrawals of nothing.
 #
 # Format: METHOD PATH | molecule_id | YYYY-MM-DD | principal | scope | exposure | blurb
 #
@@ -90,3 +100,5 @@ GET /v1/admin/federations | task-20260617-2fb5 | 2026-06-17 | operator | - | ada
 DELETE /v1/admin/federations/{id} | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | Dissolve a whole portée — revoke every backing habilitation and remove the grouping manifest
 DELETE /v1/admin/federations/{id}/galaxies/{galaxy} | task-20260617-2fb5 | 2026-06-17 | operator | - | adapter-only | Revoke one galaxy from a portée, leaving the rest of the relation intact
 POST /v1/molecules/{id}/land | task-20260901-3b53 | 2026-09-01 | tenant | cosmon:molecule:write | tenant-verb | The harvest door (ADR-176, issue #51) — close one molecule and integrate it where the second authority arises; no options in the body, refused unless an operator-sealed grant covers it, synchronous because a 202 here would hide the very failure #51 reports
+POST /v1/molecules/{id}/land | task-20260907-6ddc | 2026-09-07 | tenant | cosmon:molecule:write | withdrawn | Withdrawn by issue #51: `land` was a second name for `done`, kept only because ADR-080 §5.1 classed `done` as operator-only. The §5.1 amendment retires that classification, so the operation has one name again — see the `POST /v1/molecules/{id}/done` line below
+POST /v1/molecules/{id}/done | task-20260907-6ddc | 2026-09-07 | tenant | cosmon:molecule:write | tenant-verb | The harvest door (ADR-176 as amended, issue #51) — close one molecule and integrate it where the second authority arises, with the full parameter set of `cs done`: the requester on this deployment is the operator, so withholding a strategy from them protects nobody (D4 reversed). The reason is mandatory and never fabricated; the operator's sealed grant still authorises the effect (D1); synchronous, because a 202 here would hide the very failure #51 reports

@@ -1121,6 +1121,7 @@ mod tests {
 
     fn sample_molecule(suffix: &str, status: MoleculeStatus, worker: Option<&str>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: mol_id(suffix),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("formula-1").unwrap(),

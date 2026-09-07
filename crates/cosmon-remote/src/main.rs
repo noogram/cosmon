@@ -357,8 +357,50 @@ enum MoleculeCmd {
     Tackle { id: String },
     #[command(about = format!("{} — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream", canon::POST_V1_MOLECULES_ID_RUN.label()))]
     Run { id: String },
-    #[command(about = format!("{} — the harvest door (ADR-176): close this molecule and integrate it where that second authority arises. Carries no options — strategy, reservations and base are sealed in the operator's grant. Refused unless a grant covers it; 200 with the outcome, never 202", canon::POST_V1_MOLECULES_ID_LAND.label()))]
-    Land { id: String },
+    #[command(about = format!("{} — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202", canon::POST_V1_MOLECULES_ID_DONE.label()))]
+    Done {
+        id: String,
+        /// Why this molecule is being closed. Traced trunk-side; the door
+        /// refuses rather than inventing one.
+        #[arg(long)]
+        reason: String,
+        /// Merge strategy: `merge` (default) or `ff-only`.
+        #[arg(long)]
+        strategy: Option<String>,
+        /// Proceed even if the molecule is not in a terminal state.
+        #[arg(long)]
+        force: bool,
+        /// Silent no-op when the molecule is not `Completed` or already merged.
+        #[arg(long)]
+        if_completed: bool,
+        /// Skip merging the worker's branch into the base branch.
+        #[arg(long)]
+        no_merge: bool,
+        /// Skip removing the git worktree.
+        #[arg(long)]
+        no_worktree_remove: bool,
+        /// Skip deleting the worker's branch after the merge.
+        #[arg(long)]
+        no_branch_delete: bool,
+        /// Skip killing the worker's session.
+        #[arg(long)]
+        no_kill: bool,
+        /// Disable auto-propel escalation on merge conflict.
+        #[arg(long)]
+        no_auto_propel: bool,
+        /// Custom message sent to the worker during auto-propel escalation.
+        #[arg(long)]
+        propel_message: Option<String>,
+        /// Maximum number of auto-propel escalation retries.
+        #[arg(long)]
+        max_retries: Option<u32>,
+        /// Skip the blocking `[hooks] pre_done` gate for this invocation.
+        #[arg(long)]
+        skip_pre_done_hook: bool,
+        /// Run the `[hooks] post_merge` deploy hook off the reference trunk.
+        #[arg(long)]
+        deploy_off_trunk: bool,
+    },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_COLLAPSE.label(), canon::POST_V1_MOLECULES_ID_COLLAPSE.effect_suffix()))]
     Collapse {
         id: String,
@@ -1409,8 +1451,44 @@ async fn run_molecule(
                 );
             }
         }
-        MoleculeCmd::Land { id } => {
-            let env = client.land(&id).await?;
+        MoleculeCmd::Done {
+            id,
+            reason,
+            strategy,
+            force,
+            if_completed,
+            no_merge,
+            no_worktree_remove,
+            no_branch_delete,
+            no_kill,
+            no_auto_propel,
+            propel_message,
+            max_retries,
+            skip_pre_done_hook,
+            deploy_off_trunk,
+        } => {
+            // Only non-default flags reach the wire, so a bare
+            // `molecule done <id> --reason "..."` sends the reason alone and
+            // the server applies `cs done`'s own defaults. A `false` on the
+            // wire and an absent field mean the same thing; sending the
+            // first would make every request look like an override.
+            let some_if = |on: bool| on.then_some(true);
+            let body = cosmon_remote::client::DoneRequest {
+                reason,
+                strategy,
+                force: some_if(force),
+                if_completed: some_if(if_completed),
+                no_merge: some_if(no_merge),
+                no_worktree_remove: some_if(no_worktree_remove),
+                no_branch_delete: some_if(no_branch_delete),
+                no_kill: some_if(no_kill),
+                no_auto_propel: some_if(no_auto_propel),
+                propel_message,
+                max_retries,
+                skip_pre_done_hook: some_if(skip_pre_done_hook),
+                deploy_off_trunk: some_if(deploy_off_trunk),
+            };
+            let env = client.done(&id, &body).await?;
             if json {
                 print_json(true, &serde_json::to_value(&env)?);
             } else {

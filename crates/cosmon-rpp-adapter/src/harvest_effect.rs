@@ -53,6 +53,18 @@ use std::process::Command;
 use cosmon_core::harvest_door::{DoorRefusal, HarvestOptions};
 use cosmon_core::id::MoleculeId;
 
+/// The message an unavailable effect crosses the door's string-typed seam
+/// as.
+///
+/// The door's [`SealedHarvestEffect`](cosmon_filestore::harvest_door::SealedHarvestEffect)
+/// reports failure as a `String`, deliberately: it re-reads the trunk-side
+/// record and derives the named refusal from *that*, never from error text.
+/// "No effect exists" is the one outcome that record cannot express — no
+/// effect ran, so nothing was written — so the route has to recognise it,
+/// and it does so against this constant rather than against a sentence
+/// somebody may reword.
+pub const UNAVAILABLE_MARKER: &str = "cosmon::harvest_effect::unavailable";
+
 /// Why a harvest effect did not run, or did not complete.
 #[derive(Debug)]
 pub enum HarvestEffectError {

@@ -64,6 +64,9 @@ async fn fixture() -> Fixture {
         DenyList::new(security_dir.path().to_path_buf()).with_ttl(Duration::from_secs(0));
 
     let state = AppState {
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
         worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
