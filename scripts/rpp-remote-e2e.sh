@@ -27,11 +27,11 @@
 #   tackle       POST /v1/molecules/:id/tackle — a REAL worker, spawned by
 #                the shipped image, with no `cs` binary in it
 #   worker       the worker finishes: the molecule reaches `completed`
-#   land         POST /v1/molecules/:id/land — the NAMED refusal (below)
+#   done         POST /v1/molecules/:id/done — the NAMED refusal (below)
 #
 # The `tackle` leg is what issue #54 U7 adds, and it is the reason the
 # rest of the scenario exists. Until U6 the adapter reached `tackle`,
-# `run` and `land` by shelling out to `cs` — a binary its own Dockerfile
+# `run` and `done` by shelling out to `cs` — a binary its own Dockerfile
 # has never shipped — so all three failed against the image an operator
 # actually deploys, while every in-process suite stayed green. U6 cut
 # dispatch over to `cosmon_runtime::LibraryExecutor` over the tmux
@@ -49,13 +49,13 @@
 # separation is load-bearing: a smoke that provisioned the tenant-facing
 # image would be proving the claim against an image nobody runs.
 #
-# `land` is still asserted as a NAMED refusal, but the name has changed
+# `done` is still asserted as a NAMED refusal, but the name has changed
 # and the reason is different. It is no longer "the binary is missing":
 # the door's decision half runs in-process and this script now ARMS it
 # (`[harvest_authority] required` in the throwaway galaxy), so the
 # decision admits the harvest and the refusal comes from the effect
 # half, which has no library implementation yet — `501
-# land_effect_unavailable`, ADR-176 §12. Pinning the label is what makes
+# harvest_effect_unavailable`, ADR-176 §12. Pinning the label is what makes
 # the day it becomes a real harvest announce itself here instead of
 # passing silently — see RPP_E2E_EXPECT_LAND_LABEL below.
 #
@@ -88,7 +88,7 @@
 #   RPP_E2E_EXPECT_SUB       falsifier: what `auth-me` must observe
 #   RPP_E2E_CLIENT_AUDIENCE  falsifier: the audience the CLIENT asks for
 #   RPP_E2E_EXPECT_STATUS    falsifier: the status `observe` must report
-#   RPP_E2E_EXPECT_LAND_LABEL  falsifier: the refusal label `land` returns
+#   RPP_E2E_EXPECT_DONE_LABEL  falsifier: the refusal label `done` returns
 #   RPP_E2E_EXPECT_TACKLE_LABEL
 #                            falsifier: run the scenario against an image
 #                            whose `tackle` is expected to REFUSE, and
@@ -198,7 +198,7 @@ IDP_SUB="${RPP_E2E_IDP_SUB:-cs-oidc-mock-user}"
 #   RPP_E2E_EXPECT_SUB         → `auth-me` (what /v1/auth/me must report)
 #   RPP_E2E_CLIENT_AUDIENCE    → `login`   (the audience the CLIENT asks for)
 #   RPP_E2E_EXPECT_STATUS      → `observe` (the recorded lifecycle status)
-#   RPP_E2E_EXPECT_LAND_LABEL  → `land`    (the named refusal)
+#   RPP_E2E_EXPECT_DONE_LABEL  → `done`    (the named refusal)
 EXPECT_SUB="${RPP_E2E_EXPECT_SUB:-$IDP_SUB}"
 CLIENT_AUDIENCE="${RPP_E2E_CLIENT_AUDIENCE:-$AUDIENCE}"
 #   RPP_E2E_EXPECT_TACKLE_LABEL → `tackle`  (empty = must succeed)
@@ -207,13 +207,13 @@ CLIENT_AUDIENCE="${RPP_E2E_CLIENT_AUDIENCE:-$AUDIENCE}"
 # in `Pending` (cosmon_core::nucleate: Pending if unassigned, Queued if
 # assigned) and `observe` renders that as the snake_case label.
 EXPECT_OBSERVE_STATUS="${RPP_E2E_EXPECT_STATUS:-pending}"
-# `land` no longer refuses for want of a binary. The door's decision
+# `done` no longer refuses for want of a binary. The door's decision
 # half runs in-process (issue #54 U3) and this script arms it, so the
 # decision ADMITS and the refusal is the effect half's: `501
-# land_effect_unavailable` (ADR-176 §12). The label is deliberately
+# harvest_effect_unavailable` (ADR-176 §12). The label is deliberately
 # outside the closed seven-refusal set — it names a missing
 # implementation, not a verdict about this molecule.
-EXPECT_LAND_LABEL="${RPP_E2E_EXPECT_LAND_LABEL:-land_effect_unavailable}"
+EXPECT_DONE_LABEL="${RPP_E2E_EXPECT_DONE_LABEL:-harvest_effect_unavailable}"
 EXPECT_TACKLE_LABEL="${RPP_E2E_EXPECT_TACKLE_LABEL:-}"
 BUILD_ROOT="${RPP_E2E_BUILD_ROOT:-$REPO_ROOT}"
 BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd)"
@@ -478,9 +478,9 @@ cp "$REPO_ROOT/.cosmon/formulas/task-work.formula.toml" "$GALAXY/.cosmon/formula
 #
 # `harvest_door::decide` fails closed on a galaxy that has not armed
 # `[harvest_authority] required` — it refuses `not_authorized` before it
-# has even loaded the molecule. Leaving it unarmed would make the `land`
+# has even loaded the molecule. Leaving it unarmed would make the `done`
 # step green for the wrong reason: the label under test
-# (`land_effect_unavailable`) belongs to the EFFECT half, and it is only
+# (`harvest_effect_unavailable`) belongs to the EFFECT half, and it is only
 # reached by a decision that admitted the harvest. Arming is the
 # operator gesture the tenant cannot make, which is the point of the
 # second key — so it is done here, on the host, in a galaxy that lives
@@ -766,7 +766,7 @@ fi
 record worker 0 "$(( $(now_ms) - t0 ))" "the spawned worker drove $MOL_ID to 'completed' through the tenant store"
 
 # ---------------------------------------------------------------------------
-# Step 10 — land. The harvest door on a molecule that is now genuinely
+# Step 10 — done. The harvest door on a molecule that is now genuinely
 # harvestable: completed by a real worker, in a galaxy whose operator
 # armed `[harvest_authority] required` at stage time.
 #
@@ -774,11 +774,17 @@ record worker 0 "$(( $(now_ms) - t0 ))" "the spawned worker drove $MOL_ID to 'co
 # refusal — `not_authorized`, `not_completed`, `reservation_requires_seal`,
 # `backlog_full` — has been made inapplicable on purpose, so the only
 # thing left to answer is the transaction itself, and it answers
-# `501 land_effect_unavailable`: the sealed `cs done` path has exactly
-# one implementation and it is not callable as a library yet (ADR-176
-# §12, the enumerated U6 follow-up). The refusal is the CONTRACT here,
-# not a defect to route around — a `202` that integrated nothing is the
-# defect issue #51 reported, and a `cs` fallback is what U6 retired.
+# `501 harvest_effect_unavailable`: this deployment declares no
+# `harvest_cs_binary`, so the effect port is the honest default (ADR-176
+# §12 as amended by issue #51). The refusal is the CONTRACT here, not a
+# defect to route around — a `202` that integrated nothing is the defect
+# issue #51 reported, and a silent `cs` fallback is what U6 retired. An
+# operator who declares the binary gets a real harvest, and this
+# assertion is where that announces itself.
+#
+# The request carries `--reason`, which the door requires and never
+# fabricates (issue #51). Sending none would answer `missing_reason` and
+# this step would pass for the wrong reason.
 #
 # The assertion is the NAME of the refusal and the CLI's exit code, not
 # merely "it failed": a door that refuses for an unnamed reason is the
@@ -787,15 +793,17 @@ record worker 0 "$(( $(now_ms) - t0 ))" "the spawned worker drove $MOL_ID to 'co
 # ---------------------------------------------------------------------------
 t0=$(now_ms)
 set +e
-cs_remote --json molecule land "$MOL_ID" >"$LOGS/land.out" 2>"$LOGS/land.err"
-land_rc=$?
+cs_remote --json molecule done "$MOL_ID" \
+  --reason "closed by the rpp-remote end-to-end walk" \
+  >"$LOGS/done.out" 2>"$LOGS/done.err"
+done_rc=$?
 set -e
-[[ $land_rc -ne 0 ]] || fail land "$t0" "land SUCCEEDED — the sealed effect half has no library implementation, so a success here means the door integrated nothing and said otherwise"
-land_label="$(grep -o '"error":"[a-z_]*"' "$LOGS/land.err" | head -1 | cut -d'"' -f4)"
-[[ -n "$land_label" ]] || land_label="$(grep -o '"label":"[a-z_]*"' "$LOGS/land.err" | head -1 | cut -d'"' -f4)"
-[[ "$land_label" == "$EXPECT_LAND_LABEL" ]] \
-  || fail land "$t0" "land refused '${land_label:-<unnamed>}' (exit $land_rc), expected '$EXPECT_LAND_LABEL' — if SealedHarvestEffect grew a library implementation, this is where it announces itself (ADR-176 §12)"
-record land 0 "$(( $(now_ms) - t0 ))" "decision half admitted, effect half refused '$land_label' (ADR-176 §12), cosmon-remote exit $land_rc"
+[[ $done_rc -ne 0 ]] || fail done "$t0" "done SUCCEEDED — this deployment declares no harvest effect, so a success here means the door integrated nothing and said otherwise"
+done_label="$(grep -o '"error":"[a-z_]*"' "$LOGS/done.err" | head -1 | cut -d'"' -f4)"
+[[ -n "$done_label" ]] || done_label="$(grep -o '"label":"[a-z_]*"' "$LOGS/done.err" | head -1 | cut -d'"' -f4)"
+[[ "$done_label" == "$EXPECT_DONE_LABEL" ]] \
+  || fail done "$t0" "done refused '${done_label:-<unnamed>}' (exit $done_rc), expected '$EXPECT_DONE_LABEL' — if the deployment wired a harvest effect, this is where it announces itself (ADR-176 §12)"
+record done 0 "$(( $(now_ms) - t0 ))" "decision half admitted, effect half refused '$done_label' (ADR-176 §12), cosmon-remote exit $done_rc"
 
 echo
 echo "==> all steps green — $(wc -l <"$NDJSON" | tr -d ' ') recorded"

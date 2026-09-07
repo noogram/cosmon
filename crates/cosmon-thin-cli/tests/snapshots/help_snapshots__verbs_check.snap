@@ -11,9 +11,9 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ✓ avatar_status  GET    /v1/avatar/:instance_id/status
 ✓ collapse       POST   /v1/molecules/:id/collapse
 ✓ converse       POST   /v1/avatar/converse
+✓ done           POST   /v1/molecules/:id/done
 ✓ ensemble       GET    /v1/molecules
 ✓ freeze         POST   /v1/molecules/:id/freeze
-✓ land           POST   /v1/molecules/:id/land
 ✓ nucleate       POST   /v1/molecules
 ✓ observe        GET    /v1/molecules/:id
 ✓ run            POST   /v1/molecules/:id/run
@@ -21,7 +21,6 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 ✓ tackle         POST   /v1/molecules/:id/tackle
 ✓ tag            POST   /v1/molecules/:id/tags
 
-⚠ done           OPERATOR-ONLY (ADR-080 §5.1)
 ⚠ evolve         OPERATOR-ONLY (ADR-080 §5.1)
 ⚠ complete       OPERATOR-ONLY (ADR-080 §5.1)
 ⚠ security activate OPERATOR-ONLY (ADR-080 §5.1)
@@ -34,5 +33,5 @@ cs-thin verbs --check (cosmon-thin-cli v0.1.0, target: (unset))
 
 ─────────────────────────────────────────────────
 16/16 RPP-exposable verbs covered.
-10 operator-only verbs by design (see ADR-080 §5.1).
+9 operator-only verbs by design (see ADR-080 §5.1).
 Status: COMPLETE.

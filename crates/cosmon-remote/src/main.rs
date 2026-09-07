@@ -97,6 +97,16 @@ enum Cmd {
         /// Disable the live events tail (the observe poll still runs).
         #[arg(long = "no-events")]
         no_events: bool,
+        /// Leave the molecule open instead of closing it once it completes.
+        ///
+        /// `do` closes what it opened: a completed molecule whose branch
+        /// never reaches the trunk is the pile-up issue #51 reports. Pass
+        /// this when you harvest on your own schedule.
+        #[arg(long = "no-close")]
+        no_close: bool,
+        /// Reason traced on the molecule when `do` closes it.
+        #[arg(long = "close-reason")]
+        close_reason: Option<String>,
     },
     #[command(display_order = 1, about = format!("Like `do`, then price it: brackets the same nucleate + tackle + follow flow with two {} reads and reports the quota delta THIS run charged against your bucket. Zero new routes; the leak caveat is printed honestly", canon::GET_V1_QUOTA.label()))]
     Run {
@@ -810,10 +820,13 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
             follow_timeout,
             poll_interval,
             no_events,
+            no_close,
+            close_reason,
         } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             let mut variables = parse_vars(&vars)?;
             variables.insert("topic".into(), topic);
+            let defaults = cosmon_remote::do_flow::DoOptions::default();
             let opts = cosmon_remote::do_flow::DoOptions {
                 formula,
                 kind,
@@ -823,6 +836,8 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
                 poll_interval: std::time::Duration::from_secs(poll_interval.max(1)),
                 poll_timeout: std::time::Duration::from_secs(follow_timeout),
                 follow_events: !no_events,
+                close: !no_close,
+                close_reason: close_reason.unwrap_or(defaults.close_reason),
             };
             // `run_do_cmd` wants the store by value (it remembers the
             // credit-guard answer); the store is cheap to construct.
@@ -858,6 +873,11 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
                 poll_interval: std::time::Duration::from_secs(poll_interval.max(1)),
                 poll_timeout: std::time::Duration::from_secs(follow_timeout),
                 follow_events: !no_events,
+                // `run` asks for the resident drain, which closes the
+                // molecules it tackles through its own teardown. A second
+                // harvest from the client would race that one.
+                close: false,
+                close_reason: String::new(),
             };
             run_run_cmd(
                 &profile,

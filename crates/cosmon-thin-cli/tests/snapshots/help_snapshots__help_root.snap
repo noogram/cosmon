@@ -25,9 +25,9 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   avatar_status GET    /v1/avatar/:instance_id/status   scope: cosmon:world:observe
   collapse   POST   /v1/molecules/:id/collapse       scope: cosmon:molecule:write
   converse   POST   /v1/avatar/converse              scope: cosmon:pilote:converse
+  done       POST   /v1/molecules/:id/done           scope: cosmon:molecule:write
   ensemble   GET    /v1/molecules                    scope: cosmon:molecule:read
   freeze     POST   /v1/molecules/:id/freeze         scope: cosmon:molecule:write
-  land       POST   /v1/molecules/:id/land           scope: cosmon:molecule:write
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
   run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn
@@ -41,7 +41,6 @@ OPERATOR-ONLY VERBS — refused by §8p (see ADR-080 §5.1):
   incompatible with a JWT-bearing remote principal. cs-thin will
   never grow a sub-command for them — by design.
 
-  ⚠ done                   operator-only (ADR-080 §5.1)
   ⚠ evolve                 operator-only (ADR-080 §5.1)
   ⚠ complete               operator-only (ADR-080 §5.1)
   ⚠ security activate      operator-only (ADR-080 §5.1)

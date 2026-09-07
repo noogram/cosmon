@@ -1882,11 +1882,19 @@ impl DoneBody {
         options.no_worktree_remove = self.no_worktree_remove.unwrap_or(false);
         options.no_branch_delete = self.no_branch_delete.unwrap_or(false);
         options.no_kill = self.no_kill.unwrap_or(false);
-        options.no_auto_propel = self.no_auto_propel.unwrap_or(false);
+        // The one default that differs from `cs done`'s, and the one
+        // ADR-176 decision the D4 reversal does not carry with it: D6
+        // disarms auto-propel on this path *by construction*. Escalation
+        // injects a natural-language instruction — partly authored by the
+        // requester through the molecule briefing — into a live worker
+        // session, to resolve a conflict on the trunk, and renders the
+        // result as `merged_after_n_escalation(s)`, a success label. That
+        // is not a merge parameter, it is an agent dispatch wearing one,
+        // so it stays off unless the requester asks for it and holds the
+        // spawn scope that says they may spend agent budget.
+        options.no_auto_propel = self.no_auto_propel.unwrap_or(true);
         options.propel_message = self.propel_message;
-        options.max_retries = self
-            .max_retries
-            .unwrap_or(cosmon_core::harvest_door::DEFAULT_MAX_RETRIES);
+        options.max_retries = self.max_retries.unwrap_or(0);
         options.skip_pre_done_hook = self.skip_pre_done_hook.unwrap_or(false);
         options.deploy_off_trunk = self.deploy_off_trunk.unwrap_or(false);
         Ok(options)
@@ -2015,7 +2023,7 @@ pub async fn done_molecule(
             &state,
             &jwt,
             "done",
-            &[SCOPE_MOLECULE_WRITE, SCOPE_WORKER_SPAWN],
+            &[SCOPE_WORKER_SPAWN],
             SCOPE_WORKER_SPAWN,
         )?;
     }

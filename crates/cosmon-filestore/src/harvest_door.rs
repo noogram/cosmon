@@ -5,7 +5,8 @@
 //! # Why this module exists
 //!
 //! Until issue #54, the door's body lived in `cosmon-cli`'s binary-private
-//! `cmd/land.rs`, and the only way for the §8p adapter to open it was the
+//! `cmd/land.rs` — a verb issue #51 later withdrew — and the only way for
+//! the §8p adapter to open it was the
 //! ADR-080 §3.5 clause (e) subprocess envelope around the `cs` binary — a
 //! binary the shipped adapter image does not carry. This module is the door
 //! itself, callable in-process: the ordered refusal checks, the trunk-lock
@@ -188,7 +189,8 @@ pub trait SealedHarvestEffect {
 /// The order of the checks is the order of the cost they avoid: the armed
 /// second key first (a doctrine violation, and the cheapest read), then the
 /// two that read only the molecule, the reservation scan, and the backlog
-/// census last. Exactly the order `cmd/land.rs` established; moving the body
+/// census last. Exactly the order the withdrawn `cmd/land.rs` established;
+/// moving the body
 /// here must not reorder it, because the refusal a requester sees first is
 /// part of the door's observable contract.
 ///

@@ -1,0 +1,42 @@
+`POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202
+
+Usage: cosmon-remote molecule done [OPTIONS] --reason <REASON> <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --profile <PROFILE>
+          Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --reason <REASON>
+          Why this molecule is being closed. Traced trunk-side; the door refuses rather than inventing one
+      --json
+          Render machine-readable JSON instead of human text where applicable
+      --strategy <STRATEGY>
+          Merge strategy: `merge` (default) or `ff-only`
+      --force
+          Proceed even if the molecule is not in a terminal state
+      --token <TOKEN>
+          Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+      --if-completed
+          Silent no-op when the molecule is not `Completed` or already merged
+      --no-merge
+          Skip merging the worker's branch into the base branch
+      --no-worktree-remove
+          Skip removing the git worktree
+      --no-branch-delete
+          Skip deleting the worker's branch after the merge
+      --no-kill
+          Skip killing the worker's session
+      --no-auto-propel
+          Disable auto-propel escalation on merge conflict
+      --propel-message <PROPEL_MESSAGE>
+          Custom message sent to the worker during auto-propel escalation
+      --max-retries <MAX_RETRIES>
+          Maximum number of auto-propel escalation retries
+      --skip-pre-done-hook
+          Skip the blocking `[hooks] pre_done` gate for this invocation
+      --deploy-off-trunk
+          Run the `[hooks] post_merge` deploy hook off the reference trunk
+  -h, --help
+          Print help
