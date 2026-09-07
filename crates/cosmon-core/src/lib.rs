@@ -263,6 +263,7 @@ pub mod run_state;
 pub mod scope_guard;
 #[doc(hidden)]
 pub mod session;
+pub mod session_thread;
 #[doc(hidden)]
 pub mod signal;
 #[doc(hidden)]
