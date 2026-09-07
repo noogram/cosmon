@@ -47,7 +47,7 @@ Project:
   init                 Bootstrap a project-local .cosmon/ directory (creates the target dir if missing)
   trust                Trust — grant this repository permission to run its own formulas/hooks (the `direnv allow` of cosmon; refuses repo-supplied shell until granted)
   config               Config — inspect `.cosmon/config.toml` (`show adapters`, `adapters`)
-  status               Project pulse — quick DAG overview like git status
+  status               Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
   project              Project — materialize views from the ledger (STATUS.md, ISSUES.md, GitHub Issues)
   reconcile            Reconcile — **deprecated** alias for `cs project` (ADR-052 §D3)
   scheduler            Scheduler — read-only view onto `cosmon-scheduler`'s state (patrols, last fires, log)

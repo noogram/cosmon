@@ -31,6 +31,7 @@ THE 7 VERBS — RPP-exposable (ADR-080 §8p):
   nucleate   POST   /v1/molecules                    scope: cosmon:molecule:write
   observe    GET    /v1/molecules/:id                scope: cosmon:molecule:read
   run        POST   /v1/molecules/:id/run            scope: cosmon:molecule:write+cosmon:worker:spawn
+  status     GET    /v1/molecules/:id/status         scope: cosmon:molecule:read
   stuck      POST   /v1/molecules/:id/stuck          scope: cosmon:molecule:write
   tackle     POST   /v1/molecules/:id/tackle         scope: cosmon:molecule:write+cosmon:worker:spawn
   tag        POST   /v1/molecules/:id/tags           scope: cosmon:molecule:write

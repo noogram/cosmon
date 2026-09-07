@@ -348,8 +348,15 @@ pub const STATUS: &str = "EXAMPLES:
   cs status                   # pulse: active / pending / blocked / completed
   cs status --fleet research
   cs status --json            # includes `galaxies` block (by-kind + nascent)
+  cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
+  cs status task-20260907-b25f --json # same four fields, machine-readable
 
-SEE ALSO: cs peek (fractal TUI), cs ensemble (full snapshot),
+NOTE: with a molecule id the answer is the cheap read — no coupling report,
+      no token totals, no model attribution. `cs observe <id>` is the full
+      one. The id is exact, never a prefix.
+
+SEE ALSO: cs observe (full molecule read), cs wait (block until it moves),
+          cs peek (fractal TUI), cs ensemble (full snapshot),
           cs galaxies list (four-family taxonomy).";
 
 pub const GALAXIES: &str = "IMAGE:

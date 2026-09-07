@@ -50,6 +50,7 @@ pub mod hints;
 pub mod oidc;
 pub mod phone_home;
 pub mod pkce;
+pub mod wait;
 
 pub use client::{
     ArtifactEntry, ArtifactManifest, Client, DrainBounds, DrainStarted, EnsembleEnvelope,

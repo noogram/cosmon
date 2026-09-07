@@ -15,6 +15,7 @@ freeze       POST /v1/molecules/:id/freeze
 nucleate     POST /v1/molecules
 observe      GET /v1/molecules/:id
 run          POST /v1/molecules/:id/run
+status       GET /v1/molecules/:id/status
 stuck        POST /v1/molecules/:id/stuck
 tackle       POST /v1/molecules/:id/tackle
 tag          POST /v1/molecules/:id/tags

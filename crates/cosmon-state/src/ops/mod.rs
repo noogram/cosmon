@@ -10,7 +10,8 @@
 //!
 //! Today the namespace contains the V0 read-only + V1 mutation cuts
 //! exposed over the §8j RPP boundary:
-//! [`observe`](fn@observe), [`tag`](fn@tag), [`nucleate`](fn@nucleate),
+//! [`observe`](fn@observe), [`molecule_status`](fn@molecule_status),
+//! [`tag`](fn@tag), [`nucleate`](fn@nucleate),
 //! [`ensemble`](fn@ensemble) / [`collapse`](fn@collapse) / [`freeze`](fn@freeze) / [`thaw`](fn@thaw) / [`stuck`](fn@stuck).
 //!
 //! Every verb-level error implements [`error::OpsError`] — the wire
@@ -30,6 +31,7 @@ pub mod ensemble;
 pub mod error;
 pub mod freeze;
 pub mod model_attribution;
+pub mod molecule_status;
 pub mod nucleate;
 pub mod observe;
 pub mod stuck;
@@ -50,6 +52,7 @@ pub use model_attribution::{
     latest_model_selection, model_selections, realized_attribution, realized_provenance,
     ModelAttribution,
 };
+pub use molecule_status::{molecule_status, StatusError, StatusJson, StatusView};
 pub use nucleate::{nucleate, NucleateError, NucleateJson, NucleateRequest, NucleateView};
 pub use observe::{
     detect_ghost, observe, observe_loaded, MoleculeView, ObserveError, ObserveJson,
