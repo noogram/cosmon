@@ -532,6 +532,7 @@ mod tests {
     fn pending_molecule() -> MoleculeData {
         let now = chrono::Utc::now();
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new("task-20260727-aaaa").expect("id"),
             fleet_id: cosmon_core::id::FleetId::new("default").expect("fleet"),
             formula_id: cosmon_core::id::FormulaId::new("task-work").expect("formula"),

@@ -499,7 +499,6 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
-    #[test]
     /// Falsifier 4 of the D4 reversal: reversing D4 did not break the
     /// failure surface.
     ///

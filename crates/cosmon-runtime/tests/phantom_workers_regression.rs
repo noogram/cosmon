@@ -63,6 +63,7 @@ fn seed_molecule(
     typed_links: Vec<MoleculeLink>,
 ) {
     let data = MoleculeData {
+        harvest_reason: None,
         id: id.clone(),
         fleet_id: FleetId::new("default").expect("fleet id"),
         formula_id: FormulaId::new("task-work").expect("formula id"),
@@ -183,6 +184,7 @@ fn pre_fix_phantom_pathway_is_now_blocked() {
     // the post-fix store identically — without this rogue state, fix
     // 1 holds.
     let mut root_data = MoleculeData {
+        harvest_reason: None,
         id: root.clone(),
         fleet_id: FleetId::new("default").expect("fleet id"),
         formula_id: FormulaId::new("task-work").expect("formula id"),

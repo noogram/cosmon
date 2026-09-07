@@ -34,6 +34,7 @@ fn sediment_mol(id: &str, age_hours: i64, tags: &[&str]) -> MoleculeData {
     }
     let now = Utc::now();
     MoleculeData {
+        harvest_reason: None,
         id: MoleculeId::new(id).unwrap(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

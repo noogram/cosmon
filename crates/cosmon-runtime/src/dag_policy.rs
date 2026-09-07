@@ -1168,6 +1168,7 @@ mod tests {
 
     fn make_mol(id: &MoleculeId, status: MoleculeStatus, links: Vec<MoleculeLink>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: FleetId::new("default").expect("fleet id"),
             formula_id: FormulaId::new("task-work").expect("formula id"),
@@ -1897,6 +1898,7 @@ description = "write"
 
         let p = mol_id("task-20260414-prnt");
         let p_data = MolData {
+            harvest_reason: None,
             id: p.clone(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),
@@ -2001,6 +2003,7 @@ description = "write"
         let a = mol_id("task-20260414-aaaa");
         let b = mol_id("task-20260414-bbbb");
         let make = |id: &MoleculeId, links: Vec<MoleculeLink>| MolData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),
