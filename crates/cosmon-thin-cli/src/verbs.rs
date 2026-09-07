@@ -113,7 +113,7 @@ pub fn done() {}
     path = "/v1/molecules/:id/status",
     principal = "tenant"
 )]
-pub fn molecule_status() {}
+pub fn status() {}
 
 // ---------------------------------------------------------------------------
 // D-AVATAR instance lifecycle (task-20260525-738e)
