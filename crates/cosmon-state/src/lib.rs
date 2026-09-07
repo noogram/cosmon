@@ -468,6 +468,21 @@ pub struct MoleculeData {
     /// Legacy state files deserialize to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub non_integration: Option<NonIntegration>,
+    /// Why this molecule was closed, as the caller of the harvest stated it.
+    ///
+    /// Written by `cs done` (and by the §8p `POST /v1/molecules/{id}/done`
+    /// route through it) when the caller supplied a reason, and never
+    /// otherwise: the withdrawn `land` gesture fabricated a generic sentence,
+    /// which is indistinguishable a year later from one somebody meant. A
+    /// harvest with nothing recorded here is a harvest whose caller said
+    /// nothing — an honest absence, not a default.
+    ///
+    /// Distinct from [`Self::collapse_reason`], which records an *abandoned*
+    /// molecule. This one records a *closed* one, on the success path.
+    ///
+    /// Legacy state files deserialize to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harvest_reason: Option<String>,
     /// Soft-contract seal captured when `prompt.md` was first written at
     /// nucleation time. `None` for legacy molecules that predate the
     /// feature — `cs verify` treats the absence as "inconclusive", not
@@ -1455,6 +1470,7 @@ mod tests {
             pending_step: None,
             merged_at: None,
             non_integration: None,
+            harvest_reason: None,
             prompt_seal: None,
             briefing_seals: Vec::new(),
             bootstrap_seals: Vec::new(),
@@ -2296,6 +2312,7 @@ mod tests {
                         pending_step: None,
                         merged_at: None,
                         non_integration: None,
+                        harvest_reason: None,
                         prompt_seal: None,
                         briefing_seals,
                         bootstrap_seals: Vec::new(),

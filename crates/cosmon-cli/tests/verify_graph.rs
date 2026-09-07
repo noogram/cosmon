@@ -58,6 +58,7 @@ fn setup_project(tmp: &std::path::Path) -> std::path::PathBuf {
 
 fn write_mol(store: &FileStore, id: &str, links: Vec<MoleculeLink>) {
     let mol = MoleculeData {
+        harvest_reason: None,
         id: MoleculeId::new(id).unwrap(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

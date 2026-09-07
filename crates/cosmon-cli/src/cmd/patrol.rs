@@ -3519,6 +3519,7 @@ mod tests {
 
     fn make_molecule(id: &str, status: MoleculeStatus, worker: Option<&str>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             id: MoleculeId::new(id).unwrap(),
             formula_id: FormulaId::new("mol-polecat-work").unwrap(),

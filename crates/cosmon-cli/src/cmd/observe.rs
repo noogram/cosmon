@@ -527,6 +527,7 @@ mod tests {
         worker: Option<&str>,
     ) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("mol-polecat-work").unwrap(),
