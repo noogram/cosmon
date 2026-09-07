@@ -3,30 +3,56 @@ One gesture: nucleate + tackle + follow until the result is ready (composition o
 Usage: cosmon-remote do [OPTIONS] <TOPIC>
 
 Arguments:
-  <TOPIC>  What you want done — becomes the molecule's `topic` variable
+  <TOPIC>
+          What you want done — becomes the molecule's `topic` variable
 
 Options:
       --formula <FORMULA>
-          Formula to nucleate (the standard one-shot work unit) [default: task-work]
+          Formula to nucleate (the standard one-shot work unit)
+          
+          [default: task-work]
+
       --profile <PROFILE>
           Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+
       --json
           Render machine-readable JSON instead of human text where applicable
+
       --kind <KIND>
           
+
       --token <TOKEN>
           Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+
       --var <KEY=VALUE>
           Free-form variables `--var k=v`, repeat as needed
+
       --tag <TAGS>
           
+
   -y, --yes
           Skip the credit guard for this run (scripts/CI). Does NOT persist consent — a script's yes is not the operator's
+
       --follow-timeout <FOLLOW_TIMEOUT>
-          Give-up deadline (seconds) for the follow phase. The worker keeps running server-side past it; `result <id>` later [default: 1800]
+          Give-up deadline (seconds) for the follow phase. The worker keeps running server-side past it; `result <id>` later
+          
+          [default: 1800]
+
       --poll-interval <POLL_INTERVAL>
-          Poll cadence (seconds) of the follow phase [default: 5]
+          Poll cadence (seconds) of the follow phase
+          
+          [default: 5]
+
       --no-events
           Disable the live events tail (the observe poll still runs)
+
+      --no-close
+          Leave the molecule open instead of closing it once it completes.
+          
+          `do` closes what it opened: a completed molecule whose branch never reaches the trunk is the pile-up issue #51 reports. Pass this when you harvest on your own schedule.
+
+      --close-reason <CLOSE_REASON>
+          Reason traced on the molecule when `do` closes it
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')

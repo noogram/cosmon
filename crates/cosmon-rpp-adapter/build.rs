@@ -29,7 +29,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use cosmon_surface_canon::{parse_canon, CanonEvent};
+use cosmon_surface_canon::{fold_live, parse_canon, CanonEvent};
 
 const DATA_FILE: &str = "data/surface_events.txt";
 const GENERATED_FILE: &str = "surface_events_generated.rs";
@@ -43,7 +43,11 @@ fn main() {
     let raw = fs::read_to_string(&data_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", data_path.display()));
 
-    let events = parse_canon(&raw, DATA_FILE).unwrap_or_else(|err| panic!("{err}"));
+    let logged = parse_canon(&raw, DATA_FILE).unwrap_or_else(|err| panic!("{err}"));
+    // The log is history; the fold is the live surface. A `withdrawn` line
+    // removes the route an earlier line mounted (issue #51 withdrew
+    // `POST /v1/molecules/{id}/land`), and both stay readable in the file.
+    let events = fold_live(&logged).unwrap_or_else(|err| panic!("{DATA_FILE}: {err}"));
     assert!(
         !events.is_empty(),
         "{DATA_FILE} contains no events — at least the V0 read-only base must be declared",

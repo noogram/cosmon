@@ -42,6 +42,7 @@ use cosmon_transport::mock::MockBackend;
 fn pending_molecule(id: &str) -> MoleculeData {
     let now = chrono::Utc::now();
     MoleculeData {
+        harvest_reason: None,
         id: MoleculeId::new(id).expect("id"),
         fleet_id: cosmon_core::id::FleetId::new("default").expect("fleet"),
         formula_id: cosmon_core::id::FormulaId::new("gate-first").expect("formula"),

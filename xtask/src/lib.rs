@@ -205,6 +205,17 @@ pub fn render_bijection_block(events: &[CanonEvent]) -> Result<String, String> {
                         "operator-only route on the frozen surface: {method} {path}"
                     ));
                 }
+                // A `withdrawn` line is a `surface_removed` event, not a
+                // route. Callers render the FOLDED canon
+                // (`cosmon_surface_canon::fold_live`), so one reaching
+                // here means an unfolded log was passed — say so rather
+                // than documenting a route the router does not mount.
+                Exposure::Withdrawn => {
+                    return Err(format!(
+                        "withdrawal event reached the renderer: {method} {path} — \
+                         render `fold_live(&events)`, not the raw log"
+                    ));
+                }
             };
             out.push_str(&format!("| `{method} {path}` | {status} |\n"));
         }
@@ -317,7 +328,11 @@ pub fn inject(document: &str, blocks: &[(&'static str, String)]) -> Result<Strin
 ///
 /// Propagates canon-parse, rendering and injection failures.
 pub fn regenerate(canon_text: &str, document: &str) -> Result<String, String> {
-    let events = parse_canon(canon_text, CANON_RELATIVE)?;
+    let logged = parse_canon(canon_text, CANON_RELATIVE)?;
+    // Fold the withdrawals: the reference documents the live surface, not
+    // the log. A withdrawn route left in would tell a tenant to call a
+    // path the router does not mount.
+    let events = cosmon_surface_canon::fold_live(&logged)?;
     let blocks = render_blocks(&events)?;
     inject(document, &blocks)
 }

@@ -222,6 +222,7 @@ mod tests {
 
     fn mk_stress_mol(id: &str) -> cosmon_state::MoleculeData {
         cosmon_state::MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: cosmon_core::id::FormulaId::new("deep-think").unwrap(),

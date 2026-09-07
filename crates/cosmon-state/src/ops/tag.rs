@@ -354,6 +354,7 @@ mod tests {
 
     fn make_molecule(id: &str) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

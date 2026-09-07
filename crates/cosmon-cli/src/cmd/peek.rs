@@ -1162,6 +1162,7 @@ mod tests {
         step: usize,
     ) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             fleet_id: FleetId::new("default").unwrap(),
             id: MoleculeId::new(id).unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

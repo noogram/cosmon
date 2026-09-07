@@ -1,41 +1,92 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The harvest door — `POST /v1/molecules/:id/land` integration tests
-//! (ADR-176, issue #51; library-direct decision half, issue #54 U3).
+//! The harvest door — `POST /v1/molecules/:id/done` integration tests
+//! (ADR-176 as amended by the D4 reversal, issue #51).
 //!
-//! Each test pins one property the deliberation made non-negotiable, and
-//! each is written so that it fails for the *reason* it exists rather than
+//! Each test pins one property the decision made non-negotiable, and each
+//! is written so that it fails for the *reason* it exists rather than
 //! incidentally:
 //!
 //! 1. A landed harvest answers **200, never 202**. A 202 on a transaction
 //!    that may integrate nothing rebuilds the defect issue #51 reports.
-//! 2. The body carries **no options**. A request with any body at all is
-//!    refused `unsupported_parameter`.
-//! 3. The four **pre-effect** refusals — and `already_landed`
-//!    idempotence — are decided in-process from the tenant's own state
-//!    files, with **no `cs` binary involved** (issue #54 U3), each under
-//!    its own label. Since U6 the subprocess effect is retired: a harvest
-//!    the decision half ADMITS answers the typed refusal
-//!    `501 land_effect_unavailable` until the sealed transaction grows a
-//!    library implementation (ADR-176 §11).
-//! 4. The door needs `cosmon:molecule:write` and **not** the
-//!    `worker:spawn` composition that `tackle` and `run` carry — because
-//!    auto-propel is disarmed here, so no agent budget is spent.
-//! 5. Idempotence: a repeat request reports `already_landed`, success.
+//! 2. The body carries the **full parameter set** of `cs done`, and the
+//!    parameters **arrive at the merge** — asserted against the options
+//!    the effect port actually received, not against a field that parsed.
+//! 3. The **reason is mandatory and never fabricated**: a request without
+//!    one is refused `missing_reason`, and a request with one has that
+//!    exact sentence reach the effect.
+//! 4. The pre-effect refusals — and `already_landed` idempotence — are
+//!    decided in-process from the tenant's own state files, each under its
+//!    own label, with no `cs` binary involved (issue #54 U3).
+//! 5. A deployment that declared no effect implementation answers the
+//!    typed `501 harvest_effect_unavailable` rather than a lie (ADR-176
+//!    §11).
+//! 6. The door needs `cosmon:molecule:write`; only *arming auto-propel*
+//!    additionally needs `worker:spawn`, because that is the one option
+//!    on this route that spends agent budget.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use cosmon_core::harvest_door::ALL_REFUSALS;
+use cosmon_core::harvest_door::{HarvestOptions, ALL_REFUSALS};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
+use cosmon_rpp_adapter::harvest_effect::{HarvestEffectError, HarvestEffectPort};
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
 use serde_json::{json, Value};
 use tower::ServiceExt;
+
+/// An effect that records the options it was handed and reports success.
+///
+/// The only way to assert "the parameter arrives at the merge" without a
+/// real git tree: the door's contract with the effect *is* the options it
+/// passes, so what this records is exactly what the sealed transaction
+/// would execute with.
+#[derive(Debug, Default)]
+struct SpyEffect {
+    seen: std::sync::Mutex<Option<HarvestOptions>>,
+}
+
+impl SpyEffect {
+    fn last(&self) -> Option<HarvestOptions> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl HarvestEffectPort for SpyEffect {
+    fn harvest(
+        &self,
+        tenant_root: &std::path::Path,
+        molecule: &cosmon_core::id::MoleculeId,
+        options: &HarvestOptions,
+    ) -> Result<(), HarvestEffectError> {
+        *self.seen.lock().unwrap() = Some(options.clone());
+        // The door does not trust an effect's `Ok`: it re-reads the
+        // trunk-side record and derives the outcome from THAT (a
+        // `--if-completed` no-op also returns success). So the spy has to
+        // record a landing the way the sealed transaction does, or the
+        // door correctly reads it as "a no-op that recorded nothing".
+        use cosmon_state::StateStore as _;
+        let store = cosmon_filestore::FileStore::new(tenant_root.join(".cosmon").join("state"));
+        let mut data = store
+            .load_molecule(molecule)
+            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+        data.merged_at = Some(chrono::Utc::now());
+        data.harvest_reason = Some(options.reason.clone());
+        store
+            .save_molecule(molecule, &data)
+            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+        Ok(())
+    }
+
+    fn binds_trunk_lock(&self) -> bool {
+        true
+    }
+}
 
 fn make_state(
     oidc: &OidcMock,
@@ -59,6 +110,9 @@ fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
+        harvest_effect: std::sync::Arc::new(
+            cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
+        ),
         worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
@@ -89,14 +143,22 @@ fn make_state(
     }
 }
 
-fn land_request(jwt: &str, id: &str, body: Body) -> Request<Body> {
+/// A harvest request carrying the caller's own JSON body.
+fn done_request(jwt: &str, id: &str, body: Body) -> Request<Body> {
     Request::builder()
         .method("POST")
-        .uri(format!("/v1/molecules/{id}/land"))
+        .uri(format!("/v1/molecules/{id}/done"))
         .header("Authorization", format!("Bearer {jwt}"))
         .header("Content-Type", "application/json")
         .body(body)
         .unwrap()
+}
+
+/// The minimal legal body: a reason and nothing else. Every harvest needs
+/// one — the door refuses rather than inventing it — so a test that sent
+/// `Body::empty()` would be testing `missing_reason`, not what it means to.
+fn bare(reason: &str) -> Body {
+    Body::from(serde_json::to_string(&json!({ "reason": reason })).unwrap())
 }
 
 fn jwt_with(oidc: &OidcMock, scopes: &[&str], jti: &str) -> String {
@@ -158,7 +220,11 @@ async fn never_202_on_a_transaction_that_may_integrate_nothing() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-1");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-land", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-land",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
 
@@ -175,38 +241,234 @@ async fn never_202_on_a_transaction_that_may_integrate_nothing() {
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(body.get("request_id").is_some());
-    assert_eq!(body["error"], "land_effect_unavailable");
+    assert_eq!(body["error"], "harvest_effect_unavailable");
 }
 
-/// ADR-176 D4 on the wire: the body is inert.
+/// The D4 reversal on the wire, and the load-bearing falsifier of this
+/// molecule: the strategy the requester sends **arrives at the effect**.
 ///
-/// The refusal is on the *channel*, not on a known field set — a struct
-/// with `deny_unknown_fields` would accept whatever fields it knew about
-/// the day someone added one.
+/// Asserted against the [`HarvestOptions`] the port actually received, not
+/// against a field that deserialised — the two are only the same while
+/// nothing between them re-defaults the value. A body with no strategy
+/// gets the documented default (`merge`), which is the other half of the
+/// claim: the door adds nothing the caller did not ask for.
 #[tokio::test]
-async fn a_request_body_is_refused_as_an_unsupported_parameter() {
+async fn a_requested_strategy_arrives_at_the_effect() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-strat");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-strat");
+
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-strat",
+            Body::from(
+                serde_json::to_string(&json!({
+                    "reason": "the spike answered its question",
+                    "strategy": "ff-only",
+                    "force": true,
+                }))
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let seen = spy.last().expect("the effect must have been reached");
+    assert_eq!(
+        seen.strategy,
+        cosmon_core::harvest_door::MergeStrategy::FfOnly,
+        "the requested strategy must arrive at the merge, not stop at the parser",
+    );
+    assert!(seen.force, "--force must arrive too");
+    assert_eq!(seen.reason, "the spike answered its question");
+}
+
+/// The documented default: a body carrying only a reason harvests exactly
+/// as a bare `cs done` does.
+#[tokio::test]
+async fn a_bare_request_gets_the_documented_default_strategy() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-defaults");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-defaults");
+
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-defaults",
+            bare("close the spike"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let seen = spy.last().expect("the effect must have been reached");
+    assert_eq!(
+        seen.strategy,
+        cosmon_core::harvest_door::MergeStrategy::Merge,
+    );
+    assert!(!seen.force);
+    assert!(!seen.skip_pre_done_hook);
+    // The one wire default that is NOT `cs done`'s: ADR-176 D6 keeps
+    // auto-propel disarmed unless the requester arms it, because
+    // escalation is an agent dispatch wearing a merge parameter.
+    assert!(seen.no_auto_propel);
+    assert_eq!(seen.max_retries, 0);
+}
+
+/// `force` on the wire is not inert: a molecule that is not terminal is
+/// refused without it and admitted with it.
+///
+/// The end-to-end half of the same claim `force_waives_the_not_completed_
+/// refusal_and_nothing_else` makes at the door. A flag a requester can
+/// send and the server silently ignores is worse than one they cannot
+/// send: they would read `not_completed` for a request that named the
+/// override.
+#[tokio::test]
+async fn force_on_the_wire_changes_the_answer_for_a_non_terminal_molecule() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
     tenant_a
-        .insert_molecule("task-20260901-body", &json!({}))
+        .insert_molecule("task-20260901-flying", &json!({"status": "running"}))
         .unwrap();
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
-    let app = router(make_state(&oidc, &tenants, security_dir.path()));
-    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-body");
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-force");
+
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-flying",
+            bare("close it anyway"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_completed");
+    assert!(
+        spy.last().is_none(),
+        "a refused harvest must not reach the effect",
+    );
+
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-flying",
+            Body::from(
+                serde_json::to_string(&json!({
+                    "reason": "close it anyway",
+                    "force": true,
+                }))
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        spy.last().is_some_and(|o| o.force),
+        "--force must reach the effect, not stop at the decision half",
+    );
+}
+
+/// The gap the reporters named: `land` fabricated a generic reason. The
+/// door refuses instead, and the refusal is named so a client can act on
+/// it.
+#[tokio::test]
+async fn a_request_with_no_reason_is_refused_not_given_a_generic_one() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-mute");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-mute");
 
     for payload in [
-        r#"{"strategy":"ff-only"}"#,
-        r#"{"force":true}"#,
-        r#"{"skip_pre_done_hook":true}"#,
-        r#"{"base":"main"}"#,
+        Body::empty(),
+        Body::from("{}"),
+        Body::from(r#"{"reason":""}"#),
+        Body::from(r#"{"reason":"   "}"#),
+        Body::from(r#"{"strategy":"ff-only"}"#),
     ] {
         let resp = app
             .clone()
-            .oneshot(land_request(
+            .oneshot(done_request(&jwt, "task-20260901-mute", payload))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["error"], "missing_reason");
+    }
+    assert!(
+        spy.last().is_none(),
+        "a reasonless harvest must never reach the effect",
+    );
+}
+
+/// A parameter the door does not know is refused, not ignored.
+///
+/// `deny_unknown_fields` rather than a permissive parse: a client that
+/// sends `strategu: "ff-only"` and is silently harvested with the default
+/// has been told nothing, and will believe the wrong thing about its
+/// history.
+#[tokio::test]
+async fn an_unknown_parameter_is_refused_rather_than_ignored() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-typo");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let app = router(make_state(&oidc, &tenants, security_dir.path()));
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-typo");
+
+    for payload in [
+        r#"{"reason":"x","strategu":"ff-only"}"#,
+        r#"{"reason":"x","base":"main"}"#,
+        r#"{"reason":"x","strategy":"fast-forward"}"#,
+    ] {
+        let resp = app
+            .clone()
+            .oneshot(done_request(
                 &jwt,
-                "task-20260901-body",
+                "task-20260901-typo",
                 Body::from(payload.to_owned()),
             ))
             .await
@@ -222,29 +484,53 @@ async fn a_request_body_is_refused_as_an_unsupported_parameter() {
     }
 }
 
-/// An empty JSON object is the one non-empty body a well-behaved client
-/// may send, and it must be accepted — refusing it would make the door
-/// unusable from any HTTP library that always serialises a body.
+/// Arming auto-propel is the one option that spends agent budget — it
+/// injects a natural-language instruction into a live worker session — so
+/// it needs the `worker:spawn` scope `tackle` and `run` carry. A plain
+/// harvest does not, and is not made to claim a budget it never touches.
 #[tokio::test]
-async fn an_empty_json_object_is_still_no_parameter() {
+async fn arming_auto_propel_needs_the_spawn_scope() {
     let mut tenants = TenantWorkspaces::new();
     let tenant_a = tenants.add("a");
     arm_harvest_authority(&tenant_a);
-    plant_completed(&tenant_a, "task-20260901-empty");
+    plant_completed(&tenant_a, "task-20260901-propel");
 
     let oidc = oidc_mock().await;
     let security_dir = tempfile::tempdir().unwrap();
-    let app = router(make_state(&oidc, &tenants, security_dir.path()));
-    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-empty");
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
 
+    let armed = Body::from(
+        serde_json::to_string(&json!({
+            "reason": "let the worker rebase",
+            "no_auto_propel": false,
+            "max_retries": 3,
+        }))
+        .unwrap(),
+    );
+    let write_only = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-propel-w");
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-empty", Body::from("{}")))
+        .clone()
+        .oneshot(done_request(&write_only, "task-20260901-propel", armed))
         .await
         .unwrap();
-    // Past the parameter gate: the empty object reaches the effect
-    // boundary (whose U6 answer is the typed refusal), never a 400.
-    assert_ne!(resp.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Disarmed, the same token opens the door.
+    let disarmed = Body::from(
+        serde_json::to_string(&json!({
+            "reason": "no escalation, thank you",
+            "no_auto_propel": true,
+        }))
+        .unwrap(),
+    );
+    let resp = app
+        .oneshot(done_request(&write_only, "task-20260901-propel", disarmed))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 /// The four pre-effect refusals, decided **in-process** from the tenant's
@@ -291,7 +577,11 @@ async fn the_pre_effect_refusals_are_decided_in_process_from_real_state() {
     ] {
         let resp = app
             .clone()
-            .oneshot(land_request(&jwt, id, Body::empty()))
+            .oneshot(done_request(
+                &jwt,
+                id,
+                bare("the test closes this molecule"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), status, "{id} answered the wrong status");
@@ -317,7 +607,11 @@ async fn an_unarmed_tenant_galaxy_refuses_not_authorized_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-cold");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-cold", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-cold",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
@@ -359,7 +653,11 @@ async fn a_full_backlog_refuses_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-full");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-ninth", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-ninth",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -388,13 +686,17 @@ async fn an_admitted_harvest_answers_the_typed_effect_refusal() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-refusals");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-refuse", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-refuse",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
     let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
     let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert_eq!(body["error"], "land_effect_unavailable");
+    assert_eq!(body["error"], "harvest_effect_unavailable");
     // The label is NOT one of the door's seven named refusals: the
     // closed set stays closed, and the parity gap has its own name.
     for refusal in ALL_REFUSALS {
@@ -424,10 +726,10 @@ async fn write_scope_alone_opens_the_door() {
     let write_only = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-write");
     let resp = app
         .clone()
-        .oneshot(land_request(
+        .oneshot(done_request(
             &write_only,
             "task-20260901-scope",
-            Body::empty(),
+            bare("the test closes this molecule"),
         ))
         .await
         .unwrap();
@@ -439,10 +741,10 @@ async fn write_scope_alone_opens_the_door() {
     // the trunk it resolves against.
     let read_only = jwt_with(&oidc, &["cosmon:molecule:read"], "jti-land-read");
     let resp = app
-        .oneshot(land_request(
+        .oneshot(done_request(
             &read_only,
             "task-20260901-scope",
-            Body::empty(),
+            bare("the test closes this molecule"),
         ))
         .await
         .unwrap();
@@ -475,7 +777,11 @@ async fn a_repeat_request_reports_already_landed_in_process() {
     let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-land-again");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-again", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-again",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -514,7 +820,11 @@ async fn the_decision_half_needs_no_cs_binary_at_all() {
 
     let resp = app
         .clone()
-        .oneshot(land_request(&jwt, "task-20260901-nobin", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-nobin",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::CONFLICT);
@@ -523,7 +833,11 @@ async fn the_decision_half_needs_no_cs_binary_at_all() {
     assert_eq!(body["error"], "not_completed");
 
     let resp = app
-        .oneshot(land_request(&jwt, "task-20260901-nobin2", Body::empty()))
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-nobin2",
+            bare("the test closes this molecule"),
+        ))
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
@@ -553,7 +867,11 @@ async fn an_unknown_molecule_is_not_an_existence_oracle() {
     for id in ["not-a-molecule-id", "task-20260901-ghost"] {
         let resp = app
             .clone()
-            .oneshot(land_request(&jwt, id, Body::empty()))
+            .oneshot(done_request(
+                &jwt,
+                id,
+                bare("the test closes this molecule"),
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{id}");

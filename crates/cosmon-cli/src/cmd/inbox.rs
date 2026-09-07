@@ -1170,6 +1170,7 @@ mod tests {
 
     fn mk_mol(id: &str, status: MoleculeStatus, kind: Option<MoleculeKind>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             fleet_id: FleetId::new("default").unwrap(),
             id: MoleculeId::new(id).unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

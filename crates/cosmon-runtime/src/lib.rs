@@ -1892,6 +1892,7 @@ mod tests {
 
     fn running_mol_with_session(id: &str, session: Option<&str>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).expect("id"),
             fleet_id: cosmon_core::id::FleetId::new("default").expect("fleet"),
             formula_id: FormulaId::new("task-work").expect("formula"),
@@ -2124,6 +2125,7 @@ mod tests {
 
         // Molecule is already Running, on step 1 (native in our convention).
         let mol = MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new("task-20260414-aaaa").unwrap(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),
@@ -2610,6 +2612,7 @@ mod tests {
     /// Minimal `Pending` molecule for runtime tests.
     fn pending_mol(id: &str) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

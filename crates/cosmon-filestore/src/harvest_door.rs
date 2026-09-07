@@ -5,7 +5,8 @@
 //! # Why this module exists
 //!
 //! Until issue #54, the door's body lived in `cosmon-cli`'s binary-private
-//! `cmd/land.rs`, and the only way for the §8p adapter to open it was the
+//! `cmd/land.rs` — a verb issue #51 later withdrew — and the only way for
+//! the §8p adapter to open it was the
 //! ADR-080 §3.5 clause (e) subprocess envelope around the `cs` binary — a
 //! binary the shipped adapter image does not carry. This module is the door
 //! itself, callable in-process: the ordered refusal checks, the trunk-lock
@@ -51,7 +52,9 @@
 
 use cosmon_core::config::ProjectConfig;
 use cosmon_core::error::CosmonError;
-use cosmon_core::harvest_door::{reservation_requiring_seal, DoorOutcome, DoorRefusal};
+use cosmon_core::harvest_door::{
+    reservation_requiring_seal, DoorOutcome, DoorRefusal, HarvestOptions,
+};
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_state::{MoleculeFilter, NonIntegration, NonIntegrationReason, StateStore};
@@ -158,7 +161,13 @@ pub trait SealedHarvestEffect {
     /// serializes it under [`StateStore::lock_trunk`].
     fn binds_trunk_lock(&self) -> bool;
 
-    /// Perform the sealed harvest of `molecule`.
+    /// Perform the sealed harvest of `molecule` with the caller's options.
+    ///
+    /// The options are the requester's, in full, since the D4 reversal —
+    /// merge strategy, `force`, the hook waivers, the reason. They carry no
+    /// authority: whether the effect may happen at all is still the
+    /// operator's `[harvest_authority]` arming, checked by [`decide`] and
+    /// re-derived at the effect boundary (D1, ADR-172 D3).
     ///
     /// # Errors
     ///
@@ -168,7 +177,7 @@ pub trait SealedHarvestEffect {
     /// derives the named refusal from that record rather than from error
     /// text (a string match on a message is a mirror that drifts the first
     /// time someone edits the message).
-    fn harvest(&mut self, molecule: &MoleculeId) -> Result<(), String>;
+    fn harvest(&mut self, molecule: &MoleculeId, options: &HarvestOptions) -> Result<(), String>;
 }
 
 /// The door's decision half — the ordered pre-effect refusal checks.
@@ -176,7 +185,8 @@ pub trait SealedHarvestEffect {
 /// The order of the checks is the order of the cost they avoid: the armed
 /// second key first (a doctrine violation, and the cheapest read), then the
 /// two that read only the molecule, the reservation scan, and the backlog
-/// census last. Exactly the order `cmd/land.rs` established; moving the body
+/// census last. Exactly the order the withdrawn `cmd/land.rs` established;
+/// moving the body
 /// here must not reorder it, because the refusal a requester sees first is
 /// part of the door's observable contract.
 ///
@@ -188,6 +198,7 @@ pub fn decide(
     store: &dyn StateStore,
     cfg: &ProjectConfig,
     molecule: &MoleculeId,
+    options: &HarvestOptions,
 ) -> Result<DoorDecision, LandError> {
     // 1. The second key. A galaxy that has not armed harvest authority has
     //    granted nobody anything, and a door that proceeded anyway would be
@@ -213,7 +224,17 @@ pub fn decide(
     // 3. Admissibility. `is_terminal()` is `Completed | Collapsed`, and only
     //    one of the two is work anyone asked to land — the ADR-176 §1 defect
     //    stated generally.
-    if mol.status != MoleculeStatus::Completed {
+    //
+    //    `force` waives this check and nothing else, because that is exactly
+    //    what `cs done --force` waives ("proceed even if the molecule is not
+    //    in a terminal state"). Since the D4 reversal the flag crosses the
+    //    wire, and a flag that crossed the wire but was silently refused
+    //    here would be worse than one that never crossed: the requester
+    //    would read `not_completed` for a request that named the override.
+    //    It waives no authority: the second key above is checked before
+    //    this, the reservation and backlog checks after it, and `force` is
+    //    invisible to all three.
+    if !options.force && mol.status != MoleculeStatus::Completed {
         return Err(LandError::Refused(DoorRefused::with(
             DoorRefusal::NotCompleted,
             format!("status is {}", mol.status.as_str()),
@@ -252,8 +273,8 @@ pub fn decide(
 
 /// The whole door: decision, effect, interpretation.
 ///
-/// `cs land` calls this with the sealed `cs done` transaction as the effect;
-/// the §8p route calls it in-process. The trunk-lock discipline between the
+/// The §8p route calls this with the requester's options and the
+/// deployment's effect implementation. The trunk-lock discipline between the
 /// two halves is the module header's §-amendment: the flock binds exactly
 /// once, at the effect boundary, and the door acquires it only for an
 /// effect that does not bind it itself.
@@ -268,9 +289,20 @@ pub fn land(
     store: &dyn StateStore,
     cfg: &ProjectConfig,
     molecule: &MoleculeId,
+    options: &HarvestOptions,
     effect: &mut dyn SealedHarvestEffect,
 ) -> Result<DoorOutcome, LandError> {
-    match decide(store, cfg, molecule)? {
+    // 0. The argument set, before anything is read. A harvest with no
+    //    stated reason is refused rather than given a fabricated one — the
+    //    one gap the reporters of issue #51 named explicitly in `land`.
+    options.validate().map_err(|refusal| {
+        LandError::Refused(DoorRefused::with(
+            refusal,
+            "the request named no reason for closing this molecule",
+        ))
+    })?;
+
+    match decide(store, cfg, molecule, options)? {
         DoorDecision::AlreadyLanded => return Ok(DoorOutcome::AlreadyLanded),
         DoorDecision::Proceed => {}
     }
@@ -279,10 +311,10 @@ pub fn land(
     //    The guard is RAII: a panicking effect releases the lock on unwind
     //    rather than wedging every later harvest of the kernel.
     let effect_result = if effect.binds_trunk_lock() {
-        effect.harvest(molecule)
+        effect.harvest(molecule, options)
     } else {
-        let _guard = store.lock_trunk("land")?;
-        effect.harvest(molecule)
+        let _guard = store.lock_trunk("harvest")?;
+        effect.harvest(molecule, options)
     };
 
     interpret_effect(store, molecule, effect_result)
@@ -423,6 +455,7 @@ mod tests {
         mutate: impl FnOnce(&mut cosmon_state::MoleculeData),
     ) {
         let mut data = cosmon_state::MoleculeData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: cosmon_core::id::FleetId::new("default").expect("fleet id"),
             formula_id: cosmon_core::id::FormulaId::new("task-work").expect("formula id"),
@@ -482,12 +515,23 @@ mod tests {
         max_seen: Arc<AtomicUsize>,
     }
 
+    /// The options every door test lands with: a stated reason and the
+    /// documented defaults. A test that varied them would be testing the
+    /// merge, not the door.
+    fn opts() -> HarvestOptions {
+        HarvestOptions::new("the door test closes this molecule")
+    }
+
     impl SealedHarvestEffect for OverlapProbe {
         fn binds_trunk_lock(&self) -> bool {
             false // no boundary of its own: the door must serialize it.
         }
 
-        fn harvest(&mut self, _molecule: &MoleculeId) -> Result<(), String> {
+        fn harvest(
+            &mut self,
+            _molecule: &MoleculeId,
+            _options: &HarvestOptions,
+        ) -> Result<(), String> {
             let now = self.inside.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_seen.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -523,7 +567,7 @@ mod tests {
                     // the flock on disk, not from sharing a Rust object.
                     let store = FileStore::new(state_root);
                     let mut effect = OverlapProbe { inside, max_seen };
-                    let _ = land(&store, &armed(), &id, &mut effect);
+                    let _ = land(&store, &armed(), &id, &opts(), &mut effect);
                 });
             }
         });
@@ -545,7 +589,11 @@ mod tests {
             fn binds_trunk_lock(&self) -> bool {
                 false
             }
-            fn harvest(&mut self, _molecule: &MoleculeId) -> Result<(), String> {
+            fn harvest(
+                &mut self,
+                _molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 panic!("effect crashed mid-harvest");
             }
         }
@@ -558,7 +606,7 @@ mod tests {
         let id_clone = id.clone();
         let crashed = std::thread::spawn(move || {
             let store = FileStore::new(state_root);
-            let _ = land(&store, &armed(), &id_clone, &mut PanickingEffect);
+            let _ = land(&store, &armed(), &id_clone, &opts(), &mut PanickingEffect);
         })
         .join();
         assert!(crashed.is_err(), "the probe effect must actually panic");
@@ -573,7 +621,7 @@ mod tests {
             inside: Arc::new(AtomicUsize::new(0)),
             max_seen: Arc::new(AtomicUsize::new(0)),
         };
-        let outcome = land(&w.store, &armed(), &id, &mut probe);
+        let outcome = land(&w.store, &armed(), &id, &opts(), &mut probe);
         std::env::remove_var("COSMON_TRUNK_LOCK_NONBLOCKING");
         assert!(
             !matches!(
@@ -597,7 +645,11 @@ mod tests {
             fn binds_trunk_lock(&self) -> bool {
                 true
             }
-            fn harvest(&mut self, _molecule: &MoleculeId) -> Result<(), String> {
+            fn harvest(
+                &mut self,
+                _molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 std::env::set_var("COSMON_TRUNK_LOCK_NONBLOCKING", "1");
                 let acquired = self.store.acquire_trunk_lock("effect-boundary");
                 std::env::remove_var("COSMON_TRUNK_LOCK_NONBLOCKING");
@@ -616,7 +668,7 @@ mod tests {
         // `crate::trunk_lock_env_serial`).
         let _env = crate::trunk_lock_env_serial();
         let mut effect = SelfBinding { store: &w.store };
-        let out = land(&w.store, &armed(), &id, &mut effect);
+        let out = land(&w.store, &armed(), &id, &opts(), &mut effect);
         match out {
             Err(LandError::EffectFailed(msg)) => {
                 assert!(
@@ -633,7 +685,11 @@ mod tests {
         fn binds_trunk_lock(&self) -> bool {
             true // keep decision tests independent of the flock.
         }
-        fn harvest(&mut self, _molecule: &MoleculeId) -> Result<(), String> {
+        fn harvest(
+            &mut self,
+            _molecule: &MoleculeId,
+            _options: &HarvestOptions,
+        ) -> Result<(), String> {
             Ok(())
         }
     }
@@ -644,7 +700,13 @@ mod tests {
         let id = mol("task-20260904-cold");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        let out = land(&w.store, &ProjectConfig::default(), &id, &mut InertEffect);
+        let out = land(
+            &w.store,
+            &ProjectConfig::default(),
+            &id,
+            &opts(),
+            &mut InertEffect,
+        );
         match out {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::NotAuthorized);
@@ -660,12 +722,90 @@ mod tests {
         let id = mol("task-20260904-live");
         plant(&w, &id, MoleculeStatus::Running, |_| {});
 
-        match land(&w.store, &armed(), &id, &mut InertEffect) {
+        match land(&w.store, &armed(), &id, &opts(), &mut InertEffect) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::NotCompleted);
                 assert_eq!(r.detail.as_deref(), Some("status is running"));
             }
             other => panic!("work in flight must refuse, got {other:?}"),
+        }
+    }
+
+    /// The gap the reporters of issue #51 named: `land` fabricated a
+    /// generic reason where the caller supplied none. The door refuses
+    /// instead — before it reads the store, so a caller with nothing to say
+    /// never reaches the effect.
+    #[test]
+    fn a_harvest_with_no_reason_is_refused_not_given_a_generic_one() {
+        let w = world();
+        let id = mol("task-20260101-aaaa");
+        plant(&w, &id, MoleculeStatus::Completed, |_| {});
+        let mut effect = InertEffect;
+        for blank in ["", "   ", "\n\t"] {
+            let out = land(
+                &w.store,
+                &armed(),
+                &id,
+                &HarvestOptions::new(blank),
+                &mut effect,
+            );
+            match out {
+                Err(LandError::Refused(r)) => {
+                    assert_eq!(r.refusal, DoorRefusal::MissingReason);
+                }
+                other => panic!("a blank reason must be refused, got {other:?}"),
+            }
+        }
+        // And the converse: the caller's own sentence passes through
+        // unchanged rather than being replaced by one the door wrote.
+        let opts = HarvestOptions::new("the spike answered its question");
+        assert_eq!(opts.reason, "the spike answered its question");
+        assert!(opts.validate().is_ok());
+    }
+
+    /// `force` changes behaviour on a molecule that is not terminal:
+    /// refused without it, admitted with it.
+    ///
+    /// The falsifier that a parameter which crosses the wire is not inert
+    /// once it gets there. A flag the requester can send and the door
+    /// silently ignores is worse than one they cannot send: they would
+    /// read `not_completed` for a request that named the override.
+    #[test]
+    fn force_waives_the_not_completed_refusal_and_nothing_else() {
+        let w = world();
+        let id = mol("task-20260101-bbbb");
+        plant(&w, &id, MoleculeStatus::Running, |_| {});
+
+        // Without it: the named refusal, as before.
+        match decide(&w.store, &armed(), &id, &opts()) {
+            Err(LandError::Refused(r)) => assert_eq!(r.refusal, DoorRefusal::NotCompleted),
+            other => panic!("a running molecule must refuse not_completed, got {other:?}"),
+        }
+
+        // With it: admitted.
+        let mut forced = opts();
+        forced.force = true;
+        assert_eq!(
+            decide(&w.store, &armed(), &id, &forced).expect("force admits"),
+            DoorDecision::Proceed,
+        );
+
+        // And it waives NOTHING else. The second key is checked before it,
+        // the reservation after it; `force` is invisible to both.
+        match decide(&w.store, &ProjectConfig::default(), &id, &forced) {
+            Err(LandError::Refused(r)) => assert_eq!(r.refusal, DoorRefusal::NotAuthorized),
+            other => panic!("force must not arm an unarmed galaxy, got {other:?}"),
+        }
+        let reserved = mol("task-20260101-cccc");
+        plant(&w, &reserved, MoleculeStatus::Running, |m| {
+            m.tags
+                .insert(cosmon_core::tag::Tag::new("needs-review").expect("tag"));
+        });
+        match decide(&w.store, &armed(), &reserved, &forced) {
+            Err(LandError::Refused(r)) => {
+                assert_eq!(r.refusal, DoorRefusal::ReservationRequiresSeal);
+            }
+            other => panic!("force must not lift a human reservation, got {other:?}"),
         }
     }
 
@@ -678,7 +818,7 @@ mod tests {
                 .insert(cosmon_core::tag::Tag::new("needs-review").expect("tag"));
         });
 
-        match land(&w.store, &armed(), &id, &mut InertEffect) {
+        match land(&w.store, &armed(), &id, &opts(), &mut InertEffect) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::ReservationRequiresSeal);
                 assert!(r.detail.expect("detail").contains("needs-review"));
@@ -695,7 +835,7 @@ mod tests {
             m.merged_at = Some(chrono::Utc::now());
         });
 
-        let out = land(&w.store, &armed(), &id, &mut InertEffect).expect("idempotent");
+        let out = land(&w.store, &armed(), &id, &opts(), &mut InertEffect).expect("idempotent");
         assert_eq!(out, DoorOutcome::AlreadyLanded);
     }
 
@@ -717,7 +857,7 @@ mod tests {
         let id = mol("task-20260904-full");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        match land(&w.store, &armed(), &id, &mut InertEffect) {
+        match land(&w.store, &armed(), &id, &opts(), &mut InertEffect) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::BacklogFull);
                 let detail = r.detail.expect("detail");
@@ -733,7 +873,7 @@ mod tests {
         let id = mol("task-20260904-noop");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        match land(&w.store, &armed(), &id, &mut InertEffect) {
+        match land(&w.store, &armed(), &id, &opts(), &mut InertEffect) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::NotCompleted);
                 assert!(r.detail.expect("detail").contains("no-op"));
@@ -751,7 +891,11 @@ mod tests {
             fn binds_trunk_lock(&self) -> bool {
                 true
             }
-            fn harvest(&mut self, molecule: &MoleculeId) -> Result<(), String> {
+            fn harvest(
+                &mut self,
+                molecule: &MoleculeId,
+                _options: &HarvestOptions,
+            ) -> Result<(), String> {
                 // The sealed transaction records why under the lock, then
                 // fails with unrelated prose — the record must win.
                 let mut m = self.w.store.load_molecule(molecule).expect("load");
@@ -770,7 +914,13 @@ mod tests {
         let id = mol("task-20260904-clash");
         plant(&w, &id, MoleculeStatus::Completed, |_| {});
 
-        match land(&w.store, &armed(), &id, &mut FailingEffect { w: &w }) {
+        match land(
+            &w.store,
+            &armed(),
+            &id,
+            &opts(),
+            &mut FailingEffect { w: &w },
+        ) {
             Err(LandError::Refused(r)) => {
                 assert_eq!(r.refusal, DoorRefusal::MergeConflict);
                 let detail = r.detail.expect("detail");

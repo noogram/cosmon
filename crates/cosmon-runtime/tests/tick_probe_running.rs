@@ -54,6 +54,7 @@ fn mol_id(raw: &str) -> MoleculeId {
 fn seed(store: &dyn StateStore, id: &MoleculeId, status: MoleculeStatus) {
     let now = Utc::now();
     let data = MoleculeData {
+        harvest_reason: None,
         id: id.clone(),
         fleet_id: FleetId::new("default").expect("fleet id"),
         formula_id: FormulaId::new("task-work").expect("formula id"),

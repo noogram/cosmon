@@ -59,6 +59,7 @@ fn seed_molecule(state_dir: &Path, id: &str) -> MoleculeId {
     let store = FileStore::new(state_dir);
     let mol_id = MoleculeId::new(id).unwrap();
     let mol = MoleculeData {
+        harvest_reason: None,
         id: mol_id.clone(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

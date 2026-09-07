@@ -19,6 +19,55 @@ this stage.
 
 ## [Unreleased]
 
+### Changed
+
+- **`cs done` is exposed on the Remote Pilot Port with its full parameter
+  set; `cs land` and `POST /v1/molecules/{id}/land` are withdrawn** (GitHub
+  issue #51, reopened). `POST /v1/molecules/{id}/done` carries what `cs done`
+  carries — `strategy` (`merge` / `ff-only`), `force`, the teardown opt-outs,
+  the hook waivers — and the value arrives at the merge, asserted against the
+  options the effect receives rather than against a field that parsed. `land`
+  was a second name for the same operation, kept only because ADR-080 §5.1
+  classed `done` as an administration surface. It is not: closing a molecule
+  is the last step of its normal life, and whoever may nucleate it, build its
+  worker and run it may legitimately close it. **ADR-080 §5.4** retires the
+  row; **ADR-176 D4** is reversed, with the reasoning in the amendment rather
+  than in a pointer to a conversation, and with the condition under which it
+  returns stated (a requester who is not the operator — the multi-tenant
+  phase). ADR-176 D1, D2, D3, D5 and D7 stand; D6 does not travel with D4, so
+  auto-propel stays disarmed by default on this route and arming it requires
+  `cosmon:worker:spawn`.
+- **The harvest reason is carried through and never fabricated.** `land`
+  invented a generic one; the route requires `reason` and refuses
+  `missing_reason` (the eighth named refusal, exit code 77 — the seven
+  ADR-176 refusals keep 70–76 unchanged) rather than writing a sentence on
+  the caller's behalf. `cs done --reason` traces it trunk-side on the
+  molecule, on the conflicted path as well as the landed one; it stays
+  optional at the CLI, where the operator is the author of the history the
+  harvest writes.
+- **`cosmon-remote do` now closes the molecule it opened.** It nucleated,
+  tackled, followed to a terminal status and stopped — the pile-up issue #51
+  reports. The close is best-effort and named: a refused harvest leaves the
+  deliverable exactly where it was and reports the label. `--no-close` opts
+  out; `--close-reason` supplies the sentence.
+- **The append-only §8p surface canon can withdraw a route.** A line whose
+  exposure column reads `withdrawn` removes the route an earlier line
+  mounted; the mounting line is never edited, and
+  `cosmon_surface_canon::fold_live` subtracts the pair for every consumer
+  (router, help renders, client consts, the API-reference generator). A
+  withdrawal naming no live route fails the build.
+- **The harvest door's effect half is an operator-chosen port.** The default
+  is unchanged behaviour — the typed `501`, renamed `harvest_effect_unavailable`
+  — for an image carrying no `cs`. An operator who declares
+  `harvest_cs_binary` in `rpp.toml` gets the sealed `cs done` transaction,
+  legitimate now that `done` is off the §5.1 closed list. Off by default, no
+  PATH discovery; this does not restore the general §3.5 clause (e)
+  subprocess envelope issue #54 U6 retired.
+
+The trunk-side non-integration reason projected to the remote client — the
+change that made a stranded merge visible instead of silent, and the actual
+defect issue #51 first reported — is independent of all this and is unchanged.
+
 ### Fixed
 
 - **A tenant drain whose ready molecule sits on an uncovered step kind

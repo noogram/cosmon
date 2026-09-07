@@ -76,8 +76,19 @@ pub const REQUEST_ID_ENV: &str = "COSMON_API_REQUEST_ID";
 /// `run` left the list on 2026-06-11 via the §5.2 successor path
 /// (ADR-124): `POST /v1/molecules/{id}/run` admits a *request* for a
 /// bounded drain of the caller's own DAG, not the operator orchestrator.
+///
+/// `done` left the list on 2026-09-07 by the same §5.2 successor path
+/// (issue #51, the ADR-080 §5.1 amendment). The classification was the
+/// upstream error the issue's reporters named: closing a molecule is part
+/// of its **normal lifecycle**, not an administration surface — whoever may
+/// nucleate a molecule, build its worker and run it may legitimately close
+/// it, and that the operation has an effect on workers does not make it
+/// administration. Restricting *which* molecules a requester may close
+/// stays legitimate and is the multi-tenant question, deliberately not
+/// answered here; ADR-176 D5 still refuses an `owner` field. What continues
+/// to gate the *effect* is the operator's `[harvest_authority]` arming
+/// (ADR-176 D1), which this change does not touch.
 pub const OPERATOR_ONLY_VERBS: &[&str] = &[
-    "done",
     "evolve",
     "complete",
     "security",
@@ -220,11 +231,13 @@ mod tests {
     fn the_exposed_surface_still_runs_under_the_envelope() {
         // §8p's exposed verbs are the whole point of the envelope: the
         // second lock must be invisible to them. `run` is the load-bearing
-        // one — it left the closed list through §5.2 (ADR-124).
+        // one — it left the closed list through §5.2 (ADR-124) — and `done`
+        // is the second, by the same path (issue #51, the ADR-080 §5.1
+        // amendment): closing a molecule is lifecycle, not administration.
         let lookup = env(&[(REQUEST_ENV, "1")]);
         for verb in [
             "observe", "nucleate", "tag", "ensemble", "collapse", "freeze", "thaw", "stuck",
-            "tackle", "run", "note",
+            "tackle", "run", "note", "done",
         ] {
             assert!(
                 refuse_operator_only_verb(verb, &lookup).is_ok(),
@@ -236,14 +249,34 @@ mod tests {
     #[test]
     fn only_the_exact_marker_is_an_envelope() {
         // Same bit the rest of the envelope reads, no broader: a stray
-        // `COSMON_API_REQUEST=0` in a shell must not brick `cs done`.
+        // `COSMON_API_REQUEST=0` in a shell must not brick `cs purge`.
         for value in ["0", "true", "", "  "] {
             assert!(
-                refuse_operator_only_verb("done", env(&[(REQUEST_ENV, value)])).is_ok(),
+                refuse_operator_only_verb("purge", env(&[(REQUEST_ENV, value)])).is_ok(),
                 "`{value}` must not read as an active envelope"
             );
         }
-        assert!(refuse_operator_only_verb("done", env(&[(REQUEST_ENV, "1")])).is_err());
+        assert!(refuse_operator_only_verb("purge", env(&[(REQUEST_ENV, "1")])).is_err());
+    }
+
+    /// The §5.1 amendment of issue #51, asserted where the list lives.
+    ///
+    /// `done` off the closed list is what makes the harvest reachable at
+    /// all: while it was on, `cs` refused it under the request envelope and
+    /// the door's effect half could not run in any shape. A revert of the
+    /// amendment fails here first, and names why.
+    #[test]
+    fn done_is_no_longer_an_operator_only_verb() {
+        assert!(
+            !OPERATOR_ONLY_VERBS.contains(&"done"),
+            "closing a molecule is lifecycle, not administration (ADR-080 §5.1 as amended \
+             by issue #51); the multi-tenant restriction is on WHICH molecules a requester \
+             may close, not on the verb"
+        );
+        assert!(
+            refuse_operator_only_verb("done", env(&[(REQUEST_ENV, "1")])).is_ok(),
+            "the second lock must not refuse a lifecycle verb"
+        );
     }
 
     #[test]

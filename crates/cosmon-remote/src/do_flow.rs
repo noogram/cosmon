@@ -3,16 +3,32 @@
 //! `do` — the one-gesture composition nucleate → credit guard →
 //! tackle → follow.
 //!
-//! PURELY client-side: this module composes three existing §8p routes
+//! PURELY client-side: this module composes four existing §8p routes
 //! (`POST /v1/molecules`, `POST /v1/molecules/{id}/tackle`,
-//! `GET /v1/molecules/{id}`) plus the best-effort `GET /v1/events`
-//! tail. Zero new routes; doctrine §5.1 untouched — operator-side the
-//! pilot keeps the tackle gesture, tenant-side it is the tenant's own
-//! molecule and budget, and `molecule nucleate` alone stays available
-//! as the advanced path.
+//! `GET /v1/molecules/{id}`, `POST /v1/molecules/{id}/done`) plus the
+//! best-effort `GET /v1/events` tail. Zero new routes; tenant-side it is
+//! the tenant's own molecule and budget, and `molecule nucleate` alone
+//! stays available as the advanced path.
 //!
 //! The golden first hour becomes `login → do → result`
 //! (4 gestures instead of 10).
+//!
+//! # Why `do` closes what it opened
+//!
+//! It did not, until issue #51. `do` nucleated, tackled and followed to a
+//! terminal status, and then stopped — the molecule was `completed` and
+//! its branch was never on the trunk, which is the pile-up the issue
+//! reports. It could not close it: `done` was on the ADR-080 §5.1
+//! operator-only list and the surface exposed no closing gesture the flow
+//! could reach.
+//!
+//! With `done` exposed, the flow ends where the lifecycle ends. The close
+//! is **best-effort and named**: a harvest the door refuses (an unarmed
+//! galaxy, a reservation, a conflict) leaves the work exactly where it
+//! was and `do` reports the label, because a flow that failed on a
+//! refusal would make the deliverable unreachable over a decision that is
+//! not the deliverable's fault. [`DoOptions::close`] turns it off for a
+//! caller that harvests on its own schedule.
 //!
 //! # The credit guard
 //!
@@ -103,6 +119,19 @@ pub struct DoOptions {
     /// Tail `GET /v1/events` for this molecule while polling
     /// (best-effort: a dropped stream never fails the flow).
     pub follow_events: bool,
+    /// Close the molecule through the harvest door once it completes.
+    ///
+    /// On by default: `do` opened the molecule, and a flow that leaves a
+    /// completed molecule unintegrated is the pile-up issue #51 reports.
+    /// A refusal is reported, never fatal.
+    pub close: bool,
+    /// The reason traced on the molecule when `do` closes it.
+    ///
+    /// Defaults to naming the flow that closed it, which is a fact rather
+    /// than a fabricated judgement — `do` genuinely knows only that its
+    /// own molecule reached a terminal status. A caller with something to
+    /// say passes it here.
+    pub close_reason: String,
 }
 
 impl Default for DoOptions {
@@ -116,6 +145,8 @@ impl Default for DoOptions {
             poll_interval: Duration::from_secs(5),
             poll_timeout: Duration::from_secs(1800),
             follow_events: true,
+            close: true,
+            close_reason: "closed by `cosmon-remote do` after the molecule completed".to_owned(),
         }
     }
 }
@@ -131,6 +162,11 @@ pub struct DoOutcome {
     pub terminal_status: Option<String>,
     /// Whether the credit guard was displayed this run.
     pub guard_shown: bool,
+    /// Outcome of the closing harvest: `landed` / `already_landed`, or
+    /// the named refusal label when the door refused. `None` when the
+    /// flow did not reach a terminal `completed` status, or when
+    /// [`DoOptions::close`] was off.
+    pub harvest_outcome: Option<String>,
 }
 
 /// Statuses after which polling stops.
@@ -240,10 +276,37 @@ where
         task.abort();
     }
 
+    // 5. Close. Only a `completed` molecule is work anyone asked to land —
+    //    `collapsed` and `failed` are the ADR-176 §1 case the door refuses
+    //    anyway, and asking would spend a request to be told so.
+    let harvest_outcome = if opts.close && terminal_status.as_deref() == Some("completed") {
+        let body = crate::client::DoneRequest::new(opts.close_reason.clone());
+        match client.done(&molecule_id, &body).await {
+            Ok(env) => {
+                progress(&format!("harvest: {}", env.harvest.outcome));
+                Some(env.harvest.outcome)
+            }
+            Err(e) => {
+                // Named, not fatal: the deliverable exists and is
+                // retrievable; the branch is where it was. Reporting the
+                // label is what tells the operator which gesture lifts it.
+                let label = e.to_string();
+                progress(&format!(
+                    "harvest refused ({label}) — the deliverable stands; \
+                     close it later with `molecule done {molecule_id} --reason ...`"
+                ));
+                Some(label)
+            }
+        }
+    } else {
+        None
+    };
+
     Ok(DoOutcome {
         molecule_id,
         terminal_status,
         guard_shown,
+        harvest_outcome,
     })
 }
 

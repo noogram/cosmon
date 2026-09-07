@@ -68,6 +68,23 @@ pub enum Exposure {
     /// operator-only verb (ADR-080 §5.1). The §8p freeze test asserts
     /// that **no** event on the frozen surface carries this value.
     OperatorOnly,
+    /// A `surface_removed` event: this line **withdraws** the route an
+    /// earlier line mounted.
+    ///
+    /// The log is append-only and its lines are immutable, which until
+    /// issue #51 meant a route could be added and never taken back. The
+    /// first withdrawal (`POST /v1/molecules/{id}/land`, superseded by
+    /// `POST /v1/molecules/{id}/done`) needed one, because two names for
+    /// one operation is precisely what that issue reverses — and a
+    /// verb that survives only in a golden is how a withdrawn verb comes
+    /// back.
+    ///
+    /// The discipline is preserved rather than broken: nothing is edited
+    /// or renumbered, the mounting line stays readable as history, and
+    /// [`fold_live`] subtracts the pair. A withdrawal of a route no line
+    /// ever mounted is a build error — an append-only log must not
+    /// accumulate withdrawals of nothing.
+    Withdrawn,
 }
 
 impl Exposure {
@@ -78,6 +95,7 @@ impl Exposure {
             Self::TenantVerb => "tenant-verb",
             Self::AdapterOnly => "adapter-only",
             Self::OperatorOnly => "operator-only",
+            Self::Withdrawn => "withdrawn",
         }
     }
 
@@ -88,6 +106,7 @@ impl Exposure {
             Self::TenantVerb => "Exposure::TenantVerb",
             Self::AdapterOnly => "Exposure::AdapterOnly",
             Self::OperatorOnly => "Exposure::OperatorOnly",
+            Self::Withdrawn => "Exposure::Withdrawn",
         }
     }
 
@@ -96,6 +115,7 @@ impl Exposure {
             "tenant-verb" => Some(Self::TenantVerb),
             "adapter-only" => Some(Self::AdapterOnly),
             "operator-only" => Some(Self::OperatorOnly),
+            "withdrawn" => Some(Self::Withdrawn),
             _ => None,
         }
     }
@@ -194,7 +214,7 @@ fn parse_line(line: &str) -> Result<CanonEvent, String> {
     let Some(exposure) = Exposure::from_token(exposure) else {
         return Err(format!(
             "ambiguous exposure {exposure:?} (expected `tenant-verb`, \
-             `adapter-only`, or `operator-only`)"
+             `adapter-only`, `operator-only`, or `withdrawn`)"
         ));
     };
     if blurb.is_empty() {
@@ -257,6 +277,40 @@ pub fn effect_annotation(scope: &str) -> Option<&'static str> {
         }
     }
     None
+}
+
+/// Fold the raw event log into the **live** §8p surface.
+///
+/// The log is append-only and every line in it is history; this is the
+/// projection consumers actually mount, help-render and freeze-test. A
+/// [`Exposure::Withdrawn`] line removes the route an earlier line mounted,
+/// in order, so the fold is a replay rather than a set difference: a route
+/// mounted, withdrawn and mounted again ends up live, which is the only
+/// reading that matches what the router does.
+///
+/// # Errors
+///
+/// A withdrawal of a route that is not live. An append-only log whose
+/// withdrawals do not correspond to mountings has drifted from the router,
+/// and a build that folded it would ship a surface nobody declared.
+pub fn fold_live(events: &[CanonEvent]) -> Result<Vec<CanonEvent>, String> {
+    let mut live: Vec<CanonEvent> = Vec::new();
+    for ev in events {
+        if ev.exposure == Exposure::Withdrawn {
+            let before = live.len();
+            live.retain(|e| e.method_path != ev.method_path);
+            if live.len() == before {
+                return Err(format!(
+                    "withdrawal of {:?} names no live route — an append-only log must not \
+                     accumulate withdrawals of nothing",
+                    ev.method_path
+                ));
+            }
+            continue;
+        }
+        live.push(ev.clone());
+    }
+    Ok(live)
 }
 
 /// Normalise a path template so `{id}`-style (axum) and `:id`-style

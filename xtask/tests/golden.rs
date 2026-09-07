@@ -26,8 +26,13 @@ fn rendered_blocks_match_golden() {
         .join(xtask::CANON_RELATIVE);
     let canon_text = std::fs::read_to_string(&canon_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", canon_path.display()));
-    let events = cosmon_surface_canon::parse_canon(&canon_text, xtask::CANON_RELATIVE)
+    let logged = cosmon_surface_canon::parse_canon(&canon_text, xtask::CANON_RELATIVE)
         .expect("canon parses");
+    // The reference documents the LIVE surface, not the log: a withdrawn
+    // route (issue #51 withdrew `POST /v1/molecules/{id}/land`) must not
+    // keep a block telling a tenant to call it. Same fold `regenerate`
+    // applies, so this golden and the smithy doc cannot disagree.
+    let events = cosmon_surface_canon::fold_live(&logged).expect("canon folds");
 
     let mut rendered = String::new();
     for (name, content) in xtask::render_blocks(&events).expect("blocks render") {

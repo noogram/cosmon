@@ -352,6 +352,7 @@ mod tests {
     fn sample_mol(id: &MoleculeId, status: MoleculeStatus, merged: bool) -> MoleculeData {
         let now = Utc::now();
         MoleculeData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

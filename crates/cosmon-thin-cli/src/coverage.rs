@@ -62,11 +62,12 @@ pub struct OperatorOnlyEntry {
 ///
 /// Entries appear in the same order as the ADR table for diff-friendliness.
 pub const OPERATOR_ONLY: &[OperatorOnlyEntry] = &[
-    OperatorOnlyEntry {
-        name: "done",
-        adr_ref: "ADR-080 §5.1",
-        note: None,
-    },
+    // `done` left this list on 2026-09-07 (issue #51, ADR-080 §5.4):
+    // closing a molecule is lifecycle, not administration. It is exposed
+    // as `POST /v1/molecules/{id}/done` and delivered by
+    // `cosmon-remote molecule done`; cs-thin carries no arm for it for the
+    // reason recorded in `tests/cli-flag-allowlist.toml` — it holds no
+    // galaxy, so it could only ever demonstrate the refusal.
     OperatorOnlyEntry {
         name: "evolve",
         adr_ref: "ADR-080 §5.1",

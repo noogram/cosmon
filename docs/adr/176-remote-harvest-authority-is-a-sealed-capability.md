@@ -154,7 +154,13 @@ ancestor of the base — **overriding `--force`**. Only when the branch is
 reachable from the base does `merge_succeeded || force` permit deletion. The
 invariant pins the topology guard, not the flag.
 
-### D4 — The interdict is on degrees of freedom, not on names
+### D4 — REVERSED (2026-09-07): the parameters were never what the seal protected
+
+> **Status: reversed.** The decision below is retired. Its original text is
+> kept in full, because a reversal that hides what it reverses teaches
+> nobody. Read the original first; the reversal argument follows it.
+
+#### D4 as originally decided (2026-09-01) — retired
 
 **No option crosses the wire.** Not `--force`, `--strategy`,
 `--skip-pre-done-hook`, `--no-branch-delete`, `--propel-message` — and not
@@ -172,16 +178,82 @@ that requester. The door exposes **no parameter that changes a gate's verdict,
 a merge's strategy, or a destructive step's precondition.**
 
 **Corollary — how §5.1 must be read.** The closed list is a list of *degrees of
-freedom*, not of *verb names*. ADR-080 §5.1's two `NO (NEVER)` rows already
-contain both formulations, one line apart:
+freedom*, not of *verb names*.
 
-- L77 (`cs stitch`) names the *effect*: "a trunk-writing gesture". Honest.
-- L76 (`cs done`) names a *gesture* and enumerates its side effects. This is
-  the formulation that let an open route reproduce the forbidden effect under
-  another name.
+#### Why it is reversed
 
-`docs/guides/api-cli-coverage.md` is amended accordingly (§10). Both rows stay
-`NO (NEVER)`: this ADR opens no route.
+The load-bearing sentence — *a derogation requested by its beneficiary is not
+a derogation* — is true, and it is **conditional**. It holds when the
+requester is a **constrained principal, distinct from the party the gate
+protects**. Strip that condition and the sentence says nothing: every
+derogation is requested by someone who benefits from it, including the
+operator typing `cs done --strategy ff-only` on their own machine, and by
+that reading no flag would exist at all.
+
+The deployment that exists is single-tenant: **one galaxy, one nucleon, one
+user, and the requester *is* the operator.** There, beneficiary and protected
+party are the same person. `--skip-pre-done-hook` waives a Definition-of-Done
+that person wrote, for a molecule that person nucleated, on a trunk that
+person owns. The gate protects nobody from them, and withholding the flag is
+not a safety property — it is an amputation of their own verb, reachable at
+their own terminal one command away.
+
+The corollary goes with it. Reading §5.1 as a list of *degrees of freedom*
+rather than of verb names is what allowed `land` to be built: a second name
+performing `done`'s effect with a fixed argument set, conforming to the
+letter of a classification that was itself wrong. ADR-080 §5.1 is amended
+(its new §5.4) and `cs done` leaves the closed list under its own name. The
+list is a list of verbs.
+
+#### What is decided instead
+
+`POST /v1/molecules/{id}/done` carries the **full parameter set** of
+`cs done`, expressed once in the domain as
+`cosmon_core::harvest_door::HarvestOptions` so that the wire, the CLI and
+the merge read the same options and a parameter cannot mean one thing in a
+request body and another at the merge. Two departures from that totality,
+both stated rather than silent:
+
+- **`--dry-run` has no wire counterpart.** It prints a teardown plan for a
+  terminal, and the door's own decision half (`harvest_door::decide`) is the
+  wire's preview: it answers every pre-effect refusal without mutating
+  anything. Two previews with different answers would be two doors.
+- **`--reason` is mandatory here and optional at the CLI.** This is the gap
+  the reporters named: `land` fabricated a generic reason. An operator at
+  their own terminal authors the history a harvest writes; a requester
+  reaching over §8p does not, and the trunk-side reason is the only account a
+  later reader has of why someone else's molecule was closed. A request
+  without one is refused `missing_reason` — the eighth named refusal, exit
+  code 77 — and none is invented. The seven refusals of D7 keep 70–76.
+
+**D6 does not travel with D4.** Auto-propel stays **disarmed by default on
+this route**, and arming it additionally requires the `cosmon:worker:spawn`
+scope. Escalation is not a merge parameter: it injects a natural-language
+instruction into a live worker session to resolve a conflict *on the trunk*,
+and renders the result under a success label. It is an agent dispatch wearing
+a flag, and it is the one option on this route that spends agent budget.
+
+#### What would bring D4 back
+
+**A requester who is not the operator** — the multi-tenant phase. The
+condition is exactly the one the original sentence needed and the current
+deployment does not satisfy. When it arrives, note what it will actually
+need: a restriction on **which molecules** a requester may close, not on
+which parameters they may pass. Those are different questions, and D4
+answered the second while the first is the one that protects anybody. D5
+stands and still refuses an `owner` field; nothing here adds an ownership
+notion.
+
+**What the reversal does not touch.** D1 (the authority foundation) stands:
+the JWT authenticates the requester, the operator-sealed
+`[harvest_authority]` arming authorises the effect, verified at the effect
+boundary with facts re-derived there. The seal answers *may this requester
+cause this effect at all*; the parameters answer *how*. Reversing D4 does
+not dismantle D1 — a galaxy that has armed nothing still refuses every
+harvest `not_authorized`. D2 (the door decides which authority the intent
+needs), D3 (a closure that did not merge never deletes the branch), D5 and
+D7 (the three failure policies, the seven named refusals and their exit
+codes) are likewise untouched.
 
 ### D5 — The holder is the kernel, read from the path; no `owner` field
 
@@ -340,9 +412,11 @@ observable, it is capped, and reaching the cap is itself a named refusal.
 - ADR-080 §5.2's numbered exit path stands, with clause 2 rewritten: a
   successor ADR (this one) plus **`DoneAuthorization::Delegated`** — not
   `delegate_for` — plus the coverage-guide row.
-- The closed list of §5.1 acquires a reading rule (D4): it enumerates degrees
-  of freedom. A future row is justified by the *effect and the parameters* it
-  withholds, in L77's idiom, not by a gesture name.
+- ~~The closed list of §5.1 acquires a reading rule (D4): it enumerates degrees
+  of freedom.~~ **Retired with D4 (2026-09-07).** The list is a list of verbs.
+  `cs done` left it under its own name via ADR-080 §5.4 (issue #51), and a
+  future row is justified by the verb being administration rather than
+  lifecycle.
 - `docs/guides/api-cli-coverage.md` L76 and L77 are amended (§10). Both stay
   `NO (NEVER)`; the drift gate (`crates/cosmon-cli/tests/api_cli_coverage.rs`)
   is unaffected because the exposure column does not change.
@@ -420,8 +494,13 @@ and it is why D1 imports ADR-172 instead of extending ADR-124's bound vector.
 
 This decision is violated if any of these becomes true:
 
-1. Any §8p route accepts a parameter that alters a gate verdict, a merge
-   strategy, or a destructive step's precondition (D4).
+1. ~~Any §8p route accepts a parameter that alters a gate verdict, a merge
+   strategy, or a destructive step's precondition (D4).~~ **Retired with the
+   D4 reversal (2026-09-07)**: the harvest door carries the full parameter
+   set of `cs done`. Replaced by the falsifier the reversal actually owns —
+   *a request reaches the merge with a parameter the requester did not send,
+   or fails to reach it with one they did*, asserted at the options the
+   effect receives rather than at the field that parsed.
 2. A harvest is authorised by a JWT claim, an authorship record, a session id,
    a cwd, or any other value the requester can author (D1, D5).
 3. A grant issued against one base authorises an effect on another, or survives
@@ -480,21 +559,34 @@ landed (`8b54b0bd`, `6c8eee2f`, `f0bfe4f9`), and `DoneAuthorization` is code
 (`crates/cosmon-core/src/harvest_authorization.rs`, verified and consumed at
 the effect boundary by `crates/cosmon-cli/src/cmd/done_authority.rs`). The door
 this ADR bounds was then built by `task-20260901-3b53` as the verb **`cs land`**
-and the route **`POST /v1/molecules/{id}/land`** — a distinct gesture, not
-`cs done` with fewer flags reachable: its argument set is fixed at the type
-(`done::Args::sealed_door`), and rows L76/L77 of the coverage guide stay
-`NO (NEVER)` unchanged. `cs done` is still refused across §8p, by the closed
-list and by the parse-time second lock, and that is the point: the door varies
-nothing and refuses without a seal, so it withholds every degree of freedom D4
-enumerates.
+and the route **`POST /v1/molecules/{id}/land`**.
+
+**Second postscript (2026-09-07, issue #51 reopened).** Both were **withdrawn**
+by `task-20260907-6ddc`. `land` was a second name for `done`, and it existed
+only because ADR-080 §5.1 classed `done` as operator-only — a classification
+the issue's reporters showed to be the upstream error (see the D4 reversal
+above and ADR-080 §5.4). The operation has one name again: `cs done`, and
+`POST /v1/molecules/{id}/done` carrying its full parameter set. What remains
+from `land` unchanged is everything that was actually load-bearing: the
+`[harvest_authority]` second key, the ordered pre-effect refusals, the seven
+named refusals with their exit codes, the never-202 shape, and the
+trunk-side non-integration reason projected to the remote client — the change
+that made a stranded merge visible instead of silent.
 
 One falsifier of §8 could **not** be satisfied as written and is recorded
 rather than papered over: falsifier 6 wants `base_not_fast_forward` refused at
 capability arming, and cosmon ships no grant-issuing path to put that check in
 (ADR-172 D2 — verification without a signer). The door instead makes the class
-unreachable through itself (it fixes `strategy = Merge`, so no request can
+unreachable through itself (it fixed `strategy = Merge`, so no request could
 select a fast-forward) and answers the residue as `503` — the only refusal on
 this route that is not charged to the requester.
+
+**Amended by the D4 reversal (2026-09-07):** a request *can* now select
+`ff-only`, so the class is no longer unreachable through the door. The `503`
+answer is what carries the policy: `base_not_fast_forward` stays an operator
+configuration fault, never charged to the requester as a 4xx, and the
+falsifier stays recorded-as-unmet for the same reason as before — cosmon
+still ships no grant-issuing path to put an arming-time check in.
 
 ---
 
@@ -576,10 +668,13 @@ door is not holding it.
 
 ### What does not change
 
-The closed list (§D4) is untouched: the library entry takes the molecule
-and the effect, nothing else, and the route still refuses any request body.
+~~The closed list (§D4) is untouched: the library entry takes the molecule
+and the effect, nothing else, and the route still refuses any request body.~~
+**Amended 2026-09-07:** the D4 reversal gives the library entry a third
+argument — the requester's `HarvestOptions` — and the route accepts them.
 The seven refusals, their labels, their exit codes 70–76 and their HTTP
-statuses are byte-identical; the only observable route change beside
+statuses are byte-identical (`missing_reason` is added as an eighth, code
+77, and displaces none); the only observable route change beside
 latency is that a well-formed molecule id the tenant's store has never
 seen now answers `404 not_found` from the decision half — the same
 no-existence-oracle boundary the rest of the surface holds — where it
@@ -611,3 +706,35 @@ no-existence-oracle 404. The three execution refusals (`merge_conflict`,
 `base_not_fast_forward`, `pre_done_refused`) belong to the sealed transaction
 and return with its library implementation — the named follow-up, tracked in
 ADR-080 §3.5.3's enumerated parity gap alongside the drain's teardown leg.
+
+### Amendment (2026-09-07, issue #51) — the effect is a port with two implementations
+
+The label is renamed `harvest_effect_unavailable` with the withdrawal of
+`land`, and the "until" clause acquires an answer for the deployment that
+actually exists.
+
+The sealed transaction still has exactly one implementation — `cmd/done.rs` —
+and it still does not move behind a library without forking the door, so §12's
+refusal to rewrite it stands. What changes is that the effect half is now an
+explicit **port** (`cosmon_rpp_adapter::harvest_effect::HarvestEffectPort`)
+with two implementations the operator chooses between:
+
+- `UnavailableHarvestEffect`, **the default** — the honest `501` above, for an
+  image that carries no `cs`. Nothing about §12 changes for that deployment.
+- `CsBinaryHarvestEffect`, wired when the operator declares
+  `harvest_cs_binary` in `rpp.toml` — the harvest runs as that binary, with
+  the argv `HarvestOptions::cs_done_argv` builds, in the tenant's galaxy root.
+
+The second is legitimate now and was not before, for one reason: ADR-080 §5.1
+listed `done`, so `cs` refused it under the request envelope (§3.5's second
+lock) and no child could perform it in any shape. With §5.4 taking `done` off
+that list, a child that closes a molecule is an ordinary local gesture, and it
+announces itself as one — `api_envelope::hand_off_to_local_child` consumes the
+request marker, exactly as the resident drain's own `cs done` teardown already
+does, and consumes **no** security posture (the egress variables and the
+exposed-host refusal are untouched).
+
+This does **not** restore the general §3.5 clause (e) subprocess envelope that
+issue #54 U6 retired. It is one port, one verb, one operator-declared binary,
+off by default, with no PATH discovery — a door that found its own executor
+would change behaviour the day someone else's `cs` appeared on the host.

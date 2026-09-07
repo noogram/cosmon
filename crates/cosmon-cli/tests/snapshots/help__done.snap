@@ -14,24 +14,31 @@ Options:
       --config <PATH>
           Path to configuration file
 
+      --reason <REASON>
+          Why this molecule is being closed. Traced trunk-side on the molecule.
+          
+          Optional here and **mandatory over the wire** (`POST /v1/molecules/{id}/done`), and the asymmetry is deliberate. An operator standing at their own terminal is the author of the git history this harvest writes; a requester reaching the door over §8p is not, and the trunk-side reason is the only account a later reader has of why someone else's molecule was closed. Making it mandatory here too would break every hook, patrol sweep and `cs run` teardown that legitimately closes a molecule without a sentence to add — a usability amputation with no safety property behind it.
+          
+          What is *not* optional anywhere is honesty: when no reason is given, none is recorded. The withdrawn `land` gesture fabricated a generic one, and a fabricated reason is indistinguishable, a year later, from one somebody meant.
+
       --force
           Proceed even if the molecule is not in a terminal state
+
+  -v, --verbose
+          Enable verbose output
 
       --if-completed
           Silent no-op when the molecule is not `Completed` or already merged.
           
           Hook-friendly gate for callers that do not know whether the molecule is ready for teardown — tmux `pane-died` hooks, patrol sweeps, and the legacy `cs harvest` alias. Exits success without touching state when the precondition is not met; otherwise, behaves exactly like `cs done`. Supersedes the stand-alone `cs harvest` verb (ADR-052).
 
-  -v, --verbose
-          Enable verbose output
+      --json
+          Output in JSON format
 
       --dry-run
           Compute and display the teardown plan without executing any steps.
           
           Reports what `cs done` *would* do: worktree state (clean/dirty), whether a merge is needed, whether the tmux session is alive, whether a fleet worker is registered, and whether the branch exists.
-
-      --json
-          Output in JSON format
 
       --no-merge
           Skip merging the worker's branch into the base branch

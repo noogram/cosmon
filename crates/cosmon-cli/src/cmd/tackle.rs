@@ -9710,6 +9710,7 @@ mod tests {
 
     fn sample_molecule(id: &str, status: MoleculeStatus) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("idea-to-plan").unwrap(),

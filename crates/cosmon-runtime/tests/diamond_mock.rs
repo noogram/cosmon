@@ -199,6 +199,7 @@ fn mol_id(raw: &str) -> MoleculeId {
 
 fn seed(store: &dyn StateStore, id: &MoleculeId, links: Vec<MoleculeLink>) {
     let data = MoleculeData {
+        harvest_reason: None,
         id: id.clone(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

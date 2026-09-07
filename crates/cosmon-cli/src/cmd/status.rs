@@ -791,6 +791,7 @@ mod tests {
         kind: Option<MoleculeKind>,
     ) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(format!("cs-20260401-{suffix}")).unwrap(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("mol-polecat-work").unwrap(),

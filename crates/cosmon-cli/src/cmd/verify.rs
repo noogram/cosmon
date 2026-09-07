@@ -1236,6 +1236,7 @@ mod tests {
         use cosmon_core::id::{FleetId, FormulaId, MoleculeId};
         use std::collections::{BTreeSet, HashMap};
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new("task-20260417-seal").unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

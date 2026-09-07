@@ -285,7 +285,12 @@ fn list_axum_routes() -> &'static [RouteInfo] {
 /// hard-NEVER form) per ADR-080 §5.1. The audit gate refuses to admit
 /// any axum route for these verbs.
 const NEVER_VERBS: &[&str] = &[
-    "done",
+    // `done` left the NEVER class 2026-09-07 (issue #51, ADR-080 §5.4):
+    // closing a molecule is the last step of its normal lifecycle, not an
+    // administration surface, and `POST /v1/molecules/:id/done` exposes it
+    // under its own name with the full `cs done` parameter set. What stays
+    // restricted is WHICH molecules a requester may close — the
+    // multi-tenant question, deliberately unanswered.
     "evolve",
     "complete",
     "purge",

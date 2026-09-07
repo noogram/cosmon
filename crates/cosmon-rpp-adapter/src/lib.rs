@@ -72,6 +72,7 @@ pub mod deny_list;
 pub mod drain;
 pub mod error;
 pub mod events_bus;
+pub mod harvest_effect;
 pub mod image_init;
 pub mod jwks_fetch;
 pub mod jwt;
@@ -345,6 +346,16 @@ pub struct AppState {
     /// same [`provisioner::Provisioner`] (single-writer discipline holds).
     /// See [`portee::PorteeProvisioner`].
     pub portee_provisioner: Arc<portee::PorteeProvisioner>,
+    /// The effect half of the harvest door (`POST /v1/molecules/{id}/done`).
+    ///
+    /// Defaults to [`harvest_effect::UnavailableHarvestEffect`], which
+    /// refuses `harvest_effect_unavailable` for every harvest the decision
+    /// half admits — the honest answer for an image that carries no `cs`.
+    /// An operator who declared `harvest_cs_binary` in `rpp.toml` gets
+    /// [`harvest_effect::CsBinaryHarvestEffect`] instead. Off by default
+    /// because a door that discovered its own executor would change
+    /// behaviour when someone else's `cs` appeared on the host's PATH.
+    pub harvest_effect: Arc<dyn harvest_effect::HarvestEffectPort>,
 }
 
 impl AppState {
@@ -445,18 +456,22 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/run",
             post(routes::molecules::run_molecule),
         )
-        // The harvest door (task-20260901-3b53, ADR-176, issue #51).
-        // The tenant asks for ONE molecule to be closed and, where the
-        // second authority arises, integrated. The body carries no
-        // options — strategy, reservations and base are sealed fields of
-        // the operator's grant (D4). Synchronous by decision: a 202 on a
-        // transaction that may integrate nothing is the defect #51
-        // reports. Refuses `not_authorized` in any galaxy that has not
-        // armed `[harvest_authority] required` — the JWT authenticates
-        // the requester, the seal authorises the effect.
+        // The harvest door (ADR-176 as amended, issue #51). The tenant
+        // asks for ONE molecule to be closed and, where the second
+        // authority arises, integrated — with the FULL parameter set of
+        // `cs done`, because on the deployment that exists the requester
+        // is the operator and a derogation withheld from them protects
+        // nobody (the D4 reversal). The reason is mandatory and never
+        // fabricated. Synchronous by decision: a 202 on a transaction
+        // that may integrate nothing is the defect #51 reports. Refuses
+        // `not_authorized` in any galaxy that has not armed
+        // `[harvest_authority] required` — the JWT authenticates the
+        // requester, the seal authorises the effect (D1, unchanged).
+        // Replaces the withdrawn `POST /v1/molecules/{id}/land`: two
+        // names for one operation was the divergence this reverses.
         .route(
-            "/v1/molecules/{id}/land",
-            post(routes::molecules::land_molecule),
+            "/v1/molecules/{id}/done",
+            post(routes::molecules::done_molecule),
         )
         // Artifact endpoints (e653 spec, task-20260522-ef4f). The
         // PUT and GET share `/artifacts/{token}` — axum disambiguates
