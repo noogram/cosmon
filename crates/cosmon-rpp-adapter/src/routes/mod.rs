@@ -30,6 +30,7 @@ pub mod oauth_discovery;
 pub mod observability;
 pub mod quota;
 pub mod result;
+pub mod session;
 pub mod workers;
 
 pub use observability::{diagnostics_handler, metrics_handler};

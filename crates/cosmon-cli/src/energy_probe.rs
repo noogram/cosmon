@@ -636,9 +636,7 @@ pub fn read_claude_pid_file(pid: u32) -> Option<(String, String)> {
 /// `sessionStoragePortable.ts`.
 #[must_use]
 pub fn sanitize_path(path: &str) -> String {
-    path.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    cosmon_core::session_thread::sanitise_agent_path(path)
 }
 
 /// The Claude Code **configuration root** — the directory that holds

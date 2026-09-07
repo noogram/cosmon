@@ -7,6 +7,7 @@ Commands:
   list      `GET /v1/molecules` — ensemble list with optional filters
   get       `GET /v1/molecules/{id}`
   result    `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
+  session   `GET /v1/molecules/{id}/session` — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session
   tackle    `POST /v1/molecules/{id}/tackle` [coûteux]
   run       `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream
   done      `POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202

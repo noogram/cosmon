@@ -1,0 +1,13 @@
+`GET /v1/molecules/{id}/session` — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session
+
+Usage: cosmon-remote molecule session [OPTIONS] <ID>
+
+Arguments:
+  <ID>  
+
+Options:
+      --profile <PROFILE>  Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
+      --tail <TAIL>        Show only the last N entries
+      --json               Render machine-readable JSON instead of human text where applicable
+      --token <TOKEN>      Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
+  -h, --help               Print help

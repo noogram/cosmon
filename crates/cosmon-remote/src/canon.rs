@@ -110,7 +110,9 @@ include!(concat!(env!("OUT_DIR"), "/canon_surface_generated.rs"));
 /// entry may be `operator-only`.
 ///
 /// NOT consumed (and why): `GET /v1/molecules/{id}/logs` (SSE pane
-/// tail — no CLI verb yet) and `POST /v1/avatar/perceive` (canal (d),
+/// tail — no CLI verb yet; its retrospective sibling
+/// `GET /v1/molecules/{id}/session` IS consumed, as `molecule session`)
+/// and `POST /v1/avatar/perceive` (canal (d),
 /// adapter-only, OFF by default). `converse` joined as a top-level
 /// verb to expose the conversational channel.
 ///
@@ -141,6 +143,7 @@ pub static ROUTES_USED: &[&CanonRoute] = &[
     GET_V1_AVATAR_INSTANCE_ID_MOULD_INFO,
     // Deliverable + artifacts.
     GET_V1_MOLECULES_ID_RESULT,
+    GET_V1_MOLECULES_ID_SESSION,
     GET_V1_MOLECULES_ID_ARTIFACTS,
     GET_V1_MOLECULES_ID_ARTIFACTS_TOKEN,
     PUT_V1_MOLECULES_ID_ARTIFACTS_TOKEN,
