@@ -587,6 +587,52 @@ pub struct SessionEnvelope {
     pub entries: Vec<SessionEntry>,
 }
 
+/// Envelope returned by `GET /v1/molecules/{id}/status`.
+///
+/// Deliberately small: this is the body a poller re-reads every few
+/// seconds, and every field on it is a field the poller pays for. Four
+/// facts, each of which a waiting client actually consumes — the status,
+/// the band it belongs to, when it last changed, and whether it is over.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StatusEnvelope {
+    pub request_id: String,
+    pub molecule_id: String,
+    /// Lifecycle status (`pending`, `running`, `completed`, …).
+    pub status: String,
+    /// The band: `live` · `waiting` · `blocked` · `parked` · `failed` · `done`.
+    #[serde(default)]
+    pub phase: String,
+    /// Last write to the molecule's state, RFC3339.
+    #[serde(default)]
+    pub updated_at: String,
+    /// Whether the molecule is over. Read from the server rather than
+    /// re-derived here, so a client is never wrong about the terminal set
+    /// on the day it changes.
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+/// The answer to one conditional status poll.
+///
+/// `NotModified` is a real answer, not an absence: the molecule has not
+/// moved since the tag was issued, which is precisely what a waiter wanted
+/// to know, and it arrived without a body.
+#[derive(Debug, Clone)]
+pub enum StatusPoll {
+    /// The server answered `304` — unchanged since `etag`.
+    NotModified {
+        /// The tag to echo on the next poll.
+        etag: Option<String>,
+    },
+    /// A fresh answer, with the tag that will make the next poll conditional.
+    Fresh {
+        /// The tag to echo on the next poll, when the server sent one.
+        etag: Option<String>,
+        /// The body.
+        envelope: Box<StatusEnvelope>,
+    },
+}
+
 /// Envelope returned by `GET /v1/molecules/{id}/result`.
 ///
 /// The route returns 200 for *any*
@@ -1048,6 +1094,39 @@ impl Client {
             .send(self.req_canon(canon::GET_V1_MOLECULES_ID_RESULT, &[id]))
             .await?;
         decode_json(resp).await
+    }
+
+    /// `GET /v1/molecules/{id}/status` — one molecule's status, cheaply.
+    ///
+    /// The poll primitive behind [`crate::wait`]. Pass the `etag` from the
+    /// previous answer as `if_none_match` and an unchanged molecule costs a
+    /// `304` with no body.
+    ///
+    /// This dials the dedicated status route, never `GET /v1/molecules/{id}`:
+    /// the full read answers the same question but scans three append-only
+    /// logs on the way, so polling it would cost more the longer the wait ran.
+    /// Client and adapter ship as one version — an adapter too old to mount
+    /// this route answers `404`, which is the honest failure and not something
+    /// to paper over with a silent fallback to the expensive read.
+    pub async fn get_status(&self, id: &str, if_none_match: Option<&str>) -> Result<StatusPoll> {
+        let mut rb = self.req_canon(canon::GET_V1_MOLECULES_ID_STATUS, &[id]);
+        if let Some(tag) = if_none_match {
+            rb = rb.header(header::IF_NONE_MATCH, tag);
+        }
+        let resp = self.send(rb).await?;
+        let etag = resp
+            .headers()
+            .get(header::ETAG)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        if resp.status() == StatusCode::NOT_MODIFIED {
+            return Ok(StatusPoll::NotModified { etag });
+        }
+        let envelope: StatusEnvelope = decode_json(resp).await?;
+        Ok(StatusPoll::Fresh {
+            etag,
+            envelope: Box::new(envelope),
+        })
     }
 
     /// `GET /v1/molecules/{id}/session` — read the worker's message thread.

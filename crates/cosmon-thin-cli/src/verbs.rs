@@ -102,6 +102,19 @@ pub fn run() {}
 #[cosmon_thin_macro::verb(method = "POST", path = "/v1/molecules/:id/done", principal = "tenant")]
 pub fn done() {}
 
+/// Wire stub for `GET /v1/molecules/:id/status` — the poll surface
+/// (issue #51 follow-up). ONE molecule's status, phase, `updated_at`
+/// and terminality, read from `state.json` alone, so a client can
+/// implement `wait` by polling instead of the server holding a blocked
+/// thread per waiter. Distinct from `GET /v1/molecules/:id`, which
+/// answers the same question but scans three growing logs on the way.
+#[cosmon_thin_macro::verb(
+    method = "GET",
+    path = "/v1/molecules/:id/status",
+    principal = "tenant"
+)]
+pub fn molecule_status() {}
+
 // ---------------------------------------------------------------------------
 // D-AVATAR instance lifecycle (task-20260525-738e)
 // ---------------------------------------------------------------------------

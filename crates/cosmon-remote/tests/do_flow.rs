@@ -78,24 +78,45 @@ async fn mount_happy_path(server: &MockServer) {
         .expect(1)
         .mount(server)
         .await;
-    // First observe sees the worker running; every later one sees the
-    // terminal state. Mount order matters: the bounded mock wins while
-    // it has uses left.
+    // The follow phase polls the STATUS route — it is `wait`, sharing the
+    // one poller of the crate. The first poll sees the worker running;
+    // every later one sees the terminal state. Mount order matters: the
+    // bounded mock wins while it has uses left.
     Mock::given(method("GET"))
-        .and(path("/v1/molecules/task-do-0001"))
+        .and(path("/v1/molecules/task-do-0001/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "request_id": "req-do-3",
-            "molecule": {"id": "task-do-0001", "kind": "task", "status": "running"},
+            "molecule_id": "task-do-0001",
+            "status": "running",
+            "phase": "live",
+            "updated_at": "2026-09-07T10:00:00Z",
+            "terminal": false,
         })))
         .up_to_n_times(1)
         .mount(server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/v1/molecules/task-do-0001"))
+        .and(path("/v1/molecules/task-do-0001/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "request_id": "req-do-4",
+            "molecule_id": "task-do-0001",
+            "status": "completed",
+            "phase": "done",
+            "updated_at": "2026-09-07T10:00:20Z",
+            "terminal": true,
+        })))
+        .mount(server)
+        .await;
+    // Falsifier 6, the half that lives here: `do` no longer has a polling
+    // loop of its own, so it never dials the full molecule read. This
+    // `expect(0)` is what fails the day a second loop reappears.
+    Mock::given(method("GET"))
+        .and(path("/v1/molecules/task-do-0001"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "request_id": "req-do-never",
             "molecule": {"id": "task-do-0001", "kind": "task", "status": "completed"},
         })))
+        .expect(0)
         .mount(server)
         .await;
     Mock::given(method("GET"))

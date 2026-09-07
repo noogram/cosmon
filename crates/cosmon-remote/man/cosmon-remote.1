@@ -34,6 +34,9 @@ Molecule lifecycle (the §8p frozen surface)
 cosmon\-remote\-run(1)
 Like `do`, then price it: brackets the same nucleate + tackle + follow flow with two `GET /v1/quota` reads and reports the quota delta THIS run charged against your bucket. Zero new routes; the leak caveat is printed honestly
 .TP
+cosmon\-remote\-wait(1)
+Block until a molecule reaches a status, by polling `GET /v1/molecules/{id}/status` — client\-side, so nothing on the server waits for you. Exit 0 when a requested status is reached, 124 on timeout, 125 when it ended some OTHER terminal way (a collapse is not a timeout, and a script must not retry it)
+.TP
 cosmon\-remote\-artifact(1)
 Artifact endpoints
 .TP

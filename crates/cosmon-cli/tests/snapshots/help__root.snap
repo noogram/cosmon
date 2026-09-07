@@ -242,7 +242,7 @@ Commands:
   journal         Write down what you notice while you work; anything worth doing becomes a task without you stopping to file it
   sessions        Sessions — two agent sessions on one mission: one drives, the other watches and advises; only a human signs the relay
   daemons         Daemons — operator view over `cosmon-daemon-supervisor` (list/status/reload/logs)
-  status          Project pulse — quick DAG overview like git status
+  status          Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
   tackle          Tackle a molecule — spawn ONE worker on this node (always leaf; for DAG walks use `cs run`)
   claim           Claim a molecule for the pilot; the runtime defers until it is released
   release         Release a pilot claim and return the molecule to the runtime frontier

@@ -163,10 +163,10 @@ fn commands_section(lines: &[String]) -> Vec<String> {
 /// since A3 (`after_long_help` attached — see module docs), so only
 /// the catalogue is compared line-by-line.
 #[test]
-fn root_commands_catalogue_gains_the_seven_blessed_verbs() {
+fn root_commands_catalogue_gains_the_eight_blessed_verbs() {
     // Catalogue-scoped diff (the rest of the page is consciously
     // long-form since A3 \u{2014} `after_long_help` attached, see module
-    // docs). Seven blessed verb additions, all additive (\u{21d2} minor):
+    // docs). Eight blessed verb additions, all additive (\u{21d2} minor):
     // 1. `avatar`   \u{2014} A2 fusion (drained from cs-thin), CHANGELOG 0.2.0.
     // 2. `do`       \u{2014} B2 client-side composition (task-20260610-56c4).
     // 3. `doctor`   \u{2014} C1 onboarding checks (stitch 828e).
@@ -179,6 +179,11 @@ fn root_commands_catalogue_gains_the_seven_blessed_verbs() {
     //    (delib-20260710-33b7 C2/C7, task-20260710-2565); distinct from
     //    `auth login` (the Claude device flow).
     // 7. `logout`   \u{2014} forget the persisted credential; reverse of `login`.
+    // 8. `wait`     \u{2014} block until a molecule reaches a status, by
+    //    polling `GET /v1/molecules/{id}/status`. Client-side by
+    //    decision: a blocking ROUTE would make the adapter hold a
+    //    thread and a waiter-keyed piece of state per client
+    //    (issue #51 follow-up, task-20260907-b25f).
     // Plus four in-place description edits: the diagnostic verbs
     // (healthz, quota, workers, noyaux) gained an explicit
     // `(diagnostic)` marker in the B2+C1 integration (stitch 828e) \u{2014}
@@ -211,8 +216,9 @@ fn root_commands_catalogue_gains_the_seven_blessed_verbs() {
     }
     assert_eq!(
         added.len(),
-        7 + inplace_subs.len(),
-        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout + the in-place edits, got {added:?}"
+        8 + inplace_subs.len(),
+        "root commands: blessed additions are avatar, do, doctor, converse, run, login, logout, wait \
+         + the in-place edits, got {added:?}"
     );
     for verb in [
         "  avatar  ",
@@ -222,6 +228,7 @@ fn root_commands_catalogue_gains_the_seven_blessed_verbs() {
         "  run  ",
         "  login  ",
         "  logout  ",
+        "  wait  ",
     ] {
         assert!(
             added.iter().any(|l| l.starts_with(verb)),
@@ -243,17 +250,19 @@ const TACKLE_PRE: &str = "  tackle    `POST /v1/molecules/{id}/tackle`";
 const TACKLE_POST: &str = "  tackle    `POST /v1/molecules/{id}/tackle` [co\u{fb}teux]";
 
 #[test]
-fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_done_lines() {
+fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_done_session_and_status_lines() {
     // In-place substitutions: the thaw about correction (A2, blessed
     // in CHANGELOG 0.2.0) and the scope-derived [coûteux] marker on
-    // tackle (A3, task-20260610-10d2). Three blessed additions: the
+    // tackle (A3, task-20260610-10d2). Four blessed additions: the
     // `run` verb (B2 bounded drain, task-20260610-56c4), the `done`
     // verb — the harvest door of ADR-176, answering issue #51
     // (task-20260901-3b53, renamed from `land` by task-20260907-6ddc)
-    // — and the `session` verb, the read of a worker's message thread
-    // that the same issue asked for next (task-20260907-e376). All three
-    // are additive, which is why they can join a surface pinned this
-    // tightly: the line each adds is the whole change.
+    // — the `session` verb, the read of a worker's message thread
+    // that the same issue asked for next (task-20260907-e376), and the
+    // `status` verb, the cheap per-molecule read `wait` polls
+    // (task-20260907-b25f). All four are additive, which is why they can
+    // join a surface pinned this tightly: the line each adds is the
+    // whole change.
     let pre = lines_of("molecule.pre-fusion.help.txt");
     let post = lines_of("molecule.help.txt");
     let added: Vec<&String> = post.iter().filter(|l| !pre.contains(l)).collect();
@@ -271,9 +280,9 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_done_lines(
     }
     assert_eq!(
         added.len(),
-        6,
+        7,
         "blessed: thaw correction + tackle marker + run line + done line + session line \
-         + --token reword, got {added:?}"
+         + status line + --token reword, got {added:?}"
     );
     assert!(
         added.iter().any(|l| l.as_str() == THAW_POST),
@@ -304,6 +313,12 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_done_lines(
             .iter()
             .any(|l| l.starts_with("  session   `GET /v1/molecules/{id}/session`")),
         "missing the blessed session verb line (the worker thread read), got {added:?}"
+    );
+    assert!(
+        added
+            .iter()
+            .any(|l| l.starts_with("  status    `GET /v1/molecules/{id}/status`")),
+        "missing the blessed status verb line (the poll surface), got {added:?}"
     );
 }
 
