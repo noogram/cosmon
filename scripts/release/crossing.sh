@@ -20,7 +20,7 @@
 #   * rebase-and-fast-forward — rewrites every development SHA, dangling every
 #     merge SHA recorded in `events.jsonl`. The ledger's own witnesses would
 #     then point at objects that no longer exist. Both alternatives also force
-#     deleting `ensure_attribution_carrier` (crates/cosmon-cli/src/cmd/done.rs),
+#     deleting `ensure_attribution_carrier` (crates/cosmon-harvest/src/transaction.rs),
 #     which the deliberation refused unanimously.
 #
 # ── Why a script and not a `cs` verb ────────────────────────────────────────

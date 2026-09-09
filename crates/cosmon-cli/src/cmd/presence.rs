@@ -925,32 +925,12 @@ pub(crate) fn leases(ctx: &Context) -> anyhow::Result<PilotLeaseStore> {
 
 /// The lease ledger over an explicit state root, trust root attached.
 ///
-/// The same store [`leases`] builds, for the one caller that has a path rather
-/// than a [`Context`]: the authority guard on the lifecycle verbs
-/// (`super::guard::refuse_unleased_pilot_gesture`). It exists because the
-/// guard once built `PilotLeaseStore::new` directly, and a store with no
-/// pinned key honours no grant — so every leased mission read back as
-/// *unleased* and the guard returned `Ok(())` for callers the ledger refused.
-/// The M8 relève exercise caught it by collapsing a leased mission from an
-/// unleased co-pilot while `cs sessions takeover check`, reading the same
-/// ledger through [`leases`], refused the very same session.
-///
-/// Both readers now come through here, which is the point: this is one
-/// function so that "resolve the trust root" is not a step a call site can
-/// perform differently, or forget.
-///
-/// # Errors
-///
-/// As [`leases`].
-pub(crate) fn leases_at(state_root: &std::path::Path) -> anyhow::Result<PilotLeaseStore> {
-    let store = PilotLeaseStore::new(state_root);
-    Ok(
-        match MinisignOperatorVerifier::resolve_for_state_root(state_root)? {
-            Some(v) => store.trusting(std::sync::Arc::new(v)),
-            None => store,
-        },
-    )
-}
+/// Re-exported from [`cosmon_harvest::pilot_gesture::leases_at`], where it
+/// moved with the lifecycle authority guard: the guard is its other reader,
+/// and both must resolve the trust root the same way — a store with no pinned
+/// key honours no grant, so a second construction site made every leased
+/// mission read back as *unleased*.
+pub(crate) use cosmon_harvest::pilot_gesture::leases_at;
 
 /// Why `session`'s claim to the primary seat on `mission` at `epoch` would be
 /// refused — `None` when it holds up.

@@ -38,30 +38,43 @@ pub mod realized_watcher;
 // silently breaks every `[`Item`]` the module writes about itself.
 pub mod briefing_backstop;
 
+// Five modules the harvest transaction reads, re-exported from
+// `cosmon-harvest` rather than defined here.
+//
+// They followed the transaction out of this binary when ADR-176 §12's
+// follow-up lifted it into a library, for one reason each: `trust` gates the
+// `pre_done` / `post_merge` hooks the harvest runs, `base_branch` answers
+// which trunk it merges onto, `adr` resolves the ADR-number collisions the
+// merge creates, `injection_provenance` stamps the auto-propel messages it
+// sends, and `target_repo` answers which repository it acts in. A copy in
+// this crate would be a second answer to each of those questions — the exact
+// drift the one-implementation-two-callers rule exists to prevent. The
+// spellings (`cosmon_cli::trust::…`, `cosmon_cli::base_branch::…`) are
+// unchanged for every existing caller and test.
+
 /// Repo-supplied shell trust gate (B5, RCE-by-clone) — the `direnv allow`
 /// of cosmon. Every `sh -c` on a string the repository supplies (formula
 /// `command`/`verification` steps, `post_merge`/`pre_done` hooks) is gated on
 /// a per-repo, human-granted trust marker recorded outside the repo. See the
 /// module docs for the threat model and the staleness contract.
-pub mod trust;
+pub use cosmon_harvest::trust;
 
-pub mod adr;
+pub use cosmon_harvest::adr;
 
 // The census of everywhere `cs` can put text in a worker's composer
-// (COSMON #26 residual). Documented by the module's own `//!` header for the
-// same intra-doc-link reason as `briefing_backstop` above.
-pub mod injection_provenance;
+// (COSMON #26 residual).
+pub use cosmon_harvest::injection_provenance;
 
 /// Resolution of a molecule's integration base branch — the single place that
 /// answers "which trunk does this molecule's work belong to?" for both the
 /// branch cut (`cs tackle`) and the harvest (`cs done`).
-pub mod base_branch;
+pub use cosmon_harvest::base_branch;
 
 /// Resolution of a galaxy's target repository — the single place that answers
 /// "which git repository does this galaxy's work land in?", turning a binding
 /// that was implicit-by-cwd into an optional `[project] target_repo`
 /// declaration. Absent, the answer is the pre-existing cwd one, unchanged.
-pub mod target_repo;
+pub use cosmon_harvest::target_repo;
 
 /// Shell-side seams for the seal-verification contract (ADR-140 D4, N4):
 /// a real TLC runner and a filesystem verdict cache. The pure decision logic

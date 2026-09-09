@@ -35,7 +35,7 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use cosmon_cli::target_repo;
+//! use cosmon_harvest::target_repo;
 //!
 //! // `[project] target_repo = "deliverable"` in a galaxy rooted at /gal
 //! // points at /gal/deliverable, whatever directory `cs` was fired from.
@@ -132,6 +132,27 @@ pub fn resolve_with_source() -> anyhow::Result<ResolvedRepo> {
 ///
 /// Same as [`resolve()`](crate::target_repo::resolve).
 pub fn resolve_from_config(config_path: &Path) -> anyhow::Result<ResolvedRepo> {
+    resolve_from_config_in(config_path, None)
+}
+
+/// [`resolve_from_config`] with the fallback directory named explicitly.
+///
+/// When no `[project] target_repo` is declared, the answer is "the repository
+/// containing *a* directory", and until the harvest became a library that
+/// directory could only be the process's own — a CLI is always run from
+/// somewhere. A server is not: it handles a request for a galaxy it is not
+/// cwd'd in, and reading `current_dir()` there would resolve the *adapter's*
+/// repository and merge a tenant's branch into it. `from` is how the library
+/// caller says which directory it is acting in; `None` keeps the CLI's
+/// process-wide answer.
+///
+/// # Errors
+///
+/// Same as [`resolve()`](crate::target_repo::resolve).
+pub fn resolve_from_config_in(
+    config_path: &Path,
+    from: Option<&Path>,
+) -> anyhow::Result<ResolvedRepo> {
     let declared = cosmon_filestore::load_project_config(config_path)
         .ok()
         .and_then(|cfg| cfg.project.target_repo)
@@ -158,8 +179,11 @@ pub fn resolve_from_config(config_path: &Path) -> anyhow::Result<ResolvedRepo> {
         });
     }
 
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("failed to read the current directory: {e}"))?;
+    let cwd = match from {
+        Some(dir) => dir.to_path_buf(),
+        None => std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("failed to read the current directory: {e}"))?,
+    };
     let root = git_toplevel(&cwd)
         .ok_or_else(|| anyhow::anyhow!("not in a git repository: {}", cwd.display()))?;
     let root = unnest_cosmon_worktree(&root).unwrap_or(root);

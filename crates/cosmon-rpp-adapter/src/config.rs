@@ -64,16 +64,26 @@ pub struct RppConfig {
     /// ignored so an existing `rpp.toml` keeps parsing across the
     /// library-direct cut-over. Removal is a config-major follow-up.
     pub subprocess_timeout_sec: Option<u64>,
-    /// Absolute path to the `cs` binary that performs the harvest effect
-    /// of `POST /v1/molecules/{id}/done` (issue #51, ADR-176 §11).
+    /// Absolute path to a `cs` binary that performs the harvest effect of
+    /// `POST /v1/molecules/{id}/done` **instead of** the library
+    /// (issue #51, ADR-176 §11 and §12's follow-up).
     ///
-    /// Absent — the default — means this deployment declares no effect
-    /// implementation: the door answers every pre-effect refusal in full
-    /// and then refuses `501 harvest_effect_unavailable` rather than
-    /// pretending. Present means the operator reviewed *which* binary
-    /// closes their molecules. There is deliberately no PATH fallback: a
-    /// door that discovered its own executor would change behaviour the
-    /// day someone else's `cs` appeared on the host's PATH.
+    /// Absent — the default, and what nearly every deployment should
+    /// use — means the harvest runs in-process through
+    /// [`crate::harvest_effect::LibraryHarvestEffect`]: the sealed
+    /// transaction is the `cosmon-harvest` crate this binary links, so an
+    /// armed galaxy is harvestable with no configuration at all. It used
+    /// to mean a typed `501 harvest_effect_unavailable`, because the
+    /// transaction was locked inside the `cs` binary and no library could
+    /// reach it.
+    ///
+    /// **Kept for one release**, as the operator's escape hatch: run the
+    /// harvest as a *specific* build of `cs` rather than as the one
+    /// compiled into this adapter — a deployment pinning an older or
+    /// patched `cs`, or one auditing the two against each other. There is
+    /// deliberately no PATH fallback: a door that discovered its own
+    /// executor would change behaviour the day someone else's `cs`
+    /// appeared on the host's PATH.
     pub harvest_cs_binary: Option<PathBuf>,
     /// JWKS HTTP-fetch refresh interval, seconds. Default
     /// [`crate::jwks_fetch::DEFAULT_REFRESH_TTL`] (1 h). The TTL is only

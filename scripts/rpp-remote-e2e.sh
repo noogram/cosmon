@@ -207,13 +207,31 @@ CLIENT_AUDIENCE="${RPP_E2E_CLIENT_AUDIENCE:-$AUDIENCE}"
 # in `Pending` (cosmon_core::nucleate: Pending if unassigned, Queued if
 # assigned) and `observe` renders that as the snake_case label.
 EXPECT_OBSERVE_STATUS="${RPP_E2E_EXPECT_STATUS:-pending}"
-# `done` no longer refuses for want of a binary. The door's decision
-# half runs in-process (issue #54 U3) and this script arms it, so the
-# decision ADMITS and the refusal is the effect half's: `501
-# harvest_effect_unavailable` (ADR-176 §12). The label is deliberately
-# outside the closed seven-refusal set — it names a missing
-# implementation, not a verdict about this molecule.
-EXPECT_DONE_LABEL="${RPP_E2E_EXPECT_DONE_LABEL:-harvest_effect_unavailable}"
+# `done` no longer refuses for want of an implementation either. The
+# sealed transaction is a library (`cosmon-harvest`) that the adapter
+# links, so the effect half RUNS on a stock image — and this step now
+# reaches all the way into the merge transaction. What stops it there is
+# the one thing this script deliberately cannot produce: the ADR-172
+# operator seal. No shipped path can mint one (that is the central
+# falsifier of `done_authorization_unforgeable`), so the harvest is
+# refused `not_authorized` — a name from the closed refusal set, exit
+# code 71, chosen because it is the same verdict the decision half gives
+# an unarmed galaxy: this harvest is not authorised.
+#
+# That is a stronger assertion than the one it replaces. The old
+# `harvest_effect_unavailable` proved only that the door reached an
+# effect that did not exist. This proves the effect exists, ran, took the
+# trunk lock and re-derived the facts — and the merge is a signature
+# away. The real merge is asserted where a seal CAN be minted: the
+# adapter's `tests/v1_done_library_effect.rs`, whose test operator lives
+# in the `publish = false`, dev-only `cosmon-minisign-testkit`.
+#
+# An operator who drops a sealed grant in the throwaway galaxy before
+# this step gets a real merge and sets
+# `RPP_E2E_EXPECT_DONE_LABEL=` to nothing… which this script does not
+# support, on purpose: a green run must not depend on a key somebody had
+# to have.
+EXPECT_DONE_LABEL="${RPP_E2E_EXPECT_DONE_LABEL:-not_authorized}"
 EXPECT_TACKLE_LABEL="${RPP_E2E_EXPECT_TACKLE_LABEL:-}"
 BUILD_ROOT="${RPP_E2E_BUILD_ROOT:-$REPO_ROOT}"
 BUILD_ROOT="$(cd "$BUILD_ROOT" && pwd)"
@@ -479,15 +497,17 @@ cp "$REPO_ROOT/.cosmon/formulas/task-work.formula.toml" "$GALAXY/.cosmon/formula
 # `harvest_door::decide` fails closed on a galaxy that has not armed
 # `[harvest_authority] required` — it refuses `not_authorized` before it
 # has even loaded the molecule. Leaving it unarmed would make the `done`
-# step green for the wrong reason: the label under test
-# (`harvest_effect_unavailable`) belongs to the EFFECT half, and it is only
-# reached by a decision that admitted the harvest. Arming is the
+# step green for the wrong reason: `not_authorized` is a label BOTH halves
+# can produce, and the one under test is the effect half's — reached only
+# by a decision that admitted the harvest. Arming is the
 # operator gesture the tenant cannot make, which is the point of the
 # second key — so it is done here, on the host, in a galaxy that lives
-# for one run. No seal is minted and none is ever committed.
+# for one run. No seal is minted and none is ever committed, which is why
+# step 10's harvest reaches the merge transaction and is refused there.
 cat >"$GALAXY/.cosmon/config.toml" <<'TOML'
 # Throwaway e2e galaxy. Arms the ADR-176 harvest door so its decision
-# half admits and the refusal under test comes from the effect half.
+# half admits and the refusal under test comes from the effect half —
+# the library harvest transaction, refusing for want of an operator seal.
 [harvest_authority]
 required = true
 TOML
@@ -771,16 +791,20 @@ record worker 0 "$(( $(now_ms) - t0 ))" "the spawned worker drove $MOL_ID to 'co
 # armed `[harvest_authority] required` at stage time.
 #
 # That is what makes this step reach the EFFECT half. Every pre-effect
-# refusal — `not_authorized`, `not_completed`, `reservation_requires_seal`,
-# `backlog_full` — has been made inapplicable on purpose, so the only
-# thing left to answer is the transaction itself, and it answers
-# `501 harvest_effect_unavailable`: this deployment declares no
-# `harvest_cs_binary`, so the effect port is the honest default (ADR-176
-# §12 as amended by issue #51). The refusal is the CONTRACT here, not a
-# defect to route around — a `202` that integrated nothing is the defect
-# issue #51 reported, and a silent `cs` fallback is what U6 retired. An
-# operator who declares the binary gets a real harvest, and this
-# assertion is where that announces itself.
+# refusal — `not_completed`, `reservation_requires_seal`, `backlog_full`
+# — has been made inapplicable on purpose, so the only thing left to
+# answer is the transaction itself. And the transaction now RUNS here:
+# it is a library this adapter links (`cosmon-harvest`), not a `cs`
+# process it would have to find, so no `harvest_cs_binary` line is
+# needed and no `501 harvest_effect_unavailable` is possible.
+#
+# It runs and refuses `not_authorized`, from inside the trunk lock,
+# because no operator seal covers this harvest — and this script mints
+# none, because nothing that ships can. That refusal is the CONTRACT
+# here: it says the effect exists and re-derived its facts. A `202`
+# that integrated nothing is the defect issue #51 reported; a silent
+# `cs` fallback is what U6 retired; and a `500 harvest_failed` here
+# would mean the transaction lost the name of its own refusal.
 #
 # The request carries `--reason`, which the door requires and never
 # fabricates (issue #51). Sending none would answer `missing_reason` and
@@ -798,12 +822,12 @@ cs_remote --json molecule done "$MOL_ID" \
   >"$LOGS/done.out" 2>"$LOGS/done.err"
 done_rc=$?
 set -e
-[[ $done_rc -ne 0 ]] || fail done "$t0" "done SUCCEEDED — this deployment declares no harvest effect, so a success here means the door integrated nothing and said otherwise"
+[[ $done_rc -ne 0 ]] || fail done "$t0" "done SUCCEEDED — no operator seal covers this harvest and this script mints none, so a success here means the effect boundary let an unauthorised harvest through"
 done_label="$(grep -o '"error":"[a-z_]*"' "$LOGS/done.err" | head -1 | cut -d'"' -f4)"
 [[ -n "$done_label" ]] || done_label="$(grep -o '"label":"[a-z_]*"' "$LOGS/done.err" | head -1 | cut -d'"' -f4)"
 [[ "$done_label" == "$EXPECT_DONE_LABEL" ]] \
-  || fail done "$t0" "done refused '${done_label:-<unnamed>}' (exit $done_rc), expected '$EXPECT_DONE_LABEL' — if the deployment wired a harvest effect, this is where it announces itself (ADR-176 §12)"
-record done 0 "$(( $(now_ms) - t0 ))" "decision half admitted, effect half refused '$done_label' (ADR-176 §12), cosmon-remote exit $done_rc"
+  || fail done "$t0" "done refused '${done_label:-<unnamed>}' (exit $done_rc), expected '$EXPECT_DONE_LABEL' — 'harvest_effect_unavailable' means this image lost the library harvest; 'harvest_failed' means the transaction ran and lost the NAME of its refusal (ADR-176 §12 follow-up)"
+record done 0 "$(( $(now_ms) - t0 ))" "decision half admitted, the LIBRARY effect ran in-process and refused '$done_label' for want of an operator seal (ADR-172 D3), cosmon-remote exit $done_rc"
 
 echo
 echo "==> all steps green — $(wc -l <"$NDJSON" | tr -d ' ') recorded"

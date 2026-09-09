@@ -26,9 +26,13 @@ pub mod dispatch_ledger;
 pub mod diverge;
 pub mod doctor;
 pub mod done;
-pub mod done_authority;
+// The harvest-authority decision moved to `cosmon-harvest` with the
+// transaction it authorises; re-exported so `cmd::done_authority::…` still
+// resolves for this crate and its tests.
+#[allow(unused_imports)] // named as `cmd::done_authority` by this crate's tests.
+pub use cosmon_harvest::done_authority;
 pub mod drop;
-pub(crate) mod egress_delegate;
+pub(crate) use cosmon_harvest::egress_delegate;
 pub mod ensemble;
 pub mod errors;
 pub mod events;
@@ -49,7 +53,7 @@ pub mod interaction;
 pub mod journal;
 pub mod key;
 pub mod kill;
-pub mod lineage;
+pub use cosmon_harvest::lineage;
 pub mod listen;
 pub mod livelock;
 pub(crate) mod machine_reading;
