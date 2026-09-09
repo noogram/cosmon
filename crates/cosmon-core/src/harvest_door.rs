@@ -276,6 +276,19 @@ pub enum DoorOutcome {
         /// Whether the molecule's branch is on the trunk.
         merged: bool,
     },
+    /// Nothing was done, because the request asked for nothing to be done
+    /// in this condition: [`HarvestOptions::if_completed`] on a molecule
+    /// that is not `Completed`.
+    ///
+    /// A success, and a distinct one. `cs done --if-completed` is the
+    /// idempotent sweep gesture — the sweeper does not know whether the
+    /// molecule finished, and says so by sending the option — so answering
+    /// it with [`DoorRefusal::NotCompleted`] reports a refusal for the one
+    /// case the caller explicitly declared acceptable. It is not
+    /// [`Self::AlreadyLanded`] either: nothing has landed and the work may
+    /// still be running, so a caller that read the two as the same would
+    /// stop waiting for a molecule that is not finished.
+    NoOp,
 }
 
 impl DoorOutcome {
@@ -286,6 +299,7 @@ impl DoorOutcome {
             Self::Landed => "landed",
             Self::ClosedWithoutMerge => "closed_without_merge",
             Self::AlreadyLanded { .. } => "already_landed",
+            Self::NoOp => "no_op",
         }
     }
 
@@ -298,11 +312,71 @@ impl DoorOutcome {
     pub const fn merged(self) -> bool {
         match self {
             Self::Landed => true,
-            Self::ClosedWithoutMerge => false,
+            // Two different reasons for the same answer — a deliberate
+            // closure and a request that did nothing — merged into one arm
+            // because `merged` asks only one question, and the outcome
+            // label is where the two stay distinguishable.
+            Self::ClosedWithoutMerge | Self::NoOp => false,
             Self::AlreadyLanded { merged } => merged,
         }
     }
 }
+
+/// Why a harvest **effect** did not run, or did not complete.
+///
+/// # Why this is one type and not one per adapter
+///
+/// The effect half of the door is reached through two traits — the
+/// filestore's `SealedHarvestEffect` (the library seam the CLI and the
+/// route share) and the §8p adapter's `HarvestEffectPort` (the
+/// deployment's choice of implementation). They answer to different
+/// owners and both are useful, but until the PR #62 review they carried
+/// *different error types*, and the bridge between them flattened the
+/// typed one to a `String`. A [`Self::Refused`] the effect produced at its
+/// authority boundary — before touching anything, so with no trunk-side
+/// record to re-derive it from — arrived at the wire as an anonymous
+/// `harvest_failed`, losing the label and the status the requester was
+/// promised.
+///
+/// So the error contract is shared even though the traits are not: two
+/// seams, one vocabulary. A refusal stays named all the way across.
+#[derive(Debug)]
+pub enum EffectFailure {
+    /// No effect implementation is wired in this deployment. A typed
+    /// refusal rather than a failure: the door admitted the harvest and
+    /// the server cannot perform it, which the requester must be told
+    /// plainly rather than discovering through a success that integrated
+    /// nothing.
+    Unavailable,
+    /// The effect refused, by name, and says so itself — a `cs` child that
+    /// exited on one of the door's stable codes 70–77, or an in-process
+    /// implementation returning its own verdict.
+    ///
+    /// The door still prefers the trunk-side `non_integration` record for
+    /// the *detail* when that record names the same refusal, because the
+    /// sealed transaction writes the conflicted files there and an exit
+    /// code cannot carry them. What the record must no longer do is
+    /// **rename** this refusal, or erase it by being absent.
+    Refused(DoorRefusal),
+    /// The effect ran and failed with no name of its own. The string is
+    /// the implementation's own message; the door re-reads the trunk-side
+    /// record and derives the named refusal from *that* rather than from
+    /// this text, because a string match on a message is a mirror that
+    /// drifts the first time somebody edits the message.
+    Failed(String),
+}
+
+impl fmt::Display for EffectFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("no harvest effect is wired in this deployment"),
+            Self::Refused(refusal) => write!(f, "the effect refused: {}", refusal.as_str()),
+            Self::Failed(message) => write!(f, "the effect failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for EffectFailure {}
 
 /// Merge strategy for the branch a harvest integrates.
 ///

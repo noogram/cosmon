@@ -1886,31 +1886,6 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     }
 
-    // Trace the caller's reason on the molecule BEFORE anything can fail.
-    //
-    // Deliberately not folded into the `merged_at` stamp: that stamp only
-    // happens when the merge landed, and the harvest whose reason a later
-    // reader most needs is precisely the one that did not. A conflicted
-    // harvest leaves `non_integration` explaining *what the repository did*
-    // and `harvest_reason` explaining *what the caller wanted* — the two
-    // halves of the same event.
-    if let Some(reason) = args
-        .reason
-        .as_deref()
-        .map(str::trim)
-        .filter(|r| !r.is_empty())
-    {
-        match store.load_molecule(&mol_id) {
-            Ok(mut latest) => {
-                latest.harvest_reason = Some(reason.to_owned());
-                if let Err(e) = store.save_molecule(&mol_id, &latest) {
-                    eprintln!("⚠ recording the harvest reason failed: {e}");
-                }
-            }
-            Err(e) => eprintln!("⚠ reloading the molecule to record the reason failed: {e}"),
-        }
-    }
-
     let socket = super::tmux_socket_name(ctx);
 
     // Resolve the tmux session name the worker was tackled with. Stored
@@ -1935,6 +1910,39 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         )?;
         report_plan(ctx, &plan);
         return Ok(());
+    }
+
+    // Trace the caller's reason on the molecule BEFORE anything can fail.
+    //
+    // Deliberately not folded into the `merged_at` stamp: that stamp only
+    // happens when the merge landed, and the harvest whose reason a later
+    // reader most needs is precisely the one that did not. A conflicted
+    // harvest leaves `non_integration` explaining *what the repository did*
+    // and `harvest_reason` explaining *what the caller wanted* — the two
+    // halves of the same event.
+    //
+    // "Before anything can fail" is not "before anything is decided":
+    // this write sits **after** the `--dry-run` return above, because a
+    // dry run promises no side effects and a durable field is a side
+    // effect whatever else the run avoided. `cs done <id> --dry-run
+    // --reason …` is how an operator inspects a plan before committing to
+    // it, and the reason they were trying out must not become the reason
+    // of record for a harvest they did not perform (PR #62 review).
+    if let Some(reason) = args
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        match store.load_molecule(&mol_id) {
+            Ok(mut latest) => {
+                latest.harvest_reason = Some(reason.to_owned());
+                if let Err(e) = store.save_molecule(&mol_id, &latest) {
+                    eprintln!("⚠ recording the harvest reason failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("⚠ reloading the molecule to record the reason failed: {e}"),
+        }
     }
 
     let branch_name = format!("feat/{mol_id}");
