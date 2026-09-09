@@ -42,7 +42,7 @@ async fn oidc_flow_is_defended_against_the_read_only_env_backend() {
 
     let http = reqwest::Client::new();
 
-    // (1) `login` must refuse the Env backend at step 0 — before the loopback
+    // (1) `login` must refuse the Env backend at step 0 — before the callback
     // listener binds or the browser opens — because the freshly minted
     // credential could not be persisted (F4 #1). `open` must never be called.
     let login_outcome = oidc::login(
