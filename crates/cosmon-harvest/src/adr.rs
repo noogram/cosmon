@@ -46,7 +46,7 @@ use std::collections::BTreeSet;
 /// `INDEX.md`, `README.md`).
 ///
 /// ```
-/// use cosmon_cli::adr::parse_adr_number;
+/// use cosmon_harvest::adr::parse_adr_number;
 /// assert_eq!(parse_adr_number("117-rpp.md"), Some(117));
 /// assert_eq!(parse_adr_number("docs/adr/032-p-external-witness.md"), Some(32));
 /// assert_eq!(parse_adr_number("INDEX.md"), None);
@@ -70,7 +70,7 @@ pub fn parse_adr_number(path: &str) -> Option<u32> {
 /// reach four digits.
 ///
 /// ```
-/// use cosmon_cli::adr::format_adr_number;
+/// use cosmon_harvest::adr::format_adr_number;
 /// assert_eq!(format_adr_number(7), "007");
 /// assert_eq!(format_adr_number(117), "117");
 /// ```
@@ -85,7 +85,7 @@ pub fn format_adr_number(n: u32) -> String {
 /// in `existing` are harmless (the max is unaffected).
 ///
 /// ```
-/// use cosmon_cli::adr::next_free_number;
+/// use cosmon_harvest::adr::next_free_number;
 /// assert_eq!(next_free_number(&[1, 2, 117, 118]), 119);
 /// assert_eq!(next_free_number(&[]), 1);
 /// ```
@@ -112,7 +112,7 @@ pub struct Collision {
 /// non-empty result is informational, not necessarily an error.
 ///
 /// ```
-/// use cosmon_cli::adr::find_collisions;
+/// use cosmon_harvest::adr::find_collisions;
 /// let files = vec![
 ///     "117-rpp.md".to_string(),
 ///     "117-llmport.md".to_string(),
@@ -193,7 +193,7 @@ pub fn renumbered_path(old_path: &str, new_number: u32) -> Option<String> {
 /// same assignment).
 ///
 /// ```
-/// use cosmon_cli::adr::plan_renumber;
+/// use cosmon_harvest::adr::plan_renumber;
 /// // Base owns 117; the branch also added a different 117 → renumber it.
 /// let base = vec![1, 117];
 /// let added = vec!["docs/adr/117-llmport.md".to_string()];
@@ -250,7 +250,7 @@ pub fn plan_renumber(base_numbers: &[u32], branch_added: &[String]) -> Vec<Renum
 /// exactly the fleet-collision case. See ADR-121 for the documented limit.
 ///
 /// ```
-/// use cosmon_cli::adr::rewrite_self_reference;
+/// use cosmon_harvest::adr::rewrite_self_reference;
 /// let body = "# ADR-117 — RPP\n\nThis supersedes ADR-113.\n";
 /// let out = rewrite_self_reference(body, 117, 120);
 /// assert!(out.starts_with("# ADR-120 — RPP"));

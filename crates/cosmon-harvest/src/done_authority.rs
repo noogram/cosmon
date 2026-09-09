@@ -55,6 +55,20 @@ pub enum HarvestDecision {
     /// This exact harvest already landed under this permit. The caller reports
     /// the recorded outcome and mutates nothing further.
     AlreadyLanded(Box<ConsumptionRecord>),
+    /// No authorisation covers this harvest. The string is the operator-facing
+    /// message — every candidate grant and why each was refused.
+    ///
+    /// A *decision*, not an error, and the distinction is the point. Every
+    /// path out of [`authorize_harvest`] used to be
+    /// [`CosmonError::StateStore`], so a refused harvest and a torn ledger
+    /// were the same value to the caller: both reached `cs done` as exit 1
+    /// and the harvest route as an anonymous `500 harvest_failed`. A galaxy
+    /// that armed `[harvest_authority]` and has not yet been given a grant is
+    /// the single most likely production shape there is, and it deserves a
+    /// name. Separating it here is what lets the transaction answer
+    /// `not_authorized` (exit 71) for the refusal while a genuine I/O fault
+    /// stays a fault.
+    Refused(String),
 }
 
 /// Everything the effect boundary needs from the `cs done` transaction.
@@ -97,10 +111,12 @@ pub struct HarvestRequest<'a> {
 ///
 /// # Errors
 ///
-/// [`CosmonError::StateStore`] when the mechanism is in force and no
-/// authorisation covers this harvest, when the ledger cannot be read or
-/// written, or when the epoch or policy cannot be resolved. There is no
-/// permissive branch: absence of a trust root refuses.
+/// [`CosmonError::StateStore`] when the ledger cannot be read or written, or
+/// when the epoch or policy cannot be resolved — genuine faults. A harvest no
+/// authorisation covers is **not** an error: it is
+/// [`HarvestDecision::Refused`], so the caller can give it a name rather than
+/// a stack trace. There is no permissive branch either way: absence of a trust
+/// root refuses.
 pub fn authorize_harvest(
     _trunk: &dyn TrunkGuard,
     cfg: &HarvestAuthorityConfig,
@@ -174,9 +190,9 @@ pub fn authorize_harvest(
         }
     }
 
-    Err(CosmonError::StateStore {
-        reason: refusal_message(molecule, base, &refusals),
-    })
+    Ok(HarvestDecision::Refused(refusal_message(
+        molecule, base, &refusals,
+    )))
 }
 
 /// One refused candidate, rendered for the operator.
@@ -314,6 +330,18 @@ mod tests {
         .expect("fixture grant")
     }
 
+    /// The refusal message from a run that must refuse.
+    ///
+    /// A refusal is `Ok(HarvestDecision::Refused(_))` and a fault is `Err`, so
+    /// these tests say which of the two they are asserting rather than
+    /// accepting either.
+    fn refusal_text(result: Result<HarvestDecision, CosmonError>, why: &str) -> String {
+        match result {
+            Ok(HarvestDecision::Refused(message)) => message,
+            other => panic!("{why}: {other:?}"),
+        }
+    }
+
     fn run(
         w: &World,
         cfg: &HarvestAuthorityConfig,
@@ -358,8 +386,10 @@ mod tests {
     fn with_it_on_and_no_grant_the_harvest_is_refused() {
         let w = world();
         let molecule = mol("task-20260901-6da6");
-        let err = run(&w, &required(), &molecule, &[], "main").expect_err("no grant must refuse");
-        let text = err.to_string();
+        let text = refusal_text(
+            run(&w, &required(), &molecule, &[], "main"),
+            "no grant must refuse",
+        );
         assert!(text.contains("no operator-sealed authorisation"), "{text}");
         // The claim bound of ADR-172 D5 is in the message an operator reads.
         assert!(text.contains("does not make the trunk"), "{text}");
@@ -412,11 +442,11 @@ mod tests {
         )
         .expect("store");
 
-        let err = run(&w, &required(), &molecule, &[], "release")
-            .expect_err("an edited grant must not verify");
-        assert!(err
-            .to_string()
-            .contains("not an authorised harvest gesture"));
+        let text = refusal_text(
+            run(&w, &required(), &molecule, &[], "release"),
+            "an edited grant must not verify",
+        );
+        assert!(text.contains("not an authorised harvest gesture"), "{text}");
     }
 
     #[test]
@@ -448,7 +478,10 @@ mod tests {
         )
         .expect("store");
 
-        assert!(run(&w, &required(), &molecule, &[], "main").is_err());
+        assert!(matches!(
+            run(&w, &required(), &molecule, &[], "main"),
+            Ok(HarvestDecision::Refused(_))
+        ));
     }
 
     #[test]
@@ -480,7 +513,10 @@ mod tests {
         )
         .expect("store");
         assert!(
-            run(&w, &required(), &fresh, &[], "main").is_err(),
+            matches!(
+                run(&w, &required(), &fresh, &[], "main"),
+                Ok(HarvestDecision::Refused(_))
+            ),
             "deleting the trust root must stop harvests, not unlock them"
         );
     }
@@ -508,9 +544,11 @@ mod tests {
         )
         .expect("bump epoch");
 
-        let err = run(&w, &required(), &molecule, &[], "main")
-            .expect_err("a superseded epoch must refuse");
-        assert!(err.to_string().contains("revoked"), "{err}");
+        let text = refusal_text(
+            run(&w, &required(), &molecule, &[], "main"),
+            "a superseded epoch must refuse",
+        );
+        assert!(text.contains("revoked"), "{text}");
     }
 
     #[test]
@@ -529,9 +567,11 @@ mod tests {
         .expect("store");
 
         let tags = vec!["needs-review".to_owned()];
-        let err = run(&w, &required(), &molecule, &tags, "main")
-            .expect_err("an unnamed reservation must refuse");
-        assert!(err.to_string().contains("needs-review"), "{err}");
+        let text = refusal_text(
+            run(&w, &required(), &molecule, &tags, "main"),
+            "an unnamed reservation must refuse",
+        );
+        assert!(text.contains("needs-review"), "{text}");
     }
 
     #[test]
@@ -625,11 +665,8 @@ mod tests {
                 base: "main",
                 invocation_id: "inv-1",
             },
-        )
-        .expect_err("a policy edit must lapse the delegation");
-        assert!(
-            err.to_string().contains("outside the grant's scope"),
-            "{err}"
         );
+        let text = refusal_text(err, "a policy edit must lapse the delegation");
+        assert!(text.contains("outside the grant's scope"), "{text}");
     }
 }

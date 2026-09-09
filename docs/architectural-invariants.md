@@ -3325,18 +3325,18 @@ skip.
   message and merged by hand; without that signal, 491 insertions would
   have disappeared. Fixed by hardening the probe to compare against the
   configured base branch (`resolve_base_branch` in
-  `crates/cosmon-cli/src/cmd/done.rs`) and documented here.
+  `crates/cosmon-harvest/src/transaction.rs`) and documented here.
 
 **Enforcement.** The regression test
 `strict_ancestry_refuses_head_shortcut_when_head_is_feature_branch` in
-`crates/cosmon-cli/src/cmd/done.rs` pins the invariant: HEAD is moved
+`crates/cosmon-harvest/src/transaction.rs` pins the invariant: HEAD is moved
 onto the feature branch, the branch is NOT integrated into `main`, and
 `is_branch_merged` must report `false`. Any future regression that
 reverts to a HEAD-based probe will fail the gate.
 
 **Base branch resolution.** The base is a **property of the molecule**,
 not of the session that runs the verb. `cosmon_cli::base_branch::resolve`
-(`crates/cosmon-cli/src/base_branch.rs`) tries, in strict order:
+(`crates/cosmon-harvest/src/base_branch.rs`) tries, in strict order:
 
 1. the molecule's own `base_branch`, persisted by `cs tackle --base
    <branch>`, which also cuts `feat/<mol-id>` from that ref instead of the

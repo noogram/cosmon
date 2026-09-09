@@ -141,7 +141,8 @@ fn no_shipped_verb_constructs_a_harvest_seal() {
 /// first, so the bound is pinned there.
 #[test]
 fn the_refusal_never_claims_the_trunk_is_immutable() {
-    let boundary = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/done_authority.rs");
+    let boundary =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../cosmon-harvest/src/done_authority.rs");
     let body = std::fs::read_to_string(&boundary).expect("read the effect boundary");
     let shipped = body.split("#[cfg(test)]").next().unwrap_or(&body);
 

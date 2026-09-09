@@ -56,13 +56,22 @@ this stage.
   `cosmon_surface_canon::fold_live` subtracts the pair for every consumer
   (router, help renders, client consts, the API-reference generator). A
   withdrawal naming no live route fails the build.
-- **The harvest door's effect half is an operator-chosen port.** The default
-  is unchanged behaviour — the typed `501`, renamed `harvest_effect_unavailable`
-  — for an image carrying no `cs`. An operator who declares
-  `harvest_cs_binary` in `rpp.toml` gets the sealed `cs done` transaction,
-  legitimate now that `done` is off the §5.1 closed list. Off by default, no
-  PATH discovery; this does not restore the general §3.5 clause (e)
-  subprocess envelope issue #54 U6 retired.
+- **The harvest door's effect half is an operator-chosen port, and its
+  default is now a library.** The sealed harvest transaction — merge with
+  lineage trailers, the publish / identity / confidentiality gates, the
+  `pre_done` gate, the teardown — moved out of the `cs` binary into the new
+  `cosmon-harvest` crate. `POST /v1/molecules/{id}/done` **merges on a stock
+  deployment**: no `harvest_cs_binary`, no `cs` process, no `501`. One
+  implementation and two callers — `cs done` and the RPP route build the same
+  argument set and call the same function — so no gate, refusal or trailer
+  exists twice. `harvest_cs_binary` in `rpp.toml` is kept for one release as
+  the operator's escape hatch (run the harvest as a *specific* build of
+  `cs`); it still has no PATH discovery, and this does not restore the
+  general ADR-080 §3.5 clause (e) subprocess envelope issue #54 U6 retired.
+  The typed `501 harvest_effect_unavailable` survives for a port with no
+  implementation and is no longer reachable from any shipped configuration.
+  The adapter deliberately does **not** depend on `cosmon-cli`: a server does
+  not compile the whole CLI to close a molecule.
 
 The trunk-side non-integration reason projected to the remote client — the
 change that made a stranded merge visible instead of silent, and the actual
@@ -70,6 +79,21 @@ defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
 
+- **A harvest that no operator grant covers is refused by name.** The ADR-172
+  effect boundary answered an anonymous error for every outcome, so an armed
+  galaxy with no grant yet — the state every galaxy passes through the moment
+  it arms `[harvest_authority]` — reached `cs done` as a generic exit 1 and
+  the harvest route as `500 harvest_failed`. It is now `not_authorized`, exit
+  code 71, from both callers, carrying the same operator-facing message and
+  the same ADR-172 §D5 claim bound. A genuine I/O fault at that boundary is
+  still a fault, not a refusal.
+- **The harvest writes its merge events to the galaxy it is harvesting.**
+  `EventV2::MergeDispatched` resolved its `events.jsonl` by walking up from
+  the process's working directory instead of using the state directory the
+  invocation had already resolved. Invisible for `cs done`, which stands in
+  its own galaxy; wrong for the library caller, which found the events log of
+  whatever galaxy the server was installed in and then tried to commit that
+  foreign path into the tenant's repository.
 - **A tenant drain whose ready molecule sits on an uncovered step kind
   terminates with the named `unsupported_step` token instead of busy-looping
   to `timeout`** (PR #57 review, findings 1–5). The permanent

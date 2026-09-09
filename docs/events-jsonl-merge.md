@@ -17,7 +17,7 @@ same: accept both sides, sort by timestamp, move on.
 
 When `try_merge_branch` detects a conflict and every unmerged file is an
 append-only JSONL file (see `APPEND_ONLY_JSONL_BASENAMES` in
-`crates/cosmon-cli/src/cmd/done.rs`), the resolver:
+`crates/cosmon-harvest/src/transaction.rs`), the resolver:
 
 1. Reads both sides of each conflicting file from the git index
    (`git show :2:path` for *ours*, `git show :3:path` for *theirs*).
@@ -45,7 +45,7 @@ the manual-resolution escape hatch.
 
 ## Test coverage
 
-See `crates/cosmon-cli/src/cmd/done.rs`:
+See `crates/cosmon-harvest/src/transaction.rs`:
 
 - `test_merge_jsonl_by_timestamp_unions_and_sorts` — pure-function union + sort.
 - `test_is_append_only_jsonl_recognizes_events_and_interactions` — classifier.

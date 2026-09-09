@@ -738,3 +738,84 @@ This does **not** restore the general §3.5 clause (e) subprocess envelope that
 issue #54 U6 retired. It is one port, one verb, one operator-declared binary,
 off by default, with no PATH discovery — a door that found its own executor
 would change behaviour the day someone else's `cs` appeared on the host.
+
+### Amendment (2026-09-09, issue #51) — §12's follow-up is done: the transaction is a library
+
+**Status: adopted.** This closes the "until" clause of §12 and the parity gap
+ADR-080 §3.5.3 enumerated alongside it. The 90-day clause the ADR-095
+amendment attached to `501 harvest_effect_unavailable` lapses with it: the
+`501` is no longer reachable from any shipped configuration.
+
+§12 declined to move the sealed transaction on the grounds that it "does not
+move cleanly behind the existing ports without forking the door". That was
+true of *rewriting* it and false of *relocating* it, and the distinction is
+the whole amendment. Nothing was rewritten. `cmd/done.rs` and the five modules
+it reads — `lineage`, `done_authority`, `egress_delegate`, `trust`,
+`base_branch`, `adr`, `injection_provenance`, `target_repo`, the worktree
+guards and the ADR-168 §D6 lease guard — moved into a new crate,
+`cosmon-harvest`, unchanged. `cosmon-cli` re-exports every one of them under
+its old path, so no call site in the CLI changed spelling, and
+`cosmon-rpp-adapter` takes a dependency on the crate.
+
+**One implementation, two callers.** `cs done` parses `Args` off the command
+line; `harvest_effect::LibraryHarvestEffect` builds the same `Args` through
+`Args::from_harvest_options` — the seam the D4 reversal left for exactly
+this — and both call `cosmon_harvest::run`. No gate, refusal, trailer or
+teardown decision exists twice. D3 is untouched: `decide_branch_delete` is the
+same function, so a closure that did not merge still never deletes the branch.
+
+**What the port now offers.** `LibraryHarvestEffect` is the default and needs
+no configuration: an armed galaxy is harvestable on a stock image.
+`CsBinaryHarvestEffect` stays for one release as the operator's escape hatch —
+run the harvest as a *specific* build of `cs` rather than as the one compiled
+into the adapter — still declared, still with no PATH discovery.
+`UnavailableHarvestEffect` and its `501` survive as the route's answer for a
+port with no implementation, and as the double the tests that pin that answer
+construct.
+
+**Two defects the move surfaced**, both invisible while the transaction had
+only one caller:
+
+1. `EventV2::MergeDispatched` resolved `events.jsonl` by walking up from the
+   process's working directory rather than from the state directory the
+   invocation had already resolved. For a CLI standing in its own galaxy the
+   two agree. For a server they do not: the first route-driven harvest wrote
+   its merge event into the galaxy the *adapter* was installed in and then
+   tried to commit that foreign path into the tenant's repository.
+2. The ADR-172 effect boundary returned an anonymous `CosmonError` for every
+   outcome, so "no operator seal covers this harvest" — the state every galaxy
+   is in between arming `[harvest_authority]` and receiving its first grant —
+   reached `cs done` as exit 1 and the route as `500 harvest_failed`. It is
+   now `HarvestDecision::Refused`, named `not_authorized` (exit code 71) by
+   the transaction, from both callers. `not_authorized` rather than a ninth
+   name because it is the same verdict the decision half already gives an
+   unarmed galaxy; the two differ in which half noticed, not in what the
+   caller does next. A genuine I/O fault at that boundary is still a fault.
+
+**What this does not do.** It does not make the trunk immutable (§D5's bound
+is unchanged, and the refusal still says so in the operator's own words), it
+does not touch D1 — `[harvest_authority]` still authorises the effect and an
+unarmed galaxy still refuses `not_authorized` — and it does not answer D5's
+multi-tenant question about *which* molecules a requester may close.
+
+**Falsifiers.** The route merges on a deployment declaring nothing, and its
+merge commit carries a message byte-identical to a golden captured from the
+`cs` binary built before the move
+(`cosmon-rpp-adapter/tests/v1_done_library_effect.rs`). No `cs` is spawned on
+that path, asserted with a poisoned `cs` on `PATH` that records having run.
+`cosmon-rpp-adapter` reaches `cosmon-harvest` and does **not** reach
+`cosmon-cli`, asserted over the manifest graph
+(`tests/harvest_dependency_shape.rs`). Every one of the eight door refusals
+keeps its name and its exit code through both callers
+(`harvest_effect::tests::every_door_refusal_keeps_its_name_through_the_library_effect`).
+
+`scripts/rpp-remote-e2e.sh` step 10 changes accordingly, and not to "asserts a
+real merge": the script cannot mint an operator seal, because no shipped path
+can — that is the central falsifier of ADR-172, asserted across the workspace
+by `done_authorization_unforgeable`. So the step now asserts that the library
+effect **ran**, took the trunk lock, re-derived its facts and refused
+`not_authorized` for want of a seal. That is a strictly stronger assertion
+than the `harvest_effect_unavailable` it replaces, which proved only that the
+door reached an effect that did not exist. The real merge is asserted where a
+seal *can* be minted: the adapter's integration test, whose test operator
+lives in the `publish = false`, dev-only `cosmon-minisign-testkit`.

@@ -18,6 +18,17 @@ use cosmon_state::{event_log, BriefingSeal, StateStore};
 
 use super::Context;
 
+// The worktree anchor and the two mismatch guards moved to `cosmon-harvest`
+// with the harvest transaction — `cs done`'s containment guard is one of the
+// three, and the RPP route performs that harvest without going through this
+// crate. Re-exported (not re-implemented) so `super::evolve::canonical_or`
+// stays the spelling every call site in this crate already uses.
+#[allow(unused_imports)] // `done_worktree_mismatch` is the harvest's half of
+// the pair; re-exported here so `super::evolve::…` keeps naming all three.
+pub(crate) use cosmon_harvest::worktree::{
+    canonical_or, done_worktree_mismatch, recorded_worktree_for,
+};
+
 /// Outcome of an attempted per-step auto-commit.
 ///
 /// Carnot D1 resolution: re-running a step costs ~30k tokens + 5-15 worker-min;
@@ -381,40 +392,6 @@ fn is_shared_main_checkout(project_root: &Path) -> bool {
     canonical_or(&project_root.join(git_dir)) == canonical_or(&project_root.join(common_dir))
 }
 
-/// Canonicalize `p`, degrading to a lexical copy when the path does not exist
-/// on disk (`std::fs::canonicalize` requires the path to exist).
-///
-/// The worktree guard must be **total** — it can never error — because the
-/// auto-commit it protects is a defensive convenience that must not block the
-/// molecule lifecycle. Canonicalizing also resolves symlinks so a worktree
-/// reached through a symlinked path still matches its recorded target.
-pub(crate) fn canonical_or(p: &Path) -> PathBuf {
-    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-}
-
-/// Resolve the worktree `cs tackle` recorded for `mol`, as an absolute path.
-///
-/// `cs tackle` stamps the worker's worktree into the bound worker's `repo`
-/// field (stored relative to the galaxy root for portability — see
-/// [`cosmon_filestore::make_relative`]). We read it back from the fleet and
-/// resolve it against `galaxy_root`.
-///
-/// Returns `None` for molecules with no bound worker or no recorded repo —
-/// the legacy / test shapes that must keep behaving as before (no
-/// worktree-mismatch regression). This is the *recorded-path* source the
-/// guard compares against, which is why the guard is Cell-B-safe: it never
-/// hard-codes a `~/galaxies` prefix.
-pub(crate) fn recorded_worktree_for(
-    store: &FileStore,
-    mol: &cosmon_state::MoleculeData,
-    galaxy_root: &Path,
-) -> Option<PathBuf> {
-    let wid = mol.assigned_worker.as_ref()?;
-    let fleet = store.load_fleet().ok()?;
-    let repo = fleet.workers.get(wid)?.repo.as_deref()?;
-    Some(cosmon_filestore::resolve_repo_path(repo, galaxy_root))
-}
-
 /// Decide whether `cs evolve`'s per-step auto-commit may run in `cwd_toplevel`.
 ///
 /// Returns `Some((recorded, actual))` — both canonicalized — when the git
@@ -466,27 +443,6 @@ pub(crate) fn evolve_worktree_mismatch(
 /// Returns `true` when the auto-commit must be skipped.
 pub(crate) fn unrecorded_worktree_refusal(recorded_worktree: Option<&Path>) -> bool {
     recorded_worktree.is_none()
-}
-
-/// Decide whether `cs done`'s artifact commit may run in `commit_root`.
-///
-/// Unlike [`evolve_worktree_mismatch`], `cs done` commits the molecule's
-/// durable artifacts from the **galaxy root** (the worktree is torn down
-/// first), so the safety question is *containment*, not equality: the
-/// recorded worktree must live inside the galaxy we are about to commit into.
-/// When it does not, `cs done` is running in a foreign repo (the genericize
-/// ghost-commit — a release clone outside the galaxy) and must SKIP + warn.
-///
-/// Returns `Some((recorded, root))` on mismatch, `None` when safe (contained,
-/// or no recorded worktree).
-pub(crate) fn done_worktree_mismatch(
-    recorded_worktree: Option<&Path>,
-    commit_root: &Path,
-) -> Option<(PathBuf, PathBuf)> {
-    let recorded = recorded_worktree?;
-    let rec = canonical_or(recorded);
-    let root = canonical_or(commit_root);
-    (!rec.starts_with(&root)).then_some((rec, root))
 }
 
 /// Guard + run a per-step auto-commit, reporting the outcome.

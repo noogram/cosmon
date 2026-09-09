@@ -447,19 +447,15 @@ async fn main() -> anyhow::Result<()> {
         cosmon_transport::TmuxBackend::new("cosmon"),
     ));
 
-    // The harvest door's effect half (issue #51, ADR-176 §11). Absent
-    // config means an honest `501 harvest_effect_unavailable` for every
-    // harvest the door admits; a declared binary means the operator chose
-    // which `cs` closes their molecules. No PATH fallback.
-    let harvest_effect: std::sync::Arc<dyn cosmon_rpp_adapter::harvest_effect::HarvestEffectPort> =
-        match cfg.harvest_cs_binary.clone() {
-            Some(binary) => std::sync::Arc::new(
-                cosmon_rpp_adapter::harvest_effect::CsBinaryHarvestEffect::new(binary),
-            ),
-            None => {
-                std::sync::Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect)
-            }
-        };
+    // The harvest door's effect half (issue #51, ADR-176 §11 and §12's
+    // follow-up). The default is the LIBRARY: the sealed transaction is a
+    // crate this binary links, so an armed galaxy is harvestable on a stock
+    // image with no configuration line at all. `harvest_cs_binary` stays for
+    // one release as the operator's escape hatch — run the harvest as a
+    // *specific* build of `cs` rather than as the one compiled in here. No
+    // PATH fallback in either case.
+    let harvest_effect =
+        cosmon_rpp_adapter::harvest_effect::from_config(cfg.harvest_cs_binary.clone());
 
     let state = AppState {
         harvest_effect,
