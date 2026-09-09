@@ -608,3 +608,308 @@ IFBDD construction order: instrument first, behaviour second.
   *"if the code contradicts either thesis or the invariants, the
   thesis wins"* clause is the structural license for this overrule;
   the IFBDD lens is the doctrinal warrant.
+
+---
+
+## Amendment (2026-09-09) — "no daemon" is core hygiene; the server is the daemon
+
+> **The original text above is untouched.** This amendment does not rewrite
+> ADR-095; it scopes what its prohibition ever bound, and records which of
+> its five invariants the shipped code refutes. A reversal that hides what
+> it reverses teaches nobody (the form is ADR-176 §D4's).
+
+**Provenance.** Two model families deliberated independently on 2026-09-07,
+without sight of each other, and converged on the same three verdicts: keep
+ADR-095, amend it, name no external substrate. The five-persona panel is
+`delib-20260907-8bb7` (`synthesis.md`, `outcomes.md`); the second family's
+refutation-posture verdict is `task-20260907-94e6/verdict.md`. The operating
+constraint that reopened the question came from the reporters of GitHub
+issues #51/#54/#60: a person who wants to run missions without leaving a
+laptop awake and without opening an SSH session.
+
+### A1 — Scope: the prohibition binds the transactional core, not the server
+
+*"No daemon"* and *"No scheduler process"* (THESIS.md, *What Cosmon Does NOT
+Ship*) are **hygiene of the transactional core — Layer A, the `cs` verbs**.
+They say: a `cs` invocation reads the disk, mutates, writes and exits; crash
+recovery is re-reading the disk; no `cs` command acquires a daemon flavour.
+They were never a ban on a supervised long-lived process elsewhere in the
+orbit.
+
+**The server is the daemon.** `cosmon-rpp-adapter` is a supervised long-lived
+process by design. It may hold connections, caches and health samples, and it
+may carry background tasks (patrol cadence, multi-galaxy DAG surveillance).
+That is admitted here as doctrine, not tolerated as drift.
+
+What does not move: the domain core stays I/O-free and stateless, every `cs`
+verb stays one-shot, and crash recovery stays *re-read the disk*. The cut this
+amendment substitutes for the literal prohibition is the second family's, and
+it is stricter than "no daemon" because it is decidable:
+
+> Cosmon owns mission truth and irreversible lifecycle authority. A resident
+> server may own transport, scheduling cadence, ephemeral caches and durable
+> delivery receipts. A worker runtime may own cognition and tool-session
+> state. An external operator loop may own conversation state. **None of them
+> may silently become molecule truth.**
+
+### A2 — RR-1 and RR-3 are refuted, with the observations
+
+Each observation below was re-verified in this tree on 2026-09-09; the
+commands and their output are in this molecule's `result.md`.
+
+**RR-1 — refuted.** The invariant's own test is *"`cargo tree -p
+cosmon-runtime --no-default-features` shows zero edges to state-mutating
+crates"*. `crates/cosmon-runtime/Cargo.toml:14,18` declares
+`cosmon-filestore` and `cosmon-state` as non-optional workspace
+dependencies, and `cargo tree -p cosmon-runtime --no-default-features -e
+normal` prints both edges. ADR-138 §10 already concedes this in writing —
+*"the `cs run` RR-1 CI test … fails today"* — and files the split as a
+`temp:warm` bead that was never taken.
+
+The second, sharper refutation is at the server seam.
+`crates/cosmon-rpp-adapter/src/drain.rs` runs the bounded tenant drain as a
+library call, and its own header states the consequence: *"so no `cs` binary
+is involved anywhere on the path"* (`drain.rs:13`). The module imports
+`cosmon_runtime::{compile_plan, DagPolicy, LibraryExecutor, Runtime, …}`
+directly (`drain.rs:43-46`). RR-1 said the CLI surface is the *only* mutation
+path. It is not.
+
+**RR-3 — refuted, and its escape hatch is closed.** RR-3 promised excision in
+one PR, gated by `scripts/runtime-excision-test.sh`. That script **was never
+written** (`ls scripts/runtime-excision-test.sh` → no such file), so the
+periodic CI job it was to gate has never run. Meanwhile
+`crates/cosmon-rpp-adapter/Cargo.toml:53` depends on `cosmon-runtime`.
+Deleting the crate is therefore not "remove the crate and one subcommand and
+the rest stays green" — it is a subsystem extraction that would take the RPP
+server with it.
+
+This closes §4's falsification pact. §4 says: if any of its three triggers
+fires, *"the Resident Runtime is excised via RR-3 (the deletion is one PR by
+construction)"*. The deletion is not one PR, the test that would prove it
+does not exist, and the 90-day clock's start date is unrecorded. **The
+falsification pact of §4 is currently unpayable**, and that is the single
+most serious finding of the 2026-09-07 audit: an Accepted ADR whose escape
+hatch cannot be taken is doctrine without a refutation condition.
+
+**What is *not* refuted.** The panel's pattern, and the point of restating
+rather than deleting: the three invariants that fell (RR-1, RR-2 literally,
+RR-3) constrain **process topology**. The two that held (RR-4, RR-5)
+constrain **the data and its trace**. ADR-095 was wrong in its letter and
+right in its load-bearing content.
+
+### A3 — Restatements
+
+One formulation per invariant, chosen and argued.
+
+**RR-1′ — exactly one implementation per lifecycle transition, or a typed
+refusal; never a silent divergence.**
+
+Chosen over the competing RR-1a/RR-1b split (core verbs for the domain
+core, library seam allowed server-side with a named CLI equivalent), because
+the split describes *where* code may live and the failure that actually
+occurred is about *how many answers a transition has*. The current state is
+worse than either horn of the original invariant: `tackle` has two
+implementations with an enumerated parity gap, and harvest has one
+implementation on the CLI side and **zero** on the library side, which is why
+`POST …/done` refuses `501 harvest_effect_unavailable` on a stock deployment
+(`crates/cosmon-rpp-adapter/src/harvest_effect.rs`, `UnavailableHarvestEffect`
+as the default). A library call may be the implementation; a subprocess may
+be the implementation; two divergent implementations of one transition may
+not both be. Where a seam has no implementation, it returns a **typed
+refusal** naming the gap — as `harvest_effect_unavailable` and the drain's
+`drained` token already do. Silence is the breach, not the library call.
+
+**RR-2′ — the server may hold caches; no server-resident datum is
+authoritative or the sole input to a lifecycle or admission decision; server
+liveness state is re-derivable from disk on restart.**
+
+RR-2's literal text ("introduces no new schema, no new state file, no new
+directory") is already refuted by `.cosmon/state/runtime-trace.jsonl`, and
+enforcing it literally would forbid a reliable server its delivery receipts.
+The auditable content was never "no state" — it was *no second authority*.
+Operational state is permitted when it is classified: a transport receipt, a
+request journal, or forensic evidence — never a lifecycle verdict.
+
+**The first named case is the drain registry.** `DrainRegistry`
+(`crates/cosmon-rpp-adapter/src/lib.rs:144`) holds each noyau's active-drain
+slot in a `Mutex<HashSet<String>>`, in RAM by design, and its own doc comment
+says durability *"lives in the tenant filesystem state like everything
+else"*. Under RR-2′ that is a promise with a test: restart the adapter
+mid-drain and the on-disk record must still name the in-flight drain. Nobody
+has run that probe. Until someone does, the drain registry is the standing
+example of what RR-2′ requires and the cheapest place to falsify it.
+
+**RR-3′ — deletability is replaced by non-exclusivity of the server.**
+
+The property RR-3 was reaching for was never "the crate can be deleted"; it
+was "cosmon does not depend on this thing being here". State that directly:
+**CI proves that a bare `cs` drives a mission end-to-end — nucleate, tackle,
+evolve, complete, done — with the adapter absent.** That test is runnable
+today, unlike the excision script; it survives the adapter growing; and it
+fails loudly the day a lifecycle transition becomes reachable only through
+the server. Non-exclusivity is also what makes A1's cut enforceable: a server
+that is the only way to close a molecule *is* molecule truth, whatever it
+says about itself.
+
+### A4 — RR-4 promoted, and RR-4b
+
+**RR-4 is promoted** from one of five build constraints to the invariant the
+other four exist to protect: JSON-on-disk remains the authoritative source of
+truth, for molecule state and for harvest authority. Both families sustained
+it. The second family's strengthening is adopted: durable external witnesses
+— process identity, delivery receipt, remote request id — belong in the
+reconstruction *input*, while status and authority stay on disk.
+
+**RR-4b (new) — a server deployment must have a configured off-box durability
+path for `.cosmon/state/` before it is declared active.**
+
+RR-4 as written is a statement about a process restart. On a server the
+relevant failure is a machine change, and there RR-4 is undefended:
+`ArchiveConfig::enabled` defaults to `false`
+(`crates/cosmon-core/src/config.rs:1226-1229`) and `.cosmon/state/` is
+gitignored, so a fresh server's mission record survives its process and not
+its host. "You can `cat` cosmon's state" is not a property of a disk that no
+longer exists. The implementation half — archive on by default, the gitignore
+negation that actually re-includes the archive, and repair of a mangled
+`.cosmon/.gitignore` — is GitHub issue #60, in flight as `task-20260909-4788`.
+Until a deployment satisfies RR-4b it is a demonstration, not an active
+server.
+
+### A5 — RR-5 extended
+
+**Canonicity, settled.** The second family asked explicitly which stream is
+canonical, because the guide has called both by the RR-5 name.
+**`events.jsonl` is canonical for correlation.** The four RR-5 variants are
+`EventV2` cases (`crates/cosmon-core/src/event_v2.rs`, classified in
+`audit.rs:124-127`) and land in the molecule's event log;
+`.cosmon/state/runtime-trace.jsonl` is loop-local forensic detail, written by
+the resident's trace writer (`crates/cosmon-runtime/src/resident.rs:1962`),
+and is **evidence, not the correlation spine**. Any audit that has to join
+the two joins them *on* `events.jsonl`.
+
+**The library seam needs its own hooks, and the first one is missing.** The
+RR-5 taxonomy is keyed to shell-outs (`RuntimeShelledOut`,
+`RuntimeMergeDispatched`) that the server path no longer performs. The first
+missing hook is **"drain completed with unintegrated branches"**: the
+in-process drain dispatches and drains but does not integrate, and it is
+honest about that — in its HTTP response, via the `drained` token
+(`crates/cosmon-rpp-adapter/src/drain.rs:35,57`). There is no `EventV2`
+variant carrying the fact (`grep -n unintegrated
+crates/cosmon-core/src/event_v2.rs` → no match), so a drain that leaves
+completed-but-unintegrated molecules behind leaves **nothing in the
+correlation spine**. An operator reading `events.jsonl` a week later cannot
+tell it happened. Ship the variant before the next behaviour on that seam.
+
+**RR-5′ — a forensic event the operator's location cannot reach is not a
+forensic event.** RR-5 assumed a human with a shell on the host. The user
+this amendment exists for has neither. An instrument that is only readable by
+`ssh`-ing to the machine fails RR-5 for that user exactly as a missing
+instrument does. The obligation is therefore two-part: emit the event before
+the effect, *and* make the stream reachable from where the operator stands.
+
+### A6 — §14 restated: the state has no privileged reader
+
+`docs/architectural-invariants.md` §14 is *"you can `cat` cosmon's state"*.
+Read literally it assumes a human with a shell, and it would be broken by any
+server — including the one cosmon already runs. Its content was never `cat`;
+`cat` was the probe. The content is:
+
+> **§14′ — the state has no privileged reader.** No component holds a view of
+> the state that another reader cannot obtain. `cat` and `GET` are the same
+> act at two distances.
+
+**The server-side test of legitimacy** joins §14's three existing probes:
+**stop the adapter, start a dumber second reader, and ask whether the
+operator can still answer *what ran*, *why it was dispatched*, and *what it
+cost*.** If the answer requires the adapter to be up, the adapter has become
+a privileged reader and the badge is lost — whatever the files on disk look
+like. This is the probe that lets cosmon ship a server without deleting its
+own badge, and the one that catches the failure the badge was written
+against.
+
+### A7 — External systems are optional roles, never lifecycle authority
+
+An **operator-loop adapter** (OpenClaw/Hermes class) may own conversation,
+delivery and notification state and call a narrow capability set. A
+**confinement envelope** (NemoClaw class) may own the sandbox, credential and
+egress perimeter a worker runs inside. A **worker runtime** may own cognition
+and tool-session state. Any of them may be plugged; none becomes lifecycle
+authority, and none receives unrestricted operator credentials — capability
+scoping, expiry and auditable attribution are the price of the plug.
+
+Position (b) — adopting an external runtime as cosmon's *substrate* — is not
+reopened here. Note also, for anyone re-litigating it: adopting an external
+*worker* runtime already happened, at the worker seam, via ADR-103's
+`LoopOwnership::External`. The 2026-05 `adopt × 0` verdict only ever bound
+the substrate-beneath question.
+
+**The falsifier of this clause, recorded verbatim as the amendment's own.**
+This amendment's A7 is refuted — and the *standard remote surface* becomes an
+external operator loop rather than the native one — if a **30-day, 20-mission
+bounded comparison on one VPS** shows all of the following (second family,
+verdict §6):
+
+- at least 95% of check-in messages and final results delivered without
+  manual recovery, with duplicates visible and harmless;
+- no lost or duplicated cosmon lifecycle transition under forced
+  gateway/runtime restarts;
+- stable mapping of one external conversation/session to one molecule or
+  explicit mission root;
+- full capability scoping: the gateway cannot mutate outside the
+  operator-granted molecule/verb set;
+- lower median operator intervention time and no higher unrecoverable-mission
+  rate than the native RPP client;
+- complete reconstruction from cosmon state plus classified delivery receipts
+  after killing every resident process;
+- acceptable maintenance and security burden.
+
+Failure to meet those criteria retains the native surface. Success changes
+the **standard surface**, not the transactional substrate. Superseding
+ADR-095 with an external *worker substrate* requires a separate controlled
+trial showing a large, reproducible long-horizon completion or confinement
+gain unobtainable through the current worker adapter, while preserving every
+lifecycle and forensic property above.
+
+### A8 — The 90-day moat clause
+
+The named failure mode of this amendment is that it serves the commodity. A
+server clock and a handful of routes are what the market shipped last month
+for eleven euros a month; a sealed integration authority is what no inspected
+product has. So the clause is mechanical:
+
+> **At 90 days from this amendment (2026-12-08): if the server-side patrol
+> cadence and the session-thread read surface have shipped while the default
+> harvest effect still answers `501 harvest_effect_unavailable` on a stock
+> deployment, the amendment served the commodity and starved the moat —
+> reverse the priority.**
+
+Two notes for whoever reads the clock. The panel named the condition
+"`SealedHarvestEffect` still answers `501`"; the type that actually answers is
+`UnavailableHarvestEffect`, the default implementation of
+`HarvestEffectPort` (`crates/cosmon-rpp-adapter/src/harvest_effect.rs:124`) —
+the clause is stated above against the observable refusal label, which is what
+a reader can check. And the interim answer already exists: `harvest_cs_binary`
+(ADR-176's second postscript) wires `CsBinaryHarvestEffect` for an operator who
+declares a `cs` on the host, off by default. That is an interim answer, not the
+moat: it requires a binary on the image. The library extraction that makes
+`POST …/done` merge on a stock deployment is in flight as `task-20260909-f98c`.
+
+### A9 — Relation to ADR-080 §5.4 and ADR-176's D4 reversal
+
+Both already landed on this branch and are cited, not restated:
+ADR-080 §5.4 took `cs done` off the closed list as **lifecycle, not
+administration**; ADR-176 §D4-reversed established that the seal never
+protected the parameters, for a single-tenant deployment where requester and
+protected party are the same person. This amendment supplies the doctrinal
+cover those two decisions were operating without — that a supervised
+long-lived server carrying lifecycle verbs is admitted architecture rather
+than tolerated drift.
+
+### What this amendment does not decide
+
+Not decided here: the ordering of session-thread read versus whisper-write;
+the go-to-market question of integrating with an institutional hub versus
+being launchable by one; and whether the §4 90-day clock ever started (its
+trigger is an edit to a host config file nobody has inspected). Each is
+recorded in `delib-20260907-8bb7/outcomes.md` as an operator decision, and
+none of them is a doctrinal question.
