@@ -10,9 +10,11 @@
 # Removing one does not yield a "partial" binding — it yields a file the
 # loader cannot resolve a noyau from, and admission fails closed.
 #
-# `scripts/rpp-remote-e2e.sh` materialises its run binding from THIS
-# file (cp + substitute), so a template that cannot produce a working
-# binding turns that smoke red rather than passing unnoticed.
+# The container-level e2e suite (`tests/e2e/`, entered through
+# `scripts/rpp-remote-e2e.sh`) materialises its run binding from THIS
+# file (cp + substitute) and asserts every key the loader reads is still
+# in it, so a template that cannot produce a working binding turns
+# `tests/e2e/test_binding_template.py` red rather than passing unnoticed.
 
 # Directory name under `nucleons/` (the habilitation id). Must match the
 # directory this file lives in.
