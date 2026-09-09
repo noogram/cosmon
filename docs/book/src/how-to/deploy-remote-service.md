@@ -348,7 +348,20 @@ have to believe about your next deployment. One command re-performs the whole
 thing against real containers and tells you which step broke:
 
 ```sh
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r tests/e2e/requirements.txt
 bash scripts/rpp-remote-e2e.sh
+```
+
+The suite lives in `tests/e2e/` and is driven by `pytest`; the shell entry point
+is a pass-through that forwards every argument, so the whole runner is available
+from it:
+
+```sh
+bash scripts/rpp-remote-e2e.sh -k healthz     # one test, alone
+bash scripts/rpp-remote-e2e.sh -x --pdb       # stop at the first red, break in
+bash scripts/rpp-remote-e2e.sh --junitxml=e2e.xml
+pytest tests/e2e -m "not stack"               # the parts needing no docker
 ```
 
 It builds both images from `crates/cosmon-rpp-adapter/deploy/docker-compose.yml`,
@@ -356,28 +369,85 @@ waits on the two healthchecks that file already declares, and then drives the
 stack with the compiled `cosmon-remote` binary over the published loopback
 ports — `login` (the real authorization-code + PKCE flow against the mock IdP,
 headless), `auth me`, `nucleate`, `observe`, and a `land` that must come back
-with its named refusal. Each step is one line of `{step, rc, ms, evidence}` in
-`.rpp-remote-e2e/<stamp>/e2e.ndjson`; the first red step ends the run.
+with its named refusal.
+
+Every assertion says *why* the value it expects is the right one, naming the ADR
+section, route document or invariant it derives from; when one breaks, the
+failure prints that sentence together with the request as sent, the response as
+received and the tail of the adapter's own log. Each exchange is also written to
+`.rpp-remote-e2e/<stamp>/artifacts/` as its own file, beside the familiar
+one-line-per-step `e2e.ndjson`.
+
+**The stack is reinitialised between test sets.** Each test class gets
+`down -v` + `up --wait` + reprovisioning, and a fresh tenant galaxy tree — so no
+molecule, inbox entry or rate-limiter bucket from one set can make the next one
+pass or fail. `tests/e2e/test_reinit.py` is the proof rather than the promise: it
+plants a molecule in one set and asserts its absence in the next, and it goes red
+under `RPP_E2E_REINIT=0`.
 
 Nothing of yours is touched. The tracked `deploy/` tree is copied, not written
-to; the nucleon binding is materialised into the copy; the tenant galaxy is a
-throwaway tree destroyed with the stack; `$HOME` is redirected so the run reads
-neither your `cosmon-remote` profiles nor your OS keychain; the containers carry
-a name suffix and non-default ports so a live deployment on 8443/8444 keeps
-running beside it. Pass `--keep` to leave the stack up and poke at it.
+to; the nucleon binding is materialised into the copy from the tracked
+`.example`, so a template that has lost a key the loader reads turns the suite
+red instead of passing on a private copy you will never have; the tenant galaxy
+is a throwaway tree destroyed with the stack; `$HOME` is redirected so the run
+reads neither your `cosmon-remote` profiles nor your OS keychain; the containers
+carry a name suffix and non-default ports so a live deployment on 8443/8444 keeps
+running beside it. Set `RPP_E2E_KEEP=1` to leave the stack up and poke at it.
 
-If `docker` or `jq` is missing the script exits 2 and says so. It has no skip
-path on purpose: a smoke that prints green without running is how an absent
-prerequisite becomes a passing nightly.
+If `docker` or `pytest` is missing the run exits 2 and says so. There is no skip
+path, on purpose: a smoke that prints green without running is how an absent
+prerequisite becomes a passing nightly. Exit 1 is a red test — "ran and failed"
+and "could not run" are different verdicts.
 
-Two legs are deliberately not in it. `tackle` and `land` still shell out to
-`cs`, and the adapter image has shipped no `cs` since it went library-direct —
+### What the mock IdP does and does not prove
+
+The login flow runs against `cs-oidc-mock`, a mock. It proves the *shape* of the
+flow — discovery, an authorization-code redirect, PKCE-S256 on the token
+exchange, a signed JWT whose `(iss, sub, aud)` the adapter resolves against your
+nucleon binding. It proves nothing that depends on a real provider's policy, and
+it is known to deviate from one in these ways (the list is kept beside the
+fixture, in `tests/e2e/conftest.py`):
+
+- `/authorize` **auto-approves**: no login form, no consent, no MFA, so no
+  redirect chain, session cookie or interactive timeout is exercised.
+- `sub` is a fixed, readable string. A real IdP mints an opaque per-user
+  identifier whose shape you must not assume.
+- **Discovery is minimal** — it carries what this client reads and no more. A
+  real document advertises `userinfo_endpoint`, `end_session_endpoint`,
+  `claims_supported` and several `*_supported` arrays; a client that grew to
+  depend on one of them would pass here and fail against production.
+- **Token response order and extras**: real providers add `id_token`,
+  `refresh_token`, `scope` and vendor claims, in no guaranteed order. Nothing may
+  be asserted positionally.
+- **Keys do not rotate** and expiry is generous: no `kid` rollover, no re-fetch
+  on an unknown `kid`, no clock-skew edge.
+- **No refresh, revocation or introspection endpoints** exist, so no test here
+  covers the paths that use them.
+
+The same tests run against a real IdP with no code change — the provider is read
+entirely from configuration:
+
+```sh
+RPP_E2E_ISSUER=https://idp.example/realms/cosmon \
+RPP_E2E_AUDIENCE=<the client_id registered there> \
+RPP_E2E_IDP_SUB=<the sub that IdP mints for the test principal> \
+RPP_E2E_EXPECT_SUB=<the same value> \
+pytest tests/e2e -m stack
+```
+
+Two things must then be provisioned out of band, exactly as an operator would:
+the JWKS the adapter pins from disk must be that provider's (the adapter never
+dials the issuer — see the `rpp-jwks` volume in the compose file), and the
+redirect URI `http://127.0.0.1:7777/callback` must be registered on the client.
+
+Two legs are deliberately not in the suite. `tackle` and `land` still shell out
+to `cs`, and the adapter image has shipped no `cs` since it went library-direct —
 so `tackle` is out of scope here and `land` is asserted on the *name* of the
 refusal it does return. Issue #54 owns making those two routes library-direct;
-when it does, this script's pinned label goes red, which is the point.
+when it does, the pinned label goes red, which is the point.
 
-The same script runs nightly in CI as the non-blocking `rpp-remote-e2e` job,
-which uploads `e2e.ndjson` as an artifact.
+The same entry point runs nightly in CI as the non-blocking `rpp-remote-e2e`
+job, which uploads the JUnit report and the per-exchange artefacts.
 
 ## See also
 
