@@ -65,6 +65,7 @@
 //! of the dispatch to the HTTP request lives in the adapter's own
 //! audit inbox and the `WorkerSpawned` event, not in the worker's env.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use cosmon_core::id::WorkerId;
@@ -401,6 +402,119 @@ impl<B: TransportBackend> TransportBackend for EnvelopedBackend<B> {
 
     fn terminate_session(&self, session_name: &str) -> Result<(), TransportError> {
         self.inner.terminate_session(session_name)
+    }
+}
+
+/// The adapter's transport backends, **one tmux socket per tenant
+/// project** (architectural invariant §7f).
+///
+/// # Why this is not a single backend
+///
+/// §7f: *the tmux socket name is derived from the project and never
+/// shared across projects*, with
+/// [`cosmon_filestore::resolve_tmux_socket_name`] as its single source of
+/// truth — the CLI's `cmd::tmux_socket_name`, cockpit-http and the MCP
+/// nudge fallback all route through it, and hardcoded socket literals are
+/// what the invariant explicitly forbids. The adapter used to build one
+/// `TmuxBackend::new("cosmon")` and share it across every admitted tenant,
+/// which broke the invariant twice over: distinct tenant galaxies landed
+/// in one tmux namespace, and a local `cs done` — which resolves the
+/// *project* socket — looked for the worker on a socket the adapter had
+/// never used, so it could neither find nor terminate it.
+///
+/// Resolution happens per admitted tenant root and is cached, so the same
+/// noyau reuses one backend across dispatches, readers (logs, session
+/// probes, status) and teardown — the same socket on every path by
+/// construction rather than by convention.
+#[derive(Clone, Debug)]
+pub enum WorkerBackends {
+    /// Production: a tmux backend per tenant project socket, memoized by
+    /// tenant root.
+    PerProjectTmux(std::sync::Arc<std::sync::Mutex<HashMap<PathBuf, SharedBackend>>>),
+    /// One injected backend for every tenant — the test shape (an
+    /// in-memory mock), and the escape hatch for a deployment that
+    /// supplies its own transport.
+    Fixed(SharedBackend),
+}
+
+impl WorkerBackends {
+    /// Production constructor: resolve a tmux socket per tenant project.
+    #[must_use]
+    pub fn per_project_tmux() -> Self {
+        Self::PerProjectTmux(std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())))
+    }
+
+    /// Inject one backend for every tenant (tests, custom transports).
+    #[must_use]
+    pub fn fixed(backend: std::sync::Arc<dyn TransportBackend + Send + Sync>) -> Self {
+        Self::Fixed(SharedBackend(backend))
+    }
+
+    /// The tmux socket name a worker for `tenant_root` must live on.
+    ///
+    /// Delegates to [`cosmon_filestore::resolve_tmux_socket_name`] — the
+    /// §7f single source of truth — over the tenant's own
+    /// `.cosmon/config.toml`, so the adapter's answer is the same string
+    /// `cs tackle`, `cs done` and `cs peek` compute for that project.
+    #[must_use]
+    pub fn socket_for(tenant_root: &Path) -> String {
+        let config_path = cosmon_filestore::resolve_config_path_from(tenant_root);
+        cosmon_filestore::resolve_tmux_socket_name(&config_path)
+    }
+
+    /// The backend to spawn, read and tear down `tenant_root`'s workers
+    /// through.
+    ///
+    /// # Panics
+    ///
+    /// Never panics on a poisoned cache: a poisoned mutex is recovered
+    /// through its guard, because losing socket memoization must not take
+    /// the adapter down.
+    #[must_use]
+    pub fn for_tenant(&self, tenant_root: &Path) -> SharedBackend {
+        match self {
+            Self::Fixed(backend) => backend.clone(),
+            Self::PerProjectTmux(cache) => {
+                let mut guard = cache
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                guard
+                    .entry(tenant_root.to_path_buf())
+                    .or_insert_with(|| {
+                        let socket = Self::socket_for(tenant_root);
+                        tracing::info!(
+                            event = "worker.socket_resolved",
+                            tenant_root = %tenant_root.display(),
+                            socket = %socket,
+                            "tenant worker transport bound to its project tmux socket (§7f)"
+                        );
+                        SharedBackend(std::sync::Arc::new(cosmon_transport::TmuxBackend::new(
+                            socket,
+                        )))
+                    })
+                    .clone()
+            }
+        }
+    }
+
+    /// The socket the tenant's backend actually carries, when this is the
+    /// per-project tmux transport; `None` for an injected backend, which
+    /// has no socket of its own.
+    ///
+    /// Exists for the §7f falsifier and for operator diagnostics — the
+    /// question "*which* socket did this tenant's worker land on" must be
+    /// answerable from the running adapter, not inferred.
+    #[must_use]
+    pub fn socket_of(&self, tenant_root: &Path) -> Option<String> {
+        match self {
+            Self::Fixed(_) => None,
+            Self::PerProjectTmux(_) => {
+                // Bind first, so the answer is the socket a dispatch would
+                // really use rather than a recomputation beside it.
+                let _bound = self.for_tenant(tenant_root);
+                Some(Self::socket_for(tenant_root))
+            }
+        }
     }
 }
 

@@ -438,14 +438,16 @@ async fn main() -> anyhow::Result<()> {
         cosmon_rpp_adapter::portee::PorteeProvisioner::new(state_dir.clone(), provisioner.clone()),
     );
 
-    // Worker transport (issue #54 U6): the tmux backend on the default
-    // `cosmon` socket — the same socket `cs tackle` used, so operator
-    // tooling (`tmux -L cosmon attach …`) keeps working unchanged.
-    // Every spawn through it is clamped by the worker envelope in the
-    // routes; see `cosmon_rpp_adapter::worker_env`.
-    let worker_backend = cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
-        cosmon_transport::TmuxBackend::new("cosmon"),
-    ));
+    // Worker transport (issue #54 U6): one tmux backend PER TENANT
+    // PROJECT SOCKET, resolved through `resolve_tmux_socket_name` — the
+    // same resolver `cs tackle` and `cs done` use, which is what
+    // architectural invariant §7f requires (a shared `"cosmon"` literal is
+    // what it forbids). Operator tooling therefore attaches with
+    // `tmux -L $(cs ensemble --json | jq -r .project.tmux_socket) …`, and
+    // a local `cs done` finds the worker the adapter spawned. Every spawn
+    // is clamped by the worker envelope in the routes; see
+    // `cosmon_rpp_adapter::worker_env`.
+    let worker_backend = cosmon_rpp_adapter::worker_env::WorkerBackends::per_project_tmux();
 
     let state = AppState {
         worker_backend,

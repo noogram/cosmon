@@ -1496,7 +1496,7 @@ pub async fn tackle_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
-    let backend = EnvelopedBackend::new(state.worker_backend.clone(), &envelope);
+    let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_tackled_by(cosmon_core::tackle::TackledBy::Human);
     let dispatch_id = molecule_id.clone();
@@ -1594,11 +1594,17 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_step",
             request_id: Some(request_id.to_owned()),
         },
-        TackleExecError::Spawn { .. } => ApiError {
+        TackleExecError::Spawn { .. } | TackleExecError::OrphanRetained { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "worker_spawn_failed",
             request_id: Some(request_id.to_owned()),
         },
+        // The rollback wrapper adds *what was preserved*, never a different
+        // failure class: the wire label stays the one the underlying
+        // failure earns, and the preservation detail lives in the log.
+        TackleExecError::RolledBackPreserving { source, .. } => {
+            tackle_exec_error_to_response(source, request_id)
+        }
         TackleExecError::State(_)
         | TackleExecError::Id(_)
         | TackleExecError::Ledger(_)
@@ -1780,7 +1786,7 @@ pub async fn run_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
-    let backend = EnvelopedBackend::new(state.worker_backend.clone(), &envelope);
+    let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // Default actor class: `runtime:<pid>` — the drain's dispatches are
     // runtime claims (never sticky), exactly as `cs run`'s were.
     let executor = LibraryExecutor::new(&tenant_root, backend);

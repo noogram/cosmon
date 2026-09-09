@@ -22,6 +22,7 @@ use std::sync::OnceLock;
 
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
+use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
 use cosmon_runtime::tackle_exec::LibraryExecutor;
 use cosmon_runtime::{
@@ -412,5 +413,144 @@ fn failed_spawn_rolls_back_worktree_ledger_and_status() {
     assert!(
         !branches.contains(&format!("feat/{}", mol.id.as_str())),
         "the feature branch must be removed on rollback: {branches}"
+    );
+}
+
+/// Second-family review of PR #57, finding 1: **rollback must not own
+/// resources it did not create.**
+///
+/// `create_worktree` is idempotent — an existing worktree is reused and an
+/// existing branch is tolerated — but the dispatch-error path used to call
+/// `remove_worktree_and_branch` unconditionally. So retrying a molecule
+/// whose previous worker crashed with its worktree preserved, and hitting
+/// a backend/ledger failure on the retry, destroyed the prior work with
+/// `git worktree remove --force` + `git branch -D` instead of undoing this
+/// attempt's own allocations.
+///
+/// The falsifier is the uncommitted file: it belongs to the *previous*
+/// dispatch, so a correct rollback cannot touch it.
+#[test]
+fn rollback_preserves_a_reused_worktree_and_its_branch() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260909-a1a1");
+    let worktree = project.join(".worktrees").join(mol.id.as_str());
+    let branch = format!("feat/{}", mol.id.as_str());
+
+    // A prior dispatch's worktree, with work in it that was never committed.
+    cosmon_runtime::tackle_exec::create_worktree(&project, &worktree, &branch, None)
+        .expect("the prior dispatch's worktree must be creatable");
+    let prior_work = worktree.join("prior-uncommitted.txt");
+    std::fs::write(&prior_work, "work the previous worker had not committed")
+        .expect("seed prior work");
+
+    // The retry fails after the worktree step.
+    let backend = MockBackend::new();
+    backend.set_spawn_error("no seats left");
+    let executor = LibraryExecutor::new(&project, backend);
+    let err = executor
+        .dispatch(&mol.id)
+        .expect_err("a failing backend must fail the dispatch");
+
+    assert!(
+        prior_work.exists(),
+        "rollback destroyed uncommitted work it did not create: {err}"
+    );
+    let branches = std::process::Command::new("git")
+        .args(["-C", &project.to_string_lossy(), "branch", "--list"])
+        .output()
+        .expect("git branch");
+    let branches = String::from_utf8_lossy(&branches.stdout).into_owned();
+    assert!(
+        branches.contains(&branch),
+        "rollback deleted a branch it did not create: {branches}"
+    );
+    // The ledger is still rolled back — only the *filesystem* resources are
+    // preserved, because only they predate this attempt.
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert_eq!(observed.status, MoleculeStatus::Pending);
+    assert!(observed.process.is_none(), "no process record may survive");
+    assert!(
+        err.to_string().contains("preserved"),
+        "the error must name what rollback deliberately left behind: {err}"
+    );
+}
+
+/// Second-family review of PR #57, finding 3: **a failed prompt delivery
+/// must not leave a live worker behind.**
+///
+/// `spawn` succeeds — the transport has committed a detached session to the
+/// operating system — and `send_input_observed` then fails. The executor
+/// used to propagate that failure straight through, rolling the ledger back
+/// and removing the worktree while the session it had just created kept
+/// running: a live process with no registration and no working directory,
+/// exactly the §8ab shape ("an effect without a record is visible to
+/// nothing").
+#[test]
+fn failed_prompt_delivery_terminates_the_spawned_session() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260909-b2b2");
+    let backend = MockBackend::new();
+    backend.set_send_input_error("pane vanished mid-paste");
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let err = executor
+        .dispatch(&mol.id)
+        .expect_err("a failed prompt delivery must fail the dispatch");
+    assert!(err.to_string().contains("pane vanished mid-paste"), "{err}");
+
+    assert!(
+        backend
+            .calls()
+            .iter()
+            .any(|c| matches!(c, MockCall::Terminate { .. })),
+        "the successfully spawned session must be terminated when its \
+         prompt could not be delivered: {:?}",
+        backend.calls()
+    );
+    assert!(
+        backend.list_sessions().expect("list").is_empty(),
+        "no session may outlive a rolled-back dispatch"
+    );
+    // Termination confirmed ⇒ the ordinary rollback symmetry applies.
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert_eq!(observed.status, MoleculeStatus::Pending);
+    assert!(observed.process.is_none(), "no process record may survive");
+}
+
+/// The other half of finding 3: when the teardown itself cannot be
+/// confirmed, the dispatch record and the worktree are **retained**, not
+/// rolled back.
+///
+/// A live worker with a rolled-back ledger is invisible to every sweep;
+/// a live worker with a stale-but-present record is discoverable, which is
+/// the recoverable shape §8ab asks for. The error names both the session
+/// and the worktree so an operator can finish the teardown by hand.
+#[test]
+fn unconfirmed_termination_retains_the_record_and_the_worktree() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260909-c3c3");
+    let backend = MockBackend::new();
+    backend.set_send_input_error("pane vanished mid-paste");
+    backend.set_terminate_error("tmux server unreachable");
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let err = executor
+        .dispatch(&mol.id)
+        .expect_err("an unconfirmed teardown must fail the dispatch");
+    let rendered = err.to_string();
+    assert!(
+        rendered.contains(mol.id.as_str()) && rendered.contains(".worktrees"),
+        "the error must name the surviving session and its worktree: {rendered}"
+    );
+
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert!(
+        observed.process.is_some(),
+        "the dispatch record must be RETAINED so the possibly-live worker \
+         stays discoverable"
+    );
+    assert!(
+        project.join(".worktrees").join(mol.id.as_str()).exists(),
+        "the worktree of a possibly-live worker must not be removed"
     );
 }
