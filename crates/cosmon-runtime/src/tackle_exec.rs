@@ -292,6 +292,72 @@ enum SpawnAttemptFailure {
     },
 }
 
+/// Where one dispatch reads its state, formulas, and project config.
+///
+/// # Why this exists
+///
+/// The executor used to resolve all three through the `cosmon_filestore`
+/// `*_from` helpers, which consult `COSMON_STATE_DIR`,
+/// `COSMON_FORMULAS_DIR` and `COSMON_CONFIG` **before** the caller-supplied
+/// directory. On a single-tenant CLI that ordering is the feature: an
+/// operator's explicit override outranks walk-up. On the multi-tenant RPP
+/// path it is a confusion of authority — the route authorises and observes
+/// the molecule in the admitted tenant's deterministic store
+/// (`<tenant_root>/.cosmon/state`), and the executor would then load and
+/// mutate whatever store the adapter process happened to inherit. With a
+/// same-named molecule there, the wrong record is dispatched into the
+/// admitted tenant's worktree; without one, an authorised molecule fails as
+/// if it did not exist. The worker envelope pins `COSMON_STATE_DIR` for the
+/// *child*, which cannot repair a read the parent already performed.
+///
+/// So the paths become an explicit value: [`Self::rooted_at`] for a caller
+/// that knows its tenant (the RPP routes, the drain), [`Self::ambient`] for
+/// a caller that genuinely wants operator overrides to win (the CLI, the
+/// resident runtime on a developer machine).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TenantPaths {
+    /// The state directory (`<root>/.cosmon/state`) molecules are read
+    /// from and written to.
+    pub state_dir: PathBuf,
+    /// The directory formula TOML files are resolved against.
+    pub formulas_dir: PathBuf,
+    /// The project config file (`<root>/.cosmon/config.toml`).
+    pub config_path: PathBuf,
+}
+
+impl TenantPaths {
+    /// The deterministic layout under a project root: no environment
+    /// variable can move any of the three.
+    ///
+    /// This is the spelling the RPP adapter's authorisation and observe
+    /// paths already use, so a dispatch cannot read a different store from
+    /// the one the request was admitted against.
+    #[must_use]
+    pub fn rooted_at(root: &Path) -> Self {
+        let cosmon = root.join(cosmon_filestore::resolve::COSMON_DIR_NAME);
+        Self {
+            state_dir: cosmon.join("state"),
+            formulas_dir: cosmon.join("formulas"),
+            config_path: cosmon.join("config.toml"),
+        }
+    }
+
+    /// The historical resolution: `COSMON_STATE_DIR` /
+    /// `COSMON_FORMULAS_DIR` / `COSMON_CONFIG` first, then walk-up from
+    /// `cwd`, then the `$HOME` fallbacks.
+    ///
+    /// Kept for callers that *want* ambient overrides — a `cs` invocation
+    /// whose operator exported one is asking for exactly this.
+    #[must_use]
+    pub fn ambient(cwd: &Path) -> Self {
+        Self {
+            state_dir: cosmon_filestore::resolve_state_dir_from(cwd),
+            formulas_dir: cosmon_filestore::resolve_formulas_dir_from(cwd),
+            config_path: cosmon_filestore::resolve_config_path_from(cwd),
+        }
+    }
+}
+
 /// The library implementation of the runtime's [`Executor`] seam: plan →
 /// execute in-process, spawning through an injectable transport backend
 /// instead of shelling `cs tackle`.
@@ -304,6 +370,14 @@ enum SpawnAttemptFailure {
 /// [`TransportBackend`] the embedder injects (`cosmon_transport`'s
 /// `TmuxBackend` in production, its `MockBackend` in tests).
 ///
+/// # Where it reads from
+///
+/// [`Self::new`] resolves state / formulas / config the way `cs` does —
+/// `COSMON_STATE_DIR` & co. first, then walk-up from `cwd`. A multi-tenant
+/// embedder must not inherit that: it calls [`Self::with_paths`] with
+/// [`TenantPaths::rooted_at`] so the dispatch reads the very store the
+/// request was authorised against.
+///
 /// # Not yet the default
 ///
 /// [`crate::SubprocessExecutor`] remains the default executor for one more
@@ -313,8 +387,14 @@ enum SpawnAttemptFailure {
 /// executor stays available behind its explicit constructor only.
 #[derive(Debug, Clone)]
 pub struct LibraryExecutor<B> {
-    /// Project root containing `.cosmon/` (state resolved by walk-up).
+    /// Project root containing `.cosmon/` — the dispatch's git root and
+    /// the origin of [`TenantPaths::ambient`] walk-up.
     cwd: PathBuf,
+    /// Where this dispatch reads state, formulas, and project config.
+    ///
+    /// Ambient by default (the CLI-shaped caller); [`Self::with_paths`]
+    /// replaces it with the tenant's deterministic layout.
+    paths: TenantPaths,
     /// The transport port workers are spawned through.
     backend: B,
     /// The actor class stamped on the anti-preemption lease.
@@ -329,13 +409,30 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     /// "manual always wins" lease semantics are identical on both paths.
     #[must_use]
     pub fn new(cwd: impl Into<PathBuf>, backend: B) -> Self {
+        let cwd = cwd.into();
+        let paths = TenantPaths::ambient(&cwd);
         Self {
-            cwd: cwd.into(),
+            cwd,
             backend,
             by: TackledBy::Runtime {
                 pid: std::process::id(),
             },
+            paths,
         }
+    }
+
+    /// Pin the state / formulas / config this executor reads, instead of
+    /// resolving them from the ambient environment.
+    ///
+    /// A multi-tenant embedder (the RPP adapter's tackle and run routes)
+    /// MUST call this with [`TenantPaths::rooted_at`] of the admitted
+    /// tenant root: it is what makes the route's "tenant-deterministic"
+    /// claim true for the dispatch itself and not only for the worker it
+    /// spawns.
+    #[must_use]
+    pub fn with_paths(mut self, paths: TenantPaths) -> Self {
+        self.paths = paths;
+        self
     }
 
     /// Override the actor class recorded on the dispatch claim.
@@ -368,7 +465,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         id: &MoleculeId,
         pin: &DispatchPin,
     ) -> Result<TackleReceipt, TackleExecError> {
-        let state_dir = cosmon_filestore::resolve_state_dir_from(&self.cwd);
+        let state_dir = self.paths.state_dir.clone();
         let store = FileStore::new(&state_dir);
         let mol = store.load_molecule(id)?;
         if !mol.status.is_alive() {
@@ -381,7 +478,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // Resolve the formula (best-effort, like the runtime's native-tail
         // drain): an id that does not resolve degrades the per-step pins,
         // it does not block dispatch.
-        let formulas_dir = cosmon_filestore::resolve_formulas_dir_from(&self.cwd);
+        let formulas_dir = &self.paths.formulas_dir;
         let formula_path = formulas_dir.join(format!("{}.formula.toml", mol.formula_id.as_str()));
         let formula = std::fs::read_to_string(&formula_path)
             .ok()
@@ -423,7 +520,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             std::env::var("COSMON_DEFAULT_ADAPTER").ok()
         };
         let env_model = if pinned { None } else { env_default_model() };
-        let config_path = cosmon_filestore::resolve_config_path_from(&self.cwd);
+        let config_path = self.paths.config_path.clone();
         let project_config =
             cosmon_filestore::load_project_config(&config_path).unwrap_or_default();
         let global_cfg_path = global_adapter_config_path();

@@ -1,0 +1,5 @@
+# Pinned so a nightly run is reproducible. pytest is the only runtime
+# dependency: everything else the harness needs (HTTP, JSON, subprocess,
+# temp trees) is in the standard library, which keeps the install a
+# single wheel and the supply chain of a *test* harness to one name.
+pytest==8.3.5
