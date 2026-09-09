@@ -139,6 +139,77 @@ sealed_at = "2026-04-27T14:00:00Z"         # set at provisioning
 
 Multiple `oidc-identity.toml` files MAY exist under the same `nucleon_id` — one Nucléon may have several Orbitales (ADR-063), each authenticating through a different IdP claim. Cross-tenant pivot is impossible: a `sub → nucleon_id` mapping is scoped at provisioning to exactly one `noyau`; the RPP rejects requests whose JWT `sub` resolves to a `nucleon_id` outside the request's tenant routing.
 
+#### 3.1.1 Amendment (2026-09-05) — the callback listener is configurable, the advertised `redirect_uri` is not
+
+*Source: GitHub issue #52, reported externally; implemented in `task-20260904-90e4`.*
+
+Clause (a) says how the RPP resolves an identity it is handed. How the tenant
+*obtains* one is the client's OAuth2-PKCE browser flow (`cosmon-remote login`,
+`delib-20260710-33b7` C7): the client opens a one-shot listener, sends the
+operator to the IdP, and catches the `?code=…&state=…` the browser is bounced
+back with. That listener bound `127.0.0.1` and advertised
+`http://127.0.0.1:7777/callback`, as one indivisible fact.
+
+The reporter falsified the coupling, not the default. Run `cosmon-remote` inside
+a container or a VM and the browser is on another machine. The browser dials
+*its own* `127.0.0.1:7777`; the catcher listens on the container's, and the
+redirect never crosses the boundary. Login cannot be completed at all — not a
+weaker security posture, an unreachable one.
+
+**Two facts, separated.** The **listening interface** becomes an operator knob
+(`login --bind <IP>`, default `127.0.0.1`, carried as the private
+`OidcEndpoints.bind_addr: IpAddr` — an address, with no port beside it). The
+**advertised `redirect_uri`** does not move: it stays the `127.0.0.1` literal, because the IdP enforces its registered
+redirect set by exact match (RFC 8252 §7.3) and because that is precisely the
+address a port-forward from the browser's machine dials. The documented recipe
+is therefore the reporter's own: forward `127.0.0.1:7777` on the browser's
+machine into the container (`ssh -L`, or the runtime's published port) and bind
+`0.0.0.0` inside it.
+
+**What the flag may not carry.** An address, never `host:port`. The invariant to
+hold is "the listener and the advertised URI name the same port", and the first
+two revisions of this change both tried to hold it by *maintaining* two fields.
+The first left `OidcEndpoints.redirect_uri` and a `bind` carrying `{addr, port}`
+public, with `bind` seeded once in `::new`; a caller that assigned
+`redirect_uri` afterwards moved the advertised port and left the listener on the
+old one. The failure is silent by construction — nothing asserts, the listener
+simply waits on a port no browser will dial, until the login timeout. It was
+caught by an existing integration test doing exactly that
+(`oidc_flow::login_and_refresh_carry_identity_against_a_provider_that_gates_on_openid`),
+which hung out its ten seconds and reported "no OAuth redirect arrived". The
+second made both fields private and added `with_redirect_uri`, a setter whose
+whole job was to repair a field the type should never have owned.
+
+**A port stored nowhere cannot drift.** The shape that holds is to store no
+second copy at all. `redirect_uri` is **public** — it is the value the provider
+matches byte-for-byte, nothing about it is secret, and it is the single source of
+truth for the port. `bind_addr: IpAddr` is **private**, defaulting to
+`127.0.0.1`, because it is the one security-relevant degree of freedom here and
+widening it must be a call an operator asked for, not a field assigned in
+passing; `with_bind_addr` is its override. The socket address is **derived at
+bind time** — `OidcEndpoints::callback_addr()` pairs `bind_addr` with the port
+parsed out of `redirect_uri` — so `with_redirect_uri` and the stored port are
+both gone. The invariant is no longer maintained; it is structural.
+
+**Why widening the bind is admissible.** A non-loopback listener lets anyone who
+can reach that interface *connect* to the catcher for the length of one login.
+It does not let them finish it. `oidc::callback::classify_request` refuses to
+terminate the flow on any request that cannot echo the per-flow high-entropy
+`state` — every other request is answered `404` and discarded (the F2 property
+from `task-20260710-a6ae`, already load-bearing against cross-origin preempts) —
+and a code captured off the wire is inert without the PKCE verifier, which never
+leaves the client process. The exposure is real but bounded, and it is
+**opt-in**: the default is unchanged and the widened case prints a one-line
+stderr notice, carrying no `state`, no code and no token, before the browser
+opens.
+
+**Not a profile key.** `--bind` is deliberately per-invocation and is *not*
+added to the `config set` whitelist. A durable profile key would make an
+unusual security posture silent and permanent — a container image built once
+would bind `0.0.0.0` on every subsequent login with nothing in the gesture to
+say so. The knob is needed exactly as often as a login is performed, so a flag
+is the right lifetime for it.
+
 ### 3.2 Clause (b) — Causal closure
 
 > Every admitted request is materialised on disk before any `cs` invocation:

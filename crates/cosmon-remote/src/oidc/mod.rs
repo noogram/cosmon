@@ -15,7 +15,7 @@
 //! This is a **different flow** from [`crate::pkce`], which is the
 //! Claude/Anthropic manual-paste device flow (`/v1/auth/claude/*`) where the
 //! PKCE crypto lives on the server. Here the CLI *is* the OAuth client: it mints
-//! the verifier, derives the S256 challenge, runs a loopback redirect catcher,
+//! the verifier, derives the S256 challenge, runs a callback redirect catcher,
 //! and exchanges the code itself. Keeping the two apart — distinct module,
 //! distinct error type ([`OidcError`], never `Error::Auth`) — is a load-bearing
 //! part of the contract: the brief calls out by name the confusion of reusing
@@ -35,18 +35,22 @@
 //! - [`error`] — [`OidcError`] (C4).
 //! - [`pkce_s256`] — the verifier / S256 challenge / CSRF nonces (C7).
 //! - [`discovery`] — OIDC metadata + the cosmon `client_id` registry (C8).
-//! - [`loopback`] — the bind-before-browser redirect catcher (C7).
+//! - [`callback`] — the bind-before-browser redirect catcher (C7).
 //! - [`exchange`] — the code and refresh token grants (C2).
 //! - [`flow`] — [`login`] / [`ensure_token`] / [`refresh_credential`] /
 //!   [`force_refresh`] / [`logout`] (C2, C6, C7).
 
+pub mod callback;
 pub mod discovery;
 pub mod error;
 pub mod exchange;
 pub mod flow;
-pub mod loopback;
 pub mod pkce_s256;
 
+pub use callback::{
+    parse_callback_target, redirect_uri, CallbackParams, CallbackServer, CALLBACK_PATH,
+    DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
+};
 pub use discovery::{ClientRegistry, OAuthClient, ProviderMetadata, CLIENT_REGISTRY_SCHEMA};
 pub use error::OidcError;
 pub use exchange::TokenResponse;
@@ -54,10 +58,6 @@ pub use flow::{
     bearer_identity, build_authorize_url, cached_access, discover, ensure_token, force_refresh,
     login, logout, refresh_credential, BearerIdentity, CacheState, LoginOutcome, OidcEndpoints,
     RefreshConfig, RefreshRotation, TokenState, LOGIN_TIMEOUT_SECS, REFRESH_LEEWAY_SECS,
-};
-pub use loopback::{
-    parse_callback_target, redirect_uri, CallbackParams, LoopbackServer, CALLBACK_PATH,
-    DEFAULT_REDIRECT_PORT, LOOPBACK_IP,
 };
 pub use pkce_s256::{CodeVerifier, Nonce};
 

@@ -1353,7 +1353,7 @@ fn following_browser(authorize_url: &str) {
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         // Redirect-following is `reqwest`'s default — the 302 lands on the
-        // loopback listener exactly as a browser's would.
+        // callback listener exactly as a browser's would.
         let _ = reqwest::get(&url).await;
     });
 }
@@ -1381,7 +1381,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
         l.local_addr().unwrap().port()
     };
     let http = reqwest::Client::new();
-    let mut endpoints = oidc::discover(
+    let endpoints = oidc::discover(
         &http,
         &server.uri(),
         &server.uri(),
@@ -1392,6 +1392,7 @@ async fn login_and_refresh_carry_identity_against_a_provider_that_gates_on_openi
     )
     .await
     .unwrap();
+    let mut endpoints = endpoints;
     endpoints.redirect_uri = format!("http://127.0.0.1:{port}/callback");
 
     // The scope the client will actually send leads with `openid`.

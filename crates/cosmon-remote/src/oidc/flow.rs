@@ -4,7 +4,7 @@
 //! (delib-20260710-33b7 C2, C6, C7).
 //!
 //! This module orchestrates the pieces — [`super::discovery`],
-//! [`super::pkce_s256`], [`super::loopback`], [`super::exchange`] — and the
+//! [`super::pkce_s256`], [`super::callback`], [`super::exchange`] — and the
 //! credential-store primitives from [`crate::credential`] into three public
 //! gestures:
 //!
@@ -35,10 +35,10 @@ use std::time::Duration;
 use base64::Engine as _;
 use chrono::{DateTime, Utc};
 
+use super::callback::{self, CallbackServer};
 use super::discovery::{ClientRegistry, ProviderMetadata};
 use super::error::OidcError;
 use super::exchange::{self, TokenResponse};
-use super::loopback::{self, LoopbackServer};
 use super::pkce_s256::{CodeVerifier, Nonce};
 use crate::credential::{
     BackendKind, CredentialKey, CredentialStore, SecretToken, StoreOutcome, StoredCredential,
@@ -67,10 +67,29 @@ pub struct OidcEndpoints {
     pub token_endpoint: String,
     /// The provisioned `client_id` (`== aud`).
     pub client_id: String,
-    /// The exact `redirect_uri` (loopback), matched byte-for-byte by the server.
-    pub redirect_uri: String,
     /// The scopes to request.
     pub scopes: Vec<String>,
+    /// The exact `redirect_uri` (loopback), matched byte-for-byte by the
+    /// server. Public: it is the value the provider compares against its
+    /// registered set, and nothing about it is secret. It is also the **single
+    /// source of truth for the callback port** — no port is stored anywhere
+    /// else, so assigning this field cannot leave a listener behind on a stale
+    /// one. See [`Self::callback_addr`].
+    pub redirect_uri: String,
+    /// The interface the callback catcher binds. `127.0.0.1` unless
+    /// [`Self::with_bind_addr`] moved it.
+    ///
+    /// **Private on purpose**, and the only field here that is: it is the one
+    /// security-relevant degree of freedom in this struct. The default is the
+    /// secure one — a catcher no other host can reach — and widening it must be
+    /// a deliberate call an operator asked for (`login --bind`), not a struct
+    /// field someone assigns in passing. Read it with [`Self::bind_addr`].
+    ///
+    /// It carries **no port**. The socket address is derived at bind time from
+    /// this address and the port parsed out of [`Self::redirect_uri`]
+    /// ([`Self::callback_addr`]), so the listener and the advertised URI cannot
+    /// disagree — there is no second copy of the port to drift.
+    bind_addr: std::net::IpAddr,
 }
 
 impl OidcEndpoints {
@@ -90,7 +109,48 @@ impl OidcEndpoints {
             client_id: client_id.into(),
             redirect_uri: redirect_uri.into(),
             scopes,
+            bind_addr: std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
         }
+    }
+
+    /// The interface the callback catcher will bind — `127.0.0.1` unless
+    /// [`Self::with_bind_addr`] overrode it. Exposed read-only because the
+    /// operator notice at login time has to name it.
+    #[must_use]
+    pub fn bind_addr(&self) -> std::net::IpAddr {
+        self.bind_addr
+    }
+
+    /// The socket address the callback catcher binds, **derived, never stored**:
+    /// [`Self::bind_addr`] paired with the port of [`Self::redirect_uri`] — its
+    /// explicit port if it has one, else its scheme's well-known default
+    /// (`http` → 80, `https` → 443, matching what a browser resolves the same
+    /// portless URI to; [`callback::DEFAULT_REDIRECT_PORT`] applies only when
+    /// the URI fails to parse as a URL at all).
+    ///
+    /// Deriving it here is what makes "the listener's port equals the advertised
+    /// URI's port" true *by construction* rather than by maintenance: an earlier
+    /// revision stored the port alongside the URI, and a caller that reassigned
+    /// the URI bound the old port and hung until the login timeout. There is now
+    /// nothing to reassign.
+    #[must_use]
+    pub fn callback_addr(&self) -> std::net::SocketAddr {
+        std::net::SocketAddr::new(self.bind_addr, redirect_port(&self.redirect_uri))
+    }
+
+    /// Override the interface the callback listener binds, leaving
+    /// [`Self::redirect_uri`] untouched.
+    ///
+    /// The default (`127.0.0.1`) is the secure one and needs no call. A
+    /// non-loopback address widens who can reach the catcher for the duration
+    /// of one login; the flow stays sound because
+    /// [`super::callback::CallbackServer::accept`] refuses to terminate on any
+    /// request that cannot echo the per-flow `state`, and the code is useless
+    /// without the PKCE verifier that never leaves this process.
+    #[must_use]
+    pub fn with_bind_addr(mut self, addr: std::net::IpAddr) -> Self {
+        self.bind_addr = addr;
+        self
     }
 
     /// The credential key `(issuer, sub, aud=client_id)` this login persists to.
@@ -258,7 +318,7 @@ pub async fn discover(
     // range, RFC 8252 §7.3), so there is nothing for the reverse-discovery
     // document to publish here. The default is built from the loopback IP
     // literal, so it needs no re-validation.
-    let redirect_uri = loopback::redirect_uri(loopback::DEFAULT_REDIRECT_PORT);
+    let redirect_uri = callback::redirect_uri(callback::DEFAULT_REDIRECT_PORT);
     // We present the OIDC `id_token` as the cosmon bearer (see
     // [`identity_bearer`]); Forgejo only mints an `id_token` when `openid` is in
     // the authorization request. Guarantee it regardless of what the profile or
@@ -330,11 +390,11 @@ pub fn build_authorize_url(
 ///
 /// 1. generate the PKCE `code_verifier` + S256 `code_challenge`, and the CSRF
 ///    `state` nonce;
-/// 2. **bind the loopback listener before opening the browser** (fail fast if
+/// 2. **bind the callback listener before opening the browser** (fail fast if
 ///    the redirect port is taken);
 /// 3. build the authorize URL and hand it to `open` (which opens the browser);
-/// 4. `await` the redirect on the loopback listener (bounded by `timeout`);
-/// 5. verify the echoed `state` (done inside [`LoopbackServer::accept`]);
+/// 4. `await` the redirect on the callback listener (bounded by `timeout`);
+/// 5. verify the echoed `state` (done inside [`CallbackServer::accept`]);
 /// 6. exchange the code + verifier for `{access, refresh, expires_in}`;
 /// 7. persist the triple under `(issuer, sub, client_id)` and return the
 ///    outcome.
@@ -363,9 +423,12 @@ pub async fn login(
     let challenge = verifier.code_challenge();
     let state = Nonce::generate();
 
-    // 2. Bind the loopback listener BEFORE opening the browser (C7 ordering).
-    let port = redirect_port(&endpoints.redirect_uri);
-    let server = LoopbackServer::bind(port).await?;
+    // 2. Bind the callback listener BEFORE opening the browser (C7 ordering).
+    // The port is derived here from `redirect_uri` — the one place it is
+    // written down — paired with the (private) bind address. Nothing stores a
+    // second copy, so the listener cannot be on a port the browser will not
+    // dial.
+    let server = CallbackServer::bind(endpoints.callback_addr()).await?;
 
     // 3. Build the authorize URL and open the browser.
     let authorize_url = build_authorize_url(endpoints, state.as_str(), &challenge)?;
@@ -618,13 +681,22 @@ async fn rotate(
 
 // --- small helpers -------------------------------------------------------
 
-/// The port the loopback listener must bind to match `redirect_uri` exactly.
-/// Falls back to the default when the URI has no explicit port.
+/// The port the callback listener must bind to match `redirect_uri` exactly.
+///
+/// An explicit port wins outright. Absent that, the scheme's well-known
+/// default applies — `http://127.0.0.1/callback` means port 80 to any
+/// browser that follows it, not [`callback::DEFAULT_REDIRECT_PORT`], so
+/// binding anywhere else would silently miss the redirect. The constant is
+/// reached only when `redirect_uri` cannot be parsed as a URL at all, which
+/// [`OidcEndpoints::new`]'s callers avoid by always seeding a real URI.
+/// Called **once**, in [`OidcEndpoints::new`], to seed [`OidcEndpoints::bind`];
+/// the login path then reads the carried value rather than re-parsing the
+/// string.
 fn redirect_port(redirect_uri: &str) -> u16 {
     url::Url::parse(redirect_uri)
         .ok()
-        .and_then(|u| u.port())
-        .unwrap_or(loopback::DEFAULT_REDIRECT_PORT)
+        .and_then(|u| u.port_or_known_default())
+        .unwrap_or(callback::DEFAULT_REDIRECT_PORT)
 }
 
 /// Pick the bearer cosmon-server validates out of a token-endpoint response —
@@ -986,7 +1058,117 @@ mod tests {
     fn redirect_port_parses_or_defaults() {
         assert_eq!(redirect_port("http://127.0.0.1:7777/callback"), 7777);
         assert_eq!(redirect_port("http://127.0.0.1:9000/callback"), 9000);
-        assert_eq!(redirect_port("not a url"), loopback::DEFAULT_REDIRECT_PORT);
+        assert_eq!(redirect_port("not a url"), callback::DEFAULT_REDIRECT_PORT);
+    }
+
+    /// Review finding (task-20260904-6c5f, verdict.json #3): the doc comment on
+    /// `OidcEndpoints` promises the listener and the advertised `redirect_uri`
+    /// agree on the port. A URI with no explicit port means the *scheme's*
+    /// well-known port to any browser that follows it — `http` implies 80,
+    /// `https` implies 443 — never [`callback::DEFAULT_REDIRECT_PORT`]. Before
+    /// the fix this asserted 7777 and passed; a real deployment advertising a
+    /// portless `http://127.0.0.1/callback` would then listen on the wrong
+    /// port and never see the redirect.
+    #[test]
+    fn redirect_port_of_a_portless_uri_is_the_scheme_default() {
+        assert_eq!(redirect_port("http://127.0.0.1/callback"), 80);
+        assert_eq!(redirect_port("https://127.0.0.1/callback"), 443);
+    }
+
+    #[test]
+    fn endpoints_derive_the_callback_addr_from_the_redirect_uri_port() {
+        // Nothing is seeded: the listener's port is read out of the advertised
+        // URI at the moment it is asked for, so the two cannot disagree.
+        let e = OidcEndpoints::new(
+            "https://idp.example",
+            "https://idp.example/authorize",
+            "https://idp.example/token",
+            "client",
+            "http://127.0.0.1:31337/callback",
+            vec!["openid".into()],
+        );
+        assert_eq!(e.callback_addr().to_string(), "127.0.0.1:31337");
+        assert!(e.callback_addr().ip().is_loopback());
+    }
+
+    #[test]
+    fn with_bind_addr_moves_the_listener_and_never_the_redirect_uri() {
+        let e = endpoints().with_bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        let plain = endpoints();
+        // The advertised URI — the byte-for-byte registered value — is untouched.
+        assert_eq!(e.redirect_uri, plain.redirect_uri);
+        // Only the address half moved; the port still matches the URI.
+        assert_eq!(e.callback_addr().port(), plain.callback_addr().port());
+        assert!(!e.callback_addr().ip().is_loopback());
+    }
+
+    /// A free TCP port, obtained by binding and immediately releasing one.
+    /// Used to name a port in a `redirect_uri` that the listener can then
+    /// actually take, so the assertion lands on a bound socket.
+    fn a_free_port() -> u16 {
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind an ephemeral port");
+        let port = l.local_addr().expect("read the ephemeral port").port();
+        drop(l);
+        port
+    }
+
+    /// The regression the old encapsulation existed for: a caller assigned
+    /// `redirect_uri` after construction, the stored bind kept the OLD port, and
+    /// login waited for a redirect that could never arrive.
+    ///
+    /// It can no longer go red by *forgetting* to move a second field — there is
+    /// no second field, which is the point of the design. What it still
+    /// falsifies is the derivation itself: break `callback_addr` so it stops
+    /// reading the port out of `redirect_uri` and this test fails on the bound
+    /// socket. So it is both an executable usage example — assign the URI as
+    /// plainly as possible — and a live guard on the one rule left.
+    #[tokio::test]
+    async fn changing_the_redirect_uri_moves_the_listener_port_with_it() {
+        let port = a_free_port();
+        let mut e = endpoints();
+        e.redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+        let server = super::callback::CallbackServer::bind(e.callback_addr())
+            .await
+            .expect("bind the derived callback address");
+        assert_eq!(server.local_addr().to_string(), format!("127.0.0.1:{port}"));
+    }
+
+    /// Falsifier 3: the two `--bind` cases, asserted on the socket the listener
+    /// actually took rather than on any field.
+    #[tokio::test]
+    async fn the_bind_address_is_the_only_thing_bind_addr_moves() {
+        let port = a_free_port();
+        let uri = format!("http://127.0.0.1:{port}/callback");
+
+        let mut wildcard =
+            endpoints().with_bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        wildcard.redirect_uri = uri.clone();
+        let server = super::callback::CallbackServer::bind(wildcard.callback_addr())
+            .await
+            .expect("bind the wildcard address");
+        assert_eq!(server.local_addr().to_string(), format!("0.0.0.0:{port}"));
+        drop(server);
+
+        let mut plain = endpoints();
+        plain.redirect_uri = uri;
+        let server = super::callback::CallbackServer::bind(plain.callback_addr())
+            .await
+            .expect("bind the default address");
+        assert_eq!(server.local_addr().to_string(), format!("127.0.0.1:{port}"));
+    }
+
+    #[test]
+    fn with_bind_addr_leaves_the_authorize_url_byte_identical() {
+        // Falsifier 2: moving the listener must not perturb what the browser is
+        // sent — the authorize URL is built from redirect_uri alone.
+        let plain = endpoints();
+        let moved =
+            endpoints().with_bind_addr(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            build_authorize_url(&plain, "st", "ch").unwrap(),
+            build_authorize_url(&moved, "st", "ch").unwrap()
+        );
     }
 
     #[test]
