@@ -223,7 +223,7 @@ pub const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
 /// belongs to this worker therefore needs its head, never its body — and the
 /// body is what made the un-pinned scan read every historical rollout on the
 /// host in full.
-const MAX_HEAD_BYTES: u64 = 64 * 1024;
+pub const MAX_HEAD_BYTES: u64 = 64 * 1024;
 
 /// What one session read actually cost on the filesystem.
 ///
@@ -694,6 +694,69 @@ fn clamp_limit(requested: Option<usize>) -> usize {
     requested.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
 }
 
+/// Read both planes for one molecule: the agent transcript, and the live
+/// tmux pane.
+///
+/// Split out of [`get_session`] because it is the whole of the route's
+/// **blocking** work, and it is the part with a policy in it: which planes are
+/// read, in what order, and what gets remembered afterwards. The route around
+/// it is the five-clause admission pipeline plus a projection.
+///
+/// Everything here runs on the blocking pool. A multi-megabyte file read and
+/// a `tmux capture-pane` fork on the async executor stall every other request
+/// served by the same worker thread — the read is bounded now, but bounded is
+/// not free.
+///
+/// # Errors
+///
+/// `Err(())` only when the blocking task itself could not be joined (a
+/// panicking or cancelled pool task). Every *absence* — no locator, no
+/// transcript, no pane — is a `None`, because "nothing was retrievable" is an
+/// answer this route must give as a 200.
+async fn resolve_session_planes(
+    tenant_state_dir: &Path,
+    data: &MoleculeData,
+    molecule_id_str: &str,
+) -> Result<(Option<TranscriptRead>, Option<String>), ()> {
+    let roots = AgentSessionRoots::from_env();
+    let locator = resolve_locator(tenant_state_dir, data);
+    let candidates = session_candidates(
+        molecule_id_str,
+        data.session_name.as_deref(),
+        data.assigned_worker
+            .as_ref()
+            .map(cosmon_core::id::WorkerId::as_str),
+    );
+    // The pane is captured whenever the molecule could still be at a live
+    // prompt — a terminal molecule has no pane, and asking tmux about one
+    // would be a fork per request for a guaranteed miss.
+    let want_pane = !data.status.is_terminal();
+    let (locator, transcript, pane) = tokio::task::spawn_blocking(move || {
+        let mut budget = ReadBudget::default();
+        let transcript = locator
+            .as_ref()
+            .and_then(|l| read_transcript_for(&roots, l, &mut budget));
+        let pane = if want_pane || transcript.is_none() {
+            capture_first_pane(&candidates)
+        } else {
+            None
+        };
+        (locator, transcript, pane)
+    })
+    .await
+    .map_err(|_| ())?;
+
+    // Pin what was resolved, so the next read opens one file instead of
+    // scanning, and so a legacy molecule stops depending on its fleet entry.
+    if let Some(mut locator) = locator {
+        if let Some(found) = transcript.as_ref() {
+            locator = locator.with_transcript(found.path.to_string_lossy());
+        }
+        remember_locator(tenant_state_dir, data, &locator);
+    }
+    Ok((transcript, pane))
+}
+
 /// `GET /v1/molecules/{id}/session` — see module docs.
 pub async fn get_session(
     State(state): State<Arc<AppState>>,
@@ -724,52 +787,13 @@ pub async fn get_session(
         observe_with_state_dir_public(&state, &spark, &jwt, &molecule_id)?;
     let data = &view.data;
 
-    // Resolve the thread: transcript first, pane as the snapshot fallback.
-    //
-    // All of it is filesystem and subprocess work, so it runs on the blocking
-    // pool: a multi-megabyte read and a `tmux capture-pane` fork on the async
-    // executor stall every other request served by the same worker thread.
-    let roots = AgentSessionRoots::from_env();
-    let locator = resolve_locator(&tenant_state_dir, data);
-    let candidates = session_candidates(
-        &molecule_id_str,
-        data.session_name.as_deref(),
-        data.assigned_worker
-            .as_ref()
-            .map(cosmon_core::id::WorkerId::as_str),
-    );
-    // The pane is captured whenever the molecule could still be at a live
-    // prompt — a terminal molecule has no pane, and asking tmux about one
-    // would be a fork per request for a guaranteed miss.
-    let want_pane = !data.status.is_terminal();
-    let read = tokio::task::spawn_blocking(move || {
-        let mut budget = ReadBudget::default();
-        let transcript = locator
-            .as_ref()
-            .and_then(|l| read_transcript_for(&roots, l, &mut budget));
-        let pane = if want_pane || transcript.is_none() {
-            capture_first_pane(&candidates)
-        } else {
-            None
-        };
-        (locator, transcript, pane, budget)
-    })
-    .await
-    .map_err(|_| ApiError {
-        status: StatusCode::INTERNAL_SERVER_ERROR,
-        label: "internal",
-        request_id: Some(spark.request_id.clone()),
-    })?;
-    let (locator, transcript, pane, _budget) = read;
-
-    // Pin what was resolved, so the next read opens one file instead of
-    // scanning, and so a legacy molecule stops depending on its fleet entry.
-    if let Some(mut locator) = locator {
-        if let Some(found) = transcript.as_ref() {
-            locator = locator.with_transcript(found.path.to_string_lossy());
-        }
-        remember_locator(&tenant_state_dir, data, &locator);
-    }
+    let (transcript, pane) = resolve_session_planes(&tenant_state_dir, data, &molecule_id_str)
+        .await
+        .map_err(|()| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "internal",
+            request_id: Some(spark.request_id.clone()),
+        })?;
 
     let truncated = transcript.as_ref().is_some_and(|t| t.truncated);
     let live = pane.is_some()
