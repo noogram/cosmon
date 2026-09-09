@@ -33,7 +33,7 @@ use axum::http::{Request, StatusCode};
 use cosmon_core::harvest_door::{HarvestOptions, ALL_REFUSALS};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
-use cosmon_rpp_adapter::harvest_effect::{HarvestEffectError, HarvestEffectPort};
+use cosmon_rpp_adapter::harvest_effect::{EffectFailure, HarvestEffectPort};
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
@@ -63,7 +63,7 @@ impl HarvestEffectPort for SpyEffect {
         tenant_root: &std::path::Path,
         molecule: &cosmon_core::id::MoleculeId,
         options: &HarvestOptions,
-    ) -> Result<(), HarvestEffectError> {
+    ) -> Result<(), EffectFailure> {
         *self.seen.lock().unwrap() = Some(options.clone());
         // The door does not trust an effect's `Ok`: it re-reads the
         // trunk-side record and derives the outcome from THAT (a
@@ -74,12 +74,12 @@ impl HarvestEffectPort for SpyEffect {
         let store = cosmon_filestore::FileStore::new(tenant_root.join(".cosmon").join("state"));
         let mut data = store
             .load_molecule(molecule)
-            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+            .map_err(|e| EffectFailure::Failed(e.to_string()))?;
         data.merged_at = Some(chrono::Utc::now());
         data.harvest_reason = Some(options.reason.clone());
         store
             .save_molecule(molecule, &data)
-            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+            .map_err(|e| EffectFailure::Failed(e.to_string()))?;
         Ok(())
     }
 
@@ -113,7 +113,7 @@ fn make_state(
         harvest_effect: std::sync::Arc::new(
             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
         ),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.to_path_buf(),
@@ -790,6 +790,110 @@ async fn a_repeat_request_reports_already_landed_in_process() {
     assert_eq!(body["harvest"]["outcome"], "already_landed");
 }
 
+/// The PR #62 finding, end to end and through a **real spawned child**:
+/// a harvest that asks for `no_merge` gets the closure it asked for, and
+/// the route says so instead of naming a hook refusal nobody performed.
+///
+/// The effect is the production [`CsBinaryHarvestEffect`], wired to a
+/// test-local `cs` stub that does exactly what `cs done --no-merge` does
+/// on disk: archive the molecule and record `merge-skipped` trunk-side.
+/// Nothing about the interpretation is stubbed — that is the half under
+/// test, and a spy returning `Ok(())` would have hidden the defect the way
+/// the argv-only test did.
+///
+/// Before the fix this answered `409 pre_done_refused`; the retry then
+/// answered `already_landed`, so the *first* successful closure was the
+/// only one reported as a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_requested_no_merge_closure_is_a_success_through_the_real_binary_effect() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    let planted = tenant_a
+        .insert_molecule("task-20260909-skip", &json!({"status": "completed"}))
+        .unwrap();
+
+    // The state the sealed `cs done --no-merge` transaction leaves behind:
+    // archived, no `merged_at`, and the deliberate skip written down.
+    let mut after: Value = serde_json::from_slice(&std::fs::read(&planted).unwrap()).unwrap();
+    after["archived"] = json!(true);
+    after["non_integration"] = json!({
+        "reason": "merge-skipped",
+        "at": chrono::Utc::now().to_rfc3339(),
+        "base_branch": "main",
+        "detail": "`cs done --no-merge`: integration skipped by the operator, branch preserved",
+    });
+    let scratch = tempfile::tempdir().unwrap();
+    let after_path = scratch.path().join("after.json");
+    std::fs::write(&after_path, serde_json::to_vec(&after).unwrap()).unwrap();
+
+    let cs = scratch.path().join("cs");
+    std::fs::write(
+        &cs,
+        format!(
+            "#!/bin/sh\ncp '{}' '{}'\nexit 0\n",
+            after_path.display(),
+            planted.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cs, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect =
+        Arc::new(cosmon_rpp_adapter::harvest_effect::CsBinaryHarvestEffect::new(&cs))
+            as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-nomerge");
+
+    let body = json!({
+        "reason": "closing without integrating: the branch stays for review",
+        "no_merge": true,
+    });
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260909-skip",
+            Body::from(serde_json::to_string(&body).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a closure the requester asked for is a success, not a refusal",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let first: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(first["harvest"]["outcome"], "closed_without_merge");
+    assert_eq!(
+        first["harvest"]["merged"], false,
+        "the success must say plainly that nothing reached the trunk",
+    );
+    assert_eq!(first["harvest"]["non_integration"], "merge-skipped");
+
+    // The retry: idempotent, still naming that nothing landed.
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260909-skip",
+            Body::from(serde_json::to_string(&body).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let again: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(again["harvest"]["outcome"], "already_landed");
+    assert_eq!(again["harvest"]["merged"], false);
+}
+
 /// The issue #54 claim itself: the decision half and idempotence answer
 /// correctly against an image that carries **no `cs` binary at all** —
 /// since U6 the adapter has no `cs` path to configure in the first
@@ -879,4 +983,136 @@ async fn an_unknown_molecule_is_not_an_existence_oracle() {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "not_found", "{id}");
     }
+}
+
+/// The PR #62 review's third finding, at the wire: a refusal the effect
+/// produced at its **authority boundary** — before touching anything, so
+/// with no trunk-side record to re-derive it from — arrives as its own
+/// label and status, not as an anonymous `500 harvest_failed`.
+///
+/// Restore the stringifying bridge between the two effect traits and this
+/// goes red on the status: `403 not_authorized` becomes `500`.
+#[tokio::test]
+async fn a_typed_effect_refusal_keeps_its_label_across_the_bridge() {
+    /// An effect that declines and writes nothing — what an authority
+    /// boundary looks like from outside.
+    #[derive(Debug)]
+    struct RefusingEffect;
+    impl HarvestEffectPort for RefusingEffect {
+        fn harvest(
+            &self,
+            _tenant_root: &std::path::Path,
+            _molecule: &cosmon_core::id::MoleculeId,
+            _options: &HarvestOptions,
+        ) -> Result<(), EffectFailure> {
+            Err(EffectFailure::Refused(
+                cosmon_core::harvest_door::DoorRefusal::NotAuthorized,
+            ))
+        }
+        fn binds_trunk_lock(&self) -> bool {
+            true
+        }
+    }
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-typed");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::new(RefusingEffect) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-typed");
+
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-typed",
+            bare("close it if you may"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a refusal the effect named must keep its status across the seam",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_authorized");
+}
+
+/// The PR #62 review's fifth finding, at the wire: `if_completed: true` on
+/// work that is still running is the documented **successful no-op**, not
+/// `409 not_completed`.
+///
+/// The spy proves the second half of the claim: the effect is never
+/// reached, so the door answers from one store read rather than by
+/// spawning a sealed transaction to learn the same fact. And `merged` is
+/// false — a caller reading the 200 alone must not conclude the branch
+/// shipped, because the molecule has not even finished.
+#[tokio::test]
+async fn if_completed_on_running_work_is_a_successful_no_op() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    tenant_a
+        .insert_molecule("task-20260901-sweep", &json!({"status": "running"}))
+        .unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-sweep");
+
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-sweep",
+            Body::from(
+                serde_json::to_string(&json!({
+                    "reason": "the sweep closes whatever finished",
+                    "if_completed": true,
+                }))
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the sweep declared this condition acceptable by sending the option",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["harvest"]["outcome"], "no_op");
+    assert_eq!(body["harvest"]["merged"], false);
+    assert!(
+        spy.last().is_none(),
+        "a no-op must not spawn a sealed transaction to discover it is one",
+    );
+
+    // Without the option, the same molecule is still refused: the no-op is
+    // one request's answer, not an amnesty for `not_completed`.
+    let resp = app
+        .oneshot(done_request(
+            &jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-sweep-2"),
+            "task-20260901-sweep",
+            bare("close it whatever state it is in"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_completed");
 }

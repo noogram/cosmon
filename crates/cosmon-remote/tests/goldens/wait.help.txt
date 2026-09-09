@@ -9,7 +9,7 @@ Options:
       --for <FOR>                      Statuses to wait for, comma-separated. Defaults to the terminal set, so `wait <id>` means "until it is over" [default: completed,collapsed]
       --profile <PROFILE>              Profile name (default: `default_profile` from config.toml, or `$COSMON_REMOTE_PROFILE`)
       --json                           Render machine-readable JSON instead of human text where applicable
-      --timeout <TIMEOUT>              Maximum seconds to wait before giving up [default: 600]
+      --timeout <TIMEOUT>              Maximum seconds to wait before giving up. An absolute deadline: it bounds the request in flight, not only the sleep between two of them, so an answer that arrives late is a timeout even when it would have been a success. The contract is your clock [default: 600]
       --poll-interval <POLL_INTERVAL>  Seconds between polls. Clamped to the remaining budget, so a value larger than `--timeout` still terminates on time [default: 5]
       --token <TOKEN>                  Bearer JWT (overrides `$COSMON_REMOTE_TOKEN`). When unset and an authenticated call is made, the CLI uses the OIDC credential recorded by `login`, refreshing it silently; run `login` if none is stored
       --quiet                          Suppress the per-transition progress lines. Implied by `--json`

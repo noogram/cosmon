@@ -142,7 +142,7 @@ fn make_state(security_dir: &Path, home_dir: &Path, token_url: String) -> AppSta
         harvest_effect: std::sync::Arc::new(
             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
         ),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.to_path_buf(),
@@ -644,7 +644,7 @@ async fn auth_claude_disabled_returns_503() {
         harvest_effect: std::sync::Arc::new(
             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
         ),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security.path().to_path_buf(),
@@ -698,7 +698,7 @@ async fn molecule_routes_unaffected_by_auth_claude_addition() {
         harvest_effect: std::sync::Arc::new(
             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
         ),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security.path().to_path_buf(),

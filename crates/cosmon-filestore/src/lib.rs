@@ -159,6 +159,57 @@ impl FileStore {
             .join(id.as_str())
     }
 
+    /// Path to the durable session locator sidecar
+    /// (`fleets/{fleet}/molecules/{id}/session-locator.json`).
+    ///
+    /// Public because two crates address it: `cosmon-runtime` writes it at
+    /// dispatch, the RPP adapter's session route reads it after teardown.
+    #[must_use]
+    pub fn session_locator_path(&self, id: &MoleculeId) -> PathBuf {
+        self.molecule_dir(id)
+            .join(cosmon_core::session_thread::SESSION_LOCATOR_FILE)
+    }
+
+    /// Record where this molecule's agent transcript can be found.
+    ///
+    /// Written at dispatch, so the transcript stays reachable after `cs done`
+    /// / `cs purge` remove the fleet worker entry the resolution used to
+    /// depend on — see [`cosmon_core::session_thread::SessionLocator`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the molecule directory cannot be created, the
+    /// locator cannot be serialised, or the write fails.
+    pub fn save_session_locator(
+        &self,
+        id: &MoleculeId,
+        locator: &cosmon_core::session_thread::SessionLocator,
+    ) -> Result<(), CosmonError> {
+        let path = self.session_locator_path(id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let body = serde_json::to_string_pretty(locator)?;
+        fs::write(&path, body)?;
+        Ok(())
+    }
+
+    /// Read the durable session locator, or `None` when the molecule predates
+    /// it (legacy) or the sidecar is unreadable.
+    ///
+    /// Deliberately infallible in the return type: a missing or corrupt
+    /// locator is a *fallback* condition for the reader, not an error the
+    /// caller can act on — the session route then tries the legacy fleet
+    /// entry, exactly as it did before this sidecar existed.
+    #[must_use]
+    pub fn load_session_locator(
+        &self,
+        id: &MoleculeId,
+    ) -> Option<cosmon_core::session_thread::SessionLocator> {
+        let body = fs::read_to_string(self.session_locator_path(id)).ok()?;
+        serde_json::from_str(&body).ok()
+    }
+
     fn molecule_path(&self, id: &MoleculeId) -> PathBuf {
         self.molecule_dir(id).join("state.json")
     }

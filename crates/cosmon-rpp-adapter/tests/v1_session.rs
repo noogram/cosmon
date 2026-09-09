@@ -102,9 +102,11 @@ async fn fixture() -> Fixture {
 
     let state = AppState {
         harvest_effect: Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(Arc::new(
-            cosmon_transport::MockBackend::new(),
-        )),
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::Fixed(
+            cosmon_rpp_adapter::worker_env::SharedBackend(Arc::new(
+                cosmon_transport::MockBackend::new(),
+            )),
+        ),
         state_dir: security_dir.path().to_path_buf(),
         inbox_root: security_dir.path().join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -172,15 +174,81 @@ async fn get_session(fx: &Fixture, uri: &str, token: Option<&str>) -> (StatusCod
     (status, body)
 }
 
-/// Seed a molecule bound to a worker whose recorded worktree is `cwd`, and
-/// plant `log` as that worker's claude session transcript.
+/// Absolute path of the persistent molecule directory for a `default`-fleet
+/// molecule under this tenant. Teardown does **not** remove it, which is why
+/// the session locator lives there.
+fn molecule_dir(tenant: &TenantPath, id: &str) -> std::path::PathBuf {
+    tenant
+        .state_dir
+        .join("fleets")
+        .join("default")
+        .join("molecules")
+        .join(id)
+}
+
+/// The fake worktree a seeded worker is recorded against. Distinct per worker
+/// so each test sanitises to its own `projects/` subdirectory (see
+/// [`claude_root`]).
+fn worker_cwd(worker: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("cosmon-session-{worker}"))
+}
+
+/// Plant `log` as the claude session transcript for a worker whose worktree
+/// is `cwd`.
+fn plant_transcript(cwd: &std::path::Path, log: &str) {
+    let project =
+        claude_root()
+            .join("projects")
+            .join(cosmon_core::session_thread::sanitise_agent_path(
+                &cwd.to_string_lossy(),
+            ));
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("session.jsonl"), log).unwrap();
+}
+
+/// Seed a **closed** molecule the way the world looks after `cs done`: the
+/// transcript is on disk, the durable session locator names its worktree, and
+/// there is **no fleet worker entry at all** — teardown removed it.
 ///
-/// This is the post-mortem path on purpose: nothing here is alive. No tmux
-/// session exists in the test environment, the molecule is `completed`, and
-/// the transcript still resolves from the *recorded* cwd — which is the whole
-/// claim the route makes.
+/// The previous version of this fixture kept an `Active` fleet entry while
+/// calling itself post-mortem, which is exactly the state normal teardown
+/// does not leave behind: it made the retrospective read look like it worked
+/// when the only locator it had was one `cs done` deletes.
 fn seed_worker_with_transcript(tenant: &TenantPath, id: &str, worker: &str, log: &str) {
-    let cwd = std::env::temp_dir().join(format!("cosmon-session-{worker}"));
+    let cwd = worker_cwd(worker);
+    plant_transcript(&cwd, log);
+
+    tenant
+        .insert_molecule(
+            id,
+            &serde_json::json!({
+                "status": "completed",
+                "assigned_worker": worker,
+                "adapter": "claude",
+            }),
+        )
+        .unwrap();
+
+    let locator = cosmon_core::session_thread::SessionLocator::new(
+        cwd.to_string_lossy(),
+        Some("claude".to_owned()),
+    );
+    let dir = molecule_dir(tenant, id);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join(cosmon_core::session_thread::SESSION_LOCATOR_FILE),
+        serde_json::to_string_pretty(&locator).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Seed a molecule the way a **legacy** dispatch left it: an `Active` fleet
+/// worker carrying the worktree, and no locator sidecar. This is the state of
+/// every molecule dispatched before the sidecar existed.
+fn seed_legacy_worker_with_transcript(tenant: &TenantPath, id: &str, worker: &str, log: &str) {
+    let cwd = worker_cwd(worker);
+    plant_transcript(&cwd, log);
+
     let mut w = WorkerData::new(
         WorkerId::new(worker).unwrap(),
         AgentId::new("claude").unwrap(),
@@ -194,25 +262,33 @@ fn seed_worker_with_transcript(tenant: &TenantPath, id: &str, worker: &str, log:
     fleet.workers.insert(w.id.clone(), w);
     store.save_fleet(&fleet).unwrap();
 
-    let project =
-        claude_root()
-            .join("projects")
-            .join(cosmon_core::session_thread::sanitise_agent_path(
-                &cwd.to_string_lossy(),
-            ));
-    std::fs::create_dir_all(&project).unwrap();
-    std::fs::write(project.join("session.jsonl"), log).unwrap();
-
     tenant
         .insert_molecule(
             id,
             &serde_json::json!({
-                "status": "completed",
+                "status": "running",
                 "assigned_worker": worker,
                 "adapter": "claude",
             }),
         )
         .unwrap();
+}
+
+/// Perform the fleet-side half of `cs done` / `cs purge`: remove the worker
+/// entry (`crates/cosmon-cli/src/cmd/done.rs`, step 4). Nothing else about
+/// the molecule changes — the transcript stays on disk, the molecule
+/// directory stays where it is.
+fn purge_worker_from_fleet(tenant: &TenantPath, worker: &str) {
+    let store = cosmon_filestore::FileStore::new(&tenant.state_dir);
+    let mut fleet = store.load_fleet().unwrap();
+    assert!(
+        fleet
+            .workers
+            .remove(&WorkerId::new(worker).unwrap())
+            .is_some(),
+        "the fixture must have a worker for teardown to remove"
+    );
+    store.save_fleet(&fleet).unwrap();
 }
 
 /// A four-entry claude transcript: the operator's brief, two worker turns, one
@@ -429,4 +505,63 @@ async fn a_malformed_id_is_a_404_not_a_shell_argument() {
             "id {bad:?} must not be served"
         );
     }
+}
+
+#[tokio::test]
+async fn the_thread_survives_the_worker_purge_that_cs_done_performs() {
+    // The finding, reproduced end to end. A legacy molecule (fleet entry, no
+    // locator) is read once — which resolves the transcript AND writes the
+    // durable locator. Then teardown removes the fleet entry, exactly as
+    // `cs done` step 4 does. Before the locator existed the second read
+    // returned `source: none` with the transcript still sitting on disk.
+    let fx = fixture().await;
+    let id = "task-20260909-tear";
+    seed_legacy_worker_with_transcript(&fx.tenant, id, "w-teardown", &transcript("all green"));
+    let token = logs_jwt(&fx, "jti-teardown");
+
+    let (status, before) =
+        get_session(&fx, &format!("/v1/molecules/{id}/session"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["source"], "claude-transcript");
+
+    purge_worker_from_fleet(&fx.tenant, "w-teardown");
+
+    let (status, after) =
+        get_session(&fx, &format!("/v1/molecules/{id}/session"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        after["source"], "claude-transcript",
+        "the transcript is still on disk; only the fleet entry is gone"
+    );
+    assert_eq!(after["total"], before["total"]);
+    assert_eq!(after["entries"], before["entries"]);
+}
+
+#[tokio::test]
+async fn a_first_read_writes_the_locator_so_teardown_cannot_take_it() {
+    // The migration half, stated separately: the sidecar is what survives,
+    // so its existence after the first read is the property, not a detail of
+    // the test above.
+    let fx = fixture().await;
+    let id = "task-20260909-migr";
+    seed_legacy_worker_with_transcript(&fx.tenant, id, "w-migrate", &transcript("done"));
+    let sidecar =
+        molecule_dir(&fx.tenant, id).join(cosmon_core::session_thread::SESSION_LOCATOR_FILE);
+    assert!(!sidecar.exists(), "a legacy molecule starts without one");
+
+    let token = logs_jwt(&fx, "jti-migrate");
+    let (status, _) = get_session(&fx, &format!("/v1/molecules/{id}/session"), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let written: cosmon_core::session_thread::SessionLocator =
+        serde_json::from_str(&std::fs::read_to_string(&sidecar).unwrap()).unwrap();
+    assert_eq!(
+        written.cwd,
+        worker_cwd("w-migrate").to_string_lossy(),
+        "the locator records the worktree the fleet entry named"
+    );
+    assert!(
+        written.transcript.is_some(),
+        "the resolved transcript is pinned, so the next read opens one file"
+    );
 }

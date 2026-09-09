@@ -3707,7 +3707,11 @@ pub(super) fn create_worktree(
     // second copy of the idempotence probes is a first copy that will one
     // day disagree. Behaviour (idempotence, unborn-HEAD seeding, operator
     // identity pinning) is unchanged; only the error type is adapted.
+    // The ownership receipt (issue #57 review, finding 1) is consumed by
+    // the library executor's rollback seam; this CLI path keeps its own
+    // `cleanup_partial_tackle`, so the receipt is not needed here.
     cosmon_runtime::tackle_exec::create_worktree(repo_root, worktree_path, branch, start_point)
+        .map(|_ownership| ())
         .map_err(|e| anyhow::anyhow!("{e}"))
 }
 

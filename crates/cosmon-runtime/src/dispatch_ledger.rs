@@ -251,6 +251,23 @@ pub fn commit_dispatch(
         return Err(e);
     }
 
+    // The durable transcript locator, written once, here — the only place
+    // that knows the worktree and the adapter at the instant the dispatch is
+    // committed. Best-effort by design: the molecule is fully recorded and
+    // about to be spawned, and refusing a healthy dispatch because a
+    // read-convenience sidecar could not be written would trade a working
+    // worker for a readable history. What it buys is that the transcript
+    // stays locatable after `cs done` / `cs purge` remove the fleet entry
+    // this read used to depend on — see
+    // [`cosmon_core::session_thread::SessionLocator`].
+    let _ = store.save_session_locator(
+        &mol_id,
+        &cosmon_core::session_thread::SessionLocator::new(
+            record.worktree_path.to_string_lossy(),
+            Some(record.adapter.as_str().to_owned()),
+        ),
+    );
+
     Ok((
         updated,
         DispatchRecorded {
@@ -655,6 +672,39 @@ mod tests {
         // from this instant onwards.
         let fleet = store.load_fleet().expect("fleet");
         assert!(fleet.workers.contains_key(&worker));
+    }
+
+    /// The dispatch records **where the transcript will be**, in a file that
+    /// outlives the fleet entry.
+    ///
+    /// Without this, the only locator was `fleet.workers[worker].repo`, and
+    /// `cs done` deletes that — so the session read went `source: none` the
+    /// moment a molecule closed normally, with the agent log still on disk.
+    /// The second half of this test is the teardown itself.
+    #[test]
+    fn the_dispatch_records_a_transcript_locator_that_outlives_the_fleet_entry() {
+        let (dir, store, mol) = fixture();
+        let worker = WorkerId::new("rewrite-briefing-aaaa").expect("worker id");
+        let adapter = adapter();
+        commit_dispatch(&store, &mol, &record(&worker, &adapter, dir.path()))
+            .expect("commit must succeed");
+
+        let locator = store
+            .load_session_locator(&mol.id)
+            .expect("the dispatch writes the locator");
+        assert_eq!(locator.cwd, dir.path().to_string_lossy());
+        assert_eq!(locator.adapter.as_deref(), Some("claude"));
+
+        // `cs done` step 4, reduced to the write that matters here.
+        let mut fleet = store.load_fleet().expect("fleet");
+        assert!(fleet.workers.remove(&worker).is_some());
+        store.save_fleet(&fleet).expect("save fleet");
+
+        assert_eq!(
+            store.load_session_locator(&mol.id),
+            Some(locator),
+            "teardown removes the worker, never the molecule's own record"
+        );
     }
 
     /// COSMON #35 §4 — a re-dispatch thaws.

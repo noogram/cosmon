@@ -45,6 +45,17 @@
 #      PASS/FAIL exactly as before (delegated to the other three
 #      provenance harnesses, which this script re-runs and folds into
 #      its own verdict so one green run covers the whole gate).
+#   8. Suffixed integration branches (2026-09-09): one external issue
+#      answered by several chained PRs needs several branch names, so a
+#      branch may read `feat/issue-<N>-<slug>`. A stacked merge between
+#      two suffixed branches is accepted exactly like a bare one — the
+#      slug names the PR, not the provenance.
+#   9. The slug buys no leniency: a suffixed integration branch whose
+#      second parent carries a plain, non-provenance merge is still
+#      rejected, naming that inner commit.
+#  10. Nor does it weaken the agreement rule: a PR-shaped subject with a
+#      slug whose PR number disagrees with the branch's issue number
+#      still falls through to the ordinary rejection.
 #
 # Exit codes: 0 all passed | 1 a scenario failed | 2 harness setup error
 
@@ -189,6 +200,57 @@ basesync_issue=$(git rev-parse HEAD)
 git checkout -q main
 git merge -q --no-ff --no-edit -m "evolve(task-20260905-a007)" feat/issue-13
 
+# --- Scenario 8: stacked merge between two SUFFIXED integration branches.
+#     Issue 20 is answered by two chained PRs; each gets its own branch
+#     name, both naming issue 20's sibling issue numbers in the same shape.
+mol_8a="task-20260909-a008"
+mol_8b="task-20260909-a009"
+git checkout -q -b feat/issue-21-session main
+git checkout -q -b "feat/$mol_8b"
+echo w8b > w8b.txt && git add w8b.txt && git commit -q -m "evolve($mol_8b): work"
+git checkout -q feat/issue-21-session
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_8b'" "feat/$mol_8b"
+
+git checkout -q -b feat/issue-20-done main
+git checkout -q -b "feat/$mol_8a"
+echo w8a > w8a.txt && git add w8a.txt && git commit -q -m "evolve($mol_8a): work"
+git checkout -q feat/issue-20-done
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_8a'" "feat/$mol_8a"
+git merge -q --no-ff --no-edit \
+    -m "Merge branch 'feat/issue-21-session' into feat/issue-20-done" feat/issue-21-session
+stacked_suffixed=$(git rev-parse HEAD)
+
+git checkout -q main
+git merge -q --no-ff --no-edit \
+    -m "Merge pull request #20 from noogram/feat/issue-20-done" feat/issue-20-done
+pr_suffixed=$(git rev-parse HEAD)
+
+# --- Scenario 9: suffixed branch carrying a non-clean merge, still rejected.
+mol_9="task-20260909-a010"
+git checkout -q -b feat/issue-22-status main
+git checkout -q -b "feat/$mol_9"
+echo w9 > w9.txt && git add w9.txt && git commit -q -m "evolve($mol_9): work"
+git checkout -q feat/issue-22-status
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_9'" "feat/$mol_9"
+
+git checkout -q -b rogue-22 main
+echo r22 > r22.txt && git add r22.txt && git commit -q -m "unreviewed material"
+git checkout -q feat/issue-22-status
+git merge -q --no-ff --no-edit -m "fix: sneak it in behind a slug" rogue-22
+bad_inner_suffixed=$(git rev-parse HEAD)
+
+git checkout -q main
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/issue-22-status'" feat/issue-22-status
+local_suffixed_dirty=$(git rev-parse HEAD)
+
+# --- Scenario 10: suffixed branch, PR number disagrees with issue number.
+git checkout -q -b feat/issue-23-review main
+echo w10 > w10.txt && git add w10.txt && git commit -q -m "evolve(task-20260909-a011): work"
+git checkout -q main
+git merge -q --no-ff --no-edit \
+    -m "Merge pull request #98 from noogram/feat/issue-23-review" feat/issue-23-review
+pr_suffixed_mismatch=$(git rev-parse HEAD)
+
 out=$(run_gate)
 
 grep -q "^ok    $pr_clean" <<<"$out" && r=0 || r=1
@@ -213,6 +275,23 @@ verdict "5b. mismatch is refused as an ordinary bad subject, not an integration 
 
 grep -q "^ok    $basesync_issue" <<<"$out" && r=0 || r=1
 verdict "6. base-sync onto feat/issue-<N> accepted" 0 "$r"
+
+grep -q "^ok    $pr_suffixed" <<<"$out" && r=0 || r=1
+verdict "8a. suffixed integration branch landed via PR accepted" 0 "$r"
+grep -q "^ok    $stacked_suffixed" <<<"$out" && r=0 || r=1
+verdict "8b. stacked merge between two suffixed branches accepted" 0 "$r"
+grep -q "^ok    $stacked_suffixed  (issue-20)" <<<"$out" && r=0 || r=1
+verdict "8c. stacked verdict keys on the target's <N>, not the slug" 0 "$r"
+
+grep -q "^FAIL  $local_suffixed_dirty" <<<"$out" && r=0 || r=1
+verdict "9a. suffixed branch with a bad inner merge still rejected" 0 "$r"
+grep -A3 "^FAIL  $local_suffixed_dirty" <<<"$out" | grep -q "$bad_inner_suffixed" && r=0 || r=1
+verdict "9b. rejection names the offending inner commit" 0 "$r"
+
+grep -q "^FAIL  $pr_suffixed_mismatch" <<<"$out" && r=0 || r=1
+verdict "10a. suffixed PR-number/issue-number mismatch still refused" 0 "$r"
+grep -A3 "^FAIL  $pr_suffixed_mismatch" <<<"$out" | grep -q "subject does not match" && r=0 || r=1
+verdict "10b. mismatch refused as an ordinary bad subject" 0 "$r"
 
 if [ "$failed" -ne 0 ]; then
     printf '%s\n' "$out" | sed 's/^/      /'
