@@ -129,11 +129,18 @@ impl From<CosmonError> for LandError {
 /// What the decision half concluded, when it did not refuse.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoorDecision {
-    /// This exact harvest already landed (or archived, for the no-branch
-    /// molecule). The caller reports the same success as the first call and
-    /// mutates nothing — idempotence is what makes a retry over a network
-    /// that loses responses safe.
-    AlreadyLanded,
+    /// This exact harvest already happened — the branch landed, or the
+    /// molecule was archived without one. The caller reports the same
+    /// success as the first call and mutates nothing — idempotence is what
+    /// makes a retry over a network that loses responses safe.
+    ///
+    /// `merged` is what keeps the retry as informative as the call it
+    /// repeats: an archived `no_merge` closure and a landed merge are both
+    /// "already done", and only this field separates them.
+    AlreadyLanded {
+        /// Whether the molecule's branch is on the trunk.
+        merged: bool,
+    },
     /// Every pre-effect check passed; the sealed effect may proceed. The
     /// load-bearing authority check still happens *at the effect boundary*,
     /// under the trunk lock, with every fact re-derived there (ADR-172 D3)
@@ -218,7 +225,9 @@ pub fn decide(
     //    disjunct that closes the no-branch molecule's loop — it never
     //    stamps `merged_at` because it has nothing to merge.
     if mol.merged_at.is_some() || mol.archived {
-        return Ok(DoorDecision::AlreadyLanded);
+        return Ok(DoorDecision::AlreadyLanded {
+            merged: mol.merged_at.is_some(),
+        });
     }
 
     // 3. Admissibility. `is_terminal()` is `Completed | Collapsed`, and only
@@ -303,7 +312,7 @@ pub fn land(
     })?;
 
     match decide(store, cfg, molecule, options)? {
-        DoorDecision::AlreadyLanded => return Ok(DoorOutcome::AlreadyLanded),
+        DoorDecision::AlreadyLanded { merged } => return Ok(DoorOutcome::AlreadyLanded { merged }),
         DoorDecision::Proceed => {}
     }
 
@@ -317,10 +326,10 @@ pub fn land(
         effect.harvest(molecule, options)
     };
 
-    interpret_effect(store, molecule, effect_result)
+    interpret_effect(store, molecule, options, effect_result)
 }
 
-/// The door's post-effect interpretation.
+/// The door's post-effect interpretation, **relative to what was asked**.
 ///
 /// The effect succeeding is not by itself proof that the work landed:
 /// `--if-completed` exits success on a no-op, and a molecule with no branch
@@ -328,21 +337,39 @@ pub fn land(
 /// record answers — for failure too, where the record beats the error text
 /// (the sealed transaction writes `non_integration` under the lock on every
 /// failure path).
+///
+/// # Why `options` is a parameter here
+///
+/// A record alone does not say whether what happened is what the requester
+/// wanted. `merge-skipped` is written by a *successful* `cs done
+/// --no-merge`, and reading it without the request produced the PR #62
+/// defect: a closure the operator asked for came back as
+/// `pre_done_refused`, a hook refusal nobody performed, and only the retry
+/// — by then archived — reported success. Interpretation therefore takes
+/// the requested options, and [`closure_without_merge`] is the one place
+/// that decides which non-integration records a given request had asked
+/// for.
 fn interpret_effect(
     store: &dyn StateStore,
     molecule: &MoleculeId,
+    options: &HarvestOptions,
     effect_result: Result<(), String>,
 ) -> Result<DoorOutcome, LandError> {
     match effect_result {
         Ok(()) => {
             let after = store.load_molecule(molecule)?;
             match after.non_integration.as_ref() {
-                None if after.merged_at.is_some() || after.archived => Ok(DoorOutcome::Landed),
+                None if after.merged_at.is_some() => Ok(DoorOutcome::Landed),
+                // Archived with nothing recorded: terminal, and nothing
+                // reached the trunk. Reporting it as `Landed` would tell a
+                // caller the branch shipped when it did not.
+                None if after.archived => Ok(DoorOutcome::ClosedWithoutMerge),
                 None => Err(LandError::Refused(DoorRefused::with(
                     DoorRefusal::NotCompleted,
                     "the harvest was a no-op and nothing was recorded",
                 ))),
-                Some(record) => Err(LandError::Refused(refusal_from_record(record))),
+                Some(record) => closure_without_merge(options, &after, record)
+                    .ok_or_else(|| LandError::Refused(refusal_from_record(record))),
             }
         }
         Err(message) => {
@@ -358,14 +385,54 @@ fn interpret_effect(
     }
 }
 
+/// The non-integration records that are a **success** for this request,
+/// or `None` when the record names something nobody asked for.
+///
+/// Both admitted shapes have the same signature on disk — archived,
+/// terminal, no `merged_at` — and the same recovery, which is none: no
+/// retry will integrate them, because integration was never the point.
+///
+/// * `merge-skipped` **and** `no_merge` requested: the operator asked for
+///   closure without integration and got exactly that. Without the second
+///   half of that condition the record still refuses — a skip nobody
+///   requested is a fact about the world the requester must be told, and
+///   this function is deliberately not a blanket amnesty for the reason
+///   tag.
+/// * `no-branch`: there was nothing to integrate. No option produces it and
+///   none suppresses it; `cs done` archives and exits zero.
+///
+/// Everything else — a conflict, a hard merge failure, a refused
+/// `pre_done` gate — is a refusal whatever was requested.
+fn closure_without_merge(
+    options: &HarvestOptions,
+    after: &cosmon_state::MoleculeData,
+    record: &NonIntegration,
+) -> Option<DoorOutcome> {
+    if !after.archived || after.merged_at.is_some() {
+        return None;
+    }
+    match record.reason {
+        NonIntegrationReason::MergeSkipped if options.no_merge => {
+            Some(DoorOutcome::ClosedWithoutMerge)
+        }
+        NonIntegrationReason::NoBranch => Some(DoorOutcome::ClosedWithoutMerge),
+        _ => None,
+    }
+}
+
 /// Map the trunk-side non-integration record to a door refusal.
 ///
 /// The two mechanical reasons are the ones ADR-176 D7 calls an *execution
 /// event* and a *configuration error*; `PreDoneRefused` is the *verdict*.
-/// `NoBranch` and `MergeSkipped` cannot arise on this path — the door never
-/// passes `--no-merge`, and a molecule with no branch archives successfully —
-/// so they are mapped to the refusal whose recovery is the same (a human
-/// looks) rather than given a variant that no request can produce.
+///
+/// `NoBranch` and `MergeSkipped` reach this function only when the door's
+/// private `closure_without_merge` has already declined them — a `merge-skipped`
+/// record on a request that never sent `no_merge`, or either record on a
+/// molecule the effect left un-archived. Both mean the world did something
+/// the requester did not ask for, and the recovery is the same as a refused
+/// gate: a human looks. They are mapped there rather than given a variant
+/// of their own, which is why this function is not the place that decides
+/// whether a skip was requested.
 #[must_use]
 pub fn refusal_from_record(record: &NonIntegration) -> DoorRefused {
     let refusal = match record.reason {
@@ -836,7 +903,7 @@ mod tests {
         });
 
         let out = land(&w.store, &armed(), &id, &opts(), &mut InertEffect).expect("idempotent");
-        assert_eq!(out, DoorOutcome::AlreadyLanded);
+        assert_eq!(out, DoorOutcome::AlreadyLanded { merged: true });
     }
 
     #[test]
@@ -931,10 +998,135 @@ mod tests {
         }
     }
 
+    /// An effect that closes the molecule the way `cs done --no-merge`
+    /// does: it archives, and it records the deliberate skip trunk-side.
+    /// Nothing failed — the operator asked for exactly this.
+    struct SkippingEffect<'a> {
+        w: &'a World,
+        reason: NonIntegrationReason,
+    }
+    impl SealedHarvestEffect for SkippingEffect<'_> {
+        fn binds_trunk_lock(&self) -> bool {
+            true
+        }
+        fn harvest(
+            &mut self,
+            molecule: &MoleculeId,
+            _options: &HarvestOptions,
+        ) -> Result<(), String> {
+            let mut m = self.w.store.load_molecule(molecule).expect("load");
+            m.archived = true;
+            m.non_integration = Some(NonIntegration {
+                reason: self.reason,
+                at: chrono::Utc::now(),
+                base_branch: Some("main".to_owned()),
+                detail: Some("integration skipped by the operator".to_owned()),
+            });
+            self.w.store.save_molecule(molecule, &m).expect("save");
+            Ok(())
+        }
+    }
+
+    /// The PR #62 defect: a harvest that *asked* for `no_merge` and got
+    /// exactly that read as `pre_done_refused` — a hook refusal nobody
+    /// performed — because the door interpreted the record without ever
+    /// looking at what was requested.
+    #[test]
+    fn a_requested_no_merge_closure_is_a_success_not_a_hook_refusal() {
+        let w = world();
+        let id = mol("task-20260909-skip");
+        plant(&w, &id, MoleculeStatus::Completed, |_| {});
+
+        let mut asked = opts();
+        asked.no_merge = true;
+        let out = land(
+            &w.store,
+            &armed(),
+            &id,
+            &asked,
+            &mut SkippingEffect {
+                w: &w,
+                reason: NonIntegrationReason::MergeSkipped,
+            },
+        )
+        .expect("a requested no-merge closure is a success");
+        assert_eq!(out, DoorOutcome::ClosedWithoutMerge);
+        assert!(!out.merged(), "nothing was merged and the outcome says so");
+
+        // And the retry, now that the molecule is archived, is the
+        // idempotent success — still naming that nothing landed.
+        let again = land(
+            &w.store,
+            &armed(),
+            &id,
+            &asked,
+            &mut SkippingEffect {
+                w: &w,
+                reason: NonIntegrationReason::MergeSkipped,
+            },
+        )
+        .expect("the retry is idempotent");
+        assert_eq!(again, DoorOutcome::AlreadyLanded { merged: false });
+    }
+
+    /// The converse, which is what keeps the fix from being a blanket
+    /// amnesty: a `merge-skipped` record on a request that never asked
+    /// for it is still a refusal. Interpretation is relative to the
+    /// requested options, not to the record alone.
+    #[test]
+    fn an_unrequested_merge_skip_is_still_refused() {
+        let w = world();
+        let id = mol("task-20260909-nask");
+        plant(&w, &id, MoleculeStatus::Completed, |_| {});
+
+        match land(
+            &w.store,
+            &armed(),
+            &id,
+            &opts(),
+            &mut SkippingEffect {
+                w: &w,
+                reason: NonIntegrationReason::MergeSkipped,
+            },
+        ) {
+            Err(LandError::Refused(r)) => assert_eq!(r.refusal, DoorRefusal::PreDoneRefused),
+            other => panic!("an unrequested skip must still refuse, got {other:?}"),
+        }
+    }
+
+    /// The same defect on the path the old comment claimed could not
+    /// arise: a molecule with no branch archives successfully and records
+    /// `no-branch`, and the door read that success as a refused hook.
+    #[test]
+    fn a_molecule_with_no_branch_closes_successfully() {
+        let w = world();
+        let id = mol("task-20260909-nobr");
+        plant(&w, &id, MoleculeStatus::Completed, |_| {});
+
+        let out = land(
+            &w.store,
+            &armed(),
+            &id,
+            &opts(),
+            &mut SkippingEffect {
+                w: &w,
+                reason: NonIntegrationReason::NoBranch,
+            },
+        )
+        .expect("a molecule with nothing to integrate closes");
+        assert_eq!(out, DoorOutcome::ClosedWithoutMerge);
+    }
+
     #[test]
     fn every_non_integration_reason_maps_to_a_named_refusal() {
         // Exhaustive over the persisted partition, so a sixth reason added
         // to `cosmon-state` cannot reach the door as an unnamed failure.
+        //
+        // This pins the *refusal* mapping only. Whether a record reaches
+        // it at all is `closure_without_merge`'s question, asked first and
+        // asked with the request in hand — which is why `NoBranch` and
+        // `MergeSkipped` still appear here with a refusal beside them and
+        // are nonetheless successes on the requests that asked for them.
         use NonIntegrationReason as R;
         let cases = [
             (R::Conflict, DoorRefusal::MergeConflict),

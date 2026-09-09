@@ -542,6 +542,11 @@ async fn already_landed_is_still_a_success_envelope_for_the_client() {
         .await
         .expect("200");
     assert_eq!(landed.harvest.outcome, "already_landed");
+    // The typed client decodes the two fields the door added with the PR
+    // #62 fix, and the retry states the same integration fact the first
+    // call did: this molecule's branch is on the trunk.
+    assert_eq!(landed.harvest.merged, Some(true));
+    assert_eq!(landed.harvest.non_integration, None);
 }
 
 /// The pre-effect refusals, walked end to end across three crates.
