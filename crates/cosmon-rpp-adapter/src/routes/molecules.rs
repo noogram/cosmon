@@ -1544,7 +1544,15 @@ pub async fn tackle_molecule(
         claude_model: state.claude_model.clone(),
     };
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
+    // The paths are pinned to the admitted tenant, not resolved from the
+    // adapter process's environment: this dispatch must read the very store
+    // `run_observe` authorised the molecule in. Without the pin, an
+    // inherited `COSMON_STATE_DIR` / `COSMON_FORMULAS_DIR` / `COSMON_CONFIG`
+    // outranks the tenant root inside the executor, and the worker envelope
+    // — which pins the *child*'s view — cannot undo a read the parent has
+    // already performed.
     let executor = LibraryExecutor::new(&tenant_root, backend)
+        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
         .with_tackled_by(cosmon_core::tackle::TackledBy::Human);
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
@@ -1836,7 +1844,11 @@ pub async fn run_molecule(
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // Default actor class: `runtime:<pid>` — the drain's dispatches are
     // runtime claims (never sticky), exactly as `cs run`'s were.
-    let executor = LibraryExecutor::new(&tenant_root, backend);
+    // Same tenant pin as the tackle route: the drain compiles its DAG from
+    // the deterministic tenant store, and every dispatch it makes must read
+    // that store too.
+    let executor = LibraryExecutor::new(&tenant_root, backend)
+        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root));
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,
