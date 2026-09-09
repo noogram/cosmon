@@ -1,0 +1,35 @@
+# tests/e2e/pyproject.toml — the e2e harness is its own Python project.
+#
+# It lives beside the tests rather than at the repo root because it is
+# not part of the Rust workspace's build and must never be installed by
+# it: `pip install -r tests/e2e/requirements.txt` is a deliberate,
+# separate gesture an operator (or the nightly CI job) performs.
+#
+# The pytest configuration is here so that `pytest tests/e2e` picks it
+# up through rootdir discovery no matter which directory it is invoked
+# from — the same walk-up property the `cs` CLI has.
+
+[project]
+name = "cosmon-rpp-e2e"
+version = "0.1.0"
+description = "Container-level end-to-end harness for the §8j Remote Pilot Port"
+requires-python = ">=3.9"
+# Runtime dependencies are pinned in requirements.txt, not here: this
+# project is never published, and a pinned lock is what makes a nightly
+# reproducible.
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["."]
+# `-ra` prints the reason for every non-passing outcome at the end, which
+# is the line a nightly reader wants; `--strict-markers` makes a typo in
+# `@pytest.mark.stack` an error instead of a silently unselected test.
+addopts = "-ra --strict-markers --tb=short"
+markers = [
+    "stack: needs the real docker compose stack (docker daemon required; never skipped, see conftest.py)",
+]
+junit_family = "xunit2"
+# The suite's own log stream is the debugging channel: `-o log_cli=true`
+# turns it on live, and it is captured into the JUnit report either way.
+log_format = "%(asctime)s %(levelname)-5s %(name)s: %(message)s"
+log_date_format = "%H:%M:%S"
