@@ -299,10 +299,21 @@ pub struct HarvestLanded {
     /// The molecule that was closed, and integrated where the second
     /// authority arose.
     pub molecule: String,
-    /// `landed`, or `already_landed` when the harvest had already
-    /// happened — the idempotent reply that makes a retry over a lossy
-    /// network safe.
+    /// `landed`, `closed_without_merge` when the closure deliberately
+    /// integrated nothing, `no_op` when `if_completed` was sent and there
+    /// was nothing to close, or `already_landed` when the harvest had
+    /// already happened — the idempotent reply that makes a retry over a
+    /// lossy network safe.
     pub outcome: String,
+    /// Whether the branch is on the trunk. `None` only against a server
+    /// older than the field; a caller deciding whether the work shipped
+    /// must read this rather than infer it from the 200.
+    #[serde(default)]
+    pub merged: Option<bool>,
+    /// The kebab-case `non_integration` reason when nothing was
+    /// integrated (`merge-skipped`, `no-branch`), `None` when it was.
+    #[serde(default)]
+    pub non_integration: Option<String>,
 }
 
 /// Body of `POST /v1/molecules/{id}/done` — the harvest door's full

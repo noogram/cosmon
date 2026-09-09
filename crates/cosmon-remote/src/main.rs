@@ -1591,7 +1591,17 @@ async fn run_molecule(
             if json {
                 print_json(true, &serde_json::to_value(&env)?);
             } else {
-                println!("{} — {}", env.harvest.molecule, env.harvest.outcome);
+                // Name the trunk-side fact, not only the label: a
+                // `closed_without_merge` success left the branch where it
+                // was, and an operator reading one line should not have to
+                // fetch the result route to learn why.
+                match env.harvest.non_integration.as_deref() {
+                    Some(reason) => println!(
+                        "{} — {} (not integrated: {reason})",
+                        env.harvest.molecule, env.harvest.outcome,
+                    ),
+                    None => println!("{} — {}", env.harvest.molecule, env.harvest.outcome),
+                }
             }
         }
         MoleculeCmd::Run { id } => {

@@ -296,11 +296,18 @@ second directory, a second trunk, a second lock — not a field. A Nucléon may
 hold N Orbitales (ADR-063), so provisioning a second one is not harder than
 provisioning a second token.
 
-### D6 — Auto-propel is disarmed on the remote path
+### D6 — Auto-propel is disarmed by default on the remote path
 
-**The remote harvest path MUST NOT auto-propel.** `--propel-message` is
+> **Amended by the D4 reversal (2026-09-09).** The absolute prohibition
+> below is **retired**; the operative requirement is the one stated in
+> *D6 does not travel with D4* above, and repeated at the end of this
+> section. It is retired rather than deleted because the three reasons
+> are still the reasons — they are what the scope requirement answers,
+> and a reader who found only the new rule would not know what it costs.
+
+~~**The remote harvest path MUST NOT auto-propel.** `--propel-message` is
 unreachable (D4) and the escalation ladder's propel rung is off, not
-merely defaulted off. Three independent reasons, each sufficient:
+merely defaulted off.~~ Three independent reasons, each sufficient:
 
 1. **It is `cs whisper --to-session` in substance.** The escalation propels a
    live worker session with an instruction. Cross-session text injection into a
@@ -318,6 +325,21 @@ merely defaulted off. Three independent reasons, each sufficient:
    outcome is then rendered as `merged_after_{n}_escalation(s)`
    (`crates/cosmon-cli/src/cmd/done.rs:2296`): a **success label**. Neither the
    closed list nor ADR-124 mentions this path.
+
+**What stands after the amendment.** Auto-propel on this route is **off by
+default and armable only with `cosmon:worker:spawn`** — the scope that
+already means *this request may spend agent budget*. The D4 reversal put
+`--propel-message` back within reach of a requester who **is** the
+operator, and an option reachable by that requester cannot also be
+"unreachable"; keeping the absolute sentence would have left the ADR with
+two current requirements and let a reader pick. What the three reasons buy
+is not the prohibition but the price: reason 2 is exactly why the arming
+condition is a *spend* scope and not a boolean, and reasons 1 and 3 are why
+the default is off rather than on. The condition that would restore the
+prohibition is D4's own: **a requester who is not the operator**. In that
+phase the requester authors the briefing an escalated agent reads and does
+not own the trunk it resolves against, and reason 3 stops being a price and
+becomes an injection surface with a beneficiary.
 
 ### D7 — Three failure policies, and they are three
 
@@ -506,8 +528,13 @@ This decision is violated if any of these becomes true:
 3. A grant issued against one base authorises an effect on another, or survives
    a change to a covered field (ADR-172 D3, inherited).
 4. A closure that did not merge deletes the branch (D3).
-5. The remote path propels a worker, on any code path, under any flag name
-   (D6).
+5. ~~The remote path propels a worker, on any code path, under any flag name
+   (D6).~~ **Amended with D6 (2026-09-09)**, for the reason falsifier 1 was:
+   a requester who is the operator may arm it. Replaced by the falsifier the
+   amendment actually owns — *the remote path propels a worker without
+   `cosmon:worker:spawn`, or propels one for a request that did not arm it*
+   — which is what `arming_auto_propel_needs_the_spawn_scope` and the
+   route's default-off assertion pin.
 6. `base_not_fast_forward` is first reported at request time rather than at
    capability arming (D7).
 7. The `pre_done` queue is unbounded, or reaching its bound is silent rather
@@ -738,3 +765,34 @@ This does **not** restore the general §3.5 clause (e) subprocess envelope that
 issue #54 U6 retired. It is one port, one verb, one operator-declared binary,
 off by default, with no PATH discovery — a door that found its own executor
 would change behaviour the day someone else's `cs` appeared on the host.
+
+### Amendment (2026-09-09, PR #62 review) — a requested closure is not a refusal
+
+The reporters of the PR #62 review found the door reading one of its own
+successes as a refusal. `cs done --no-merge` archives the molecule and
+records `merge-skipped` trunk-side — a *deliberate* choice, written down
+(§the `record_non_integration` rationale in `cmd/done.rs`). The door then
+re-read that record and mapped it, with `no-branch`, to `pre_done_refused`:
+a blocking hook gate that nobody had run, for a closure the requester had
+explicitly asked for. The first successful no-merge harvest answered `409`;
+only its retry answered success, and by then the molecule was archived.
+
+The cause was interpreting the effect **without the request**. A record says
+what happened; only the options say whether that is what was wanted. So
+`interpret_effect` now takes the `HarvestOptions`, and `DoorOutcome` grows a
+third success — `closed_without_merge` — for the two shapes where closure
+happened and integration deliberately did not:
+
+- `merge-skipped` **with** `no_merge` requested. Without that flag the
+  record still refuses: this is not an amnesty for the tag, it is
+  interpretation relative to the request.
+- `no-branch`, which no option produces and none suppresses. `cs done`
+  archives and exits zero; the door said `pre_done_refused` for it too.
+
+The seven ADR-176 refusals and their exit codes 70–76 are untouched, as is
+`missing_reason` at 77 — no refusal was renamed, retired, or widened. What
+changed is that two states which were never refusals stopped being reported
+as one. Every success now also answers `DoorOutcome::merged`, and the route
+publishes it alongside the kebab-case `non_integration` tag the result route
+already carries, so no client has to infer from a `200` that the branch
+shipped.
