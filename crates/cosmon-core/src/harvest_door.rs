@@ -244,15 +244,38 @@ impl fmt::Display for DoorRefusal {
 }
 
 /// What the door did when it did not refuse.
+///
+/// # Why closure and integration are separate successes
+///
+/// `cs done` carries two authorities (D2), and a request may deliberately
+/// exercise only the first: `no_merge` closes the molecule and leaves the
+/// branch where it is. That is the operator getting exactly what they
+/// asked for, so it is a success — but it is not [`Self::Landed`], because
+/// nothing reached the trunk and a caller that read it as a landing would
+/// be wrong about the one fact the trunk cares about. Hence a third
+/// variant rather than a boolean bolted onto the second: every outcome
+/// answers [`Self::merged`] on its own, and no caller has to reconstruct
+/// the answer from the options it happened to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoorOutcome {
-    /// The molecule was closed and, where the second authority arose, its
-    /// branch landed on the resolved base.
+    /// The molecule was closed and its branch landed on the resolved base.
     Landed,
-    /// The harvest had already landed. The door mutates nothing and reports
-    /// the same success as the first call — idempotence is what makes a
-    /// retried request safe over a network that loses responses.
-    AlreadyLanded,
+    /// The molecule was closed and **nothing was integrated**, because the
+    /// request asked for that (`no_merge`) or because there was no branch
+    /// to integrate. A success: the closure authority was exercised in
+    /// full and the trunk was deliberately left alone. The kebab-case
+    /// reason is on the molecule's `non_integration` record, which the
+    /// result route already publishes.
+    ClosedWithoutMerge,
+    /// The harvest had already happened. The door mutates nothing and
+    /// reports the same success as the first call — idempotence is what
+    /// makes a retried request safe over a network that loses responses.
+    /// `merged` restates which of the two first-call successes it was, so
+    /// a retry is not less informative than the call it repeats.
+    AlreadyLanded {
+        /// Whether the molecule's branch is on the trunk.
+        merged: bool,
+    },
 }
 
 impl DoorOutcome {
@@ -261,7 +284,22 @@ impl DoorOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Landed => "landed",
-            Self::AlreadyLanded => "already_landed",
+            Self::ClosedWithoutMerge => "closed_without_merge",
+            Self::AlreadyLanded { .. } => "already_landed",
+        }
+    }
+
+    /// Whether this outcome put the molecule's branch on the trunk.
+    ///
+    /// The one question the label alone cannot answer for every variant,
+    /// and the one a caller deciding whether the work shipped must not
+    /// have to guess at.
+    #[must_use]
+    pub const fn merged(self) -> bool {
+        match self {
+            Self::Landed => true,
+            Self::ClosedWithoutMerge => false,
+            Self::AlreadyLanded { merged } => merged,
         }
     }
 }

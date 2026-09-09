@@ -790,6 +790,110 @@ async fn a_repeat_request_reports_already_landed_in_process() {
     assert_eq!(body["harvest"]["outcome"], "already_landed");
 }
 
+/// The PR #62 finding, end to end and through a **real spawned child**:
+/// a harvest that asks for `no_merge` gets the closure it asked for, and
+/// the route says so instead of naming a hook refusal nobody performed.
+///
+/// The effect is the production [`CsBinaryHarvestEffect`], wired to a
+/// test-local `cs` stub that does exactly what `cs done --no-merge` does
+/// on disk: archive the molecule and record `merge-skipped` trunk-side.
+/// Nothing about the interpretation is stubbed — that is the half under
+/// test, and a spy returning `Ok(())` would have hidden the defect the way
+/// the argv-only test did.
+///
+/// Before the fix this answered `409 pre_done_refused`; the retry then
+/// answered `already_landed`, so the *first* successful closure was the
+/// only one reported as a failure.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_requested_no_merge_closure_is_a_success_through_the_real_binary_effect() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    let planted = tenant_a
+        .insert_molecule("task-20260909-skip", &json!({"status": "completed"}))
+        .unwrap();
+
+    // The state the sealed `cs done --no-merge` transaction leaves behind:
+    // archived, no `merged_at`, and the deliberate skip written down.
+    let mut after: Value = serde_json::from_slice(&std::fs::read(&planted).unwrap()).unwrap();
+    after["archived"] = json!(true);
+    after["non_integration"] = json!({
+        "reason": "merge-skipped",
+        "at": chrono::Utc::now().to_rfc3339(),
+        "base_branch": "main",
+        "detail": "`cs done --no-merge`: integration skipped by the operator, branch preserved",
+    });
+    let scratch = tempfile::tempdir().unwrap();
+    let after_path = scratch.path().join("after.json");
+    std::fs::write(&after_path, serde_json::to_vec(&after).unwrap()).unwrap();
+
+    let cs = scratch.path().join("cs");
+    std::fs::write(
+        &cs,
+        format!(
+            "#!/bin/sh\ncp '{}' '{}'\nexit 0\n",
+            after_path.display(),
+            planted.display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&cs, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect =
+        Arc::new(cosmon_rpp_adapter::harvest_effect::CsBinaryHarvestEffect::new(&cs))
+            as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-nomerge");
+
+    let body = json!({
+        "reason": "closing without integrating: the branch stays for review",
+        "no_merge": true,
+    });
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260909-skip",
+            Body::from(serde_json::to_string(&body).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "a closure the requester asked for is a success, not a refusal",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let first: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(first["harvest"]["outcome"], "closed_without_merge");
+    assert_eq!(
+        first["harvest"]["merged"], false,
+        "the success must say plainly that nothing reached the trunk",
+    );
+    assert_eq!(first["harvest"]["non_integration"], "merge-skipped");
+
+    // The retry: idempotent, still naming that nothing landed.
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260909-skip",
+            Body::from(serde_json::to_string(&body).unwrap()),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let again: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(again["harvest"]["outcome"], "already_landed");
+    assert_eq!(again["harvest"]["merged"], false);
+}
+
 /// The issue #54 claim itself: the decision half and idempotence answer
 /// correctly against an image that carries **no `cs` binary at all** —
 /// since U6 the adapter has no `cs` path to configure in the first

@@ -217,23 +217,99 @@ mod tests {
         assert!(matches!(err, HarvestEffectError::Unavailable));
     }
 
+    /// Write an executable stub `cs` that appends its own argv to
+    /// `log`, one argument per line, and exits zero.
+    ///
+    /// A stub rather than a mock object because the claim under test is
+    /// about a **child process**: what `Command` was actually built with,
+    /// including `current_dir` and the argv the operator's binary would
+    /// see. An in-process assertion on `cs_done_argv` cannot fail if
+    /// `harvest` stops passing it.
+    #[cfg(unix)]
+    fn stub_cs(dir: &Path, log: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let script = dir.join("cs");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\npwd >> '{}'\nexit 0\n",
+                log.display(),
+                log.display(),
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
     /// The falsifier for "the parameter reaches the effect": the argv the
-    /// `cs` child is spawned with is the one the requester's options build,
-    /// including a non-default strategy and the caller's own reason.
+    /// `cs` child is **spawned** with is the one the requester's options
+    /// build, including a non-default strategy and the caller's own
+    /// reason — read back from the child itself, not from the builder
+    /// this side of the fork.
+    #[cfg(unix)]
     #[test]
     fn the_cs_child_is_spawned_with_the_requested_options() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant_root = tmp.path().join("galaxy");
+        std::fs::create_dir_all(&tenant_root).unwrap();
+        let log = tmp.path().join("argv.txt");
+        let effect = CsBinaryHarvestEffect::new(stub_cs(tmp.path(), &log));
+
         let mut options = HarvestOptions::new("the spike answered its question");
         options.strategy = cosmon_core::harvest_door::MergeStrategy::FfOnly;
         options.force = true;
 
-        let argv = options.cs_done_argv("task-20260101-abcd");
+        effect
+            .harvest(
+                &tenant_root,
+                &MoleculeId::new("task-20260101-abcd").unwrap(),
+                &options,
+            )
+            .expect("the stub child exits zero");
+
+        let seen = std::fs::read_to_string(&log).expect("the child must have run");
+        let argv: Vec<&str> = seen.lines().collect();
         assert_eq!(argv[0], "done");
         assert_eq!(argv[1], "task-20260101-abcd");
-        let strategy_at = argv.iter().position(|a| a == "--strategy").unwrap();
+        let strategy_at = argv.iter().position(|a| *a == "--strategy").unwrap();
         assert_eq!(argv[strategy_at + 1], "ff-only");
-        let reason_at = argv.iter().position(|a| a == "--reason").unwrap();
+        let reason_at = argv.iter().position(|a| *a == "--reason").unwrap();
         assert_eq!(argv[reason_at + 1], "the spike answered its question");
-        assert!(argv.iter().any(|a| a == "--force"));
+        assert!(argv.iter().any(|a| *a == "--force"));
+        // The child also runs in the tenant's own galaxy root: a `cs done`
+        // executed anywhere else would harvest a different kernel.
+        let cwd = std::fs::canonicalize(argv.last().unwrap()).unwrap();
+        assert_eq!(cwd, std::fs::canonicalize(&tenant_root).unwrap());
+    }
+
+    /// A child that exits with a door refusal code is reported as that
+    /// **named** refusal, never as an anonymous failure — the mirror
+    /// `DoorRefusal::from_exit_code` exists for.
+    #[cfg(unix)]
+    #[test]
+    fn a_refusing_child_is_reported_as_its_named_refusal() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let tmp = tempfile::tempdir().unwrap();
+        let script = tmp.path().join("cs");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\nexit {}\n", DoorRefusal::BacklogFull.exit_code()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let err = CsBinaryHarvestEffect::new(&script)
+            .harvest(
+                tmp.path(),
+                &MoleculeId::new("task-20260101-abcd").unwrap(),
+                &HarvestOptions::new("close it"),
+            )
+            .unwrap_err();
+        match err {
+            HarvestEffectError::Refused(r) => assert_eq!(r, DoorRefusal::BacklogFull),
+            other => panic!("a door exit code must stay named, got {other:?}"),
+        }
     }
 
     #[test]

@@ -738,3 +738,34 @@ This does **not** restore the general §3.5 clause (e) subprocess envelope that
 issue #54 U6 retired. It is one port, one verb, one operator-declared binary,
 off by default, with no PATH discovery — a door that found its own executor
 would change behaviour the day someone else's `cs` appeared on the host.
+
+### Amendment (2026-09-09, PR #62 review) — a requested closure is not a refusal
+
+The reporters of the PR #62 review found the door reading one of its own
+successes as a refusal. `cs done --no-merge` archives the molecule and
+records `merge-skipped` trunk-side — a *deliberate* choice, written down
+(§the `record_non_integration` rationale in `cmd/done.rs`). The door then
+re-read that record and mapped it, with `no-branch`, to `pre_done_refused`:
+a blocking hook gate that nobody had run, for a closure the requester had
+explicitly asked for. The first successful no-merge harvest answered `409`;
+only its retry answered success, and by then the molecule was archived.
+
+The cause was interpreting the effect **without the request**. A record says
+what happened; only the options say whether that is what was wanted. So
+`interpret_effect` now takes the `HarvestOptions`, and `DoorOutcome` grows a
+third success — `closed_without_merge` — for the two shapes where closure
+happened and integration deliberately did not:
+
+- `merge-skipped` **with** `no_merge` requested. Without that flag the
+  record still refuses: this is not an amnesty for the tag, it is
+  interpretation relative to the request.
+- `no-branch`, which no option produces and none suppresses. `cs done`
+  archives and exits zero; the door said `pre_done_refused` for it too.
+
+The seven ADR-176 refusals and their exit codes 70–76 are untouched, as is
+`missing_reason` at 77 — no refusal was renamed, retired, or widened. What
+changed is that two states which were never refusals stopped being reported
+as one. Every success now also answers `DoorOutcome::merged`, and the route
+publishes it alongside the kebab-case `non_integration` tag the result route
+already carries, so no client has to infer from a `200` that the branch
+shipped.
