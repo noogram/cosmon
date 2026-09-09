@@ -132,7 +132,7 @@ ARCHIVE — durable proof\-of\-work trail (ADR\-030, see docs/archive.md):
   cs archive prune \-\-dry\-run      what [archive.retention] would delete
   cs archive prune                execute the retention policy
 .PP
-Terminal transitions (cs done / cs collapse / cs freeze / cs stuck) populate \*(Aq.cosmon/state/archive/YYYY/MM/<id>/\*(Aq when [archive] enabled = true in the project config. The archive outlives worktree teardown — a fresh clone sees every merged molecule\*(Aqs canonical snapshot without running cs.
+Terminal transitions (cs done / cs collapse / cs freeze / cs stuck) populate \*(Aq.cosmon/state/archive/YYYY/MM/<id>/\*(Aq when [archive] enabled = true in the project config — the default since 2026\-09 (issue #60); set enabled = false to opt out. Enabling is not retroactive: molecules that terminated before it was on left nothing behind to archive. The archive outlives worktree teardown — a fresh clone sees every merged molecule\*(Aqs canonical snapshot without running cs. If \*(Aqcs archive list\*(Aq shows entries that never reach git status, run \*(Aqcs doctor gitignore\*(Aq.
 .PP
 Worked example — verify the current month\*(Aqs archive in CI:
   cs archive list \-\-year "$(date +%Y)" \-\-month "$(date +%m)" \-\-json \\

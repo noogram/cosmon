@@ -22,6 +22,7 @@ configuration surface without reading cosmon source code.
 | `[worker]` | Worker behavior on completion | no |
 | `[hooks]` | Lifecycle hook commands | no |
 | `[gates]` | Verification gate commands (language-agnostic) | no |
+| `[archive]` | Durable proof-of-work archive: on/off and retention | no |
 
 All sections except `[project]` are optional and default to sensible
 values. Missing sections never produce an error.
@@ -323,6 +324,49 @@ the target repository. When that repository belongs to a third party, cosmon's
 scaffolding is visible in their tree. Declaring `target_repo` makes this
 *legible* rather than accidental; a separate `worktrees_root` is what would
 make it *movable*. See ADR-170.
+
+## `[archive]` — the durable proof-of-work archive
+
+```toml
+[archive]
+enabled = false          # opt out; the default is true
+
+[archive.retention]
+keep_all     = true      # safety switch; must be false before anything is deleted
+max_age_days = 0         # 0 disables the age rule
+max_total_mb = 0         # 0 disables the size rule
+keep_kinds   = ["decision", "deliberation"]
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `enabled` | `true` | Terminal transitions (`cs done`, `cs collapse`, `cs freeze`, `cs stuck`) write a canonical snapshot under `.cosmon/state/archive/YYYY/MM/<id>/`. |
+| `retention.keep_all` | `true` | `cs archive prune` never deletes anything while this is set. |
+| `retention.max_age_days` | `0` | Age above which an entry becomes a deletion candidate; `0` disables the rule. |
+| `retention.max_total_mb` | `0` | Soft cap on total archive size, oldest-first eviction; `0` disables the rule. |
+| `retention.keep_kinds` | `["decision", "deliberation"]` | Molecule kinds never deleted regardless of age or size pressure. |
+
+`enabled` defaults to `true` since 2026-09 (issue #60). `cs done` tears the
+worktree down, and every artifact a molecule wrote outside the diff goes
+with it; that loss is silent and cannot be undone afterwards, because at
+that point the data no longer exists. Retention defaults to the safe
+"keep everything", so having the subsystem on never deletes anything later.
+
+Three consequences worth knowing:
+
+* **Activation is not retroactive.** Molecules that terminated while the
+  archive was off left nothing behind to archive.
+* **An existing galaxy needs no command for the default.** It is applied
+  when `config.toml` is parsed, so a config with no `[archive] enabled`
+  line picks it up on the next `cs` invocation. A config that says
+  `enabled = false` keeps the archive off — a default is not an override.
+* **The archive is meant to reach git.** `.cosmon/.gitignore` ignores
+  runtime state in bulk and re-includes `state/archive/`. Galaxies created
+  before 2026-09, and galaxies whose ignore file was hand-edited, can be
+  silently excluding it. `cs doctor gitignore` puts the question to real
+  git and names the rule; `cs init --upgrade` is the repair.
+
+Full model, layout and CI recipes: [`docs/archive.md`](archive.md).
 
 ## `config.toml` vs `CLAUDE.md` — overlap and source of truth
 

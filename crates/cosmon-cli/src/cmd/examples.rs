@@ -1142,9 +1142,12 @@ pub const ARCHIVE: &str = "EXAMPLES:
 
 Operator view onto `.cosmon/state/archive/`. Terminal transitions
 (`cs done` / `cs collapse` / `cs freeze` / `cs stuck`) populate the
-archive when `[archive] enabled = true` in the project config. The
-archive outlives worktree teardown and branch deletion — a fresh
-clone sees every merged molecule's canonical snapshot.
+archive when `[archive] enabled = true` in the project config — the
+default since 2026-09; set `enabled = false` to opt out. Enabling is
+not retroactive. The archive outlives worktree teardown and branch
+deletion — a fresh clone sees every merged molecule's canonical
+snapshot. If entries never reach `git status`, run
+`cs doctor gitignore`.
 
 Retention is controlled by `[archive.retention]` in config.toml:
   keep_all      (default true)  — safety switch; must be false to delete

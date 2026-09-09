@@ -356,7 +356,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         println!("  project_id: {authoritative_project_id}");
         println!();
         println!("  .cosmon/");
-        println!("    .gitignore          # ignores runtime state");
+        println!("    .gitignore          # ignores runtime state, tracks state/archive/");
         println!("    config.toml         # project identity + gates + hooks");
         println!("    surfaces.toml       # surface projections");
         println!("    formulas/           # formula templates (git-tracked)");
@@ -365,6 +365,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
         println!("    molecules/          # molecule declarations (git-tracked)");
         println!("    state/              # runtime state (git-ignored)");
+        println!("      archive/          # durable proof-of-work snapshots (tracked)");
         println!("  .gitleaks.toml        # federation scan baseline (unblocks cs done harvests)");
         if let Some(ref repo) = github_repo {
             println!();
@@ -763,7 +764,7 @@ mod tests {
     // Materialization internals the upgrade tests assert against; they
     // live in the library with the code that writes them.
     use cosmon_filestore::project_upgrade::{
-        generate_claude_md, COSMON_SECTION_END, COSMON_SECTION_START,
+        generate_claude_md, COSMON_GITIGNORE_BLOCK_START, COSMON_SECTION_END, COSMON_SECTION_START,
         LEGACY_COSMON_GITIGNORE_CONTENT, LEGACY_SELECTIVE_COSMON_GITIGNORE_CONTENT,
     };
 
@@ -1473,9 +1474,14 @@ mod tests {
     }
 
     /// Fresh `cs init` must write the archive-aware `.cosmon/.gitignore`:
-    /// `state/` is ignored in bulk, with `!state/archive/` negated so the
+    /// `state/*` is ignored in bulk, with `!state/archive/` negated so the
     /// durable archive subtree (synthesis.md, outcomes.md, manifests) lands
-    /// in git history once the archive subsystem starts writing.
+    /// in git history. `state/*` rather than `state/` is load-bearing —
+    /// git does not descend into an excluded directory, so a blanket
+    /// `state/` voids the negation (issue #60). The behavioural proof
+    /// against a real git binary lives in
+    /// `cosmon-filestore/tests/gitignore_archive_semantics.rs`; this test
+    /// only pins what `cs init` writes.
     #[test]
     fn init_writes_archive_aware_cosmon_gitignore() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1498,10 +1504,14 @@ mod tests {
 
         let body = fs::read_to_string(tmp.path().join(".cosmon/.gitignore")).unwrap();
 
-        // Runtime state is ignored in bulk.
+        // Runtime state is ignored in bulk — with the descending form.
         assert!(
-            body.lines().any(|l| l.trim() == "state/"),
-            "gitignore must blanket-ignore state/"
+            body.lines().any(|l| l.trim() == "state/*"),
+            "gitignore must blanket-ignore state/* (not state/)"
+        );
+        assert!(
+            !body.lines().any(|l| l.trim() == "state/"),
+            "a blanket `state/` would stop git descending and void the negation"
         );
 
         // The archive subtree is re-included via negation.
@@ -1595,7 +1605,9 @@ mod tests {
     }
 
     /// `cs init --upgrade` must NOT touch a user-customized
-    /// `.cosmon/.gitignore` — only exact legacy matches get migrated.
+    /// `.cosmon/.gitignore` when nothing says the file is broken. A
+    /// user's deliberate edits are not cosmon's to overwrite; the repair
+    /// path below is entered only on git's own verdict.
     #[test]
     fn upgrade_preserves_user_customized_gitignore() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1623,6 +1635,56 @@ mod tests {
 
         let body = fs::read_to_string(cosmon_dir.join(".gitignore")).unwrap();
         assert_eq!(body, custom, "custom gitignore must not be touched");
+    }
+
+    /// A customized `.cosmon/.gitignore` that real git says excludes the
+    /// archive subtree is repaired by appending the cosmon-managed block
+    /// below the user's lines — which are preserved byte for byte
+    /// (issue #60, the second user's mangled file).
+    #[test]
+    fn upgrade_repairs_a_customized_gitignore_that_hides_the_archive() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["init", "-q", "."])
+            .status()
+            .expect("git init");
+        let cosmon_dir = root.join(".cosmon");
+        fs::create_dir_all(&cosmon_dir).unwrap();
+        let custom = "# my own rules\nstate/\n!state/archive\nstate/archive/**\nfoo.bar\n";
+        fs::write(cosmon_dir.join(".gitignore"), custom).unwrap();
+
+        let ctx = Context {
+            verbose: false,
+            json: true,
+            config: None,
+        };
+        let args = Args {
+            path: root.to_path_buf(),
+            upgrade: true,
+            soft: false,
+            template: ProjectTemplate::Generic,
+            no_git: true,
+            yes: false,
+            tenant: None,
+        };
+
+        run(&ctx, &args).expect("upgrade must succeed");
+
+        let body = fs::read_to_string(cosmon_dir.join(".gitignore")).unwrap();
+        assert!(
+            body.starts_with(custom),
+            "every user line must survive the repair, got:\n{body}"
+        );
+        assert!(body.contains(COSMON_GITIGNORE_BLOCK_START));
+        assert!(body.contains("!state/archive/**"));
+        assert!(
+            cosmon_filestore::project_upgrade::archive_subtree_ignored_rule(root, &cosmon_dir)
+                .is_none(),
+            "after the repair, git must track the archive subtree"
+        );
     }
 
     /// `cs init --upgrade` against a project missing `.cosmon/.gitignore`

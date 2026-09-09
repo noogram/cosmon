@@ -1208,12 +1208,19 @@ fn default_whisper_allowed_commands() -> Vec<String> {
 /// their durable artifacts copied under `.cosmon/state/archive/` so the
 /// chain of reasoning survives worktree teardown and branch deletion.
 ///
-/// Default: disabled. `#[non_exhaustive]` — future fields (compression,
-/// filters) can be added without breaking callers.
+/// Default: **enabled** (since 2026-09, issue #60). Losing a molecule's
+/// artifacts to worktree teardown is silent and irreversible, while the
+/// cost of keeping them is small and bounded by a retention policy that
+/// already defaults to the safe `keep_all`. Activation is **not
+/// retroactive**: molecules terminated before the archive was on left no
+/// data behind to archive.
+///
+/// `#[non_exhaustive]` — future fields (compression, filters) can be
+/// added without breaking callers.
 ///
 /// ```toml
 /// [archive]
-/// enabled = true
+/// enabled = false   # opt out; the default is true
 ///
 /// [archive.retention]
 /// keep_all = false
@@ -1221,17 +1228,40 @@ fn default_whisper_allowed_commands() -> Vec<String> {
 /// max_total_mb = 512
 /// keep_kinds = ["decision", "deliberation"]
 /// ```
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ArchiveConfig {
-    /// Whether the archive subsystem is enabled. Default: `false`.
-    #[serde(default)]
+    /// Whether the archive subsystem is enabled. Default: `true`.
+    ///
+    /// The default is applied at parse time, so a galaxy whose
+    /// `config.toml` has no `[archive]` section picks it up on the next
+    /// run with no migration. A galaxy that wrote `enabled = false`
+    /// explicitly keeps it off — a default is not an override.
+    #[serde(default = "default_archive_enabled")]
     pub enabled: bool,
 
     /// Retention policy — which archive entries `cs archive prune` may
     /// delete. Defaults to the safe "keep everything" policy.
     #[serde(default)]
     pub retention: RetentionConfig,
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_archive_enabled(),
+            retention: RetentionConfig::default(),
+        }
+    }
+}
+
+/// Default for [`ArchiveConfig::enabled`] — `true`.
+///
+/// Named rather than inlined because `serde(default = "...")` needs a path,
+/// and because the constant is the single place the "archive on by default"
+/// decision of issue #60 is written down.
+const fn default_archive_enabled() -> bool {
+    true
 }
 
 /// Archive retention policy — drives `cs archive prune`.
@@ -2430,8 +2460,24 @@ mod tests {
     }
 
     #[test]
-    fn test_archive_default_disabled() {
+    fn test_archive_default_enabled() {
+        // Issue #60: a fresh galaxy archives by default. Losing the
+        // artifacts is silent and irreversible; keeping them is cheap.
         let config = ProjectConfig::default();
+        assert!(config.archive.enabled);
+    }
+
+    #[test]
+    fn test_archive_explicit_false_survives_the_default_flip() {
+        // A default is not an override: a galaxy that deliberately wrote
+        // `enabled = false` keeps the archive off, upgrade or not.
+        let config = ProjectConfig::parse(
+            r"
+            [archive]
+            enabled = false
+            ",
+        )
+        .unwrap();
         assert!(!config.archive.enabled);
     }
 
@@ -2449,8 +2495,10 @@ mod tests {
 
     #[test]
     fn test_archive_absent_section_defaults() {
+        // No `[archive]` section at all — an existing galaxy's config —
+        // picks up the new default at parse time, with no migration.
         let config = ProjectConfig::parse("").unwrap();
-        assert!(!config.archive.enabled);
+        assert!(config.archive.enabled);
     }
 
     #[test]

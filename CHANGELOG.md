@@ -21,6 +21,48 @@ this stage.
 
 ### Changed
 
+- **A default cosmon project keeps its archive, and the ignore rule that
+  tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
+  `true`: `cs done` tears the worktree down, and until now every artifact a
+  molecule wrote outside the diff — deliberation syntheses, per-persona
+  responses, outcomes, briefings, reports — went with it, silently and
+  irreversibly. Retention still defaults to `keep_all`, so turning the
+  subsystem on deletes nothing later. Activation is **not retroactive**:
+  molecules that terminated while it was off left no data behind to archive.
+  An existing galaxy needs no command for the default itself — it is applied
+  when `config.toml` is parsed — and a galaxy that wrote `enabled = false`
+  explicitly keeps the archive off.
+
+  The `.cosmon/.gitignore` body shipped since 2026-04 announced that
+  `state/archive/` was re-included by negation and did not deliver it: git
+  does not descend into a directory excluded by `state/`, so
+  `!state/archive/` matched nothing. The bulk exclusion is now `state/*`,
+  which lets git descend, and the block opens with `!state/` so it binds
+  even when a broader rule precedes it. The behaviour is pinned against a
+  real `git check-ignore` in a real repository, not against the file's text
+  — asserting the text is what let the defect ship.
+
+- **`cs init --upgrade` can repair a customised `.cosmon/.gitignore`, and
+  `cs doctor gitignore` names the state where it cannot.** Cosmon's rules
+  now live in a block delimited by `# cosmon:gitignore:start` /
+  `# cosmon:gitignore:end`, which `--upgrade` owns and rewrites in place;
+  everything outside the markers is preserved byte for byte. A customised,
+  marker-less file is still left alone — a user's deliberate edits are not
+  cosmon's to overwrite — unless real git reports that it excludes the
+  archive subtree, in which case the managed block is *appended* below the
+  user's lines, adding cosmon's rules and removing none of theirs. This is
+  the reported case of a galaxy whose ignore file had been hand-rewritten
+  into a chain of rules that ignored and re-included each other.
+
+### Added
+
+- **`cs doctor gitignore`** — asks real git whether `.cosmon/.gitignore`
+  still tracks the archive subtree it claims to track, and names the rule
+  responsible when it does not. Warning-level: an un-versioned archive is a
+  loss of provenance, not a broken build.
+
+### Changed
+
 - **`cs done` is exposed on the Remote Pilot Port with its full parameter
   set; `cs land` and `POST /v1/molecules/{id}/land` are withdrawn** (GitHub
   issue #51, reopened). `POST /v1/molecules/{id}/done` carries what `cs done`
