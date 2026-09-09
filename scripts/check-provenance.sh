@@ -31,6 +31,17 @@
 #     walked the same way). This preserves the underlying property: no
 #     code reaches main except through a molecule's `cs done`, one level
 #     of PR-wrapping removed.
+#   - Since 2026-09-09: an integration branch may carry a descriptive
+#     suffix, `feat/issue-<N>-<slug>` with `<slug>` in [a-z0-9-]+, in
+#     every shape above. One external issue is often answered by several
+#     chained pull requests (issue #51 → `feat/issue-51-done`,
+#     `-session`, `-status`), and each needs its own branch name while
+#     naming the same issue. The slug is decoration only: it is never
+#     part of the issue's identity, so the PR-number/issue-number
+#     agreement rule below still compares `<N>` alone, and the recursive
+#     second-parent walk treats a suffixed branch exactly like a bare
+#     one. Nothing about the property being preserved changes — a name
+#     is not a provenance claim.
 #   - The base-sync class (below) also accepts `Merge branch 'main' into
 #     feat/issue-<N>`, not only `feat/<mol_id>`.
 #   - mol_id has a recorded molecule_completed or molecule_collapsed
@@ -176,12 +187,19 @@ BASE_SYNC_RE="^Merge branch [\"']main[\"'] into feat/${MOL_ID_RE}\$"
 # recognition, it never relaxes the gate.
 BASE_SYNC_TRAILER_RE="^Base-Sync:[[:space:]]*[^[:space:]]+\.\.feat/${MOL_ID_RE}[[:space:]]*\$"
 
+# Shared integration-branch name fragment: the issue number, optionally
+# followed by a descriptive slug (ADR-052 §D5-quater, 2026-09-09). Two
+# capture groups per use — the `<N>` every rule keys on, and the slug,
+# which is captured only so it can be ignored. Callers that read
+# BASH_REMATCH must count both.
+ISSUE_N_RE='([0-9]+)(-[a-z0-9-]+)?'
+
 # Base-sync targeting an external-issue integration branch instead of a
 # molecule branch (ADR-052 §D5-quater, 2026-09-05): `git merge main` run inside
 # `feat/issue-<N>` while the issue is still being worked. Same structural
 # check as BASE_SYNC_RE — the trailer path is unchanged, since `cs sync`
 # only ever stamps a molecule branch name in its trailer.
-BASE_SYNC_ISSUE_RE="^Merge branch [\"']main[\"'] into feat/issue-([0-9]+)\$"
+BASE_SYNC_ISSUE_RE="^Merge branch [\"']main[\"'] into feat/issue-${ISSUE_N_RE}\$"
 
 # Integration-branch → main merge shapes (ADR-052 §D5-quater, 2026-09-05).
 # Work on an external GitHub issue lands on a local integration branch
@@ -190,16 +208,16 @@ BASE_SYNC_ISSUE_RE="^Merge branch [\"']main[\"'] into feat/issue-([0-9]+)\$"
 # writes the merge-commit subject itself; requiring the same <N> on both
 # sides keeps the match anchored to the branch name the second-parent
 # walk below actually inspects, rather than trusting the PR number alone.
-PR_MERGE_RE="^Merge pull request #([0-9]+) from [^/[:space:]]+/feat/issue-([0-9]+)\$"
+PR_MERGE_RE="^Merge pull request #([0-9]+) from [^/[:space:]]+/feat/issue-${ISSUE_N_RE}\$"
 
 # The same landing without GitHub's wrapper — a local
 # `git merge --no-ff feat/issue-<N>` straight onto main.
-LOCAL_INTEGRATION_MERGE_RE="^Merge branch [\"']feat/issue-([0-9]+)[\"']\$"
+LOCAL_INTEGRATION_MERGE_RE="^Merge branch [\"']feat/issue-${ISSUE_N_RE}[\"']\$"
 
 # Stacked integration branches: issue N's branch pulls in issue M's
 # branch before M's own PR has merged. Recognised the same way, checked
 # by the same recursive rule.
-STACKED_INTEGRATION_RE="^Merge branch [\"']feat/issue-([0-9]+)[\"'] into feat/issue-([0-9]+)\$"
+STACKED_INTEGRATION_RE="^Merge branch [\"']feat/issue-${ISSUE_N_RE}[\"'] into feat/issue-${ISSUE_N_RE}\$"
 
 # Does $1 (a commit subject) name an integration-branch landing? Echoes
 # the issue number and returns 0 if so, returns 1 otherwise. A PR-shaped
@@ -219,7 +237,10 @@ integration_target_n() {
         return 0
     fi
     if [[ "$subject" =~ $STACKED_INTEGRATION_RE ]]; then
-        printf '%s' "${BASH_REMATCH[2]}"
+        # Two capture groups per branch name: 1/2 are the source's <N> and
+        # slug, 3/4 the target's. The landing target is the branch merged
+        # INTO, so the issue number of interest is group 3.
+        printf '%s' "${BASH_REMATCH[3]}"
         return 0
     fi
     return 1

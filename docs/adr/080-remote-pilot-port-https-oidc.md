@@ -157,41 +157,43 @@ redirect never crosses the boundary. Login cannot be completed at all — not a
 weaker security posture, an unreachable one.
 
 **Two facts, separated.** The **listening interface** becomes an operator knob
-(`login --bind <IP>`, default `127.0.0.1`, carried as
-`oidc::LoopbackBind { addr, port }`). The **advertised `redirect_uri`** does not
-move: it stays the `127.0.0.1` literal, because the IdP enforces its registered
+(`login --bind <IP>`, default `127.0.0.1`, carried as the private
+`OidcEndpoints.bind_addr: IpAddr` — an address, with no port beside it). The
+**advertised `redirect_uri`** does not move: it stays the `127.0.0.1` literal, because the IdP enforces its registered
 redirect set by exact match (RFC 8252 §7.3) and because that is precisely the
 address a port-forward from the browser's machine dials. The documented recipe
 is therefore the reporter's own: forward `127.0.0.1:7777` on the browser's
 machine into the container (`ssh -L`, or the runtime's published port) and bind
 `0.0.0.0` inside it.
 
-**What the flag may not carry.** An address, never `host:port`. The port is
-shared with the advertised URI by construction — one field, read by both — so
-listener and URI cannot drift apart. `LoopbackBind` exists for that reason: the
-bind was previously *re-derived* at login time by parsing the port back out of
-the `redirect_uri` string, which is a second source of truth waiting to
-disagree with the first.
-
-Carrying the bind is not by itself enough, and the first revision of this
-change proved it. `OidcEndpoints.redirect_uri` and `.bind` were both left
+**What the flag may not carry.** An address, never `host:port`. The invariant to
+hold is "the listener and the advertised URI name the same port", and the first
+two revisions of this change both tried to hold it by *maintaining* two fields.
+The first left `OidcEndpoints.redirect_uri` and a `bind` carrying `{addr, port}`
 public, with `bind` seeded once in `::new`; a caller that assigned
-`redirect_uri` afterwards moved the advertised port and left the listener on
-the old one. The failure is silent by construction — nothing asserts, the
-listener simply waits on a port no browser will dial, until the login timeout.
-It was caught by an existing integration test doing exactly that
+`redirect_uri` afterwards moved the advertised port and left the listener on the
+old one. The failure is silent by construction — nothing asserts, the listener
+simply waits on a port no browser will dial, until the login timeout. It was
+caught by an existing integration test doing exactly that
 (`oidc_flow::login_and_refresh_carry_identity_against_a_provider_that_gates_on_openid`),
-which hung out its ten seconds and reported "no OAuth redirect arrived".
+which hung out its ten seconds and reported "no OAuth redirect arrived". The
+second made both fields private and added `with_redirect_uri`, a setter whose
+whole job was to repair a field the type should never have owned.
 
-So both fields are **private**, and the pair is re-established together by
-every constructor and setter (`new`, `with_redirect_uri`, `with_bind_addr`);
-they are read through accessors. The invariant is "the listener and the
-advertised URI name the same port", and an invariant over two fields belongs to
-the type that owns them, not to the discipline of whoever assigns them.
+**A port stored nowhere cannot drift.** The shape that holds is to store no
+second copy at all. `redirect_uri` is **public** — it is the value the provider
+matches byte-for-byte, nothing about it is secret, and it is the single source of
+truth for the port. `bind_addr: IpAddr` is **private**, defaulting to
+`127.0.0.1`, because it is the one security-relevant degree of freedom here and
+widening it must be a call an operator asked for, not a field assigned in
+passing; `with_bind_addr` is its override. The socket address is **derived at
+bind time** — `OidcEndpoints::callback_addr()` pairs `bind_addr` with the port
+parsed out of `redirect_uri` — so `with_redirect_uri` and the stored port are
+both gone. The invariant is no longer maintained; it is structural.
 
 **Why widening the bind is admissible.** A non-loopback listener lets anyone who
 can reach that interface *connect* to the catcher for the length of one login.
-It does not let them finish it. `oidc::loopback::classify_request` refuses to
+It does not let them finish it. `oidc::callback::classify_request` refuses to
 terminate the flow on any request that cannot echo the per-flow high-entropy
 `state` — every other request is answered `404` and discarded (the F2 property
 from `task-20260710-a6ae`, already load-bearing against cross-origin preempts) —

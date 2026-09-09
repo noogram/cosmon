@@ -229,9 +229,20 @@ requirement, but the archive layout is designed to support it.
    Accepted (Implemented), `man cs` synopsis example.
    (_this commit_.)
 
-Default remains `enabled = false` — flipping to `true` by default is
-deferred to a future minor release after the archive has matured on
-opt-in projects. The gitignore pattern shipped is per-file (not the
+7. **M7 (2026-09-09) — default on, and the negation repaired** (GitHub
+   issue #60). `[archive] enabled` defaults to `true`; the
+   `.cosmon/.gitignore` bulk exclusion becomes `state/*` so git descends
+   and the `!state/archive/` negation binds at all; cosmon's rules move
+   into a marker-delimited block that `cs init --upgrade` owns, so a
+   customised — or hand-mangled — file can be repaired without
+   overwriting the user's own lines; `cs doctor gitignore` names a galaxy
+   that is silently excluding the archive it writes.
+
+The deferral recorded here — "flipping to `true` by default is deferred to
+a future minor release after the archive has matured on opt-in projects" —
+was closed by M7. What matured in the meantime was the evidence: the loss
+`enabled = false` causes is silent and irreversible, and its cost was
+measured at 29 MB across 2561 files on a ~500-molecule galaxy. The gitignore pattern shipped is per-file (not the
 `!.cosmon/archive/` negation originally sketched) because the
 two-directory split in the final design is `state/` (live apparatus,
 with nested durable archive) rather than `state/` + sibling `archive/`.

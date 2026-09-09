@@ -309,8 +309,12 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              cs archive prune                execute the retention policy\n\n\
              Terminal transitions (cs done / cs collapse / cs freeze / cs stuck) \
              populate '.cosmon/state/archive/YYYY/MM/<id>/' when [archive] enabled = true \
-             in the project config. The archive outlives worktree teardown — a fresh \
-             clone sees every merged molecule's canonical snapshot without running cs.\n\n\
+             in the project config — the default since 2026-09 (issue #60); set \
+             enabled = false to opt out. Enabling is not retroactive: molecules that \
+             terminated before it was on left nothing behind to archive. The archive \
+             outlives worktree teardown — a fresh clone sees every merged molecule's \
+             canonical snapshot without running cs. If 'cs archive list' shows entries \
+             that never reach git status, run 'cs doctor gitignore'.\n\n\
              Worked example — verify the current month's archive in CI:\n  \
              cs archive list --year \"$(date +%Y)\" --month \"$(date +%m)\" --json \\\n    \
                | jq -r '.entries[].molecule_id' \\\n    \

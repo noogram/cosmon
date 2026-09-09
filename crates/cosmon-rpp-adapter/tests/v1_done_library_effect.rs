@@ -221,9 +221,11 @@ fn stock_state(oidc: &OidcMock, tenants: &TenantWorkspaces, security_dir: &Path)
     AppState {
         // The whole point: no configuration line, and the harvest still runs.
         harvest_effect: cosmon_rpp_adapter::harvest_effect::from_config(None),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(Arc::new(
-            cosmon_transport::MockBackend::new(),
-        )),
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::Fixed(
+            cosmon_rpp_adapter::worker_env::SharedBackend(Arc::new(
+                cosmon_transport::MockBackend::new(),
+            )),
+        ),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),

@@ -51,6 +51,16 @@ fn client(server: &MockServer) -> Client {
     Client::new(&profile_for(server), Some("fake-jwt".into())).expect("client builds")
 }
 
+/// A client whose *transport* timeout is far larger than any wait budget the
+/// test hands `poll_until`. Without it a slow-response test would be proving
+/// that `reqwest` gave up, not that the wait deadline bound the request —
+/// which is exactly the confusion the deadline findings are about.
+fn client_with_transport_timeout(server: &MockServer, secs: u64) -> Client {
+    let mut profile = profile_for(server);
+    profile.timeout_secs = secs;
+    Client::new(&profile, Some("fake-jwt".into())).expect("client builds")
+}
+
 /// A status answer, with the `terminal` flag the server owns.
 fn status_body(id: &str, status: &str, phase: &str, terminal: bool, at: &str) -> serde_json::Value {
     json!({
@@ -287,6 +297,123 @@ async fn a_poll_interval_larger_than_the_timeout_still_terminates_on_time() {
     assert!(
         elapsed < Duration::from_secs(20),
         "the 100 s interval was not clamped to the remaining budget: {elapsed:?}",
+    );
+}
+
+/// The advertised deadline bounds the request that is *in flight*, not only
+/// the sleep between two of them. A server that takes 6 s to answer must not
+/// keep a `--timeout 1` wait blocked for 6 s: the wait's contract is its own
+/// clock, and a request still outstanding when that clock runs out is a
+/// timeout, not a pending success.
+#[tokio::test]
+async fn a_stalled_request_does_not_outlive_the_deadline() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/molecules/task-wait-0007/status"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(6))
+                .set_body_json(status_body(
+                    "task-wait-0007",
+                    "running",
+                    "live",
+                    false,
+                    "2026-09-07T10:00:00Z",
+                )),
+        )
+        .mount(&server)
+        .await;
+
+    let started = Instant::now();
+    let outcome = poll_until(
+        &client_with_transport_timeout(&server, 30),
+        "task-wait-0007",
+        &opts(
+            &["completed"],
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        ),
+        |_, _| {},
+    )
+    .await
+    .expect("a request that outlives the budget is a timeout, not a transport error");
+    let elapsed = started.elapsed();
+
+    assert_eq!(outcome.slug(), "timeout");
+    assert!(
+        elapsed >= Duration::from_secs(1),
+        "returned in {elapsed:?} — that is not a one-second wait",
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "the in-flight request outlived the deadline: {elapsed:?} — the \
+         budget bounded the sleep but not the request",
+    );
+}
+
+/// The other half of the same clause: a *successful* answer that arrives after
+/// the deadline is still a timeout. The caller was promised an answer within
+/// its budget; handing it a success at five times that budget is a different
+/// promise, and the script that set the budget cannot tell the difference.
+#[tokio::test]
+async fn a_completion_that_arrives_after_the_deadline_is_a_timeout() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/molecules/task-wait-0008/status"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(status_body(
+            "task-wait-0008",
+            "running",
+            "live",
+            false,
+            "2026-09-07T10:00:00Z",
+        )))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/molecules/task-wait-0008/status"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_secs(6))
+                .set_body_json(status_body(
+                    "task-wait-0008",
+                    "completed",
+                    "done",
+                    true,
+                    "2026-09-07T10:00:30Z",
+                )),
+        )
+        .mount(&server)
+        .await;
+
+    let started = Instant::now();
+    let outcome = poll_until(
+        &client_with_transport_timeout(&server, 30),
+        "task-wait-0008",
+        &opts(
+            &["completed"],
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        ),
+        |_, _| {},
+    )
+    .await
+    .unwrap();
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        outcome.slug(),
+        "timeout",
+        "a success delivered after the deadline is not a success the caller asked for",
+    );
+    assert_eq!(
+        outcome.report().status,
+        "running",
+        "the last answer seen inside the budget is the one reported",
+    );
+    assert!(
+        elapsed < Duration::from_secs(4),
+        "waited {elapsed:?} for a late completion on a one-second budget",
     );
 }
 
