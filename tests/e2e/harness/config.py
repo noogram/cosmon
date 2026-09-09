@@ -49,8 +49,21 @@ class E2EConfig:
     client_audience: str
     #: Falsifier: the lifecycle status ``observe`` must report.
     expect_observe_status: str
-    #: Falsifier: the named refusal the ``done`` door must return.
-    expect_done_label: str
+    #: Falsifier: the harvest outcome the ``done`` door must report on a
+    #: molecule that is completed, sealed and carries a branch with work.
+    #: `landed` is the only one of the four success outcomes that put
+    #: something on the trunk; overriding it turns exactly the merge test
+    #: red.
+    expect_done_outcome: str
+    #: The galaxy identity written into the throwaway tenant's
+    #: ``[project] project_id`` and sealed into every grant. The
+    #: transaction re-derives it inside the trunk lock, so the two must
+    #: agree or the grant covers a different galaxy.
+    galaxy_id: str
+    #: The tenant repository's trunk. Pinned rather than inherited from
+    #: this machine's ``init.defaultBranch``, because the sealed grant
+    #: names the base branch it covers.
+    base_branch: str
     #: Falsifier: the named refusal ``tackle`` must return. Empty (the
     #: default) means tackle must SUCCEED. Naming a label here points the
     #: suite at an image whose dispatch cannot work — how the pre-U6
@@ -182,30 +195,36 @@ class E2EConfig:
             # `Queued` if assigned) and observe renders the snake_case
             # label.
             expect_observe_status=_env("RPP_E2E_EXPECT_STATUS", "pending"),
-            # `done` no longer refuses for want of a binary, nor for want
-            # of an implementation. The door's decision half runs
-            # in-process (issue #54 U3) and this suite ARMS it in the
-            # throwaway galaxy, so the decision ADMITS; and the sealed
-            # transaction is now a library the adapter links
-            # (`cosmon-harvest`), not a `cs` process it has to find, so
-            # the effect half RUNS on a stock image. No
-            # `harvest_cs_binary` line is needed and no `501
-            # harvest_effect_unavailable` is reachable.
+            # `done` does not refuse here any more, and the change of
+            # verdict is the point of issue #67 and #68. The decision half
+            # runs in-process and this suite ARMS `[harvest_authority]`, so
+            # it admits. The effect half is a library the adapter links
+            # (`cosmon-harvest`), not a `cs` process it has to find, so it
+            # RUNS on a stock image — no `harvest_cs_binary` line is needed
+            # and no `501 harvest_effect_unavailable` is reachable.
             #
-            # It runs, takes the trunk lock, re-derives the facts — and
-            # refuses `not_authorized`, because the one thing this suite
-            # deliberately cannot produce is an ADR-172 operator seal.
-            # Nothing that ships can mint one; that is the central
-            # falsifier of `done_authorization_unforgeable`. So the label
-            # is inside the closed refusal set, and it asserts something
-            # stronger than the one it replaces: not that the door
-            # reached an effect that did not exist, but that the effect
-            # exists, ran, and is a signature away from a real merge.
-            # The real merge is asserted where a seal CAN be minted — the
-            # adapter's `tests/v1_done_library_effect.rs`, whose test
-            # operator lives in the `publish = false`
-            # `cosmon-minisign-testkit`.
-            expect_done_label=_env("RPP_E2E_EXPECT_DONE_LABEL", "not_authorized"),
+            # What it then met, until this suite could provision one, was
+            # ADR-172's second half: an armed galaxy demands an
+            # operator-SEALED grant, verified inside the trunk lock, and a
+            # deployment with the switch on and no trust root refuses
+            # `not_authorized` from the effect boundary. That refusal was
+            # asserted here as the contract. It is not the contract any
+            # more — it is the shape a stock deployment must never be left
+            # in — so the fixture pins a trust root and seals one
+            # molecule-scoped grant (`ComposeStack.seal_harvest_grant`),
+            # exactly as the operator would, and the assertion moved from
+            # "it refuses by name" to "it MERGES, and the merge commit is
+            # on the base branch carrying the lineage trailers `cs done`
+            # writes".
+            #
+            # `landed` is the falsifier: `closed_without_merge`, `no_op`
+            # and `already_landed` are the three success outcomes that put
+            # nothing on the trunk, and a client reading the 200 alone
+            # would believe the branch shipped. Overriding this turns the
+            # merge test red and nothing else.
+            expect_done_outcome=_env("RPP_E2E_EXPECT_DONE_OUTCOME", "landed"),
+            galaxy_id=_env("RPP_E2E_GALAXY_ID", "cosmon-rpp-e2e"),
+            base_branch=_env("RPP_E2E_BASE_BRANCH", "main"),
             expect_tackle_label=os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL", ""),
             build_root=build_root,
             e2e_stage=_env("RPP_E2E_E2E_STAGE", "1") != "0",

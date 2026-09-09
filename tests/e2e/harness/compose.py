@@ -333,40 +333,96 @@ class ComposeStack:
             cfg.repo_root / ".cosmon" / "formulas" / "task-work.formula.toml",
             cfg.galaxy / ".cosmon" / "formulas" / "task-work.formula.toml",
         )
-        # Arm the harvest door.
+        # Arm the harvest door — BOTH halves of ADR-172 §D1.
         #
         # `harvest_door::decide` fails closed on a galaxy that has not
-        # armed `[harvest_authority] required` — it refuses
-        # `not_authorized` before it has even loaded the molecule.
-        # Leaving it unarmed would make the `done` test green for the
-        # wrong reason: `not_authorized` is a label BOTH halves can
-        # produce, and the one under test is the effect half's — reached
-        # only by a decision that admitted the harvest. Arming is the
-        # operator gesture the tenant cannot make, which is the point of
-        # the second key — so it is done here, on the host, in a galaxy
-        # that lives for one test set. No seal is minted and none is
-        # committed, which is why the `done` test's harvest reaches the
-        # merge transaction and is refused there.
+        # armed `[harvest_authority] required`: it refuses
+        # `not_authorized` before it has even loaded the molecule. Arming
+        # it is the operator gesture the tenant cannot make, which is the
+        # point of the second key — so it is done here, on the host, in a
+        # galaxy that lives for one test set.
+        #
+        # Arming alone is not enough, and the difference is the whole
+        # reason this galaxy is provisioned rather than merely created.
+        # Once armed, the *effect* half demands an operator-sealed grant,
+        # verified inside the trunk lock; a galaxy with the switch on and
+        # no trust root refuses `not_authorized` a second time, from the
+        # other half. That is the shape a stock deployment must never be
+        # left in, so `seal_harvest_grant` pins a trust root and one
+        # molecule-scoped grant per molecule under test — see its
+        # docstring for why the signer is a `publish = false` binary and
+        # not a shipped verb.
+        #
+        # `[project] project_id` is not decoration: the grant seals the
+        # galaxy identity and the transaction re-derives it inside the
+        # lock, so a galaxy with no id cannot be the galaxy a grant names.
         (cfg.galaxy / ".cosmon" / "config.toml").write_text(
-            "# Throwaway e2e galaxy. Arms the ADR-176 harvest door so its\n"
-            "# decision half admits and the refusal under test comes from\n"
-            "# the effect half — the library harvest transaction, refusing\n"
-            "# for want of an operator seal.\n"
+            "# Throwaway e2e galaxy. Arms the ADR-176 harvest door and names\n"
+            "# itself, so the ADR-172 grant this run seals can be verified\n"
+            "# against a galaxy identity re-derived inside the trunk lock.\n"
+            "[project]\n"
+            f'project_id = "{cfg.galaxy_id}"\n'
+            "\n"
             "[harvest_authority]\n"
             "required = true\n",
             encoding="utf-8",
         )
         # The tenant root must be a git repository: the library tackle
         # executor resolves the repo root from it and cuts the worker's
-        # worktree with `git worktree add`. `ensure_base_commit` covers a
-        # commit-less repo, so `git init` alone is enough — but a plain
-        # directory is not, and the failure without this is a
-        # `tackle_unavailable` whose cause is three layers down in the
-        # adapter log.
-        init = _run(["git", "init", "-q", str(cfg.galaxy)])
+        # worktree with `git worktree add`, and the harvest transaction
+        # merges that worktree's branch back into the base branch here.
+        #
+        # `-b main` rather than whatever this machine's `init.defaultBranch`
+        # happens to be: the sealed grant names the base branch it covers,
+        # and a grant signed for `main` against a repository whose trunk is
+        # `master` is refused for a reason that reads like a signature
+        # failure. The branch name is a fact of the fixture, so it is
+        # pinned by the fixture.
+        init = _run(["git", "init", "-q", "-b", cfg.base_branch, str(cfg.galaxy)])
         if init.returncode != 0:
             raise AssertionError(
                 f"git init of the throwaway galaxy failed: {init.stderr.strip()[:400]}"
+            )
+        # An identity, in the REPOSITORY's own config rather than the
+        # user's: the worker commits inside the container as uid 10000,
+        # whose `$HOME` holds no identity at all, and `git commit` with no
+        # `user.email` fails with a message about `git config` that says
+        # nothing about a harvest. Signing is turned off for the same
+        # reason — the image ships no key, and an inherited
+        # `commit.gpgsign = true` would abort the merge commit.
+        for key, value in (
+            ("user.email", "e2e-operator@example.invalid"),
+            ("user.name", "Cosmon E2E Operator"),
+            ("commit.gpgsign", "false"),
+        ):
+            cfgset = _run(["git", "-C", str(cfg.galaxy), "config", key, value])
+            if cfgset.returncode != 0:
+                raise AssertionError(
+                    f"could not set {key} on the throwaway galaxy: "
+                    f"{cfgset.stderr.strip()[:200]}"
+                )
+        # `.cosmon/` and `.worktrees/` are runtime state, not content. A
+        # merge that swept them onto the base branch would commit the
+        # molecule store into the tree whose history the harvest is
+        # writing, and the next `cs done` would read its own commits.
+        (cfg.galaxy / ".gitignore").write_text(
+            ".cosmon/\n.worktrees/\n", encoding="utf-8"
+        )
+        (cfg.galaxy / "README.md").write_text(
+            "Throwaway tenant galaxy for the cosmon RPP container e2e.\n",
+            encoding="utf-8",
+        )
+        # A base commit, so `<base>..<branch>` is a range and not an
+        # error. `cs done` can bootstrap a commit-less repository, but the
+        # merge assertion needs a base revision recorded BEFORE the
+        # harvest to compare against, and there is none until something
+        # is committed.
+        add = _run(["git", "-C", str(cfg.galaxy), "add", ".gitignore", "README.md"])
+        commit = _run(["git", "-C", str(cfg.galaxy), "commit", "-q", "-m", "base"])
+        if add.returncode != 0 or commit.returncode != 0:
+            raise AssertionError(
+                "could not write the throwaway galaxy's base commit: "
+                f"{(add.stderr + commit.stderr).strip()[:400]}"
             )
         # The adapter runs as uid 10000; on a Linux runner the
         # bind-mounted tree is owned by the runner's uid and nucleate
@@ -375,6 +431,65 @@ class ComposeStack:
         # the `.git` directory `git init` just made.
         for path in [cfg.galaxies_root, *cfg.galaxies_root.rglob("*")]:
             os.chmod(path, 0o777)
+
+    def seal_harvest_grant(self, sealer: Path, molecule: str) -> Path:
+        """Pin the ADR-172 trust root and seal one grant for ``molecule``.
+
+        The operator gesture the tenant cannot make, and the one the
+        container cannot make either: cosmon verifies operator signatures
+        and ships no code that produces one, so the signer is
+        ``cs-e2e-harvest-seal`` — a binary of the ``publish = false``
+        ``cosmon-minisign-testkit`` crate, which appears only in
+        ``[dev-dependencies]`` and is therefore in no shipped closure.
+        It writes the same two artefacts an operator would place by hand:
+        ``.cosmon/harvest.pub`` and one molecule-scoped ratified grant.
+
+        Provisioning it here rather than weakening the assertion is the
+        point. The alternative — assert that a stock stack *refuses* —
+        was true and is no longer: since issue #67 the effect half is a
+        library the adapter links, so a galaxy that is armed **and**
+        sealed merges. What the container adds over
+        ``v1_done_library_effect.rs``, which proves the same thing
+        in-process, is that it merges through the image an operator
+        deploys, on a bind-mounted tenant tree, driven by the real
+        ``cosmon-remote``.
+
+        Written on the HOST side of the bind-mount, so the grant is in
+        place before the request; the adapter reads it from inside the
+        container by the same path.
+        """
+        proc = _run(
+            [
+                str(sealer),
+                str(self.cfg.galaxy),
+                self.cfg.galaxy_id,
+                molecule,
+                self.cfg.base_branch,
+            ]
+        )
+        if proc.returncode != 0:
+            raise AssertionError(
+                f"could not seal a harvest grant for {molecule}: "
+                f"{proc.stderr.strip()[:800]}"
+            )
+        grant = (
+            self.cfg.galaxy
+            / ".cosmon"
+            / "state"
+            / "harvest"
+            / "grants"
+            / f"{molecule}.json"
+        )
+        pubkey = self.cfg.galaxy / ".cosmon" / "harvest.pub"
+        for path in (grant, pubkey):
+            if not path.is_file():
+                raise AssertionError(
+                    f"the sealer exited 0 but {path} does not exist"
+                )
+            os.chmod(path, 0o666)
+        os.chmod(grant.parent, 0o777)
+        os.chmod(grant.parent.parent, 0o777)
+        return grant
 
     # -- compose ------------------------------------------------------
 

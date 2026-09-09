@@ -117,6 +117,50 @@ def remote_binary(cfg: E2EConfig) -> Path:
 
 
 @pytest.fixture(scope="session")
+def sealer_binary(cfg: E2EConfig) -> Path:
+    """``cs-e2e-harvest-seal`` — the human at the keyboard, compiled.
+
+    ADR-172 §D1 has two halves and the suite must provision both. Arming
+    ``[harvest_authority] required`` makes the door's decision half
+    admit; the effect half then demands an operator-SEALED grant,
+    verified inside the trunk lock. Cosmon verifies operator signatures
+    and ships no code that produces one, so the signer cannot be a `cs`
+    verb or anything in the image: it is a binary of the
+    ``publish = false`` ``cosmon-minisign-testkit`` crate, which appears
+    only in ``[dev-dependencies]`` and is in no shipped closure.
+
+    Built here rather than re-implemented in Python on purpose. A Python
+    minisign would be a second spelling of the grant's canonical bytes,
+    and the first time `HarvestGrant::canonical_bytes` changed the suite
+    would keep passing against a grant nothing else accepts.
+    ``COSMON_E2E_SEALER_BIN`` skips the build for a developer iterating
+    on the suite itself.
+    """
+    override = os.environ.get("COSMON_E2E_SEALER_BIN", "")
+    if override:
+        binary = Path(override)
+    else:
+        proc = subprocess.run(
+            [
+                "cargo", "build", "--release", "--locked",
+                "-p", "cosmon-minisign-testkit",
+                "--bin", "cs-e2e-harvest-seal",
+            ],
+            cwd=cfg.repo_root,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode != 0:
+            raise AssertionError(
+                "cargo build --bin cs-e2e-harvest-seal failed:\n" + proc.stderr[-4000:]
+            )
+        binary = cfg.repo_root / "target" / "release" / "cs-e2e-harvest-seal"
+    if not binary.is_file():
+        raise AssertionError(f"cs-e2e-harvest-seal binary not found at {binary}")
+    return binary
+
+
+@pytest.fixture(scope="session")
 def compose_stack(cfg: E2EConfig, recorder: Recorder) -> ComposeStack:
     """The staged deploy tree with both images built. Session-scoped.
 
@@ -370,6 +414,23 @@ def worked(dispatched: str, logged_in: RemoteCli, molecule: str, cfg: E2EConfig,
         f"molecule {molecule} is '{status or '<unreadable>'}' after {cfg.worker_timeout}s, "
         f"not 'completed'. The worker pane, captured before teardown:\n{pane[-4000:]}"
     )
+
+
+@pytest.fixture(scope="class")
+def sealed(stack: ComposeStack, sealer_binary: Path, molecule: str) -> str:
+    """One operator-sealed ADR-172 grant covering this set's molecule.
+
+    The operator gesture the tenant cannot make and the container cannot
+    make either — see :func:`sealer_binary`. Without it an armed galaxy
+    refuses `not_authorized` a second time, from the effect boundary,
+    which is the shape a stock deployment must never be left in and the
+    thing this suite used to assert.
+
+    Returns the molecule id, so a test can depend on the seal by naming
+    it where it would have named the molecule.
+    """
+    stack.seal_harvest_grant(sealer_binary, molecule)
+    return molecule
 
 
 def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
