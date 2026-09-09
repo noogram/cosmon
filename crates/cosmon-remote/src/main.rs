@@ -148,7 +148,10 @@ enum Cmd {
         /// set, so `wait <id>` means "until it is over".
         #[arg(long, default_value = "completed,collapsed", value_delimiter = ',')]
         r#for: Vec<String>,
-        /// Maximum seconds to wait before giving up.
+        /// Maximum seconds to wait before giving up. An absolute deadline:
+        /// it bounds the request in flight, not only the sleep between two
+        /// of them, so an answer that arrives late is a timeout even when
+        /// it would have been a success. The contract is your clock.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
         /// Seconds between polls. Clamped to the remaining budget, so a
