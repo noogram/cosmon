@@ -1228,8 +1228,11 @@ dependencies = [
 name = "cosmon-minisign-testkit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64",
  "blake2",
+ "cosmon-core",
+ "cosmon-filestore",
  "ed25519-dalek",
 ]
 

@@ -127,7 +127,13 @@ class RemoteCli:
         """
         return self.json("molecule", "tackle", molecule_id, step="tackle")
 
-    def done(self, molecule_id: str, reason: str) -> Tuple[int, Any, str]:
+    def done(
+        self,
+        molecule_id: str,
+        reason: str,
+        strategy: Optional[str] = None,
+        no_merge: bool = False,
+    ) -> Tuple[int, Any, str]:
         """``POST /v1/molecules/:id/done`` — the harvest door.
 
         One gesture again since issue #51: the second `land` verb was
@@ -137,7 +143,17 @@ class RemoteCli:
         ``--reason`` is mandatory and is never fabricated — the door
         refuses `missing_reason` rather than inventing a sentence — so
         the caller must say why, here as at the terminal.
+
+        ``--strategy`` and ``--no-merge`` are the D4 reversal: the body
+        carries the full parameter set of `cs done`, because on the
+        deployment that exists the requester merging into their own trunk
+        **is** the operator. They are passed through unchanged so the
+        suite can assert what the merge did with them, rather than only
+        that the route accepted them.
         """
-        return self.json(
-            "molecule", "done", molecule_id, "--reason", reason, step="done"
-        )
+        args = ["molecule", "done", molecule_id, "--reason", reason]
+        if strategy is not None:
+            args += ["--strategy", strategy]
+        if no_merge:
+            args.append("--no-merge")
+        return self.json(*args, step="done")

@@ -8,8 +8,11 @@ license = "AGPL-3.0-only"
 description = "Test-only minisign signer — the human operator, in a test harness (ADR-171)"
 
 [dependencies]
+anyhow = { workspace = true }
 base64 = { workspace = true }
 blake2 = { workspace = true }
+cosmon-core = { workspace = true }
+cosmon-filestore = { workspace = true }
 ed25519-dalek = { workspace = true }
 
 [lints]
