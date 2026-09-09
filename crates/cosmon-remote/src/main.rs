@@ -748,8 +748,9 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
         if w.waiting {
             let _ = writeln!(
                 out,
-                "WAITING:  class={} awaiting_operator={}{}",
+                "WAITING:  class={} evidence_source={} awaiting_operator={}{}",
                 w.class,
+                w.evidence_source.as_deref().unwrap_or("none"),
                 w.awaiting_operator,
                 w.evidence
                     .as_deref()
@@ -757,6 +758,13 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
                     .unwrap_or_default()
             );
         }
+    }
+    if env.truncated {
+        let _ = writeln!(
+            out,
+            "(the transcript exceeded the read ceiling: the oldest entries \
+are not shown, and ordinals count the retrieved window)"
+        );
     }
     if env.entries.is_empty() && env.source == "none" {
         let _ = writeln!(
@@ -1676,7 +1684,17 @@ async fn run_molecule(
             if json {
                 print_json(true, &serde_json::to_value(&env)?);
             } else {
-                println!("{} — {}", env.harvest.molecule, env.harvest.outcome);
+                // Name the trunk-side fact, not only the label: a
+                // `closed_without_merge` success left the branch where it
+                // was, and an operator reading one line should not have to
+                // fetch the result route to learn why.
+                match env.harvest.non_integration.as_deref() {
+                    Some(reason) => println!(
+                        "{} — {} (not integrated: {reason})",
+                        env.harvest.molecule, env.harvest.outcome,
+                    ),
+                    None => println!("{} — {}", env.harvest.molecule, env.harvest.outcome),
+                }
             }
         }
         MoleculeCmd::Run { id } => {
