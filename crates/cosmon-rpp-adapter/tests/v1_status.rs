@@ -10,6 +10,10 @@
 //!    on payload size and on the *field set*: the three fields the full read
 //!    pays a growing log scan for (`energy`, `api_tokens`, `model`) are absent
 //!    here, which is the read that is not happening.
+//! 1b. …and on **cost**, which is the property those two are proxies for. A
+//!    handler that folds the full observation and then projects the same six
+//!    fields passes both of them; it does not survive a measurement taken
+//!    with megabytes planted in the three logs.
 //! 2. A conditional poll on an unchanged molecule gets `304` and no body.
 //! 3. No server-side state is keyed by a waiter — there is no `wait` route to
 //!    create any, which this pins structurally.
@@ -278,6 +282,108 @@ async fn the_status_read_is_strictly_cheaper_than_the_full_molecule_read() {
     assert!(
         obj["updated_at"].as_str().is_some_and(|s| !s.is_empty()),
         "a poller needs to know WHEN, not only what",
+    );
+}
+
+/// Falsifier 1b — the status read's **cost** does not grow with the logs.
+///
+/// The payload test above is a proxy and cannot be anything else: a handler
+/// that calls the full `observe` and then projects the same six fields emits
+/// byte-identical answers and passes every assertion in it. Payload size is
+/// what the client pays; what the *server* pays is reads, and the three reads
+/// this route exists to avoid — the coupling report's `log/energy.jsonl`, the
+/// token meter's `instrumentation/tokens.jsonl`, and the model attribution's
+/// `events.jsonl` — are invisible in the answer. They are tolerant readers: a
+/// missing or unreadable log yields `None`, never an error, so no response
+/// byte and no status code can report whether they ran.
+///
+/// The one channel that can is cost at scale. So: measure the route against a
+/// tenant whose logs are empty, plant megabytes in all three, and measure
+/// again. The claim is that the second number is the first — the status answer
+/// is a function of `state.json` alone, and `state.json` did not change. The
+/// full molecule read on the same molecule is measured beside it as the
+/// fixture's own guard: if *it* did not slow down, the logs are not being read
+/// by anybody and this test is asserting nothing.
+///
+/// Thresholds are one-sided and generous. The claim is a *difference in kind*
+/// — constant versus linear in log size — so a 4× ceiling on a route that
+/// should not move at all, against a full read that moves by an order of
+/// magnitude, has room for a loaded CI box without having room for the defect.
+#[tokio::test]
+async fn the_status_read_does_not_pay_for_the_logs_it_does_not_read() {
+    let fx = fixture().await;
+    seed(&fx.tenant, "task-20260907-0010", "running");
+    let token = read_jwt(&fx, "cost-1");
+
+    // Best-of-N: the minimum is the run the scheduler left alone, and it is
+    // the only honest estimate of what the work itself costs.
+    async fn best_of(fx: &Fixture, uri: &str, token: &str) -> Duration {
+        let mut best = Duration::MAX;
+        for _ in 0..7 {
+            let started = std::time::Instant::now();
+            let (status, _, _) = get(fx, uri, Some(token), None).await;
+            assert_eq!(status, StatusCode::OK);
+            best = best.min(started.elapsed());
+        }
+        best
+    }
+
+    const STATUS_URI: &str = "/v1/molecules/task-20260907-0010/status";
+    const FULL_URI: &str = "/v1/molecules/task-20260907-0010";
+    let lean_status = best_of(&fx, STATUS_URI, &token).await;
+    let lean_full = best_of(&fx, FULL_URI, &token).await;
+
+    // Plant the three logs the full read folds. The lines are well-formed and
+    // about *other* molecules, so every reader parses them in full and then
+    // discards them — the exact work a poll must not repeat.
+    let state_dir = &fx.tenant.state_dir;
+    std::fs::create_dir_all(state_dir.join("log")).unwrap();
+    std::fs::create_dir_all(state_dir.join("instrumentation")).unwrap();
+    let mut energy = String::new();
+    let mut tokens = String::new();
+    let mut events = String::new();
+    for i in 0..40_000 {
+        let other = format!("task-20260101-{:04x}", i % 0xffff);
+        energy.push_str(&format!(
+            r#"{{"molecule":"{other}","joules":1.5,"at":"2026-01-01T00:00:00Z"}}"#
+        ));
+        energy.push('\n');
+        tokens.push_str(&format!(
+            r#"{{"molecule_id":"{other}","input_tokens":11,"output_tokens":22,"at":"2026-01-01T00:00:00Z"}}"#
+        ));
+        tokens.push('\n');
+        events.push_str(&format!(
+            r#"{{"seq":{i},"event":{{"type":"ModelSelected","mol_id":"{other}"}}}}"#
+        ));
+        events.push('\n');
+    }
+    std::fs::write(state_dir.join("log/energy.jsonl"), &energy).unwrap();
+    std::fs::write(state_dir.join("instrumentation/tokens.jsonl"), &tokens).unwrap();
+    std::fs::write(state_dir.join("events.jsonl"), &events).unwrap();
+
+    let fat_status = best_of(&fx, STATUS_URI, &token).await;
+    let fat_full = best_of(&fx, FULL_URI, &token).await;
+
+    // The fixture's own guard, the cost twin of the payload test's
+    // `big_fat > big`: if the full read did not notice several megabytes of
+    // log, nothing here is reading them and the assertion below is vacuous.
+    assert!(
+        fat_full > lean_full * 3,
+        "fixture is not exercising the claim: the full read barely moved \
+         ({lean_full:?} → {fat_full:?}) against {} B of planted log",
+        energy.len() + tokens.len() + events.len(),
+    );
+
+    assert!(
+        fat_status < (lean_status * 4).max(Duration::from_millis(20)),
+        "the status read grew with the logs ({lean_status:?} → {fat_status:?}) \
+         — it is folding scans it has no business folding; the full read went \
+         {lean_full:?} → {fat_full:?} over the same logs",
+    );
+    assert!(
+        fat_status * 3 < fat_full,
+        "the status read is no longer decisively cheaper than the full read \
+         ({fat_status:?} vs {fat_full:?})",
     );
 }
 
