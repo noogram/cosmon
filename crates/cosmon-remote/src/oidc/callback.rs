@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The loopback redirect catcher (delib-20260710-33b7 C7).
+//! The OAuth callback catcher (delib-20260710-33b7 C7).
 //!
 //! The authorization-code flow needs a `redirect_uri` the browser can reach
 //! after the operator signs in. For a native CLI that is a loopback listener:
@@ -10,7 +10,7 @@
 //!
 //! Two invariants the contract makes load-bearing:
 //!
-//! - **Bind before browser.** [`LoopbackServer::bind`] must succeed *before* the
+//! - **Bind before browser.** [`CallbackServer::bind`] must succeed *before* the
 //!   authorize URL is opened. If the port is taken we fail fast with a precise
 //!   error, rather than opening a browser that will redirect into the void.
 //! - **The IP literal, not `localhost`.** We bind and advertise `127.0.0.1`
@@ -23,7 +23,7 @@
 //!   page open during login would each consume the one accept slot — parking or
 //!   failing the flow while the genuine redirect lands on a second, never-serviced
 //!   socket (login hang / spurious failure / on-demand DoS; review
-//!   `task-20260710-a6ae` F2). [`LoopbackServer::accept`] therefore loops,
+//!   `task-20260710-a6ae` F2). [`CallbackServer::accept`] therefore loops,
 //!   answering and discarding every non-matching request, and returns **only** on
 //!   a `GET /callback` whose `state` verifies against the per-flow [`Nonce`] (or
 //!   on the overall timeout). Because only a request that echoes the high-entropy
@@ -32,24 +32,32 @@
 //!   silent preconnect cannot wedge the loop.
 //!
 //! The **listening interface** is a separate knob from the advertised
-//! `redirect_uri` ([`LoopbackBind`]). By default the two agree: bind
-//! `127.0.0.1`, advertise `http://127.0.0.1:<port>/callback`. A caller may move
-//! the *listener* to another interface (`0.0.0.0`, so a redirect forwarded into
-//! a container can land) without moving the *advertised* URI, which stays the
-//! registered literal — the two are deliberately decoupled, and the port is
-//! shared so the listener and the URI can never disagree about it. Binding
-//! beyond loopback widens who can reach the catcher; what keeps that safe is
-//! the `state` check in [`LoopbackServer::accept`], which refuses to let any
-//! request terminate the flow unless it echoes the per-flow high-entropy
-//! `state`.
+//! `redirect_uri`. By default the two agree: bind `127.0.0.1`, advertise
+//! `http://127.0.0.1:<port>/callback`. A caller may move the *listener* to
+//! another interface (`0.0.0.0`, so a redirect forwarded into a container can
+//! land) without moving the *advertised* URI, which stays the registered
+//! literal. The **port is never carried twice**: [`CallbackServer::bind`] takes
+//! one already-resolved [`SocketAddr`], and its caller
+//! ([`OidcEndpoints::callback_addr`]) derives that port from the advertised URI
+//! at the moment of binding, so there is no stored copy that can drift.
+//! Binding beyond loopback widens who can reach the catcher; what keeps that
+//! safe is the `state` check in [`CallbackServer::accept`], which refuses to
+//! let any request terminate the flow unless it echoes the per-flow
+//! high-entropy `state`.
 //!
-//! The impure I/O ([`LoopbackServer`]) is kept thin; the parsing of the HTTP
+//! The name says what the type does — bind a socket, listen, and handle the TCP
+//! stream as HTTP on the callback route. Loopback is its default *address*, not
+//! its defining trait.
+//!
+//! The impure I/O ([`CallbackServer`]) is kept thin; the parsing of the HTTP
 //! request target into a [`CallbackParams`] is a **pure function**
 //! ([`parse_callback_target`]) so it can be unit- and property-tested without a
 //! socket. The `/callback` path and `GET` method are asserted before a request
 //! is treated as a callback.
+//!
+//! [`OidcEndpoints::callback_addr`]: super::flow::OidcEndpoints::callback_addr
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -91,62 +99,7 @@ pub fn redirect_uri(port: u16) -> String {
     format!("http://{LOOPBACK_IP}:{port}{CALLBACK_PATH}")
 }
 
-/// Where the callback catcher actually listens: an interface address plus the
-/// port the advertised `redirect_uri` names.
-///
-/// This exists so the bind address is **carried**, never re-derived from the
-/// `redirect_uri` string. The port is the one field the two must share (the
-/// browser dials the advertised port), so it is stored once and read by both;
-/// the address is free to differ, and defaults to [`LOOPBACK_IP`].
-///
-/// ```
-/// use cosmon_remote::oidc::LoopbackBind;
-/// let b = LoopbackBind::loopback(7777);
-/// assert!(b.is_loopback());
-/// assert_eq!(b.socket_addr().to_string(), "127.0.0.1:7777");
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LoopbackBind {
-    /// The interface the listener binds. [`LOOPBACK_IP`] unless an operator
-    /// opted out explicitly (`login --bind`). A non-loopback value is an
-    /// opt-in: the authorization code will transit that interface. What still
-    /// protects the exchange is the `state` check [`LoopbackServer::accept`]
-    /// performs on every request, plus PKCE — no request that cannot echo the
-    /// per-flow nonce can end the flow. Construct directly with the struct
-    /// literal (`LoopbackBind { addr, port }`) — there is deliberately no
-    /// second constructor alongside [`LoopbackBind::loopback`].
-    pub addr: IpAddr,
-    /// The port, shared with the advertised `redirect_uri`. `0` asks the OS for
-    /// an ephemeral port (tests); read the real one back with
-    /// [`LoopbackServer::port`].
-    pub port: u16,
-}
-
-impl LoopbackBind {
-    /// The default: bind the loopback literal on `port`.
-    #[must_use]
-    pub const fn loopback(port: u16) -> Self {
-        Self {
-            addr: IpAddr::V4(LOOPBACK_IP),
-            port,
-        }
-    }
-
-    /// Whether this bind stays on a loopback interface (the secure default).
-    /// `false` is the case that warrants the operator notice at login time.
-    #[must_use]
-    pub fn is_loopback(&self) -> bool {
-        self.addr.is_loopback()
-    }
-
-    /// The socket address the listener binds.
-    #[must_use]
-    pub fn socket_addr(&self) -> SocketAddr {
-        SocketAddr::new(self.addr, self.port)
-    }
-}
-
-/// What the browser handed back on the loopback callback.
+/// What the browser handed back on the callback redirect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallbackParams {
     /// The authorization `code` to exchange for tokens.
@@ -254,7 +207,7 @@ fn parse_request_line(request_line: &str) -> Result<(&str, &str)> {
     Ok((method, target))
 }
 
-/// Classification of one accepted request inside the [`LoopbackServer::accept`]
+/// Classification of one accepted request inside the [`CallbackServer::accept`]
 /// loop. Only the two terminating variants end the wait; `Ignore` means answer
 /// politely and keep listening for the genuine redirect.
 enum Accepted {
@@ -312,46 +265,60 @@ fn classify_request(request_line: &str, expected_state: &Nonce) -> Accepted {
     }
 }
 
-/// A bound loopback listener waiting for exactly one OAuth callback.
+/// A bound listener waiting for exactly one OAuth callback.
 ///
-/// Construct with [`LoopbackServer::bind`] **before** opening the browser, then
-/// `await` [`LoopbackServer::accept`] to capture the redirect.
-pub struct LoopbackServer {
+/// Construct with [`CallbackServer::bind`] **before** opening the browser, then
+/// `await` [`CallbackServer::accept`] to capture the redirect.
+///
+/// It owns a socket, not a policy: the address it listens on is decided by the
+/// caller and handed in whole. Nothing here re-derives, stores, or second-
+/// guesses a port, which is why no port can drift from the advertised
+/// `redirect_uri`.
+pub struct CallbackServer {
     listener: TcpListener,
-    port: u16,
+    local_addr: SocketAddr,
 }
 
-impl LoopbackServer {
-    /// Bind the interface and port named by `bind` (`127.0.0.1:<port>` by
-    /// default). Fails fast (a precise [`OidcError::Callback`]) if the port is
-    /// already taken — this is the "bind before browser" gate. Pass port `0` to
-    /// let the OS pick an ephemeral port (used by tests); read it back with
-    /// [`LoopbackServer::port`].
+impl CallbackServer {
+    /// Bind `addr` (`127.0.0.1:<port>` in the default flow). Fails fast (a
+    /// precise [`OidcError::Callback`]) if the port is already taken — this is
+    /// the "bind before browser" gate. Pass port `0` to let the OS pick an
+    /// ephemeral port (used by tests); read it back with
+    /// [`CallbackServer::port`].
     ///
     /// The bound address does **not** change what [`OidcEndpoints::redirect_uri`]
     /// advertises: that stays the registered `127.0.0.1` literal whatever
     /// interface is listening.
     ///
     /// [`OidcEndpoints::redirect_uri`]: super::flow::OidcEndpoints::redirect_uri
-    pub async fn bind(bind: LoopbackBind) -> Result<Self> {
-        let addr = bind.socket_addr();
+    pub async fn bind(addr: SocketAddr) -> Result<Self> {
         let listener = TcpListener::bind(addr)
             .await
             .map_err(|e| OidcError::Callback {
                 reason: format!("could not bind {addr} for the OAuth redirect: {e}"),
             })?;
         let bound = listener.local_addr().map_err(|e| OidcError::Callback {
-            reason: format!("could not read the bound loopback address: {e}"),
+            reason: format!("could not read the bound callback address: {e}"),
         })?;
         Ok(Self {
             listener,
-            port: bound.port(),
+            local_addr: bound,
         })
     }
 
+    /// The address actually bound, read back from the socket rather than echoed
+    /// from the request. This is what a test asserts against when it wants proof
+    /// that a bind landed where it was asked to, rather than proof that a field
+    /// was assigned.
+    #[must_use]
+    pub fn local_addr(&self) -> SocketAddr {
+        self.local_addr
+    }
+
     /// The port actually bound (meaningful after `bind(0)`).
+    #[must_use]
     pub fn port(&self) -> u16 {
-        self.port
+        self.local_addr.port()
     }
 
     /// Accept connections **in a loop** until one is a `GET /callback` whose
@@ -381,7 +348,7 @@ impl LoopbackServer {
                 return Err(no_redirect_error(timeout));
             };
             let (mut stream, _peer) = accepted.map_err(|e| OidcError::Callback {
-                reason: format!("accept on the loopback listener failed: {e}"),
+                reason: format!("accept on the callback listener failed: {e}"),
             })?;
 
             // Bound each connection by whichever is smaller: the per-connection
@@ -503,6 +470,8 @@ fn error_page(reason: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::net::IpAddr;
+
     use super::*;
     use proptest::prelude::*;
 
@@ -658,7 +627,7 @@ mod tests {
         // The F2 regression: a silent preconnect and a favicon probe must NOT
         // consume the single accept slot; the genuine redirect on a later socket
         // still wins.
-        let server = LoopbackServer::bind(LoopbackBind::loopback(0))
+        let server = CallbackServer::bind(SocketAddr::new(IpAddr::V4(LOOPBACK_IP), 0))
             .await
             .unwrap();
         let port = server.port();
@@ -705,11 +674,9 @@ mod tests {
         // The container case (issue #52): the catcher listens on 0.0.0.0 so a
         // redirect forwarded into the container lands, while the advertised
         // redirect_uri stays the registered 127.0.0.1 literal.
-        let bind = LoopbackBind {
-            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            port: 0,
-        };
-        let server = LoopbackServer::bind(bind).await.unwrap();
+        let server = CallbackServer::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 0))
+            .await
+            .unwrap();
         let port = server.port();
         // The advertised URI does not follow the listener off loopback. The
         // advertised URI is owned by `OidcEndpoints`; here we only check that
@@ -764,7 +731,7 @@ mod tests {
             );
             return;
         };
-        let server = LoopbackServer::bind(LoopbackBind::loopback(0))
+        let server = CallbackServer::bind(SocketAddr::new(IpAddr::V4(LOOPBACK_IP), 0))
             .await
             .unwrap();
         let port = server.port();
@@ -776,22 +743,11 @@ mod tests {
         );
     }
 
-    #[test]
-    fn bind_reports_whether_it_stays_on_loopback() {
-        assert!(LoopbackBind::loopback(7777).is_loopback());
-        let wildcard = LoopbackBind {
-            addr: IpAddr::V4(Ipv4Addr::UNSPECIFIED),
-            port: 7777,
-        };
-        assert!(!wildcard.is_loopback());
-        assert_eq!(wildcard.socket_addr().to_string(), "0.0.0.0:7777");
-    }
-
     #[tokio::test]
     async fn accept_times_out_when_only_noise_arrives() {
         // A cross-origin `?error=…` that cannot prove `state` must not terminate
         // the flow; with no genuine redirect, accept eventually times out.
-        let server = LoopbackServer::bind(LoopbackBind::loopback(0))
+        let server = CallbackServer::bind(SocketAddr::new(IpAddr::V4(LOOPBACK_IP), 0))
             .await
             .unwrap();
         let port = server.port();

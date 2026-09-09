@@ -299,10 +299,21 @@ pub struct HarvestLanded {
     /// The molecule that was closed, and integrated where the second
     /// authority arose.
     pub molecule: String,
-    /// `landed`, or `already_landed` when the harvest had already
-    /// happened — the idempotent reply that makes a retry over a lossy
-    /// network safe.
+    /// `landed`, `closed_without_merge` when the closure deliberately
+    /// integrated nothing, `no_op` when `if_completed` was sent and there
+    /// was nothing to close, or `already_landed` when the harvest had
+    /// already happened — the idempotent reply that makes a retry over a
+    /// lossy network safe.
     pub outcome: String,
+    /// Whether the branch is on the trunk. `None` only against a server
+    /// older than the field; a caller deciding whether the work shipped
+    /// must read this rather than infer it from the 200.
+    #[serde(default)]
+    pub merged: Option<bool>,
+    /// The kebab-case `non_integration` reason when nothing was
+    /// integrated (`merge-skipped`, `no-branch`), `None` when it was.
+    #[serde(default)]
+    pub non_integration: Option<String>,
 }
 
 /// Body of `POST /v1/molecules/{id}/done` — the harvest door's full
@@ -542,6 +553,15 @@ pub struct SessionWaiting {
     /// The line that fired the classification.
     #[serde(default)]
     pub evidence: Option<String>,
+    /// Which plane the classification read: `transcript` · `pane` ·
+    /// `control-plane` · `none`.
+    ///
+    /// Named because the two planes answer different questions. A live
+    /// permission prompt is drawn on the *screen* and need not be written to
+    /// the transcript at all, so a verdict of `waiting` sourced from `pane`
+    /// is a live stop, while one sourced from `transcript` may be historical.
+    #[serde(default)]
+    pub evidence_source: Option<String>,
     /// The worker declared a stop for the operator.
     #[serde(default)]
     pub awaiting_operator: bool,
@@ -579,6 +599,11 @@ pub struct SessionEnvelope {
     /// How many entries this page carries.
     #[serde(default)]
     pub returned: usize,
+    /// Whether the transcript read hit its byte ceiling, so the oldest part
+    /// of the thread is not represented. `total` and the ordinals then count
+    /// the retrieved window, not the whole file.
+    #[serde(default)]
+    pub truncated: bool,
     /// The waiting verdict.
     #[serde(default)]
     pub waiting: Option<SessionWaiting>,

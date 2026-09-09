@@ -139,6 +139,23 @@ pub struct WaitReport {
 /// already-terminal molecule returns immediately with one poll and no
 /// wait — the idempotence `cs wait` has.
 ///
+/// # The deadline bounds the request, not only the sleep
+///
+/// `opts.timeout` is an absolute deadline computed once, and *every*
+/// request is issued with the budget that is left. A request still in
+/// flight when the budget runs out is abandoned and reported as
+/// [`WaitOutcome::TimedOut`]; the loop also refuses to start a further
+/// poll once the deadline has passed. That is deliberate even when the
+/// late answer would have been a success: the caller's contract is its
+/// own clock, not the server's. A `--timeout 2` that returns a
+/// completion at five seconds has answered a question nobody asked, and
+/// the script that set the budget cannot tell that from a fast answer.
+///
+/// This is separate from the profile's transport timeout, which bounds a
+/// single request against a dead peer and knows nothing about how long
+/// this wait has left. Whichever is shorter wins; only this one is what
+/// the caller asked for.
+///
 /// Every poll after the first is conditional on the previous answer's
 /// entity-tag, so a molecule that is not moving costs a `304` and no
 /// body. `progress` is called once per observed transition (never per
@@ -169,8 +186,50 @@ where
     let mut unchanged_polls: u32 = 0;
     let mut transitions: u32 = 0;
 
+    // Built once so the deadline paths and the terminal paths report the
+    // same shape; `last` is the answer seen INSIDE the budget, which is
+    // the only one the caller was promised.
+    macro_rules! timed_out {
+        () => {{
+            let (status, phase, terminal) = last.clone().unwrap_or_else(|| {
+                // Only reachable when every poll so far was a `304` with no
+                // prior body — a server answering conditionally to a tag we
+                // never received — or when the very first request outlived
+                // the budget. Report it as unknown rather than invent one.
+                ("unknown".to_owned(), "unknown".to_owned(), false)
+            });
+            return Ok(WaitOutcome::TimedOut(WaitReport {
+                molecule_id: molecule_id.to_owned(),
+                status,
+                phase,
+                terminal,
+                polls,
+                unchanged_polls,
+                transitions,
+                elapsed: started.elapsed(),
+            }));
+        }};
+    }
+
     loop {
-        let poll = client.get_status(molecule_id, etag.as_deref()).await?;
+        // What is left of the budget bounds the request itself. Without
+        // this the sleep is clamped but the next request is not, so a slow
+        // answer can win minutes after the deadline the caller advertised.
+        // The first poll is not exempt — it is immediate (no sleep precedes
+        // it), not unbounded.
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            timed_out!();
+        }
+        let poll =
+            match tokio::time::timeout(remaining, client.get_status(molecule_id, etag.as_deref()))
+                .await
+            {
+                Ok(result) => result?,
+                // The request was still outstanding when the budget ran out.
+                // That is the promised outcome, not a transport error.
+                Err(_elapsed) => timed_out!(),
+            };
         polls = polls.saturating_add(1);
         match poll {
             StatusPoll::NotModified { etag: tag } => {
@@ -232,22 +291,7 @@ where
 
         let now = tokio::time::Instant::now();
         if now >= deadline {
-            let (status, phase, terminal) = last.unwrap_or_else(|| {
-                // Only reachable when every poll so far was a `304` with no
-                // prior body — a server answering conditionally to a tag we
-                // never received. Report it as unknown rather than invent one.
-                ("unknown".to_owned(), "unknown".to_owned(), false)
-            });
-            return Ok(WaitOutcome::TimedOut(WaitReport {
-                molecule_id: molecule_id.to_owned(),
-                status,
-                phase,
-                terminal,
-                polls,
-                unchanged_polls,
-                transitions,
-                elapsed: started.elapsed(),
-            }));
+            timed_out!();
         }
         // Clamp to what is left, so `--poll-interval 100 --timeout 3`
         // wakes at 3 s rather than at 100.

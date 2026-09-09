@@ -188,6 +188,77 @@ pub fn sanitise_agent_path(path: &str) -> String {
 /// tell a cut entry from a short one.
 pub const MAX_ENTRY_CHARS: usize = 8_000;
 
+/// The file name of the durable per-molecule session locator, written inside
+/// the molecule directory (`fleets/{fleet}/molecules/{id}/`).
+///
+/// Named here rather than in the writer or the reader because two crates
+/// depend on it being the same string — `cosmon-runtime` writes it at
+/// dispatch, the RPP adapter reads it long afterwards — and a format contract
+/// with two definitions drifts.
+pub const SESSION_LOCATOR_FILE: &str = "session-locator.json";
+
+/// Where a molecule's agent transcript can be found, recorded at dispatch and
+/// kept for as long as the molecule directory exists.
+///
+/// # Why this exists
+///
+/// The transcript used to be located exclusively through `assigned_worker` →
+/// `fleet.workers[worker].repo`. That entry is **deleted by normal teardown**:
+/// `cs done` purges the worker from `fleet.json`, and so does `cs purge`. The
+/// agent's log file is still on disk, but nothing left in cosmon could say
+/// *which* directory it belonged to, so the retrospective read that is the
+/// whole point of `GET /v1/molecules/{id}/session` returned `source: none`
+/// the moment a molecule was closed normally.
+///
+/// The molecule directory outlives the fleet entry — it is where `result.md`
+/// and `blocked_on.json` already live, and the same route already reads the
+/// latter post-mortem. So the locator is written there, once, at dispatch.
+///
+/// It is deliberately **not** a `MoleculeData` field: these are host paths,
+/// not domain state, and every new `MoleculeData` field has to be carried by
+/// the archive projection and salvaged field-by-field by the state rebuild.
+/// A sidecar in the molecule directory has neither cost and exactly the
+/// lifetime wanted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionLocator {
+    /// The adapter that served the dispatch (`claude`, `codex`, …). Selects
+    /// which transcript plane is tried first; `None` for a dispatch that
+    /// recorded none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter: Option<String>,
+    /// The worker's working directory — the key both transcript planes are
+    /// indexed by. Absolute, as resolved on the host at dispatch.
+    pub cwd: String,
+    /// The transcript file itself, once one has been resolved.
+    ///
+    /// Absent at dispatch (the agent has not created its log yet) and filled
+    /// in by the first successful read. That write-back is what makes the
+    /// subsequent reads open **one** file instead of walking the host's whole
+    /// session tree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<String>,
+}
+
+impl SessionLocator {
+    /// A locator for a worker whose working directory is known but whose
+    /// transcript has not been resolved yet — the state at dispatch.
+    #[must_use]
+    pub fn new(cwd: impl Into<String>, adapter: Option<String>) -> Self {
+        Self {
+            adapter,
+            cwd: cwd.into(),
+            transcript: None,
+        }
+    }
+
+    /// The same locator with the resolved transcript path pinned.
+    #[must_use]
+    pub fn with_transcript(mut self, path: impl Into<String>) -> Self {
+        self.transcript = Some(path.into());
+        self
+    }
+}
+
 /// How many trailing entries [`waiting_from_entries`] hands the classifier by
 /// default. Matches `cs patrol --dialogue-lines` (40): the live prompt sits at
 /// the very end of a thread, and a wider window only invites a stale marker

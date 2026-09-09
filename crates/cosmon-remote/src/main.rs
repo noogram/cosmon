@@ -148,7 +148,10 @@ enum Cmd {
         /// set, so `wait <id>` means "until it is over".
         #[arg(long, default_value = "completed,collapsed", value_delimiter = ',')]
         r#for: Vec<String>,
-        /// Maximum seconds to wait before giving up.
+        /// Maximum seconds to wait before giving up. An absolute deadline:
+        /// it bounds the request in flight, not only the sleep between two
+        /// of them, so an answer that arrives late is a timeout even when
+        /// it would have been a success. The contract is your clock.
         #[arg(long, default_value_t = 600)]
         timeout: u64,
         /// Seconds between polls. Clamped to the remaining budget, so a
@@ -745,8 +748,9 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
         if w.waiting {
             let _ = writeln!(
                 out,
-                "WAITING:  class={} awaiting_operator={}{}",
+                "WAITING:  class={} evidence_source={} awaiting_operator={}{}",
                 w.class,
+                w.evidence_source.as_deref().unwrap_or("none"),
                 w.awaiting_operator,
                 w.evidence
                     .as_deref()
@@ -754,6 +758,13 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
                     .unwrap_or_default()
             );
         }
+    }
+    if env.truncated {
+        let _ = writeln!(
+            out,
+            "(the transcript exceeded the read ceiling: the oldest entries \
+are not shown, and ordinals count the retrieved window)"
+        );
     }
     if env.entries.is_empty() && env.source == "none" {
         let _ = writeln!(
@@ -1673,7 +1684,17 @@ async fn run_molecule(
             if json {
                 print_json(true, &serde_json::to_value(&env)?);
             } else {
-                println!("{} — {}", env.harvest.molecule, env.harvest.outcome);
+                // Name the trunk-side fact, not only the label: a
+                // `closed_without_merge` success left the branch where it
+                // was, and an operator reading one line should not have to
+                // fetch the result route to learn why.
+                match env.harvest.non_integration.as_deref() {
+                    Some(reason) => println!(
+                        "{} — {} (not integrated: {reason})",
+                        env.harvest.molecule, env.harvest.outcome,
+                    ),
+                    None => println!("{} — {}", env.harvest.molecule, env.harvest.outcome),
+                }
             }
         }
         MoleculeCmd::Run { id } => {
@@ -2377,8 +2398,9 @@ async fn run_login(
         Some(addr) => endpoints.with_bind_addr(addr),
         None => endpoints,
     };
-    if !endpoints.bind().is_loopback() {
-        eprintln!("{}", non_loopback_bind_notice(&endpoints.bind()));
+    let callback_addr = endpoints.callback_addr();
+    if !callback_addr.ip().is_loopback() {
+        eprintln!("{}", non_loopback_bind_notice(callback_addr));
     }
 
     let cred_store = CredentialStore::detect()?;
@@ -2444,17 +2466,16 @@ async fn run_login(
 /// It states the widened exposure and the bound on it: for the length of one
 /// login anyone able to reach that interface can *connect* to the catcher, but
 /// only a request echoing the per-flow high-entropy `state` can end the flow
-/// (`classify_request` in `oidc::loopback`), and a captured code is unusable
+/// (`classify_request` in `oidc::callback`), and a captured code is unusable
 /// without the PKCE verifier that never leaves this process. It carries no
 /// secret — no `state`, no code, no token.
-fn non_loopback_bind_notice(bind: &cosmon_remote::oidc::LoopbackBind) -> String {
+fn non_loopback_bind_notice(bind: std::net::SocketAddr) -> String {
     format!(
-        "note: the OAuth redirect catcher is listening on {} (not loopback) for this login. \
+        "note: the OAuth redirect catcher is listening on {bind} (not loopback) for this login. \
          The authorization code will transit that interface; only a redirect echoing this \
          flow's state can complete it, and the code is unusable without the PKCE verifier \
          held in this process. The advertised redirect URI is unchanged: {}",
-        bind.socket_addr(),
-        cosmon_remote::oidc::redirect_uri(bind.port),
+        cosmon_remote::oidc::redirect_uri(bind.port()),
     )
 }
 
@@ -2531,11 +2552,10 @@ mod tests {
 
     #[test]
     fn non_loopback_notice_names_the_interface_and_keeps_the_redirect_uri() {
-        use cosmon_remote::oidc::LoopbackBind;
-        let notice = non_loopback_bind_notice(&LoopbackBind {
-            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            port: 7777,
-        });
+        let notice = non_loopback_bind_notice(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            7777,
+        ));
         // The exposure is named, with its bound...
         assert!(notice.contains("0.0.0.0:7777"), "{notice}");
         assert!(notice.contains("not loopback"), "{notice}");

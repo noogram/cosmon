@@ -74,7 +74,7 @@ fn make_state(state_dir: &std::path::Path, seal: AdminSeal) -> (AppState, Shared
         harvest_effect: std::sync::Arc::new(
             cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect,
         ),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: state_dir.to_path_buf(),
