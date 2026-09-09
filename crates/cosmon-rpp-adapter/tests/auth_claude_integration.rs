@@ -139,7 +139,7 @@ fn make_state(security_dir: &Path, home_dir: &Path, token_url: String) -> AppSta
     let auth_claude = Some(Arc::new(AuthClaudeState::new(config, store)));
 
     AppState {
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.to_path_buf(),
@@ -638,7 +638,7 @@ async fn auth_claude_disabled_returns_503() {
     let deny_list = DenyList::new(security.path().to_path_buf()).with_ttl(Duration::from_secs(0));
     let jwks = JwksStore::load(security.path()).unwrap();
     let state = AppState {
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security.path().to_path_buf(),
@@ -689,7 +689,7 @@ async fn molecule_routes_unaffected_by_auth_claude_addition() {
     let deny_list = DenyList::new(security.path().to_path_buf()).with_ttl(Duration::from_secs(0));
     let jwks = JwksStore::load(security.path()).unwrap();
     let state = AppState {
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security.path().to_path_buf(),
