@@ -274,8 +274,9 @@ cosmon-remote login --bind 0.0.0.0
 `http://127.0.0.1:7777/callback` — it is registered with the provider by exact
 match, so changing it would simply be rejected, and it is the address your
 browser must dial for the forward to pick the redirect up. The port is not
-part of the flag: it stays the redirect port, so the listener and the
-advertised URI cannot disagree about it.
+part of the flag, and it is not stored anywhere either: the listener's port is
+read out of the advertised `redirect_uri` at the moment of binding, so the two
+have no way to disagree about it.
 
 A non-loopback bind is announced on stderr, once, before the browser opens. It
 widens who can *connect* to the catcher for the length of one login. What

@@ -148,7 +148,7 @@ fn login_help_documents_the_flag_and_the_unchanged_redirect_uri() {
 /// This spawns `cosmon-remote login --bind <non-loopback>` for real, with
 /// discovery served from a loopback mock so the run stays hermetic, and
 /// asserts the notice lands on stderr. `203.0.113.7` (TEST-NET-3, RFC 5737)
-/// is never a local interface, so the loopback-server bind that follows the
+/// is never a local interface, so the callback-server bind that follows the
 /// notice fails immediately with an OS error — no browser opens, no timeout is
 /// waited out, and the login is expected to fail *after* the notice was
 /// printed. RED with the call site removed, GREEN with it restored (recorded
