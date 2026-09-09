@@ -31,7 +31,8 @@ On a terminal, the first `cs init` of your life also asks the one-time
 developer-share question (deny-by-default, `cs opt-in-share --status` to
 review). Never asked under `--json`, never asked when stdout is captured.
 
-Symmetric undo: `rm -rf <path>/.cosmon/`.
+Symmetric undo: removing the `.cosmon/` directory it created deletes
+every artifact `cs init` wrote.
 
 ###### **Arguments:**
 
