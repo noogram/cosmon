@@ -47,7 +47,7 @@ pub enum UpgradeError {
     #[error("filesystem error during upgrade: {0}")]
     Io(#[from] std::io::Error),
     /// The neurion registry (`registry.sqlite`) could not be created or
-    /// seeded. Carries the SQLite message as text so this crate's public
+    /// seeded. Carries the `SQLite` message as text so this crate's public
     /// error surface does not leak `rusqlite` types.
     #[error("registry: {0}")]
     Registry(String),
@@ -878,7 +878,7 @@ pub fn upgrade_project(root: &Path, _opts: &UpgradeOptions) -> Result<UpgradeRep
 /// the three default referents.
 ///
 /// Split out of [`upgrade_project`] so the `rusqlite` surface is
-/// confined to one function and the SQLite error text is converted to
+/// confined to one function and the `SQLite` error text is converted to
 /// [`UpgradeError::Registry`] at exactly one place. Shared with the
 /// fresh-init path in `cs init`, which is why it is public: the two
 /// paths must seed byte-identical databases or a galaxy born fresh and
