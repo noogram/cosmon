@@ -12,6 +12,8 @@
 //!   directories, outward symlinks, untracked files.
 //! - `cs doctor mcp` — query the neurion registry for registered MCP
 //!   servers and flag missing binaries, inline tokens, lax config perms.
+//! - `cs doctor gitignore` — ask real git whether `.cosmon/.gitignore`
+//!   still tracks the archive subtree it claims to track (issue #60).
 //! - `cs doctor deps` — walk workspace Cargo.toml files and flag
 //!   unpinned / wildcard / mutable git dependencies.
 //! - `cs doctor supervision` — cross-reference the cosmon supervision
@@ -31,6 +33,7 @@ use super::Context;
 
 pub mod deps;
 pub mod findings;
+pub mod gitignore;
 pub mod leaks;
 pub mod mcp_audit;
 pub mod supervision;
@@ -59,6 +62,8 @@ pub enum DoctorCommand {
     Mcp(mcp_audit::Args),
     /// Flag unpinned or mutable dependency declarations.
     Deps(deps::Args),
+    /// Check that `.cosmon/.gitignore` tracks the archive it claims to.
+    Gitignore(gitignore::Args),
     /// Detect binaries supervised by both cosmon and a `LaunchAgent`.
     Supervision(supervision::Args),
     /// Run every security probe and aggregate findings.
@@ -90,6 +95,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         DoctorCommand::Worktrees(a) => worktrees::run(ctx, a),
         DoctorCommand::Mcp(a) => mcp_audit::run(ctx, a),
         DoctorCommand::Deps(a) => deps::run(ctx, a),
+        DoctorCommand::Gitignore(a) => gitignore::run(ctx, a),
         DoctorCommand::Supervision(a) => supervision::run(ctx, a),
         DoctorCommand::Security(a) => run_security(ctx, a),
     }

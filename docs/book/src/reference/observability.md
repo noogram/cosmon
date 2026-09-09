@@ -217,6 +217,7 @@ Doctor — diagnostic probes (whisper channel, …)
 * `worktrees` — Audit `.worktrees/` for perm/symlink/untracked hazards
 * `mcp` — Audit MCP servers registered in the configured service registry
 * `deps` — Flag unpinned or mutable dependency declarations
+* `gitignore` — Check that `.cosmon/.gitignore` tracks the archive it claims to
 * `supervision` — Detect binaries supervised by both cosmon and a `LaunchAgent`
 * `security` — Run every security probe and aggregate findings
 
@@ -283,6 +284,18 @@ Flag unpinned or mutable dependency declarations
 ###### **Options:**
 
 * `--root <ROOT>` — Override the workspace root
+
+
+
+## `cs doctor gitignore`
+
+Check that `.cosmon/.gitignore` tracks the archive it claims to
+
+**Usage:** `cs doctor gitignore [OPTIONS]`
+
+###### **Options:**
+
+* `--root <ROOT>` — Override the galaxy root (the directory containing `.cosmon/`)
 
 
 

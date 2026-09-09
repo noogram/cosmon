@@ -152,7 +152,7 @@ advance → terminate → infrastructure → introspection.
 | `cs peek` | NO (V2 TBD) | (TBD) `GET /v1/molecules/:id/peek` | Wheat-paste byte raster (ADR-066). Re-evaluate need at V2. The *thread* half of what `peek` shows a human — who said what, in order, and whether the worker is sitting on an unanswered prompt — is exposed separately and read-only by `GET /v1/molecules/:id/session` (issue #51 follow-up, task-20260907-e376), which is adapter-only and needs no `cs` verb: an operator at the host attaches to the pane. The raster itself stays local because it is a byte-exact rendering for one terminal, not a projection a remote principal can use. |
 | `cs topology` | NO | — | Topon-driven structural map; local. |
 | `cs replay` | NO | — | Event-log replay; local debug tool. |
-| `cs archive` | NO | — | Cold-storage of completed molecules; operator-only. |
+| `cs archive` | NO | — | Cold-storage of completed molecules; operator-only. Written by every terminal transition since `[archive] enabled` defaults to `true` (issue #60); a fresh galaxy that has run no molecule to a terminal state still returns nothing from `cs archive list`, which is emptiness, not a fault. |
 | `cs opt-in-share` | NO | — | Opt-in fleet-stats sharing; operator-only. |
 | `cs inspect` | NO | — | Low-level state inspector; local debug. |
 | `cs artifacts` | NO | — | Operator audit over the artifact map (ADR-057); local. |
@@ -164,7 +164,7 @@ advance → terminate → infrastructure → introspection.
 | `cs errors` | NO | — | Read-only IFBDD aggregator over local `events.jsonl` for `MoleculeCollapsed`. Tenant-scoped views ride the same path as `cs tokens` — re-evaluate at V2 if tenant_auditor asks. |
 | `cs quench` | NO | — | Energy-budget injection; operator-only. |
 | `cs help` | NO | — | Documentation, not a remote act. The RPP serves a hand-written OpenAPI document under `openapi/v1.yaml` instead. (`man cs` is the same row, different surface.) |
-| `cs doctor` | NO | — | Local diagnostic tool. |
+| `cs doctor` | NO | — | Local diagnostic tool. `cs doctor gitignore` (issue #60) shells out to the local `git` to decide whether `.cosmon/state/archive/` is ignored — a verdict about this checkout's working tree that no remote principal can act on. |
 | `cs test` | NO | — | Local test harness. |
 | `cs demo` | NO | — | Local demo runner. |
 

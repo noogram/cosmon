@@ -29,6 +29,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use cosmon_core::id::ProjectId;
 
@@ -211,7 +212,73 @@ pub const BUILTIN_FORMULAS: &[(&str, &str)] = &[
 /// is still caught. See `docs/guides/gitleaks-state-journals.md`.
 pub const COSMON_GITLEAKS_BASELINE: &str =
     include_str!("../../../assets/gitleaks/cosmon-baseline.gitleaks.toml");
-pub const COSMON_GITIGNORE_CONTENT: &str = "\
+/// Opening marker of the cosmon-managed section of `.cosmon/.gitignore`.
+///
+/// Exists because the exact-match replacement discipline below has a blind
+/// spot: once a user (or an agent acting for one) edits the file at all,
+/// cosmon can never touch it again — including when the edit left the file
+/// broken. A delimited block narrows cosmon's ownership from "the whole
+/// file, if untouched" to "these lines, always", which is both safer and
+/// repairable. Mirrors [`COSMON_SECTION_START`] for `CLAUDE.md`.
+pub const COSMON_GITIGNORE_BLOCK_START: &str =
+    "# cosmon:gitignore:start — managed by `cs init --upgrade`; edit outside this block";
+
+/// Closing marker of the cosmon-managed section of `.cosmon/.gitignore`.
+///
+/// See [`COSMON_GITIGNORE_BLOCK_START`].
+pub const COSMON_GITIGNORE_BLOCK_END: &str = "# cosmon:gitignore:end";
+
+/// The cosmon-managed block of `.cosmon/.gitignore`, markers included.
+///
+/// Every rule here is relative to `.cosmon/`. Two forms are load-bearing
+/// and were wrong until issue #60: see the comment body.
+pub const COSMON_GITIGNORE_BLOCK: &str = "\
+# cosmon:gitignore:start — managed by `cs init --upgrade`; edit outside this block
+# Cosmon runtime — ephemeral state is ignored in bulk; the archive subtree
+# (durable, human-readable proof-of-work snapshots) is re-included via
+# negation, so a molecule's chain of reasoning reaches git history.
+#
+# Two forms are load-bearing and easy to get wrong (issue #60):
+#   * `state/*`, never `state/`: git does not descend into an excluded
+#     directory, so a blanket `state/` makes every negation below match
+#     nothing — the rule reads as if the archive were tracked and it is not.
+#   * `!state/` first: it keeps the directory itself un-excluded, so this
+#     block still binds when a broader `state/` rule precedes it.
+# See ADR: ARCHIVE M1 (task-20260413) and issue #60.
+!state/
+state/*
+!state/archive/
+!state/archive/**
+registry.sqlite
+registry.sqlite-journal
+registry.sqlite-wal
+*.lock
+*.tmp
+# cosmon:gitignore:end
+";
+
+/// Contents of `.cosmon/.gitignore` as written by a fresh `cs init`.
+///
+/// Cosmon state is split like git itself: ephemeral runtime (registry,
+/// lockfiles, PIDs, tmux/pty logs, volatile `state.json`) is ignored;
+/// durable intellectual artifacts (deliberation syntheses, decision
+/// outcomes, briefings, per-persona responses, append-only notes, the
+/// `events.jsonl` audit trail, reports) are **tracked** under
+/// `state/archive/`. That chain of reasoning is what makes cosmon projects
+/// interesting archaeologically — it belongs in git history, not only in
+/// the runtime working tree that `cs done` tears down.
+///
+/// A fresh file is exactly the managed block; user lines, when there are
+/// any, live outside it.
+pub const COSMON_GITIGNORE_CONTENT: &str = COSMON_GITIGNORE_BLOCK;
+
+/// Previous `.cosmon/.gitignore` body (ARCHIVE M1, 2026-04-12 → issue #60).
+///
+/// Announced the archive negation and did not deliver it: `state/` excludes
+/// the directory, so git never descends and `!state/archive/` matches
+/// nothing. Kept verbatim so `cs init --upgrade` can recognise and replace
+/// it by exact match.
+pub const LEGACY_BROKEN_NEGATION_GITIGNORE_CONTENT: &str = "\
 # Cosmon runtime — ephemeral state is ignored in bulk; the archive subtree
 # (durable, human-readable proof-of-work snapshots) is re-included via
 # negation. See ADR: ARCHIVE M1 (task-20260413).
@@ -665,11 +732,153 @@ pub fn strip_cosmon_gitignore_block(body: &str) -> String {
     }
     result
 }
+/// Rewrite the cosmon-managed part of a `.cosmon/.gitignore` body.
+///
+/// Returns the new body, or `None` when nothing should change.
+///
+/// Ownership is deliberately narrow, in four cases:
+///
+/// 1. The body already is the current canonical block — nothing to do.
+/// 2. The body is one of the recognised legacy bodies, byte for byte —
+///    replaced wholesale, the discipline that has always applied.
+/// 3. The body carries [`COSMON_GITIGNORE_BLOCK_START`] and
+///    [`COSMON_GITIGNORE_BLOCK_END`] — only the lines between the markers
+///    are replaced; everything outside them is preserved byte for byte.
+///    This is how cosmon keeps owning its rules in a file a user also edits.
+/// 4. The body is customized and carries no marker — left alone, unless
+///    `repair` is set, in which case the managed block is *appended*. An
+///    appended block adds cosmon's own lines and removes none of the
+///    user's; because git resolves an ignore file last-match-wins, and
+///    because the block opens with `!state/`, it binds regardless of what
+///    precedes it.
+///
+/// Case 4 is the answer to the mangled-file report in issue #60: an agent
+/// had rewritten a galaxy's file into a chain of rules that ignored and
+/// re-included each other, and the exact-match rule meant `cs init
+/// --upgrade` would never look at it again. Appending under a marker keeps
+/// the reason exact-match exists — a user's deliberate edits are not
+/// cosmon's to overwrite — while giving cosmon a lane of its own.
+///
+/// # Example
+///
+/// ```
+/// use cosmon_filestore::project_upgrade::{
+///     rewrite_cosmon_gitignore, COSMON_GITIGNORE_CONTENT,
+/// };
+///
+/// // A pristine current file needs nothing.
+/// assert!(rewrite_cosmon_gitignore(COSMON_GITIGNORE_CONTENT, false).is_none());
+///
+/// // A customized file is left alone until it is known to be broken.
+/// assert!(rewrite_cosmon_gitignore("my-own-rule\n", false).is_none());
+/// let repaired = rewrite_cosmon_gitignore("my-own-rule\n", true).unwrap();
+/// assert!(repaired.starts_with("my-own-rule\n"));
+/// assert!(repaired.contains("!state/archive/**"));
+/// ```
+#[must_use]
+pub fn rewrite_cosmon_gitignore(body: &str, repair: bool) -> Option<String> {
+    if body == COSMON_GITIGNORE_CONTENT {
+        return None;
+    }
+    if body == LEGACY_BROKEN_NEGATION_GITIGNORE_CONTENT
+        || body == LEGACY_COSMON_GITIGNORE_CONTENT
+        || body == LEGACY_SELECTIVE_COSMON_GITIGNORE_CONTENT
+    {
+        return Some(COSMON_GITIGNORE_CONTENT.to_owned());
+    }
+    if let Some(updated) = replace_managed_block(body) {
+        return (updated != body).then_some(updated);
+    }
+    if !repair {
+        return None;
+    }
+    let mut out = body.to_owned();
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    if !out.is_empty() {
+        out.push('\n');
+    }
+    out.push_str(COSMON_GITIGNORE_BLOCK);
+    Some(out)
+}
+
+/// Replace the marked region of `body` with the current managed block.
+///
+/// `None` when the body carries no complete marker pair — the caller then
+/// decides whether to append one.
+fn replace_managed_block(body: &str) -> Option<String> {
+    let start = body.find(COSMON_GITIGNORE_BLOCK_START)?;
+    let end_marker = body[start..].find(COSMON_GITIGNORE_BLOCK_END)? + start;
+    // Consume the end marker line up to and including its newline, so the
+    // replacement block (which ends in one) does not double it.
+    let after = body[end_marker..]
+        .find('\n')
+        .map_or(body.len(), |i| end_marker + i + 1);
+    let mut out = String::with_capacity(body.len() + COSMON_GITIGNORE_BLOCK.len());
+    out.push_str(&body[..start]);
+    out.push_str(COSMON_GITIGNORE_BLOCK);
+    out.push_str(&body[after..]);
+    Some(out)
+}
+
+/// Ask real git whether the archive subtree of `cosmon_dir` is ignored.
+///
+/// Returns the `git check-ignore -v` verdict (`<file>:<line>:<pattern>`)
+/// naming the rule that excludes a representative archive artifact, and
+/// `None` when nothing excludes it — or when git is unavailable, which is
+/// not a diagnosis and must not be reported as one.
+///
+/// WHY shell out rather than evaluate the rules here: an ignore file that
+/// says one thing and does another is exactly the defect of issue #60, and
+/// a re-implementation of git's precedence rules is a second place for the
+/// same class of mistake to hide. git is the authority on what git ignores.
+///
+/// WHY two invocations: `check-ignore -v` exits 0 whenever *any* pattern
+/// matches, negations included, so its exit status alone cannot answer the
+/// question. The plain form exits 1 for a re-included path and is the
+/// verdict; the verbose form is then run only to name the rule.
+///
+/// The probed path is synthetic and never created — `check-ignore` answers
+/// for paths that do not exist.
+#[must_use]
+pub fn archive_subtree_ignored_rule(project_root: &Path, cosmon_dir: &Path) -> Option<String> {
+    let git_root = find_git_root(project_root)?;
+    let probe = cosmon_dir
+        .join("state")
+        .join("archive")
+        .join("2026")
+        .join("01")
+        .join("probe")
+        .join("result.md");
+    let check = |verbose: bool| {
+        let mut cmd = Command::new("git");
+        cmd.arg("-C").arg(&git_root).arg("check-ignore");
+        if verbose {
+            cmd.arg("-v");
+        }
+        cmd.arg("--no-index").arg("--").arg(&probe).output().ok()
+    };
+    if !check(false)?.status.success() {
+        return None;
+    }
+    let verbose = check(true)?;
+    let named = String::from_utf8_lossy(&verbose.stdout).trim().to_owned();
+    Some(if named.is_empty() {
+        "ignored by an unnamed rule".to_owned()
+    } else {
+        named
+    })
+}
+
 /// Upgrade legacy gitignore rules to the consolidated scheme.
 ///
 /// Rewrites:
-///   * `.cosmon/.gitignore` if its body matches `LEGACY_COSMON_GITIGNORE_CONTENT`
-///     exactly (untouched user-customized files are preserved).
+///   * `.cosmon/.gitignore`, per [`rewrite_cosmon_gitignore`]: a recognised
+///     legacy body is replaced wholesale, a marked body has only its marked
+///     region rewritten, and a customized marker-less body is left alone
+///     unless real git reports the archive subtree ignored — in which case
+///     the managed block is appended below the user's lines.
 ///   * The project `.gitignore` at the git root: removes every legacy
 ///     Cosmon block — `.cosmon/`, `.cosmon/state/`, `.worktrees/`, orphan
 ///     `# Cosmon …` comments — and writes `.worktrees/` to
@@ -681,18 +890,17 @@ pub fn strip_cosmon_gitignore_block(body: &str) -> String {
 fn upgrade_gitignore_rules(project_root: &Path, cosmon_dir: &Path) -> bool {
     let mut changed = false;
 
-    // .cosmon/.gitignore — exact-match replacement only. Two legacy bodies
-    // are recognized: the blanket `state/` era and the selective-rules era.
-    // User-customized files are left untouched.
+    // .cosmon/.gitignore — see `rewrite_cosmon_gitignore` for the ownership
+    // rules. A customized, marker-less body is rewritten only when real git
+    // says the archive subtree is currently ignored, which is the one state
+    // the user cannot have intended while the archive is writing into it.
     let cosmon_ignore = cosmon_dir.join(".gitignore");
     if let Ok(body) = fs::read_to_string(&cosmon_ignore) {
-        let is_legacy = body == LEGACY_COSMON_GITIGNORE_CONTENT
-            || body == LEGACY_SELECTIVE_COSMON_GITIGNORE_CONTENT;
-        if is_legacy
-            && body != COSMON_GITIGNORE_CONTENT
-            && fs::write(&cosmon_ignore, COSMON_GITIGNORE_CONTENT).is_ok()
-        {
-            changed = true;
+        let broken = archive_subtree_ignored_rule(project_root, cosmon_dir).is_some();
+        if let Some(updated) = rewrite_cosmon_gitignore(&body, broken) {
+            if fs::write(&cosmon_ignore, &updated).is_ok() {
+                changed = true;
+            }
         }
     } else if !cosmon_ignore.exists() && fs::write(&cosmon_ignore, COSMON_GITIGNORE_CONTENT).is_ok()
     {
