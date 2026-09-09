@@ -205,6 +205,36 @@ defect issue #51 first reported — is independent of all this and is unchanged.
   `COSMON_RPP_NAME_SUFFIX`), each defaulting to its previous literal so the
   rendered configuration of the reference deployment is unchanged.
 
+### Changed
+
+- **The container-level e2e moved from a shell script to a `pytest` suite under
+  `tests/e2e/`.** Answering the review of PR #56: a shell script was the fastest
+  way to prove the stack end to end once, and the wrong substrate to grow test
+  selection, debugging and reporting on. `scripts/rpp-remote-e2e.sh` is now a
+  pass-through to `pytest tests/e2e` (every argument forwarded), so the command
+  CI and the how-to page name is unchanged. What the move buys, each of it a
+  point the review made: `-k` selection, so `pytest tests/e2e -k healthz` is a
+  real command — the scenario's legs reach their preconditions through fixtures,
+  not by a sibling test having run first; a JUnit report and per-exchange
+  artefacts (request, response, container logs) instead of one NDJSON line;
+  `--pdb`, `-x`, `--lf`. Every assertion now states *why* the value it expects is
+  the right one, naming the ADR section, route document or invariant it derives
+  from, and the helper that carries that sentence prints the request, the
+  response and the adapter log tail when it breaks. The **stack is reinitialised
+  between test sets** — `down -v` + `up --wait` + reprovisioning, plus a fresh
+  tenant galaxy tree, per test class — so no molecule or rate-limiter bucket from
+  one set can decide another's verdict; `tests/e2e/test_reinit.py` plants a
+  molecule in one set and asserts its absence in the next, and goes red under
+  `RPP_E2E_REINIT=0`, which is what makes the boundary a claim the suite supports
+  rather than one it asserts. The **mock IdP caveat** the review asked for is
+  written where the fixture is defined and on the how-to page: six named
+  deviations from a real provider (auto-approving `/authorize`, a readable fixed
+  `sub`, a minimal discovery document, unordered token-response extras,
+  non-rotating keys, no refresh/revocation/introspection) and the environment
+  profile that runs the same tests against a real IdP. The image build stays
+  session-scoped: it is minutes of `cargo build --release`, and paying it per
+  test would make the suite unusable.
+
 ### Fixed
 
 - **No worker could ever start in the adapter image: tmux ran every pane

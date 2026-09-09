@@ -188,20 +188,22 @@ pub const PASSTHROUGH_VARS: &[&str] = &[
 /// server's decision, computed from the sealed binding's root — never from
 /// this process's environment (the same "an inherited adapter value must
 /// never win" rule [`WorkerEnvelope::build_env`] enforces on the workers).
+///
+/// It delegates to [`cosmon_runtime::TenantPaths::rooted_at`], which is the
+/// same value the tackle / run routes hand to the
+/// [`cosmon_runtime::LibraryExecutor`]: the dispatch's own reads and the
+/// worker's `COSMON_STATE_DIR` pin then share one definition rather than
+/// two that merely happen to agree.
 #[must_use]
 pub fn tenant_state_dir(tenant_root: &Path) -> PathBuf {
-    tenant_root
-        .join(cosmon_filestore::resolve::COSMON_DIR_NAME)
-        .join("state")
+    cosmon_runtime::TenantPaths::rooted_at(tenant_root).state_dir
 }
 
 /// The tenant's formulas directory, `<tenant_root>/.cosmon/formulas` —
 /// [`tenant_state_dir`]'s sibling, same determinism rationale.
 #[must_use]
 pub fn tenant_formulas_dir(tenant_root: &Path) -> PathBuf {
-    tenant_root
-        .join(cosmon_filestore::resolve::COSMON_DIR_NAME)
-        .join("formulas")
+    cosmon_runtime::TenantPaths::rooted_at(tenant_root).formulas_dir
 }
 
 /// Whether `key` is allowed to be inherited by a spawned worker.
