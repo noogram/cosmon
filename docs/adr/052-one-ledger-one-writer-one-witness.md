@@ -794,6 +794,28 @@ silently accepted as this shape) — plus a re-run of the three prior
 provenance harnesses, so this file also certifies that the shapes it
 did not touch still PASS/FAIL exactly as before.
 
+**Amendment (2026-09-09) — the suffixed integration branch.** One
+external issue is often answered by several chained pull requests, and
+each needs a branch name of its own: issue #51 was landed as
+`feat/issue-51-done` → `feat/issue-51-session` → `feat/issue-51-status`
+(PRs #62/#63/#64). The five shapes above therefore admit an optional
+descriptive suffix, `feat/issue-<N>-<slug>` with `<slug>` matching
+`[a-z0-9-]+`, wherever they name an integration branch. The slug is
+decoration on the branch, not a provenance claim: the issue identity
+stays `<N>` alone, so the PR-number/issue-number agreement rule still
+compares `<N>` only, and the recursive second-parent walk treats a
+suffixed branch exactly like a bare one. Nothing the property rests on
+moves — a landing is still accepted iff every merge it carries beyond
+main's history is itself gated. Without this, every
+forward-propagation merge between two of the chained branches
+(`Merge branch 'feat/issue-58' into feat/issue-51-done`) FAILed the
+gate in exactly the PR scope CI uses. Covered by scenarios 8-10 of the
+same harness: a stacked merge between two suffixed branches is
+accepted; a suffixed branch carrying a non-clean merge is still
+rejected, naming that inner commit; and a slugged PR subject whose
+number disagrees with the branch's issue number still falls through to
+the ordinary refusal.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,
