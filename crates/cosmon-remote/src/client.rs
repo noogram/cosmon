@@ -542,6 +542,15 @@ pub struct SessionWaiting {
     /// The line that fired the classification.
     #[serde(default)]
     pub evidence: Option<String>,
+    /// Which plane the classification read: `transcript` · `pane` ·
+    /// `control-plane` · `none`.
+    ///
+    /// Named because the two planes answer different questions. A live
+    /// permission prompt is drawn on the *screen* and need not be written to
+    /// the transcript at all, so a verdict of `waiting` sourced from `pane`
+    /// is a live stop, while one sourced from `transcript` may be historical.
+    #[serde(default)]
+    pub evidence_source: Option<String>,
     /// The worker declared a stop for the operator.
     #[serde(default)]
     pub awaiting_operator: bool,
@@ -579,6 +588,11 @@ pub struct SessionEnvelope {
     /// How many entries this page carries.
     #[serde(default)]
     pub returned: usize,
+    /// Whether the transcript read hit its byte ceiling, so the oldest part
+    /// of the thread is not represented. `total` and the ordinals then count
+    /// the retrieved window, not the whole file.
+    #[serde(default)]
+    pub truncated: bool,
     /// The waiting verdict.
     #[serde(default)]
     pub waiting: Option<SessionWaiting>,

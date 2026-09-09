@@ -704,8 +704,9 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
         if w.waiting {
             let _ = writeln!(
                 out,
-                "WAITING:  class={} awaiting_operator={}{}",
+                "WAITING:  class={} evidence_source={} awaiting_operator={}{}",
                 w.class,
+                w.evidence_source.as_deref().unwrap_or("none"),
                 w.awaiting_operator,
                 w.evidence
                     .as_deref()
@@ -713,6 +714,13 @@ fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
                     .unwrap_or_default()
             );
         }
+    }
+    if env.truncated {
+        let _ = writeln!(
+            out,
+            "(the transcript exceeded the read ceiling: the oldest entries \
+are not shown, and ordinals count the retrieved window)"
+        );
     }
     if env.entries.is_empty() && env.source == "none" {
         let _ = writeln!(

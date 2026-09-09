@@ -28,17 +28,47 @@
 //! [`cosmon_core::session_thread`] for the schemas and the finding. Resolution
 //! order, first hit wins:
 //!
-//! 1. **claude transcript** — `<claude-config>/projects/{sanitised-cwd}/*.jsonl`,
+//! 1. **the pinned transcript** — the exact file
+//!    [`cosmon_core::session_thread::SessionLocator`] recorded, one open and
+//!    no scan at all.
+//! 2. **claude transcript** — `<claude-config>/projects/{sanitised-cwd}/*.jsonl`,
 //!    the most recent log for the worker's recorded working directory.
-//! 2. **codex rollout** — `~/.codex/sessions/**/rollout-*.jsonl` whose
+//! 3. **codex rollout** — `~/.codex/sessions/**/rollout-*.jsonl` whose
 //!    `session_meta.payload.cwd` is that same directory.
-//! 3. **tmux scrollback** — a capture of the live pane, when no transcript
+//! 4. **tmux scrollback** — a capture of the live pane, when no transcript
 //!    file resolves. Named as such on the wire, with its limits stated.
-//! 4. **none** — nothing was retrievable. An explicit `source`, never an
+//! 5. **none** — nothing was retrievable. An explicit `source`, never an
 //!    empty `200` that reads like an empty session.
 //!
-//! Both transcript paths key off the *recorded* worker directory, so they
-//! answer long after the pane is gone — which is the whole point of the route.
+//! # The locator, and why the fleet entry was not enough
+//!
+//! Both transcript planes key off the worker's *working directory*, which
+//! used to be recoverable only through `assigned_worker` →
+//! `fleet.workers[worker].repo`. Normal teardown deletes that entry: `cs done`
+//! purges the worker from `fleet.json`, and so does `cs purge`. The agent log
+//! survives on disk, but nothing was left to say which directory it belonged
+//! to — so the *retrospective* read this route exists for returned
+//! `source: none` the moment a molecule closed cleanly, which is precisely
+//! when a human wants to read it. The locator sidecar
+//! (`fleets/{fleet}/molecules/{id}/session-locator.json`) is written at
+//! dispatch, lives beside `result.md` and `blocked_on.json` in a directory
+//! teardown keeps, and is what this route resolves from first. The fleet
+//! entry remains as the fallback for molecules dispatched before it existed —
+//! and their first successful read writes the sidecar, so the dependency
+//! expires by itself.
+//!
+//! # Bounded work, not just a bounded response
+//!
+//! `tail`/`limit` bound what is *returned*; they used to bound nothing about
+//! what was *read*. A `tail=3` request walked the host's whole codex session
+//! tree, read every rollout in full to check its first eight lines, and then
+//! allocated the entire selected transcript before taking three entries off
+//! the end. Now: the pinned path is opened directly when there is one; a
+//! candidate rollout is probed by its head alone ([`MAX_HEAD_BYTES`]); the
+//! selected transcript is read from its **end** under
+//! [`MAX_TRANSCRIPT_BYTES`], with `truncated` on the wire when that ceiling
+//! bites; and the whole of it runs under `spawn_blocking` rather than on the
+//! async executor.
 //!
 //! # Pipeline (same five clauses as `get_molecule` / `get_result`)
 //!
@@ -70,6 +100,11 @@
 //! control-plane `await-operator` signal. No marker vocabulary is invented
 //! here. Per ADR-137 §2 the text half is evidence for a human only — this
 //! route mutates nothing and no autonomous action is keyed off it.
+//!
+//! Both planes are classified, not just the one the entries came from: a live
+//! permission prompt is drawn on the *screen* and need not appear in the
+//! transcript at all, so a transcript-only verdict reported a worker frozen
+//! at a prompt as busy. `waiting.evidence_source` names which plane fired.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -80,7 +115,7 @@ use axum::response::Json;
 use cosmon_core::id::MoleculeId;
 use cosmon_core::session_thread::{
     entries_from_pane, parse_claude_transcript, parse_codex_rollout, tail, waiting_from_entries,
-    window, ThreadEntry, ThreadSource, WAITING_SCAN_ENTRIES,
+    window, SessionLocator, ThreadEntry, ThreadSource, WAITING_SCAN_ENTRIES,
 };
 use cosmon_state::MoleculeData;
 use serde::Deserialize;
@@ -170,11 +205,94 @@ pub struct ResolvedThread {
     pub entries: Vec<ThreadEntry>,
 }
 
+/// Byte ceiling on a single transcript read.
+///
+/// A worker's own log is the one file this route is *supposed* to read, but
+/// it grows without bound while the worker runs, and `read_to_string` on it
+/// allocated the whole thing before any window was applied — so a `tail=3`
+/// request paid for a hundred-megabyte thread. Four mebibytes is far more
+/// than [`MAX_LIMIT`] entries of [`cosmon_core::session_thread::MAX_ENTRY_CHARS`]
+/// could ever return, so the ceiling is invisible to every honest read and
+/// present for the dishonest one. When it bites, `truncated` says so on the
+/// wire rather than passing a partial thread off as a whole one.
+pub const MAX_TRANSCRIPT_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Byte ceiling on the *metadata* probe of a candidate codex rollout.
+///
+/// `session_meta` is the first line of a rollout. Deciding whether a file
+/// belongs to this worker therefore needs its head, never its body — and the
+/// body is what made the un-pinned scan read every historical rollout on the
+/// host in full.
+const MAX_HEAD_BYTES: u64 = 64 * 1024;
+
+/// What one session read actually cost on the filesystem.
+///
+/// Returned rather than logged because it is the falsifier: "the read is
+/// bounded" is a claim about opens and bytes, and a test can only hold this
+/// route to it if the route reports them. The route itself does not serve
+/// these numbers — they exist to be asserted against.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReadBudget {
+    /// How many files were opened and read from.
+    pub files_opened: u64,
+    /// How many bytes were read out of them.
+    pub bytes_read: u64,
+}
+
+/// Read at most `max_bytes` from the **end** of `path`.
+///
+/// Reading from the end is what makes `tail` cheap: the entries a reader
+/// almost always wants are the last ones, and the head of a long-running
+/// worker's log is exactly the part nobody asked for. When the file is
+/// larger than the ceiling the first (necessarily partial) line is dropped —
+/// half a JSON object is not an entry — and `true` is returned for
+/// `truncated`.
+fn read_tail_bounded(
+    path: &Path,
+    max_bytes: u64,
+    budget: &mut ReadBudget,
+) -> Option<(String, bool)> {
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    budget.files_opened += 1;
+    if len <= max_bytes {
+        let mut buf = String::new();
+        file.read_to_string(&mut buf).ok()?;
+        budget.bytes_read += buf.len() as u64;
+        return Some((buf, false));
+    }
+    file.seek(SeekFrom::Start(len - max_bytes)).ok()?;
+    let mut raw = Vec::new();
+    file.take(max_bytes).read_to_end(&mut raw).ok()?;
+    budget.bytes_read += raw.len() as u64;
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    let kept = match text.find('\n') {
+        Some(nl) => text[nl + 1..].to_owned(),
+        None => String::new(),
+    };
+    Some((kept, true))
+}
+
+/// Read at most the first `MAX_HEAD_BYTES` of `path` — the metadata probe.
+fn read_head_bounded(path: &Path, budget: &mut ReadBudget) -> Option<String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path).ok()?;
+    budget.files_opened += 1;
+    let mut raw = Vec::new();
+    file.take(MAX_HEAD_BYTES).read_to_end(&mut raw).ok()?;
+    budget.bytes_read += raw.len() as u64;
+    Some(String::from_utf8_lossy(&raw).into_owned())
+}
+
 /// The most-recently-modified `*.jsonl` directly inside `dir`.
 ///
 /// Most recent wins because a worktree can host several attempts (a resume, a
 /// retry): the log still being appended to is the current attempt's, and an
 /// abandoned earlier one is at worst not shown — never mixed in.
+///
+/// Metadata only: no file here is opened, which is why the claude plane costs
+/// one open per request no matter how many attempts a worktree has hosted.
 fn most_recent_jsonl(dir: &Path) -> Option<PathBuf> {
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
@@ -209,26 +327,31 @@ fn walk_jsonl(root: &Path, out: &mut Vec<PathBuf>) {
 }
 
 /// The codex rollout log whose `session_meta` names `cwd`, most recent first.
-fn codex_log_for_cwd(root: &Path, cwd: &str) -> Option<(PathBuf, String)> {
+///
+/// Only the **head** of each candidate is read (see [`MAX_HEAD_BYTES`]), and
+/// candidates are tried newest-first so the answer is normally found in the
+/// first one or two files rather than after the whole tree. This scan runs
+/// only when the molecule has no pinned transcript path yet; once one is
+/// pinned in the [`cosmon_core::session_thread::SessionLocator`], later reads
+/// open exactly that file.
+fn codex_log_for_cwd(root: &Path, cwd: &str, budget: &mut ReadBudget) -> Option<PathBuf> {
     let mut files = Vec::new();
     walk_jsonl(root, &mut files);
-    let mut best: Option<(std::time::SystemTime, PathBuf, String)> = None;
-    for path in files {
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        if !codex_session_matches_cwd(&content, cwd) {
-            continue;
-        }
-        let mtime = path
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(t, _, _)| mtime >= *t) {
-            best = Some((mtime, path, content));
-        }
-    }
-    best.map(|(_, p, c)| (p, c))
+    let mut by_mtime: Vec<(std::time::SystemTime, PathBuf)> = files
+        .into_iter()
+        .map(|p| {
+            let mtime = p
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (mtime, p)
+        })
+        .collect();
+    by_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+    by_mtime.into_iter().find_map(|(_, path)| {
+        let head = read_head_bounded(&path, budget)?;
+        codex_session_matches_cwd(&head, cwd).then_some(path)
+    })
 }
 
 /// Whether a codex rollout's `session_meta` line names `cwd`. Only the head of
@@ -252,37 +375,22 @@ fn codex_session_matches_cwd(content: &str, cwd: &str) -> bool {
     false
 }
 
-/// Read the agent transcript for a worker whose working directory is known.
+/// Parse one already-read transcript, trying the plane the adapter names
+/// first.
 ///
-/// `adapter` is the molecule's recorded adapter (`claude`, `codex`, an
-/// in-process provider, or `None` for the legacy case where none was
-/// recorded). It selects which plane to try **first**; both are tried, because
-/// a mis-recorded adapter should cost accuracy of ordering, never the whole
-/// answer.
-///
-/// Returns `None` when neither plane resolves — the caller then falls back to
-/// the pane.
-#[must_use]
-pub fn read_transcript_thread(
-    roots: &AgentSessionRoots,
-    cwd: &Path,
-    adapter: Option<&str>,
-) -> Option<ResolvedThread> {
+/// Both parsers are total and shape-selective — a codex rollout run through
+/// the claude parser yields nothing, and vice versa — so trying both costs a
+/// second pass on a mis-recorded adapter and never the answer.
+fn parse_by_adapter(content: &str, adapter: Option<&str>) -> Option<ResolvedThread> {
     let claude = || {
-        let dir = roots
-            .claude_projects
-            .join(sanitise_agent_path(&cwd.to_string_lossy()));
-        let path = most_recent_jsonl(&dir)?;
-        let content = std::fs::read_to_string(path).ok()?;
-        let entries = parse_claude_transcript(&content);
+        let entries = parse_claude_transcript(content);
         (!entries.is_empty()).then_some(ResolvedThread {
             source: ThreadSource::ClaudeTranscript,
             entries,
         })
     };
     let codex = || {
-        let (_, content) = codex_log_for_cwd(&roots.codex_sessions, &cwd.to_string_lossy())?;
-        let entries = parse_codex_rollout(&content);
+        let entries = parse_codex_rollout(content);
         (!entries.is_empty()).then_some(ResolvedThread {
             source: ThreadSource::CodexRollout,
             entries,
@@ -292,6 +400,89 @@ pub fn read_transcript_thread(
         codex().or_else(claude)
     } else {
         claude().or_else(codex)
+    }
+}
+
+/// A transcript read, with everything the caller needs to answer *and* to
+/// keep the next read cheap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptRead {
+    /// The thread itself.
+    pub thread: ResolvedThread,
+    /// The file it came from, so the caller can pin it in the locator.
+    pub path: PathBuf,
+    /// Whether [`MAX_TRANSCRIPT_BYTES`] cut off the oldest part of the file.
+    pub truncated: bool,
+}
+
+/// Read the agent transcript for a molecule, using its durable locator.
+///
+/// Resolution order, and why it is this one:
+///
+/// 1. **The pinned transcript path**, when the locator carries one. This is
+///    the O(1) path: one open, bounded bytes, no directory walk anywhere.
+/// 2. **The claude project directory** for the recorded cwd — a directory
+///    listing plus one open.
+/// 3. **The codex rollout tree** — the only scan left, newest-first and
+///    head-only, and it stops being taken as soon as step 1 can answer.
+///
+/// `adapter` selects which of 2/3 is tried first; both are tried, because a
+/// mis-recorded adapter should cost accuracy of ordering, never the whole
+/// answer.
+///
+/// Returns `None` when neither plane resolves — the caller then falls back to
+/// the pane.
+#[must_use]
+pub fn read_transcript_for(
+    roots: &AgentSessionRoots,
+    locator: &SessionLocator,
+    budget: &mut ReadBudget,
+) -> Option<TranscriptRead> {
+    let adapter = locator.adapter.as_deref();
+    if let Some(pinned) = locator.transcript.as_deref() {
+        let path = PathBuf::from(pinned);
+        if let Some((content, truncated)) = read_tail_bounded(&path, MAX_TRANSCRIPT_BYTES, budget) {
+            if let Some(thread) = parse_by_adapter(&content, adapter) {
+                return Some(TranscriptRead {
+                    thread,
+                    path,
+                    truncated,
+                });
+            }
+        }
+    }
+    let cwd = locator.cwd.as_str();
+    let claude = |budget: &mut ReadBudget| {
+        let dir = roots.claude_projects.join(sanitise_agent_path(cwd));
+        let path = most_recent_jsonl(&dir)?;
+        let (content, truncated) = read_tail_bounded(&path, MAX_TRANSCRIPT_BYTES, budget)?;
+        let entries = parse_claude_transcript(&content);
+        (!entries.is_empty()).then_some(TranscriptRead {
+            thread: ResolvedThread {
+                source: ThreadSource::ClaudeTranscript,
+                entries,
+            },
+            path,
+            truncated,
+        })
+    };
+    let codex = |budget: &mut ReadBudget| {
+        let path = codex_log_for_cwd(&roots.codex_sessions, cwd, budget)?;
+        let (content, truncated) = read_tail_bounded(&path, MAX_TRANSCRIPT_BYTES, budget)?;
+        let entries = parse_codex_rollout(&content);
+        (!entries.is_empty()).then_some(TranscriptRead {
+            thread: ResolvedThread {
+                source: ThreadSource::CodexRollout,
+                entries,
+            },
+            path,
+            truncated,
+        })
+    };
+    if adapter == Some("codex") {
+        codex(budget).or_else(|| claude(budget))
+    } else {
+        claude(budget).or_else(|| codex(budget))
     }
 }
 
@@ -404,20 +595,98 @@ fn capture_first_pane(candidates: &[String]) -> Option<String> {
     None
 }
 
-/// The working directory `cs tackle` recorded for this molecule's worker.
+/// The molecule's durable session locator, or one reconstructed from the
+/// legacy fleet entry.
 ///
-/// Filesystem-derived and pane-independent, which is what makes the transcript
-/// readable post-mortem: the pane is gone, the fleet entry is not.
-fn recorded_worker_cwd(tenant_state_dir: &Path, data: &MoleculeData) -> Option<PathBuf> {
+/// # Why the order is this one
+///
+/// The locator sidecar is written at dispatch inside the molecule directory,
+/// which outlives the worker. The fleet entry does not: `cs done` removes the
+/// worker from `fleet.json` (and `cs purge` removes it too), so a molecule
+/// closed the normal way had **no** recoverable cwd — the transcript was
+/// still on disk and this route answered `source: none`. Reading the sidecar
+/// first is the fix; reading the fleet entry second is what keeps molecules
+/// dispatched before the sidecar existed readable.
+///
+/// Returns `None` when neither source knows a working directory.
+fn resolve_locator(tenant_state_dir: &Path, data: &MoleculeData) -> Option<SessionLocator> {
     use cosmon_state::StateStore as _;
-    let worker_id = data.assigned_worker.as_ref()?;
     let store = cosmon_filestore::FileStore::new(tenant_state_dir);
+    if let Some(mut locator) = store.load_session_locator(&data.id) {
+        // The molecule's recorded adapter wins over a stale sidecar field:
+        // the sidecar is written once, and a re-dispatch under another
+        // adapter would otherwise keep pointing at the first one's plane.
+        if locator.adapter.is_none() {
+            locator.adapter.clone_from(&data.adapter);
+        }
+        return Some(locator);
+    }
+    let worker_id = data.assigned_worker.as_ref()?;
     let fleet = store.load_fleet().ok()?;
     let repo = fleet.workers.get(worker_id)?.repo.clone()?;
-    Some(match store.project_root() {
+    let cwd = match store.project_root() {
         Some(root) => cosmon_filestore::resolve_repo_path(&repo, &root),
         None => PathBuf::from(repo),
-    })
+    };
+    Some(SessionLocator::new(
+        cwd.to_string_lossy(),
+        data.adapter.clone(),
+    ))
+}
+
+/// Persist what this read learned, so the next one is cheap.
+///
+/// Best-effort: a locator that cannot be written costs the *next* request its
+/// O(1) path, never this one its answer. This is also the migration path for
+/// molecules dispatched before the sidecar existed — their first successful
+/// read writes the locator the fleet entry supplied, and from then on
+/// teardown cannot take it away.
+fn remember_locator(tenant_state_dir: &Path, data: &MoleculeData, locator: &SessionLocator) {
+    let store = cosmon_filestore::FileStore::new(tenant_state_dir);
+    if store.load_session_locator(&data.id).as_ref() == Some(locator) {
+        return;
+    }
+    let _ = store.save_session_locator(&data.id, locator);
+}
+
+/// The waiting verdict, and which plane's text produced it.
+///
+/// # Why the pane is consulted even when a transcript resolved
+///
+/// A permission prompt is drawn on the **screen**. The agent writes its own
+/// turns to the transcript, but the harness dialogue that stops it — "Do you
+/// want to proceed?" — is not always one of them. Classifying `waiting` from
+/// transcript entries alone therefore reported a worker frozen at a live
+/// prompt as *not waiting*, which is the one direction this field must never
+/// be wrong in. So both planes are classified and the *evidence source* is
+/// named on the wire rather than left for the reader to guess.
+///
+/// The transcript is preferred when it fires, because it is the dated,
+/// attributed plane; the pane is what catches what the transcript never saw.
+#[must_use]
+pub fn waiting_with_pane(
+    entries: &[ThreadEntry],
+    pane: Option<&str>,
+    awaiting_operator: bool,
+) -> (cosmon_core::session_thread::WaitingVerdict, &'static str) {
+    let from_transcript = waiting_from_entries(entries, WAITING_SCAN_ENTRIES, awaiting_operator);
+    if from_transcript.class != cosmon_core::dialogue::DialogueClass::None {
+        return (from_transcript, "transcript");
+    }
+    if let Some(text) = pane {
+        let pane_entries = entries_from_pane(text);
+        let from_pane =
+            waiting_from_entries(&pane_entries, WAITING_SCAN_ENTRIES, awaiting_operator);
+        if from_pane.class != cosmon_core::dialogue::DialogueClass::None {
+            return (from_pane, "pane");
+        }
+    }
+    let source = if awaiting_operator {
+        "control-plane"
+    } else {
+        "none"
+    };
+    (from_transcript, source)
 }
 
 /// Clamp a caller-supplied window size into `[0, MAX_LIMIT]`.
@@ -456,26 +725,59 @@ pub async fn get_session(
     let data = &view.data;
 
     // Resolve the thread: transcript first, pane as the snapshot fallback.
+    //
+    // All of it is filesystem and subprocess work, so it runs on the blocking
+    // pool: a multi-megabyte read and a `tmux capture-pane` fork on the async
+    // executor stall every other request served by the same worker thread.
     let roots = AgentSessionRoots::from_env();
-    let transcript = recorded_worker_cwd(&tenant_state_dir, data)
-        .and_then(|cwd| read_transcript_thread(&roots, &cwd, data.adapter.as_deref()));
-    let pane = if transcript.is_some() {
-        None
-    } else {
-        capture_first_pane(&session_candidates(
-            &molecule_id_str,
-            data.session_name.as_deref(),
-            data.assigned_worker
-                .as_ref()
-                .map(cosmon_core::id::WorkerId::as_str),
-        ))
-    };
+    let locator = resolve_locator(&tenant_state_dir, data);
+    let candidates = session_candidates(
+        &molecule_id_str,
+        data.session_name.as_deref(),
+        data.assigned_worker
+            .as_ref()
+            .map(cosmon_core::id::WorkerId::as_str),
+    );
+    // The pane is captured whenever the molecule could still be at a live
+    // prompt — a terminal molecule has no pane, and asking tmux about one
+    // would be a fork per request for a guaranteed miss.
+    let want_pane = !data.status.is_terminal();
+    let read = tokio::task::spawn_blocking(move || {
+        let mut budget = ReadBudget::default();
+        let transcript = locator
+            .as_ref()
+            .and_then(|l| read_transcript_for(&roots, l, &mut budget));
+        let pane = if want_pane || transcript.is_none() {
+            capture_first_pane(&candidates)
+        } else {
+            None
+        };
+        (locator, transcript, pane, budget)
+    })
+    .await
+    .map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "internal",
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    let (locator, transcript, pane, _budget) = read;
+
+    // Pin what was resolved, so the next read opens one file instead of
+    // scanning, and so a legacy molecule stops depending on its fleet entry.
+    if let Some(mut locator) = locator {
+        if let Some(found) = transcript.as_ref() {
+            locator = locator.with_transcript(found.path.to_string_lossy());
+        }
+        remember_locator(&tenant_state_dir, data, &locator);
+    }
+
+    let truncated = transcript.as_ref().is_some_and(|t| t.truncated);
     let live = pane.is_some()
         || data
             .process
             .as_ref()
             .is_some_and(cosmon_core::process::MoleculeProcess::is_active);
-    let thread = assemble_thread(transcript, pane.as_deref());
+    let thread = assemble_thread(transcript.map(|t| t.thread), pane.as_deref());
 
     // The waiting verdict: the pane/text classifier plus the control-plane
     // `await-operator` witnesses. The durable `blocked_on.json` is the belt to
@@ -489,7 +791,8 @@ pub async fn get_session(
             .join(data.id.as_str())
             .join("blocked_on.json")
             .exists();
-    let waiting = waiting_from_entries(&thread.entries, WAITING_SCAN_ENTRIES, awaiting_operator);
+    let (waiting, waiting_evidence_source) =
+        waiting_with_pane(&thread.entries, pane.as_deref(), awaiting_operator);
 
     // Page: `tail` wins over `offset`/`limit`.
     let total = thread.entries.len();
@@ -515,10 +818,12 @@ pub async fn get_session(
         "total": total,
         "offset": first_index,
         "returned": shown.len(),
+        "truncated": truncated,
         "waiting": {
             "waiting": waiting.waiting,
             "class": waiting.class.as_str(),
             "evidence": waiting.evidence,
+            "evidence_source": waiting_evidence_source,
             "awaiting_operator": waiting.awaiting_operator,
         },
         "entries": shown.iter().map(|e| json!({
@@ -562,6 +867,11 @@ mod tests {
         }
     }
 
+    /// A locator for `cwd` with nothing pinned yet — the state at dispatch.
+    fn locator_for(cwd: &str, adapter: Option<&str>) -> SessionLocator {
+        SessionLocator::new(cwd, adapter.map(ToOwned::to_owned))
+    }
+
     #[test]
     fn claude_transcript_resolves_from_the_recorded_cwd() {
         let claude = tempfile::tempdir().unwrap();
@@ -573,11 +883,18 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("s.jsonl"), CLAUDE_LOG).unwrap();
 
-        let t = read_transcript_thread(&roots_with(claude.path(), codex.path()), cwd, None)
-            .expect("the transcript resolves without any live pane");
-        assert_eq!(t.source, ThreadSource::ClaudeTranscript);
-        assert_eq!(t.entries.len(), 2);
-        assert_eq!(t.entries[1].text, "working");
+        let mut budget = ReadBudget::default();
+        let t = read_transcript_for(
+            &roots_with(claude.path(), codex.path()),
+            &locator_for("/work/tree", None),
+            &mut budget,
+        )
+        .expect("the transcript resolves without any live pane");
+        assert_eq!(t.thread.source, ThreadSource::ClaudeTranscript);
+        assert_eq!(t.thread.entries.len(), 2);
+        assert_eq!(t.thread.entries[1].text, "working");
+        assert!(!t.truncated);
+        assert_eq!(budget.files_opened, 1, "one open for one transcript");
     }
 
     #[test]
@@ -588,14 +905,15 @@ mod tests {
         std::fs::create_dir_all(&nested).unwrap();
         std::fs::write(nested.join("rollout-x.jsonl"), CODEX_LOG).unwrap();
 
-        let t = read_transcript_thread(
+        let mut budget = ReadBudget::default();
+        let t = read_transcript_for(
             &roots_with(claude.path(), codex.path()),
-            Path::new("/work/tree"),
-            Some("codex"),
+            &locator_for("/work/tree", Some("codex")),
+            &mut budget,
         )
         .expect("the rollout resolves by its session_meta cwd");
-        assert_eq!(t.source, ThreadSource::CodexRollout);
-        assert_eq!(t.entries[0].text, "codex speaking");
+        assert_eq!(t.thread.source, ThreadSource::CodexRollout);
+        assert_eq!(t.thread.entries[0].text, "codex speaking");
     }
 
     #[test]
@@ -603,12 +921,154 @@ mod tests {
         let claude = tempfile::tempdir().unwrap();
         let codex = tempfile::tempdir().unwrap();
         std::fs::write(codex.path().join("rollout-x.jsonl"), CODEX_LOG).unwrap();
-        assert!(read_transcript_thread(
+        let mut budget = ReadBudget::default();
+        assert!(read_transcript_for(
             &roots_with(claude.path(), codex.path()),
-            Path::new("/some/other/tree"),
-            Some("codex"),
+            &locator_for("/some/other/tree", Some("codex")),
+            &mut budget,
         )
         .is_none());
+    }
+
+    /// The bounded-read falsifier, in the shape the finding names: a host
+    /// carrying many large unrelated rollouts, and one `tail`-style read.
+    ///
+    /// Before the change this opened **and fully read** every file in the
+    /// tree; the assertion below is on opens and bytes, not on wall-clock, so
+    /// it cannot pass by being run on a fast machine.
+    #[test]
+    fn a_pinned_transcript_costs_one_open_however_large_the_host_tree_is() {
+        let claude = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        // Twelve unrelated rollouts of ~200 KiB each: 2.4 MiB nobody asked
+        // for.
+        let noise = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"/elsewhere\"}}}}\n{}",
+            "x".repeat(200_000)
+        );
+        for i in 0..12 {
+            std::fs::write(codex.path().join(format!("rollout-{i}.jsonl")), &noise).unwrap();
+        }
+        let mine = codex.path().join("rollout-mine.jsonl");
+        std::fs::write(&mine, CODEX_LOG).unwrap();
+
+        let locator =
+            locator_for("/work/tree", Some("codex")).with_transcript(mine.to_string_lossy());
+        let mut budget = ReadBudget::default();
+        let t = read_transcript_for(
+            &roots_with(claude.path(), codex.path()),
+            &locator,
+            &mut budget,
+        )
+        .expect("the pinned transcript resolves");
+        assert_eq!(t.thread.entries[0].text, "codex speaking");
+        assert_eq!(
+            budget.files_opened, 1,
+            "a pinned locator must open exactly the pinned file"
+        );
+        assert!(
+            budget.bytes_read < 4_096,
+            "read {} bytes for a two-line transcript",
+            budget.bytes_read
+        );
+    }
+
+    /// The unpinned scan is still bounded: candidates are probed by their
+    /// head, so an unrelated 200 KiB rollout costs a page, not 200 KiB.
+    #[test]
+    fn an_unpinned_scan_reads_only_the_head_of_a_candidate() {
+        let claude = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        let noise = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"cwd\":\"/elsewhere\"}}}}\n{}",
+            "x".repeat(400_000)
+        );
+        std::fs::write(codex.path().join("rollout-noise.jsonl"), &noise).unwrap();
+
+        let mut budget = ReadBudget::default();
+        assert!(read_transcript_for(
+            &roots_with(claude.path(), codex.path()),
+            &locator_for("/work/tree", Some("codex")),
+            &mut budget,
+        )
+        .is_none());
+        assert!(
+            budget.bytes_read <= MAX_HEAD_BYTES,
+            "the metadata probe read {} bytes of a 400 KiB file",
+            budget.bytes_read
+        );
+    }
+
+    #[test]
+    fn a_transcript_past_the_ceiling_is_cut_at_its_head_and_says_so() {
+        let claude = tempfile::tempdir().unwrap();
+        let codex = tempfile::tempdir().unwrap();
+        let cwd = "/work/big";
+        let dir = claude.path().join(sanitise_agent_path(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("s.jsonl");
+        // One oversized early line, then the two real ones.
+        let filler = format!(
+            "{{\"type\":\"assistant\",\"message\":{{\"role\":\"assistant\",\"content\":[{{\"type\":\"text\",\"text\":\"{}\"}}]}}}}",
+            "y".repeat(MAX_TRANSCRIPT_BYTES as usize)
+        );
+        std::fs::write(&path, format!("{filler}\n{CLAUDE_LOG}")).unwrap();
+
+        let mut budget = ReadBudget::default();
+        let t = read_transcript_for(
+            &roots_with(claude.path(), codex.path()),
+            &locator_for(cwd, None),
+            &mut budget,
+        )
+        .expect("the tail of an oversized transcript still resolves");
+        assert!(t.truncated, "the cut must be declared, not hidden");
+        assert!(
+            budget.bytes_read <= MAX_TRANSCRIPT_BYTES,
+            "read {} bytes past the ceiling",
+            budget.bytes_read
+        );
+        assert_eq!(
+            t.thread.entries.last().map(|e| e.text.as_str()),
+            Some("working"),
+            "reading from the end must keep the NEWEST entries"
+        );
+    }
+
+    #[test]
+    fn a_live_pane_prompt_is_seen_even_when_the_transcript_is_calm() {
+        // Falsifier for the third finding: the permission prompt is drawn on
+        // the screen and never written to the transcript. A transcript-only
+        // verdict called this worker busy.
+        let entries = entries_from_pane("Compiling cosmon-core\n12 tests running");
+        let (calm, source) = waiting_with_pane(&entries, None, false);
+        assert!(!calm.waiting);
+        assert_eq!(source, "none");
+
+        let (verdict, source) = waiting_with_pane(
+            &entries,
+            Some("Bash(cargo test)\nDo you want to proceed?\n 1. Yes\n 2. No"),
+            false,
+        );
+        assert!(verdict.waiting, "a live prompt on the pane is waiting");
+        assert_eq!(source, "pane");
+        assert!(verdict.evidence.is_some());
+    }
+
+    #[test]
+    fn the_transcript_keeps_the_verdict_when_it_fires_itself() {
+        let entries = entries_from_pane("Do you want to proceed?");
+        let (verdict, source) = waiting_with_pane(&entries, Some("idle"), false);
+        assert!(verdict.waiting);
+        assert_eq!(source, "transcript");
+    }
+
+    #[test]
+    fn the_control_plane_signal_alone_is_named_as_such() {
+        let entries = entries_from_pane("running tests");
+        let (verdict, source) = waiting_with_pane(&entries, Some("running tests"), true);
+        assert!(verdict.waiting);
+        assert!(verdict.awaiting_operator);
+        assert_eq!(source, "control-plane");
     }
 
     #[test]
