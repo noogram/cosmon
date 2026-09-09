@@ -2104,8 +2104,9 @@ async fn run_login(
         Some(addr) => endpoints.with_bind_addr(addr),
         None => endpoints,
     };
-    if !endpoints.bind().is_loopback() {
-        eprintln!("{}", non_loopback_bind_notice(&endpoints.bind()));
+    let callback_addr = endpoints.callback_addr();
+    if !callback_addr.ip().is_loopback() {
+        eprintln!("{}", non_loopback_bind_notice(callback_addr));
     }
 
     let cred_store = CredentialStore::detect()?;
@@ -2171,17 +2172,16 @@ async fn run_login(
 /// It states the widened exposure and the bound on it: for the length of one
 /// login anyone able to reach that interface can *connect* to the catcher, but
 /// only a request echoing the per-flow high-entropy `state` can end the flow
-/// (`classify_request` in `oidc::loopback`), and a captured code is unusable
+/// (`classify_request` in `oidc::callback`), and a captured code is unusable
 /// without the PKCE verifier that never leaves this process. It carries no
 /// secret — no `state`, no code, no token.
-fn non_loopback_bind_notice(bind: &cosmon_remote::oidc::LoopbackBind) -> String {
+fn non_loopback_bind_notice(bind: std::net::SocketAddr) -> String {
     format!(
-        "note: the OAuth redirect catcher is listening on {} (not loopback) for this login. \
+        "note: the OAuth redirect catcher is listening on {bind} (not loopback) for this login. \
          The authorization code will transit that interface; only a redirect echoing this \
          flow's state can complete it, and the code is unusable without the PKCE verifier \
          held in this process. The advertised redirect URI is unchanged: {}",
-        bind.socket_addr(),
-        cosmon_remote::oidc::redirect_uri(bind.port),
+        cosmon_remote::oidc::redirect_uri(bind.port()),
     )
 }
 
@@ -2258,11 +2258,10 @@ mod tests {
 
     #[test]
     fn non_loopback_notice_names_the_interface_and_keeps_the_redirect_uri() {
-        use cosmon_remote::oidc::LoopbackBind;
-        let notice = non_loopback_bind_notice(&LoopbackBind {
-            addr: std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-            port: 7777,
-        });
+        let notice = non_loopback_bind_notice(std::net::SocketAddr::new(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
+            7777,
+        ));
         // The exposure is named, with its bound...
         assert!(notice.contains("0.0.0.0:7777"), "{notice}");
         assert!(notice.contains("not loopback"), "{notice}");
