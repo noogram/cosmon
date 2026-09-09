@@ -67,7 +67,7 @@ async fn fixture() -> Fixture {
         DenyList::new(security_dir.path().to_path_buf()).with_ttl(Duration::from_secs(0));
 
     let state = AppState {
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.path().to_path_buf(),

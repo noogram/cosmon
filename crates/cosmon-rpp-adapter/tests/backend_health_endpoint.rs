@@ -35,7 +35,7 @@ async fn make_state(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
     let tenants = TenantWorkspaces::new();
     AppState {
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(std::sync::Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.to_path_buf(),

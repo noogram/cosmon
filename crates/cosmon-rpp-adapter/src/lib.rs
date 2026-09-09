@@ -206,13 +206,13 @@ pub enum Posture {
 /// rate-limiter, deny-list) — never any per-request business state.
 #[derive(Clone, Debug)]
 pub struct AppState {
-    /// Transport port workers are spawned through (issue #54 U6 —
-    /// production wires `cosmon_transport::TmuxBackend`, tests an
-    /// in-memory mock). Every spawn is clamped by the
-    /// [`worker_env::EnvelopedBackend`] decorator before it reaches
-    /// this backend, so the §3.5 env allow-list holds regardless of
-    /// which backend the deployment picked.
-    pub worker_backend: worker_env::SharedBackend,
+    /// Transport ports workers are spawned through (issue #54 U6 —
+    /// production wires one `cosmon_transport::TmuxBackend` **per tenant
+    /// project socket** (§7f), tests an in-memory mock). Every spawn is
+    /// clamped by the [`worker_env::EnvelopedBackend`] decorator before it
+    /// reaches the resolved backend, so the §3.5 env allow-list holds
+    /// regardless of which backend the deployment picked.
+    pub worker_backend: worker_env::WorkerBackends,
     /// Cosmon state directory (`.cosmon/state/`). Used to resolve
     /// nucleon mappings, JWKS, deny-list, rate-limiter on-disk.
     pub state_dir: PathBuf,
