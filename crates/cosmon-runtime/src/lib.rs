@@ -75,7 +75,7 @@ pub use resident::{
     ResidentError, ResidentScheduler, RunSummary, RuntimeLoop, RuntimeLoopConfig,
     TEARDOWN_ATTEMPT_CEILING, TEARDOWN_BACKOFF_BASE, TEARDOWN_BACKOFF_CAP,
 };
-pub use tackle_exec::{LibraryExecutor, TackleExecError, TackleReceipt};
+pub use tackle_exec::{LibraryExecutor, TackleExecError, TackleReceipt, TenantPaths};
 pub use witness::{
     canonical_attestation_record, compute_attestation_b3, refuse_if_same_session,
     resolve_witness_id, resolve_witness_id_from, SameSessionRefusal, ATTESTATION_RECORD_SCHEMA,
