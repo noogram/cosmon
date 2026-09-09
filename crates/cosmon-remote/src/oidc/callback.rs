@@ -49,13 +49,13 @@
 //! stream as HTTP on the callback route. Loopback is its default *address*, not
 //! its defining trait.
 //!
-//! [`OidcEndpoints::callback_addr`]: super::flow::OidcEndpoints::callback_addr
-//!
 //! The impure I/O ([`CallbackServer`]) is kept thin; the parsing of the HTTP
 //! request target into a [`CallbackParams`] is a **pure function**
 //! ([`parse_callback_target`]) so it can be unit- and property-tested without a
 //! socket. The `/callback` path and `GET` method are asserted before a request
 //! is treated as a callback.
+//!
+//! [`OidcEndpoints::callback_addr`]: super::flow::OidcEndpoints::callback_addr
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
