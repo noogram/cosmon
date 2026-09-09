@@ -2061,15 +2061,26 @@ pub async fn done_molecule(
             } else {
                 read_non_integration_tag(&tenant_root, &molecule_id).await
             };
-            let body = json!({
-                "request_id": spark.request_id,
-                "harvest": {
-                    "molecule": molecule_id_str,
-                    "outcome": outcome.as_str(),
-                    "merged": outcome.merged(),
-                    "non_integration": non_integration,
-                },
-            });
+            let body = harvest_success_body(
+                &spark.request_id,
+                &molecule_id_str,
+                outcome,
+                non_integration.as_deref(),
+            );
+            return Ok((StatusCode::OK, Json(body)).into_response());
+        }
+        harvest_door::DoorDecision::NoOp => {
+            // `if_completed` on work that is not finished. A success with
+            // nothing behind it, and it must not read as a landing: the
+            // molecule is still running, so `merged` is false and there
+            // is no non-integration record to explain — nothing was
+            // integrated because nothing was closed.
+            let body = harvest_success_body(
+                &spark.request_id,
+                &molecule_id_str,
+                cosmon_core::harvest_door::DoorOutcome::NoOp,
+                None,
+            );
             return Ok((StatusCode::OK, Json(body)).into_response());
         }
         harvest_door::DoorDecision::Proceed => {}
@@ -2088,20 +2099,39 @@ pub async fn done_molecule(
     )
     .await?;
 
-    // `merged` is not decoration: `closed_without_merge` is a success, and
-    // a client that read the 200 alone would believe the branch shipped.
-    // The reason tag travels with it so the requester does not have to
-    // fetch the result route to learn why nothing was integrated.
-    let body = json!({
-        "request_id": spark.request_id,
+    let body = harvest_success_body(
+        &spark.request_id,
+        &molecule_id_str,
+        outcome,
+        non_integration.as_deref(),
+    );
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// The one shape of a successful harvest reply.
+///
+/// Four success outcomes reach the wire — `landed`, `closed_without_merge`,
+/// `already_landed`, `no_op` — and a client that had to learn which fields
+/// each carries would be reading four replies. `merged` is not decoration:
+/// three of the four did not put anything on the trunk, and a client
+/// reading the `200` alone would believe the branch shipped. The reason tag
+/// travels with it so the requester does not have to fetch the result route
+/// to learn why nothing was integrated.
+fn harvest_success_body(
+    request_id: &str,
+    molecule_id: &str,
+    outcome: cosmon_core::harvest_door::DoorOutcome,
+    non_integration: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "request_id": request_id,
         "harvest": {
-            "molecule": molecule_id_str,
+            "molecule": molecule_id,
             "outcome": outcome.as_str(),
             "merged": outcome.merged(),
             "non_integration": non_integration,
         },
-    });
-    Ok((StatusCode::OK, Json(body)).into_response())
+    })
 }
 
 /// Run the door's effect half through the deployment's port and interpret
@@ -2109,8 +2139,9 @@ pub async fn done_molecule(
 ///
 /// `spawn_blocking` because both the effect and the trunk-side re-read are
 /// synchronous work. The port's typed answers map onto the wire:
-/// [`HarvestEffectError::Unavailable`] to the honest `501`, a named refusal
-/// to its own status, and anything else to the anonymous `harvest_failed`.
+/// [`EffectFailure::Unavailable`](cosmon_core::harvest_door::EffectFailure)
+/// to the honest `501`, a named refusal to its own status, and anything
+/// else to the anonymous `harvest_failed`.
 ///
 /// Returns the outcome and, when the closure integrated nothing, the
 /// kebab-case `non_integration` reason read back under the same blocking
@@ -2178,9 +2209,7 @@ async fn run_harvest_effect(
             label: "not_found",
             request_id: Some(request_id.to_owned()),
         }),
-        Err(harvest_door::LandError::EffectFailed(message))
-            if message == crate::harvest_effect::UNAVAILABLE_MARKER =>
-        {
+        Err(harvest_door::LandError::EffectUnavailable) => {
             tracing::warn!(
                 request_id = %request_id,
                 molecule_id = %molecule_id,
@@ -2213,16 +2242,16 @@ impl harvest_door::SealedHarvestEffect for PortBackedEffect<'_> {
         self.port.binds_trunk_lock()
     }
 
-    fn harvest(&mut self, molecule: &MoleculeId, options: &HarvestOptions) -> Result<(), String> {
-        use crate::harvest_effect::HarvestEffectError;
-        match self.port.harvest(&self.root, molecule, options) {
-            Ok(()) => Ok(()),
-            Err(HarvestEffectError::Unavailable) => {
-                Err(crate::harvest_effect::UNAVAILABLE_MARKER.to_owned())
-            }
-            Err(HarvestEffectError::Failed(message)) => Err(message),
-            Err(HarvestEffectError::Refused(refusal)) => Err(refusal.as_str().to_owned()),
-        }
+    fn harvest(
+        &mut self,
+        molecule: &MoleculeId,
+        options: &HarvestOptions,
+    ) -> Result<(), cosmon_core::harvest_door::EffectFailure> {
+        // Nothing to translate: both seams speak the one effect-error
+        // vocabulary since the PR #62 review. The version of this bridge
+        // that stringified the error is what lost a named refusal on the
+        // way to the wire.
+        self.port.harvest(&self.root, molecule, options)
     }
 }
 

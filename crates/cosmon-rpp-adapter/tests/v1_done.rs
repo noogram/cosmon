@@ -33,7 +33,7 @@ use axum::http::{Request, StatusCode};
 use cosmon_core::harvest_door::{HarvestOptions, ALL_REFUSALS};
 use cosmon_oidc_testkit::{IssueJwt, OidcMock, OidcMockConfig, TenantPath, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
-use cosmon_rpp_adapter::harvest_effect::{HarvestEffectError, HarvestEffectPort};
+use cosmon_rpp_adapter::harvest_effect::{EffectFailure, HarvestEffectPort};
 use cosmon_rpp_adapter::nucleon_map::{HabilitationId, HabilitationMap, Noyau};
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
 use cosmon_rpp_adapter::{router, AppState, BackendHealthRegistry, JwksStore, Posture};
@@ -63,7 +63,7 @@ impl HarvestEffectPort for SpyEffect {
         tenant_root: &std::path::Path,
         molecule: &cosmon_core::id::MoleculeId,
         options: &HarvestOptions,
-    ) -> Result<(), HarvestEffectError> {
+    ) -> Result<(), EffectFailure> {
         *self.seen.lock().unwrap() = Some(options.clone());
         // The door does not trust an effect's `Ok`: it re-reads the
         // trunk-side record and derives the outcome from THAT (a
@@ -74,12 +74,12 @@ impl HarvestEffectPort for SpyEffect {
         let store = cosmon_filestore::FileStore::new(tenant_root.join(".cosmon").join("state"));
         let mut data = store
             .load_molecule(molecule)
-            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+            .map_err(|e| EffectFailure::Failed(e.to_string()))?;
         data.merged_at = Some(chrono::Utc::now());
         data.harvest_reason = Some(options.reason.clone());
         store
             .save_molecule(molecule, &data)
-            .map_err(|e| HarvestEffectError::Failed(e.to_string()))?;
+            .map_err(|e| EffectFailure::Failed(e.to_string()))?;
         Ok(())
     }
 
@@ -983,4 +983,136 @@ async fn an_unknown_molecule_is_not_an_existence_oracle() {
         let body: Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(body["error"], "not_found", "{id}");
     }
+}
+
+/// The PR #62 review's third finding, at the wire: a refusal the effect
+/// produced at its **authority boundary** — before touching anything, so
+/// with no trunk-side record to re-derive it from — arrives as its own
+/// label and status, not as an anonymous `500 harvest_failed`.
+///
+/// Restore the stringifying bridge between the two effect traits and this
+/// goes red on the status: `403 not_authorized` becomes `500`.
+#[tokio::test]
+async fn a_typed_effect_refusal_keeps_its_label_across_the_bridge() {
+    /// An effect that declines and writes nothing — what an authority
+    /// boundary looks like from outside.
+    #[derive(Debug)]
+    struct RefusingEffect;
+    impl HarvestEffectPort for RefusingEffect {
+        fn harvest(
+            &self,
+            _tenant_root: &std::path::Path,
+            _molecule: &cosmon_core::id::MoleculeId,
+            _options: &HarvestOptions,
+        ) -> Result<(), EffectFailure> {
+            Err(EffectFailure::Refused(
+                cosmon_core::harvest_door::DoorRefusal::NotAuthorized,
+            ))
+        }
+        fn binds_trunk_lock(&self) -> bool {
+            true
+        }
+    }
+
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    plant_completed(&tenant_a, "task-20260901-typed");
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::new(RefusingEffect) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-typed");
+
+    let resp = app
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-typed",
+            bare("close it if you may"),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "a refusal the effect named must keep its status across the seam",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_authorized");
+}
+
+/// The PR #62 review's fifth finding, at the wire: `if_completed: true` on
+/// work that is still running is the documented **successful no-op**, not
+/// `409 not_completed`.
+///
+/// The spy proves the second half of the claim: the effect is never
+/// reached, so the door answers from one store read rather than by
+/// spawning a sealed transaction to learn the same fact. And `merged` is
+/// false — a caller reading the 200 alone must not conclude the branch
+/// shipped, because the molecule has not even finished.
+#[tokio::test]
+async fn if_completed_on_running_work_is_a_successful_no_op() {
+    let mut tenants = TenantWorkspaces::new();
+    let tenant_a = tenants.add("a");
+    arm_harvest_authority(&tenant_a);
+    tenant_a
+        .insert_molecule("task-20260901-sweep", &json!({"status": "running"}))
+        .unwrap();
+
+    let oidc = oidc_mock().await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let spy = Arc::new(SpyEffect::default());
+    let mut state = make_state(&oidc, &tenants, security_dir.path());
+    state.harvest_effect = Arc::clone(&spy) as Arc<dyn HarvestEffectPort>;
+    let app = router(state);
+    let jwt = jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-sweep");
+
+    let resp = app
+        .clone()
+        .oneshot(done_request(
+            &jwt,
+            "task-20260901-sweep",
+            Body::from(
+                serde_json::to_string(&json!({
+                    "reason": "the sweep closes whatever finished",
+                    "if_completed": true,
+                }))
+                .unwrap(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "the sweep declared this condition acceptable by sending the option",
+    );
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["harvest"]["outcome"], "no_op");
+    assert_eq!(body["harvest"]["merged"], false);
+    assert!(
+        spy.last().is_none(),
+        "a no-op must not spawn a sealed transaction to discover it is one",
+    );
+
+    // Without the option, the same molecule is still refused: the no-op is
+    // one request's answer, not an amnesty for `not_completed`.
+    let resp = app
+        .oneshot(done_request(
+            &jwt_with(&oidc, &["cosmon:molecule:write"], "jti-done-sweep-2"),
+            "task-20260901-sweep",
+            bare("close it whatever state it is in"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+    let bytes = to_bytes(resp.into_body(), 4096).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["error"], "not_completed");
 }

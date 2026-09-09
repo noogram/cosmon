@@ -300,7 +300,8 @@ pub struct HarvestLanded {
     /// authority arose.
     pub molecule: String,
     /// `landed`, `closed_without_merge` when the closure deliberately
-    /// integrated nothing, or `already_landed` when the harvest had
+    /// integrated nothing, `no_op` when `if_completed` was sent and there
+    /// was nothing to close, or `already_landed` when the harvest had
     /// already happened — the idempotent reply that makes a retry over a
     /// lossy network safe.
     pub outcome: String,
