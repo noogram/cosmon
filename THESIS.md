@@ -896,6 +896,8 @@ The paragraphs above are scope refusals: the markets cosmon refuses to enter. Th
 
 - **No daemon.** Stateless CLI, git-composable; crash-recovery is re-reading the disk.
 - **No scheduler process.** External clocks (cron, tmux, humans) drive invocations; cosmon owns no loop.
+
+  > **Scope of the two bullets above** ([ADR-095](docs/adr/095-resident-runtime-ifbdd-path.md) Amendment 2026-09-09, §A1). They bind the **transactional core** — Layer A, the `cs` verbs. Every `cs` invocation reads the disk, mutates, writes and exits; no `cs` command acquires a daemon flavour; crash recovery is re-reading the disk. They are *not* a ban on a supervised long-lived process elsewhere in the orbit: `cosmon-rpp-adapter` is one by design, may hold caches and delivery receipts, and may carry background tasks. The server is the daemon; the core stays stateless. What no resident process may do is become molecule truth — own authoritative lifecycle state, or be the only path to a lifecycle transition.
 - **No broker, no message queue.** Control plane = DAG, data plane = filesystem. Nothing else crosses workers.
 - **No mailboxes.** Workers read predecessors' evidence from disk; inter-worker messaging is forbidden by design.
 - **No background bash, no hidden side-channels.** Every state transition is a visible `cs` invocation.
