@@ -140,6 +140,116 @@ pub enum TackleExecError {
         /// The transport-level failure.
         reason: String,
     },
+
+    /// The session **spawned**, its briefing could not be delivered, and
+    /// the teardown of that session could not be confirmed either.
+    ///
+    /// This is the one dispatch failure that deliberately leaves state
+    /// behind. A tmux worker is committed to the operating system the
+    /// instant the spawn returns (§8ab); rolling the ledger back and
+    /// removing the worktree under a process that may still be running
+    /// produces exactly the shape §8ab forbids — *an effect without a
+    /// record is visible to nothing*. So the dispatch record and the
+    /// worktree are RETAINED, and this error names both so an operator (or
+    /// a sweep) can finish the teardown.
+    #[error(
+        "molecule {id}: worker session '{session_name}' spawned but its \
+         briefing could not be delivered ({reason}), and terminating that \
+         session could not be confirmed ({termination}); the dispatch \
+         record and the worktree at {} are RETAINED so the possibly-live \
+         worker stays discoverable — verify and tear it down by hand",
+        worktree.display()
+    )]
+    OrphanRetained {
+        /// The molecule whose worker may still be running.
+        id: Box<MoleculeId>,
+        /// The transport session that was created and may survive.
+        session_name: String,
+        /// Why the briefing could not be delivered.
+        reason: String,
+        /// Why the teardown could not be confirmed.
+        termination: String,
+        /// The retained worktree.
+        worktree: PathBuf,
+    },
+
+    /// A dispatch failed and the rollback deliberately kept resources it
+    /// had not created.
+    ///
+    /// [`create_worktree`] is idempotent: it reuses an existing worktree
+    /// and tolerates an existing branch. Rollback therefore removes only
+    /// what *this* attempt allocated ([`WorktreeOwnership`]) — retrying a
+    /// crashed worker whose worktree was preserved must never destroy that
+    /// worker's uncommitted work. The wrapper exists so the outcome is
+    /// visible on the wire and in the log rather than being a silent
+    /// asymmetry.
+    #[error("{source} — rollback preserved pre-existing {preserved}")]
+    RolledBackPreserving {
+        /// The dispatch failure that triggered the rollback.
+        source: Box<TackleExecError>,
+        /// What was deliberately left in place.
+        preserved: String,
+    },
+}
+
+/// Which of a dispatch's filesystem resources **this attempt actually
+/// created** — the receipt [`create_worktree`] hands back so rollback can
+/// tell its own allocations from someone else's.
+///
+/// # Why this exists
+///
+/// `create_worktree` is idempotent by design: an existing worktree is
+/// reused and an existing branch is tolerated, so a retry after a crashed
+/// worker lands on the work the crash left behind. Rollback used to be
+/// unconditional (`git worktree remove --force` then `git branch -D`), so
+/// a retry that then failed for an unrelated reason — a refused ledger
+/// commit, a backend with no seats — destroyed that prior work instead of
+/// undoing its own allocations. Ownership is the missing half of
+/// idempotence: what you did not create, you do not get to delete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeOwnership {
+    /// `true` when this call created the worktree directory; `false` when
+    /// it reused one that already existed.
+    pub worktree_created: bool,
+    /// `true` when this call created the feature branch; `false` when the
+    /// branch already existed.
+    pub branch_created: bool,
+}
+
+impl WorktreeOwnership {
+    /// Everything was created by this attempt — rollback may remove both.
+    const OWNS_ALL: Self = Self {
+        worktree_created: true,
+        branch_created: true,
+    };
+
+    /// Nothing was created by this attempt — rollback must remove neither.
+    const OWNS_NOTHING: Self = Self {
+        worktree_created: false,
+        branch_created: false,
+    };
+
+    /// Name what a rollback under this receipt would deliberately keep, or
+    /// `None` when the attempt owns everything it touched.
+    ///
+    /// The wording lands in [`TackleExecError::RolledBackPreserving`], so
+    /// an operator reading a failed dispatch sees which resources survived
+    /// on purpose rather than wondering whether cleanup half-ran.
+    #[must_use]
+    fn preserved_note(self, worktree_path: &Path, branch: &str) -> Option<String> {
+        let mut kept = Vec::new();
+        if !self.worktree_created {
+            kept.push(format!("worktree {}", worktree_path.display()));
+        }
+        if !self.branch_created {
+            kept.push(format!("branch {branch}"));
+        }
+        if kept.is_empty() {
+            None
+        } else {
+            Some(kept.join(" and "))
+        }
+    }
 }
 
 /// What a successful library dispatch leaves behind — the receipt the
@@ -156,6 +266,30 @@ pub struct TackleReceipt {
     pub branch_name: String,
     /// The worktree the worker writes in.
     pub worktree_path: PathBuf,
+}
+
+/// How a spawn attempt failed, in the only dimension the caller must act
+/// on: whether anything the transport created can still be running.
+///
+/// The dispatch ledger's rollback is safe exactly when nothing survives the
+/// failure. When a session was spawned and could not be confirmed torn
+/// down, rolling the record back would erase the only trace of a live,
+/// paid process (§8ab) — so that case is typed apart rather than folded
+/// into a string.
+#[derive(Debug)]
+enum SpawnAttemptFailure {
+    /// Nothing survives: either the spawn itself failed, or the briefing
+    /// failed and the session was confirmed terminated. The caller rolls
+    /// the ledger back as usual.
+    Rolled(String),
+    /// A session was spawned, its briefing failed, and terminating it did
+    /// not succeed. The caller retains the dispatch record and worktree.
+    Unterminated {
+        /// Why the briefing could not be delivered.
+        reason: String,
+        /// Why the teardown could not be confirmed.
+        termination: String,
+    },
 }
 
 /// The library implementation of the runtime's [`Executor`] seam: plan →
@@ -376,7 +510,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             .worktree_path
             .clone()
             .unwrap_or_else(|| repo_root.join(".worktrees").join(plan.molecule_id.as_str()));
-        create_worktree(
+        let ownership = create_worktree(
             repo_root,
             &worktree_path,
             &plan.branch_name,
@@ -385,9 +519,24 @@ impl<B: TransportBackend> LibraryExecutor<B> {
 
         match self.dispatch_in_worktree(store, state_dir, repo_root, mol, plan, &worktree_path) {
             Ok(receipt) => Ok(receipt),
+            // The one failure that must NOT clean up: a session was
+            // spawned, its briefing failed, and its teardown could not be
+            // confirmed. Removing the worktree under a possibly-live worker
+            // is the §8ab shape the retention exists to avoid.
+            Err(e @ TackleExecError::OrphanRetained { .. }) => Err(e),
             Err(e) => {
-                remove_worktree_and_branch(repo_root, &worktree_path, &plan.branch_name);
-                Err(e)
+                match remove_worktree_and_branch(
+                    repo_root,
+                    &worktree_path,
+                    &plan.branch_name,
+                    ownership,
+                ) {
+                    None => Err(e),
+                    Some(preserved) => Err(TackleExecError::RolledBackPreserving {
+                        source: Box::new(e),
+                        preserved,
+                    }),
+                }
             }
         }
     }
@@ -450,22 +599,41 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             // resolves to the wrong project.
             cwd: Some(worktree_path.to_path_buf()),
         };
-        // Any failure inside the spawn rolls the ledger back; the caller
-        // removes the partial worktree — `cs tackle`'s symmetry contract,
-        // kept.
-        if let Err(reason) = self.spawn_recorded(store, &agent, &recorded, &plan.prompt) {
-            dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
-            emit_worker_spawn_rolled_back(
-                state_dir,
-                &plan.molecule_id,
-                &wid,
-                plan.adapter.as_str(),
-                "spawn",
-            );
-            return Err(TackleExecError::Spawn {
-                id: Box::new(plan.molecule_id.clone()),
+        // A failure inside the spawn rolls the ledger back and the caller
+        // removes this attempt's worktree — `cs tackle`'s symmetry
+        // contract, kept — UNLESS the attempt may have left a live session
+        // behind, in which case both are retained (§8ab, see
+        // `SpawnAttemptFailure`).
+        match self.spawn_recorded(store, &agent, &recorded, &plan.prompt) {
+            Ok(()) => {}
+            Err(SpawnAttemptFailure::Rolled(reason)) => {
+                dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
+                emit_worker_spawn_rolled_back(
+                    state_dir,
+                    &plan.molecule_id,
+                    &wid,
+                    plan.adapter.as_str(),
+                    "spawn",
+                );
+                return Err(TackleExecError::Spawn {
+                    id: Box::new(plan.molecule_id.clone()),
+                    reason,
+                });
+            }
+            Err(SpawnAttemptFailure::Unterminated {
                 reason,
-            });
+                termination,
+            }) => {
+                // Deliberately NO ledger rollback: the record is the only
+                // thing that makes the possibly-live worker findable.
+                return Err(TackleExecError::OrphanRetained {
+                    id: Box::new(plan.molecule_id.clone()),
+                    session_name,
+                    reason,
+                    termination,
+                    worktree: worktree_path.to_path_buf(),
+                });
+            }
         }
 
         Ok(TackleReceipt {
@@ -502,18 +670,32 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         agent: &AgentDefinition,
         recorded: &dispatch_ledger::DispatchRecorded,
         prompt: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SpawnAttemptFailure> {
         let handle = self
             .backend
             .spawn(agent, &RuntimeConfig::default())
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| SpawnAttemptFailure::Rolled(e.to_string()))?;
         let provenance = InjectionProvenance::new(
             InjectionOrigin::TackleBriefing,
             "library-executor briefing delivery",
         );
-        self.backend
-            .send_input_observed(recorded.worker(), prompt, &provenance)
-            .map_err(|e| e.to_string())?;
+        // Post-spawn failure — the seam §8ab names. The session already
+        // exists and is detached: propagating the delivery error alone
+        // would leave it running while the caller erased its registration
+        // and its working directory. Terminate it first; only a CONFIRMED
+        // teardown licenses the ordinary rollback.
+        if let Err(delivery) =
+            self.backend
+                .send_input_observed(recorded.worker(), prompt, &provenance)
+        {
+            return Err(match self.backend.terminate(recorded.worker()) {
+                Ok(()) => SpawnAttemptFailure::Rolled(delivery.to_string()),
+                Err(termination) => SpawnAttemptFailure::Unterminated {
+                    reason: delivery.to_string(),
+                    termination: termination.to_string(),
+                },
+            });
+        }
 
         if let Some(pid) = handle.pid {
             let start_time = cosmon_process_witness::process_start_time(pid);
@@ -572,6 +754,14 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
 /// corrupt-repo / permission problem and cascade into a surface lie
 /// downstream.
 ///
+/// # The ownership receipt
+///
+/// Returns a [`WorktreeOwnership`] saying which of the two resources this
+/// call actually created. Idempotence and rollback are two halves of one
+/// contract: because reuse is legitimate, the undo path must be able to
+/// tell a resource it allocated from one it merely found (see
+/// [`WorktreeOwnership`] for the work this protects).
+///
 /// # Errors
 ///
 /// Returns [`TackleExecError::Git`] when git cannot be run or fails for a
@@ -581,10 +771,11 @@ pub fn create_worktree(
     worktree_path: &Path,
     branch: &str,
     start_point: Option<&str>,
-) -> Result<(), TackleExecError> {
-    // If worktree already exists, reuse it.
+) -> Result<WorktreeOwnership, TackleExecError> {
+    // If worktree already exists, reuse it — and own neither it nor the
+    // branch it already carries.
     if worktree_path.exists() {
-        return Ok(());
+        return Ok(WorktreeOwnership::OWNS_NOTHING);
     }
 
     // Newcomer first-run guard (task-20260722-44ce, reported by an external
@@ -628,6 +819,7 @@ pub fn create_worktree(
         .args(refs)
         .output()
         .map_err(|e| TackleExecError::Git(format!("failed to run git branch: {e}")))?;
+    let mut ownership = WorktreeOwnership::OWNS_ALL;
     if !branch_out.status.success() {
         let stderr = String::from_utf8_lossy(&branch_out.stderr);
         // The ONLY tolerated failure is "branch already exists" — tackle is
@@ -643,6 +835,9 @@ pub fn create_worktree(
                 stderr.trim()
             )));
         }
+        // Tolerated, but NOT ours: a branch that predates this call is a
+        // prior dispatch's, and rollback leaves it alone.
+        ownership.branch_created = false;
     }
 
     // Create worktree directory parent.
@@ -673,7 +868,8 @@ pub fn create_worktree(
         // If worktree already checked out, that's fine.
         if stderr.contains("already checked out") || stderr.contains("already exists") {
             pin_operator_identity(repo_root, worktree_path);
-            return Ok(());
+            ownership.worktree_created = false;
+            return Ok(ownership);
         }
         return Err(TackleExecError::Git(format!(
             "git worktree add failed: {}",
@@ -691,7 +887,7 @@ pub fn create_worktree(
     // set identity never blocks tackle (the assertion catches the residue).
     pin_operator_identity(repo_root, worktree_path);
 
-    Ok(())
+    Ok(ownership)
 }
 
 /// Materialize the base branch when the repository has no commits yet.
@@ -824,27 +1020,45 @@ pub fn git_config_value(repo_root: &Path, key: &str) -> Option<String> {
     }
 }
 
-/// Best-effort undo of [`create_worktree`], used on the spawn-failure path.
+/// Best-effort undo of [`create_worktree`], used on the dispatch-failure
+/// path — **scoped to what this attempt created**.
 ///
 /// Mirrors the CLI's `cleanup_partial_tackle` for the subset this executor
-/// creates: the worktree directory and the feature branch. Best-effort
-/// throughout — this runs on a path already returning an error, and a
-/// cleanup failure must not mask the original cause (a leftover worktree is
-/// the recoverable shape; `cs tackle` reuses it idempotently).
-fn remove_worktree_and_branch(repo_root: &Path, worktree_path: &Path, branch: &str) {
-    let _ = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "worktree",
-            "remove",
-            "--force",
-            &worktree_path.to_string_lossy(),
-        ])
-        .output();
-    let _ = std::process::Command::new("git")
-        .args(["-C", &repo_root.to_string_lossy(), "branch", "-D", branch])
-        .output();
+/// creates: the worktree directory and the feature branch. Both removals
+/// are gated on the `ownership` receipt, because the commands involved are
+/// `git worktree remove --force` and `git branch -D`: run over a reused
+/// worktree they destroy the uncommitted work of the crashed dispatch this
+/// one was retrying. Best-effort throughout — this runs on a path already
+/// returning an error, and a cleanup failure must not mask the original
+/// cause (a leftover worktree is the recoverable shape; `cs tackle` reuses
+/// it idempotently).
+///
+/// Returns the note naming what was deliberately preserved, or `None` when
+/// the attempt owned everything it touched.
+fn remove_worktree_and_branch(
+    repo_root: &Path,
+    worktree_path: &Path,
+    branch: &str,
+    ownership: WorktreeOwnership,
+) -> Option<String> {
+    if ownership.worktree_created {
+        let _ = std::process::Command::new("git")
+            .args([
+                "-C",
+                &repo_root.to_string_lossy(),
+                "worktree",
+                "remove",
+                "--force",
+                &worktree_path.to_string_lossy(),
+            ])
+            .output();
+    }
+    if ownership.branch_created {
+        let _ = std::process::Command::new("git")
+            .args(["-C", &repo_root.to_string_lossy(), "branch", "-D", branch])
+            .output();
+    }
+    ownership.preserved_note(worktree_path, branch)
 }
 
 /// Resolve the repository root the dispatch cwd lives in.
