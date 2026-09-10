@@ -97,6 +97,16 @@ enum Cmd {
         /// Disable the live events tail (the observe poll still runs).
         #[arg(long = "no-events")]
         no_events: bool,
+        /// Leave the molecule open instead of closing it once it completes.
+        ///
+        /// `do` closes what it opened: a completed molecule whose branch
+        /// never reaches the trunk is the pile-up issue #51 reports. Pass
+        /// this when you harvest on your own schedule.
+        #[arg(long = "no-close")]
+        no_close: bool,
+        /// Reason traced on the molecule when `do` closes it.
+        #[arg(long = "close-reason")]
+        close_reason: Option<String>,
     },
     #[command(display_order = 1, about = format!("Like `do`, then price it: brackets the same nucleate + tackle + follow flow with two {} reads and reports the quota delta THIS run charged against your bucket. Zero new routes; the leak caveat is printed honestly", canon::GET_V1_QUOTA.label()))]
     Run {
@@ -357,8 +367,50 @@ enum MoleculeCmd {
     Tackle { id: String },
     #[command(about = format!("{} — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream", canon::POST_V1_MOLECULES_ID_RUN.label()))]
     Run { id: String },
-    #[command(about = format!("{} — the harvest door (ADR-176): close this molecule and integrate it where that second authority arises. Carries no options — strategy, reservations and base are sealed in the operator's grant. Refused unless a grant covers it; 200 with the outcome, never 202", canon::POST_V1_MOLECULES_ID_LAND.label()))]
-    Land { id: String },
+    #[command(about = format!("{} — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202", canon::POST_V1_MOLECULES_ID_DONE.label()))]
+    Done {
+        id: String,
+        /// Why this molecule is being closed. Traced trunk-side; the door
+        /// refuses rather than inventing one.
+        #[arg(long)]
+        reason: String,
+        /// Merge strategy: `merge` (default) or `ff-only`.
+        #[arg(long)]
+        strategy: Option<String>,
+        /// Proceed even if the molecule is not in a terminal state.
+        #[arg(long)]
+        force: bool,
+        /// Silent no-op when the molecule is not `Completed` or already merged.
+        #[arg(long)]
+        if_completed: bool,
+        /// Skip merging the worker's branch into the base branch.
+        #[arg(long)]
+        no_merge: bool,
+        /// Skip removing the git worktree.
+        #[arg(long)]
+        no_worktree_remove: bool,
+        /// Skip deleting the worker's branch after the merge.
+        #[arg(long)]
+        no_branch_delete: bool,
+        /// Skip killing the worker's session.
+        #[arg(long)]
+        no_kill: bool,
+        /// Disable auto-propel escalation on merge conflict.
+        #[arg(long)]
+        no_auto_propel: bool,
+        /// Custom message sent to the worker during auto-propel escalation.
+        #[arg(long)]
+        propel_message: Option<String>,
+        /// Maximum number of auto-propel escalation retries.
+        #[arg(long)]
+        max_retries: Option<u32>,
+        /// Skip the blocking `[hooks] pre_done` gate for this invocation.
+        #[arg(long)]
+        skip_pre_done_hook: bool,
+        /// Run the `[hooks] post_merge` deploy hook off the reference trunk.
+        #[arg(long)]
+        deploy_off_trunk: bool,
+    },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_COLLAPSE.label(), canon::POST_V1_MOLECULES_ID_COLLAPSE.effect_suffix()))]
     Collapse {
         id: String,
@@ -768,10 +820,13 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
             follow_timeout,
             poll_interval,
             no_events,
+            no_close,
+            close_reason,
         } => {
             let (_, profile) = store.resolve(cli.profile.as_deref())?;
             let mut variables = parse_vars(&vars)?;
             variables.insert("topic".into(), topic);
+            let defaults = cosmon_remote::do_flow::DoOptions::default();
             let opts = cosmon_remote::do_flow::DoOptions {
                 formula,
                 kind,
@@ -781,6 +836,8 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
                 poll_interval: std::time::Duration::from_secs(poll_interval.max(1)),
                 poll_timeout: std::time::Duration::from_secs(follow_timeout),
                 follow_events: !no_events,
+                close: !no_close,
+                close_reason: close_reason.unwrap_or(defaults.close_reason),
             };
             // `run_do_cmd` wants the store by value (it remembers the
             // credit-guard answer); the store is cheap to construct.
@@ -816,6 +873,11 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
                 poll_interval: std::time::Duration::from_secs(poll_interval.max(1)),
                 poll_timeout: std::time::Duration::from_secs(follow_timeout),
                 follow_events: !no_events,
+                // `run` asks for the resident drain, which closes the
+                // molecules it tackles through its own teardown. A second
+                // harvest from the client would race that one.
+                close: false,
+                close_reason: String::new(),
             };
             run_run_cmd(
                 &profile,
@@ -1409,12 +1471,58 @@ async fn run_molecule(
                 );
             }
         }
-        MoleculeCmd::Land { id } => {
-            let env = client.land(&id).await?;
+        MoleculeCmd::Done {
+            id,
+            reason,
+            strategy,
+            force,
+            if_completed,
+            no_merge,
+            no_worktree_remove,
+            no_branch_delete,
+            no_kill,
+            no_auto_propel,
+            propel_message,
+            max_retries,
+            skip_pre_done_hook,
+            deploy_off_trunk,
+        } => {
+            // Only non-default flags reach the wire, so a bare
+            // `molecule done <id> --reason "..."` sends the reason alone and
+            // the server applies `cs done`'s own defaults. A `false` on the
+            // wire and an absent field mean the same thing; sending the
+            // first would make every request look like an override.
+            let some_if = |on: bool| on.then_some(true);
+            let body = cosmon_remote::client::DoneRequest {
+                reason,
+                strategy,
+                force: some_if(force),
+                if_completed: some_if(if_completed),
+                no_merge: some_if(no_merge),
+                no_worktree_remove: some_if(no_worktree_remove),
+                no_branch_delete: some_if(no_branch_delete),
+                no_kill: some_if(no_kill),
+                no_auto_propel: some_if(no_auto_propel),
+                propel_message,
+                max_retries,
+                skip_pre_done_hook: some_if(skip_pre_done_hook),
+                deploy_off_trunk: some_if(deploy_off_trunk),
+            };
+            let env = client.done(&id, &body).await?;
             if json {
                 print_json(true, &serde_json::to_value(&env)?);
             } else {
-                println!("{} — {}", env.harvest.molecule, env.harvest.outcome);
+                // Name the trunk-side fact, not only the label: a
+                // `closed_without_merge` success left the branch where it
+                // was, and an operator reading one line should not have to
+                // fetch the result route to learn why.
+                match env.harvest.non_integration.as_deref() {
+                    Some(reason) => println!(
+                        "{} — {} (not integrated: {reason})",
+                        env.harvest.molecule, env.harvest.outcome,
+                    ),
+                    None => println!("{} — {}", env.harvest.molecule, env.harvest.outcome),
+                }
             }
         }
         MoleculeCmd::Run { id } => {

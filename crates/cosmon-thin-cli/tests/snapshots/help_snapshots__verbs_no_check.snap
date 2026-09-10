@@ -9,9 +9,9 @@ avatar_mould_info GET /v1/avatar/:instance_id/mould-info
 avatar_status GET /v1/avatar/:instance_id/status
 collapse     POST /v1/molecules/:id/collapse
 converse     POST /v1/avatar/converse
+done         POST /v1/molecules/:id/done
 ensemble     GET /v1/molecules
 freeze       POST /v1/molecules/:id/freeze
-land         POST /v1/molecules/:id/land
 nucleate     POST /v1/molecules
 observe      GET /v1/molecules/:id
 run          POST /v1/molecules/:id/run

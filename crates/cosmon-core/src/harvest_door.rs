@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-//! The vocabulary of the harvest door — ADR-176, the answer to issue #51.
+//! The vocabulary of the harvest door — ADR-176, the answer to issue #51,
+//! **as amended by its reversal of D4**.
 //!
 //! # Why a door and not a command
 //!
@@ -9,19 +10,38 @@
 //! future molecule inherits as its initial condition. ADR-176 D2 refuses to
 //! split that into two verbs for the requester to choose between. The
 //! requester states an intent; the door decides which authorities that intent
-//! needs, and refuses by name when it cannot exercise them.
+//! needs, and refuses by name when it cannot exercise them. That decision
+//! stands.
 //!
-//! So the door takes **one** argument — the molecule — and nothing else. Not
-//! a strategy, not a `--force`, not a hook skip. ADR-176 D4 states the reason
-//! in one sentence: *a derogation requested by its beneficiary is not a
-//! derogation*. Every flag `cs done` owns exists to let the **operator**
-//! overrule a gate built to protect a third party; a remote requester holding
-//! one holds the gate's own off-switch.
+//! # Why the door now carries the whole parameter set
+//!
+//! It did not, at first. ADR-176 D4 read *no option crosses the wire*, and
+//! rested on one sentence — *a derogation requested by its beneficiary is not
+//! a derogation*. That sentence is sound only when the requester is a
+//! constrained principal, **distinct** from the party the gate protects. The
+//! deployment that exists is single-tenant: one galaxy, one nucleon, one
+//! user, and the requester *is* the operator. There, beneficiary and
+//! protected party are the same person, the gate protects nobody, and
+//! withholding `--strategy` from someone merging into their own trunk is an
+//! amputation of their own verb rather than a safety property.
+//!
+//! So D4 is reversed and [`HarvestOptions`] carries the full argument set of
+//! `cs done`. What did **not** move is the authority: the operator's
+//! `[harvest_authority]` arming still authorises the *effect* (D1). The seal
+//! answers *may this requester cause this effect at all*; the options answer
+//! *how*. Reversing D4 does not dismantle D1, and the seven named
+//! [`DoorRefusal`]s below are untouched by it.
+//!
+//! The condition under which D4 comes back is stated and testable: a
+//! requester who is **not** the operator — the multi-tenant phase. What that
+//! phase needs is a restriction on *which* molecules a requester may close,
+//! not on which parameters they may pass; ADR-176 D5 still refuses an
+//! `owner` field, and this module deliberately grows no ownership notion.
 //!
 //! # Why the refusals live here and not at either end
 //!
 //! A refusal has to be the same string in three places: the exit code of the
-//! CLI door, the label the §8p route returns, and the word an operator greps
+//! CLI verb, the label the §8p route returns, and the word an operator greps
 //! for in a log. Three spellings of one refusal is three refusals as far as a
 //! script is concerned. [`DoorRefusal`] is the single spelling, and
 //! `harvest_door_labels_and_codes_are_a_bijection` pins the mirror so a new
@@ -84,6 +104,15 @@ pub enum DoorRefusal {
     /// judgement, so the molecule joins the bounded backlog of
     /// [`Self::BacklogFull`].
     PreDoneRefused,
+    /// The request carried no reason for closing the molecule.
+    ///
+    /// The eighth refusal, added by the D4 reversal, and the only one that
+    /// is a *fault of the argument set* rather than of the world. It exists
+    /// because the alternative is worse than a refusal: `land` fabricated a
+    /// generic reason, and a fabricated reason is indistinguishable, a year
+    /// later, from one somebody meant. The seven ADR-176 refusals keep their
+    /// labels and their exit codes 70–76 unchanged; this one takes 77.
+    MissingReason,
 }
 
 /// Every refusal, in check order. Iterated by the mirror tests and by any
@@ -96,6 +125,7 @@ pub const ALL_REFUSALS: &[DoorRefusal] = &[
     DoorRefusal::MergeConflict,
     DoorRefusal::BaseNotFastForward,
     DoorRefusal::PreDoneRefused,
+    DoorRefusal::MissingReason,
 ];
 
 impl DoorRefusal {
@@ -111,6 +141,7 @@ impl DoorRefusal {
             Self::MergeConflict => "merge_conflict",
             Self::BaseNotFastForward => "base_not_fast_forward",
             Self::PreDoneRefused => "pre_done_refused",
+            Self::MissingReason => "missing_reason",
         }
     }
 
@@ -131,6 +162,7 @@ impl DoorRefusal {
             Self::MergeConflict => 74,
             Self::BaseNotFastForward => 75,
             Self::PreDoneRefused => 76,
+            Self::MissingReason => 77,
         }
     }
 
@@ -196,6 +228,11 @@ impl DoorRefusal {
                  is a human judgement, not a repository fact; the molecule is recorded as \
                  closed-but-unintegrated and counts against the bounded backlog"
             }
+            Self::MissingReason => {
+                "the request named no reason for closing this molecule. The reason is \
+                 traced trunk-side and is the only account a later reader has; the door \
+                 will not invent one. Send `reason` with a sentence a human would write"
+            }
         }
     }
 }
@@ -207,15 +244,51 @@ impl fmt::Display for DoorRefusal {
 }
 
 /// What the door did when it did not refuse.
+///
+/// # Why closure and integration are separate successes
+///
+/// `cs done` carries two authorities (D2), and a request may deliberately
+/// exercise only the first: `no_merge` closes the molecule and leaves the
+/// branch where it is. That is the operator getting exactly what they
+/// asked for, so it is a success — but it is not [`Self::Landed`], because
+/// nothing reached the trunk and a caller that read it as a landing would
+/// be wrong about the one fact the trunk cares about. Hence a third
+/// variant rather than a boolean bolted onto the second: every outcome
+/// answers [`Self::merged`] on its own, and no caller has to reconstruct
+/// the answer from the options it happened to send.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DoorOutcome {
-    /// The molecule was closed and, where the second authority arose, its
-    /// branch landed on the resolved base.
+    /// The molecule was closed and its branch landed on the resolved base.
     Landed,
-    /// The harvest had already landed. The door mutates nothing and reports
-    /// the same success as the first call — idempotence is what makes a
-    /// retried request safe over a network that loses responses.
-    AlreadyLanded,
+    /// The molecule was closed and **nothing was integrated**, because the
+    /// request asked for that (`no_merge`) or because there was no branch
+    /// to integrate. A success: the closure authority was exercised in
+    /// full and the trunk was deliberately left alone. The kebab-case
+    /// reason is on the molecule's `non_integration` record, which the
+    /// result route already publishes.
+    ClosedWithoutMerge,
+    /// The harvest had already happened. The door mutates nothing and
+    /// reports the same success as the first call — idempotence is what
+    /// makes a retried request safe over a network that loses responses.
+    /// `merged` restates which of the two first-call successes it was, so
+    /// a retry is not less informative than the call it repeats.
+    AlreadyLanded {
+        /// Whether the molecule's branch is on the trunk.
+        merged: bool,
+    },
+    /// Nothing was done, because the request asked for nothing to be done
+    /// in this condition: [`HarvestOptions::if_completed`] on a molecule
+    /// that is not `Completed`.
+    ///
+    /// A success, and a distinct one. `cs done --if-completed` is the
+    /// idempotent sweep gesture — the sweeper does not know whether the
+    /// molecule finished, and says so by sending the option — so answering
+    /// it with [`DoorRefusal::NotCompleted`] reports a refusal for the one
+    /// case the caller explicitly declared acceptable. It is not
+    /// [`Self::AlreadyLanded`] either: nothing has landed and the work may
+    /// still be running, so a caller that read the two as the same would
+    /// stop waiting for a molecule that is not finished.
+    NoOp,
 }
 
 impl DoorOutcome {
@@ -224,10 +297,290 @@ impl DoorOutcome {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Landed => "landed",
-            Self::AlreadyLanded => "already_landed",
+            Self::ClosedWithoutMerge => "closed_without_merge",
+            Self::AlreadyLanded { .. } => "already_landed",
+            Self::NoOp => "no_op",
+        }
+    }
+
+    /// Whether this outcome put the molecule's branch on the trunk.
+    ///
+    /// The one question the label alone cannot answer for every variant,
+    /// and the one a caller deciding whether the work shipped must not
+    /// have to guess at.
+    #[must_use]
+    pub const fn merged(self) -> bool {
+        match self {
+            Self::Landed => true,
+            // Two different reasons for the same answer — a deliberate
+            // closure and a request that did nothing — merged into one arm
+            // because `merged` asks only one question, and the outcome
+            // label is where the two stay distinguishable.
+            Self::ClosedWithoutMerge | Self::NoOp => false,
+            Self::AlreadyLanded { merged } => merged,
         }
     }
 }
+
+/// Why a harvest **effect** did not run, or did not complete.
+///
+/// # Why this is one type and not one per adapter
+///
+/// The effect half of the door is reached through two traits — the
+/// filestore's `SealedHarvestEffect` (the library seam the CLI and the
+/// route share) and the §8p adapter's `HarvestEffectPort` (the
+/// deployment's choice of implementation). They answer to different
+/// owners and both are useful, but until the PR #62 review they carried
+/// *different error types*, and the bridge between them flattened the
+/// typed one to a `String`. A [`Self::Refused`] the effect produced at its
+/// authority boundary — before touching anything, so with no trunk-side
+/// record to re-derive it from — arrived at the wire as an anonymous
+/// `harvest_failed`, losing the label and the status the requester was
+/// promised.
+///
+/// So the error contract is shared even though the traits are not: two
+/// seams, one vocabulary. A refusal stays named all the way across.
+#[derive(Debug)]
+pub enum EffectFailure {
+    /// No effect implementation is wired in this deployment. A typed
+    /// refusal rather than a failure: the door admitted the harvest and
+    /// the server cannot perform it, which the requester must be told
+    /// plainly rather than discovering through a success that integrated
+    /// nothing.
+    Unavailable,
+    /// The effect refused, by name, and says so itself — a `cs` child that
+    /// exited on one of the door's stable codes 70–77, or an in-process
+    /// implementation returning its own verdict.
+    ///
+    /// The door still prefers the trunk-side `non_integration` record for
+    /// the *detail* when that record names the same refusal, because the
+    /// sealed transaction writes the conflicted files there and an exit
+    /// code cannot carry them. What the record must no longer do is
+    /// **rename** this refusal, or erase it by being absent.
+    Refused(DoorRefusal),
+    /// The effect ran and failed with no name of its own. The string is
+    /// the implementation's own message; the door re-reads the trunk-side
+    /// record and derives the named refusal from *that* rather than from
+    /// this text, because a string match on a message is a mirror that
+    /// drifts the first time somebody edits the message.
+    Failed(String),
+}
+
+impl fmt::Display for EffectFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("no harvest effect is wired in this deployment"),
+            Self::Refused(refusal) => write!(f, "the effect refused: {}", refusal.as_str()),
+            Self::Failed(message) => write!(f, "the effect failed: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for EffectFailure {}
+
+/// Merge strategy for the branch a harvest integrates.
+///
+/// The domain twin of `cs done --strategy`. It lives here rather than in the
+/// CLI because the wire, the door and the merge must name the same two
+/// shapes; a third spelling in a request body is a third strategy as far as a
+/// script is concerned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MergeStrategy {
+    /// Non-fast-forward merge (`git merge --no-ff --no-edit`) — the default,
+    /// because parallel tackling is the validated common case: when the
+    /// first worker lands, the trunk moves and the second can no longer
+    /// fast-forward.
+    #[default]
+    Merge,
+    /// Fast-forward-only merge (`git merge --ff-only`). Strictly linear
+    /// history; refused when the completion merge must carry trailers,
+    /// because a fast-forward creates no cosmon-owned commit to stamp.
+    FfOnly,
+}
+
+impl MergeStrategy {
+    /// Stable wire token — the same word `cs done --strategy` accepts.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Merge => "merge",
+            Self::FfOnly => "ff-only",
+        }
+    }
+
+    /// Parse a wire token, or `None` for anything else.
+    ///
+    /// Deliberately not `FromStr` with a lossy fallback: a body carrying
+    /// `"fast-forward"` must be refused as an unsupported parameter, never
+    /// silently defaulted to `merge` — a strategy the requester did not ask
+    /// for is the same defect as a strategy they could not ask for.
+    #[must_use]
+    pub fn from_token(token: &str) -> Option<Self> {
+        match token {
+            "merge" => Some(Self::Merge),
+            "ff-only" => Some(Self::FfOnly),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for MergeStrategy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The full parameter set of one harvest — the argument set of `cs done`,
+/// expressed once, in the domain, for every caller of the door.
+///
+/// # Why this type exists
+///
+/// Before the D4 reversal the door's argument set was fixed at the type
+/// (`done::Args::sealed_door`) so that *no option could cross the wire*. The
+/// reversal replaces that seal with this struct: the wire, the CLI and the
+/// merge now read the **same** options, so a parameter cannot mean one thing
+/// in a request body and another at the merge. It is I/O-free and carries no
+/// authority — the operator's `[harvest_authority]` arming still decides
+/// whether the effect may happen at all (D1).
+///
+/// # Why `reason` is not optional
+///
+/// Closing someone's molecule is a lifecycle act that outlives the request,
+/// and the trunk-side record of *why* is the only thing a later reader has.
+/// `land` fabricated a generic one; the door refuses to. A caller that has
+/// nothing to say is a caller who has not decided, and
+/// [`Self::validate`] answers that with [`DoorRefusal::MissingReason`]
+/// rather than inventing a sentence on their behalf.
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Ten independent bool fields because each mirrors one independent `cs done`
+// opt-out, one-to-one. A bitflag or a nested enum would rename the mapping
+// without reducing it, and the round-trip falsifier
+// (`every_harvest_option_survives_the_argv_round_trip`) is what keeps the
+// list honest — exactly the reasoning `done::Args` already carries.
+#[allow(clippy::struct_excessive_bools)]
+pub struct HarvestOptions {
+    /// Why this molecule is being closed. Traced on the molecule; never
+    /// fabricated. Empty or whitespace-only is a refusal, not a default.
+    pub reason: String,
+    /// Merge strategy for the worker's branch.
+    pub strategy: MergeStrategy,
+    /// Proceed even if the molecule is not in a terminal state.
+    pub force: bool,
+    /// Silent no-op when the molecule is not `Completed` or already merged.
+    pub if_completed: bool,
+    /// Skip merging the worker's branch into the base branch.
+    pub no_merge: bool,
+    /// Skip removing the git worktree.
+    pub no_worktree_remove: bool,
+    /// Skip deleting the worker's branch after the merge.
+    pub no_branch_delete: bool,
+    /// Skip killing the worker's session.
+    pub no_kill: bool,
+    /// Disable auto-propel escalation on merge conflict.
+    pub no_auto_propel: bool,
+    /// Custom message sent to the worker during auto-propel escalation.
+    pub propel_message: Option<String>,
+    /// Maximum number of auto-propel escalation retries before giving up.
+    pub max_retries: u32,
+    /// Skip the blocking `[hooks] pre_done` gate for this invocation.
+    pub skip_pre_done_hook: bool,
+    /// Run the `[hooks] post_merge` deploy hook even off the reference trunk.
+    pub deploy_off_trunk: bool,
+}
+
+impl HarvestOptions {
+    /// The options of a harvest whose caller supplied only a reason.
+    ///
+    /// Every other field takes the same value `cs done` defaults to, so the
+    /// door with no options passed behaves exactly as the operator's bare
+    /// `cs done <mol>` does — the documented default falsifier 1 names.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            strategy: MergeStrategy::Merge,
+            force: false,
+            if_completed: false,
+            no_merge: false,
+            no_worktree_remove: false,
+            no_branch_delete: false,
+            no_kill: false,
+            no_auto_propel: false,
+            propel_message: None,
+            max_retries: DEFAULT_MAX_RETRIES,
+            skip_pre_done_hook: false,
+            deploy_off_trunk: false,
+        }
+    }
+
+    /// The `cs done` argument vector this option set executes as.
+    ///
+    /// The **one** place the domain options become CLI flags. It exists so
+    /// that "the parameter arrives at the merge" is a property something can
+    /// assert end to end: the effect adapter spawns exactly this argv, and
+    /// `cs done`'s own parser turns it back into the argument set the merge
+    /// reads. A flag added to [`HarvestOptions`] and forgotten here is a
+    /// parameter the requester can send and the merge never sees, which is
+    /// the defect the D4 reversal exists to remove.
+    ///
+    /// Flags are emitted only when they differ from `cs done`'s own default,
+    /// so the argv of a bare harvest is `["done", "<mol>", "--reason", …]` —
+    /// the documented default, not a re-statement of it.
+    #[must_use]
+    pub fn cs_done_argv(&self, molecule: &str) -> Vec<String> {
+        let mut argv = vec![
+            "done".to_owned(),
+            molecule.to_owned(),
+            "--reason".to_owned(),
+            self.reason.clone(),
+        ];
+        let mut flag = |on: bool, name: &str| {
+            if on {
+                argv.push(name.to_owned());
+            }
+        };
+        flag(self.force, "--force");
+        flag(self.if_completed, "--if-completed");
+        flag(self.no_merge, "--no-merge");
+        flag(self.no_worktree_remove, "--no-worktree-remove");
+        flag(self.no_branch_delete, "--no-branch-delete");
+        flag(self.no_kill, "--no-kill");
+        flag(self.no_auto_propel, "--no-auto-propel");
+        flag(self.skip_pre_done_hook, "--skip-pre-done-hook");
+        flag(self.deploy_off_trunk, "--deploy-off-trunk");
+        if self.strategy != MergeStrategy::Merge {
+            argv.push("--strategy".to_owned());
+            argv.push(self.strategy.as_str().to_owned());
+        }
+        if let Some(message) = &self.propel_message {
+            argv.push("--propel-message".to_owned());
+            argv.push(message.clone());
+        }
+        if self.max_retries != DEFAULT_MAX_RETRIES {
+            argv.push("--max-retries".to_owned());
+            argv.push(self.max_retries.to_string());
+        }
+        argv
+    }
+
+    /// Refuse an argument set the door cannot honour.
+    ///
+    /// # Errors
+    ///
+    /// [`DoorRefusal::MissingReason`] when the reason is absent in
+    /// substance — empty or whitespace only.
+    pub fn validate(&self) -> Result<(), DoorRefusal> {
+        if self.reason.trim().is_empty() {
+            return Err(DoorRefusal::MissingReason);
+        }
+        Ok(())
+    }
+}
+
+/// Default auto-propel retry ceiling — the value `cs done --max-retries`
+/// documents as its default, named once so the wire and the CLI cannot
+/// drift.
+pub const DEFAULT_MAX_RETRIES: u32 = 3;
 
 /// Tags that reserve a molecule for a human decision.
 ///
@@ -257,6 +610,45 @@ pub fn reservation_requiring_seal(tags: &[String]) -> Option<&str> {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    /// Falsifier 4 of the D4 reversal: reversing D4 did not break the
+    /// failure surface.
+    ///
+    /// The seven ADR-176 refusals keep their exact labels and their exact
+    /// exit codes 70–76, pinned literally rather than derived, so a
+    /// renumbering that a bijection test would happily accept fails here.
+    /// `missing_reason` is the eighth and takes 77; it displaces nothing.
+    #[test]
+    fn the_seven_adr_176_refusals_keep_their_labels_and_codes() {
+        let pinned: &[(DoorRefusal, &str, i32)] = &[
+            (DoorRefusal::NotCompleted, "not_completed", 70),
+            (DoorRefusal::NotAuthorized, "not_authorized", 71),
+            (
+                DoorRefusal::ReservationRequiresSeal,
+                "reservation_requires_seal",
+                72,
+            ),
+            (DoorRefusal::BacklogFull, "backlog_full", 73),
+            (DoorRefusal::MergeConflict, "merge_conflict", 74),
+            (DoorRefusal::BaseNotFastForward, "base_not_fast_forward", 75),
+            (DoorRefusal::PreDoneRefused, "pre_done_refused", 76),
+        ];
+        for (refusal, label, code) in pinned {
+            assert_eq!(refusal.as_str(), *label, "{label} lost its label");
+            assert_eq!(refusal.exit_code(), *code, "{label} lost its exit code");
+            assert_eq!(DoorRefusal::from_exit_code(*code), Some(*refusal));
+        }
+        assert_eq!(DoorRefusal::MissingReason.exit_code(), 77);
+        assert_eq!(DoorRefusal::MissingReason.as_str(), "missing_reason");
+        // And the operator-configuration classification of D7 is
+        // untouched: exactly one refusal is not charged to the requester.
+        let operator_faults: Vec<&str> = ALL_REFUSALS
+            .iter()
+            .filter(|r| r.is_operator_configuration_fault())
+            .map(|r| r.as_str())
+            .collect();
+        assert_eq!(operator_faults, vec!["base_not_fast_forward"]);
+    }
 
     #[test]
     fn harvest_door_labels_and_codes_are_a_bijection() {

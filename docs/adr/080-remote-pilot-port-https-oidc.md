@@ -446,7 +446,6 @@ The RPP MUST refuse to expose the following verbs even by accidental routing. Th
 
 | Verb | Why operator-only | Source |
 |------|-------------------|--------|
-| `cs done` | Closes molecule → merges to `main` → kills tmux → removes worktree → deletes branch. Irreversible. Operator gesture. | ADR-077 §2 R5; CLAUDE.md *Pilot patterns* |
 | `cs evolve` | Worker-internal advance. Workers run in their own worktrees with their own `cs` binary; the RPP must not reach into a worker's process. | CLAUDE.md *Command perimeters* |
 | `cs complete` | Worker-internal terminal transition (Active → Completed). Same reasoning as `cs evolve`. | CLAUDE.md *Command perimeters* |
 | `cs security activate` | Switches the cosmon-wide security posture from `prepared` to `active` (ADR-076). Affects every subsequent operation across all tenants. Operator-only. | ADR-076 |
@@ -473,7 +472,60 @@ In V0 and V1 *no* such successor exists; the list is materially closed.
 
 `cs verify` is read-only and idempotent; its only objection is the *oracle for state existence* turing flagged. A V2 successor ADR may expose it as `GET /v1/molecules/:id/verify` if and only if (i) the rate-limiter caps verify queries below the leaked-information threshold turing computed in `delib-20260427-d2ce/responses/turing.md` §Oracle side-channels, and (ii) the response body redacts existence (`200 OK` and `404 Not Found` are timing-equivalent, response-body-equivalent, and response-size-equivalent — turing G14). Until that ADR lands, `cs verify` is operator-only.
 
-### 5.4 The `cs run` exit path — bounded drain (resolved 2026-06-11)
+### 5.4 The `cs done` exit path — lifecycle, not administration (amended 2026-09-07)
+
+`cs done` **left the closed list** on 2026-09-07, via the successor path of
+§5.2 (GitHub issue #51, `task-20260907-6ddc`). The row that named it, and
+the reasoning behind that row, are retired here rather than qualified: the
+classification was wrong, not merely narrow.
+
+**What the row said.** *Closes molecule → merges to `main` → kills tmux →
+removes worktree → deletes branch. Irreversible. Operator gesture.* Every
+clause of that is a true description of what `cs done` does. None of it
+establishes that the verb is **administration**.
+
+**Why it is lifecycle.** A molecule's normal life is nucleate → tackle →
+evolve → complete → done. Closing it is the last step of that life, not a
+gesture upon the system that hosts it. Whoever may nucleate a molecule,
+build its worker and run it may legitimately close it; that the operation
+has an *effect on workers* — a session killed, a worktree removed — no more
+makes it administration than `tackle`'s creating a session makes *that*
+administration. `tackle` has been exposed since V2 for exactly this reason.
+Irreversibility is not the criterion either: `collapse` is irreversible and
+exposed, and a molecule that can be opened and never closed is not a
+narrower surface, it is a leaking one.
+
+**What the misclassification cost.** It is the upstream cause of everything
+issue #51 reports. A tenant closed nothing, work piled up completed and
+unintegrated, and the door built to relieve it (`cs land` /
+`POST /v1/molecules/{id}/land`, ADR-176) could not reach its own effect: the
+sealed transaction is `cs done`, and §3.5's second lock made `cs` refuse
+`done` under the request envelope. A conforming detour around a wrong
+decision reproduced the decision's cost with an extra name attached.
+
+**What is still restricted, and where.** *Which* molecules a requester may
+close is a legitimate restriction and remains **unanswered**: it is the
+multi-tenant question, and it is deliberately out of scope here. The
+deployment that exists is single-tenant — one galaxy, one nucleon, one user
+— so the case does not arise; ADR-176 D5 still refuses an `owner` field, and
+nothing in this amendment adds an ownership notion. What continues to gate
+the *effect* is the operator's `[harvest_authority]` arming (ADR-176 D1),
+verified at the effect boundary: a galaxy that has armed nothing refuses
+every harvest with `not_authorized`, exactly as before.
+
+**A note on how §5.1 is read.** ADR-176 §D4 described this list as a list of
+*degrees of freedom* rather than of verb names — the reading under which
+`land` could expose `done`'s effect while `done` stayed listed, provided the
+argument set was fixed at the type. That reading is retired with the row.
+The list is a list of verbs, and a verb whose effect is legitimately
+exposable belongs off it, under its own name.
+
+**The `delegate_for` claim model of §5.2 is intentionally NOT used**, for the
+same reason ADR-124 gave: the requester closes *its own* molecule in *its
+own* galaxy. There is no operator authority being delegated — the operator's
+seal authorises the class of effect once, at arming time, not per request.
+
+### 5.5 The `cs run` exit path — bounded drain (resolved 2026-06-11)
 
 `cs run` left the closed list via the successor path of §5.2:
 [ADR-124](124-tenant-bounded-drain-run.md) (B2 bounded drain,

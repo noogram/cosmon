@@ -275,8 +275,8 @@ pub struct TackleBody {
     pub spawned_at: Option<String>,
 }
 
-/// Response of `POST /v1/molecules/{id}/land` — the harvest door
-/// (ADR-176, issue #51).
+/// Response of `POST /v1/molecules/{id}/done` — the harvest door
+/// (ADR-176 as amended, issue #51).
 ///
 /// **200-shaped, deliberately.** Its sibling [`RunEnvelope`] is 202
 /// because a drain is hours-shaped; a harvest is not, and answering
@@ -285,24 +285,101 @@ pub struct TackleBody {
 /// either happened or it did not, and `outcome` says which.
 ///
 /// Refusals never decode into this type: they arrive as HTTP errors
-/// carrying one of the seven named labels
+/// carrying one of the named labels
 /// ([`cosmon_core::harvest_door::DoorRefusal`]).
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct LandEnvelope {
+pub struct HarvestEnvelope {
     pub request_id: String,
     pub harvest: HarvestLanded,
 }
 
-/// The `harvest` body of [`LandEnvelope`].
+/// The `harvest` body of [`HarvestEnvelope`].
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HarvestLanded {
     /// The molecule that was closed, and integrated where the second
     /// authority arose.
     pub molecule: String,
-    /// `landed`, or `already_landed` when the harvest had already
-    /// happened — the idempotent reply that makes a retry over a lossy
-    /// network safe.
+    /// `landed`, `closed_without_merge` when the closure deliberately
+    /// integrated nothing, `no_op` when `if_completed` was sent and there
+    /// was nothing to close, or `already_landed` when the harvest had
+    /// already happened — the idempotent reply that makes a retry over a
+    /// lossy network safe.
     pub outcome: String,
+    /// Whether the branch is on the trunk. `None` only against a server
+    /// older than the field; a caller deciding whether the work shipped
+    /// must read this rather than infer it from the 200.
+    #[serde(default)]
+    pub merged: Option<bool>,
+    /// The kebab-case `non_integration` reason when nothing was
+    /// integrated (`merge-skipped`, `no-branch`), `None` when it was.
+    #[serde(default)]
+    pub non_integration: Option<String>,
+}
+
+/// Body of `POST /v1/molecules/{id}/done` — the harvest door's full
+/// parameter set.
+///
+/// Every field but `reason` is skipped when it is `None`, so a bare
+/// harvest sends `{"reason": "..."}` and the server applies `cs done`'s
+/// own defaults. Not a mirror of every flag by accident: the wire shape is
+/// generated from the same argument set (`cs done --help`) and a flag with
+/// no wire counterpart is named in the route's docs, never dropped
+/// silently.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct DoneRequest {
+    /// Why this molecule is being closed. Mandatory; the door refuses
+    /// `missing_reason` rather than fabricating one.
+    pub reason: String,
+    /// `merge` (default) or `ff-only`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub strategy: Option<String>,
+    /// Proceed even if the molecule is not in a terminal state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+    /// Silent no-op when the molecule is not `Completed` or already merged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub if_completed: Option<bool>,
+    /// Skip merging the worker's branch into the base branch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_merge: Option<bool>,
+    /// Skip removing the git worktree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_worktree_remove: Option<bool>,
+    /// Skip deleting the worker's branch after the merge.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_branch_delete: Option<bool>,
+    /// Skip killing the worker's session.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_kill: Option<bool>,
+    /// Disable auto-propel escalation on merge conflict.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_auto_propel: Option<bool>,
+    /// Custom message sent to the worker during auto-propel escalation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub propel_message: Option<String>,
+    /// Maximum number of auto-propel escalation retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<u32>,
+    /// Skip the blocking `[hooks] pre_done` gate for this invocation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_pre_done_hook: Option<bool>,
+    /// Run the `[hooks] post_merge` deploy hook off the reference trunk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deploy_off_trunk: Option<bool>,
+}
+
+impl DoneRequest {
+    /// A bare harvest with the caller's reason and nothing else.
+    ///
+    /// The constructor takes the reason positionally because it is the one
+    /// argument the door will not supply for you.
+    #[must_use]
+    pub fn new(reason: impl Into<String>) -> Self {
+        Self {
+            reason: reason.into(),
+            ..Self::default()
+        }
+    }
 }
 
 /// Response of `POST /v1/molecules/{id}/run` (bounded drain,
@@ -926,17 +1003,26 @@ impl Client {
         decode_json(resp).await
     }
 
-    /// `POST /v1/molecules/{id}/land` — the harvest door (ADR-176).
+    /// `POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as
+    /// amended by the reversal of D4).
     ///
     /// Ask for one molecule to be closed and, where the second authority
     /// arises, integrated into its resolved base. The request carries the
-    /// id and nothing else: no strategy, no force, no hook waiver — those
-    /// are sealed fields of the operator's grant, not parameters (D4).
-    /// Refused unless an operator-sealed grant covers the molecule on that
-    /// base; the bearer token authenticates the asker, never the effect.
-    pub async fn land(&self, id: &str) -> Result<LandEnvelope> {
+    /// **full parameter set** of `cs done` — a requester merging into their
+    /// own trunk is the operator, and withholding a merge strategy from
+    /// them protects nobody. What still gates the effect is the operator's
+    /// sealed grant: the bearer token authenticates the asker, never the
+    /// effect (D1).
+    ///
+    /// `reason` is mandatory server-side and is refused rather than
+    /// invented — [`DoneRequest::new`] makes it the one argument you cannot
+    /// forget.
+    pub async fn done(&self, id: &str, body: &DoneRequest) -> Result<HarvestEnvelope> {
         let resp = self
-            .send(self.req_canon(canon::POST_V1_MOLECULES_ID_LAND, &[id]))
+            .send(
+                self.req_canon(canon::POST_V1_MOLECULES_ID_DONE, &[id])
+                    .json(body),
+            )
             .await?;
         decode_json(resp).await
     }

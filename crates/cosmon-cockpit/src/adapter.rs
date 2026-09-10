@@ -496,6 +496,7 @@ mod tests {
 
     fn sample_mol(suffix: &str, status: MoleculeStatus) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(format!("task-20260410-{suffix}")).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

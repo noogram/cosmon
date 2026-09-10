@@ -53,6 +53,7 @@ use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Json, Response};
 use cosmon_core::auth::{JwtClaims, Subject};
+use cosmon_core::harvest_door::HarvestOptions;
 use cosmon_core::id::{FleetId, MoleculeId};
 use cosmon_core::tag::Tag;
 use cosmon_filestore::{harvest_door, FileStore};
@@ -1827,29 +1828,131 @@ pub async fn run_molecule(
 }
 
 // ---------------------------------------------------------------------------
-// The harvest door — land (`POST /v1/molecules/:id/land`)
+// The harvest door — done (`POST /v1/molecules/:id/done`)
 // ---------------------------------------------------------------------------
 
-/// `POST /v1/molecules/:id/land` — the harvest door (ADR-176, issue #51).
+/// Body schema for `POST /v1/molecules/:id/done` — the full parameter set of
+/// `cs done`.
 ///
-/// # A request door, not a command
+/// `deny_unknown_fields` rather than a permissive parse: a body carrying
+/// `strategu: "ff-only"` must be told, not silently harvested with the
+/// default. Every field but `reason` is optional and defaults to what
+/// `cs done` itself defaults to, so a body of `{"reason": "..."}` is the
+/// documented bare harvest.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoneBody {
+    /// Why this molecule is being closed. **Mandatory**, and never
+    /// fabricated: the withdrawn `land` gesture invented a generic sentence,
+    /// which a year later is indistinguishable from one somebody meant.
+    pub reason: Option<String>,
+    /// `merge` (default) or `ff-only`.
+    #[serde(default)]
+    pub strategy: Option<String>,
+    /// Proceed even if the molecule is not in a terminal state.
+    #[serde(default)]
+    pub force: Option<bool>,
+    /// Silent no-op when the molecule is not `Completed` or already merged.
+    #[serde(default)]
+    pub if_completed: Option<bool>,
+    /// Skip merging the worker's branch into the base branch.
+    #[serde(default)]
+    pub no_merge: Option<bool>,
+    /// Skip removing the git worktree.
+    #[serde(default)]
+    pub no_worktree_remove: Option<bool>,
+    /// Skip deleting the worker's branch after the merge.
+    #[serde(default)]
+    pub no_branch_delete: Option<bool>,
+    /// Skip killing the worker's session.
+    #[serde(default)]
+    pub no_kill: Option<bool>,
+    /// Disable auto-propel escalation on merge conflict.
+    #[serde(default)]
+    pub no_auto_propel: Option<bool>,
+    /// Custom message sent to the worker during auto-propel escalation.
+    #[serde(default)]
+    pub propel_message: Option<String>,
+    /// Maximum number of auto-propel escalation retries.
+    #[serde(default)]
+    pub max_retries: Option<u32>,
+    /// Skip the blocking `[hooks] pre_done` gate for this invocation.
+    #[serde(default)]
+    pub skip_pre_done_hook: Option<bool>,
+    /// Run the `[hooks] post_merge` deploy hook off the reference trunk.
+    #[serde(default)]
+    pub deploy_off_trunk: Option<bool>,
+}
+
+impl DoneBody {
+    /// Fold the body into the domain options, refusing an unknown strategy.
+    fn into_options(self) -> Result<HarvestOptions, &'static str> {
+        let strategy = match self.strategy.as_deref() {
+            None => cosmon_core::harvest_door::MergeStrategy::Merge,
+            Some(token) => cosmon_core::harvest_door::MergeStrategy::from_token(token)
+                .ok_or("unsupported_parameter")?,
+        };
+        let mut options = HarvestOptions::new(self.reason.unwrap_or_default());
+        options.strategy = strategy;
+        options.force = self.force.unwrap_or(false);
+        options.if_completed = self.if_completed.unwrap_or(false);
+        options.no_merge = self.no_merge.unwrap_or(false);
+        options.no_worktree_remove = self.no_worktree_remove.unwrap_or(false);
+        options.no_branch_delete = self.no_branch_delete.unwrap_or(false);
+        options.no_kill = self.no_kill.unwrap_or(false);
+        // The one default that differs from `cs done`'s, and the one
+        // ADR-176 decision the D4 reversal does not carry with it: D6
+        // disarms auto-propel on this path *by construction*. Escalation
+        // injects a natural-language instruction — partly authored by the
+        // requester through the molecule briefing — into a live worker
+        // session, to resolve a conflict on the trunk, and renders the
+        // result as `merged_after_n_escalation(s)`, a success label. That
+        // is not a merge parameter, it is an agent dispatch wearing one,
+        // so it stays off unless the requester asks for it and holds the
+        // spawn scope that says they may spend agent budget.
+        options.no_auto_propel = self.no_auto_propel.unwrap_or(true);
+        options.propel_message = self.propel_message;
+        options.max_retries = self.max_retries.unwrap_or(0);
+        options.skip_pre_done_hook = self.skip_pre_done_hook.unwrap_or(false);
+        options.deploy_off_trunk = self.deploy_off_trunk.unwrap_or(false);
+        Ok(options)
+    }
+}
+
+/// `POST /v1/molecules/:id/done` — the harvest door (ADR-176, issue #51),
+/// as amended by the reversal of D4.
 ///
-/// The body carries **no options**, and that is a property this route
-/// enforces rather than inherits: any body but an empty one or `{}` is
-/// refused with `unsupported_parameter`. Merge strategy, reservations and
-/// base are sealed fields of the operator's grant, never request parameters
-/// (ADR-176 D4). The requester states one intent — *land this molecule* —
-/// and the door decides which of the two authorities that intent needs
-/// (D2: the closure authority always; the integration authority when, and
-/// only when, the molecule's resolved base is the kernel's reference trunk).
+/// # A door, and now the operator's own verb through it
 ///
-/// # Two proofs, two keys
+/// The route once refused every body but an empty one: "no option crosses
+/// the wire" (D4), on the argument that *a derogation requested by its
+/// beneficiary is not a derogation*. That argument holds only where the
+/// requester is a constrained principal distinct from the party the gate
+/// protects. On the deployment that exists — one galaxy, one nucleon, one
+/// user — the requester **is** the operator, so the gate protected nobody
+/// and withholding `--strategy` from someone merging into their own trunk
+/// was an amputation of their own verb.
 ///
-/// The JWT **authenticates the requester**; the operator-sealed grant
-/// **authorises the effect**, and it is verified inside the trunk lock with
-/// every fact re-derived there (ADR-172 D3). A bearer brings a request, never
-/// an authority: in a galaxy that has not armed `[harvest_authority]
-/// required`, every call to this route refuses `not_authorized`.
+/// So the body carries the full argument set of `cs done`, folded into
+/// [`HarvestOptions`] and carried unchanged to the merge. What did *not*
+/// move is the authority: the JWT authenticates the requester, and the
+/// operator-sealed grant authorises the effect, verified inside the trunk
+/// lock with every fact re-derived there (ADR-176 D1, ADR-172 D3). A galaxy
+/// that has not armed `[harvest_authority] required` still refuses
+/// `not_authorized` for every call.
+///
+/// Restricting *which* molecules a requester may close remains the
+/// multi-tenant question and is deliberately not answered here: no
+/// ownership check, no `owner` field (D5 stands).
+///
+/// # The reason is mandatory here and nowhere else
+///
+/// `cs done` accepts `--reason` and records nothing when none is given —
+/// the operator at their own terminal authors the history this writes. A
+/// requester reaching over §8p does not, and the trunk-side reason is the
+/// only account a later reader has of why someone else's molecule was
+/// closed. A body with no reason is refused `missing_reason`; the door does
+/// not invent one, which is the gap the reporters named in `land`.
 ///
 /// # Never 202
 ///
@@ -1857,36 +1960,28 @@ pub async fn run_molecule(
 /// because a drain is hours-shaped. This one must not. A 202 on a
 /// transaction that may integrate nothing rebuilds exactly the defect issue
 /// #51 reports — the tenant reads success, the branch is stranded, and
-/// nobody is coming. `never_202_on_a_transaction_that_may_integrate_nothing`
-/// pins it.
+/// nobody is coming.
 ///
 /// # Named refusals
 ///
-/// Every outcome is one of the seven [`DoorRefusal`] labels.
+/// Every outcome is one of the [`DoorRefusal`] labels.
 /// `base_not_fast_forward` maps to 503 alone: ADR-176 D7 classes it an
 /// operator *configuration* error, decidable at arming time, and charging
 /// it to the requester as a 4xx would convert the operator's
 /// misconfiguration into the tenant's failure class.
 ///
-/// # Library-direct decision, typed-refusal effect (issue #54 U3 → U6)
+/// # The effect half
 ///
-/// Since issue #54 U3 the door's **decision half** runs in-process through
-/// [`cosmon_filestore::harvest_door::decide`] — the same library body `cs
-/// land` executes, so the two doors cannot drift — and every pre-effect
-/// refusal, plus `already_landed` idempotence, answers without any `cs`
-/// binary present. U6 retired the subprocess that used to carry the
-/// **effect half** (the sealed `cs done` transaction: merge with lineage
-/// trailers, provenance gates, teardown) along with the rest of the
-/// ADR-080 §3.5 clause (e) envelope. Its one implementation is still
-/// `cmd/done.rs`, and duplicating it in a library would fork the door —
-/// so until the [`SealedHarvestEffect`] port grows a library
-/// implementation (the enumerated ADR-176 §11 follow-up), a harvest the
-/// decision half ADMITS is answered with the typed refusal
-/// **501 `land_effect_unavailable`** rather than a subprocess or a lie.
+/// The decision half runs in-process ([`cosmon_filestore::harvest_door::decide`]),
+/// so every pre-effect refusal and the `already_landed` idempotence answer
+/// with no `cs` binary present. The effect half — the sealed harvest
+/// transaction, whose one implementation is `cmd/done.rs` — is injected
+/// through [`crate::harvest_effect::HarvestEffectPort`]. A deployment that
+/// declared no implementation answers the typed
+/// **501 `harvest_effect_unavailable`** rather than a subprocess or a lie.
 ///
 /// [`DoorRefusal`]: cosmon_core::harvest_door::DoorRefusal
-/// [`SealedHarvestEffect`]: cosmon_filestore::harvest_door::SealedHarvestEffect
-pub async fn land_molecule(
+pub async fn done_molecule(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     AxumPath(molecule_id_str): AxumPath<String>,
@@ -1898,34 +1993,57 @@ pub async fn land_molecule(
         .map_err(|e| state.reject(e))?;
 
     // 2. Scope. `cosmon:molecule:write` alone — deliberately NOT the
-    //    `+ worker:spawn` composition that tackle and run carry. That pair
-    //    exists because those two verbs burn Anthropic credit; this one does
-    //    not, because auto-propel is disarmed on this path by construction
-    //    (ADR-176 D6). Requiring the spawn scope here would say the door
-    //    spends agent budget, which would then be true the day someone
-    //    re-armed escalation.
+    //    `+ worker:spawn` composition that tackle and run carry. Those two
+    //    burn Anthropic credit; a harvest does not, unless auto-propel is
+    //    armed, and auto-propel injects text into a live worker session.
+    //    Requesting escalation is therefore the one option on this route
+    //    that spends agent budget, and it is refused without the spawn
+    //    scope below rather than by widening the whole route's gate.
     authorise_scope(
         &state,
         &jwt,
-        "land",
+        "done",
         &[SCOPE_MOLECULE_WRITE],
         SCOPE_MOLECULE_WRITE,
     )?;
 
     // 3. Admission boundary (clauses a–d, materialise inbox).
-    let spark = build_spark(&state, &jwt, Verb::LandMolecule, Some(&molecule_id_str))?;
+    let spark = build_spark(&state, &jwt, Verb::DoneMolecule, Some(&molecule_id_str))?;
 
-    // 4. The body must be empty. Checked *here*, on raw bytes, rather than by
-    //    deserialising into a field-less struct: a struct with
-    //    `deny_unknown_fields` refuses the fields it knows about today, while
-    //    this refuses the whole channel. A door whose body is inert cannot
-    //    grow a parameter by accident.
-    if !body.is_empty() && body.as_ref() != b"{}" {
-        return Err(ApiError {
-            status: StatusCode::BAD_REQUEST,
-            label: "unsupported_parameter",
-            request_id: Some(spark.request_id.clone()),
-        });
+    // 4. The body. Empty is legal only in the sense that it fails the same
+    //    way `{}` does — with `missing_reason`, named, rather than with a
+    //    parse error the requester cannot act on.
+    let parsed: DoneBody = if body.is_empty() {
+        serde_json::from_slice(b"{}")
+    } else {
+        serde_json::from_slice(&body)
+    }
+    .map_err(|_| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label: "unsupported_parameter",
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    let options = parsed.into_options().map_err(|label| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        label,
+        request_id: Some(spark.request_id.clone()),
+    })?;
+    if let Err(refusal) = options.validate() {
+        return Err(door_refusal_to_api_error(refusal, &spark.request_id));
+    }
+    // Auto-propel is the one option that spends agent budget: it sends a
+    // natural-language instruction into a live worker session and retries
+    // the merge. Arming it therefore needs the spawn scope tackle and run
+    // carry, checked here rather than on the whole route so a plain harvest
+    // is not made to claim a budget it never touches.
+    if !options.no_auto_propel && options.max_retries > 0 {
+        authorise_scope(
+            &state,
+            &jwt,
+            "done",
+            &[SCOPE_WORKER_SPAWN],
+            SCOPE_WORKER_SPAWN,
+        )?;
     }
 
     // 5. Malformed id and absent tenant root both collapse to 404 — the same
@@ -1944,75 +2062,240 @@ pub async fn land_molecule(
         });
     }
 
-    // 6. The decision half, in-process (issue #54 U3): the same library body
-    //    `cs land` runs, over the tenant's own state files. Every pre-effect
+    // 6. The decision half, in-process: the same library body the door has
+    //    always run, over the tenant's own state files. Every pre-effect
     //    refusal — and the `already_landed` idempotent success — answers
     //    here without the `cs` binary existing at all.
-    match decide_land_in_process(&tenant_root, &molecule_id, &spark.request_id).await? {
-        harvest_door::DoorDecision::AlreadyLanded => {
-            // Idempotence answered in-process: the same success as the first
-            // call, nothing mutated, no subprocess spawned.
-            let body = json!({
-                "request_id": spark.request_id,
-                "harvest": {
-                    "molecule": molecule_id_str,
-                    "outcome": cosmon_core::harvest_door::DoorOutcome::AlreadyLanded.as_str(),
-                },
-            });
+    match decide_harvest_in_process(&tenant_root, &molecule_id, &options, &spark.request_id).await?
+    {
+        harvest_door::DoorDecision::AlreadyLanded { merged } => {
+            let outcome = cosmon_core::harvest_door::DoorOutcome::AlreadyLanded { merged };
+            // The retry answers with the same three facts the first call
+            // did — including *why* nothing was integrated, when nothing
+            // was. An idempotent reply that drops a field is not the same
+            // reply.
+            let non_integration = if merged {
+                None
+            } else {
+                read_non_integration_tag(&tenant_root, &molecule_id).await
+            };
+            let body = harvest_success_body(
+                &spark.request_id,
+                &molecule_id_str,
+                outcome,
+                non_integration.as_deref(),
+            );
+            return Ok((StatusCode::OK, Json(body)).into_response());
+        }
+        harvest_door::DoorDecision::NoOp => {
+            // `if_completed` on work that is not finished. A success with
+            // nothing behind it, and it must not read as a landing: the
+            // molecule is still running, so `merged` is false and there
+            // is no non-integration record to explain — nothing was
+            // integrated because nothing was closed.
+            let body = harvest_success_body(
+                &spark.request_id,
+                &molecule_id_str,
+                cosmon_core::harvest_door::DoorOutcome::NoOp,
+                None,
+            );
             return Ok((StatusCode::OK, Json(body)).into_response());
         }
         harvest_door::DoorDecision::Proceed => {}
     }
 
-    // 7. The effect half — a TYPED refusal since issue #54 U6.
-    //
-    //    The sealed harvest transaction (merge with lineage trailers,
-    //    provenance gates, teardown) has exactly one implementation,
-    //    `cmd/done.rs`'s sealed-door path, and it is not yet callable
-    //    as a library (ADR-176 §11: the `SealedHarvestEffect` port is
-    //    the seam; its library implementation is the enumerated
-    //    follow-up). The subprocess that used to reach it is retired
-    //    with the rest of the §3.5 clause (e) envelope, and the door
-    //    refuses honestly instead of pretending: `501
-    //    land_effect_unavailable`, never a silent `cs` fallback and
-    //    never a 202 that integrates nothing (the defect issue #51
-    //    reports). Every pre-effect refusal and the `already_landed`
-    //    idempotence above still answer in full, in-process.
-    tracing::warn!(
-        request_id = %spark.request_id,
-        molecule_id = %molecule_id_str,
-        "land decision half admitted the harvest, but the sealed effect \
-         has no library implementation yet (ADR-176 §11) — refusing \
-         land_effect_unavailable"
+    // 7. The effect half, through the port. The options travel unchanged
+    //    from the request body to the merge; that is the whole point of the
+    //    D4 reversal, and `a_requested_strategy_arrives_at_the_merge` in
+    //    `cmd/done.rs` is what keeps it true.
+    let (outcome, non_integration) = run_harvest_effect(
+        &state,
+        &tenant_root,
+        &molecule_id,
+        &options,
+        &spark.request_id,
+    )
+    .await?;
+
+    let body = harvest_success_body(
+        &spark.request_id,
+        &molecule_id_str,
+        outcome,
+        non_integration.as_deref(),
     );
-    Err(ApiError {
-        status: StatusCode::NOT_IMPLEMENTED,
-        label: "land_effect_unavailable",
-        request_id: Some(spark.request_id),
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// The one shape of a successful harvest reply.
+///
+/// Four success outcomes reach the wire — `landed`, `closed_without_merge`,
+/// `already_landed`, `no_op` — and a client that had to learn which fields
+/// each carries would be reading four replies. `merged` is not decoration:
+/// three of the four did not put anything on the trunk, and a client
+/// reading the `200` alone would believe the branch shipped. The reason tag
+/// travels with it so the requester does not have to fetch the result route
+/// to learn why nothing was integrated.
+fn harvest_success_body(
+    request_id: &str,
+    molecule_id: &str,
+    outcome: cosmon_core::harvest_door::DoorOutcome,
+    non_integration: Option<&str>,
+) -> serde_json::Value {
+    json!({
+        "request_id": request_id,
+        "harvest": {
+            "molecule": molecule_id,
+            "outcome": outcome.as_str(),
+            "merged": outcome.merged(),
+            "non_integration": non_integration,
+        },
     })
 }
 
-/// Run the door's in-process decision half over the tenant's own state
-/// (issue #54 U3) and map its typed answers onto the wire.
+/// Run the door's effect half through the deployment's port and interpret
+/// the result the way [`cosmon_filestore::harvest_door::land`] does.
+///
+/// `spawn_blocking` because both the effect and the trunk-side re-read are
+/// synchronous work. The port's typed answers map onto the wire:
+/// [`EffectFailure::Unavailable`](cosmon_core::harvest_door::EffectFailure)
+/// to the honest `501`, a named refusal to its own status, and anything
+/// else to the anonymous `harvest_failed`.
+///
+/// Returns the outcome and, when the closure integrated nothing, the
+/// kebab-case `non_integration` reason read back under the same blocking
+/// task. The door's own vocabulary cannot carry that tag — it is a
+/// `cosmon-state` type and the domain crate is upstream of it — so the
+/// route reads it where the state is already open rather than inventing a
+/// second spelling of it.
+async fn run_harvest_effect(
+    state: &Arc<AppState>,
+    tenant_root: &std::path::Path,
+    molecule_id: &MoleculeId,
+    options: &HarvestOptions,
+    request_id: &str,
+) -> Result<(cosmon_core::harvest_door::DoorOutcome, Option<String>), ApiError> {
+    let effect = Arc::clone(&state.harvest_effect);
+    let root = tenant_root.to_path_buf();
+    let id = molecule_id.clone();
+    let opts = options.clone();
+    let state_dir = tenant_root.join(".cosmon").join("state");
+    let config_path = tenant_root.join(".cosmon").join("config.toml");
+    let unavailable = ApiError {
+        status: StatusCode::NOT_IMPLEMENTED,
+        label: "harvest_effect_unavailable",
+        request_id: Some(request_id.to_owned()),
+    };
+    let failed = ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        label: "harvest_failed",
+        request_id: Some(request_id.to_owned()),
+    };
+
+    let joined = tokio::task::spawn_blocking(move || {
+        let store = FileStore::new(&state_dir);
+        let cfg = cosmon_filestore::load_project_config(&config_path)
+            .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
+        let mut bridge = PortBackedEffect {
+            port: effect.as_ref(),
+            root,
+        };
+        let outcome = harvest_door::land(&store, &cfg, &id, &opts, &mut bridge)?;
+        // Read back inside the same blocking task: the effect has
+        // returned, the store is open, and the tag is exactly the one the
+        // result route publishes for this molecule.
+        let reason = if outcome.merged() {
+            None
+        } else {
+            non_integration_tag(&store, &id)
+        };
+        Ok::<_, harvest_door::LandError>((outcome, reason))
+    })
+    .await;
+
+    let Ok(result) = joined else {
+        return Err(failed);
+    };
+    match result {
+        Ok(outcome) => Ok(outcome),
+        Err(harvest_door::LandError::Refused(refused)) => {
+            Err(door_refusal_to_api_error(refused.refusal, request_id))
+        }
+        Err(harvest_door::LandError::Fault(cosmon_core::error::CosmonError::MoleculeNotFound(
+            _,
+        ))) => Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(request_id.to_owned()),
+        }),
+        Err(harvest_door::LandError::EffectUnavailable) => {
+            tracing::warn!(
+                request_id = %request_id,
+                molecule_id = %molecule_id,
+                "the door admitted the harvest, but this deployment declared no \
+                 harvest effect (ADR-176 §11) — refusing harvest_effect_unavailable"
+            );
+            Err(unavailable)
+        }
+        Err(_) => Err(failed),
+    }
+}
+
+/// Bridge the adapter's [`HarvestEffectPort`] onto the door's
+/// [`SealedHarvestEffect`] seam.
+///
+/// Two traits rather than one because they answer to different owners: the
+/// door's seam is a library contract shared with the CLI, and the adapter's
+/// port is the deployment's choice of implementation. This is the ten lines
+/// that keep them from becoming one type with two reasons to change.
+///
+/// [`HarvestEffectPort`]: crate::harvest_effect::HarvestEffectPort
+/// [`SealedHarvestEffect`]: cosmon_filestore::harvest_door::SealedHarvestEffect
+struct PortBackedEffect<'a> {
+    port: &'a dyn crate::harvest_effect::HarvestEffectPort,
+    root: std::path::PathBuf,
+}
+
+impl harvest_door::SealedHarvestEffect for PortBackedEffect<'_> {
+    fn binds_trunk_lock(&self) -> bool {
+        self.port.binds_trunk_lock()
+    }
+
+    fn harvest(
+        &mut self,
+        molecule: &MoleculeId,
+        options: &HarvestOptions,
+    ) -> Result<(), cosmon_core::harvest_door::EffectFailure> {
+        // Nothing to translate: both seams speak the one effect-error
+        // vocabulary since the PR #62 review. The version of this bridge
+        // that stringified the error is what lost a named refusal on the
+        // way to the wire.
+        self.port.harvest(&self.root, molecule, options)
+    }
+}
+
+/// Run the door's in-process decision half over the tenant's own state and
+/// map its typed answers onto the wire.
 ///
 /// `spawn_blocking` because the store reads are synchronous filesystem
 /// work. A refused decision becomes its named [`ApiError`]; a
 /// `MoleculeNotFound` fault collapses to `404 not_found` — the same
 /// no-existence-oracle boundary the rest of the surface holds; any other
 /// fault stays an anonymous `harvest_failed`.
-async fn decide_land_in_process(
+async fn decide_harvest_in_process(
     tenant_root: &std::path::Path,
     molecule_id: &MoleculeId,
+    options: &HarvestOptions,
     request_id: &str,
 ) -> Result<harvest_door::DoorDecision, ApiError> {
     let tenant_state_dir = tenant_root.join(".cosmon").join("state");
     let tenant_config_path = tenant_root.join(".cosmon").join("config.toml");
     let decision_molecule = molecule_id.clone();
+    let decision_options = options.clone();
     let decision = tokio::task::spawn_blocking(move || {
         let store = FileStore::new(&tenant_state_dir);
         let cfg = cosmon_filestore::load_project_config(&tenant_config_path)
             .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
-        harvest_door::decide(&store, &cfg, &decision_molecule)
+        harvest_door::decide(&store, &cfg, &decision_molecule, &decision_options)
     })
     .await
     .map_err(|_| ApiError {
@@ -2040,6 +2323,37 @@ async fn decide_land_in_process(
     })
 }
 
+/// The kebab-case `non_integration` reason recorded on a molecule, or
+/// `None` when the work is on the trunk (or the read fails).
+///
+/// One spelling of the tag for both harvest replies. It is
+/// `cosmon_state`'s own `as_str`, the same string `GET /v1/molecules/:id/
+/// result` publishes in its `integration` block — a second spelling here
+/// would be a second vocabulary as far as a client script is concerned.
+fn non_integration_tag(store: &FileStore, molecule: &MoleculeId) -> Option<String> {
+    use cosmon_state::StateStore as _;
+    store
+        .load_molecule(molecule)
+        .ok()
+        .and_then(|m| m.non_integration)
+        .map(|ni| ni.reason.as_str().to_owned())
+}
+
+/// [`non_integration_tag`] off the async path: the store read is
+/// synchronous filesystem work, so it goes to the blocking pool like every
+/// other state read on this route.
+async fn read_non_integration_tag(
+    tenant_root: &std::path::Path,
+    molecule: &MoleculeId,
+) -> Option<String> {
+    let state_dir = tenant_root.join(".cosmon").join("state");
+    let id = molecule.clone();
+    tokio::task::spawn_blocking(move || non_integration_tag(&FileStore::new(&state_dir), &id))
+        .await
+        .ok()
+        .flatten()
+}
+
 /// Map a named door refusal to its wire status and label.
 ///
 /// One mapping for both arrival paths — the in-process decision half and
@@ -2065,6 +2379,9 @@ fn door_refusal_to_api_error(
         // an operator's quantity, which is what 429 means everywhere else on
         // this surface.
         DoorRefusal::BacklogFull | DoorRefusal::PreDoneRefused => StatusCode::TOO_MANY_REQUESTS,
+        // A fault of the argument set, not of the world: the caller can fix
+        // it by saying why, and the door will not say it for them.
+        DoorRefusal::MissingReason => StatusCode::BAD_REQUEST,
         // ADR-176 D7 — an operator configuration fault, never charged to the
         // requester as a 4xx.
         DoorRefusal::BaseNotFastForward => StatusCode::SERVICE_UNAVAILABLE,

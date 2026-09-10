@@ -449,7 +449,22 @@ async fn main() -> anyhow::Result<()> {
     // `cosmon_rpp_adapter::worker_env`.
     let worker_backend = cosmon_rpp_adapter::worker_env::WorkerBackends::per_project_tmux();
 
+    // The harvest door's effect half (issue #51, ADR-176 §11). Absent
+    // config means an honest `501 harvest_effect_unavailable` for every
+    // harvest the door admits; a declared binary means the operator chose
+    // which `cs` closes their molecules. No PATH fallback.
+    let harvest_effect: std::sync::Arc<dyn cosmon_rpp_adapter::harvest_effect::HarvestEffectPort> =
+        match cfg.harvest_cs_binary.clone() {
+            Some(binary) => std::sync::Arc::new(
+                cosmon_rpp_adapter::harvest_effect::CsBinaryHarvestEffect::new(binary),
+            ),
+            None => {
+                std::sync::Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect)
+            }
+        };
+
     let state = AppState {
+        harvest_effect,
         worker_backend,
         state_dir,
         inbox_root,

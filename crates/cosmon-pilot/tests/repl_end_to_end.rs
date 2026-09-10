@@ -141,6 +141,7 @@ fn seed_molecule(root: &Path, id: &str, status: &str) {
     let store = FileStore::new(cosmon.join("state"));
     let now = chrono::Utc::now();
     let data = MoleculeData {
+        harvest_reason: None,
         id: MoleculeId::new(id).unwrap(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

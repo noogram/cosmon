@@ -110,6 +110,7 @@ mod tests {
     fn mol(id: &str) -> MoleculeData {
         let now = chrono::Utc::now();
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

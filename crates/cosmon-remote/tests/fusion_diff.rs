@@ -243,7 +243,7 @@ const TACKLE_PRE: &str = "  tackle    `POST /v1/molecules/{id}/tackle`";
 const TACKLE_POST: &str = "  tackle    `POST /v1/molecules/{id}/tackle` [co\u{fb}teux]";
 
 #[test]
-fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_land_lines() {
+fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_done_lines() {
     // In-place substitutions: the thaw about correction (A2, blessed
     // in CHANGELOG 0.2.0) and the scope-derived [coûteux] marker on
     // tackle (A3, task-20260610-10d2). Two blessed additions: the
@@ -294,30 +294,28 @@ fn molecule_diff_is_the_thaw_and_tackle_corrections_plus_the_run_and_land_lines(
     assert!(
         added
             .iter()
-            .any(|l| l.starts_with("  land      `POST /v1/molecules/{id}/land`")),
-        "missing the blessed land verb line (the harvest door), got {added:?}"
+            .any(|l| l.starts_with("  done      `POST /v1/molecules/{id}/done`")),
+        "missing the blessed done verb line (the harvest door), got {added:?}"
     );
 }
 
 /// No operator-only verb may appear on
 /// the client surface. Scans the blessed root + molecule help goldens
-/// for the ADR-080 \u{a7}5.1 tokens as command names \u{2014} `do` is NOT `done`,
-/// hence the exact-token match.
+/// for the ADR-080 \u{a7}5.1 tokens as command names.
+///
+/// `done` left that list on 2026-09-07 (issue #51, the \u{a7}5.1 amendment):
+/// closing a molecule is lifecycle, not administration, and
+/// `molecule done` is the client\u{2019}s gesture for it. The list below is
+/// derived from the shared constant rather than retyped, so the next verb
+/// to leave it cannot leave a stale copy here.
 #[test]
 fn no_operator_only_verb_on_the_client_surface() {
-    let forbidden = [
-        "done",
-        "evolve",
-        "complete",
-        "stitch",
-        "kill",
-        "purge",
-        "reconcile",
-        "verify",
-        "whisper",
-        "drop",
-        "security",
-    ];
+    // Derived, not retyped: `cs` and the adapter read this same constant,
+    // and a copy here would have gone stale the day `done` left the list.
+    // `stitch` is added locally — it is not an ADR-080 §5.1 verb but is
+    // operator-side all the same, and the client has never carried it.
+    let mut forbidden: Vec<&str> = cosmon_core::api_envelope::OPERATOR_ONLY_VERBS.to_vec();
+    forbidden.push("stitch");
     for page in ["root", "molecule"] {
         for line in lines_of(&format!("{page}.help.txt")) {
             let Some(first) = line.split_whitespace().next() else {

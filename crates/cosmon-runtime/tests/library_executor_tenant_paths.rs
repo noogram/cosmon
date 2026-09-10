@@ -79,6 +79,9 @@ fn pending_molecule(id: &str) -> MoleculeData {
         pending_step: None,
         merged_at: None,
         non_integration: None,
+        // Nothing has closed this fixture — it is `Pending`, and the door
+        // that records a harvest reason has not run. An honest absence.
+        harvest_reason: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
         bootstrap_seals: Vec::new(),

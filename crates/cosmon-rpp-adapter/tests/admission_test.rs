@@ -56,11 +56,12 @@ fn operator_only_list_is_closed() {
     // ADR-080 §5.2 — closed list. If a verb is added (or removed)
     // here without a successor ADR, this test should remind the
     // contributor. `run` left the list 2026-06-11 via ADR-124
-    // (bounded drain, task-20260610-56c4).
+    // (bounded drain, task-20260610-56c4); `done` left it 2026-09-07 via
+    // ADR-080 §5.4 (issue #51) — closing a molecule is the last step of
+    // its lifecycle, not an administration surface.
     assert_eq!(
         OPERATOR_ONLY_VERBS,
         &[
-            "done",
             "evolve",
             "complete",
             "security",

@@ -504,6 +504,7 @@ mod tests {
             t.insert(Tag::new((*raw).to_owned()).unwrap());
         }
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

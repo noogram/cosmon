@@ -649,6 +649,7 @@ mod tests {
             .map(|t| Tag::new((*t).to_owned()).expect("valid tag in test fixture"))
             .collect();
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).expect("valid id"),
             fleet_id: FleetId::new("default").expect("valid fleet"),
             formula_id: FormulaId::new(formula).expect("valid formula"),

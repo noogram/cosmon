@@ -13,7 +13,7 @@
 | 8 | molecule | POST | `/v1/molecules/{id}/tackle` | `cosmon:molecule:write` **ET** `cosmon:worker:spawn` | tenant-verb | `[coûteux]` |
 | 9 | molecule | GET | `/v1/molecules/{id}/result` | `cosmon:molecule:read` | adapter-only |  |
 | 10 | molecule | POST | `/v1/molecules/{id}/run` | `cosmon:molecule:write` **ET** `cosmon:worker:spawn` | tenant-verb | `[coûteux]` |
-| 11 | molecule | POST | `/v1/molecules/{id}/land` | `cosmon:molecule:write` | tenant-verb |  |
+| 11 | molecule | POST | `/v1/molecules/{id}/done` | `cosmon:molecule:write` | tenant-verb |  |
 | 12 | artifact | GET | `/v1/molecules/{id}/artifacts` | `cosmon:artifact:read` | adapter-only |  |
 | 13 | artifact | GET | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:read` | adapter-only |  |
 | 14 | artifact | PUT | `/v1/molecules/{id}/artifacts/{token}` | `cosmon:artifact:write` | adapter-only |  |
@@ -59,7 +59,7 @@ Découpage : **11** molecule + **3** artifact + **5** auth-claude + **6** observ
 | `POST /v1/molecules/{id}/tackle` | ✅ liée (verbe tenant, bijection testée) |
 | `GET /v1/molecules/{id}/result` | ⊘ exempte (adapter-only) |
 | `POST /v1/molecules/{id}/run` | ✅ liée (verbe tenant, bijection testée) |
-| `POST /v1/molecules/{id}/land` | ✅ liée (verbe tenant, bijection testée) |
+| `POST /v1/molecules/{id}/done` | ✅ liée (verbe tenant, bijection testée) |
 | `GET /v1/molecules/{id}/artifacts` | ⊘ exempte (adapter-only) |
 | `GET /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |
 | `PUT /v1/molecules/{id}/artifacts/{token}` | ⊘ exempte (adapter-only) |

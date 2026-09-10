@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """The tenant's journey: login → auth me → nucleate → observe → tackle →
-worker → land.
+worker → done.
 
 One test set (one class): the stack is reinitialised before it and the
 whole journey runs against that clean stack. Each leg is its own test
@@ -10,7 +10,7 @@ runnable command and not a broken one.
 
 The `tackle` leg is what issue #54 U7 added, and it is the reason the
 rest of the scenario exists. Until U6 the adapter reached `tackle`, `run`
-and `land` by shelling out to `cs` — a binary its own Dockerfile has
+and the harvest door by shelling out to `cs` — a binary its own Dockerfile has
 never shipped — so all three failed against the image an operator
 actually deploys, while every in-process suite stayed green. U6 cut
 dispatch over to `cosmon_runtime::LibraryExecutor` over the tmux
@@ -22,11 +22,12 @@ The worker is a dummy, and it is **not** in the image you deploy: the
 `tests/fakes/fake-claude` and a worker-side `cs` on top of `runtime`.
 `test_shipped_image.py` is the other half of that claim.
 
-`land` is still asserted as a NAMED refusal, but no longer because a
-binary is missing: the door's decision half runs in-process and the
-suite ARMS it in the throwaway galaxy, so the decision admits and the
-refusal comes from the effect half — `501 land_effect_unavailable`,
-ADR-176 §12.
+`done` — one gesture again since issue #51, which withdrew the second
+`land` verb — is still asserted as a NAMED refusal, but no longer
+because a binary is missing: the door's decision half runs in-process
+and the suite ARMS it in the throwaway galaxy, so the decision admits
+and the refusal comes from the effect half — `501
+harvest_effect_unavailable`, ADR-176 §12 as amended by issue #51.
 """
 from __future__ import annotations
 
@@ -245,7 +246,7 @@ class TestTenantJourney:
         )
 
     @pytest.mark.requires_dispatch
-    def test_land_returns_its_named_refusal(self, logged_in, molecule, worked, cfg, expect):
+    def test_done_returns_its_named_refusal(self, logged_in, molecule, worked, cfg, expect):
         """The harvest door refuses, and refuses *by name*.
 
         The assertion is the NAME of the refusal and the CLI's exit code,
@@ -261,22 +262,30 @@ class TestTenantJourney:
         `not_authorized`, `not_completed`, `reservation_requires_seal`,
         `backlog_full` — has been made inapplicable on purpose, so the
         only thing left to answer is the transaction itself, and it
-        answers `501 land_effect_unavailable`: the sealed `cs done` path
-        has exactly one implementation and it is not callable as a
-        library yet (ADR-176 §12). The refusal is the CONTRACT here, not
-        a defect to route around.
+        answers `501 harvest_effect_unavailable`: this deployment
+        declares no `harvest_cs_binary`, so the effect port is the honest
+        default (ADR-176 §12 as amended by issue #51). The refusal is the
+        CONTRACT here, not a defect to route around — an operator who
+        declares the binary gets a real harvest, and this assertion is
+        where that announces itself.
+
+        The request carries `--reason`, which the door requires and never
+        fabricates (issue #51). Sending none would answer `missing_reason`
+        and this test would pass for the wrong reason.
         """
-        rc, payload, stderr = logged_in.land(molecule)
+        rc, payload, stderr = logged_in.done(
+            molecule, "closed by the rpp-remote end-to-end walk"
+        )
         expect.truthy(
             rc != 0,
-            "the sealed effect half has no library implementation, so a zero exit here would "
+            "this deployment declares no harvest effect, so a zero exit here would "
             "mean the door integrated nothing and said otherwise",
         )
         expect.equals(
             _refusal_label(payload, stderr),
-            cfg.expect_land_label,
-            "ADR-176 §12: the effect half refuses `land_effect_unavailable` until "
-            "SealedHarvestEffect grows a library implementation. This is where that day "
-            "announces itself — set RPP_E2E_EXPECT_LAND_LABEL and update this expectation "
+            cfg.expect_done_label,
+            "ADR-176 §12: the effect half refuses `harvest_effect_unavailable` while the "
+            "deployment declares no `harvest_cs_binary`. This is where a wired effect "
+            "announces itself — set RPP_E2E_EXPECT_DONE_LABEL and update this expectation "
             "in the same commit",
         )

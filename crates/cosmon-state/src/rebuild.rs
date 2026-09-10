@@ -618,6 +618,7 @@ fn empty_molecule_data(
         base_branch: None,
         pending_step: None,
         merged_at: None,
+        harvest_reason: None,
         non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),
@@ -1109,6 +1110,7 @@ mod tests {
         variables.insert("topic".into(), "voix bootstrap".into());
         variables.insert("detail".into(), "long-form prose payload".into());
         let cache = MoleculeData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),
@@ -1237,6 +1239,7 @@ mod tests {
         let mut variables = HashMap::new();
         variables.insert("topic".into(), "preserved".into());
         let cache = MoleculeData {
+            harvest_reason: None,
             id: id.clone(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

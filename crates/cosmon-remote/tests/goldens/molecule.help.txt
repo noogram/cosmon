@@ -9,7 +9,7 @@ Commands:
   result    `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
   tackle    `POST /v1/molecules/{id}/tackle` [coûteux]
   run       `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream
-  land      `POST /v1/molecules/{id}/land` — the harvest door (ADR-176): close this molecule and integrate it where that second authority arises. Carries no options — strategy, reservations and base are sealed in the operator's grant. Refused unless a grant covers it; 200 with the outcome, never 202
+  done      `POST /v1/molecules/{id}/done` — the harvest door (ADR-176 as amended by issue #51): close this molecule and integrate it where that second authority arises. Carries the full parameter set of `cs done` — `--strategy`, `--force`, the hook waivers — because the requester merging into their own trunk is the operator. `--reason` is mandatory and is never fabricated. Refused unless an operator-sealed grant covers it; 200 with the outcome, never 202
   collapse  `POST /v1/molecules/{id}/collapse`
   freeze    `POST /v1/molecules/{id}/freeze`
   thaw      `POST /v1/molecules/{id}/freeze` with `state: "active"` — resume a frozen molecule (the legacy `/thaw` route is 410 Gone)

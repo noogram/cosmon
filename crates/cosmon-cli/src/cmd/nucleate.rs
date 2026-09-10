@@ -1305,6 +1305,7 @@ fn nucleate_and_persist(
         base_branch: None,
         pending_step: None,
         merged_at: None,
+        harvest_reason: None,
         non_integration: None,
         prompt_seal: None,
         briefing_seals: Vec::new(),

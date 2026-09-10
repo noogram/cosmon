@@ -82,6 +82,25 @@ pub struct Args {
     /// Molecule ID to tear down.
     molecule: String,
 
+    /// Why this molecule is being closed. Traced trunk-side on the molecule.
+    ///
+    /// Optional here and **mandatory over the wire** (`POST
+    /// /v1/molecules/{id}/done`), and the asymmetry is deliberate. An
+    /// operator standing at their own terminal is the author of the git
+    /// history this harvest writes; a requester reaching the door over §8p is
+    /// not, and the trunk-side reason is the only account a later reader has
+    /// of why someone else's molecule was closed. Making it mandatory here
+    /// too would break every hook, patrol sweep and `cs run` teardown that
+    /// legitimately closes a molecule without a sentence to add — a
+    /// usability amputation with no safety property behind it.
+    ///
+    /// What is *not* optional anywhere is honesty: when no reason is given,
+    /// none is recorded. The withdrawn `land` gesture fabricated a generic
+    /// one, and a fabricated reason is indistinguishable, a year later, from
+    /// one somebody meant.
+    #[arg(long)]
+    reason: Option<String>,
+
     /// Proceed even if the molecule is not in a terminal state.
     #[arg(long)]
     force: bool,
@@ -185,50 +204,121 @@ pub struct Args {
 }
 
 impl Args {
-    /// The one argument set the **harvest door** may build (ADR-176 D4).
+    /// Build the argument set of one harvest from the door's domain options.
     ///
-    /// Every field is fixed here rather than defaulted, because "no option
-    /// crosses the wire" has to be a property of the *type* and not of a
-    /// caller's discipline. `cs land` — and, through it, the §8p harvest
-    /// route — has no way to vary any of them: the constructor takes the
-    /// molecule and nothing else.
+    /// This constructor replaces `sealed_door`, which fixed **every** field
+    /// at the type so that "no option crosses the wire" was a property of the
+    /// type and not of a caller's discipline (ADR-176 D4). D4 is reversed:
+    /// the requester on the deployment that exists *is* the operator, so the
+    /// seal that mattered was never the argument set — it is
+    /// `[harvest_authority]`, which still authorises the effect (D1) and is
+    /// untouched here.
     ///
-    /// The three that carry the doctrine:
+    /// The mapping is total in one direction on purpose: every field of
+    /// [`HarvestOptions`](cosmon_core::harvest_door::HarvestOptions) lands
+    /// on exactly one field of `Args`, so a
+    /// parameter that reaches the door reaches the merge. The two `Args`
+    /// fields with no counterpart are named in the module docs and in the
+    /// route's own documentation, never dropped silently.
     ///
-    /// - `no_auto_propel: true` and `max_retries: 0` disarm escalation **by
-    ///   construction** (D6). Auto-propel injects a natural-language
-    ///   instruction, partly authored by the requester through the molecule
-    ///   briefing, into a live worker session to resolve a conflict *on the
-    ///   trunk*, and renders the result as `merged_after_n_escalation(s)` — a
-    ///   success label. Leaving it merely defaulted off would make a config
-    ///   edit elsewhere re-arm it here.
-    /// - `skip_pre_done_hook: false` keeps the galaxy's Definition-of-Done in
-    ///   force. That flag is the human operator's kill-switch over a gate
-    ///   built to protect third parties; a requester holding it holds the
-    ///   gate's own off-switch.
-    /// - `if_completed: true` refuses to integrate the branch of an abandoned
-    ///   molecule — the ADR-176 §1 defect in its general form. `is_terminal()`
-    ///   is `Completed | Collapsed`, and only one of those two is work anyone
-    ///   asked to land.
+    /// No production caller yet: the adapter's effect port spawns the argv
+    /// [`cs_done_argv`](cosmon_core::harvest_door::HarvestOptions::cs_done_argv)
+    /// builds rather than constructing
+    /// `Args` in-process, because the sealed transaction is not callable as
+    /// a library (ADR-176 §11). This constructor is the *other half* of that
+    /// argv's round-trip falsifier — it is what says the two agree — and it
+    /// is where a library effect will start when the port grows one.
+    #[cfg(test)]
     #[must_use]
-    pub fn sealed_door(molecule: String) -> Self {
+    pub fn from_harvest_options(
+        molecule: String,
+        opts: &cosmon_core::harvest_door::HarvestOptions,
+    ) -> Self {
         Self {
             molecule,
-            force: false,
-            if_completed: true,
+            reason: Some(opts.reason.clone()),
+            force: opts.force,
+            if_completed: opts.if_completed,
+            // `--dry-run` has no wire counterpart: it prints a teardown plan
+            // for a terminal nobody is reading on this path, and the door's
+            // own decision half (`harvest_door::decide`) is the wire's
+            // preview — it answers every pre-effect refusal without
+            // mutating anything. Two previews with different answers would
+            // be two doors.
             dry_run: false,
-            no_merge: false,
-            no_worktree_remove: false,
-            no_branch_delete: false,
-            no_kill: false,
-            strategy: MergeStrategy::Merge,
-            no_auto_propel: true,
-            propel_message: None,
-            max_retries: 0,
-            skip_pre_done_hook: false,
-            deploy_off_trunk: false,
+            no_merge: opts.no_merge,
+            no_worktree_remove: opts.no_worktree_remove,
+            no_branch_delete: opts.no_branch_delete,
+            no_kill: opts.no_kill,
+            strategy: MergeStrategy::from(opts.strategy),
+            no_auto_propel: opts.no_auto_propel,
+            propel_message: opts.propel_message.clone(),
+            max_retries: opts.max_retries,
+            skip_pre_done_hook: opts.skip_pre_done_hook,
+            deploy_off_trunk: opts.deploy_off_trunk,
         }
     }
+
+    /// The merge strategy this argument set will execute with.
+    ///
+    /// Exposed so the falsifier can assert the value that **arrives at the
+    /// merge** rather than the value that parsed off the wire — the two are
+    /// only the same while nothing between them re-defaults it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn merge_strategy(&self) -> MergeStrategy {
+        self.strategy
+    }
+
+    /// The reason this argument set will trace on the molecule, if any.
+    #[cfg(test)]
+    #[must_use]
+    pub fn harvest_reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+}
+
+impl From<cosmon_core::harvest_door::MergeStrategy> for MergeStrategy {
+    fn from(value: cosmon_core::harvest_door::MergeStrategy) -> Self {
+        match value {
+            cosmon_core::harvest_door::MergeStrategy::Merge => Self::Merge,
+            cosmon_core::harvest_door::MergeStrategy::FfOnly => Self::FfOnly,
+        }
+    }
+}
+
+impl From<MergeStrategy> for cosmon_core::harvest_door::MergeStrategy {
+    fn from(value: MergeStrategy) -> Self {
+        match value {
+            MergeStrategy::Merge => Self::Merge,
+            MergeStrategy::FfOnly => Self::FfOnly,
+        }
+    }
+}
+
+/// A refusal from the harvest door, carrying its stable exit code.
+///
+/// Homed here since `cs land` was withdrawn: the seven named refusals of
+/// ADR-176 and their exit codes 70–76 are **not** reversed by the D4
+/// reversal — only the argument set was. The type stays the single carrier
+/// so that a refusal produced anywhere reaches a script as its own code and
+/// never as the generic exit 1. `main` downcasts it; `refusal_exit_code` is
+/// the recovery.
+#[derive(Debug, thiserror::Error)]
+#[error("cs done refused ({}): {}{}", .refusal.as_str(), .refusal.message(), .detail.as_ref().map_or(String::new(), |d| format!(" — {d}")))]
+pub struct RefusedHarvest {
+    /// Which refusal fired.
+    pub refusal: cosmon_core::harvest_door::DoorRefusal,
+    /// Operator-facing specifics: the conflicted files, the reservation tag,
+    /// the backlog census. Never a raw stderr dump.
+    pub detail: Option<String>,
+}
+
+/// Recover the door's exit code from an error, if it is a door refusal.
+#[must_use]
+pub fn refusal_exit_code(err: &anyhow::Error) -> Option<i32> {
+    err.downcast_ref::<RefusedHarvest>()
+        .map(|r| r.refusal.exit_code())
 }
 
 /// Merge strategy used by `cs done` when integrating the worker's branch.
@@ -1820,6 +1910,39 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         )?;
         report_plan(ctx, &plan);
         return Ok(());
+    }
+
+    // Trace the caller's reason on the molecule BEFORE anything can fail.
+    //
+    // Deliberately not folded into the `merged_at` stamp: that stamp only
+    // happens when the merge landed, and the harvest whose reason a later
+    // reader most needs is precisely the one that did not. A conflicted
+    // harvest leaves `non_integration` explaining *what the repository did*
+    // and `harvest_reason` explaining *what the caller wanted* — the two
+    // halves of the same event.
+    //
+    // "Before anything can fail" is not "before anything is decided":
+    // this write sits **after** the `--dry-run` return above, because a
+    // dry run promises no side effects and a durable field is a side
+    // effect whatever else the run avoided. `cs done <id> --dry-run
+    // --reason …` is how an operator inspects a plan before committing to
+    // it, and the reason they were trying out must not become the reason
+    // of record for a harvest they did not perform (PR #62 review).
+    if let Some(reason) = args
+        .reason
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        match store.load_molecule(&mol_id) {
+            Ok(mut latest) => {
+                latest.harvest_reason = Some(reason.to_owned());
+                if let Err(e) = store.save_molecule(&mol_id, &latest) {
+                    eprintln!("⚠ recording the harvest reason failed: {e}");
+                }
+            }
+            Err(e) => eprintln!("⚠ reloading the molecule to record the reason failed: {e}"),
+        }
     }
 
     let branch_name = format!("feat/{mol_id}");
@@ -6644,63 +6767,115 @@ fn find_repo_root() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cosmon_core::harvest_door::HarvestOptions;
     use cosmon_core::id::{FleetId, FormulaId};
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_state::MoleculeData;
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    /// ADR-176 D4 and D6, asserted on the type rather than trusted to a
-    /// caller: the harvest door's argument set varies nothing.
+    /// The load-bearing falsifier of the D4 reversal: a parameter the
+    /// requester sends **arrives at the merge**.
     ///
-    /// This test is the surface freeze of the door. If someone adds a flag to
-    /// `Args` and wires it into [`Args::sealed_door`] with a permissive value,
-    /// this fails — which is the only moment anyone will be looking.
+    /// Not "the field parses" — the whole path. The effect adapter spawns
+    /// [`HarvestOptions::cs_done_argv`]; this parses that exact argv with
+    /// `cs done`'s own clap tree and reads back the strategy the merge will
+    /// execute with. It goes red if the argv builder forgets a flag, if clap
+    /// renames one, or if anything between re-defaults the value.
     #[test]
-    fn the_sealed_door_arms_no_degree_of_freedom() {
-        let args = Args::sealed_door("task-20260101-abcd".to_owned());
+    fn a_requested_strategy_arrives_at_the_merge() {
+        use clap::Parser as _;
 
-        // D6 — auto-propel is off by construction, not by configuration.
-        assert!(args.no_auto_propel, "auto-propel must be disarmed (D6)");
-        assert_eq!(
-            args.max_retries, 0,
-            "no escalation budget on this path (D6)"
-        );
-        assert!(
-            args.propel_message.is_none(),
-            "no requester-authored propel text (D6)"
-        );
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(subcommand)]
+            cmd: ProbeCmd,
+        }
+        #[derive(clap::Subcommand)]
+        enum ProbeCmd {
+            Done(Args),
+        }
+        let parse = |opts: &HarvestOptions| {
+            let mut argv = vec!["cs".to_owned()];
+            argv.extend(opts.cs_done_argv("task-20260101-abcd"));
+            let ProbeCmd::Done(args) = Probe::parse_from(argv).cmd;
+            args
+        };
 
-        // D4 — no derogation is reachable by the beneficiary of the effect.
-        assert!(!args.force, "--force overrules a refusal (D4)");
-        assert!(
-            !args.skip_pre_done_hook,
-            "the Definition-of-Done stays armed (D4)"
-        );
-        assert!(
-            !args.deploy_off_trunk,
-            "the deploy hook stays bounded to the trunk (D4)"
-        );
-        assert_eq!(
-            args.strategy,
-            MergeStrategy::Merge,
-            "strategy is not selectable (D4)"
-        );
+        // Requested `ff-only` reaches the merge as `ff-only`.
+        let mut opts = HarvestOptions::new("close the spike");
+        opts.strategy = cosmon_core::harvest_door::MergeStrategy::FfOnly;
+        assert_eq!(parse(&opts).merge_strategy(), MergeStrategy::FfOnly);
 
-        // ADR-176 §1 — an abandoned molecule's branch is not integrated.
-        assert!(
-            args.if_completed,
-            "Collapsed must not reach the merge (ADR-176 §1)"
-        );
+        // Requesting nothing gets the documented default, which is `merge`
+        // — the value `cs done --help` prints as `[default: merge]`.
+        let bare = HarvestOptions::new("close the spike");
+        assert_eq!(parse(&bare).merge_strategy(), MergeStrategy::Merge);
 
-        // The teardown steps are the closure authority; the door exercises
-        // it in full or refuses. A half-torn-down molecule is the state
-        // nobody can reason about.
-        assert!(!args.no_merge);
-        assert!(!args.no_worktree_remove);
-        assert!(!args.no_branch_delete);
-        assert!(!args.no_kill);
+        // And the reason rides the same argv rather than being re-invented
+        // downstream.
+        assert_eq!(parse(&bare).harvest_reason(), Some("close the spike"));
+    }
+
+    /// Every field of [`HarvestOptions`] survives the argv round trip.
+    ///
+    /// The surface freeze that replaces `the_sealed_door_arms_no_degree_of_
+    /// freedom`. That test asserted the door varies *nothing*; this one
+    /// asserts it varies *everything the CLI does*, which is what the D4
+    /// reversal decided. A field added to `HarvestOptions` and forgotten in
+    /// `cs_done_argv` fails here — the only moment anyone will be looking.
+    #[test]
+    fn every_harvest_option_survives_the_argv_round_trip() {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser)]
+        struct Probe {
+            #[command(subcommand)]
+            cmd: ProbeCmd,
+        }
+        #[derive(clap::Subcommand)]
+        enum ProbeCmd {
+            Done(Args),
+        }
+
+        let opts = HarvestOptions {
+            reason: "the spike answered its question".to_owned(),
+            strategy: cosmon_core::harvest_door::MergeStrategy::FfOnly,
+            force: true,
+            if_completed: true,
+            no_merge: true,
+            no_worktree_remove: true,
+            no_branch_delete: true,
+            no_kill: true,
+            no_auto_propel: true,
+            propel_message: Some("rebase onto the base".to_owned()),
+            max_retries: 7,
+            skip_pre_done_hook: true,
+            deploy_off_trunk: true,
+        };
+        let mut argv = vec!["cs".to_owned()];
+        argv.extend(opts.cs_done_argv("task-20260101-abcd"));
+        let ProbeCmd::Done(args) = Probe::parse_from(argv).cmd;
+
+        let expected = Args::from_harvest_options("task-20260101-abcd".to_owned(), &opts);
+        assert_eq!(args.molecule, expected.molecule);
+        assert_eq!(args.reason, expected.reason);
+        assert_eq!(args.strategy, expected.strategy);
+        assert_eq!(args.force, expected.force);
+        assert_eq!(args.if_completed, expected.if_completed);
+        assert_eq!(args.no_merge, expected.no_merge);
+        assert_eq!(args.no_worktree_remove, expected.no_worktree_remove);
+        assert_eq!(args.no_branch_delete, expected.no_branch_delete);
+        assert_eq!(args.no_kill, expected.no_kill);
+        assert_eq!(args.no_auto_propel, expected.no_auto_propel);
+        assert_eq!(args.propel_message, expected.propel_message);
+        assert_eq!(args.max_retries, expected.max_retries);
+        assert_eq!(args.skip_pre_done_hook, expected.skip_pre_done_hook);
+        assert_eq!(args.deploy_off_trunk, expected.deploy_off_trunk);
+        // `--dry-run` is the one field with no wire counterpart, and it is
+        // dropped to `false` rather than omitted by accident.
         assert!(!args.dry_run);
+        assert!(!expected.dry_run);
     }
 
     /// A stale worktree registration — the directory gone, git's bookkeeping
@@ -6770,6 +6945,7 @@ mod tests {
 
     fn sample_mol(id: &str, status: MoleculeStatus) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),
@@ -6888,6 +7064,7 @@ mod tests {
     fn default_args(mol: &str) -> Args {
         Args {
             molecule: mol.to_owned(),
+            reason: None,
             force: false,
             if_completed: false,
             dry_run: false,

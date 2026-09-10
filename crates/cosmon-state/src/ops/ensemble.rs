@@ -333,6 +333,7 @@ mod tests {
         let now = Utc::now();
         let tag_set: BTreeSet<Tag> = tags.iter().map(|t| Tag::new(*t).unwrap()).collect();
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

@@ -860,6 +860,7 @@ mod tests {
 
     fn test_molecule() -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new("task-20260407-abcd").unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("mol-task-work").unwrap(),

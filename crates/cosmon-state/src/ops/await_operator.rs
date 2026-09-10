@@ -355,6 +355,7 @@ mod tests {
     fn mol(id: &str, status: MoleculeStatus, tags: BTreeSet<Tag>) -> MoleculeData {
         let now = Utc::now();
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

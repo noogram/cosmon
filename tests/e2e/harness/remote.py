@@ -127,6 +127,17 @@ class RemoteCli:
         """
         return self.json("molecule", "tackle", molecule_id, step="tackle")
 
-    def land(self, molecule_id: str) -> Tuple[int, Any, str]:
-        """``POST /v1/molecules/:id/land`` — the harvest door."""
-        return self.json("molecule", "land", molecule_id, step="land")
+    def done(self, molecule_id: str, reason: str) -> Tuple[int, Any, str]:
+        """``POST /v1/molecules/:id/done`` — the harvest door.
+
+        One gesture again since issue #51: the second `land` verb was
+        withdrawn, and closing a molecule is the last step of its normal
+        life rather than a separate administrative act.
+
+        ``--reason`` is mandatory and is never fabricated — the door
+        refuses `missing_reason` rather than inventing a sentence — so
+        the caller must say why, here as at the terminal.
+        """
+        return self.json(
+            "molecule", "done", molecule_id, "--reason", reason, step="done"
+        )

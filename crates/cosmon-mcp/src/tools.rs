@@ -715,6 +715,7 @@ impl CosmonService {
             .map_err(|e| McpError::invalid_params(format!("invalid role: {e}"), None))?;
 
         let mol_data = MoleculeData {
+            harvest_reason: None,
             id: result.id.clone(),
             fleet_id: fleet_id.clone(),
             formula_id: result.formula_id.clone(),
@@ -1675,6 +1676,7 @@ impl CosmonService {
             .map_err(|e| McpError::internal_error(format!("nucleation failed: {e}"), None))?;
 
             let product = MoleculeData {
+                harvest_reason: None,
                 id: nuc.id.clone(),
                 fleet_id: source.fleet_id.clone(),
                 formula_id: nuc.formula_id.clone(),
@@ -1830,6 +1832,7 @@ impl CosmonService {
         .map_err(|e| McpError::internal_error(format!("nucleation failed: {e}"), None))?;
 
         let product = MoleculeData {
+            harvest_reason: None,
             id: nuc.id.clone(),
             fleet_id: sources[0].fleet_id.clone(),
             formula_id: nuc.formula_id.clone(),
@@ -3225,6 +3228,7 @@ mod tests {
 
     fn sample_mol(id: &str) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: MoleculeId::new(id).unwrap(),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("task-work").unwrap(),

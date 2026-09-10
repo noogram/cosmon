@@ -197,7 +197,7 @@ impl FileStore {
     /// *at most one* worker holds the write token
     /// on the cosmon `main` branch. Operations that must wrap themselves in
     /// this lock include `cs done` (merge), `cs stitch <root>` (DAG-respecting
-    /// landing), `cs land` (future rename of `cs done`), and any future
+    /// landing), `cs done`, and any future
     /// command that performs `git switch` / `git merge` / `git push` on the
     /// trunk checkout.
     ///
@@ -418,7 +418,7 @@ impl TrunkGuard for TrunkLockGuard {}
 /// RAII guard returned by [`FileStore::acquire_trunk_lock`]. The lock is
 /// released — and the holder hint cleared — when the guard drops.
 ///
-/// Held by `cs done`, `cs stitch <root>` (and future `cs land`) for the
+/// Held by `cs done` and `cs stitch <root>` for the
 /// duration of any operation that mutates the cosmon main checkout (merge
 /// onto main, post-merge hook, frontier write). It is the **outer** lock in
 /// the trunk ⊃ fleet order (see [`FileStore::acquire_trunk_lock`] § lock
@@ -1121,6 +1121,7 @@ mod tests {
 
     fn sample_molecule(suffix: &str, status: MoleculeStatus, worker: Option<&str>) -> MoleculeData {
         MoleculeData {
+            harvest_reason: None,
             id: mol_id(suffix),
             fleet_id: FleetId::new("default").unwrap(),
             formula_id: FormulaId::new("formula-1").unwrap(),

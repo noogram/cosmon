@@ -796,6 +796,7 @@ pub(crate) mod test_support {
         use std::collections::{BTreeSet, HashMap};
         let store = cosmon_filestore::FileStore::new(state_dir);
         let data = cosmon_state::MoleculeData {
+            harvest_reason: None,
             id: mol.clone(),
             fleet_id: cosmon_core::id::FleetId::new("default").unwrap(),
             formula_id: cosmon_core::id::FormulaId::new("task-work").unwrap(),

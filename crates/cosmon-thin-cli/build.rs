@@ -20,7 +20,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 
-use cosmon_surface_canon::{normalise_path, parse_canon, CanonEvent};
+use cosmon_surface_canon::{fold_live, normalise_path, parse_canon, CanonEvent};
 
 const DATA_FILE: &str = "../cosmon-rpp-adapter/data/surface_events.txt";
 const GENERATED_FILE: &str = "surface_scopes_generated.rs";
@@ -34,7 +34,8 @@ fn main() {
     let raw = fs::read_to_string(&data_path)
         .unwrap_or_else(|err| panic!("failed to read {}: {err}", data_path.display()));
 
-    let events = parse_canon(&raw, DATA_FILE).unwrap_or_else(|err| panic!("{err}"));
+    let logged = parse_canon(&raw, DATA_FILE).unwrap_or_else(|err| panic!("{err}"));
+    let events = fold_live(&logged).unwrap_or_else(|err| panic!("{DATA_FILE}: {err}"));
 
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let out_path = out_dir.join(GENERATED_FILE);

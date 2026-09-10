@@ -49,8 +49,8 @@ class E2EConfig:
     client_audience: str
     #: Falsifier: the lifecycle status ``observe`` must report.
     expect_observe_status: str
-    #: Falsifier: the named refusal the ``land`` door must return.
-    expect_land_label: str
+    #: Falsifier: the named refusal the ``done`` door must return.
+    expect_done_label: str
     #: Falsifier: the named refusal ``tackle`` must return. Empty (the
     #: default) means tackle must SUCCEED. Naming a label here points the
     #: suite at an image whose dispatch cannot work — how the pre-U6
@@ -182,15 +182,19 @@ class E2EConfig:
             # `Queued` if assigned) and observe renders the snake_case
             # label.
             expect_observe_status=_env("RPP_E2E_EXPECT_STATUS", "pending"),
-            # `land` no longer refuses for want of a binary. The door's
+            # `done` no longer refuses for want of a binary. The door's
             # decision half runs in-process (issue #54 U3) and this suite
             # ARMS it in the throwaway galaxy, so the decision ADMITS and
-            # the refusal is the effect half's: `501
-            # land_effect_unavailable` (ADR-176 §12). The label is
+            # the refusal is the effect half's: this deployment declares
+            # no `harvest_cs_binary`, so the effect port is the honest
+            # default and answers `501 harvest_effect_unavailable`
+            # (ADR-176 §12 as amended by issue #51). The label is
             # deliberately outside the closed seven-refusal set — it
-            # names a missing implementation, not a verdict about this
+            # names an undeclared effect, not a verdict about this
             # molecule.
-            expect_land_label=_env("RPP_E2E_EXPECT_LAND_LABEL", "land_effect_unavailable"),
+            expect_done_label=_env(
+                "RPP_E2E_EXPECT_DONE_LABEL", "harvest_effect_unavailable"
+            ),
             expect_tackle_label=os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL", ""),
             build_root=build_root,
             e2e_stage=_env("RPP_E2E_E2E_STAGE", "1") != "0",

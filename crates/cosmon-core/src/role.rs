@@ -59,7 +59,7 @@
 //! | [`Implementer`] | cognition worker running formula steps       | [`CanImplement`]         |
 //! | [`Verifier`]    | runs the `DoD` gates (build/test/clippy/fmt)  | [`CanVerify`]            |
 //! | [`Baker`]       | `pizzaiolo` — builds & pushes images         | [`CanBake`]              |
-//! | [`Stitcher`]    | `cs stitch` / `cs land` — merges to trunk    | [`CanWriteTrunk`]        |
+//! | [`Stitcher`]    | `cs stitch` / `cs done` — merges to trunk    | [`CanWriteTrunk`]        |
 //! | [`Orchestrator`]| resident runtime (`cs run`) driving a DAG    | [`CanSpawn`]             |
 //!
 //! A [`Verifier`] therefore *cannot* spawn a sub-worker (it does not
@@ -158,7 +158,7 @@ pub enum Verifier {}
 pub enum Baker {}
 
 /// The single writer: merges molecule branches into trunk
-/// (`cs stitch` / `cs land`). The *only* role that implements
+/// (`cs stitch` / `cs done`). The *only* role that implements
 /// [`CanWriteTrunk`] — this is ADR-110 I1 WRITER-UNIQUE at the type level.
 pub enum Stitcher {}
 

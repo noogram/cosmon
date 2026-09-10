@@ -254,6 +254,7 @@ impl Dispatch {
 /// A minimal Running molecule — enough for the watcher's liveness predicate.
 fn running_molecule(mol: &MoleculeId) -> MoleculeData {
     MoleculeData {
+        harvest_reason: None,
         id: mol.clone(),
         fleet_id: FleetId::new("default").unwrap(),
         formula_id: FormulaId::new("task-work").unwrap(),

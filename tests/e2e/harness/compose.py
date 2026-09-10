@@ -338,8 +338,9 @@ class ComposeStack:
         # `harvest_door::decide` fails closed on a galaxy that has not
         # armed `[harvest_authority] required` — it refuses
         # `not_authorized` before it has even loaded the molecule.
-        # Leaving it unarmed would make the `land` test green for the
-        # wrong reason: the label under test (`land_effect_unavailable`)
+        # Leaving it unarmed would make the `done` test green for the
+        # wrong reason: the label under test
+        # (`harvest_effect_unavailable`)
         # belongs to the EFFECT half, and it is only reached by a
         # decision that admitted the harvest. Arming is the operator
         # gesture the tenant cannot make, which is the point of the

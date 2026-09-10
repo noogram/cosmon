@@ -92,14 +92,15 @@ pub fn tackle() {}
 #[cosmon_thin_macro::verb(method = "POST", path = "/v1/molecules/:id/run", principal = "tenant")]
 pub fn run() {}
 
-/// Wire stub for `POST /v1/molecules/:id/land` — the harvest door
-/// (ADR-176, issue #51). The client asks for ONE molecule to be closed
-/// and, where the second authority arises, integrated. This is NOT the
-/// operator `cs done`, which stays on the closed list of ADR-080 §5.1:
-/// the door varies nothing, and it refuses unless an operator-sealed
-/// grant covers the molecule on its base.
-#[cosmon_thin_macro::verb(method = "POST", path = "/v1/molecules/:id/land", principal = "tenant")]
-pub fn land() {}
+/// Wire stub for `POST /v1/molecules/:id/done` — the harvest door
+/// (ADR-176 as amended, issue #51). The client asks for ONE molecule to
+/// be closed and, where the second authority arises, integrated, with
+/// the full parameter set of `cs done`: the ADR-080 §5.1 amendment
+/// takes `done` off the operator-only list, because closing a molecule
+/// is lifecycle and not administration. The operator's sealed grant
+/// still authorises the effect (D1). Replaces the withdrawn `land`.
+#[cosmon_thin_macro::verb(method = "POST", path = "/v1/molecules/:id/done", principal = "tenant")]
+pub fn done() {}
 
 // ---------------------------------------------------------------------------
 // D-AVATAR instance lifecycle (task-20260525-738e)
