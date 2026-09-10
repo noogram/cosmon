@@ -37,11 +37,19 @@
 #     chained pull requests (issue #51 → `feat/issue-51-done`,
 #     `-session`, `-status`), and each needs its own branch name while
 #     naming the same issue. The slug is decoration only: it is never
-#     part of the issue's identity, so the PR-number/issue-number
-#     agreement rule below still compares `<N>` alone, and the recursive
-#     second-parent walk treats a suffixed branch exactly like a bare
-#     one. Nothing about the property being preserved changes — a name
-#     is not a provenance claim.
+#     part of the issue's identity, and the recursive second-parent walk
+#     treats a suffixed branch exactly like a bare one. Nothing about the
+#     property being preserved changes — a name is not a provenance
+#     claim.
+#   - Since 2026-09-10: in the PR-wrapped shape the issue number is read
+#     from the branch name and NOT compared against the pull-request
+#     number. The branch name is what the second-parent walk inspects,
+#     so reading it is what anchors the check; the PR number identifies
+#     the pull request, never the issue. Requiring them to agree
+#     hard-coded "one issue, one PR, opened back to back", which the
+#     2026-09-09/10 stack broke in both directions — numbering drift
+#     (#55→issue 52, #66→issue 60) and several PRs per issue (#62/#63/
+#     #64 all answered issue #51). See ADR-052 §D5-quater.
 #   - The base-sync class (below) also accepts `Merge branch 'main' into
 #     feat/issue-<N>`, not only `feat/<mol_id>`.
 #   - mol_id has a recorded molecule_completed or molecule_collapsed
@@ -205,9 +213,14 @@ BASE_SYNC_ISSUE_RE="^Merge branch [\"']main[\"'] into feat/issue-${ISSUE_N_RE}\$
 # Work on an external GitHub issue lands on a local integration branch
 # `feat/issue-<N>` (molecules tackle with `--base feat/issue-<N>`, `cs
 # done` merges into it) and reaches main through a pull request. GitHub
-# writes the merge-commit subject itself; requiring the same <N> on both
-# sides keeps the match anchored to the branch name the second-parent
-# walk below actually inspects, rather than trusting the PR number alone.
+# writes the merge-commit subject itself. The PR number is captured
+# because it is part of the subject's shape, and then ignored: the issue
+# number this gate keys on is the one in the BRANCH name, which is also
+# the name the second-parent walk below inspects. Reading it there is
+# what anchors the check — comparing it to the PR number adds no
+# anchoring and only asserts that a repository never renumbers and never
+# splits one issue across pull requests, which is not the property §I9
+# protects (2026-09-10).
 PR_MERGE_RE="^Merge pull request #([0-9]+) from [^/[:space:]]+/feat/issue-${ISSUE_N_RE}\$"
 
 # The same landing without GitHub's wrapper — a local
@@ -220,17 +233,16 @@ LOCAL_INTEGRATION_MERGE_RE="^Merge branch [\"']feat/issue-${ISSUE_N_RE}[\"']\$"
 STACKED_INTEGRATION_RE="^Merge branch [\"']feat/issue-${ISSUE_N_RE}[\"'] into feat/issue-${ISSUE_N_RE}\$"
 
 # Does $1 (a commit subject) name an integration-branch landing? Echoes
-# the issue number and returns 0 if so, returns 1 otherwise. A PR-shaped
-# subject only counts when the PR number and the issue number agree —
-# see PR_MERGE_RE above.
+# the issue number and returns 0 if so, returns 1 otherwise. For a
+# PR-shaped subject the number echoed is the branch's, never the pull
+# request's — see PR_MERGE_RE above.
 integration_target_n() {
     local subject="$1"
     if [[ "$subject" =~ $PR_MERGE_RE ]]; then
-        if [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ]; then
-            printf '%s' "${BASH_REMATCH[2]}"
-            return 0
-        fi
-        return 1
+        # Group 1 is the PR number (matched, deliberately unused);
+        # group 2 is the branch's issue number, group 3 its optional slug.
+        printf '%s' "${BASH_REMATCH[2]}"
+        return 0
     fi
     if [[ "$subject" =~ $LOCAL_INTEGRATION_MERGE_RE ]]; then
         printf '%s' "${BASH_REMATCH[1]}"
