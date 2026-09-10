@@ -347,7 +347,7 @@ fn codex_log_for_cwd(root: &Path, cwd: &str, budget: &mut ReadBudget) -> Option<
             (mtime, p)
         })
         .collect();
-    by_mtime.sort_by(|a, b| b.0.cmp(&a.0));
+    by_mtime.sort_by_key(|(mtime, _)| std::cmp::Reverse(*mtime));
     by_mtime.into_iter().find_map(|(_, path)| {
         let head = read_head_bounded(&path, budget)?;
         codex_session_matches_cwd(&head, cwd).then_some(path)
