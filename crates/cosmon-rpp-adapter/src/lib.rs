@@ -348,13 +348,16 @@ pub struct AppState {
     pub portee_provisioner: Arc<portee::PorteeProvisioner>,
     /// The effect half of the harvest door (`POST /v1/molecules/{id}/done`).
     ///
-    /// Defaults to [`harvest_effect::UnavailableHarvestEffect`], which
-    /// refuses `harvest_effect_unavailable` for every harvest the decision
-    /// half admits — the honest answer for an image that carries no `cs`.
-    /// An operator who declared `harvest_cs_binary` in `rpp.toml` gets
-    /// [`harvest_effect::CsBinaryHarvestEffect`] instead. Off by default
-    /// because a door that discovered its own executor would change
-    /// behaviour when someone else's `cs` appeared on the host's PATH.
+    /// Defaults to [`harvest_effect::LibraryHarvestEffect`]: the sealed
+    /// transaction is the [`cosmon_harvest`] crate, linked into this binary,
+    /// so a galaxy armed with `[harvest_authority]` is harvestable on a
+    /// stock deployment with no configuration line. An operator who declared
+    /// `harvest_cs_binary` in `rpp.toml` gets
+    /// [`harvest_effect::CsBinaryHarvestEffect`] instead — the escape hatch
+    /// for running the harvest as a specific build of `cs`; there is
+    /// deliberately no PATH discovery, because a door that found its own
+    /// executor would change behaviour when someone else's `cs` appeared on
+    /// the host.
     pub harvest_effect: Arc<dyn harvest_effect::HarvestEffectPort>,
 }
 

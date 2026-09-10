@@ -19,7 +19,7 @@
 //! hook, whose server environment froze at startup and never sees a later
 //! `export`, refused the merge with `NotOnBase`.
 //!
-//! [`resolve`](crate::base_branch::resolve) makes the base a **property of the
+//! [`resolve`] makes the base a **property of the
 //! molecule**: the branch named by `cs tackle --base` is persisted in
 //! [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch) and
 //! wins over every ambient source. Molecules with no persisted base keep the
@@ -27,7 +27,7 @@
 //!
 //! ```no_run
 //! use std::path::Path;
-//! use cosmon_cli::base_branch;
+//! use cosmon_harvest::base_branch;
 //!
 //! // A molecule tackled with `--base release/2.0` merges back there,
 //! // whatever the environment or the galaxy's configured trunk says.

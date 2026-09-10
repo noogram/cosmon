@@ -1,0 +1,39 @@
+[package]
+name = "cosmon-harvest"
+publish.workspace = true
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+license.workspace = true
+description = "The sealed harvest transaction — merge, gates and teardown — as a library with two callers"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+# The harvest's argument set IS the `cs done` clap surface: keeping the
+# derive here rather than mirroring it in the binary is what makes the two
+# callers (`cs done` and the RPP route's effect port) share one struct and
+# one help/man golden instead of two that can drift.
+clap.workspace = true
+cosmon-agent-harness.workspace = true
+cosmon-core.workspace = true
+cosmon-filestore.workspace = true
+cosmon-hash.workspace = true
+cosmon-state.workspace = true
+cosmon-transport.workspace = true
+dirs.workspace = true
+globset.workspace = true
+ignore.workspace = true
+# `nix` (signal feature) lets the post-merge gate SIGKILL a timed-out cargo
+# subprocess's *whole process group*, not just the direct child.
+nix.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+cosmon-minisign-testkit.workspace = true
+cosmon-notary.workspace = true

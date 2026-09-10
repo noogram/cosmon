@@ -23,15 +23,27 @@ The worker is a dummy, and it is **not** in the image you deploy: the
 `test_shipped_image.py` is the other half of that claim.
 
 `done` — one gesture again since issue #51, which withdrew the second
-`land` verb — is still asserted as a NAMED refusal, but no longer
-because a binary is missing: the door's decision half runs in-process
-and the suite ARMS it in the throwaway galaxy, so the decision admits
-and the refusal comes from the effect half — `501
-harvest_effect_unavailable`, ADR-176 §12 as amended by issue #51.
+`land` verb — no longer refuses at all, and that change of verdict is
+what issues #67 and #68 are. The decision half runs in-process and the
+suite ARMS `[harvest_authority]` in the throwaway galaxy, so the
+decision admits; the effect half is a library the adapter links
+(`cosmon-harvest`) and is the DEFAULT, so it runs on a stock image; and
+the suite now also seals the ADR-172 grant that armed galaxy demands,
+because a deployment with the switch on and no trust root is the shape a
+stock deployment must never be left in. So the journey ends where a
+tenant's journey ends: a merge commit on the base branch, carrying the
+lineage trailers `cs done` writes.
+
+`v1_done_library_effect.rs` proves the same merge in-process. What this
+file adds is the only thing an in-process test cannot say: that it
+happens through the image an operator deploys, on a bind-mounted tenant
+tree, driven by the real `cosmon-remote`. ADR-176 §12 as amended by
+issues #51, #62, #67 and #68.
 """
 from __future__ import annotations
 
 import re
+import subprocess
 
 import pytest
 
@@ -52,6 +64,34 @@ def _refusal_label(payload, stderr):
             return label
     match = re.search(r'"(?:error|label)"\s*:\s*"([a-z_]+)"', stderr)
     return match.group(1) if match else None
+
+
+
+def _git(galaxy, *args) -> str:
+    """Read something out of the tenant repository, from the HOST side.
+
+    The bind-mount is the point. The adapter merged inside a container;
+    what an operator has afterwards is this directory, and a merge that
+    is only visible from inside the container is not a merge they got.
+    Returns stripped stdout, or `""` when git refused — the callers turn
+    an empty answer into their own failure message rather than raising a
+    `CalledProcessError` that names none of the context.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(galaxy), *args],
+        capture_output=True,
+        text=True,
+    )
+    return proc.stdout.strip() if proc.returncode == 0 else ""
+
+
+def _git_ok(galaxy, *args) -> bool:
+    """Whether a git command succeeded — for the existence probes."""
+    return subprocess.run(
+        ["git", "-C", str(galaxy), *args],
+        capture_output=True,
+        text=True,
+    ).returncode == 0
 
 
 class TestTenantJourney:
@@ -245,47 +285,221 @@ class TestTenantJourney:
             "terminal status means the pane got something it could not act on",
         )
 
-    @pytest.mark.requires_dispatch
-    def test_done_returns_its_named_refusal(self, logged_in, molecule, worked, cfg, expect):
-        """The harvest door refuses, and refuses *by name*.
 
-        The assertion is the NAME of the refusal and the CLI's exit code,
-        not merely "it failed": a door that refuses for an unnamed reason
-        is the defect ADR-176 exists to prevent, and a 500 would satisfy
-        a "non-zero exit" assertion just as well as the right refusal
-        does.
+    def test_done_refuses_a_reason_it_would_have_to_invent(
+        self, logged_in, molecule, expect
+    ):
+        """A harvest with no reason is refused `missing_reason`, named.
 
-        This runs on a molecule that is genuinely harvestable: completed
-        by a real worker, in a galaxy whose operator armed
-        `[harvest_authority] required` at stage time. That is what makes
-        it reach the EFFECT half. Every pre-effect refusal —
-        `not_authorized`, `not_completed`, `reservation_requires_seal`,
-        `backlog_full` — has been made inapplicable on purpose, so the
-        only thing left to answer is the transaction itself, and it
-        answers `501 harvest_effect_unavailable`: this deployment
-        declares no `harvest_cs_binary`, so the effect port is the honest
-        default (ADR-176 §12 as amended by issue #51). The refusal is the
-        CONTRACT here, not a defect to route around — an operator who
-        declares the binary gets a real harvest, and this assertion is
-        where that announces itself.
+        The gap the reporters found in the withdrawn `land`: it invented
+        a generic sentence, and a year later an invented sentence is
+        indistinguishable from one somebody meant. `cs done` at the
+        operator's own terminal may record nothing — the operator authors
+        the history — but a requester reaching over §8p does not, and the
+        trunk-side reason is the only account a later reader has of why
+        someone else's molecule was closed.
 
-        The request carries `--reason`, which the door requires and never
-        fabricates (issue #51). Sending none would answer `missing_reason`
-        and this test would pass for the wrong reason.
+        The blank reason is how the CLI expresses this: clap declares
+        `--reason` a required `String`, so a body with the field ABSENT is
+        unreachable from here and is covered wire-side by the adapter's
+        own `v1_done.rs`. Both arrive at the same check —
+        `HarvestOptions::validate` trims and refuses — and the check is
+        the claim.
+
+        This runs BEFORE anything is integrated and integrates nothing: a
+        refusal at step 4 of the route never reaches the molecule, so the
+        journey's molecule is as harvestable after this test as before.
         """
-        rc, payload, stderr = logged_in.done(
-            molecule, "closed by the rpp-remote end-to-end walk"
-        )
+        rc, payload, stderr = logged_in.done(molecule, "   ")
         expect.truthy(
             rc != 0,
-            "this deployment declares no harvest effect, so a zero exit here would "
-            "mean the door integrated nothing and said otherwise",
+            "a harvest carrying no reason must be refused, not completed with a "
+            "sentence the door made up",
         )
         expect.equals(
             _refusal_label(payload, stderr),
-            cfg.expect_done_label,
-            "ADR-176 §12: the effect half refuses `harvest_effect_unavailable` while the "
-            "deployment declares no `harvest_cs_binary`. This is where a wired effect "
-            "announces itself — set RPP_E2E_EXPECT_DONE_LABEL and update this expectation "
-            "in the same commit",
+            "missing_reason",
+            "ADR-176: the reason is mandatory on this route and never fabricated; "
+            "an unnamed 400 here would be a refusal a caller cannot branch on",
+        )
+
+    def test_done_refuses_a_strategy_it_does_not_implement(
+        self, logged_in, molecule, expect
+    ):
+        """A `--strategy` outside the closed set is refused, not defaulted.
+
+        The D4 reversal put the full parameter set of `cs done` on the
+        wire, and `deny_unknown_fields` plus a token-parsed
+        `MergeStrategy` is what keeps that from becoming a silent
+        best-effort: a body naming a strategy this build has never heard
+        of must be TOLD, because being quietly harvested with `merge`
+        after asking for something else is the failure the requester
+        cannot see.
+
+        Like the missing reason, this is refused before the molecule is
+        loaded, so it consumes nothing.
+        """
+        rc, payload, stderr = logged_in.done(
+            molecule, "a strategy nobody implements", strategy="rebase-and-pray"
+        )
+        expect.truthy(
+            rc != 0,
+            "an unimplemented merge strategy must be refused; a 200 here would mean "
+            "the door silently harvested with a strategy the requester did not ask for",
+        )
+        expect.equals(
+            _refusal_label(payload, stderr),
+            "unsupported_parameter",
+            "`MergeStrategy::from_token` knows `merge` and `ff-only` and nothing else; "
+            "the route maps the miss onto `400 unsupported_parameter`",
+        )
+
+    @pytest.mark.requires_dispatch
+    def test_done_merges_the_branch_and_stamps_the_lineage(
+        self, logged_in, sealed, worked, cfg, expect
+    ):
+        """The harvest door MERGES — through the image, onto the trunk.
+
+        The end of the tenant's journey, and the claim issues #67 and #68
+        exist to make. Everything upstream has been made true on purpose:
+        the molecule is `completed` by a worker the adapter really
+        spawned, its branch carries that worker's commit, the galaxy armed
+        `[harvest_authority] required` so the decision half admits, and
+        the `sealed` fixture pinned the trust root and the one
+        molecule-scoped grant the effect half demands inside the trunk
+        lock. What is left to answer is the transaction itself.
+
+        It answers by moving the base branch. Three things are asserted
+        and none of them is the HTTP status alone:
+
+        * `outcome` is `landed`. Three of the four success outcomes —
+          `closed_without_merge`, `no_op`, `already_landed` — put nothing
+          on the trunk, and a client reading the 200 alone would believe
+          the branch shipped. `merged` is asserted beside it because that
+          is the field the envelope publishes for exactly this question.
+        * the base branch's tip MOVED, and the worker's file is reachable
+          from it. A route that reported `landed` while `main` stood still
+          is the defect issue #51 reported, restated.
+        * the merge commit carries `Mol-Id:`. The lineage trailers are
+          derived from the ledger by `cs done` and stamped on the
+          completion merge; a merge commit without them is a merge some
+          other code path made.
+
+        `--strategy merge` is sent explicitly rather than left to the
+        default: the D4 reversal is the claim that a requester's
+        parameters reach the merge, and a test that sent none would pass
+        identically if they were dropped on the way.
+        """
+        molecule = sealed
+        base = cfg.base_branch
+        before = _git(cfg.galaxy, "rev-parse", base)
+        rc, payload, stderr = logged_in.done(
+            molecule, "closed by the rpp-remote end-to-end walk", strategy="merge"
+        )
+        expect.equals(
+            rc, 0,
+            "an armed AND sealed galaxy must MERGE on a stock deployment: "
+            "`harvest_effect_unavailable` means this image lost the library harvest, "
+            "`not_authorized` means the seal the fixture wrote did not verify, and "
+            f"`harvest_failed` means the transaction ran and lost the NAME of its "
+            f"refusal — {stderr[-600:]}",
+        )
+        harvest = (payload or {}).get("harvest", {})
+        expect.equals(
+            harvest.get("outcome"),
+            cfg.expect_done_outcome,
+            "`landed` is the one success outcome that put something on the trunk "
+            "(override with RPP_E2E_EXPECT_DONE_OUTCOME to falsify)",
+        )
+        expect.equals(
+            harvest.get("merged"),
+            True,
+            "the envelope publishes `merged` precisely so a client need not infer "
+            "integration from a 200",
+        )
+        after = _git(cfg.galaxy, "rev-parse", base)
+        expect.truthy(
+            before and after and before != after,
+            f"the base branch `{base}` must have advanced: it was {before or '<none>'} "
+            f"and is {after or '<none>'}",
+        )
+        expect.truthy(
+            _git_ok(cfg.galaxy, "cat-file", "-e", f"{base}:worker-output-{molecule}.txt"),
+            f"the worker's own file must be reachable from `{base}` after the harvest; "
+            "a moved tip with none of the branch's content is a bookkeeping commit, "
+            "not a merge",
+        )
+        message = _git(cfg.galaxy, "log", "-1", "--format=%B", base)
+        expect.truthy(
+            f"Mol-Id: {molecule}" in message,
+            "delib-20260720-cff4: `cs done` stamps the ledger-derived lineage trailers "
+            f"on the completion merge; this one reads:\n{message}",
+        )
+
+
+class TestDoneWithoutMerge:
+    """A second set: the same journey, closed with `--no-merge`.
+
+    Its own class, so it gets its own reinit, its own tenant and its own
+    molecule — the state under test is the base branch, and a set that
+    closed a second molecule in the first set's galaxy would be reading a
+    trunk the previous set had already moved.
+
+    This is the #62 review fix, and it is the falsifier for the merge
+    test above rather than a variation on it: same image, same seal, same
+    completed molecule with a commit on its branch, one flag different,
+    opposite verdict on the trunk. A build that ignored `no_merge` would
+    turn exactly this class red and leave the merge test green.
+
+    The seal is deliberately provisioned and deliberately unspent.
+    `--no-merge` takes no trunk lock, so the ADR-172 effect boundary is
+    never reached and no authority is consumed — which means the set
+    could have run without one. Sealing anyway is what makes the flag the
+    ONLY difference between this class and the merge test: drop the seal
+    and a reader could not tell which of the two changes moved the
+    verdict.
+    """
+
+    def test_no_merge_succeeds_and_integrates_nothing(
+        self, logged_in, sealed, worked, cfg, expect
+    ):
+        """`no_merge: true` — a success that must NOT move the trunk.
+
+        `--no-merge` is the one parameter whose correct behaviour looks
+        like failure from the status line: the route answers 200, and
+        that 200 must be readable as "closed, nothing integrated" rather
+        than as a landing. So `merged` is asserted false and the base
+        branch is asserted UNCHANGED — the second is what a mis-wired
+        flag would break while the first still passed, because a
+        transaction that merged and mis-reported would answer `merged`
+        from the flag it was given rather than from what it did.
+
+        The `non_integration` tag travels with the reply for the same
+        reason: a requester who reads `merged: false` should not have to
+        fetch a second route to learn why.
+        """
+        molecule = sealed
+        base = cfg.base_branch
+        before = _git(cfg.galaxy, "rev-parse", base)
+        rc, payload, stderr = logged_in.done(
+            molecule, "closed without integrating, on purpose", no_merge=True
+        )
+        expect.equals(
+            rc, 0,
+            f"`--no-merge` mutates no trunk and therefore spends no authority; it must "
+            f"succeed — {stderr[-600:]}",
+        )
+        harvest = (payload or {}).get("harvest", {})
+        expect.equals(
+            harvest.get("merged"),
+            False,
+            "a closure that skipped the merge integrated nothing, and the envelope must "
+            "say so rather than let a 200 stand for a landing",
+        )
+        after = _git(cfg.galaxy, "rev-parse", base)
+        expect.equals(
+            after,
+            before,
+            f"`{base}` must be exactly where it was: a moved tip under `merged: false` "
+            "means the reply is reporting the flag rather than the effect",
         )

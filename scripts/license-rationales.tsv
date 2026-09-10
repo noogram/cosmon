@@ -40,6 +40,7 @@ cosmon-daemon-supervisor	core	AGPL-3.0-only	daemon supervisor
 cosmon-filestore	core	AGPL-3.0-only	filestore backend — layer ② persistance (delib-ca76)
 cosmon-fuzz	core	AGPL-3.0-only	fuzzer
 cosmon-graph	core	AGPL-3.0-only	DAG primitives — layer ① noyau (delib-ca76)
+cosmon-harvest	core	AGPL-3.0-only	sealed harvest transaction lifted out of `cs` (task-f98c) — drives git, tmux, the publish/identity/confidentiality gates and galaxy teardown: the core's own effect half, never a `cargo add` target
 cosmon-hash	core	AGPL-3.0-only	hash primitives — layer ① noyau (delib-ca76)
 cosmon-llama	core	AGPL-3.0-only	llama inference wrapper — AGPL Rust binding (off by default)
 cosmon-matrix-tick	core	AGPL-3.0-only	Matrix bridge runtime

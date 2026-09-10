@@ -46,6 +46,9 @@ cosmon-core.workspace = true
 cosmon-daemon-supervisor.workspace = true
 cosmon-filestore.workspace = true
 cosmon-graph.workspace = true
+# The sealed harvest transaction (`cs done`) — a library since ADR-176 §12s
+# follow-up, so the RPP route can perform the same transaction in-process.
+cosmon-harvest.workspace = true
 cosmon-hash.workspace = true
 cosmon-notary.workspace = true
 cosmon-observability.workspace = true

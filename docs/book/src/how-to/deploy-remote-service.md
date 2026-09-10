@@ -370,7 +370,8 @@ stack with the compiled `cosmon-remote` binary over the published loopback
 ports — `login` (the real authorization-code + PKCE flow against the mock IdP,
 headless), `auth me`, `nucleate`, `observe`, `tackle` (a real worker, spawned by
 the image), a wait for that worker to drive the molecule to `completed`, and a
-`land` that must come back with its named refusal.
+`done` that must come back having **merged** the worker's branch onto the tenant
+base branch.
 
 Every assertion says *why* the value it expects is the right one, naming the ADR
 section, route document or invariant it derives from; when one breaks, the
@@ -444,11 +445,11 @@ redirect URI `http://127.0.0.1:7777/callback` must be registered on the client.
 ### The `tackle` leg, and why it is the interesting one
 
 The scenario ends by dispatching a real worker: `tackle`, then a wait for the
-molecule to reach `completed`, then `land`.
+molecule to reach `completed`, then `done`.
 
 That leg is worth more than the rest put together, because it is the one thing
 no in-process test can tell you. Until issue #54, the adapter reached `tackle`,
-`run` and `land` by running the `cs` binary — which its own Dockerfile has
+`run` and the harvest door by running the `cs` binary — which its own Dockerfile has
 never contained. Every unit and route suite was green; all three routes failed
 against the image you actually deploy. The routes now dispatch in-process, and
 this step is the only place that claim is checked where it matters: inside the
@@ -463,13 +464,44 @@ The shipped stage still carries no `cs` and no agent CLI. A smoke that
 provisioned the tenant-facing image would be proving the claim about an image
 nobody runs.
 
-`land` is still asserted as a *named* refusal, but no longer because a binary
-is missing. The script arms the harvest door in the throwaway galaxy
-(`[harvest_authority] required`), so the door's decision half admits the
-harvest and the refusal comes from the effect half:
-`501 land_effect_unavailable`. The sealed `cs done` transaction has exactly one
-implementation and it is not callable as a library yet — ADR-176 §12. When it
-becomes callable, this pinned label goes red, which is the point.
+### The `done` leg: a merge, not a refusal
+
+`done` — one gesture again since issue #51 withdrew the second `land` verb — is
+where the walk ends, and what it asserts is a **merge commit on the tenant's
+base branch**, carrying the lineage trailers `cs done` writes.
+
+That is a change of verdict, and it took three issues. The door's decision half
+runs in-process (#54), so every pre-effect refusal answers with no `cs` binary
+present. The effect half became a library the adapter links, `cosmon-harvest`,
+and the *default* (#67, #68) — so a stock deployment reaches the real
+transaction instead of a `501 harvest_effect_unavailable`. What remained was
+ADR-172's second key, and the suite now turns both halves of it:
+
+- `[harvest_authority] required = true` in the throwaway galaxy, so the
+  decision half admits. Without it the door refuses `not_authorized` before it
+  has even loaded the molecule.
+- an operator-**sealed**, molecule-scoped grant, so the effect half admits too.
+  An armed galaxy with no trust root refuses `not_authorized` a second time,
+  from inside the trunk lock — the shape a deployment must never be left in.
+
+Cosmon verifies operator signatures and ships nothing that produces one, so the
+seal cannot come from `cs` or from the image. It is minted on the host by
+`cs-e2e-harvest-seal`, a binary of the `publish = false`
+`cosmon-minisign-testkit` crate that appears only in `[dev-dependencies]` — the
+same structural arrangement ADR-171 uses for the takeover key, and the reason
+`takeover_unforgeable` still passes.
+
+Two further tests pin the parameter surface the D4 reversal put on the wire: a
+blank `--reason` is refused `400 missing_reason` (the door never invents a
+sentence), an unimplemented `--strategy` is refused `400 unsupported_parameter`
+rather than silently defaulted, and a second test set closes its molecule with
+`--no-merge` and asserts the opposite verdict — a 200 reporting `merged: false`
+with the base branch exactly where it was.
+
+`v1_done_library_effect.rs` proves the same merge in-process, and much faster.
+What the container adds is the only thing an in-process test cannot say: that it
+happens through the image an operator deploys, on a bind-mounted tenant tree,
+driven by the real `cosmon-remote`.
 
 To watch the pre-issue-54 failure for yourself, point the build at a checkout
 that predates the cut-over and name the refusal you expect:

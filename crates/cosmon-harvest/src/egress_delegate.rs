@@ -7,10 +7,10 @@
 //! tree:
 //!
 //! - the `cs done` post-merge integrity cascade (rung 1 `integrity_command`
-//!   and rung 3 `build_command`, [`super::done`]); and
-//! - the `cs validate` tier-2 stages ([`super::validate`]).
+//!   and rung 3 `build_command`, [`crate::transaction`]); and
+//! - the `cs validate` tier-2 stages (`cosmon_cli::cmd::validate`).
 //!
-//! Both are trust-gated ([`cosmon_cli::trust`]) — but trust hashes only
+//! Both are trust-gated ([`crate::trust`]) — but trust hashes only
 //! `.cosmon/config.toml` + the formula TOMLs, **not** the scripts those commands
 //! invoke. A merged branch can therefore modify a *trusted* `integrity_command`
 //! script (`./ci/integrity.sh`) without staling the trust grant, and — before
@@ -43,11 +43,11 @@ use cosmon_core::egress::{EgressJail, EgressPolicy, EgressPreflight, Enforcement
 /// The decision of applying the egress jail to one delegated command.
 ///
 /// A pure function of `(policy, netns, require_netns, exposed_multi_tenant,
-/// program, args)` ([`jail_decision`]) so the security logic is
+/// program, args)` (`jail_decision`) so the security logic is
 /// host-independently testable — the `/proc` reads, the namespace attempt and
 /// the env reads live only in [`jail_delegated_sh`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum JailDecision {
+pub enum JailDecision {
     /// Spawn `program` with `args`. Under [`EnforcementMode::Netns`] +
     /// `deny-external` these are the `unshare …` wrapper; otherwise the original
     /// `sh -c <command>`. `advisory_reason`, when `Some`, is the loud audit line
@@ -118,7 +118,7 @@ pub(crate) fn jail_decision(
 /// `COSMON_API_REQUEST` marker). With `COSMON_EGRESS_POLICY` unset the policy is
 /// `AllowAll` and the returned command is the byte-identical pre-fix
 /// `sh -c <command>`.
-pub(crate) fn jail_delegated_sh(command: &str) -> JailDecision {
+pub fn jail_delegated_sh(command: &str) -> JailDecision {
     let policy = EgressPolicy::from_env_value(std::env::var(EgressPolicy::ENV_VAR).ok().as_deref());
     let netns = cosmon_agent_harness::egress_probe::netns_probe();
     let require_netns = cosmon_agent_harness::egress_probe::require_netns_from_env();

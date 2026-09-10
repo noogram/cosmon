@@ -53,6 +53,9 @@ members = [
     "crates/cosmon-process-witness",
     "crates/cosmon-state",
     "crates/cosmon-filestore",
+    # The sealed harvest transaction, lifted out of the `cs` binary so the
+    # RPP adapter can call it in-process (ADR-176 §12 follow-up).
+    "crates/cosmon-harvest",
     "crates/cosmon-bridge-claude",
     # neurion-core — vendored in-tree, product closure (cosmon-cli, cosmon-registry). ADR-126 §6 class 2.
     # neurion-mcp dropped from members (not in closure, rehomes to the neurion galaxy).
@@ -194,6 +197,7 @@ cosmon-core = { path = "crates/cosmon-core" }
 cosmon-mcp = { path = "crates/cosmon-mcp" }
 cosmon-graph = { path = "crates/cosmon-graph" }
 cosmon-filestore = { path = "crates/cosmon-filestore" }
+cosmon-harvest = { path = "crates/cosmon-harvest" }
 cosmon-runtime = { path = "crates/cosmon-runtime" }
 cosmon-agent-harness = { path = "crates/cosmon-agent-harness" }
 cosmon-ops-tools = { path = "crates/cosmon-ops-tools" }

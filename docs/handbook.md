@@ -102,7 +102,7 @@ You always run the same four-verb cycle: `nucleate` to create a molecule, `tackl
 
 > **`cs tackle` is always one node; `cs run` walks the DAG.** Picking the verb is the routing decision — there is no auto-detect. A bare `cs tackle <id>` spawns exactly one worker on `<id>` and never inspects `Blocks` edges. To walk a DAG of N≥1 nodes (1 = leaf dispatch, N = full orchestration), use `cs run <root>`. The historical `--leaf` and `--force-runtime` flags are deprecated no-ops since the verb-unification (delib-20260426-1bcd #2 / task-20260426-c33f). Context: [spark-20260423-5e45](../spark-20260423-5e45) named the silent-runtime surprise that motivated the unification, and the chronicle `2026-04-26-verb-unification.md` tells the story.
 
-*See also: [cs help](../crates/cosmon-cli/src/cmd/help.rs), [done](../crates/cosmon-cli/src/cmd/done.rs), [architectural-invariants](architectural-invariants.md).*
+*See also: [cs help](../crates/cosmon-cli/src/cmd/help.rs), [done](../crates/cosmon-harvest/src/transaction.rs), [architectural-invariants](architectural-invariants.md).*
 
 ### The worker finished but my branch didn't land on main — what happened? <a id="cs-done"></a>
 
@@ -128,7 +128,7 @@ report `⚠ branch delete failed`. `cs done` now prunes dead registrations befor
 it deletes a branch, so an already-nested pair from before the fix also tears
 down cleanly.
 
-*See also: [done.rs](../crates/cosmon-cli/src/cmd/done.rs), [architectural-invariants §merge-before-dispatch](architectural-invariants.md).*
+*See also: [done.rs](../crates/cosmon-harvest/src/transaction.rs), [architectural-invariants §merge-before-dispatch](architectural-invariants.md).*
 
 ### When should I NOT use cosmon? <a id="non-goals"></a>
 

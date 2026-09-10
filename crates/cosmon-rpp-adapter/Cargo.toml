@@ -37,6 +37,12 @@ blake3 = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 cosmon-core = { path = "../cosmon-core" }
+# The sealed harvest transaction, as a library. This is what makes
+# `POST /v1/molecules/{id}/done` merge on a stock deployment instead of
+# answering `501 harvest_effect_unavailable` (ADR-176 §12 follow-up).
+# Deliberately NOT `cosmon-cli`: the transaction moved out of the binary so
+# that depending on it does not mean depending on the whole CLI.
+cosmon-harvest = { path = "../cosmon-harvest" }
 cosmon-filestore = { path = "../cosmon-filestore" }
 cosmon-hash = { path = "../cosmon-hash" }
 # MCP surface as a third projection of the same core the REST routes
@@ -96,6 +102,11 @@ cosmon-transport = { workspace = true, features = ["test-support"] }
 # adapter and the CLI fails here instead of in a tenant's terminal.
 cosmon-remote = { path = "../cosmon-remote" }
 cosmon-thin-cli = { path = "../cosmon-thin-cli" }
+# The operator stand-in that seals a harvest grant. `publish = false`, and it
+# appears ONLY here — so the shipped adapter has no dependency edge to a
+# signer, which `done_authorization_unforgeable` asserts across the workspace.
+cosmon-minisign-testkit = { workspace = true }
+chrono = { workspace = true }
 http-body-util = { workspace = true }
 # Phase 3 / Étage 3 (ADR-110 §"Phase 3 — conditional" point 2,
 # délib-20260523-a682 von-neumann Option D'): property tests on the

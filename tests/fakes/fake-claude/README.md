@@ -29,12 +29,20 @@ with a completed molecule, which is what the container e2e
 the rpp-adapter — with no `cs` binary of its own since issue #54 U6 —
 really spawns a worker that can drive `cs` against the tenant store.
 
-It needs `cs` on `PATH` and a resolvable state dir; inside the e2e image
-the adapter's worker envelope pins `COSMON_STATE_DIR`. Knobs:
+Before completing, it writes one file in its worktree and commits it. A
+worker that finishes with no commit leaves a branch with nothing on it,
+and `cs done` then archives that branch instead of merging it — a
+legitimate outcome, and one the container e2e's merge assertion cannot be
+written against. `FAKE_CLAUDE_NO_COMMIT=1` restores the empty-branch shape
+for a test that wants it. Identity comes from the repository config, not
+from `$HOME`: the worker envelope's home holds no git identity.
+
+It needs `cs` and `git` on `PATH` and a resolvable state dir; inside the
+e2e image the adapter's worker envelope pins `COSMON_STATE_DIR`. Knobs:
 `FAKE_CLAUDE_READ_TIMEOUT` (seconds of silence before it gives up, default
 120 — a briefing that never arrives must end as a named failure, not a
 pane that idles forever), `FAKE_CLAUDE_DONE_FILE` (a breadcrumb file
-written with the id it acted on), and `FAKE_CLAUDE_LINGER` (seconds to
+written with the id it acted on), and `FAKE_CLAUDE_NO_COMMIT` (skip the worker's own commit), `FAKE_CLAUDE_LINGER` (seconds to
 stay alive after completing, default 120).
 
 That last one is not padding. A briefing is delivered as `load-buffer` →

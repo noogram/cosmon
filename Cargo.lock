@@ -934,6 +934,7 @@ dependencies = [
  "cosmon-daemon-supervisor",
  "cosmon-filestore",
  "cosmon-graph",
+ "cosmon-harvest",
  "cosmon-hash",
  "cosmon-minisign-testkit",
  "cosmon-notary",
@@ -1165,6 +1166,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "cosmon-harvest"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "cosmon-agent-harness",
+ "cosmon-core",
+ "cosmon-filestore",
+ "cosmon-hash",
+ "cosmon-minisign-testkit",
+ "cosmon-notary",
+ "cosmon-state",
+ "cosmon-transport",
+ "dirs",
+ "globset",
+ "ignore",
+ "nix 0.31.2",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "cosmon-hash"
 version = "0.1.0"
 dependencies = [
@@ -1200,8 +1228,11 @@ dependencies = [
 name = "cosmon-minisign-testkit"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "base64",
  "blake2",
+ "cosmon-core",
+ "cosmon-filestore",
  "ed25519-dalek",
 ]
 
@@ -1404,8 +1435,10 @@ dependencies = [
  "clap",
  "cosmon-core",
  "cosmon-filestore",
+ "cosmon-harvest",
  "cosmon-hash",
  "cosmon-mcp",
+ "cosmon-minisign-testkit",
  "cosmon-notary",
  "cosmon-oidc-testkit",
  "cosmon-process-witness",

@@ -123,7 +123,7 @@ A parent molecule was spliced into child molecules (1 → N).
 | `molecule` | `MoleculeId` |
 | `branch` | `string` |
 
-**Emission point:** `crates/cosmon-cli/src/cmd/done.rs` (before `try_merge_branch`)
+**Emission point:** `crates/cosmon-harvest/src/transaction.rs` (before `try_merge_branch`)
 
 ### `merge_completed`
 
@@ -135,7 +135,7 @@ A merge attempt finished (successfully or with an error).
 | `branch` | `string` |
 | `result` | `string` (`"ok"`, `"conflict"`, `"error:..."`) |
 
-**Emission point:** `crates/cosmon-cli/src/cmd/done.rs` (after each `MergeOutcome` arm)
+**Emission point:** `crates/cosmon-harvest/src/transaction.rs` (after each `MergeOutcome` arm)
 
 ### `worker_spawned`
 

@@ -451,8 +451,9 @@ fn a_stale_epoch_is_refused_even_when_the_seat_came_back() {
 // The drift that made all of the above vacuous, pinned at the source level.
 // ---------------------------------------------------------------------------
 
-/// Production code must build the lease ledger through `presence::leases_at`,
-/// never through `PilotLeaseStore::new` directly.
+/// Production code must build the lease ledger through
+/// `cosmon_harvest::pilot_gesture::leases_at`, never through
+/// `PilotLeaseStore::new` directly.
 ///
 /// This is not style. A store built without a pinned trust root honours **no**
 /// grant, so every leased mission reads back as a mission nobody ever granted
@@ -496,15 +497,19 @@ fn the_lease_ledger_is_only_ever_built_with_its_trust_root() {
                 continue;
             }
             // The one legitimate call site is the trusting constructor, which
-            // pins the key on the very next lines.
-            if line.contains("PilotLeaseStore::new") && !as_str.ends_with("presence.rs") {
+            // pins the key on the very next lines. It moved to
+            // `cosmon-harvest` with the lifecycle authority guard — the
+            // harvest is one of the five gestures the guard covers, and the
+            // RPP route performs that harvest without going through the CLI.
+            if line.contains("PilotLeaseStore::new") && !as_str.ends_with("pilot_gesture.rs") {
                 offenders.push(format!("{as_str}:{}", n + 1));
             }
         }
     });
     assert!(
         offenders.is_empty(),
-        "the lease ledger must be built by `presence::leases_at`, which pins \
+        "the lease ledger must be built by \
+         `cosmon_harvest::pilot_gesture::leases_at`, which pins \
          the operator trust root; a bare `PilotLeaseStore::new` honours no \
          grant and silently turns every authority check into a pass. \
          Offending call sites: {offenders:?}",

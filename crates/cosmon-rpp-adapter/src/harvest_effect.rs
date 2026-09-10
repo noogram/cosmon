@@ -8,23 +8,35 @@
 //! library ([`cosmon_filestore::harvest_door::decide`]) and answers every
 //! pre-effect refusal in-process. The effect half is the sealed harvest
 //! transaction — merge with lineage trailers, publish/identity/
-//! confidentiality gates, the `pre_done` gate, the teardown — and it has
-//! exactly one implementation in this repository: `cmd/done.rs`. Rewriting
-//! it here would fork the door, which is the failure the shared
-//! [`DoorRefusal`] vocabulary exists
-//! to prevent.
+//! confidentiality gates, the `pre_done` gate, the teardown — and it still
+//! has exactly **one** implementation. What changed is where that one
+//! implementation lives: it was ~6 000 lines private to the `cs` binary
+//! (`cmd/done.rs`), and it is now the [`cosmon_harvest`] crate, which this
+//! adapter can call. Rewriting it here would fork the door, which is the
+//! failure the shared [`DoorRefusal`] vocabulary exists to prevent; calling
+//! it is not a fork.
 //!
-//! So the effect is a **port**, and the deployment chooses an
-//! implementation:
+//! The effect stays a **port**, because the deployment still chooses:
 //!
-//! - [`UnavailableHarvestEffect`] — the default and the honest answer for an
-//!   image that carries no `cs`. The route refuses `harvest_effect_unavailable`
-//!   rather than pretending, and every pre-effect refusal still answers in
-//!   full.
+//! - [`LibraryHarvestEffect`] — **the default**. The transaction runs
+//!   in-process, in the tenant's own galaxy, through the same
+//!   [`cosmon_harvest::run`] `cs done` calls with the same [`Args`]. No `cs`
+//!   process is spawned and no configuration line is needed: an armed galaxy
+//!   (`[harvest_authority]`) is harvestable on a stock image.
 //! - [`CsBinaryHarvestEffect`] — the operator declared a `cs` binary in
 //!   `rpp.toml`. The harvest runs as that binary, with the argv
 //!   [`HarvestOptions::cs_done_argv`] builds, in the tenant's own galaxy
-//!   root.
+//!   root. Kept for one release as the operator's escape hatch — a
+//!   deployment that wants the harvest to run as a *specific* build of `cs`
+//!   rather than as the one compiled into this adapter — and documented as
+//!   such in `rpp.toml`.
+//! - [`UnavailableHarvestEffect`] — the honest `501
+//!   harvest_effect_unavailable`, kept because the route must still have an
+//!   answer for a port with no implementation, and because the tests that
+//!   pin that answer must be able to select it. No shipped configuration
+//!   selects it any more.
+//!
+//! [`Args`]: cosmon_harvest::Args
 //!
 //! # Why a `cs` child is legitimate here, and was not before
 //!
@@ -164,13 +176,19 @@ pub trait HarvestEffectPort: Send + Sync + std::fmt::Debug {
     fn binds_trunk_lock(&self) -> bool;
 }
 
-/// The default: no effect implementation in this deployment.
+/// No effect implementation in this deployment.
 ///
 /// Answers [`EffectFailure::Unavailable`] for every harvest the
 /// decision half admits. Fail-honest rather than fail-open: the alternative
 /// an adapter reaches for under pressure is a `202`, and a `202` on a
 /// transaction that may integrate nothing is exactly the defect issue #51
 /// reported.
+///
+/// It was the default while the transaction was locked inside the `cs`
+/// binary. It is no longer selected by any configuration — the library
+/// implementation is always compiled in — and survives as the route's
+/// answer for a port with no implementation, and as the double the tests
+/// that pin that answer construct.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnavailableHarvestEffect;
 
@@ -275,6 +293,93 @@ impl HarvestEffectPort for CsBinaryHarvestEffect {
 
     fn binds_trunk_lock(&self) -> bool {
         true
+    }
+}
+
+/// The harvest as a library call, in-process.
+///
+/// # Why this is the default, and why it is not a second door
+///
+/// This is the same transaction `cs done` performs, reached through the same
+/// entry point: [`cosmon_harvest::run`], with an [`Args`](cosmon_harvest::Args)
+/// built by [`Args::from_harvest_options`](cosmon_harvest::Args::from_harvest_options)
+/// — the constructor the previous unit left here for exactly this. The merge
+/// and its lineage trailers, the publish / identity / confidentiality gates,
+/// the `pre_done` gate, the tmux / worktree / branch teardown and the
+/// `decide_branch_delete` invariant (D3: a closure that did not merge never
+/// deletes the branch) are not re-implemented, re-ordered or re-decided here.
+/// There is one implementation and two callers, which is what §12's follow-up
+/// asked for.
+///
+/// # What it needs that a CLI gets for free
+///
+/// A `cs` invocation stands *in* the galaxy it acts on, so it can read its
+/// own working directory for both the state store and the git checkout. A
+/// request handler stands nowhere: it is told which tenant to act for. So the
+/// context is built with [`cosmon_harvest::HarvestContext::at`], naming both
+/// halves explicitly — `<tenant>/.cosmon/state` and the tenant root — and the
+/// library's last-resort "the repository containing the current directory"
+/// answer is never reached. Without that, a harvest would resolve the
+/// *adapter's* own checkout and merge a tenant's branch into it.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LibraryHarvestEffect;
+
+impl HarvestEffectPort for LibraryHarvestEffect {
+    fn harvest(
+        &self,
+        tenant_root: &Path,
+        molecule: &MoleculeId,
+        options: &HarvestOptions,
+    ) -> Result<(), EffectFailure> {
+        let ctx = cosmon_harvest::HarvestContext::at(
+            tenant_root.join(".cosmon").join("state"),
+            tenant_root,
+        );
+        let args =
+            cosmon_harvest::Args::from_harvest_options(molecule.as_str().to_owned(), options);
+        match cosmon_harvest::run(&ctx, &args) {
+            Ok(()) => Ok(()),
+            Err(err) => Err(harvest_error_from(&err)),
+        }
+    }
+
+    fn binds_trunk_lock(&self) -> bool {
+        // The transaction flocks the trunk at its own first git mutation
+        // (ADR-172 D3) — the same code, so the same answer as the `cs` child.
+        // `flock(2)` does not nest, so the door must not hold it across this
+        // call.
+        true
+    }
+}
+
+/// Classify an error out of [`cosmon_harvest::run`].
+///
+/// A door refusal keeps its name — that is the whole reason
+/// [`cosmon_harvest::RefusedHarvest`] is a typed error and not a formatted
+/// string — so the route answers `merge_conflict` or `pre_done_refused` and
+/// not an anonymous `harvest_failed`. Anything else is a genuine fault and
+/// travels as its own message.
+fn harvest_error_from(err: &anyhow::Error) -> EffectFailure {
+    err.downcast_ref::<cosmon_harvest::RefusedHarvest>()
+        .map_or_else(
+            || EffectFailure::Failed(format!("{err:#}")),
+            |refused| EffectFailure::Refused(refused.refusal),
+        )
+}
+
+/// Choose the effect implementation this deployment runs with.
+///
+/// One function rather than a `match` in `main`, because the *default* is the
+/// decision worth pinning: `harvest_cs_binary` absent must mean the library,
+/// not a refusal. It meant a refusal while the transaction was locked inside
+/// the `cs` binary, and that was the defect issue #51 reported through
+/// `POST /v1/molecules/{id}/done` — "capable end to end, with one config
+/// line". A `main`-local match is a decision no test can reach.
+#[must_use]
+pub fn from_config(harvest_cs_binary: Option<PathBuf>) -> std::sync::Arc<dyn HarvestEffectPort> {
+    match harvest_cs_binary {
+        Some(binary) => std::sync::Arc::new(CsBinaryHarvestEffect::new(binary)),
+        None => std::sync::Arc::new(LibraryHarvestEffect),
     }
 }
 
@@ -516,5 +621,80 @@ mod tests {
             !argv.iter().any(|a| a == "--strategy"),
             "a bare harvest must not pin a strategy; `cs done`'s own default is the contract"
         );
+    }
+
+    /// The default this molecule exists to change: a deployment that
+    /// declares nothing harvests through the library.
+    ///
+    /// Goes red the moment someone restores `UnavailableHarvestEffect` as the
+    /// default, which is what made `POST …/done` answer `501` on a stock
+    /// image (ADR-176 §12) and what the 90-day clause on ADR-095's amendment
+    /// was counting down.
+    #[test]
+    fn a_deployment_that_declares_nothing_harvests_through_the_library() {
+        let effect = from_config(None);
+        assert_eq!(
+            format!("{effect:?}"),
+            "LibraryHarvestEffect",
+            "the default must be the in-process transaction, not a refusal \
+             and not a subprocess"
+        );
+        assert!(
+            effect.binds_trunk_lock(),
+            "the transaction flocks the trunk itself, so the door must not \
+             hold the lock across the call"
+        );
+    }
+
+    /// The escape hatch still works, and still needs a declaration.
+    #[test]
+    fn a_declared_binary_still_selects_the_subprocess_effect() {
+        let effect = from_config(Some(PathBuf::from("/opt/cosmon/bin/cs")));
+        assert!(
+            format!("{effect:?}").starts_with("CsBinaryHarvestEffect"),
+            "a declared `harvest_cs_binary` must still run as that binary"
+        );
+    }
+
+    /// Every one of the eight door refusals survives the library effect's
+    /// error classification with its own name.
+    ///
+    /// The CLI recovers them from an exit code
+    /// (`cosmon_harvest::refusal_exit_code`); the library caller recovers
+    /// them from the typed error. If this collapsed to
+    /// [`EffectFailure::Failed`], the route would answer an anonymous
+    /// `harvest_failed` where the CLI answers exit 74 — the same transaction
+    /// telling two callers different things, which is the drift the shared
+    /// vocabulary exists to prevent.
+    #[test]
+    fn every_door_refusal_keeps_its_name_through_the_library_effect() {
+        for &refusal in cosmon_core::harvest_door::ALL_REFUSALS {
+            let err: anyhow::Error = cosmon_harvest::RefusedHarvest {
+                refusal,
+                detail: None,
+            }
+            .into();
+            match harvest_error_from(&err) {
+                EffectFailure::Refused(seen) => {
+                    assert_eq!(seen, refusal, "{} must survive as itself", refusal.as_str())
+                }
+                other => panic!("{} collapsed to {other:?}", refusal.as_str()),
+            }
+            // And the CLI half of the same claim, on the same value: the
+            // exit code a script branches on.
+            assert_eq!(
+                cosmon_harvest::refusal_exit_code(&err),
+                Some(refusal.exit_code()),
+                "{} must keep its exit code for the CLI caller",
+                refusal.as_str()
+            );
+        }
+    }
+
+    /// A genuine fault is NOT dressed up as a refusal.
+    #[test]
+    fn a_fault_that_is_not_a_door_refusal_stays_a_failure() {
+        let err = anyhow::anyhow!("the disk went away mid-merge");
+        assert!(matches!(harvest_error_from(&err), EffectFailure::Failed(_)));
     }
 }

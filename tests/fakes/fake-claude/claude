@@ -27,7 +27,11 @@
 #                   120s of silence before giving up), FAKE_CLAUDE_DONE_FILE
 #                   (a breadcrumb written with the id it acted on),
 #                   FAKE_CLAUDE_LINGER (seconds to stay alive after
-#                   completing, default 120 — see the mode's own comment).
+#                   completing, default 120 — see the mode's own comment),
+#                   FAKE_CLAUDE_NO_COMMIT (skip the worker's own commit, for
+#                   a test that wants the empty-branch shape on purpose).
+#                   It commits one file in its worktree before completing,
+#                   so the branch it leaves is one a harvest can merge.
 #
 # ── Debug hooks ────────────────────────────────────────────────────────────
 #   PROMPT_ECHO=1            tee stdin + argv to $FAKE_CLAUDE_LOG before acting
@@ -135,6 +139,33 @@ EOF
             echo "fake-claude: no molecule id in the briefing (or none arrived)" >&2
             exit 3
         fi
+        # Do the WORK before declaring it done.
+        #
+        # A worker that completes its molecule and commits nothing leaves
+        # a branch with no commits, and `cs done` then archives it
+        # without a merge: outcome `closed_without_merge`, `merged` false,
+        # nothing on the trunk. That is a legitimate outcome for a
+        # delib-shaped molecule and a useless one for a harness whose job
+        # is to prove the harvest reaches git — the container e2e's merge
+        # assertion cannot exist without a commit to merge. So this mode
+        # writes one file and commits it, in the worktree the dispatch cut
+        # for it, which is the smallest thing a worker can do that a
+        # harvest has anything to say about.
+        #
+        # Identity comes from the repository config (the tenant tree the
+        # worktree hangs off), not from `$HOME`: a worker runs under an
+        # `env -i` envelope whose home holds no git identity at all.
+        # `FAKE_CLAUDE_NO_COMMIT=1` skips the commit for a test that wants
+        # the empty-branch shape on purpose.
+        if [ -z "${FAKE_CLAUDE_NO_COMMIT:-}" ]; then
+            printf 'work by fake-claude for %s\n' "$id" >"worker-output-$id.txt"
+            if ! git add "worker-output-$id.txt" \
+                || ! git commit -q -m "feat($id): fake-claude worker output"; then
+                echo "fake-claude: could not commit the worker's output in $PWD" >&2
+                exit 5
+            fi
+        fi
+
         # One shot, then CHECK. The exit code alone is not enough:
         # `cs complete` on an id it cannot find prints
         # "error completing <id>: molecule not found" and still exits 0,

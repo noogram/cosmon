@@ -170,6 +170,26 @@ Cosmon is organized as two cooperating layers sharing **one** state store.
   that wires RR-1 through RR-5 into a green CI; if the build is
   falsified, RR-3 makes the excision a single PR and a fresh ADR
   ratifies the retirement on forensic evidence.
+- **Amended 2026-09-09 — read the five invariants through
+  [ADR-095](adr/095-resident-runtime-ifbdd-path.md)'s amendment before
+  citing them.** "No daemon" is hygiene of **Layer A**, not a ban on a
+  supervised server: `cosmon-rpp-adapter` is a long-lived process by
+  design, and the core stays stateless. **RR-1 and RR-3 are refuted** by
+  the shipped code (the in-process drain in
+  `crates/cosmon-rpp-adapter/src/drain.rs`; `cosmon-runtime`'s
+  non-optional `cosmon-state`/`cosmon-filestore` edges, conceded in
+  ADR-138 §10; `scripts/runtime-excision-test.sh` never written, so §4's
+  escape hatch is closed). They are replaced by **RR-1′** (exactly one
+  implementation per lifecycle transition, or a typed refusal) and
+  **RR-3′** (non-exclusivity of the server: a bare `cs` drives a mission
+  end-to-end with the adapter absent). **RR-2′** permits classified
+  operational state that is never authoritative; **RR-4** is promoted and
+  gains **RR-4b** (an off-box durability path for `.cosmon/state/` before
+  a server is declared active); **RR-5** gains a library-seam taxonomy and
+  RR-5′ (*a forensic event the operator's location cannot reach is not a
+  forensic event*), with `events.jsonl` named canonical for correlation.
+  §14 is restated as **§14′ — the state has no privileged reader**; the
+  server-side probe is *stop the adapter, start a dumber second reader*.
 
 ### Layer B is bounded-ephemeral — config-honoring dispatch (delib-20260531-c761)
 
@@ -3325,18 +3345,18 @@ skip.
   message and merged by hand; without that signal, 491 insertions would
   have disappeared. Fixed by hardening the probe to compare against the
   configured base branch (`resolve_base_branch` in
-  `crates/cosmon-cli/src/cmd/done.rs`) and documented here.
+  `crates/cosmon-harvest/src/transaction.rs`) and documented here.
 
 **Enforcement.** The regression test
 `strict_ancestry_refuses_head_shortcut_when_head_is_feature_branch` in
-`crates/cosmon-cli/src/cmd/done.rs` pins the invariant: HEAD is moved
+`crates/cosmon-harvest/src/transaction.rs` pins the invariant: HEAD is moved
 onto the feature branch, the branch is NOT integrated into `main`, and
 `is_branch_merged` must report `false`. Any future regression that
 reverts to a HEAD-based probe will fail the gate.
 
 **Base branch resolution.** The base is a **property of the molecule**,
 not of the session that runs the verb. `cosmon_cli::base_branch::resolve`
-(`crates/cosmon-cli/src/base_branch.rs`) tries, in strict order:
+(`crates/cosmon-harvest/src/base_branch.rs`) tries, in strict order:
 
 1. the molecule's own `base_branch`, persisted by `cs tackle --base
    <branch>`, which also cuts `feat/<mol-id>` from that ref instead of the
@@ -3624,6 +3644,16 @@ Phase-2 (deferred behind the Mach gate):
 ## 14. Karpathy's load-bearing invariant — *you can `cat` cosmon's state* *(proposed — [ADR-095](adr/095-resident-runtime-ifbdd-path.md))*
 
 > **§14. You can `cat` cosmon's state.**
+>
+> **Restated 2026-09-09 as §14′ — *the state has no privileged reader***
+> ([ADR-095](adr/095-resident-runtime-ifbdd-path.md) Amendment §A6). `cat`
+> was always the probe, never the content: no component holds a view of the
+> state that another reader cannot obtain, and `cat` and `GET` are the same
+> act at two distances. The server-side test of legitimacy joins the three
+> probes below — **stop the adapter, start a dumber second reader, and ask
+> whether the operator can still answer *what ran*, *why it was dispatched*,
+> and *what it cost*.** If the answer requires the adapter to be up, the
+> adapter has become a privileged reader and the badge is lost.
 >
 > Every molecule's state, every event, every step, every artifact is a
 > plain file on disk that any peer — a human at a different terminal,
