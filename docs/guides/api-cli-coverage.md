@@ -149,7 +149,7 @@ advance → terminate → infrastructure → introspection.
 | `cs cluster` | NO | — | Machine-level topology (ADR-066). Operator-only. |
 | `cs mur` | NO | — | Operator-override pin (mur du matin). Operator-only. |
 | `cs motion` | NO | — | Local TUI surface. |
-| `cs peek` | NO (V2 TBD) | (TBD) `GET /v1/molecules/:id/peek` | Wheat-paste byte raster (ADR-066). Re-evaluate need at V2. |
+| `cs peek` | NO (V2 TBD) | (TBD) `GET /v1/molecules/:id/peek` | Wheat-paste byte raster (ADR-066). Re-evaluate need at V2. The *thread* half of what `peek` shows a human — who said what, in order, and whether the worker is sitting on an unanswered prompt — is exposed separately and read-only by `GET /v1/molecules/:id/session` (issue #51 follow-up, task-20260907-e376), which is adapter-only and needs no `cs` verb: an operator at the host attaches to the pane. The raster itself stays local because it is a byte-exact rendering for one terminal, not a projection a remote principal can use. |
 | `cs topology` | NO | — | Topon-driven structural map; local. |
 | `cs replay` | NO | — | Event-log replay; local debug tool. |
 | `cs archive` | NO | — | Cold-storage of completed molecules; operator-only. |

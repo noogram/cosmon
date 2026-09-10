@@ -363,6 +363,13 @@ enum MoleculeCmd {
     Get { id: String },
     #[command(about = format!("{} — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope{}", canon::GET_V1_MOLECULES_ID_RESULT.label(), canon::GET_V1_MOLECULES_ID_RESULT.effect_suffix()))]
     Result { id: String },
+    #[command(about = format!("{} — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session{}", canon::GET_V1_MOLECULES_ID_SESSION.label(), canon::GET_V1_MOLECULES_ID_SESSION.effect_suffix()))]
+    Session {
+        id: String,
+        /// Show only the last N entries.
+        #[arg(long)]
+        tail: Option<usize>,
+    },
     #[command(about = format!("{}{}", canon::POST_V1_MOLECULES_ID_TACKLE.label(), canon::POST_V1_MOLECULES_ID_TACKLE.effect_suffix()))]
     Tackle { id: String },
     #[command(about = format!("{} — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream", canon::POST_V1_MOLECULES_ID_RUN.label()))]
@@ -669,6 +676,68 @@ fn integration_caveat(env: &ResultEnvelope) -> Option<String> {
     Some(format!(
         "⚠ this deliverable is NOT integrated{base} (reason: {reason}){detail}"
     ))
+}
+
+/// Render a session thread as a table for a human.
+///
+/// The header comes first and always: `source` and `live` are what tell a
+/// reader whether they are looking at the whole conversation, a snapshot of a
+/// screen, or nothing at all — and an empty thread is ambiguous without them.
+/// A `waiting` verdict is printed only when it fires, so the common case (a
+/// worker that is simply working) stays quiet.
+fn render_session(env: &cosmon_remote::client::SessionEnvelope) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "molecule: {}  status: {}  source: {}  live: {}",
+        env.molecule_id, env.status, env.source, env.live
+    );
+    let _ = writeln!(
+        out,
+        "entries:  {} of {} (from #{})",
+        env.returned,
+        env.total,
+        env.offset.saturating_add(1)
+    );
+    if let Some(w) = &env.waiting {
+        if w.waiting {
+            let _ = writeln!(
+                out,
+                "WAITING:  class={} evidence_source={} awaiting_operator={}{}",
+                w.class,
+                w.evidence_source.as_deref().unwrap_or("none"),
+                w.awaiting_operator,
+                w.evidence
+                    .as_deref()
+                    .map(|e| format!("  — {e}"))
+                    .unwrap_or_default()
+            );
+        }
+    }
+    if env.truncated {
+        let _ = writeln!(
+            out,
+            "(the transcript exceeded the read ceiling: the oldest entries \
+are not shown, and ordinals count the retrieved window)"
+        );
+    }
+    if env.entries.is_empty() && env.source == "none" {
+        let _ = writeln!(
+            out,
+            "(no thread was retrievable: no agent transcript for this worker \
+and no live pane)"
+        );
+    }
+    for e in &env.entries {
+        let at = e.at.as_deref().unwrap_or("—");
+        let _ = writeln!(
+            out,
+            "{:>6}  {:<19}  {:<8}  {}",
+            e.ordinal, at, e.origin, e.text
+        );
+    }
+    out
 }
 
 /// Decide what `result` should print for a human. When a deliverable is
@@ -1413,6 +1482,16 @@ async fn run_molecule(
                 println!("id:     {}", env.molecule.id);
                 println!("kind:   {}", env.molecule.kind_label());
                 println!("status: {}", env.molecule.status);
+            }
+        }
+        MoleculeCmd::Session { id, tail } => {
+            let env = client.get_session(&id, tail).await?;
+            if json {
+                // `--json` hands the whole envelope through — source, waiting
+                // verdict, pagination and all. The JSON IS the answer.
+                print_json(true, &serde_json::to_value(&env)?);
+            } else {
+                print!("{}", render_session(&env));
             }
         }
         MoleculeCmd::Result { id } => {

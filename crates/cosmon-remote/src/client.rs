@@ -521,6 +521,97 @@ pub struct Integration {
     pub retryable: Option<bool>,
 }
 
+/// One entry of a worker's message thread, as
+/// `GET /v1/molecules/{id}/session` returns it.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionEntry {
+    /// 1-based position in the FULL thread — preserved through `--tail`, so a
+    /// client can see what it skipped and detect a gap between two polls.
+    pub ordinal: u64,
+    /// When the entry was written, when the source dates it. `None` for a tmux
+    /// scrollback snapshot, which carries no per-line time.
+    #[serde(default)]
+    pub at: Option<String>,
+    /// `worker` · `operator` · `system`.
+    pub origin: String,
+    /// The text of the entry.
+    pub text: String,
+}
+
+/// Whether a thread looks like it is waiting on someone, and on what evidence.
+///
+/// Two independent inputs kept apart on the wire: `awaiting_operator` is the
+/// control-plane fact a worker writes when it deliberately stops, `class` is a
+/// reading of the thread's own text. Text is forgeable and the control plane is
+/// not, so a reader that must not be fooled consults the second field.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionWaiting {
+    /// The single field most readers consume.
+    pub waiting: bool,
+    /// `none` · `permission` · `money_stake` · `unknown`.
+    pub class: String,
+    /// The line that fired the classification.
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// Which plane the classification read: `transcript` · `pane` ·
+    /// `control-plane` · `none`.
+    ///
+    /// Named because the two planes answer different questions. A live
+    /// permission prompt is drawn on the *screen* and need not be written to
+    /// the transcript at all, so a verdict of `waiting` sourced from `pane`
+    /// is a live stop, while one sourced from `transcript` may be historical.
+    #[serde(default)]
+    pub evidence_source: Option<String>,
+    /// The worker declared a stop for the operator.
+    #[serde(default)]
+    pub awaiting_operator: bool,
+}
+
+/// Envelope returned by `GET /v1/molecules/{id}/session`.
+///
+/// Read-only: there is no write counterpart, by decision — see the route's
+/// module docs. `source` is always present, including when it is `"none"`,
+/// because "the worker said nothing" and "nothing was retrievable" are
+/// different answers and an empty `entries` alone cannot tell them apart.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SessionEnvelope {
+    pub request_id: String,
+    pub molecule_id: String,
+    /// Molecule lifecycle status at read time.
+    pub status: String,
+    /// The adapter that ran the worker (`claude`, `codex`, …), when recorded.
+    #[serde(default)]
+    pub adapter: Option<String>,
+    /// `claude-transcript` · `codex-rollout` · `tmux-scrollback` · `none`.
+    pub source: String,
+    /// Whether the source carries history from before this read.
+    #[serde(default)]
+    pub retrospective: bool,
+    /// Whether a worker is still alive behind the thread.
+    #[serde(default)]
+    pub live: bool,
+    /// Entries in the full thread.
+    #[serde(default)]
+    pub total: usize,
+    /// Index of the first returned entry within the full thread.
+    #[serde(default)]
+    pub offset: usize,
+    /// How many entries this page carries.
+    #[serde(default)]
+    pub returned: usize,
+    /// Whether the transcript read hit its byte ceiling, so the oldest part
+    /// of the thread is not represented. `total` and the ordinals then count
+    /// the retrieved window, not the whole file.
+    #[serde(default)]
+    pub truncated: bool,
+    /// The waiting verdict.
+    #[serde(default)]
+    pub waiting: Option<SessionWaiting>,
+    /// The page.
+    #[serde(default)]
+    pub entries: Vec<SessionEntry>,
+}
+
 /// Envelope returned by `GET /v1/molecules/{id}/result`.
 ///
 /// The route returns 200 for *any*
@@ -981,6 +1072,25 @@ impl Client {
         let resp = self
             .send(self.req_canon(canon::GET_V1_MOLECULES_ID_RESULT, &[id]))
             .await?;
+        decode_json(resp).await
+    }
+
+    /// `GET /v1/molecules/{id}/session` — read the worker's message thread.
+    ///
+    /// The retrospective sibling of the `/logs` SSE tail: ordered, attributed
+    /// entries that survive the worker, plus a `waiting` verdict so an
+    /// unanswered prompt is visible instead of inferred. `tail` asks for the
+    /// last N entries; `None` takes the server's default page.
+    ///
+    /// Read-only. There is deliberately no `send`/`reply` counterpart on this
+    /// client — writing into a session is a separate decision, not yet taken.
+    pub async fn get_session(&self, id: &str, tail: Option<usize>) -> Result<SessionEnvelope> {
+        use std::fmt::Write as _;
+        let mut path = canon::GET_V1_MOLECULES_ID_SESSION.path_with(&[id]);
+        if let Some(n) = tail {
+            let _ = write!(path, "?tail={n}");
+        }
+        let resp = self.send(self.req(Method::GET, &path)).await?;
         decode_json(resp).await
     }
 

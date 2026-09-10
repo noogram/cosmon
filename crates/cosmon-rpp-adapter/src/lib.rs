@@ -632,6 +632,19 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/logs",
             get(routes::logs_stream::logs_stream),
         )
+        // Non-streaming read of the worker's message THREAD (issue #51
+        // follow-up). Sibling of `/logs` and deliberately not a second
+        // name for it: `/logs` tails a screen live and ends with the
+        // session, this returns the structured, ordered, attributed
+        // transcript — after the fact, without a live tmux, with an
+        // explicit `waiting` field so an unanswered prompt is visible
+        // rather than inferred. Read-only: the write direction is
+        // deferred, and `tests/session_is_read_only.rs` pins that no
+        // write path exists on this route or its client verb.
+        .route(
+            "/v1/molecules/{id}/session",
+            get(routes::session::get_session),
+        )
         // Health routes are intentionally outside `/v1/` so they
         // never count toward the §8p frozen API surface.
         .route("/healthz", get(routes::healthz))
