@@ -21,6 +21,149 @@ this stage.
 
 ### Added
 
+- **`scripts/rpp-remote-e2e.sh` — a container-level smoke of the Remote Pilot
+  Port, and a nightly CI job that runs it.** The third part of GitHub issue #53.
+  Every other test of this surface runs the adapter in-process against test
+  doubles: that proves the handlers and can prove nothing about the *deployment*
+  — that the two images boot, that the JWKS hand-off between them lands where
+  the adapter looks for it, that the nucleon binding an operator materialises is
+  the shape the loader reads, or that a tenant's `cosmon-remote login` walks the
+  mock IdP's authorization-code flow to a persisted credential. The script boots
+  the real `crates/cosmon-rpp-adapter/deploy/` stack with `docker compose up
+  --wait` (both healthchecks were already declared there; `--wait` is what makes
+  them load-bearing) and drives it with the compiled `cosmon-remote` over the
+  published loopback ports: `login` → `auth me` → `nucleate` → `observe` →
+  `land`. Each step is one NDJSON line `{step, rc, ms, evidence}`; the first red
+  step ends the run. It never edits the tracked `deploy/` tree — it copies it,
+  materialises the nucleon binding into the copy, and points the stack at a
+  throwaway galaxy destroyed with it; `$HOME` is redirected and the credential
+  backend named explicitly so the run touches neither the operator's profiles
+  nor their OS keychain. A missing `docker` is exit 2 with a sentence, never a
+  skip that prints green — that is how an absent prerequisite becomes a passing
+  nightly. `tackle` and `done` are deliberately absent: those routes still shell
+  out to `cs`, the adapter image has shipped none since it went library-direct,
+  and issue #54 owns both the fix and that leg of this scenario. `land` shells
+  out too, so the script pins the *name* of the refusal it returns today
+  (`subprocess_spawn_failed`) rather than asserting a harvest — when #54 makes
+  the door library-direct, the pin goes red and says so, instead of passing for
+  a new reason. The compose file gained the four variables the second stack
+  needs (`COSMON_RPP_ISSUER`, `COSMON_RPP_HOST_PORT`, `COSMON_OIDC_HOST_PORT`,
+  `COSMON_RPP_NAME_SUFFIX`), each defaulting to its previous literal so the
+  rendered configuration of the reference deployment is unchanged.
+
+### Changed
+
+- **The container-level e2e moved from a shell script to a `pytest` suite under
+  `tests/e2e/`.** Answering the review of PR #56: a shell script was the fastest
+  way to prove the stack end to end once, and the wrong substrate to grow test
+  selection, debugging and reporting on. `scripts/rpp-remote-e2e.sh` is now a
+  pass-through to `pytest tests/e2e` (every argument forwarded), so the command
+  CI and the how-to page name is unchanged. What the move buys, each of it a
+  point the review made: `-k` selection, so `pytest tests/e2e -k healthz` is a
+  real command — the scenario's legs reach their preconditions through fixtures,
+  not by a sibling test having run first; a JUnit report and per-exchange
+  artefacts (request, response, container logs) instead of one NDJSON line;
+  `--pdb`, `-x`, `--lf`. Every assertion now states *why* the value it expects is
+  the right one, naming the ADR section, route document or invariant it derives
+  from, and the helper that carries that sentence prints the request, the
+  response and the adapter log tail when it breaks. The **stack is reinitialised
+  between test sets** — `down -v` + `up --wait` + reprovisioning, plus a fresh
+  tenant galaxy tree, per test class — so no molecule or rate-limiter bucket from
+  one set can decide another's verdict; `tests/e2e/test_reinit.py` plants a
+  molecule in one set and asserts its absence in the next, and goes red under
+  `RPP_E2E_REINIT=0`, which is what makes the boundary a claim the suite supports
+  rather than one it asserts. The **mock IdP caveat** the review asked for is
+  written where the fixture is defined and on the how-to page: six named
+  deviations from a real provider (auto-approving `/authorize`, a readable fixed
+  `sub`, a minimal discovery document, unordered token-response extras,
+  non-rotating keys, no refresh/revocation/introspection) and the environment
+  profile that runs the same tests against a real IdP. The image build stays
+  session-scoped: it is minutes of `cargo build --release`, and paying it per
+  test would make the suite unusable.
+
+### Fixed
+
+- **Pre-merge review of the issue-#53 work: the container smoke now provisions
+  from the operator's own artefact, and the mock IdP requires what RFC 6749
+  says is required.** Four findings from an independent adversarial review,
+  fixed at their causes.
+
+  `scripts/rpp-remote-e2e.sh` claimed to materialise the nucleon binding "from
+  the `.example`" and did not — it wrote its own TOML from an inline heredoc and
+  never opened
+  `crates/cosmon-rpp-adapter/deploy/state/nucleons/nuc-tenant-demo/oidc-identity.toml.example`,
+  which held a single `sub = "…"` line. So the file a fresh operator actually
+  provisions from could not produce a binding the loader resolves a noyau from,
+  and the smoke stayed green straight through that. The `.example` is now a
+  complete template — every key `HabilitationMap::load` reads, each with a
+  `REPLACE_ME_*` placeholder and a comment saying what it is — and the script
+  `cp`s it and substitutes the run-specific values instead of authoring TOML of
+  its own. The `stage` step then asserts, on the materialised file, that no
+  placeholder survived and that every required key is present, so a template
+  that has lost a key turns `stage` red with the key named rather than passing
+  on a private copy the operator will never have.
+
+  `cs-oidc-mock`'s `POST /token` checked `client_id` and `redirect_uri` only
+  when the client sent them, which made the code's binding to both opt-in: a
+  client that simply omitted a field skipped the check. RFC 6749 §4.1.3 makes
+  `redirect_uri` REQUIRED at redemption whenever it was sent at authorization,
+  and `/authorize` here refuses a request without one, so it always was. Both
+  are now mandatory; absent is `invalid_request` (malformed), distinct from the
+  present-but-wrong refusals that follow.
+
+  The nightly CI job set `RPP_E2E_RUN_DIR: rpp-remote-e2e` while `.gitignore`
+  ignores `.rpp-remote-e2e/`, so the run's staged deploy tree, throwaway galaxy
+  and logs landed untracked-but-visible under the repo root. Both now spell the
+  dotted name the script defaults to, and the artifact upload passes
+  `include-hidden-files: true` — without it the step would have succeeded while
+  uploading nothing.
+
+  Finally the script's teardown trapped `EXIT` only, so a CI cancel (`SIGTERM`)
+  left the compose stack up for the next run to meet as "port already
+  allocated"; it now traps `INT` and `TERM` as well, idempotently. `observe`
+  asserts the recorded lifecycle status, not just the molecule id — a molecule
+  that reads back while reporting a status nucleation never produces is exactly
+  the envelope drift this smoke exists to notice — and a dead `FAILED_STEP`
+  variable is gone.
+
+- **The `COSMON_RPP_CS` line in `deploy/docker-compose.yml` was a fossil.** It
+  pointed the adapter at `/usr/local/bin/cs` inside an image that has shipped no
+  `cs` binary since it went library-direct (`task-20260504-6ad4`). It read as
+  configuration and configured nothing: the two routes that still shell out
+  (`tackle`, `land`) fail `subprocess_spawn_failed` there whether it is set or
+  not, and setting it made that failure look like a mis-set path rather than the
+  missing binary it is. Removed, with the reason and the issue that will retire
+  the shell-out (#54) written where the line used to be. No `cs` was added to
+  the image.
+
+- **Headless `cosmon-remote login`, and a `cs-oidc-mock` that can actually be
+  logged into.** GitHub issue #53 asks for a container smoke that "uses login,
+  then …". Neither half existed. The mock IdP served only `/jwks` and `/issue`,
+  so there was no `/authorize` for a client to visit and no `/token` to redeem
+  a code at; and `login` hard-coded the system browser as the thing that opens
+  the authorize URL, which a container has none of. Both halves are now real.
+  `cs-oidc-mock` gained `GET /.well-known/openid-configuration` (S256 only —
+  `plain` is a PKCE downgrade and is not advertised), a `GET /authorize` that
+  auto-approves and 302s back with `code` + the caller's `state` verbatim, and a
+  `POST /token` that redeems a **single-use, 60-second** code bound to its
+  `client_id` and `redirect_uri`, refusing any request whose PKCE verifier does
+  not digest to the challenge presented at `/authorize`. Its V0 endpoints are
+  untouched. `cosmon-remote login` gained one seam, not a second CLI surface:
+  `$COSMON_REMOTE_BROWSER` names a command that opens the sign-in URL (appended
+  as its last argument, run directly, no shell), so
+  `COSMON_REMOTE_BROWSER='curl -sS -L -o /dev/null' cosmon-remote login`
+  completes a full login with no display attached. Setting it empty is an error
+  raised **before** the listener binds, not a silent fallback — the alternative
+  is a `login` that opens nothing and then waits five minutes without saying
+  why. The default (system browser) is unchanged. `login --help` and
+  `man cosmon-remote` were re-blessed to carry the new `NO BROWSER?` block; the
+  root `--help` line is byte-identical, because a paragraph about a headless
+  environment variable does not belong in a command index. The whole IdP now
+  lives in `cosmon-oidc-testkit`'s library as a router, so
+  `crates/cosmon-remote/tests/login_headless.rs` drives the **shipped**
+  handlers in-process rather than a second mock that would stay green while the
+  binary drifted.
+
 - **`cosmon-remote login --bind <IP>` — a configurable bind address for the
   OIDC loopback callback.** The answer to GitHub issue #52: the login flow's
   one-shot redirect catcher bound `127.0.0.1` and advertised

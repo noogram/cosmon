@@ -5,6 +5,15 @@ target/
 **/.cosmon/state/
 **/.cosmon/archive/
 
+# The container-level e2e harness and the artefacts of its runs. Neither
+# belongs in an image, and the run directory is the expensive one: it is
+# created under the repo root (it must be — colima and Docker Desktop
+# share $HOME, not /var/folders) *before* the images are built, so a
+# context that included it would differ on every run, invalidate
+# `COPY . .`, and pay a full `cargo build --release` per run.
+.rpp-remote-e2e/
+tests/e2e/
+
 # Git
 .git/
 .gitignore
