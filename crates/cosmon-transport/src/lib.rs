@@ -20,6 +20,9 @@
 //!   both Adapters (ADR-097 / PR-4)
 //! - [`locale`] — the UTF-8 floor every tmux-backed worker pane needs so its
 //!   TUI is legible in a container that declares no locale
+//! - [`machine_probe`] — the platform reader behind
+//!   [`cosmon_core::admission::MachineProbe`], so the domain core decides from
+//!   a host reading it never takes itself (noogram/cosmon #58)
 
 #![forbid(unsafe_code)]
 
@@ -34,6 +37,7 @@ pub mod command_runner;
 pub mod demote_provisioning;
 pub mod dispatch;
 pub mod locale;
+pub mod machine_probe;
 #[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 pub mod opencode;

@@ -53,6 +53,7 @@ pub mod land;
 pub mod lineage;
 pub mod listen;
 pub mod livelock;
+pub(crate) mod machine_reading;
 pub mod markdown_help;
 pub mod migrate;
 pub mod mission;
@@ -189,6 +190,25 @@ impl Context {
         state_dir: impl Into<PathBuf>,
     ) -> Box<dyn cosmon_state::StateStore> {
         open_store(state_dir)
+    }
+
+    /// Obtain the host-reading adapter behind the
+    /// [`MachineProbe`](cosmon_core::admission::MachineProbe) port.
+    ///
+    /// **The sibling of [`Context::store`], and the same kind of seam.** A
+    /// command that constructed `HostMachineProbe` inline would be untestable
+    /// on any branch the developer's own machine does not happen to be in —
+    /// an unreadable counter, a probe that fails outright — which is precisely
+    /// where this instrument has to be right (noogram/cosmon #58). Handlers
+    /// therefore depend on `dyn MachineProbe` and a test drives every branch
+    /// from a canned snapshot.
+    ///
+    /// `&self` is retained for the same reason [`Context::store_at`] keeps it:
+    /// a future probe selected from config or env (a cgroup reader inside a
+    /// container, say) extends this one method rather than every call site.
+    #[allow(clippy::unused_self)]
+    pub(crate) fn machine_probe(&self) -> Box<dyn cosmon_core::admission::MachineProbe> {
+        Box::new(cosmon_transport::machine_probe::HostMachineProbe::real())
     }
 }
 

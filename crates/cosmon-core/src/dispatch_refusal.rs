@@ -58,6 +58,61 @@ pub const BRIEFLESS_DISPATCH: i32 = 16;
 /// busy-loop the briefless code was added to stop.
 pub const ADAPTER_LACKS_CAPABILITY: i32 = 17;
 
+/// Exit code `cs tackle` returns when it refuses to dispatch because the
+/// **host machine** is out of resource headroom (noogram/cosmon #58).
+///
+/// `18`, the first value past the CLI type-tightening guard band (10–17,
+/// `cosmon_cli::cmd::guard::exit_code`), which is full. Two values inside that
+/// band are already double-assigned — `UNLEASED_PILOT_GESTURE = 16` collides
+/// with [`BRIEFLESS_DISPATCH`], and `OPERATOR_ONLY_VERB_IN_API` aliases
+/// `api_envelope::EXIT_OPERATOR_ONLY_VERB_IN_API = 17` which collides with
+/// [`ADAPTER_LACKS_CAPABILITY`] — in a module whose own doc says a new guard
+/// "should reserve a new code rather than reusing one". Neither collision is
+/// this constant's to fix; both are named here so the next author trips over
+/// them deliberately rather than by surprise, and so `18` is visibly the
+/// lowest genuinely free value.
+///
+/// # Why it is deliberately absent from [`is_permanent_refusal`]
+///
+/// Resource pressure is **transient by construction**. A briefless molecule
+/// and an incapable adapter are functions of the molecule, its formula and the
+/// adapter chain — nothing a retry changes — which is what earns those two
+/// codes a park. Swap on a busy host, by contrast, is a function of *what else
+/// is running*, and the single most likely thing to change it is a sibling
+/// worker exiting. Parking a molecule for it would strand a perfectly healthy
+/// piece of work behind a spike that cleared thirty seconds later, and only an
+/// operator could unstrand it.
+///
+/// # What a re-attempt must be triggered by
+///
+/// Not a bare tick. Read against the drain loops as they stand:
+/// `cosmon_runtime::resident`'s loop sends an unrecognised non-zero
+/// `cs tackle` exit down the `else` arm at `crates/cosmon-runtime/src/resident.rs:1262`,
+/// which calls `forget_dispatch` — retracting the optimistic mark so the
+/// molecule is re-emitted on the **next poll interval**. `Runtime::run`'s
+/// drain loop does the analogous thing: only `TackleExecError::UnsupportedStep`
+/// maps to `RuntimeError::DispatchRefused` (named, not linked: the domain
+/// core does not depend on the runtime)
+/// (`crates/cosmon-runtime/src/tackle_exec.rs:549`), every other failure
+/// becomes the retryable `RuntimeError::Dispatch`, whose arm at
+/// `crates/cosmon-runtime/src/lib.rs:1682` logs, rolls the molecule back to
+/// `Pending` and `continue`s the pass. So an unrecognised exit neither stops
+/// the loop nor parks the molecule terminally — it retries immediately, every
+/// tick, which for a pressure refusal is precisely the busy-loop
+/// [`BRIEFLESS_DISPATCH`] exists to prevent, only now with a condition that
+/// *will* clear.
+///
+/// The re-attempt therefore has to be driven by a **worker-exit event or a
+/// backoff**, never by the poll interval alone. Wiring that is stage 3 of
+/// issue #58; this constant is the number the two seams will agree on, and
+/// stage 1 emits it from nowhere.
+///
+/// Note also that `resident::ExitReason` has no `DispatchRefused` variant:
+/// that variant lives on `RuntimeError` / `ShutdownReason` and is documented
+/// **permanent**, which is the second reason resource pressure must not be
+/// mapped onto it.
+pub const RESOURCE_PRESSURE: i32 = 18;
+
 /// Whether a captured process exit code is the briefless-dispatch refusal.
 ///
 /// `code` is the child's exit status: `Some(n)` for a normal exit, `None`
@@ -91,6 +146,14 @@ pub fn is_permanent_refusal(code: Option<i32>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_pressure_is_not_a_permanent_refusal() {
+        // The entire guard against parking a healthy molecule for a transient
+        // spike. See the constant's doc for the drain-loop reading that sets
+        // this polarity.
+        assert!(!is_permanent_refusal(Some(RESOURCE_PRESSURE)));
+    }
 
     #[test]
     fn briefless_dispatch_code_is_pinned() {
@@ -135,6 +198,7 @@ mod tests {
         assert!(!is_permanent_refusal(None));
         assert!(!is_permanent_refusal(Some(0)));
         assert!(!is_permanent_refusal(Some(1)));
+        assert!(!is_permanent_refusal(Some(RESOURCE_PRESSURE)));
         for transient in [10, 11, 12, 13, 14, 15] {
             assert!(
                 !is_permanent_refusal(Some(transient)),

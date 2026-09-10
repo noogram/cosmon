@@ -22,6 +22,8 @@ EXAMPLES:
 * `--cluster` [alias: `cluster`] — Walk every `.cosmon/`-bearing galaxy under `$COSMON_CLUSTER_ROOT` (default `$HOME/galaxies`) and print one aggregated table.
 
    This is the cross-galaxy extension of `--all`. Where `--all` drops the project-id filter within the current state dir, `--cluster` visits every sibling galaxy on disk and prints their workers + molecule counts. Works in tandem with `--all` (implicitly drops the project filter because the scope is now the whole cluster).
+
+   Also prints one host reading — memory, swap, the kernel's own pressure level, CPUs and load, with units — and the machine-wide totals derived from the galaxies scanned, including harvests holding a galaxy's trunk lock (a `cs done` in its post-merge gate phase has no live worker). Observations only: no threshold is applied and nothing is refused. A counter that could not be read prints `unavailable`, never `0`; if the host cannot be read at all the galaxy view still renders and the reason goes to stderr.
 * `--cluster-root <DIR>` — Override the cluster root directory when `--cluster` is set. Defaults to `$COSMON_CLUSTER_ROOT` env var, then `$HOME/galaxies`
 * `--tag <GLOB>` — Filter molecules by tag glob pattern (repeatable, any-match).
 

@@ -90,6 +90,8 @@ pub mod adapter_capability;
 #[doc(hidden)]
 pub mod adapter_exit;
 #[doc(hidden)]
+pub mod admission;
+#[doc(hidden)]
 pub mod agent;
 #[doc(hidden)]
 pub mod algorithmic_provenance;

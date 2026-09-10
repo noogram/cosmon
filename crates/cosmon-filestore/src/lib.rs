@@ -504,6 +504,87 @@ fn hostname_best_effort() -> String {
         .unwrap_or_else(|_| "unknown".to_owned())
 }
 
+/// The holder recorded in a galaxy's `trunk.lock` while a trunk write is in
+/// progress.
+///
+/// # Why this is public
+///
+/// The hint is written by [`FileStore::acquire_trunk_lock`] and cleared by
+/// [`TrunkLockGuard`] on release, so a *non-empty* hint is the one piece of
+/// durable, already-owned state that says "a `cs done` is mid-harvest right
+/// now" — including during the post-merge gate sweep, which runs inside the
+/// trunk lock and after the worker has been torn down. A read surface that
+/// counts only live workers is blind for exactly that window
+/// (noogram/cosmon #58, stage 1, the harvest blind spot). Exposing the parse
+/// here rather than re-deriving it in a command keeps the format owned by the
+/// module that writes it.
+///
+/// `#[non_exhaustive]`: the hint format is `key=value` lines and gains fields
+/// additively; a reader that does not know a new one still knows a write is
+/// in flight.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrunkLockHolder {
+    /// PID of the process holding the trunk lock, when the hint recorded one.
+    ///
+    /// [`None`] rather than `0` for an absent or unparseable field: `0` is a
+    /// real PID on some platforms and a reader must be able to tell "no PID
+    /// recorded" from "PID zero". A caller that wants to know whether the
+    /// holder is still alive checks this against the OS itself; this crate
+    /// performs no such check, because a stale hint left by a crashed holder
+    /// is a different fact from an absent one and only the caller knows which
+    /// it cares about.
+    pub pid: Option<u32>,
+    /// The `cs` command that took the lock, e.g. `cs done task-20260906-73be`.
+    pub cmd: Option<String>,
+    /// RFC-3339 instant at which the lock was taken, as written.
+    pub started_at: Option<String>,
+    /// Host on which the holder runs, as written.
+    pub host: Option<String>,
+}
+
+/// Read the trunk-lock holder recorded under `state_dir`, if a trunk write is
+/// currently recorded as in progress.
+///
+/// Returns [`None`] when the lock file is absent, unreadable, or **empty** —
+/// empty being the state [`TrunkLockGuard`]'s drop leaves behind, so "no
+/// holder" and "released" are the same observation. Never fails and never
+/// blocks: this is a read for observability, and taking the lock to answer
+/// "is the lock held?" would serialise a reader behind the writer it is
+/// reporting on.
+///
+/// Note the residual the caller must handle: a holder killed with `SIGKILL`
+/// never runs its drop, so its hint survives. The hint is evidence a write
+/// *started*, not proof one is still running; check [`TrunkLockHolder::pid`]
+/// against the OS if that distinction matters.
+#[must_use]
+pub fn read_trunk_lock_holder_at(state_dir: &Path) -> Option<TrunkLockHolder> {
+    let raw = fs::read_to_string(state_dir.join(CosmonPath::TrunkLock.rel())).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut holder = TrunkLockHolder {
+        pid: None,
+        cmd: None,
+        started_at: None,
+        host: None,
+    };
+    for line in trimmed.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        match key {
+            "pid" => holder.pid = value.trim().parse().ok(),
+            "cmd" => holder.cmd = Some(value.to_owned()),
+            "started_at" => holder.started_at = Some(value.to_owned()),
+            "host" => holder.host = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    Some(holder)
+}
+
 /// Load the project configuration from `.cosmon/config.toml`.
 ///
 /// Returns the default configuration if the file does not exist.
