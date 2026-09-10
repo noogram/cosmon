@@ -81,20 +81,31 @@ async fn mount_lifecycle(server: &MockServer) {
         .expect(1)
         .mount(server)
         .await;
+    // The follow phase is `wait::poll_until`, so it polls the STATUS route —
+    // the cheap read — not the full molecule. `run` brackets that flow with
+    // two quota reads; what it follows with is not its business.
     Mock::given(method("GET"))
-        .and(path("/v1/molecules/task-run-0001"))
+        .and(path("/v1/molecules/task-run-0001/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "request_id": "req-run-3",
-            "molecule": {"id": "task-run-0001", "kind": "task", "status": "running"},
+            "molecule_id": "task-run-0001",
+            "status": "running",
+            "phase": "live",
+            "updated_at": "2026-06-25T10:00:00Z",
+            "terminal": false,
         })))
         .up_to_n_times(1)
         .mount(server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/v1/molecules/task-run-0001"))
+        .and(path("/v1/molecules/task-run-0001/status"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "request_id": "req-run-4",
-            "molecule": {"id": "task-run-0001", "kind": "task", "status": "completed"},
+            "molecule_id": "task-run-0001",
+            "status": "completed",
+            "phase": "done",
+            "updated_at": "2026-06-25T10:00:20Z",
+            "terminal": true,
         })))
         .mount(server)
         .await;

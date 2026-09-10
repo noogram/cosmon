@@ -324,7 +324,11 @@ pub async fn get_molecule(
 }
 
 /// Extract the JWT bearer from the `Authorization` header.
-fn extract_bearer(headers: &HeaderMap) -> Result<&str, RppRejectReason> {
+///
+/// `pub(crate)` so a sibling route module reuses the ONE parser rather
+/// than growing a third private copy of it (`session` already has the
+/// second) — the shape of a bearer header is not a per-route decision.
+pub(crate) fn extract_bearer(headers: &HeaderMap) -> Result<&str, RppRejectReason> {
     let header = headers
         .get(axum::http::header::AUTHORIZATION)
         .ok_or(RppRejectReason::MissingAuthorization)?;
@@ -607,6 +611,48 @@ pub(crate) fn observe_with_state_dir_public(
             },
         })?;
     Ok((view, tenant_state_dir))
+}
+
+/// Resolve the per-tenant store and read ONE molecule's status.
+///
+/// The cheap sibling of [`observe_with_state_dir_public`]: same tenant
+/// resolution and the same error mapping, but the read behind it is
+/// [`ops::molecule_status()`] — one molecule load, no log scans. The status
+/// route ([`crate::routes::status`]) is a poll surface, and going through
+/// `observe` would have made each poll cost more as the molecule's logs
+/// grow. It returns no `state_dir` on purpose: the caller has nothing
+/// further to read.
+pub(crate) fn status_public(
+    state: &Arc<AppState>,
+    spark: &Spark,
+    molecule_id: &MoleculeId,
+) -> Result<cosmon_state::ops::StatusView, ApiError> {
+    let tenant_root = state.galaxies_root.join(spark.noyau.as_str());
+    if !tenant_root.exists() {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+        });
+    }
+    let store = FileStore::new(tenant_root.join(".cosmon").join("state"));
+    ops::molecule_status(&store, molecule_id).map_err(|e| match &e {
+        cosmon_state::ops::StatusError::MoleculeNotFound(_) => ApiError {
+            status: StatusCode::NOT_FOUND,
+            label: "not_found",
+            request_id: Some(spark.request_id.clone()),
+        },
+        cosmon_state::ops::StatusError::StoreUnavailable(_) => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "store_unavailable",
+            request_id: Some(spark.request_id.clone()),
+        },
+        _ => ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            label: "status_failed",
+            request_id: Some(spark.request_id.clone()),
+        },
+    })
 }
 
 /// Translate a [`NucleateError`] into the wire-stable [`ApiError`].

@@ -645,6 +645,16 @@ pub fn router(state: AppState) -> Router {
             "/v1/molecules/{id}/session",
             get(routes::session::get_session),
         )
+        // `GET /v1/molecules/{id}/status` — the poll surface (issue #51
+        // follow-up). One molecule load through the state store, a weak
+        // `ETag` and a bodiless `304`, so a client can implement `wait`
+        // by polling — and no log scan, which is what the full molecule
+        // read pays and what makes it the wrong thing to poll. There is no
+        // `wait` ROUTE by decision: a blocking route would hold a server
+        // thread and a piece of state ("who waits on what") per client,
+        // and the client is the one that owns its patience. See the
+        // module docs.
+        .route("/v1/molecules/{id}/status", get(routes::status::get_status))
         // Health routes are intentionally outside `/v1/` so they
         // never count toward the §8p frozen API surface.
         .route("/healthz", get(routes::healthz))

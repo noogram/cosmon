@@ -137,6 +137,31 @@ enum Cmd {
         #[arg(long = "no-events")]
         no_events: bool,
     },
+    #[command(display_order = 1, about = format!("Block until a molecule reaches a status, by polling {} — client-side, so nothing on the server waits for you. Exit 0 when a requested status is reached, {EXIT_WAIT_TIMEOUT} on timeout, {EXIT_WAIT_OTHER_TERMINAL} when it ended some OTHER terminal way (a collapse is not a timeout, and a script must not retry it)", canon::GET_V1_MOLECULES_ID_STATUS.label()))]
+    Wait {
+        /// Molecule ID to wait on. An exact id, never a prefix: resolving
+        /// one would cost a full listing to start a loop built to be
+        /// cheap, and a wait that silently follows the wrong molecule is
+        /// worse than one that refuses an ambiguous name.
+        id: String,
+        /// Statuses to wait for, comma-separated. Defaults to the terminal
+        /// set, so `wait <id>` means "until it is over".
+        #[arg(long, default_value = "completed,collapsed", value_delimiter = ',')]
+        r#for: Vec<String>,
+        /// Maximum seconds to wait before giving up. An absolute deadline:
+        /// it bounds the request in flight, not only the sleep between two
+        /// of them, so an answer that arrives late is a timeout even when
+        /// it would have been a success. The contract is your clock.
+        #[arg(long, default_value_t = 600)]
+        timeout: u64,
+        /// Seconds between polls. Clamped to the remaining budget, so a
+        /// value larger than `--timeout` still terminates on time.
+        #[arg(long = "poll-interval", default_value_t = 5)]
+        poll_interval: u64,
+        /// Suppress the per-transition progress lines. Implied by `--json`.
+        #[arg(long)]
+        quiet: bool,
+    },
     /// Molecule lifecycle (the §8p frozen surface).
     #[command(display_order = 1)]
     Molecule {
@@ -363,6 +388,8 @@ enum MoleculeCmd {
     Get { id: String },
     #[command(about = format!("{} — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope{}", canon::GET_V1_MOLECULES_ID_RESULT.label(), canon::GET_V1_MOLECULES_ID_RESULT.effect_suffix()))]
     Result { id: String },
+    #[command(about = format!("{} — status, phase, `updated_at` and whether it is terminal, and nothing else: the cheap read a poller repeats. `wait` is this in a loop. Sends a conditional request when it can, so an unmoved molecule costs a 304 and no body{}", canon::GET_V1_MOLECULES_ID_STATUS.label(), canon::GET_V1_MOLECULES_ID_STATUS.effect_suffix()))]
+    Status { id: String },
     #[command(about = format!("{} — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session{}", canon::GET_V1_MOLECULES_ID_SESSION.label(), canon::GET_V1_MOLECULES_ID_SESSION.effect_suffix()))]
     Session {
         id: String,
@@ -582,6 +609,23 @@ async fn main() {
         std::process::exit(exit_code);
     }
 }
+
+/// Exit code when `wait` gives up on the clock.
+///
+/// 124, the same code `timeout(1)` uses on GNU coreutils and BSD, and the
+/// same one `cs wait` returns — a shell composing the two must not have to
+/// learn which one it is talking to.
+pub const EXIT_WAIT_TIMEOUT: i32 = 124;
+
+/// Exit code when the molecule ended terminally but NOT in a status the
+/// caller asked for — a collapse under `--for completed`.
+///
+/// Distinct from the timeout by decision: the two failures call for
+/// opposite reactions. A timeout means *keep waiting, or look at why it is
+/// slow*; this means *stop, it will never move again*. A script that reads
+/// one code for both retries a dead molecule forever. 125 is the next free
+/// code above the timeout and is used by nothing else in this binary.
+pub const EXIT_WAIT_OTHER_TERMINAL: i32 = 125;
 
 fn exit_code_for(err: &Error) -> i32 {
     match err {
@@ -952,6 +996,26 @@ async fn dispatch(cli: Cli, store: &ProfileStore) -> Result<()> {
                 &profile,
                 ProfileStore::default_location()?,
                 opts,
+                cli.token,
+                cli.json,
+            )
+            .await
+        }
+        Cmd::Wait {
+            id,
+            r#for,
+            timeout,
+            poll_interval,
+            quiet,
+        } => {
+            let (_, profile) = store.resolve(cli.profile.as_deref())?;
+            run_wait_cmd(
+                &profile,
+                &id,
+                &r#for,
+                timeout,
+                poll_interval,
+                quiet,
                 cli.token,
                 cli.json,
             )
@@ -1484,6 +1548,35 @@ async fn run_molecule(
                 println!("status: {}", env.molecule.status);
             }
         }
+        MoleculeCmd::Status { id } => {
+            // One unconditional read: a single-shot verb has no previous
+            // answer to be conditional against.
+            let poll = client.get_status(&id, None).await?;
+            let env = match poll {
+                cosmon_remote::client::StatusPoll::Fresh { envelope, .. } => envelope,
+                // Unreachable without an `If-None-Match`; a server that
+                // answers 304 anyway gets said so rather than rendered as
+                // an empty status.
+                cosmon_remote::client::StatusPoll::NotModified { .. } => {
+                    return Err(Error::Api {
+                        status: 304,
+                        body: serde_json::json!({
+                            "error": "unexpected_not_modified",
+                            "detail": "the server answered 304 to an unconditional request",
+                        }),
+                    })
+                }
+            };
+            if json {
+                print_json(true, &serde_json::to_value(&*env)?);
+            } else {
+                println!("id:         {}", env.molecule_id);
+                println!("status:     {}", env.status);
+                println!("phase:      {}", env.phase);
+                println!("updated_at: {}", env.updated_at);
+                println!("terminal:   {}", env.terminal);
+            }
+        }
         MoleculeCmd::Session { id, tail } => {
             let env = client.get_session(&id, tail).await?;
             if json {
@@ -1832,6 +1925,118 @@ async fn run_events(
 
 /// `cosmon do "<topic>"` — drive the client-side composition of
 /// [`cosmon_remote::do_flow::run_do`] with the real interactive edges:
+/// `wait` — block on a molecule, client-side.
+///
+/// The whole verb is [`cosmon_remote::wait::poll_until`] plus a rendering
+/// and an exit code. Nothing here talks to the server that the poller does
+/// not, and nothing on the server knows a wait is in progress.
+///
+/// The three outcomes map to three exit codes, and the *reason* they are
+/// three is that they call for three different reactions from a script:
+/// carry on, wait longer, or stop. Only the reached case returns `Ok(())`
+/// — the other two exit the process directly, the way `cs wait` does, so a
+/// timeout is not rendered as a transport error.
+#[allow(clippy::too_many_arguments)]
+async fn run_wait_cmd(
+    profile: &Profile,
+    id: &str,
+    targets: &[String],
+    timeout: u64,
+    poll_interval: u64,
+    quiet: bool,
+    token: Option<String>,
+    json: bool,
+) -> Result<()> {
+    let targets: Vec<String> = targets
+        .iter()
+        .map(|t| t.trim().to_owned())
+        .filter(|t| !t.is_empty())
+        .collect();
+    if targets.is_empty() {
+        return Err(Error::Config("--for must list at least one status".into()));
+    }
+    let opts = cosmon_remote::wait::WaitOptions {
+        targets,
+        timeout: std::time::Duration::from_secs(timeout),
+        poll_interval: std::time::Duration::from_secs(poll_interval.max(1)),
+    };
+    let client = client_for(profile, token).await?;
+
+    let loud = !quiet && !json;
+    if loud {
+        println!(
+            "waiting on {id} for {} (timeout {timeout}s, poll {}s)",
+            opts.targets.join("|"),
+            poll_interval.max(1),
+        );
+    }
+    let outcome = cosmon_remote::wait::poll_until(&client, id, &opts, |from, to| {
+        if loud {
+            println!("status: {from} → {to}");
+        }
+    })
+    .await?;
+
+    let report = outcome.report();
+    if json {
+        print_json(
+            true,
+            &serde_json::json!({
+                "outcome": outcome.slug(),
+                "molecule_id": report.molecule_id,
+                "status": report.status,
+                "phase": report.phase,
+                "terminal": report.terminal,
+                "polls": report.polls,
+                "unchanged_polls": report.unchanged_polls,
+                "transitions": report.transitions,
+                "elapsed_seconds": report.elapsed.as_secs_f64(),
+            }),
+        );
+    }
+
+    match &outcome {
+        cosmon_remote::wait::WaitOutcome::Reached(r) => {
+            if loud {
+                println!(
+                    "{} reached {} in {:.1}s ({} polls, {} unchanged, {} transitions)",
+                    r.molecule_id,
+                    r.status,
+                    r.elapsed.as_secs_f64(),
+                    r.polls,
+                    r.unchanged_polls,
+                    r.transitions,
+                );
+            }
+            Ok(())
+        }
+        cosmon_remote::wait::WaitOutcome::OtherTerminal(r) => {
+            if !json {
+                eprintln!(
+                    "{}: {} ended {} — a terminal status you did not ask for; \
+it will not move again",
+                    invoked_name(),
+                    r.molecule_id,
+                    r.status,
+                );
+            }
+            std::process::exit(EXIT_WAIT_OTHER_TERMINAL);
+        }
+        cosmon_remote::wait::WaitOutcome::TimedOut(r) => {
+            if !json {
+                eprintln!(
+                    "{}: wait timed out after {:.1}s — {} is still {}",
+                    invoked_name(),
+                    r.elapsed.as_secs_f64(),
+                    r.molecule_id,
+                    r.status,
+                );
+            }
+            std::process::exit(EXIT_WAIT_TIMEOUT);
+        }
+    }
+}
+
 /// stdin for the credit guard, the profile store for the one-time
 /// acknowledgment, stdout for progress.
 async fn run_do_cmd(

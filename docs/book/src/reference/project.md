@@ -126,17 +126,28 @@ List every adapter name the dispatch registry would accept (union of compile-tim
 
 ## `cs status`
 
-Project pulse — quick DAG overview like git status
+Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
 
-**Usage:** `cs status`
+**Usage:** `cs status [MOLECULE]`
 
 EXAMPLES:
   cs status                   # pulse: active / pending / blocked / completed
   cs status --fleet research
   cs status --json            # includes `galaxies` block (by-kind + nascent)
+  cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
+  cs status task-20260907-b25f --json # same four fields, machine-readable
 
-SEE ALSO: cs peek (fractal TUI), cs ensemble (full snapshot),
+NOTE: with a molecule id the answer is the cheap read — no coupling report,
+      no token totals, no model attribution. `cs observe <id>` is the full
+      one. The id is exact, never a prefix.
+
+SEE ALSO: cs observe (full molecule read), cs wait (block until it moves),
+          cs peek (fractal TUI), cs ensemble (full snapshot),
           cs galaxies list (four-family taxonomy).
+
+###### **Arguments:**
+
+* `<MOLECULE>` — Molecule id — without it, the DAG-wide pulse; with it, that one molecule
 
 
 

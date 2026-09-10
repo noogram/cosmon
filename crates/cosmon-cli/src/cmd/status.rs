@@ -8,6 +8,24 @@
 //! - **Compact** (default): one-line summary with attention bar
 //! - **Verbose** (`--verbose`): full dashboard with molecules, sessions,
 //!   contributions, and surfaces
+//!
+//! # `cs status <id>` — one molecule
+//!
+//! With a molecule id, `status` answers about *that* molecule instead of the
+//! DAG: its status, phase, `updated_at` and whether it is terminal, read from
+//! `state.json` alone. `git status` addresses a path the same way, and the
+//! reading is the same one either way — "how is this doing".
+//!
+//! It is the local twin of `GET /v1/molecules/{id}/status`, which exists so a
+//! remote client can implement `wait` by polling something cheap. Both project
+//! the same [`cosmon_state::ops::molecule_status()`] verb, so the two surfaces
+//! cannot answer differently — the CLI/UI parity the audit tracks.
+//!
+//! Why not `cs observe <id>`, which already prints a status? Because `observe`
+//! is the *full* read — a coupling report, the token totals, the model
+//! attribution, each a scan of a log that grows with the molecule's life. That
+//! is the right answer for a human looking once and the wrong one for anything
+//! asking repeatedly.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -21,7 +39,14 @@ use super::Context;
 
 /// Arguments for the `status` subcommand.
 #[derive(clap::Args)]
-pub struct Args;
+pub struct Args {
+    // One-paragraph doc on purpose: a second one flips clap's whole page
+    // to the long layout and every sibling option loses its compact form.
+    // The rationale for "exact id, never a prefix" is in the `NOTE:` of
+    // `examples::STATUS`, where it is read once rather than per-argument.
+    /// Molecule id — without it, the DAG-wide pulse; with it, that one molecule
+    pub molecule: Option<String>,
+}
 
 /// JSON output structure for `cs status --json`.
 #[derive(serde::Serialize)]
@@ -94,8 +119,16 @@ struct AttentionInfo {
 }
 
 /// Execute the `status` command.
+///
+/// # Errors
+///
+/// Surfaces a malformed molecule id, an unknown molecule, and any state-store
+/// read failure.
 #[allow(clippy::too_many_lines)]
-pub fn run(ctx: &Context, _args: &Args) -> anyhow::Result<()> {
+pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
+    if let Some(id) = args.molecule.as_deref() {
+        return run_one(ctx, id);
+    }
     let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
     let store = ctx.store_at(&state_dir);
 
@@ -764,6 +797,34 @@ fn discover_fleet_backends(
     backends
 }
 
+/// `cs status <id>` — the one-molecule read.
+///
+/// Four facts and no more, from the ONE verb the RPP route projects too, so
+/// the local and remote answers cannot diverge. `--json` emits exactly the
+/// wire shape of `GET /v1/molecules/{id}/status` minus its envelope, which is
+/// what makes a script portable between the two.
+fn run_one(ctx: &Context, id: &str) -> anyhow::Result<()> {
+    let molecule_id = cosmon_core::id::MoleculeId::new(id)
+        .map_err(|e| anyhow::anyhow!("invalid molecule id: {e}"))?;
+    let state_dir = ctx.config.clone().unwrap_or_else(super::default_state_dir);
+    let store = ctx.store_at(&state_dir);
+
+    let view = cosmon_state::ops::molecule_status(store.as_ref(), &molecule_id)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let json = cosmon_state::ops::StatusJson::from_view(&view);
+
+    if ctx.json {
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        println!("{} {}", view.status.emoji(), view.id);
+        println!("  status:     {}", json.status);
+        println!("  phase:      {}", json.phase);
+        println!("  updated_at: {}", json.updated_at);
+        println!("  terminal:   {}", json.terminal);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -853,7 +914,7 @@ mod tests {
             json: false,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
     }
 
@@ -881,7 +942,7 @@ mod tests {
             json: false,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
     }
 
@@ -899,7 +960,7 @@ mod tests {
             json: true,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
     }
 
@@ -917,7 +978,7 @@ mod tests {
             json: false,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
     }
 
@@ -976,7 +1037,7 @@ mod tests {
             json: false,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
 
         // Verbose mode
@@ -985,7 +1046,7 @@ mod tests {
             json: false,
             config: Some(tmp.path().to_path_buf()),
         };
-        let result = run(&ctx, &Args);
+        let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
     }
 }

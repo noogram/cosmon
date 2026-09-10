@@ -239,7 +239,7 @@ enum Command {
     #[command(after_help = cmd::examples::DAEMONS)]
     Daemons(cmd::daemons::Args),
 
-    /// Project pulse — quick DAG overview like git status
+    /// Project pulse — quick DAG overview like git status; with a molecule id, that one molecule's status
     #[command(after_help = cmd::examples::STATUS)]
     Status(cmd::status::Args),
 

@@ -7,6 +7,7 @@ Commands:
   list      `GET /v1/molecules` — ensemble list with optional filters
   get       `GET /v1/molecules/{id}`
   result    `GET /v1/molecules/{id}/result` — fetch the canonical deliverable (synthesis.md / result.md / the lone artifact). Prints the body to stdout (text) or a metadata line (binary); `--json` for the full envelope
+  status    `GET /v1/molecules/{id}/status` — status, phase, `updated_at` and whether it is terminal, and nothing else: the cheap read a poller repeats. `wait` is this in a loop. Sends a conditional request when it can, so an unmoved molecule costs a 304 and no body
   session   `GET /v1/molecules/{id}/session` — read the worker's message thread: who said what, in order, with a `waiting` verdict when it looks stuck on an unanswered prompt. Survives the worker, unlike the live `/logs` tail. Read-only — nothing is written into the session
   tackle    `POST /v1/molecules/{id}/tackle` [coûteux]
   run       `POST /v1/molecules/{id}/run` — request the resident drain of the DAG rooted at this molecule. The server decides what to tackle, under the binding's bounds (read them via `quota`); 202 on spawn, lifecycle on the events stream

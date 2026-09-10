@@ -5,13 +5,22 @@
 //!
 //! PURELY client-side: this module composes four existing §8p routes
 //! (`POST /v1/molecules`, `POST /v1/molecules/{id}/tackle`,
-//! `GET /v1/molecules/{id}`, `POST /v1/molecules/{id}/done`) plus the
-//! best-effort `GET /v1/events` tail. Zero new routes; tenant-side it is
+//! `GET /v1/molecules/{id}/status`, `POST /v1/molecules/{id}/done`) plus
+//! the best-effort `GET /v1/events` tail. Zero new routes; tenant-side it is
 //! the tenant's own molecule and budget, and `molecule nucleate` alone
 //! stays available as the advanced path.
 //!
 //! The golden first hour becomes `login → do → result`
 //! (4 gestures instead of 10).
+//!
+//! # The follow phase is `wait`
+//!
+//! It is not a loop of its own: it calls [`crate::wait::poll_until`], the
+//! one polling loop of this crate. Having two was not a duplication that
+//! stayed harmless — `do`'s copy polled `GET /v1/molecules/{id}`, the full
+//! read, which pays three growing log scans per tick, while `wait` polled
+//! the cheap status route. The single implementation is what stops a
+//! second one from drifting again.
 //!
 //! # Why `do` closes what it opened
 //!
@@ -169,11 +178,6 @@ pub struct DoOutcome {
     pub harvest_outcome: Option<String>,
 }
 
-/// Statuses after which polling stops.
-fn is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "collapsed")
-}
-
 /// Run the composition. `confirm` is the interactive edge (reads one
 /// answer for the guard prompt); `progress` receives human-readable
 /// step lines (the CLI prints them, tests collect them).
@@ -250,25 +254,36 @@ where
         None
     };
 
-    let deadline = tokio::time::Instant::now() + opts.poll_timeout;
-    let mut last_status = String::from("pending");
-    let terminal_status = loop {
-        tokio::time::sleep(opts.poll_interval).await;
-        let observed = client.get_molecule(&molecule_id).await?;
-        let status = observed.molecule.status.clone();
-        if status != last_status {
-            progress(&format!("status: {last_status} → {status}"));
-            last_status.clone_from(&status);
+    // The follow phase IS `wait`, run with `do`'s deadline: one polling
+    // loop in this crate, not two. Before this, `do` had its own loop over
+    // the full molecule read while `wait` polled the cheap status route —
+    // the second implementation had already drifted onto the expensive one.
+    // The targets are empty on purpose: `do` follows to whatever end the
+    // molecule reaches, and `poll_until` stops on the server's `terminal`
+    // flag, so `do` never restates the terminal set either.
+    let wait_opts = crate::wait::WaitOptions {
+        targets: Vec::new(),
+        timeout: opts.poll_timeout,
+        poll_interval: opts.poll_interval,
+    };
+    let outcome = crate::wait::poll_until(client, &molecule_id, &wait_opts, |from, to| {
+        progress(&format!("status: {from} → {to}"));
+    })
+    .await?;
+    let terminal_status = match &outcome {
+        // `Reached` cannot occur with an empty target set; folded with
+        // `OtherTerminal` so a future caller that names targets still works.
+        crate::wait::WaitOutcome::Reached(r) | crate::wait::WaitOutcome::OtherTerminal(r) => {
+            Some(r.status.clone())
         }
-        if is_terminal(&status) {
-            break Some(status);
-        }
-        if tokio::time::Instant::now() >= deadline {
+        crate::wait::WaitOutcome::TimedOut(_) => {
+            // Not an error: the worker keeps running server-side, and the
+            // deliverable is retrievable later.
             progress(&format!(
                 "follow deadline reached — the worker keeps running; \
                  check later with `molecule result {molecule_id}`"
             ));
-            break None;
+            None
         }
     };
 
@@ -313,16 +328,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn terminal_statuses_are_the_closed_set() {
-        for s in ["completed", "failed", "collapsed"] {
-            assert!(is_terminal(s), "{s} must terminate the follow loop");
-        }
-        for s in ["pending", "running", "frozen", "stuck"] {
-            assert!(!is_terminal(s), "{s} must keep polling");
-        }
-    }
 
     #[test]
     fn guard_prompt_names_the_spend() {
