@@ -88,6 +88,17 @@ const U64_MAX_AS_F64: f64 = 18_446_744_073_709_551_615.0;
 #[derive(Debug, Clone)]
 pub struct HostMachineProbe<R: CommandRunner> {
     runner: R,
+    /// Which family of host readers this probe runs.
+    ///
+    /// A value, not a `cfg!` test inside [`HostMachineProbe::snapshot`], for
+    /// two reasons. It is what lets the darwin read sequence — the command
+    /// names, their order, the partial- and total-failure paths — be driven
+    /// by a scripted runner on any operating system, so those tests run on
+    /// the CI that actually gates this repository instead of only on the
+    /// machine that produced the fixtures. And it is the seam a `/proc`
+    /// reader plugs into: a new variant here, its own read sequence, and
+    /// [`HostReader::for_this_platform`] selecting it.
+    reader: HostReader,
     /// Working directory the reads are spawned in.
     ///
     /// The commands ignore it, but [`CommandRunner::exec`] requires one and
@@ -108,6 +119,41 @@ impl HostMachineProbe<RealCommandRunner> {
     }
 }
 
+/// Which family of host readers a [`HostMachineProbe`] runs.
+///
+/// Exists so that "what this platform can read" is a value the caller can
+/// choose rather than a compile-time branch buried in the reading code. The
+/// production path derives it from the target with
+/// [`HostReader::for_this_platform`]; a test naming a variant is asking for
+/// that reader's command sequence regardless of the host it runs on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HostReader {
+    /// darwin: four `sysctl` scalars plus `vm_stat`.
+    Darwin,
+    /// No reader exists for this platform, so a probe using it reads nothing
+    /// and reports [`ProbeError::Unsupported`]. A Linux `/proc` reader is the
+    /// follow-up that turns this variant into a third one (noogram/cosmon
+    /// #58, second-family review I6); until it lands, an honest refusal is
+    /// the only correct reading on a non-darwin host.
+    Unsupported,
+}
+
+impl HostReader {
+    /// The reader for the platform this binary was compiled for.
+    ///
+    /// The single place `target_os` is consulted, so that adding a platform
+    /// is one arm here and one read sequence, not a `cfg!` audit.
+    #[must_use]
+    pub fn for_this_platform() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Darwin
+        } else {
+            Self::Unsupported
+        }
+    }
+}
+
 impl<R: CommandRunner> HostMachineProbe<R> {
     /// A probe reading through the supplied `runner`.
     ///
@@ -117,8 +163,23 @@ impl<R: CommandRunner> HostMachineProbe<R> {
     /// healthy machine is a probe whose failure behaviour is unknown.
     #[must_use]
     pub fn with_runner(runner: R) -> Self {
+        Self::with_reader(runner, HostReader::for_this_platform())
+    }
+
+    /// A probe reading through `runner` with the read sequence `reader` names.
+    ///
+    /// The constructor that decouples *which host reader runs* from *which
+    /// host this code was compiled for*. Without it the darwin reading path
+    /// is only reachable on darwin, so its tests — the documented command
+    /// list, the partial failure, the total failure — silently turn into
+    /// `Unsupported` refusals on every other platform, which is exactly how
+    /// they went unrun on Linux CI. A parser whose tests only execute on the
+    /// machine that produced its fixtures is not tested.
+    #[must_use]
+    pub fn with_reader(runner: R, reader: HostReader) -> Self {
         Self {
             runner,
+            reader,
             cwd: std::env::temp_dir(),
         }
     }
@@ -146,15 +207,25 @@ impl<R: CommandRunner> HostMachineProbe<R> {
 
 impl<R: CommandRunner> MachineProbe for HostMachineProbe<R> {
     fn snapshot(&self) -> Result<MachineSnapshot, ProbeError> {
-        if !cfg!(target_os = "macos") {
+        match self.reader {
+            HostReader::Darwin => self.darwin_snapshot(),
             // Honest report, not a fabricated reading: the counters below are
-            // darwin's, and nothing here infers anything else from the target
-            // beyond which reader to use.
-            return Err(ProbeError::Unsupported(
+            // darwin's, and nothing here infers anything else about the host
+            // beyond the fact that no reader was selected for it.
+            HostReader::Unsupported => Err(ProbeError::Unsupported(
                 "only darwin (sysctl + vm_stat) has a reader; this host has none".to_owned(),
-            ));
+            )),
         }
+    }
+}
 
+impl<R: CommandRunner> HostMachineProbe<R> {
+    /// The darwin read sequence: four `sysctl` scalars and `vm_stat`.
+    ///
+    /// Separate from [`MachineProbe::snapshot`] so the dispatch on
+    /// [`HostReader`] stays one `match` and a second platform's sequence is a
+    /// sibling method rather than a longer branch.
+    fn darwin_snapshot(&self) -> Result<MachineSnapshot, ProbeError> {
         let mut snapshot = MachineSnapshot::unread_at(Utc::now());
         // Names of the reads that produced nothing, in the order attempted.
         // A total failure has to say *what* failed, and a partial one is not
@@ -341,6 +412,18 @@ mod tests {
         include_str!("../tests/fixtures/machine_probe/kern_memorystatus_vm_pressure_level.txt");
     const VM_STAT: &str = include_str!("../tests/fixtures/machine_probe/vm_stat.txt");
 
+    /// A probe over `runner` that runs the darwin read sequence whatever the
+    /// host is.
+    ///
+    /// Every test below drives scripted bytes, so the platform it happens to
+    /// run on is irrelevant to what it asserts — and naming the reader is
+    /// what makes that true. Going through [`HostMachineProbe::with_runner`]
+    /// instead would make these tests assert `Unsupported` on Linux, which is
+    /// the defect this indirection removes.
+    fn darwin_probe(runner: MockCommandRunner) -> HostMachineProbe<MockCommandRunner> {
+        HostMachineProbe::with_reader(runner, HostReader::Darwin)
+    }
+
     /// Script a mock runner with one healthy response per read, in the order
     /// [`HostMachineProbe::snapshot`] takes them.
     fn healthy_runner() -> MockCommandRunner {
@@ -363,7 +446,7 @@ mod tests {
     /// reader can check them without running anything.
     #[test]
     fn parses_a_known_sysctl_fixture() {
-        let probe = HostMachineProbe::with_runner(healthy_runner());
+        let probe = darwin_probe(healthy_runner());
         let snapshot = probe.snapshot().expect("a fully scripted host reads");
 
         // `total = 3072.00M` → 3072 × 1024 × 1024.
@@ -393,7 +476,7 @@ mod tests {
     /// mis-scaled or mis-assigned parser cannot satisfy by accident.
     #[test]
     fn a_unit_mistake_is_caught() {
-        let probe = HostMachineProbe::with_runner(healthy_runner());
+        let probe = darwin_probe(healthy_runner());
         let snapshot = probe.snapshot().expect("a fully scripted host reads");
 
         // The `M` suffix is mebibytes. A parser that dropped the scale would
@@ -450,7 +533,7 @@ mod tests {
         runner.script(CommandOutput::ok("not-a-number\n"));
         runner.script(CommandOutput::ok(VM_STAT));
 
-        let probe = HostMachineProbe::with_runner(runner);
+        let probe = darwin_probe(runner);
         let snapshot = probe
             .snapshot()
             .expect("a partial reading is still a reading");
@@ -476,7 +559,7 @@ mod tests {
             runner.script(CommandOutput::err(1, "no such command"));
         }
 
-        let probe = HostMachineProbe::with_runner(runner);
+        let probe = darwin_probe(runner);
         let err = probe
             .snapshot()
             .expect_err("a host on which nothing reads produces no reading");
@@ -500,7 +583,7 @@ mod tests {
     /// host; a rename would otherwise only show up on a real machine.
     #[test]
     fn the_reads_are_the_documented_commands() {
-        let probe = HostMachineProbe::with_runner(healthy_runner());
+        let probe = darwin_probe(healthy_runner());
         let _ = probe.snapshot();
         let calls: Vec<String> = probe
             .runner
@@ -541,12 +624,16 @@ mod tests {
     /// default gate. Run it with
     /// `cargo test -p cosmon-transport --features integration -- --nocapture
     /// differential`.
+    ///
+    /// Gated on `target_os = "macos"` — and it is the *only* test here that
+    /// is. It shells out to `sysctl` and `vm_stat`, binaries that exist on no
+    /// other platform, so on Linux there is nothing for it to compare against
+    /// and compiling it would only produce a test that returns early. Every
+    /// other test above drives scripted bytes and therefore runs everywhere.
+    #[cfg(target_os = "macos")]
     #[test]
     #[cfg_attr(not(feature = "integration"), ignore = "reads the real host")]
     fn differential_against_the_native_readers() {
-        if !cfg!(target_os = "macos") {
-            return;
-        }
         let native = |cmd: &str, args: &[&str]| -> String {
             RealCommandRunner
                 .exec(cmd, args, std::env::temp_dir().as_path())
@@ -590,6 +677,47 @@ mod tests {
                 "available ({probed}) exceeds physical ({total})"
             );
         }
+    }
+
+    /// A platform with no reader refuses rather than fabricating a reading,
+    /// and it refuses *without spawning anything* — the check that the
+    /// `Unsupported` arm did not become a path that runs darwin's commands on
+    /// a host that has none.
+    #[test]
+    fn an_unsupported_platform_reads_nothing() {
+        let runner = MockCommandRunner::new();
+        let probe = HostMachineProbe::with_reader(runner, HostReader::Unsupported);
+        let err = probe
+            .snapshot()
+            .expect_err("a platform with no reader produces no reading");
+        let ProbeError::Unsupported(reason) = &err else {
+            panic!("a missing reader is Unsupported, not {err:?}");
+        };
+        assert!(
+            reason.contains("darwin"),
+            "the refusal must say which platform does have a reader: {reason}"
+        );
+        assert!(
+            probe.runner.calls().is_empty(),
+            "an unsupported host must not be probed with another platform's commands"
+        );
+    }
+
+    /// The production constructor still binds the reader to the compiled
+    /// target: injecting a reader is a test seam, not a way for a release
+    /// build to read darwin counters on Linux.
+    #[test]
+    fn the_platform_selects_the_production_reader() {
+        let expected = if cfg!(target_os = "macos") {
+            HostReader::Darwin
+        } else {
+            HostReader::Unsupported
+        };
+        assert_eq!(HostReader::for_this_platform(), expected);
+        assert_eq!(
+            HostMachineProbe::with_runner(MockCommandRunner::new()).reader,
+            expected
+        );
     }
 
     /// A suffix the parser has not been shown is `None`, not a guess at its
