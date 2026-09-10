@@ -189,6 +189,12 @@ class ComposeStack:
         cfg.staged_deploy.mkdir(parents=True, exist_ok=True)
         for name in ("docker-compose.yml", "rpp.toml"):
             shutil.copy(cfg.deploy_src / name, cfg.staged_deploy / name)
+        if cfg.e2e_stage:
+            shutil.copy(
+                cfg.deploy_src / "docker-compose.e2e.yml",
+                cfg.staged_deploy / "docker-compose.e2e.yml",
+            )
+        self._pin_build_context()
 
         template = (
             cfg.deploy_src
@@ -212,6 +218,9 @@ class ComposeStack:
                     f"the binding template does not yield a loadable binding: "
                     f"nothing matches /{pattern}/ in {template.name} — {why}"
                 )
+        # Asserted against the tracked template FIRST (above), then
+        # extended in the copy: the `tackle` leg needs the third grant.
+        self.grant_worker_spawn(target)
 
         # The OAuth client registry the adapter publishes at
         # /.well-known/cosmon-oauth-clients: what `login` reads to learn
@@ -226,7 +235,8 @@ class ComposeStack:
                     "[[clients]]",
                     f'audience = "{cfg.audience}"',
                     f'client_id = "{cfg.audience}"',
-                    'scopes = ["openid", "cosmon:molecule:read", "cosmon:molecule:write"]',
+                    'scopes = ["openid", "cosmon:molecule:read", '
+                    '"cosmon:molecule:write", "cosmon:worker:spawn"]',
                     "",
                 ]
             ),
@@ -235,10 +245,77 @@ class ComposeStack:
         # The adapter Dockerfile COPYs the dist-binaries directory, which
         # is gitignored and absent on a clean checkout. An empty one is a
         # valid (and honest) input: the /dist route 404s with its own hint.
-        (cfg.repo_root / "crates" / "cosmon-rpp-adapter" / "assets" / "binaries").mkdir(
+        # cfg.build_root, not repo_root: the images are built from that
+        # tree, and creating the directory here would satisfy the COPY in
+        # the wrong one.
+        (cfg.build_root / "crates" / "cosmon-rpp-adapter" / "assets" / "binaries").mkdir(
             parents=True, exist_ok=True
         )
         self.stage_galaxy()
+
+    def _pin_build_context(self) -> None:
+        """Rewrite ``context: ../../..`` to an absolute path in the copies.
+
+        The tracked files say ``context: ../../..``, which is right where
+        they live and wrong everywhere else — it resolved correctly only
+        because the run dir defaulted to exactly two levels under the
+        repo, a single ``RPP_E2E_RUN_DIR`` away from silently building
+        the wrong tree. Rewriting it here makes the source tree an
+        explicit input, which is also what lets a falsification run build
+        the images from a pre-U6 checkout while using this checkout's
+        compose files.
+        """
+        cfg = self.cfg
+        for path in cfg.compose_files:
+            if not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            path.write_text(
+                text.replace("context: ../../..", f"context: {cfg.build_root}"),
+                encoding="utf-8",
+            )
+        pinned = cfg.compose_file.read_text(encoding="utf-8")
+        if f"context: {cfg.build_root}" not in pinned:
+            raise AssertionError(
+                f"could not pin the build context to {cfg.build_root} in "
+                f"{cfg.compose_file}; the tracked compose file no longer says "
+                "`context: ../../..`"
+            )
+
+    @staticmethod
+    def grant_worker_spawn(binding: Path) -> None:
+        """Add ``cosmon:worker:spawn`` to a materialised binding's scopes.
+
+        A THIRD grant, not a synonym for the write scope: ``tackle``
+        requires the pair by composition (AND), so a tenant holding only
+        ``:write`` cannot burn the operator's model budget by dispatching
+        workers. The tracked template deliberately does NOT hand it out —
+        an operator who copied it without trimming would grant dispatch
+        to every tenant — so the suite performs that grant itself, on its
+        own throwaway binding. That IS the operator gesture the ``tackle``
+        leg depends on; its absence is a 403 that looks nothing like a
+        scope problem from the client side.
+
+        The pre-state is asserted first: a template whose ``allowed`` line
+        this does not recognise must fail here rather than silently keep
+        the two-scope list and fail four steps later as a forbidden
+        ``tackle``.
+        """
+        least_privilege = 'allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]'
+        text = binding.read_text(encoding="utf-8")
+        if least_privilege not in text.splitlines() and least_privilege not in text:
+            raise AssertionError(
+                "the template's [scopes] allowed line is not the least-privilege pair this "
+                "suite knows how to extend; cannot add cosmon:worker:spawn"
+            )
+        text = text.replace(
+            least_privilege,
+            'allowed = ["cosmon:molecule:read", "cosmon:molecule:write", '
+            '"cosmon:worker:spawn"]',
+        )
+        binding.write_text(text, encoding="utf-8")
+        if "cosmon:worker:spawn" not in binding.read_text(encoding="utf-8"):
+            raise AssertionError(f"the operator grant cosmon:worker:spawn did not land in {binding}")
 
     def stage_galaxy(self) -> None:
         """(Re)create the throwaway tenant tree the adapter writes into.
@@ -256,9 +333,43 @@ class ComposeStack:
             cfg.repo_root / ".cosmon" / "formulas" / "task-work.formula.toml",
             cfg.galaxy / ".cosmon" / "formulas" / "task-work.formula.toml",
         )
+        # Arm the harvest door.
+        #
+        # `harvest_door::decide` fails closed on a galaxy that has not
+        # armed `[harvest_authority] required` — it refuses
+        # `not_authorized` before it has even loaded the molecule.
+        # Leaving it unarmed would make the `land` test green for the
+        # wrong reason: the label under test (`land_effect_unavailable`)
+        # belongs to the EFFECT half, and it is only reached by a
+        # decision that admitted the harvest. Arming is the operator
+        # gesture the tenant cannot make, which is the point of the
+        # second key — so it is done here, on the host, in a galaxy that
+        # lives for one test set. No seal is minted and none is committed.
+        (cfg.galaxy / ".cosmon" / "config.toml").write_text(
+            "# Throwaway e2e galaxy. Arms the ADR-176 harvest door so its\n"
+            "# decision half admits and the refusal under test comes from\n"
+            "# the effect half.\n"
+            "[harvest_authority]\n"
+            "required = true\n",
+            encoding="utf-8",
+        )
+        # The tenant root must be a git repository: the library tackle
+        # executor resolves the repo root from it and cuts the worker's
+        # worktree with `git worktree add`. `ensure_base_commit` covers a
+        # commit-less repo, so `git init` alone is enough — but a plain
+        # directory is not, and the failure without this is a
+        # `tackle_unavailable` whose cause is three layers down in the
+        # adapter log.
+        init = _run(["git", "init", "-q", str(cfg.galaxy)])
+        if init.returncode != 0:
+            raise AssertionError(
+                f"git init of the throwaway galaxy failed: {init.stderr.strip()[:400]}"
+            )
         # The adapter runs as uid 10000; on a Linux runner the
         # bind-mounted tree is owned by the runner's uid and nucleate
-        # needs to write into it.
+        # needs to write into it. The worker's worktree and its branch
+        # are cut inside this tree too, so the permission has to survive
+        # the `.git` directory `git init` just made.
         for path in [cfg.galaxies_root, *cfg.galaxies_root.rglob("*")]:
             os.chmod(path, 0o777)
 
@@ -279,12 +390,19 @@ class ComposeStack:
         )
         return env
 
+    def _compose_file_args(self) -> list:
+        """The ``-f`` flags, built from :attr:`E2EConfig.compose_files`."""
+        args = []
+        for path in self.cfg.compose_files:
+            args += ["-f", str(path)]
+        return args
+
     def compose(self, *args: str, check: bool = True, timeout: int = 3600) -> subprocess.CompletedProcess:
         """Run ``docker compose`` against the staged file, recorded."""
         cmd = [
             "docker", "compose",
             "-p", self.cfg.project,
-            "-f", str(self.cfg.compose_file),
+            *self._compose_file_args(),
             *args,
         ]
         started = time.time()
@@ -371,10 +489,23 @@ class ComposeStack:
             [
                 "docker", "compose",
                 "-p", self.cfg.project,
-                "-f", str(self.cfg.compose_file),
+                *self._compose_file_args(),
                 "logs", "--tail", str(lines), "rpp-adapter",
             ],
             env=self._compose_env(),
+        )
+        return proc.stdout or proc.stderr
+
+    def capture_worker_pane(self, session: str) -> str:
+        """``tmux capture-pane`` inside the adapter container.
+
+        The pane is the diagnosis when a spawned worker does not finish,
+        and it dies with the stack — so it is captured while it still
+        exists, never after teardown.
+        """
+        proc = self.compose(
+            "exec", "-T", "rpp-adapter", "tmux", "capture-pane", "-p", "-t", session,
+            check=False,
         )
         return proc.stdout or proc.stderr
 

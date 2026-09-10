@@ -144,25 +144,17 @@ services:
       # adapter does NOT walk this tree itself.
       #
       # Read-write since the V1 mutation cut (T-V1-MUTATIONS-NUCLEATE,
-      # 2026-05-04): `POST /v1/molecules` shells out to `cs nucleate`
-      # which materialises a new molecule directory under
-      # `<noyau>/.cosmon/state/molecules/<id>/`. Tenant isolation is
-      # still structural via the cwd-pin — the adapter cannot write
-      # outside the caller's noyau.
+      # 2026-05-04): `POST /v1/molecules` materialises a new molecule
+      # directory under `<noyau>/.cosmon/state/molecules/<id>/` —
+      # library-direct, in-process. Tenant isolation is structural via
+      # the per-noyau tenant root — the adapter cannot write outside
+      # the caller's noyau.
       - ${COSMON_GALAXIES_HOST:-${HOME}/galaxies}:/cosmon/galaxies
     environment:
       RUST_LOG: ${RUST_LOG:-info}
-      # No COSMON_RPP_CS here on purpose. The image has been
-      # library-direct since T-RPP-LIB-DIRECT (`task-20260504-6ad4`) —
-      # its Dockerfile ships no `cs` — so the variable this file used to
-      # export pointed at a path that does not exist inside the
-      # container. It read as configuration and was a fossil: the two
-      # routes that still shell out (`tackle`, `land`) fail
-      # `subprocess_spawn_failed` here whether it is set or not, and
-      # setting it made that failure look like a mis-set path rather
-      # than the missing binary it is. Issue #54 owns making those two
-      # routes library-direct; when it does, nothing here needs to
-      # change.
+      # The legacy COSMON_RPP_CS knob is retired with the ADR-080 §3.5
+      # clause (e) subprocess envelope (issue #54 U6): the image carries
+      # no `cs` binary and the adapter never spawns one.
     # Mirrors the oidc-mock probe shape so `docker compose ps` reports
     # both services with the same healthcheck semantics. The `/healthz`
     # route is excluded from the §8p frozen API surface (it is

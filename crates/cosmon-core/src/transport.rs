@@ -27,6 +27,21 @@ pub struct AgentDefinition {
     pub command: String,
     /// Command-line arguments for the executable.
     pub args: Vec<String>,
+    /// Working directory the spawned worker must start in.
+    ///
+    /// ADR-079 §5 obligation 3 — "Runs in the molecule's worktree with `cs`
+    /// on PATH as its `cwd`" — is a Port obligation, not a per-adapter
+    /// convenience: walk-up discovery from the worktree is how the worker
+    /// reaches `cs evolve` / `cs complete` at all. Without this field the
+    /// caller has no way to state the requirement, and a backend that spawns
+    /// a bare session (tmux `new-session` without `-c`) silently inherits the
+    /// dispatching process's cwd instead.
+    ///
+    /// `None` means "the backend's own cwd is acceptable" and is reserved for
+    /// call sites with no worktree (probes, readiness checks). Every backend
+    /// MUST honour a `Some` value or fail the spawn — inheriting a different
+    /// directory is not a permitted degradation.
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 /// Configuration for the transport runtime.
@@ -54,6 +69,17 @@ pub struct SpawnHandle {
     pub id: WorkerId,
     /// The transport session name (e.g. tmux session).
     pub session_name: String,
+    /// Operating-system PID of the spawned worker process, when the backend
+    /// can witness one (tmux: the pane's root process; a mock: a stand-in).
+    ///
+    /// Exists so a library dispatcher can stamp the PID witness on the
+    /// dispatch ledger the way `cs tackle` does — `orphan_scan`'s PID
+    /// liveness axis reads it back to authenticate a recorded process.
+    /// `None` means the backend has no process to point at (or could not
+    /// observe it); callers must degrade to session-probe liveness, never
+    /// fail the spawn.
+    #[serde(default)]
+    pub pid: Option<u32>,
 }
 
 /// Information about an active session.
@@ -102,6 +128,11 @@ pub enum TransportError {
 /// knowing whether the backend is tmux, Docker, or a test mock.
 pub trait TransportBackend {
     /// Spawn a new worker agent.
+    ///
+    /// Implementations MUST start the worker in
+    /// [`AgentDefinition::cwd`] when it is `Some` (ADR-079 §5 obligation 3),
+    /// and MUST NOT silently substitute the dispatching process's own
+    /// directory.
     ///
     /// # Errors
     /// Returns [`TransportError::SpawnFailed`] if the backend cannot create the session.

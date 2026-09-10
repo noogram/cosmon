@@ -147,9 +147,8 @@ impl TenantWorkspaces {
         let root = self.galaxies_root.join(noyau);
         let state_dir = root.join(".cosmon").join("state");
         std::fs::create_dir_all(&state_dir).expect("create tenant .cosmon/state");
-        // A faux molecules/ subdir signals to the fake-cs binary that
-        // this is a real cosmon root — without it `cs observe` would
-        // refuse to resolve any molecule.
+        // The molecules/ subdir marks this as a real cosmon state root
+        // for the library-direct store readers.
         std::fs::create_dir_all(state_dir.join("molecules")).expect("create molecules/ stub");
         let tenant = TenantPath {
             noyau: noyau.to_owned(),

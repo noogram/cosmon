@@ -19,26 +19,35 @@ use std::path::{Component, Path, PathBuf};
 use std::process::{Command as ProcessCommand, Stdio};
 
 use chrono::Utc;
-use cosmon_core::agent::AgentRole;
 use cosmon_core::clearance::Clearance;
-use cosmon_core::config::{
-    AdapterEntry, AdaptersConfig, OnComplete, ProjectConfig, BUILTIN_FLOOR_ADAPTER,
-};
-use cosmon_core::event_v2::{AdapterSelectionSource, CeilingAction, ModelSelectionSource};
+use cosmon_core::config::{AdapterEntry, AdaptersConfig, BUILTIN_FLOOR_ADAPTER};
+// Only the test-only wrappers around `cosmon_core::tackle_plan` (and the
+// prompt regression tests) still name these types directly.
+#[cfg(test)]
+use cosmon_core::agent::AgentRole;
+#[cfg(test)]
+use cosmon_core::config::{OnComplete, ProjectConfig};
+#[cfg(test)]
+use cosmon_core::event_v2::AdapterSelectionSource;
+use cosmon_core::event_v2::{CeilingAction, ModelSelectionSource};
 use cosmon_core::fleet::FleetSpec;
 use cosmon_core::formula::Formula;
-use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
+use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
-use cosmon_core::spawn_seam::{validate_adapter_name, LoopOwnership, ValidatedAdapterName};
+#[cfg(test)]
+use cosmon_core::spawn_seam::LoopOwnership;
+use cosmon_core::spawn_seam::{validate_adapter_name, ValidatedAdapterName};
 use cosmon_core::transport::TransportBackend;
-use cosmon_core::worker::{DesiredState, WorkerStatus};
+#[cfg(test)]
+use cosmon_core::worker::DesiredState;
+use cosmon_core::worker::WorkerStatus;
 use cosmon_filestore::FileStore;
 use cosmon_process_witness::process_start_time;
 use cosmon_state::events::worker_spawn::{
     emit_adapter_selected, emit_model_ceiling_hit, emit_model_selected,
     emit_worker_spawn_rolled_back,
 };
-use cosmon_state::{MoleculeData, MoleculeFilter, StateStore, WorkerData};
+use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
 
 use super::dispatch_ledger;
@@ -633,43 +642,22 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     short-circuit, so the trace is non-empty on every
     //     Adapter-bound `cs tackle` invocation (including dry-runs
     //     used by integration tests).
-    let formula_step_adapter: Option<(&str, &str, &str)> = formula.as_ref().and_then(|f| {
-        f.steps.get(mol.current_step).and_then(|step| {
-            step.adapter
-                .as_deref()
-                .map(|name| (name, f.name.as_str(), step.id.as_str()))
-        })
-    });
-    // The model sibling of `formula_step_adapter` (delib-20260704-b476 C1):
-    // `(model_id, formula_name, step_id)` for the currently executing step's
-    // `model = "<id>"` pin, or `None`. Read from the same step, ranks below
-    // `--model` but above every default in `resolve_model_selection`.
-    let formula_step_model: Option<(&str, &str, &str)> = formula.as_ref().and_then(|f| {
-        f.steps.get(mol.current_step).and_then(|step| {
-            step.model
-                .as_deref()
-                .map(|id| (id, f.name.as_str(), step.id.as_str()))
-        })
-    });
     // Q5a extension (task-20260531-c99e): two operator-preference tiers
     // layered into the chain — a session-scoped env hammer
     // ($COSMON_DEFAULT_ADAPTER) above both config files, and a global
     // ~/.config/cosmon/config.toml [adapters.default] below the per-galaxy
     // config but above the built-in floor. Both are best-effort reads; a
     // missing or garbled file falls through, it never aborts dispatch.
+    //
+    // The env/config *reads* stay here (they are effects); the resolution
+    // itself — both six-level chains, registry validation, the ADR-103
+    // ownership axis — is the pure decision half extracted to
+    // `cosmon_core::tackle_plan` (issue #54 / U4). The per-step
+    // adapter/model pins are read from the formula inside the resolver.
     let env_default = std::env::var("COSMON_DEFAULT_ADAPTER").ok();
+    let env_model = env_default_model();
     let global_cfg_path = global_adapter_config_path();
     let global_adapters = load_global_adapters(&global_cfg_path);
-    let (adapter_name, selection_source) = resolve_adapter_selection(
-        args.adapter.as_deref(),
-        formula_step_adapter,
-        env_default.as_deref(),
-        project_config.adapters.as_ref(),
-        &config_path,
-        global_adapters.as_ref(),
-        &global_cfg_path,
-    );
-    let selection_source = sharpen_adapter_fallback(selection_source, formula_absence.as_deref());
     // Compose the full dispatch registry: built-in Adapter names ∪ TOML
     // `[adapters]` extras. ADR-099 / TS-0 — `validate_adapter_name`
     // returns a [`ValidatedAdapterName`] whose only consumer is the
@@ -702,18 +690,33 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Gap#5 `task-20260615-df30`; opencode — `task-20260615-556a` / ADR-125;
     // `local` — `task-20260530-821f`; `ollama` — `task-20260707-7d27` hole #1)
     // is on the rows of `BUILT_IN_AXES`, beside the names it explains.
-    let mut declared_names: Vec<String> = cosmon_core::spawn_seam::built_in_adapter_names()
-        .iter()
-        .map(|n| (*n).to_owned())
-        .collect();
-    if let Some(adapters) = project_config.adapters.as_ref() {
-        declared_names.extend(AdaptersConfig::available_names(adapters));
-    }
-    let (adapter, _supervision, loop_ownership_from_validator) =
-        match validate_adapter_name(&adapter_name, &declared_names) {
-            Ok(triple) => triple,
-            Err(e) => return Err(anyhow::anyhow!("{e}")),
-        };
+    let selection = match cosmon_core::tackle_plan::resolve_selection(
+        &cosmon_core::tackle_plan::SelectionRequest {
+            adapter_flag: args.adapter.as_deref(),
+            model_flag: args.model.as_deref(),
+            formula: formula.as_ref(),
+            current_step: mol.current_step,
+            env_default_adapter: env_default.as_deref(),
+            env_default_model: env_model.as_ref().map(|(v, k)| (v.as_str(), *k)),
+            project_adapters: project_config.adapters.as_ref(),
+            config_path: &config_path,
+            global_adapters: global_adapters.as_ref(),
+            global_config_path: &global_cfg_path,
+            formula_absence: formula_absence.as_deref(),
+        },
+    ) {
+        Ok(selection) => selection,
+        Err(e) => return Err(anyhow::anyhow!("{e}")),
+    };
+    let cosmon_core::tackle_plan::TackleSelection {
+        adapter,
+        adapter_source,
+        supervision,
+        loop_ownership,
+        ownership_warning,
+        mut preferred_model,
+        mut model_source,
+    } = selection;
     // Capability-aware formula gate (noogram/cosmon #4 clause 2). The
     // formula declares what its steps need of a worker
     // (`requires_capabilities = ["shell", "vcs"]`); refuse here when the
@@ -733,25 +736,20 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // operator wants to learn that this pairing is refused.
     super::guard::refuse_incapable_adapter_dispatch(&mol, formula.as_ref(), adapter.as_str())?;
 
-    // ADR-103: per-Adapter `[adapters.<name>] ownership = "cosmon"`
-    // overrides the built-in default — the installation-perimeter
-    // escape hatch for TOML-only adapters. Built-in names ignore the
-    // TOML row (the validator owns the answer for them).
-    let loop_ownership = resolve_loop_ownership(
-        adapter.as_str(),
-        loop_ownership_from_validator,
-        project_config
-            .adapters
-            .as_ref()
-            .and_then(|cfg| cfg.entry(adapter.as_str())),
-    );
+    // ADR-103: the ownership axis was resolved with the selection; an
+    // unrecognised `[adapters.<name>].ownership` value is carried out of
+    // the pure resolver as data and surfaced here — after the capability
+    // refusal, exactly where the inline warning used to print.
+    if let Some(warning) = ownership_warning.as_deref() {
+        eprintln!("{warning}");
+    }
     // Best-effort: a write failure on `events.jsonl` must not block
     // dispatch (same discipline as the four WS-1..WS-5 helpers).
     emit_adapter_selected(
         &state_dir,
         &mol_id,
         adapter.as_str(),
-        selection_source,
+        adapter_source.clone(),
         args.role_hint.as_deref(),
         loop_ownership,
     );
@@ -774,19 +772,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     //     `--model` or a formula-step pin (the safe-default guard that
     //     rejects a *strong* config/env default lands in C4). The
     //     `ModelSelectionSource` is carried forward for the typed
-    //     `ModelSelected` event (C2), emitted just below.
-    let env_model = env_default_model();
-    let (mut preferred_model, mut model_source) = resolve_model_selection(
-        args.model.as_deref(),
-        formula_step_model,
-        env_model.as_ref().map(|(v, k)| (v.as_str(), *k)),
-        adapter.as_str(),
-        project_config.adapters.as_ref(),
-        &config_path,
-        global_adapters.as_ref(),
-        &global_cfg_path,
-    );
-    model_source = sharpen_model_fallback(model_source, formula_absence.as_deref());
+    //     `ModelSelected` event (C2), emitted just below. The chain itself
+    //     ran inside `resolve_selection` above; `preferred_model` /
+    //     `model_source` are its (still ungated) outputs.
 
     // 3a''-C4. Fail-closed strong-dispatch ceiling + safe-default guard
     //     (delib-20260704-b476 C4, carnot's safety property + kahneman's
@@ -990,7 +978,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                  back; cosmon will still dispatch because the Adapter's configured \
                  endpoint is authoritative. The pin came from {}.",
                 adapter.as_str(),
-                describe_model_source(&model_source),
+                cosmon_core::tackle_plan::describe_model_source(&model_source),
             );
         }
     }
@@ -1011,7 +999,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         &mol_id,
         adapter.as_str(),
         preferred_model.as_deref(),
-        model_source,
+        // Cloned: the effective (post-gate) source is also stamped into the
+        // `TacklePlan` assembled at step 5.
+        model_source.clone(),
     );
 
     // 3a''. Adapter preflight (task-20260719-f45b). Prove the resolved
@@ -1163,21 +1153,42 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // disagree: `--workdir` if given, else `<repo>/.worktrees/<id>`, else the
     // repo root under `--no-worktree`. `None` (no git repository) degrades to
     // a relative-paths-only wording rather than a wrong absolute path.
-    let sandbox_root = predicted_sandbox_root(
-        args.workdir.as_deref(),
-        args.no_worktree,
-        mol_id.as_str(),
-        find_repo_root().ok().as_deref(),
+    let plan = cosmon_core::tackle_plan::TacklePlan::from_parts(
+        cosmon_core::tackle_plan::TackleSelection {
+            adapter,
+            adapter_source,
+            supervision,
+            loop_ownership,
+            // Already surfaced on stderr at step 3a; not re-carried.
+            ownership_warning: None,
+            preferred_model,
+            model_source,
+        },
+        &cosmon_core::tackle_plan::PromptRequest {
+            molecule: molecule_brief(&mol),
+            formula: formula.as_ref(),
+            briefing: briefing.as_deref(),
+            config: &project_config,
+            molecule_dir: &mol_dir,
+            workdir: args.workdir.as_deref(),
+            no_worktree: args.no_worktree,
+            repo_root: find_repo_root().ok().as_deref(),
+        },
+        base_branch,
+        reviewed_start_point,
     );
-    let prompt = build_prompt(
-        &mol,
-        formula.as_ref(),
-        briefing.as_deref(),
-        &project_config,
-        &mol_dir,
-        adapter.as_str(),
-        sandbox_root.as_deref(),
-    );
+    // Phases 6–10 below are the effect half; they consume the plan's fields
+    // under their historical names.
+    let cosmon_core::tackle_plan::TacklePlan {
+        branch_name,
+        base_branch,
+        reviewed_start_point,
+        adapter,
+        loop_ownership,
+        preferred_model,
+        prompt,
+        ..
+    } = plan;
 
     // 6. Dry-run: just print the prompt.
     if args.dry_run {
@@ -1316,7 +1327,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     }
 
     let repo_root = find_repo_root()?;
-    let branch_name = format!("feat/{mol_id}");
+    // `branch_name` (`feat/<mol-id>`) comes from the plan destructured at
+    // step 5 — the one place the shape is spelled.
 
     // 7a. Base branch — a property of the molecule, not of the session
     //     (task-20260725-61fa). `--base` names the trunk this molecule's work
@@ -3284,33 +3296,21 @@ fn load_formula_for_molecule(_state_dir: &std::path::Path, mol: &MoleculeData) -
 /// resolve: every other source came from a pin that actually fired, and a
 /// formula that loaded and simply declares no `adapter` is a genuine absence
 /// the existing wording already describes correctly.
+#[cfg(test)]
 fn sharpen_adapter_fallback(
     source: AdapterSelectionSource,
     formula_absence: Option<&str>,
 ) -> AdapterSelectionSource {
-    match (source, formula_absence) {
-        (AdapterSelectionSource::Default { fallback_reason }, Some(absence)) => {
-            AdapterSelectionSource::Default {
-                fallback_reason: format!("{absence}; {fallback_reason}"),
-            }
-        }
-        (other, _) => other,
-    }
+    cosmon_core::tackle_plan::sharpen_adapter_fallback(source, formula_absence)
 }
 
 /// The model sibling of [`sharpen_adapter_fallback`] — same rule, same reason.
+#[cfg(test)]
 fn sharpen_model_fallback(
     source: ModelSelectionSource,
     formula_absence: Option<&str>,
 ) -> ModelSelectionSource {
-    match (source, formula_absence) {
-        (ModelSelectionSource::Default { fallback_reason }, Some(absence)) => {
-            ModelSelectionSource::Default {
-                fallback_reason: format!("{absence}; {fallback_reason}"),
-            }
-        }
-        (other, _) => other,
-    }
+    cosmon_core::tackle_plan::sharpen_model_fallback(source, formula_absence)
 }
 
 // ---------------------------------------------------------------------------
@@ -3324,136 +3324,46 @@ fn sharpen_model_fallback(
 /// worker runs exactly what the project author specified. Otherwise fall
 /// back to a neutral, language-agnostic instruction — cosmon does not
 /// assume any particular toolchain.
+#[cfg(test)]
 fn render_gates_instruction(gates: &cosmon_core::config::GatesConfig) -> String {
-    use std::fmt::Write;
-
-    if gates.is_empty() {
-        return "3. Run the project's verification gates \
-                (see .cosmon/config.toml `[gates]` or the project's CLAUDE.md).\n"
-            .to_owned();
-    }
-
-    let labeled: [(&str, &Option<String>); 7] = [
-        ("setup", &gates.setup_command),
-        ("build", &gates.build_command),
-        ("typecheck", &gates.typecheck_command),
-        ("test", &gates.test_command),
-        ("lint", &gates.lint_command),
-        ("format", &gates.format_command),
-        ("doc", &gates.doc_command),
-    ];
-
-    let mut out = String::from(
-        "3. Run the project's verification gates (from .cosmon/config.toml `[gates]`):\n",
-    );
-    for (label, cmd) in labeled {
-        if let Some(cmd) = cmd {
-            let _ = writeln!(out, "   - {label}: `{cmd}`");
-        }
-    }
-    if let Some(test_cmd) = &gates.test_command {
-        out.push_str(&render_test_stall_guidance(test_cmd));
-    }
-    out
+    cosmon_core::tackle_plan::render_gates_instruction(gates)
 }
-
-/// Render the anti-stall guidance that travels with the test gate.
-///
-/// A workspace-wide test run (`cargo test --workspace`, `go test ./...`,
-/// `pytest` over the whole tree) is a *trap* for an autonomous worker: one
-/// slow, network-bound, or subprocess-spawning test in an *unrelated* crate
-/// can block forever. The test process then sits near 0% CPU and never
-/// returns, and a worker that polls it in an until-loop freezes — "active"
-/// but making no progress. This is the doctrine of *a worker waiting for a
-/// signal that never comes* (delib-20260614-98f2 C2; smithy task-e375).
-///
-/// The cure is not to weaken the merge contract — the configured gate stays
-/// the Definition of Done — but to tell the worker *how* to run it without
-/// hanging: scope to the crate it touched while iterating, always wrap the
-/// run in a `timeout`, and treat a timeout firing as a finding (a stalled
-/// test) rather than a flake to silently retry.
-///
-/// The note is emitted only when a test gate is configured, and the
-/// cargo-specific `-p` / `--lib` hints are shown only when the command is a
-/// `cargo` invocation — for every other toolchain the guidance stays
-/// generic. An absent test gate leaves the prompt byte-identical.
-fn render_test_stall_guidance(test_cmd: &str) -> String {
-    use std::fmt::Write;
-
-    let mut note = String::from(
-        "   ⚠️ Test-gate anti-stall (doctrine: *a worker waiting for a signal \
-         that never comes*). A whole-tree test run can hang forever on ONE \
-         slow / network / subprocess-spawning test in an unrelated crate — \
-         the process idles near 0% CPU and never returns, freezing this \
-         worker. Stay live:\n",
-    );
-    if test_cmd.contains("cargo") {
-        note.push_str(
-            "      - Iterate on the crate you touched: `cargo test -p <crate>` \
-             (or `--lib` for just the fast unit subset) — not the whole \
-             workspace.\n",
-        );
-    } else {
-        note.push_str(
-            "      - Iterate on only the package / module you touched, not the \
-             whole tree.\n",
-        );
-    }
-    let _ = writeln!(
-        note,
-        "      - Always wrap the gate in a timeout, e.g. `timeout 600 {test_cmd}`. \
-         A timeout firing is a FINDING (a stalled / hanging test), not a flake \
-         to silently retry.",
-    );
-    note.push_str(
-        "      - NEVER sit in an until-loop polling a test that shows no \
-         progress. Kill it, scope down, and report the offending test.\n",
-    );
-    note.push_str(
-        "      The configured gate stays the merge contract — run it last, \
-         under the timeout, once the scoped tests pass.\n",
-    );
-    note
-}
-
-/// Example relative artifact path shown to a local worker, so the brief
-/// demonstrates the shape it must use instead of an absolute path.
-const DEFAULT_LOCAL_ARTIFACT_EXAMPLE: &str = "result.md";
 
 /// The directory this dispatch's worker will actually run in — computed
 /// *before* it exists, so `--dry-run` prints the same brief the real
-/// dispatch would.
-///
-/// Mirrors the `worktree_path` expression in [`run`] exactly (`--workdir`
-/// override → `<repo>/.worktrees/<id>` → repo root under `--no-worktree`);
-/// the two must never drift, or a local worker is told a root it does not
-/// write into (noogram/cosmon #24). Pure over its inputs so the mapping is
-/// unit-testable without a git repository.
+/// dispatch would. Delegates to the pure decision half in
+/// `cosmon_core::tackle_plan`.
+#[cfg(test)]
 fn predicted_sandbox_root(
     workdir: Option<&str>,
     no_worktree: bool,
     mol_id: &str,
     repo_root: Option<&Path>,
 ) -> Option<PathBuf> {
-    if let Some(dir) = workdir {
-        return Some(PathBuf::from(dir));
-    }
-    let repo_root = repo_root?;
-    if no_worktree {
-        Some(repo_root.to_owned())
-    } else {
-        Some(repo_root.join(".worktrees").join(mol_id))
+    cosmon_core::tackle_plan::predicted_sandbox_root(workdir, no_worktree, mol_id, repo_root)
+}
+
+/// Project the molecule fields the pure tackle decision reads
+/// ([`cosmon_core::tackle_plan::MoleculeBrief`]) out of the state record —
+/// the seam between the state port and the I/O-free plan builder.
+fn molecule_brief(mol: &MoleculeData) -> cosmon_core::tackle_plan::MoleculeBrief<'_> {
+    cosmon_core::tackle_plan::MoleculeBrief {
+        id: &mol.id,
+        kind: mol.kind,
+        formula_id: &mol.formula_id,
+        current_step: mol.current_step,
+        total_steps: mol.total_steps,
+        variables: &mol.variables,
     }
 }
 
 /// Build the bootstrap prompt that gives the agent full context.
 ///
-/// `sandbox_root` is the directory the worker's tools actually write into —
-/// the git worktree for a normal dispatch, the workdir for `--no-worktree`.
-/// It is `None` only when the path cannot be resolved (no git repository).
-/// A **local** worker is told this root and nothing else, because its
-/// confined tool registry refuses every path outside it (noogram/cosmon #24).
-#[allow(clippy::too_many_lines, clippy::comparison_chain)]
+/// Delegates to the pure prompt builder in `cosmon_core::tackle_plan`,
+/// projecting the molecule record through [`molecule_brief`]. Kept here so
+/// the extensive prompt regression tests below keep their historical
+/// call shape (`&MoleculeData`).
+#[cfg(test)]
 fn build_prompt(
     mol: &MoleculeData,
     formula: Option<&Formula>,
@@ -3463,602 +3373,15 @@ fn build_prompt(
     adapter_name: &str,
     sandbox_root: Option<&Path>,
 ) -> String {
-    use std::fmt::Write;
-    let mut out = String::new();
-
-    let kind_str = mol
-        .kind
-        .map_or_else(|| "molecule".to_owned(), |k| k.to_string());
-    let kind_emoji = mol
-        .kind
-        .map_or("🔧", cosmon_core::kind::MoleculeKind::emoji);
-
-    // ── AUTONOMOUS WORK MODE HEADER ─────────────────────────────
-    // Register note (task-20260727-bbaf). The header and the closing
-    // protocol used to be written in imperatives with the reason withheld
-    // ("NON-NEGOTIABLE", "This is physics, not politeness", "There is NO
-    // other valid way to end"). Two costs, both observed on 2026-07-27:
-    // the operator read a worker pane and asked whether prompts had been
-    // INJECTED into a running molecule — they were reading our own brief;
-    // and task-20260727-1765 correctly refused the blanket order, because
-    // its molecule's real state did not support the transition the brief
-    // demanded, and was left `running` with the work done. A control a
-    // competent owner mistakes for an attack costs trust on every
-    // inspection, and an order that conflicts with good judgement gets
-    // resisted by exactly the workers you want.
-    //
-    // So the anti-stall property is now carried by EXPLANATION, not by
-    // coercion: the brief states the contract and the cost of breaking it
-    // (unattended pane, held molecule slot, a stalled worker that looks
-    // healthy), and a model that understands that does not need to be
-    // forbidden from pausing. The behavioural target is unchanged and is
-    // asserted as a property in
-    // `test_build_prompt_states_completion_contract_and_blocked_path`.
-    let _ = writeln!(out, "# Autonomous work mode\n");
-    let _ = writeln!(
-        out,
-        "You are a cosmon worker executing {kind_emoji} {kind_str} `{}`.",
-        mol.id
-    );
-    let _ = writeln!(
-        out,
-        "Formula: `{}` — Step {}/{}\n",
-        mol.formula_id,
-        mol.current_step + 1,
-        mol.total_steps
-    );
-    out.push_str(
-        "Nobody is reading this pane. cosmon dispatched you into a detached \
-         session and tracks the molecule's recorded state, not anything you \
-         print here. Two consequences shape the protocol at the end of this \
-         brief. First, a question asked here reaches no one, so it is never \
-         answered. Second, a worker waiting at the prompt is indistinguishable \
-         from a worker that is thinking: it holds a molecule slot and reads as \
-         healthy to the fleet until a human happens to look, often hours \
-         later. So keep moving, and put anything you would have said to an \
-         operator into the lifecycle commands instead, where it is recorded \
-         and read.\n\n",
-    );
-
-    // ── EXTERNAL ATTRIBUTION ────────────────────────────────────
-    // Positive supply for the attribution slot (ADR-128). When the
-    // `[attribution]` block is configured, fold its one-line directive in
-    // HIGH — before the mission — so the worker has the public maker name
-    // in hand *before* it reaches a "built by" / author / copyright slot
-    // and would otherwise fill the vacuum from private context. Passive
-    // helper: an absent/empty block injects nothing and leaves the prompt
-    // byte-identical to a pre-attribution cosmon (mirrors the
-    // `CLAUDE_CONFIG_DIR` propagation discipline).
-    if let Some(directive) = config.attribution.directive() {
-        let _ = writeln!(out, "## External attribution\n\n{directive}\n");
-    }
-
-    // ── CANONICAL TEXTS — fetch, never generate ─────────────────
-    // Standing guideline folded HIGH (before the mission) so the worker
-    // carries it *before* it reaches a slot that wants a licence / legal /
-    // boilerplate file. A worker that LLM-generates the full canonical text
-    // of a standard licence (CC-BY, GPL, MPL, large SPDX texts) trips the
-    // Anthropic OUTPUT content-filter, and the API-client retries the
-    // identical blocked generation forever — burning tokens with zero
-    // progress. This is prevention for the task-20260622-27d3 pathology;
-    // the detection half lives in cosmon-provider's typed, non-retryable
-    // `ProviderError::OutputFiltered`. (task-20260623-80f9.)
-    out.push_str(
-        "## Canonical texts — fetch, never generate\n\n\
-         NEVER LLM-generate the body of a standard licence, legal notice, or \
-         large canonical/boilerplate text (CC-BY, GPL, MPL, Apache-2.0, full \
-         SPDX licence texts, long copyright headers). Emitting long canonical \
-         legal text trips the model's OUTPUT content-filter, which blocks the \
-         response and can wedge the loop retrying the identical blocked \
-         generation. **FETCH it from a canonical source instead** — e.g. \
-         `curl -fsSL https://creativecommons.org/licenses/by/4.0/legalcode.txt`, \
-         the SPDX text registry, or `choosealicense.com` — and write the \
-         fetched bytes verbatim. If a fetch is impossible, reference the \
-         licence by its SPDX identifier and STOP; do not transcribe the text \
-         from memory.\n\n",
-    );
-
-    // ── DIAGNOSIS DISCIPLINE — thin pointer, never inlined ──────
-    // A single stable pointer line for the root-cause/perf molecule class
-    // (the one that shipped machine-green AND wrong fixes on 2026-07-10).
-    // The six clauses + checklist are COGNITION and live in the pointed-to
-    // guide, which evolves independently; inlining them would rot the brief
-    // DNA and force editing every galaxy's copy on each refinement
-    // (Transport ≠ Cognition; CLAUDE.md-is-DNA / Leeloo). Passive standing
-    // clause, same shape as the Canonical-texts note above. Source:
-    // delib-20260711-f62a Q8 / §C-5 (child C7 = task-20260711-7173).
-    out.push_str(
-        "## Diagnosis discipline (root-cause & perf molecules)\n\n\
-         If this molecule claims to fix a **root cause** or a **performance** \
-         regression, follow `docs/guides/diagnosis-discipline.md` before trusting \
-         any explanation — instrument the seam, run at real scale, and get a \
-         cross-provider refutation. The six clauses and the checklist live in that \
-         doc (kept out of this brief by Transport ≠ Cognition), not here.\n\n",
-    );
-
-    // ── MISSION (from variables) ────────────────────────────────
-    if !mol.variables.is_empty() {
-        out.push_str("## Mission\n\n");
-        // Topic/title first (most important).
-        if let Some(topic) = mol.variables.get("topic") {
-            let _ = writeln!(out, "**{topic}**\n");
-        }
-        let mut vars: Vec<_> = mol
-            .variables
-            .iter()
-            .filter(|(k, _)| *k != "topic")
-            .collect();
-        vars.sort_by_key(|(k, _)| *k);
-        for (k, v) in vars {
-            let _ = writeln!(out, "- **{k}**: {v}");
-        }
-        out.push('\n');
-    }
-
-    // ── BRIEFING ────────────────────────────────────────────────
-    if let Some(briefing) = briefing {
-        if !briefing.is_empty() {
-            let _ = writeln!(out, "## Briefing\n\n{briefing}\n");
-        }
-    }
-
-    // ── ARTIFACT PATHS ──────────────────────────────────────────
-    // Adapter-aware, because the two worker classes have *different*
-    // writable roots and handing either the other one's root produces a
-    // worker that reports a path its file is not at (noogram/cosmon #24).
-    //
-    // - A coding-agent worker (claude & friends) drives a real shell: it
-    //   can write anywhere, so it gets the EXACT absolute, already-resolved
-    //   canonical molecule_dir — it never has to re-derive the path from
-    //   prose, and never abbreviates to the non-canonical
-    //   `.cosmon/molecules/<id>/`. The git worktree (`.worktrees/<id>/`) is
-    //   destroyed at `cs done`, so durable artifacts written there are lost.
-    //   (advisory backstop for the artifact-path-hygiene class; cf.
-    //   idea-20260531-107d, delib-20260410-b79f data-loss recurrence).
-    //
-    // - A local worker runs inside the confined tool registry
-    //   (`local_sandbox_registry`), whose `sanitize_join` REFUSES absolute
-    //   paths and `..` escapes. The molecule directory is outside its
-    //   sandbox: every write there fails. Naming it as the output location
-    //   was the root cause of the false "Code written to <molecule_dir>/…"
-    //   report an external tester filed as noogram/cosmon #24 — the worker
-    //   echoed the only absolute directory the brief named, while its file
-    //   had landed in the worktree. So the local worker is told the truth:
-    //   its sandbox root, and that relative paths land under it.
-    if cosmon_core::egress::adapter_is_local(adapter_name) {
-        out.push_str("## Where your output goes\n\n");
-        match sandbox_root {
-            Some(root) => {
-                let _ = writeln!(
-                    out,
-                    "Your sandbox root — the ONLY directory you can write to — is:\n\n\
-                     `{}`\n\n\
-                     Give every file a path RELATIVE to that root (`{}`, \
-                     `docs/plan.md`). Absolute paths and `..` escapes are refused \
-                     by your tools. A file you create as `{}` is at \
-                     `{}` — when you report where your output is, report THAT \
-                     path and no other.",
-                    root.display(),
-                    DEFAULT_LOCAL_ARTIFACT_EXAMPLE,
-                    DEFAULT_LOCAL_ARTIFACT_EXAMPLE,
-                    root.join(DEFAULT_LOCAL_ARTIFACT_EXAMPLE).display(),
-                );
-            }
-            None => {
-                let _ = writeln!(
-                    out,
-                    "Give every file a path RELATIVE to your working directory \
-                     (`{DEFAULT_LOCAL_ARTIFACT_EXAMPLE}`, `docs/plan.md`). Absolute \
-                     paths and `..` escapes are refused by your tools.",
-                );
-            }
-        }
-        out.push_str(
-            "\ncosmon commits what you produce and merges it back into the \
-             project when the molecule is torn down — you do not need to move, \
-             copy, or commit anything. Do NOT try to write into the molecule's \
-             state directory under `.cosmon/`: it is outside your sandbox and \
-             every such write fails.\n\n",
-        );
-    } else {
-        let _ = writeln!(
-            out,
-            "## Artifact paths — write durable output HERE\n\n\
-             Canonical molecule directory (resolved): `{}`\n\n\
-             Write all durable artifacts (synthesis.md, frame.md, responses/, \
-             outcomes.md, plan.md, …) to that absolute path. NEVER write them to \
-             the git worktree (`.worktrees/{}/`) — it is DESTROYED when `cs done` \
-             tears the session down, and anything left there is lost.\n",
-            molecule_dir.display(),
-            mol.id
-        );
-    }
-
-    // ── FULL STEP CHECKLIST (inline, not separate file) ─────────
-    if let Some(formula) = formula {
-        out.push_str("## Step Checklist\n\n");
-        for (i, step) in formula.steps.iter().enumerate() {
-            let check = if i < mol.current_step {
-                "[x]"
-            } else if i == mol.current_step {
-                "[>]"
-            } else {
-                "[ ]"
-            };
-            let marker = if i == mol.current_step {
-                " ◀ CURRENT"
-            } else {
-                ""
-            };
-            let _ = writeln!(out, "- {check} **Step {}: {}**{marker}", i + 1, step.title);
-            if i == mol.current_step {
-                // Expand current step details.
-                let _ = writeln!(out, "  {}", step.description);
-                if let Some(ref criteria) = step.exit_criteria {
-                    let _ = writeln!(out, "  **Exit criteria:** {criteria}");
-                }
-            }
-        }
-        out.push('\n');
-    }
-
-    // ── EXECUTION PROTOCOL — adapter/capability-aware split ─────
-    // Jesse #4 clause 2 (task-20260721-676d). The `claude` / external-CLI
-    // coding-agent path drives tmux + a full shell: it can run the gate
-    // toolchain, commit to git, and walk the `cs evolve` / `cs complete`
-    // lifecycle verbs. A *local* adapter (`local` / `ollama` / `llama-cpp` /
-    // `llama`, classified by `egress::adapter_is_local`) is the in-process /
-    // detached Direct-API loop of ADR-100 — a small model on the operator's
-    // own hardware that does NOT drive tmux/cargo/git/cs. Handing it the
-    // coding-agent contract guaranteed it would fail its own briefing (Jesse:
-    // "worker briefing assumes a full coding agent"). So the local worker gets
-    // a briefing it CAN satisfy: produce the declared deliverable, written to
-    // the canonical molecule directory, and let cosmon drive the lifecycle
-    // transitions on its behalf. The coding-agent briefing below is left
-    // BYTE-IDENTICAL for every non-local adapter.
-    //
-    // Orthogonality note: the #4 headline guard (a no-op-with-chatter local
-    // mission lands NOT-completed via the real-work / acceptance-artifact
-    // check) is a different seam and still holds. This split makes a local
-    // success *achievable*; the guard keeps a local *failure* honest.
-    if cosmon_core::egress::adapter_is_local(adapter_name) {
-        build_local_worker_protocol(&mut out, mol);
-        return out;
-    }
-
-    // ── EXECUTION PROTOCOL (coding agent) ───────────────────────
-    out.push_str("## Execution Protocol\n\n");
-    out.push_str(
-        "**IMPORTANT: Use the `cs` CLI for all cosmon operations. \
-Do NOT use MCP cosmon_* tools — the MCP server may be running a stale binary. \
-The CLI uses walk-up discovery from your working directory and is always correct. \
-When unsure of a command's syntax, run `cs --help` or `cs <command> --help`.**\n\n",
-    );
-    out.push_str("For EACH step:\n");
-    out.push_str("1. Read the project's CLAUDE.md for conventions (if it exists).\n");
-    out.push_str("2. Implement the step, meeting its exit criteria.\n");
-    out.push_str(&render_gates_instruction(&config.gates));
-    out.push_str("4. Commit your changes.\n");
-
-    // Steps 5+ vary based on on_complete config.
-    let on_complete = config.worker.on_complete;
-    match on_complete {
-        OnComplete::CommitPush | OnComplete::CommitPushPr => {
-            out.push_str("5. Push your branch: `git push -u origin HEAD`\n");
-            let _ = writeln!(
-                out,
-                "6. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
-                mol.id, mol.formula_id
-            );
-            out.push_str(
-                "7. Go straight into the next step. There is nobody here to \
-                 check in with, and a pause between steps is invisible to the \
-                 fleet.\n\n",
-            );
-        }
-        OnComplete::Commit => {
-            let _ = writeln!(
-                out,
-                "5. Advance: `cs evolve {} --evidence \"<summary>\" --formula .cosmon/formulas/{}.formula.toml`",
-                mol.id, mol.formula_id
-            );
-            out.push_str(
-                "6. Go straight into the next step. There is nobody here to \
-                 check in with, and a pause between steps is invisible to the \
-                 fleet.\n\n",
-            );
-        }
-    }
-
-    // ── COMPLETION CONTRACT ─────────────────────────────────────
-    // Both branches, in one place: the transition that ends the molecule,
-    // and the sanctioned path for a state that does not support it.
-    push_completion_contract(&mut out, mol, on_complete);
-
-    // ── WHAT STALLS THE FLEET ───────────────────────────────────
-    // The former "DO NOT — These are violations" list. Same observed
-    // failure modes, each now stated with its cost instead of as a bare
-    // prohibition — a worker that knows *why* a pause is harmful does not
-    // need to be forbidden from pausing, and the section no longer reads
-    // like an instruction someone injected into a running session.
-    out.push_str("## What stalls the fleet\n\n");
-    out.push_str(
-        "Each of these has actually held a molecule slot open on this fleet. \
-         They share one shape: the worker addressed an operator who was not \
-         there.\n\n",
-    );
-    out.push_str(
-        "- Pausing between steps to summarise what you did. The summary is \
-         read by nobody, and the molecule sits at `running` while it waits \
-         to be read.\n",
-    );
-    out.push_str(
-        "- Asking \"shall I continue?\" or \"would you like me to proceed?\". \
-         No answer is coming. Decide, act, and record the decision in the \
-         `--evidence` of your next `cs evolve`, where a human can find it \
-         afterwards.\n",
-    );
-    out.push_str(
-        "- Offering alternatives and waiting for a pick. Same shape: pick the \
-         one you would defend, do it, and say which and why in the evidence.\n",
-    );
-    out.push_str(
-        "- Sitting at the ❯ prompt for input. This is the mute-hang the fleet \
-         cannot distinguish from healthy work; it is the single most \
-         expensive failure mode here.\n",
-    );
-
-    // Scope boundaries — deliberately NOT bullets of the stall list above.
-    // They are not failure modes; they say how far this molecule's
-    // integration reaches, which varies with on_complete. Filing them
-    // under the stall list was what made the old section read as one
-    // undifferentiated wall of prohibitions.
-    match on_complete {
-        OnComplete::Commit => {
-            out.push_str(
-                "\n## How far integration goes\n\n\
-                 - Do NOT create GitHub PRs — integration is local via molecules.\n\
-                 - Do NOT push to remote — commits stay on the local branch; \
-                 cosmon merges them when the molecule is harvested.\n\n",
-            );
-        }
-        OnComplete::CommitPush => {
-            out.push_str(
-                "\n## How far integration goes\n\n\
-                 - Do NOT create GitHub PRs — pushing the branch is where this \
-                 molecule's integration stops.\n\n",
-            );
-        }
-        OnComplete::CommitPushPr => {
-            out.push('\n');
-        }
-    }
-
-    // ── STARTING POINT ──────────────────────────────────────────
-    // Kept LAST on purpose, and the placement is now load-bearing rather
-    // than rhetorical. This block is the only line that names which step
-    // is current, and the brief is re-read from the tail on a mid-molecule
-    // re-prime (`cs prime`) and after a context compaction — the tail is
-    // the one region reliably still in view. What changed is the voice: it
-    // is a pointer into the checklist above, not a fresh order arriving
-    // after the molecule started, which is precisely what an operator
-    // reading a live pane on 2026-07-27 mistook for an injected prompt.
-    let _ = writeln!(
-        out,
-        "## ▶ Start here: step {}\n\n\
-         Everything you need is above. Start with the work itself rather than \
-         a plan of it — a planning summary in this pane is read by nobody, \
-         whereas the same reasoning in a `cs evolve --evidence` is kept.",
-        mol.current_step + 1
-    );
-
-    out
-}
-
-/// Append the **completion contract** to `out`: how the molecule ends, and
-/// what to do when the real state does not support ending it that way.
-///
-/// Two branches, deliberately given equal standing.
-///
-/// The first is the ordinary exit — `cs complete`, preceded by whatever
-/// integration `on_complete` configures. This is the transition the fleet
-/// waits on; a worker that finishes its work and prints a summary instead
-/// leaves the molecule `running` forever.
-///
-/// The second is the branch the old brief did not have, and its absence
-/// cost us a molecule. The text used to say the completion transition was
-/// the ONLY valid way to end. On 2026-07-27 `task-20260727-1765` finished
-/// and committed its deliverable, found that the molecule's real state did
-/// not support the transition, and refused to fabricate one — correctly,
-/// on the substance. It was left `running` with the work done, because our
-/// own prompt had put a good judgement in conflict with a blanket order
-/// and offered no third door. A worker that discovers the state does not
-/// support completion is doing its job, and it needs a *sanctioned* way to
-/// say so; otherwise the only two moves are a false green or a silent
-/// stall, and both are worse than the truth. `cs note` plus `cs collapse`
-/// make "not completable" a path through the protocol rather than a
-/// violation of it.
-fn push_completion_contract(out: &mut String, mol: &MoleculeData, on_complete: OnComplete) {
-    use std::fmt::Write;
-
-    out.push_str("## Finishing\n\n");
-
-    match on_complete {
-        OnComplete::CommitPushPr => {
-            let _ = writeln!(
-                out,
-                "When every step is done:\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Create a pull request: `gh pr create --title \"<title>\" --body \"<summary>\"`\n\
-                 3. Record the completion:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```",
-                mol.id
-            );
-        }
-        OnComplete::CommitPush => {
-            let _ = writeln!(
-                out,
-                "When every step is done:\n\
-                 1. Push your branch: `git push -u origin HEAD`\n\
-                 2. Record the completion:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```",
-                mol.id
-            );
-        }
-        OnComplete::Commit => {
-            let _ = writeln!(
-                out,
-                "When every step is done, record the completion:\n\
-                 ```\n\
-                 cs complete {} --reason \"<summary>\"\n\
-                 ```",
-                mol.id
-            );
-        }
-    }
-
-    out.push_str(
-        "\nThat command is what ends the molecule. A closing summary written \
-         in this pane instead ends nothing: the work is done and the molecule \
-         still reads as `running`, so whatever is blocked on it stays \
-         blocked. Put the summary in `--reason`, where it is kept.\n\n",
-    );
-
-    // ── THE SANCTIONED NOT-COMPLETABLE PATH ─────────────────────
-    out.push_str("### When the real state does not support completing\n\n");
-    out.push_str(
-        "Sometimes it does not, and finding that out is real work, not a \
-         failure to follow instructions. The mission may rest on a premise \
-         that turned out to be false; a gate may be red for a cause outside \
-         this molecule; the deliverable may exist while the exit criteria \
-         genuinely are not met.\n\n",
-    );
-    out.push_str(
-        "In that case do NOT call `cs complete` to satisfy this protocol. A \
-         completion the state does not support is worse than no completion, \
-         because it launders a stall into a green result that the rest of the \
-         DAG then builds on. Refusing it is the right call.\n\n",
-    );
-    out.push_str(
-        "It is also not a reason to stop and wait, which is the same silent \
-         hang by another route. Say it through the lifecycle, so the finding \
-         is recorded rather than stranded in a pane nobody opens:\n\n",
-    );
-    let _ = writeln!(
-        out,
-        "1. Commit the real work you did. It must not be lost with the \
-         worktree.\n\
-         2. Write down what you found:\n\
-         ```\n\
-         cs note {id} \"<what is actually true, and what it blocks>\"\n\
-         ```\n\
-         3. End the molecule honestly, naming the cause:\n\
-         ```\n\
-         cs collapse {id} --reason \"<why completion is not supported>\" \\\n\
-         \x20   --reason-kind blocker_stuck\n\
-         ```\n\
-         Use `gate_failed` instead when a verification gate is what stands in \
-         the way, or `resource_exhausted` when you ran out of something you \
-         cannot obtain here. Then stop — the molecule is in a terminal state \
-         a human can read and act on, which is the outcome you were after \
-         when you considered asking.",
-        id = mol.id
-    );
-    out.push('\n');
-}
-
-/// Append the **local-worker** execution protocol to `out`.
-///
-/// A local adapter is the in-process / detached Direct-API loop (ADR-100): a
-/// model running on the operator's own hardware with no shell, no tmux, no git
-/// and no `cs` command. The coding-agent protocol (gate toolchain, commit,
-/// `cs evolve` / `cs complete`) is a contract it can never satisfy — handing it
-/// over is exactly the "worker briefing assumes a full coding agent" defect
-/// (Jesse #4 clause 2, task-20260721-676d). This protocol asks for the one
-/// thing a local model CAN produce: the declared deliverable, written into the
-/// canonical molecule directory. cosmon drives the lifecycle transitions on the
-/// worker's behalf, so none of the coding-agent-only directives appear here.
-///
-/// Deliberately free of the tokens the coding-agent path emits (`cargo`,
-/// `git commit`, `cs evolve`, `cs complete`, "run all gates") so the two
-/// briefings are textually distinguishable — the regression contract in
-/// `test_build_prompt_local_adapter_drops_coding_agent_directives`.
-fn build_local_worker_protocol(out: &mut String, mol: &MoleculeData) {
-    use std::fmt::Write;
-
-    out.push_str("## Execution Protocol (local worker)\n\n");
-    out.push_str(
-        "You are a **local, in-process worker** — a model running on the \
-         operator's own hardware through cosmon's Direct-API loop. You are NOT \
-         a coding agent: you have no shell, no terminal, no version control and \
-         no `cs` command. Do not attempt to run any build, test, lint, format or \
-         documentation tooling; do not commit; do not run any lifecycle command. \
-         cosmon records your progress and completion for you.\n\n",
-    );
-    out.push_str(
-        "Your one job is to PRODUCE THE DELIVERABLE this molecule declares and \
-         write it into your sandbox root, using a relative path (see \"Where \
-         your output goes\" above).\n\n",
-    );
-    out.push_str("For EACH step:\n");
-    out.push_str("1. Read the step's description and exit criteria above.\n");
-    out.push_str(
-        "2. Write the artifact it asks for as a real file under your sandbox \
-         root, with a relative path (Markdown unless the step names another \
-         format). Empty chatter is not a deliverable — the file must contain \
-         the actual work.\n",
-    );
-    out.push_str(
-        "3. Go straight into the next step. There is nobody here to check in \
-         with.\n\n",
-    );
-
-    // Completion contract, in the vocabulary this worker actually has. It
-    // owns no lifecycle verb, so "finishing" means "the file exists and is
-    // real", and the not-completable branch — the same branch the coding
-    // agent gets via `cs note` / `cs collapse` — has to be carried by the
-    // file itself, which is the only channel out of this worker that
-    // anybody reads. Kept free of the coding-agent tokens the regression
-    // contract in
-    // `test_build_prompt_local_adapter_drops_coding_agent_directives`
-    // forbids here.
-    out.push_str("## Finishing\n\n");
-    out.push_str(
-        "You are done when the file exists and contains the actual work. \
-         cosmon records the completion for you by looking at what you wrote — \
-         a reply that describes the deliverable without writing it lands as a \
-         molecule that did nothing.\n\n",
-    );
-    out.push_str("### When you cannot produce what was asked\n\n");
-    out.push_str(
-        "If the mission rests on something false, or asks for material you do \
-         not have, do not invent a deliverable to satisfy this brief — a \
-         fabricated artifact is worse than none, because the work that reads \
-         it downstream cannot tell. Do not stop and wait either: nobody is \
-         reading this session, so waiting is indistinguishable from working \
-         and holds the molecule open.\n\n",
-    );
-    out.push_str(
-        "Write the file anyway, and let it say plainly what you found: what \
-         was asked, what is actually true, and what is missing. That is a \
-         real deliverable — it is the finding — and it reaches a human, which \
-         is what you wanted when you considered asking.\n\n",
-    );
-
-    // Kept last: on a re-prime or after truncation, the tail is the region
-    // reliably still in view, and this is the only line naming which step
-    // is current.
-    let _ = writeln!(
-        out,
-        "## ▶ Start here: step {}\n\n\
-         Everything you need is above. Write the artifact rather than a plan \
-         of it — the file is the only output of this session that is kept.",
-        mol.current_step + 1
-    );
+    cosmon_core::tackle_plan::build_prompt(
+        &molecule_brief(mol),
+        formula,
+        briefing,
+        config,
+        molecule_dir,
+        adapter_name,
+        sandbox_root,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4379,269 +3702,33 @@ pub(super) fn create_worktree(
     branch: &str,
     start_point: Option<&str>,
 ) -> anyhow::Result<()> {
-    // If worktree already exists, reuse it.
-    if worktree_path.exists() {
-        return Ok(());
-    }
-
-    // Newcomer first-run guard (task-20260722-44ce, reported by external tester
-    // Matteo Cacciari / LPTHE). When the branch is cut from HEAD (no blocker
-    // start-point) and the repo has NO commits — an unborn HEAD, the state a
-    // fresh `git init` leaves behind — `git branch feat/<mol>` fails with
-    // `fatal: not a valid object name: 'main'` (git resolves the symbolic HEAD
-    // to its unborn target). That was a hard first-run wall for the documented
-    // `cs init` → `git init` → `cs demo` path. Materialize the base branch with
-    // one empty seed commit so the branch cut below just works. This fires
-    // *only* on a genuinely commit-less repo — never over existing history.
-    if start_point.is_none() {
-        ensure_base_commit(repo_root)?;
-    }
-
-    // Create branch from start_point (blocker's branch) or HEAD (main).
-    // Pre-fix (task-20260416-ef31): the result of `git branch` was
-    // silently discarded. A disk-full / permission / corrupt-repo failure
-    // would fall through, `git worktree add` would then also fail
-    // confusingly, and the tmux session still got written with a surface
-    // "Running" row — one of the mechanisms behind the surface-lie class.
-    // We now check every non-"already exists" failure and surface it.
-    let lossy = repo_root.to_string_lossy();
-    let mut args: Vec<String> = vec![
-        "-C".to_owned(),
-        lossy.into_owned(),
-        "branch".to_owned(),
-        branch.to_owned(),
-    ];
-    if let Some(sp) = start_point {
-        args.push(sp.to_owned());
-    }
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    // `LC_ALL=C` pins git's stderr to the English locale so the
-    // "already exists" idempotence probe below survives non-English
-    // operator locales. See done.rs::try_merge_branch for the structural
-    // rationale and the 2026-05-22 (drain-worker f877) discovery.
-    let branch_out = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args(refs)
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git branch: {e}"))?;
-    if !branch_out.status.success() {
-        let stderr = String::from_utf8_lossy(&branch_out.stderr);
-        // The ONLY tolerated failure is "branch already exists" — tackle is
-        // idempotent when re-invoked on the same molecule, so the branch
-        // may legitimately predate this call (e.g. `--force` respawn,
-        // partial prior tackle, manual `git branch`). Any other failure is
-        // unexpected and MUST surface: proceeding would silently paper
-        // over a disk-full / corrupt-repo / permission problem and then
-        // cascade into a surface lie downstream.
-        if !stderr.contains("already exists") {
-            return Err(anyhow::anyhow!(
-                "git branch {branch} failed: {}",
-                stderr.trim()
-            ));
-        }
-    }
-
-    // Create worktree directory parent.
-    if let Some(parent) = worktree_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // `LC_ALL=C` pins git's stderr to the English locale so the
-    // "already checked out" / "already exists" idempotence probe below
-    // survives non-English operator locales (drain-worker f877,
-    // 2026-05-22).
-    let output = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "worktree",
-            "add",
-            &worktree_path.to_string_lossy(),
-            branch,
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git worktree add: {e}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        // If worktree already checked out, that's fine.
-        if stderr.contains("already checked out") || stderr.contains("already exists") {
-            pin_operator_identity(repo_root, worktree_path);
-            return Ok(());
-        }
-        return Err(anyhow::anyhow!(
-            "git worktree add failed: {}",
-            stderr.trim()
-        ));
-    }
-
-    // Pin the operator identity at the worktree seam (delib-20260717-194b, F2).
-    // This is the single choke point every adapter passes through, so feature
-    // commits are BORN operator-authored — no post-hoc rewrite, no SHA churn,
-    // no ancestry-guard breakage. The `cs done` author-slot assertion (F4) is
-    // the backstop for when this silently no-ops (env precedence, a late
-    // amend); pinning here reduces the failure *rate*, the assertion *closes*
-    // the hole. Best-effort: a failure to resolve or set identity never blocks
-    // tackle (the assertion catches the residue).
-    pin_operator_identity(repo_root, worktree_path);
-
-    Ok(())
+    // The implementation moved to `cosmon_runtime::tackle_exec` (issue #54 /
+    // U5) so the library executor and this CLI share one worktree seam — a
+    // second copy of the idempotence probes is a first copy that will one
+    // day disagree. Behaviour (idempotence, unborn-HEAD seeding, operator
+    // identity pinning) is unchanged; only the error type is adapted.
+    // The ownership receipt (issue #57 review, finding 1) is consumed by
+    // the library executor's rollback seam; this CLI path keeps its own
+    // `cleanup_partial_tackle`, so the receipt is not needed here.
+    cosmon_runtime::tackle_exec::create_worktree(repo_root, worktree_path, branch, start_point)
+        .map(|_ownership| ())
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-/// Materialize the base branch when the repository has no commits yet.
-///
-/// A freshly `git init`'d repository has an *unborn HEAD*: the symbolic ref
-/// `HEAD` points at `refs/heads/main` (or whatever `init.defaultBranch` names),
-/// but that ref does not resolve to any object because no commit exists. In
-/// that state `git branch feat/<mol>` fails with
-/// `fatal: not a valid object name: 'main'` — the exact wall an external tester
-/// (Matteo Cacciari, LPTHE) hit twice on the documented
-/// `cs init` → `git init` → `cs demo` first-run path.
-///
-/// We detect that case *specifically* — `git rev-parse --verify HEAD` returning
-/// non-zero means the repo has no commits — and seed a single empty commit so
-/// the base branch resolves and the feature branch can be cut from it. A repo
-/// that already has history returns early untouched: cosmon MUST NEVER fabricate
-/// a commit over existing work.
-///
-/// The seed commit is authored with the operator's configured git identity when
-/// one is present (walking local → global → system); if none is configured — a
-/// bare CI checkout with no `user.*` — a neutral fallback identity is supplied
-/// via `-c` so the commit still succeeds instead of failing the newcomer's very
-/// first command with a git-identity error.
-fn ensure_base_commit(repo_root: &std::path::Path) -> anyhow::Result<()> {
-    // Probe for an unborn HEAD. `rev-parse --verify HEAD` exits non-zero with an
-    // unborn HEAD and zero once any commit exists. `--quiet` suppresses the
-    // "Needed a single revision" noise on the expected miss.
-    let head = std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "rev-parse",
-            "--quiet",
-            "--verify",
-            "HEAD",
-        ])
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git rev-parse: {e}"))?;
-    if head.status.success() {
-        // The repo already has at least one commit — leave history untouched.
-        return Ok(());
-    }
+/// See [`cosmon_runtime::tackle_exec::ensure_base_commit`] — moved with
+/// `create_worktree` (issue #54 / U5); this alias keeps the historical
+/// call sites and tests in place.
+#[cfg(test)]
+use cosmon_runtime::tackle_exec::ensure_base_commit;
+/// See [`cosmon_runtime::tackle_exec::git_config_value`] — moved with
+/// `create_worktree` (issue #54 / U5).
+use cosmon_runtime::tackle_exec::git_config_value;
 
-    // Unborn HEAD confirmed: seed one empty commit. Supply an author identity
-    // only when the repo config has none, so a configured operator keeps their
-    // own identity and a bare checkout still commits cleanly.
-    let mut args: Vec<String> = vec!["-C".to_owned(), repo_root.to_string_lossy().into_owned()];
-    if git_config_value(repo_root, "user.name").is_none()
-        || git_config_value(repo_root, "user.email").is_none()
-    {
-        args.push("-c".to_owned());
-        args.push("user.name=cosmon".to_owned());
-        args.push("-c".to_owned());
-        args.push("user.email=cosmon@localhost".to_owned());
-    }
-    args.extend([
-        "commit".to_owned(),
-        "--allow-empty".to_owned(),
-        "-m".to_owned(),
-        "cosmon: initial commit".to_owned(),
-    ]);
-    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let out = std::process::Command::new("git")
-        .env("LC_ALL", "C")
-        .args(refs)
-        .output()
-        .map_err(|e| anyhow::anyhow!("failed to run git commit: {e}"))?;
-    if !out.status.success() {
-        return Err(anyhow::anyhow!(
-            "cs tackle: the repository has no commits and cosmon could not create \
-             an initial commit to branch from: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(())
-}
+// Fleet registration (`register_tackle_worker`) moved to
+// `cosmon_runtime::dispatch_ledger` with the rest of the ledger
+// (issue #54 / U5) — it was the ledger's only fallible post-write step and
+// the two are one act.
 
-/// Pin the operator's git identity onto a freshly-created worktree
-/// (delib-20260717-194b, F2).
-///
-/// Resolves the operator identity from `repo_root`'s effective git config
-/// (`user.name` / `user.email`, which walks local → global → system) and writes
-/// it into the worktree so every worker git process — claude, codex, aider,
-/// gemini — commits with the operator in the author AND committer slots. The
-/// maker (Noogram) and the real adapter are credited ONLY on `Co-Authored-By:`
-/// trailers, never in the author slot (direction-of-control, tolnay Q3).
-///
-/// Best-effort and non-fatal: when no identity is configured (a bare CI
-/// checkout) nothing is written and the worktree inherits whatever the repo
-/// config already carries. The `cs done` author-slot assertion is the
-/// load-bearing backstop; this is defense-in-depth that lowers the failure
-/// rate at the source.
-fn pin_operator_identity(repo_root: &std::path::Path, worktree_path: &std::path::Path) {
-    for key in ["user.name", "user.email"] {
-        if let Some(value) = git_config_value(repo_root, key) {
-            let _ = std::process::Command::new("git")
-                .args([
-                    "-C",
-                    &worktree_path.to_string_lossy(),
-                    "config",
-                    key,
-                    &value,
-                ])
-                .output();
-        }
-    }
-}
-
-/// Read a single git config value from `repo_root`'s effective config.
-///
-/// Returns `None` when the key is unset or the probe fails, so the caller can
-/// fall back cleanly rather than inventing a value.
-fn git_config_value(repo_root: &std::path::Path, key: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", &repo_root.to_string_lossy(), "config", key])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let value = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Fleet registration
-// ---------------------------------------------------------------------------
-
-/// Register a tackle-created worker in the fleet.
-///
-/// Tackle workers are bound 1-to-1 to a tmux session (`cosmon-{mol_id}`)
-/// and a molecule. Registering them in fleet.json lets `cs patrol`,
-/// `cs patrol --propel`, `cs resume`, and `cs ensemble` see and manage
-/// them uniformly with spawn/deploy workers.
-///
-/// `adapter` is the Worker-Spawn Port Adapter that actually produced the
-/// worker (ADR-097 / C8). Pre-TS-0 (ADR-099) this was a `&str`; the
-/// [`ValidatedAdapterName`] newtype now forces every caller to thread
-/// the value through `validate_adapter_name`, so the byte sequence
-/// carried by the emitted `EventV2::WorkerSpawned` is the same one
-/// that traversed the validation gate — the cat-test cross-reference
-/// `adapter_selected.adapter_name == worker_spawned.adapter_name` is
-/// satisfied by construction, not by convention.
-///
-/// `loop_ownership` is the per-Adapter axis carried jointly with the
-/// validated name (ADR-103). The emitted `EventV2::WorkerSpawned`
-/// carries the wire-string projection so the cat-test extends to a
-/// second invariant: `adapter_selected.loop_ownership ==
-/// worker_spawned.loop_ownership`.
-///
-/// Idempotent: overwrites an existing entry with the same `worker_id`.
 /// Detach a `cs realized-watch` child for this dispatch (round-4 / COND-1).
 ///
 /// Re-execs the current binary so the watcher and the dispatcher can never
@@ -4742,89 +3829,6 @@ fn arm_briefing_backstop(
     cosmon_cli::briefing_backstop::detach(&cosmon_cli::briefing_backstop::backstop_argv(
         mol_state_dir,
     ))
-}
-
-pub(super) fn register_tackle_worker(
-    store: &FileStore,
-    wid: &WorkerId,
-    worktree_path: &Path,
-    repo_root: &Path,
-    mol: &MoleculeData,
-    adapter: &ValidatedAdapterName,
-    loop_ownership: LoopOwnership,
-) -> anyhow::Result<()> {
-    let mut fleet = store.load_fleet().unwrap_or_default();
-    let agent_id = AgentId::new("tackle")?;
-    let role = mol.assigned_role.unwrap_or(AgentRole::Implementation);
-    let mut worker = WorkerData::new(
-        wid.clone(),
-        agent_id,
-        role,
-        Clearance::Write,
-        WorkerStatus::Active,
-    );
-    worker.desired = DesiredState::Running;
-    worker.repo = Some(cosmon_filestore::make_relative(worktree_path, repo_root));
-    worker.current_molecule = Some(mol.id.clone());
-    fleet.workers.insert(wid.clone(), worker);
-    store.save_fleet(&fleet)?;
-
-    // Emit EventV2::WorkerSpawned. This event IS the passive "worker created
-    // at ..." metadata — its envelope timestamp is the authoritative
-    // spawned_at for the worker.
-    //
-    // Since task-20260727-198f this fires just *before* the spawn rather
-    // than ~98 s after it: the dispatch record and this event are now one
-    // act, written on the near side of the process creation (see
-    // `super::dispatch_ledger`). The timestamp therefore marks the moment
-    // cosmon committed to the worker, not the moment the readiness pipeline
-    // finished with it — which is the boundary the energy probe and the
-    // attribution cat-test actually want, and the only one that exists
-    // before a crash can swallow it. A dispatch that then fails to spawn
-    // emits `WorkerSpawnRolledBack` and removes the fleet entry.
-    //
-    // We deliberately do NOT also emit a seed
-    // WorkerHeartbeat here: a heartbeat means "the live process just proved
-    // it exists" (1 bit of real entropy). Emitting one from the spawner
-    // impersonates liveness — it produced the exact failure mode diagnosed
-    // in task-4046 (silent exec failure, heartbeat still on the wire). The
-    // only legitimate heartbeat emitters are the worker process itself and
-    // its bridge (`cs heartbeat`).
-    // The store's own state root, not `resolve_state_dir(None)`. The ambient
-    // resolver answers about the process's environment; every write above this
-    // line went through `store`. In production they are the same directory and
-    // in a test they are not, which meant the event landed in a different tree
-    // than the fleet entry it describes.
-    let events_path = store.state_root().join("events.jsonl");
-    // Propagated, not discarded. The comment above claims this event and the
-    // dispatch record are one act; a `let _ =` here made that false, and the
-    // falsity had teeth: "no `worker_spawned` on the wire" is the exact
-    // forensic signature `d62ba58` used to identify six lost molecules, so a
-    // dropped error made that signature reachable from a healthy, fully
-    // recorded dispatch. `commit_dispatch` is the only caller and it runs
-    // before the spawn — its own contract is that "in every error case nothing
-    // has been spawned" — so failing here costs a dispatch that has not
-    // started and keeps the signature meaning what the forensics assume.
-    cosmon_state::event_log::emit_one(
-        &events_path,
-        cosmon_core::event_v2::EventV2::WorkerSpawned {
-            worker_id: wid.clone(),
-            molecule: Some(mol.id.clone()),
-            session_name: wid.as_str().to_owned(),
-            role: role.to_string(),
-            adapter_name: adapter.as_str().to_owned(),
-            loop_ownership: cosmon_core::event_v2::LoopOwnershipTag::from(loop_ownership),
-        },
-        None,
-    )
-    .map_err(|e| {
-        anyhow::anyhow!(
-            "failed to record WorkerSpawned for {wid} at {}: {e}",
-            events_path.display()
-        )
-    })?;
-
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -6449,7 +5453,8 @@ const PROBE_SCOPE: &str = "`claude -p` under the worker's resolved account: prov
 /// — in which case the caller must NOT spawn (the worker would freeze).
 ///
 /// The `preferred` model is the chain-resolved pin from
-/// [`resolve_model_selection`] (delib-20260704-b476 C1) — `--model` flag,
+/// [`cosmon_core::tackle_plan::resolve_model_selection`]
+/// (delib-20260704-b476 C1) — `--model` flag,
 /// formula-step pin, `$COSMON_DEFAULT_MODEL` / `$ANTHROPIC_MODEL`, or a
 /// config `default_model`, in precedence order — or `None` when nothing
 /// pinned a model (the floor, byte-identical to today's no-pin path). Before
@@ -9506,30 +8511,14 @@ fn load_global_adapters(path: &Path) -> Option<AdaptersConfig> {
     parsed.adapters
 }
 
-/// The **strong cost-class** set for `adapter_name` (delib-20260704-b476 C4),
-/// unioned across the per-galaxy and global `[adapters.<name>].strong` rows.
-///
-/// Union (not per-galaxy-wins) is the fail-open-*and*-conservative choice: a
-/// larger strong set classifies *more* models as expensive, which only ever
-/// tightens the ceiling — the direction that protects the operator's credits.
-/// An id declared strong in either scope is treated as strong.
+/// The **strong cost-class** set for `adapter_name` (delib-20260704-b476 C4).
+/// Delegates to the pure decision half in `cosmon_core::tackle_plan`.
 fn adapter_strong_set(
     project_adapters: Option<&AdaptersConfig>,
     global_adapters: Option<&AdaptersConfig>,
     adapter_name: &str,
 ) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for cfg in [project_adapters, global_adapters].into_iter().flatten() {
-        if let Some(entry) = cfg.entry(adapter_name) {
-            for id in &entry.strong {
-                let id = id.trim();
-                if !id.is_empty() && !out.iter().any(|s| s == id) {
-                    out.push(id.to_owned());
-                }
-            }
-        }
-    }
-    out
+    cosmon_core::tackle_plan::adapter_strong_set(project_adapters, global_adapters, adapter_name)
 }
 
 /// Fold the fleet `events.jsonl` into the strong-dispatch records the ceiling
@@ -9581,59 +8570,11 @@ fn load_strong_dispatch_records(
         .collect())
 }
 
-/// Resolve the Worker-Spawn Port Adapter name for a `cs tackle`
-/// invocation (ADR-097 / C6; ADR-108 Q5a chain).
-///
-/// Walks the six-level resolution chain documented in `Args::adapter`
-/// (Q5a), highest priority first:
-///
-/// 1. `--adapter <name>` (flag passed) → [`AdapterSelectionSource::Cli`].
-/// 2. **formula step `adapter = "<name>"`** → [`AdapterSelectionSource::FormulaStep`].
-/// 3. `$COSMON_DEFAULT_ADAPTER` (set non-empty) → [`AdapterSelectionSource::EnvVar`].
-/// 4. per-galaxy `.cosmon/config.toml::[adapters.default]` → [`AdapterSelectionSource::Config`].
-/// 5. global `~/.config/cosmon/config.toml::[adapters.default]` → [`AdapterSelectionSource::GlobalConfig`].
-/// 6. Built-in floor [`BUILTIN_FLOOR_ADAPTER`] → [`AdapterSelectionSource::Default`].
-///
-/// **The loci and what each carries** (Q5a, plus the two
-/// operator-preference tiers):
-///
-/// - **`--adapter` flag** — the operator's in-the-moment choice. Always wins.
-/// - **formula step adapter** — the per-workflow *override*. A step may
-///   legitimately pin `adapter = "claude"` (e.g. a `deep-think` panel needs
-///   frontier reasoning) *regardless of any default*. Ranks above every
-///   default, below the flag.
-/// - **`$COSMON_DEFAULT_ADAPTER`** — the operator's *session hammer*: a
-///   single `export` that flips the default everywhere, this shell, right
-///   now, with no committed config. It outranks **both** config files (it
-///   is the explicit live intent) but stays **below the formula-step pin**:
-///   a step expressing a correctness need must not be silently overridden
-///   by a blanket env preference. An empty string is treated as unset.
-/// - **per-galaxy `[adapters.default]`** — the committed project *policy*.
-/// - **global `[adapters.default]`** — the operator's *machine preference*,
-///   consulted only when the per-galaxy config carries no default, so a
-///   committed per-galaxy choice always wins over the uncommitted
-///   machine-wide one.
-/// - **floor constant [`BUILTIN_FLOOR_ADAPTER`]** — the invariant *floor*:
-///   "no config = local autonomy".
-///   **Config-undeletable *and* copy-undeletable by construction** —
-///   deleting every config row, unsetting the env, falls through to this
-///   one constant (spelled exactly once, in `cosmon_core::config`), never
-///   to Claude.
-///
-/// The opt-in escape to Claude therefore exists at *every* level, which IS
-/// the operator's decision (iii): "Claude becomes an opt-in adapter."
-///
-/// `formula_step_adapter` is `(adapter_name, formula_name, step_id)` for the
-/// currently executing step, or `None` when there is no formula, the step
-/// does not pin an adapter, or the dispatch is not formula-driven.
-///
-/// `env_default` is the value of `$COSMON_DEFAULT_ADAPTER` (caller-read);
-/// an empty string is treated as unset and falls through.
-///
-/// `config_path` / `global_config_path` are the paths the resolver actually
-/// read; each appears verbatim on its variant so a retrospective audit can
-/// distinguish a per-galaxy override from a global one from a built-in
-/// fallback.
+/// Resolve the Worker-Spawn Port Adapter name (ADR-097 / C6; ADR-108 Q5a
+/// chain). The chain now lives in `cosmon_core::tackle_plan`, where its
+/// six levels are documented; this test-only wrapper keeps the historical
+/// call shape for the regression tests below.
+#[cfg(test)]
 fn resolve_adapter_selection(
     flag: Option<&str>,
     formula_step_adapter: Option<(&str, &str, &str)>,
@@ -9643,67 +8584,14 @@ fn resolve_adapter_selection(
     global_adapters_cfg: Option<&AdaptersConfig>,
     global_config_path: &Path,
 ) -> (String, AdapterSelectionSource) {
-    if let Some(name) = flag {
-        return (
-            name.to_owned(),
-            AdapterSelectionSource::Cli {
-                flag: name.to_owned(),
-            },
-        );
-    }
-    if let Some((name, formula, step_id)) = formula_step_adapter {
-        return (
-            name.to_owned(),
-            AdapterSelectionSource::FormulaStep {
-                formula: formula.to_owned(),
-                step_id: step_id.to_owned(),
-            },
-        );
-    }
-    // Q5a extension (C99E): the operator's session hammer. Empty string =
-    // unset (falls through), so `COSMON_DEFAULT_ADAPTER= cs tackle` does
-    // not pin a nonsensical empty adapter name.
-    if let Some(name) = env_default.filter(|s| !s.is_empty()) {
-        return (
-            name.to_owned(),
-            AdapterSelectionSource::EnvVar {
-                var: "COSMON_DEFAULT_ADAPTER".to_owned(),
-            },
-        );
-    }
-    if let Some(cfg) = adapters_cfg {
-        if let Some(name) = cfg.default_adapter() {
-            return (
-                name.to_owned(),
-                AdapterSelectionSource::Config {
-                    path: config_path.to_string_lossy().into_owned(),
-                    key: "adapters.default".to_owned(),
-                },
-            );
-        }
-    }
-    // Q5a extension (C99E): the operator's machine-wide preference,
-    // consulted only when the per-galaxy config declared no default.
-    if let Some(cfg) = global_adapters_cfg {
-        if let Some(name) = cfg.default_adapter() {
-            return (
-                name.to_owned(),
-                AdapterSelectionSource::GlobalConfig {
-                    path: global_config_path.to_string_lossy().into_owned(),
-                },
-            );
-        }
-    }
-    (
-        BUILTIN_FLOOR_ADAPTER.to_owned(),
-        AdapterSelectionSource::Default {
-            fallback_reason: "no --adapter flag, no formula-step adapter pin, no \
-                              $COSMON_DEFAULT_ADAPTER, and no [adapters.default] in \
-                              either the per-galaxy or global config; using built-in \
-                              'local' (Ollama-backed in-process loop, no Claude Code \
-                              in the default path)"
-                .to_owned(),
-        },
+    cosmon_core::tackle_plan::resolve_adapter_selection(
+        flag,
+        formula_step_adapter,
+        env_default,
+        adapters_cfg,
+        config_path,
+        global_adapters_cfg,
+        global_config_path,
     )
 }
 
@@ -9730,74 +8618,12 @@ pub(super) fn env_default_model() -> Option<(String, &'static str)> {
         })
 }
 
-/// Name where a model pin came from, in words an operator can act on.
-///
-/// The composition advisory is only useful if it says which knob to turn:
-/// "the pin came from `$ANTHROPIC_MODEL`" points at the shell, "from
-/// `--model`" points at the command line, and the two remedies are
-/// different. [`ModelSelectionSource`] carries the origin for the audit
-/// trail; this renders it for a human reading the advisory.
-fn describe_model_source(source: &ModelSelectionSource) -> String {
-    match source {
-        ModelSelectionSource::Flag { .. } => "the `--model` flag".to_owned(),
-        ModelSelectionSource::FormulaPin { formula, step_id } => {
-            format!("the formula-step pin `{formula}` / `{step_id}`")
-        }
-        ModelSelectionSource::EnvVar { var } => format!("the environment variable ${var}"),
-        ModelSelectionSource::Config { path, key } => format!("`{key}` in {path}"),
-        ModelSelectionSource::GlobalConfig { path } => format!("the global config {path}"),
-        ModelSelectionSource::Default { .. } => "the no-pin floor".to_owned(),
-        // `ModelSelectionSource` is `#[non_exhaustive]`: a new origin must not
-        // break this build, and an unnamed origin is better than a wrong one.
-        _ => "an unrecognised origin".to_owned(),
-    }
-}
-
-/// Resolve the per-molecule **model** pin for a `cs tackle` invocation
-/// (delib-20260704-b476 C1) — the model sibling of
-/// [`resolve_adapter_selection`], a verbatim shape-clone of its chain.
-///
-/// Walks the six-level resolution chain, highest priority first:
-///
-/// 1. `--model <id>` (flag passed) → [`ModelSelectionSource::Flag`].
-/// 2. formula step `model = "<id>"` → [`ModelSelectionSource::FormulaPin`].
-/// 3. a model env var (`$COSMON_DEFAULT_MODEL`, else the legacy
-///    `$ANTHROPIC_MODEL`) → [`ModelSelectionSource::EnvVar`].
-/// 4. per-galaxy `[adapters.<name>].default_model` →
-///    [`ModelSelectionSource::Config`].
-/// 5. global `[adapters.<name>].default_model` →
-///    [`ModelSelectionSource::GlobalConfig`].
-/// 6. **floor `None`** → [`ModelSelectionSource::Default`]: cosmon pins no
-///    model and the adapter's own default applies.
-///
-/// **Two structural differences from the adapter chain**, both load-bearing:
-///
-/// - **The floor is `None`, not a named constant** (von-neumann's minimax).
-///   A strong floor's worst case is a silent frontier dispatch with zero
-///   operator intent; `None`'s worst case is "the adapter runs its own
-///   default", strictly dominated and byte-identical to today's no-pin
-///   path. So the return type is `Option<String>`, not `String`.
-/// - **The config tiers are scoped to `adapter_name`**
-///   (`[adapters.<name>].default_model`), because a model id only has
-///   meaning inside its adapter — unlike `[adapters.default]`, which names
-///   the adapter itself.
-///
-/// `formula_step_model` is `(model_id, formula_name, step_id)` for the
-/// currently executing step, or `None`. `env_default` is
-/// `(value, var_name)` — the caller resolves `$COSMON_DEFAULT_MODEL` then
-/// the legacy `$ANTHROPIC_MODEL` and passes whichever fired, with its name,
-/// so the recorded source names the exact origin. An empty string is
-/// treated as unset (the caller already filters, kept here as defence).
-///
-/// **Safe-default note (C4).** This resolver builds the full chain but does
-/// **not** enforce the "config/env may not resolve to a *strong* model"
-/// guard — that lands in C4 (the strong-cost-class set + the reconcile-check
-/// that rejects a strong config-default). C1 must not itself wire a config
-/// path that *silently defaults* to strong; here it does not — a config
-/// `default_model` is only consulted when no positive per-molecule act
-/// (flag / pin) fired, and the guard that rejects a strong value in that
-/// slot is C4's job. The `ModelSelectionSource` is carried out verbatim so
-/// C2's `ModelSelected` event and C4's guards can read the origin.
+/// Resolve the per-molecule **model** pin (delib-20260704-b476 C1) — the
+/// model sibling of the adapter chain. The chain now lives in
+/// `cosmon_core::tackle_plan`, where its six levels are documented; this
+/// test-only wrapper keeps the historical call shape for the regression
+/// tests below.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn resolve_model_selection(
     flag: Option<&str>,
@@ -9809,108 +8635,34 @@ fn resolve_model_selection(
     global_adapters_cfg: Option<&AdaptersConfig>,
     global_config_path: &Path,
 ) -> (Option<String>, ModelSelectionSource) {
-    if let Some(id) = flag.filter(|s| !s.is_empty()) {
-        return (
-            Some(id.to_owned()),
-            ModelSelectionSource::Flag {
-                flag: id.to_owned(),
-            },
-        );
-    }
-    if let Some((id, formula, step_id)) = formula_step_model {
-        return (
-            Some(id.to_owned()),
-            ModelSelectionSource::FormulaPin {
-                formula: formula.to_owned(),
-                step_id: step_id.to_owned(),
-            },
-        );
-    }
-    // The operator's session hammer. Empty string = unset (falls through).
-    if let Some((value, var)) = env_default.filter(|(v, _)| !v.is_empty()) {
-        return (
-            Some(value.to_owned()),
-            ModelSelectionSource::EnvVar {
-                var: var.to_owned(),
-            },
-        );
-    }
-    // Config tiers are scoped to the resolved adapter — a model id only has
-    // meaning inside its adapter.
-    if let Some(id) = adapters_cfg
-        .and_then(|cfg| cfg.entry(adapter_name))
-        .and_then(|entry| entry.default_model.as_deref())
-        .filter(|s| !s.is_empty())
-    {
-        return (
-            Some(id.to_owned()),
-            ModelSelectionSource::Config {
-                path: config_path.to_string_lossy().into_owned(),
-                key: format!("adapters.{adapter_name}.default_model"),
-            },
-        );
-    }
-    if let Some(id) = global_adapters_cfg
-        .and_then(|cfg| cfg.entry(adapter_name))
-        .and_then(|entry| entry.default_model.as_deref())
-        .filter(|s| !s.is_empty())
-    {
-        return (
-            Some(id.to_owned()),
-            ModelSelectionSource::GlobalConfig {
-                path: global_config_path.to_string_lossy().into_owned(),
-            },
-        );
-    }
-    (
-        None,
-        ModelSelectionSource::Default {
-            fallback_reason: format!(
-                "no --model flag, no formula-step model pin, no \
-                 $COSMON_DEFAULT_MODEL / $ANTHROPIC_MODEL, and no \
-                 [adapters.{adapter_name}].default_model in either the \
-                 per-galaxy or global config; pinning no model (the adapter's \
-                 own default applies — strong is never reachable from silence)"
-            ),
-        },
+    cosmon_core::tackle_plan::resolve_model_selection(
+        flag,
+        formula_step_model,
+        env_default,
+        adapter_name,
+        adapters_cfg,
+        config_path,
+        global_adapters_cfg,
+        global_config_path,
     )
 }
 
-/// Resolve the per-Adapter [`LoopOwnership`] axis (ADR-103).
-///
-/// Built-in names (`claude`, `aider`, `codex`, `openai`, `anthropic`)
-/// take the validator's verdict verbatim — the
-/// [`BUILT_IN_AXES`](cosmon_core::spawn_seam) table is the
-/// authoritative source. TOML-only adapters (a `[adapters.<name>]`
-/// row whose `<name>` is not built-in) may override the legacy
-/// default by declaring `ownership = "cosmon"`; the absence-default
-/// preserves the pre-ADR-103 `External` contract.
-///
-/// Unknown `ownership` strings fall back to the validator's verdict
-/// with a stderr warning rather than aborting — `cs tackle` must
-/// remain dispatch-tolerant of stale operator config.
+/// Resolve the per-Adapter [`LoopOwnership`] axis (ADR-103). The decision
+/// lives in `cosmon_core::tackle_plan::resolve_loop_ownership`, which
+/// returns any unknown-`ownership` warning as data; this test-only wrapper
+/// keeps the historical print-and-return shape for the tests below.
+#[cfg(test)]
 fn resolve_loop_ownership(
     adapter_name: &str,
     from_validator: LoopOwnership,
     entry: Option<&AdapterEntry>,
 ) -> LoopOwnership {
-    // Built-in adapters: the validator's axis table wins.
-    if cosmon_core::spawn_seam::axes_for_built_in(adapter_name).is_some() {
-        return from_validator;
+    let (ownership, warning) =
+        cosmon_core::tackle_plan::resolve_loop_ownership(adapter_name, from_validator, entry);
+    if let Some(warning) = warning {
+        eprintln!("{warning}");
     }
-    // TOML-only adapter: read the row, fall back to the validator's
-    // verdict (which is `External` for any caller-supplied name).
-    match entry.and_then(|e| e.ownership.as_deref()) {
-        Some("cosmon") => LoopOwnership::Cosmon,
-        Some("external") | None => from_validator,
-        Some(other) => {
-            eprintln!(
-                "cs tackle: warning — [adapters.{adapter_name}].ownership = {other:?} \
-                 is not recognised ('external' or 'cosmon'); falling back to '{from_validator:?}'"
-            );
-            from_validator
-        }
-    }
+    ownership
 }
 
 // ---------------------------------------------------------------------------
@@ -10030,6 +8782,7 @@ mod tests {
     use cosmon_core::kind::MoleculeKind;
     use cosmon_core::molecule::MoleculeStatus;
     use cosmon_filestore::FileStore;
+    use cosmon_runtime::dispatch_ledger::register_tackle_worker;
     use cosmon_state::{MoleculeData, StateStore};
     use cosmon_transport::demote_provisioning::{path_usable_by_uid, RequiredAccess};
     use tempfile::TempDir;

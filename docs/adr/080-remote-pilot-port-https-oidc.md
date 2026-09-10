@@ -298,6 +298,69 @@ So the envelope is **consumed** at those hand-offs (`api_envelope::hand_off_to_l
 
 **Residual, stated rather than papered over.** The lock is keyed on an environment marker, so it defends against a mis-wired *route*, which is the threat §3.5 names. It does not defend against local code execution inside the tenant container, which can set or clear any variable — at that point clause (e) is not the boundary that matters.
 
+#### 3.5.3 Amendment (2026-09-05) — clause (e) is inapplicable to the in-process substrate *(issue #54 U6, `task-20260905-b954`)*
+
+Issue #54 retired the runtime dependency this clause governed: the adapter no
+longer invokes `cs` as a subprocess for any admitted request. What replaces
+each half of the clause:
+
+- **The verb refusal (lock 2)** is superseded by the compile-time contract of
+  typed library calls. The adapter reaches `cosmon_state::ops`,
+  `cosmon_filestore::harvest_door::decide`,
+  `cosmon_runtime::LibraryExecutor` and `cosmon_rpp_adapter::drain::run_drain`
+  — none of which can express an operator-only verb at all. Lock 1
+  (`OPERATOR_ONLY_VERBS` in admission) stays; lock 2 in
+  `cosmon_core::api_envelope` stays armed for any *other* producer of the
+  marker, but the adapter no longer mints it.
+- **The environment half (§3.5.1's allow-list)** re-homes to the one child
+  process still crossing the adapter perimeter: the worker spawn.
+  `cosmon_rpp_adapter::worker_env` carries `PASSTHROUGH_VARS` verbatim and
+  clamps it onto every spawn as an `/usr/bin/env -i K=V…` command rewrite
+  through the transport port (`EnvelopedBackend`), so the worker's environment
+  is exactly the enveloped set regardless of the tmux server's. Proof moved to
+  `crates/cosmon-rpp-adapter/tests/worker_env_hygiene.rs`.
+- **The correlation markers** are not set on workers — a worker is not the
+  network request (§3.5.2's hand-off semantics, now with no consuming `cs
+  tackle` in between: the adapter simply never mints the marker on the spawn).
+  The ADR-155 exposed-host duty the marker carried re-homes to the dedicated
+  knob: the worker envelope stamps `COSMON_EGRESS_EXPOSED=1` on every spawn
+  (see ADR-155's amendment). Setting `COSMON_API_REQUEST=1` on a worker was
+  considered and refused: lock 2 would refuse the worker's own `cs evolve` /
+  `cs complete`, which are its whole job.
+- **The subprocess timeout** survives as the drain's `max_runtime` (named
+  `timeout` exit, I4) and axum's request lifecycle; there is no child to kill.
+
+**Enumerated parity gap (the honest part of the cut-over).** The library
+executor covers worker-spawn steps only; it does not yet carry the CLI's
+claude readiness pipeline, adapter/tool preflights, the model-budget ceiling,
+fleet-template briefing injection, committee-posture delivery, base-branch
+validation, or the reviewed-tree pin (`cmd/tackle.rs` arms). A step kind it
+does not cover answers the TYPED `501 tackle_unsupported_step` (step kind
+named in the body) — never a silent `cs` fallback. The same gap exists on the
+**drain**: `POST /v1/molecules/{id}/run` accepts a DAG at admission (the gap
+is a property of the *current step*, not of the request), so a ready node of
+an uncovered kind is met mid-loop. That refusal is permanent — the formula
+does not change between ticks — and the runtime stops on the tick that
+observes it (`ShutdownReason::DispatchRefused`, PR #57 review finding 1);
+`drain.terminated` then carries the named token `unsupported_step` with the
+refused molecule id and step kind in the event body's `detail`. Before that
+fix the loop retried the refusal every poll interval and reported it as
+`timeout` — a permanent condition disguised as a bound. Likewise the sealed harvest
+transaction (`cmd/done.rs`) has no library form yet: the `land` route's effect
+half answers `501 land_effect_unavailable` (ADR-176 §11), and the in-process
+drain dispatches and drains but does not integrate completed molecules
+(`teardown_failed` is reserved for an *attempted* harvest that a sealed
+`cs done` refused; the library drain reports `drained` and leaves branches for
+the operator). Named follow-ups, in order: (1) lift the readiness pipeline
+behind the transport port so `LibraryExecutor` reaches per-adapter spawn
+parity; (2) implement `SealedHarvestEffect` as a library and re-arm the land
+effect + drain teardown; (3) flip the CLI `cs run` default executor (kept
+byte-identical in this unit); (4) bounded-concurrency drain supervision.
+
+The `COSMON_RPP_CS` knob, `cfg.cs_path`, `AppState.cs_path`, and the
+`SystemInvoker` machinery are deleted; the shipped image carries no `cs`
+binary and its Dockerfile header is now a statement of fact.
+
 ### 3.6 Reject taxonomy
 
 ```rust

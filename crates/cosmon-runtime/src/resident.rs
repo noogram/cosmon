@@ -857,6 +857,18 @@ pub struct RuntimeLoop {
     /// they cleared the obstruction. The durable half of the record is the tag
     /// and the note written on the molecule itself.
     teardown_retries: std::collections::HashMap<String, TeardownRetry>,
+    /// Optional in-process tackle executor (issue #54 / U5).
+    ///
+    /// When set (see [`RuntimeLoop::with_tackle_executor`]), `Tackle`
+    /// decisions are dispatched through the [`crate::Executor`] seam
+    /// in-process instead of shelling `cs tackle` — the library retirement
+    /// of the ADR-080 §3.5 clause (e) envelope for this loop's dispatch
+    /// leg. `None` (the default) keeps the historical `cs tackle`
+    /// shell-out, which remains the default until the library executor
+    /// reaches step-kind parity (gate / native / query / llm — the U6
+    /// cut-over). Every other verb (`ensemble`, `done`, `patrol`,
+    /// `observe`) still shells `cs` regardless.
+    tackle_executor: Option<Box<dyn crate::Executor + Send>>,
 }
 
 impl RuntimeLoop {
@@ -876,7 +888,29 @@ impl RuntimeLoop {
             trace: TraceWriter::new(trace_path),
             launch_seal: String::new(),
             teardown_retries: std::collections::HashMap::new(),
+            tackle_executor: None,
         }
+    }
+
+    /// Route `Tackle` decisions through an in-process [`crate::Executor`]
+    /// instead of shelling `cs tackle` (issue #54 / U5).
+    ///
+    /// The natural executor here is
+    /// [`crate::tackle_exec::LibraryExecutor`], which performs the
+    /// `plan → execute` sequence in-process over an injectable transport
+    /// backend — with it, this loop's dispatch leg needs no `cs` binary.
+    /// The anti-preemption recheck, the harvest (`cs done`), the snapshot
+    /// read (`cs ensemble`) and the reap sweep (`cs patrol`) still shell
+    /// `cs`; retiring those legs is out of U5's scope.
+    ///
+    /// A `Decision::Tackle` carrying an adapter directive (a per-molecule
+    /// pin or `cs run --adapter`) is handed to the executor as a
+    /// [`crate::DispatchPin`] naming that adapter — the same rung-1 intent
+    /// the shell path expresses as `--adapter <name>`.
+    #[must_use]
+    pub fn with_tackle_executor(mut self, executor: Box<dyn crate::Executor + Send>) -> Self {
+        self.tackle_executor = Some(executor);
+        self
     }
 
     /// Path the NDJSON trace will be written to.
@@ -1146,7 +1180,18 @@ impl RuntimeLoop {
                     }
                 }
                 let basis = format!("ready-frontier:{}", d.verb());
-                let result = shell_out(&self.config, &d);
+                let result = match (&d, self.tackle_executor.as_deref()) {
+                    // Issue #54 / U5: an injected executor owns the tackle
+                    // leg in-process; every other verb keeps the shell path.
+                    (
+                        Decision::Tackle {
+                            molecule_id,
+                            adapter,
+                        },
+                        Some(executor),
+                    ) => dispatch_via_executor(executor, molecule_id, adapter.as_deref()),
+                    _ => shell_out(&self.config, &d),
+                };
                 let hash_after = state_hash(&self.config.cwd);
                 // SIGINT / SIGTERM in flight: suppress the spurious
                 // `cs done failed for <id>: exit -1: ` decision record
@@ -1614,6 +1659,39 @@ fn read_ensemble(config: &RuntimeLoopConfig) -> Result<EnsembleSnapshot, Residen
     let text = String::from_utf8(output.stdout)
         .map_err(|e| ResidentError::EnsembleParse(format!("non-utf8 stdout: {e}")))?;
     EnsembleSnapshot::from_json(&text)
+}
+
+/// Dispatch one `Tackle` decision through an in-process [`crate::Executor`]
+/// (issue #54 / U5) — the library sibling of [`shell_out`]'s tackle arm.
+///
+/// The decision's adapter directive (per-molecule pin or `cs run
+/// --adapter`) becomes a [`crate::DispatchPin`] naming that adapter, the
+/// same rung-1 intent the shell path expresses as `--adapter <name>`.
+/// Failures map to [`ResidentError::CsInvocation`] with the `tackle` verb,
+/// so the loop's retry / park / trace handling is byte-identical on both
+/// paths.
+fn dispatch_via_executor(
+    executor: &(dyn crate::Executor + Send),
+    molecule_id: &str,
+    adapter: Option<&str>,
+) -> Result<(), ResidentError> {
+    let id =
+        cosmon_core::id::MoleculeId::new(molecule_id).map_err(|e| ResidentError::CsInvocation {
+            verb: "tackle".into(),
+            mol_id: molecule_id.into(),
+            reason: format!("invalid molecule id: {e}"),
+        })?;
+    let pin = crate::DispatchPin {
+        adapter: adapter.map(str::to_owned),
+        model: None,
+    };
+    executor
+        .dispatch_with_pin(&id, &pin)
+        .map_err(|e| ResidentError::CsInvocation {
+            verb: "tackle".into(),
+            mol_id: molecule_id.into(),
+            reason: e.to_string(),
+        })
 }
 
 fn shell_out(config: &RuntimeLoopConfig, d: &Decision) -> Result<(), ResidentError> {

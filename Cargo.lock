@@ -1135,11 +1135,14 @@ dependencies = [
  "cosmon-notary",
  "cosmon-state",
  "fs2",
+ "neurion-core",
  "nix 0.31.2",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
  "tempfile",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -1407,9 +1410,11 @@ dependencies = [
  "cosmon-oidc-testkit",
  "cosmon-process-witness",
  "cosmon-remote",
+ "cosmon-runtime",
  "cosmon-state",
  "cosmon-surface-canon",
  "cosmon-thin-cli",
+ "cosmon-transport",
  "dashmap",
  "http",
  "http-body-util",
@@ -1446,6 +1451,7 @@ dependencies = [
  "cosmon-hash",
  "cosmon-process-witness",
  "cosmon-state",
+ "cosmon-transport",
  "notify",
  "proptest",
  "rand 0.8.5",
@@ -1453,6 +1459,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "toml 0.8.23",
 ]
 
 [[package]]
@@ -1555,6 +1562,7 @@ dependencies = [
  "cosmon-rpp-adapter",
  "cosmon-surface-canon",
  "cosmon-thin-macro",
+ "cosmon-transport",
  "insta",
  "linkme",
  "reqwest",

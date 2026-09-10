@@ -29,6 +29,7 @@ passing nightly.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -294,6 +295,100 @@ def molecule(logged_in: RemoteCli, cfg: E2EConfig) -> str:
     if not mol_id:
         raise AssertionError(f"nucleate returned no molecule id: {str(payload)[:400]}")
     return mol_id
+
+
+@pytest.fixture(scope="class")
+def tackle_attempt(logged_in: RemoteCli, molecule: str):
+    """``POST /v1/molecules/:id/tackle``, attempted exactly ONCE per set.
+
+    Both the success path and the falsifier read this one attempt rather
+    than each calling the route: a second dispatch of the same molecule
+    is a different request with a different answer, and two tests that
+    each tackled would be asserting about two different events while
+    reading as if they agreed. Returns ``(rc, payload, stderr)``
+    unjudged — the judging belongs in the tests.
+    """
+    return logged_in.tackle(molecule)
+
+
+@pytest.fixture(scope="class")
+def dispatched(tackle_attempt, molecule: str) -> str:
+    """The worker session name the image spawned, from that one attempt.
+
+    The assertion is the SESSION NAME, not the HTTP status. A 200
+    carrying no session would satisfy "it did not fail" while describing
+    a dispatch that spawned nothing, and that is precisely the shape of
+    the lie this whole suite exists to catch.
+
+    Never reached in falsifier mode (``RPP_E2E_EXPECT_TACKLE_LABEL``):
+    the tests that need it are deselected, because a refused dispatch has
+    no worker to wait for and reporting the cascade would say the same
+    thing four times.
+    """
+    rc, payload, stderr = tackle_attempt
+    if rc != 0:
+        raise AssertionError(
+            f"POST /v1/molecules/{molecule}/tackle failed (rc={rc}): {stderr[-2000:]}"
+        )
+    # `.tackle.worker_session`, spelled once — see the `molecule` fixture
+    # for why there is no fallback chain.
+    session = (payload or {}).get("tackle", {}).get("worker_session")
+    if not session:
+        raise AssertionError(
+            f"tackle answered 200 with no worker_session: {str(payload)[:400]}"
+        )
+    return session
+
+
+@pytest.fixture(scope="class")
+def worked(dispatched: str, logged_in: RemoteCli, molecule: str, cfg: E2EConfig,
+           stack: ComposeStack) -> str:
+    """Wait for the spawned worker to drive its molecule to ``completed``.
+
+    The dummy agent (``tests/fakes/fake-claude`` in ``complete-molecule``
+    mode, staged into the e2e image only) reads the briefing the adapter
+    pasted into its pane, takes the molecule id out of it, and runs
+    ``cs complete``. So this proves three things ``tackle`` alone cannot:
+    the BRIEFING reached the pane, the worker's own environment is usable
+    (``PATH``, ``COSMON_STATE_DIR`` pinned by the envelope), and the
+    tenant store the worker writes is the same one the API reads.
+
+    Polled through the API, not off the disk: the question is what a
+    tenant can observe. Returns the terminal status.
+    """
+    deadline = time.time() + cfg.worker_timeout
+    status = ""
+    while time.time() < deadline:
+        rc, payload, _ = logged_in.observe(molecule)
+        status = (payload or {}).get("molecule", {}).get("status", "")
+        if status == "completed":
+            return status
+        time.sleep(2)
+    pane = stack.capture_worker_pane(dispatched)
+    (stack.logs_dir / "worker-pane.log").write_text(pane, encoding="utf-8")
+    raise AssertionError(
+        f"molecule {molecule} is '{status or '<unreadable>'}' after {cfg.worker_timeout}s, "
+        f"not 'completed'. The worker pane, captured before teardown:\n{pane[-4000:]}"
+    )
+
+
+def pytest_collection_modifyitems(config, items):  # noqa: D401 - pytest hook
+    """Deselect the post-dispatch tests when a tackle refusal is pinned.
+
+    ``RPP_E2E_EXPECT_TACKLE_LABEL`` points the suite at an image whose
+    dispatch must REFUSE. A worker, a completion and the harvest door's
+    effect half are then unreachable by construction. Deselecting them —
+    rather than skipping — keeps the module's no-skip contract intact:
+    nothing here prints green without having run.
+    """
+    if not os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL"):
+        return
+    kept, removed = [], []
+    for item in items:
+        (removed if item.get_closest_marker("requires_dispatch") else kept).append(item)
+    if removed:
+        config.hook.pytest_deselected(items=removed)
+        items[:] = kept
 
 
 def pytest_report_header(config):  # noqa: D401 - pytest hook

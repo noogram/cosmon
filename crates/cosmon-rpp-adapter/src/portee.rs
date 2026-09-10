@@ -506,7 +506,6 @@ mod tests {
         let image_init = ImageInit {
             inbox_root: td.join("inbox"),
             galaxies_root: td.join("galaxies"),
-            cs_path: td.join("nonexistent-cs"),
             claude_home: td.join("home"),
             formulas_seed_dir: None,
         };

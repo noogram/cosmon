@@ -27,6 +27,7 @@ testpaths = ["."]
 addopts = "-ra --strict-markers --tb=short"
 markers = [
     "stack: needs the real docker compose stack (docker daemon required; never skipped, see conftest.py)",
+    "requires_dispatch: needs `tackle` to have SUCCEEDED; deselected when RPP_E2E_EXPECT_TACKLE_LABEL pins a refusal",
 ]
 junit_family = "xunit2"
 # The suite's own log stream is the debugging channel: `-o log_cli=true`

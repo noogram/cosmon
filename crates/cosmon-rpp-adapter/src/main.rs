@@ -14,9 +14,7 @@ use cosmon_rpp_adapter::{
     deny_list::DenyList,
     jwt::JwksStore,
     nucleon_map::{render_oidc_identity_toml, HabilitationBindingSpec},
-    router,
-    subprocess::resolve_cs_path,
-    AppState, BackendHealthRegistry, HabilitationMap, IngressRateLimiter, Posture,
+    router, AppState, BackendHealthRegistry, HabilitationMap, IngressRateLimiter, Posture,
     SharedHabilitationMap, SharedJwksStore,
 };
 use tracing_subscriber::fmt;
@@ -176,7 +174,6 @@ async fn main() -> anyhow::Result<()> {
     let state_dir = cfg.resolved_state_dir();
     let inbox_root = cfg.resolved_inbox_root();
     let galaxies_root = cfg.resolved_galaxies_root();
-    let cs_path = resolve_cs_path(cfg.cs_path.as_deref());
 
     tracing::info!(
         event = "boot.posture",
@@ -197,7 +194,6 @@ async fn main() -> anyhow::Result<()> {
         state_dir_source = cfg.state_dir_source(),
         inbox_root = %inbox_root.display(),
         galaxies_root = %galaxies_root.display(),
-        cs_path = %cs_path.display(),
         "filesystem roots resolved",
     );
 
@@ -332,7 +328,6 @@ async fn main() -> anyhow::Result<()> {
     let image_init = cosmon_rpp_adapter::image_init::ImageInit {
         inbox_root: inbox_root.clone(),
         galaxies_root: galaxies_root.clone(),
-        cs_path: cs_path.clone(),
         claude_home,
         formulas_seed_dir,
     };
@@ -443,8 +438,19 @@ async fn main() -> anyhow::Result<()> {
         cosmon_rpp_adapter::portee::PorteeProvisioner::new(state_dir.clone(), provisioner.clone()),
     );
 
+    // Worker transport (issue #54 U6): one tmux backend PER TENANT
+    // PROJECT SOCKET, resolved through `resolve_tmux_socket_name` — the
+    // same resolver `cs tackle` and `cs done` use, which is what
+    // architectural invariant §7f requires (a shared `"cosmon"` literal is
+    // what it forbids). Operator tooling therefore attaches with
+    // `tmux -L $(cs ensemble --json | jq -r .project.tmux_socket) …`, and
+    // a local `cs done` finds the worker the adapter spawned. Every spawn
+    // is clamped by the worker envelope in the routes; see
+    // `cosmon_rpp_adapter::worker_env`.
+    let worker_backend = cosmon_rpp_adapter::worker_env::WorkerBackends::per_project_tmux();
+
     let state = AppState {
-        cs_path,
+        worker_backend,
         state_dir,
         inbox_root,
         galaxies_root,
@@ -453,7 +459,7 @@ async fn main() -> anyhow::Result<()> {
         rate_limiter,
         deny_list,
         posture,
-        subprocess_timeout: cfg.resolved_subprocess_timeout(),
+        drain_timeout: cosmon_rpp_adapter::DEFAULT_DRAIN_TIMEOUT,
         anthropic_api_key,
         claude_model: cfg.resolved_claude_model(),
         backend_health,

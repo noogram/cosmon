@@ -126,14 +126,24 @@ impl MoleculeEvent {
         noyau: impl Into<String>,
         root_id: impl Into<String>,
         reason: &'static str,
+        detail: Option<&str>,
     ) -> Self {
         let molecule_id = root_id.into();
         let timestamp = chrono::Utc::now().to_rfc3339();
-        let data = serde_json::json!({
+        let mut data = serde_json::json!({
             "molecule_id": molecule_id,
             "reason": reason,
             "timestamp": timestamp,
         });
+        // `detail` names the refused molecule + step kind for the
+        // `unsupported_step` token; absent for the whole-drain tokens, so
+        // the event shape is unchanged for every pre-existing reason.
+        if let (Some(detail), Some(map)) = (detail, data.as_object_mut()) {
+            map.insert(
+                "detail".to_owned(),
+                serde_json::Value::String(detail.to_owned()),
+            );
+        }
         Self {
             event: "drain.terminated",
             noyau: noyau.into(),

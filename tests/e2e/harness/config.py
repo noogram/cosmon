@@ -16,6 +16,7 @@ import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Tuple
 
 #: `cosmon-remote login` binds its OAuth redirect catcher on this fixed
 #: loopback port (``oidc::loopback::DEFAULT_REDIRECT_PORT``). It is not
@@ -50,6 +51,26 @@ class E2EConfig:
     expect_observe_status: str
     #: Falsifier: the named refusal the ``land`` door must return.
     expect_land_label: str
+    #: Falsifier: the named refusal ``tackle`` must return. Empty (the
+    #: default) means tackle must SUCCEED. Naming a label here points the
+    #: suite at an image whose dispatch cannot work — how the pre-U6
+    #: claim is falsified without a second harness: build from a checkout
+    #: that predates the library cut-over (:attr:`build_root`) and pin
+    #: ``tackle_unavailable``.
+    expect_tackle_label: str
+    #: The workspace the two images are BUILT from. Defaults to
+    #: :attr:`repo_root`. The staged compose files' build context is
+    #: rewritten to this absolute path, so the compose file can come from
+    #: this checkout while the source tree comes from another one.
+    build_root: Path
+    #: Layer ``deploy/docker-compose.e2e.yml`` on top of the deployment
+    #: compose file: the adapter image is then built from the
+    #: Dockerfile's ``e2e`` target, which adds the dummy agent and the
+    #: worker-side ``cs``. Set False for a build root with no such stage.
+    e2e_stage: bool
+    #: Seconds to wait for a spawned worker to drive its molecule to
+    #: ``completed``.
+    worker_timeout: int
     #: Whether the stack is torn down (``down -v``) and reprovisioned
     #: between test sets. Only a falsification run sets this to False.
     reinit: bool
@@ -93,6 +114,28 @@ class E2EConfig:
         return self.staged_deploy / "docker-compose.yml"
 
     @property
+    def compose_e2e_file(self) -> Path:
+        """The test-only override layered on when :attr:`e2e_stage`.
+
+        Kept a SEPARATE file rather than a flag on the deployment one, so
+        the compose configuration an operator reads renders identically
+        whether or not a smoke ever ran.
+        """
+        return self.staged_deploy / "docker-compose.e2e.yml"
+
+    @property
+    def compose_files(self) -> Tuple[Path, ...]:
+        """The ``-f`` list, in order. ``up`` and ``down`` MUST see the same set.
+
+        A teardown that forgot the override would leave the e2e-tagged
+        image's containers behind, and the next run would meet them as
+        "port already allocated".
+        """
+        if self.e2e_stage:
+            return (self.compose_file, self.compose_e2e_file)
+        return (self.compose_file,)
+
+    @property
     def galaxies_root(self) -> Path:
         """Host side of the ``/cosmon/galaxies`` bind-mount."""
         return self.run_dir / "galaxies"
@@ -121,6 +164,7 @@ class E2EConfig:
         # this when the request carries no `login_hint`, and
         # cosmon-remote sends none.
         idp_sub = _env("RPP_E2E_IDP_SUB", "cs-oidc-mock-user")
+        build_root = Path(_env("RPP_E2E_BUILD_ROOT", str(repo_root))).resolve()
         return cls(
             repo_root=repo_root,
             run_dir=run_dir,
@@ -138,7 +182,19 @@ class E2EConfig:
             # `Queued` if assigned) and observe renders the snake_case
             # label.
             expect_observe_status=_env("RPP_E2E_EXPECT_STATUS", "pending"),
-            expect_land_label=_env("RPP_E2E_EXPECT_LAND_LABEL", "subprocess_spawn_failed"),
+            # `land` no longer refuses for want of a binary. The door's
+            # decision half runs in-process (issue #54 U3) and this suite
+            # ARMS it in the throwaway galaxy, so the decision ADMITS and
+            # the refusal is the effect half's: `501
+            # land_effect_unavailable` (ADR-176 §12). The label is
+            # deliberately outside the closed seven-refusal set — it
+            # names a missing implementation, not a verdict about this
+            # molecule.
+            expect_land_label=_env("RPP_E2E_EXPECT_LAND_LABEL", "land_effect_unavailable"),
+            expect_tackle_label=os.environ.get("RPP_E2E_EXPECT_TACKLE_LABEL", ""),
+            build_root=build_root,
+            e2e_stage=_env("RPP_E2E_E2E_STAGE", "1") != "0",
+            worker_timeout=int(_env("RPP_E2E_WORKER_TIMEOUT", "120")),
             reinit=_env("RPP_E2E_REINIT", "1") != "0",
             keep=_env("RPP_E2E_KEEP", "0") == "1",
             remote_bin=os.environ.get("COSMON_REMOTE_BIN", ""),

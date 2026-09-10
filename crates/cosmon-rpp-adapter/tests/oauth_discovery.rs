@@ -25,7 +25,6 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
-use cosmon_oidc_testkit::fake_cs_path;
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::HabilitationMap;
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
@@ -45,7 +44,9 @@ fn make_state(state_dir: &std::path::Path) -> AppState {
     let deny_list = DenyList::new(state_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
 
     AppState {
-        cs_path: fake_cs_path(),
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: state_dir.to_path_buf(),
         inbox_root: state_dir.join("whispers/inbox"),
         galaxies_root: state_dir.join("galaxies"),
@@ -56,7 +57,7 @@ fn make_state(state_dir: &std::path::Path) -> AppState {
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(10),
+        drain_timeout: Duration::from_secs(10),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),

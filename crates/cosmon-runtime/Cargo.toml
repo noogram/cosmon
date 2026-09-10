@@ -21,11 +21,16 @@ rand.workspace = true
 serde = { workspace = true }
 serde_json.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 # `test-harness` exposes cosmon_core::harness (mock CommandRunner / Clock) for
 # the hermetic scenario tests (e.g. diamond_mock.rs). Off in normal builds.
 cosmon-core = { workspace = true, features = ["test-harness"] }
+# MockBackend for the library-executor falsifier: the executor itself only
+# knows the `cosmon_core::transport` port; the concrete backends stay a
+# test-side concern so the runtime crate cannot grow a tmux dependency.
+cosmon-transport = { workspace = true, features = ["test-support"] }
 chrono.workspace = true
 proptest.workspace = true
 serde_json.workspace = true

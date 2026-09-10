@@ -16,10 +16,16 @@ cosmon-hash.workspace = true
 cosmon-notary.workspace = true
 cosmon-state.workspace = true
 fs2.workspace = true
+# Registry seeding in `project_upgrade`: `cs init --upgrade` creates and
+# seeds `.cosmon/registry.sqlite`, so lifting that pass out of the CLI
+# brings its two dependencies with it. Confined to `seed_registry`.
+neurion-core.workspace = true
 nix.workspace = true
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+thiserror.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

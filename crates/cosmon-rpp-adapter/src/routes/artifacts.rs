@@ -8,8 +8,8 @@
 //! Artifacts are the worker's outputs on disk under
 //! `/tmp/cosmon/<noyau>/<molecule_id>/`. The convention is set at
 //! `tackle` time (the adapter creates the directory and exports
-//! `COSMON_ARTIFACT_DIR` into the worker subprocess env, see
-//! [`crate::subprocess`]). The worker writes files freely into that
+//! `COSMON_ARTIFACT_DIR` into the worker spawn env, see
+//! [`crate::worker_env`]). The worker writes files freely into that
 //! directory; the three routes here expose it to the pilot.
 //!
 //! # Pipeline (mirrors the molecule routes' six-step shape)
@@ -55,7 +55,7 @@ use crate::AppState;
 /// adapter creates `<root>/<noyau>/<molecule_id>/` at tackle time.
 pub const DEFAULT_ARTIFACT_ROOT: &str = "/tmp/cosmon";
 
-/// Env var name set on the worker subprocess pointing at its
+/// Env var name set on the spawned worker pointing at its
 /// per-molecule artifact directory.
 pub const ENV_COSMON_ARTIFACT_DIR: &str = "COSMON_ARTIFACT_DIR";
 

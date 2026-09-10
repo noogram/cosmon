@@ -3843,6 +3843,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec![],
+            cwd: None,
         };
         backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
 
@@ -4619,6 +4620,7 @@ mod tests {
                     role: AgentRole::Implementation,
                     command: "echo".to_owned(),
                     args: vec![],
+                    cwd: None,
                 },
                 &RuntimeConfig::default(),
             )
@@ -5361,6 +5363,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "claude".to_owned(),
             args: Vec::new(),
+            cwd: None,
         };
         backend.spawn(&agent, &RuntimeConfig::default()).unwrap();
         backend.set_canned_output(pane);

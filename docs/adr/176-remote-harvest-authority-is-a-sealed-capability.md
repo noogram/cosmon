@@ -504,3 +504,110 @@ Rows L76 (`cs done`) and L77 (`cs stitch`) are rewritten to name the effect and
 the withheld degrees of freedom rather than a gesture, and to cite this ADR in
 place of the retired `delegate_for` exit path. Neither row's *Exposed via API?*
 column changes: both remain `**NO (NEVER)**`.
+
+---
+
+## 11 · Amendment — the door is a library, and the trunk flock binds at the effect boundary (issue #54 U3)
+
+**Status: adopted, 2026-09-05.**
+
+### The change
+
+The door's body — the ordered refusal checks of §D7, the idempotence read,
+the backlog census, and the post-effect interpretation — moves out of the
+binary-private `cmd/land.rs` into the library entry
+`cosmon_filestore::harvest_door::land(...)`. `cs land` calls it; the §8p
+route `POST /v1/molecules/{id}/land` calls the same body **in-process**,
+so every pre-effect refusal and the `already_landed` idempotent success now
+answer against an image that carries no `cs` binary at all. One body, two
+callers: the two doors cannot drift, which is the property the shared
+`DoorRefusal` vocabulary was built to protect.
+
+The **effect half** — the sealed `cs done` transaction: the merge with its
+lineage trailers, the publish/identity/confidentiality gates, the pre/post
+hooks, the teardown — is *injected* through the
+`SealedHarvestEffect` port rather than moved. Its one production
+implementation is `cmd/done.rs`'s sealed-door path; a second implementation
+would be a second door. Until that path is itself library-callable, the §8p
+route reaches it through the one subprocess this route still owns, and that
+subprocess is the named seam the mission's adapter cut-over unit retires by
+implementing the port in a library — without touching the decision half
+again.
+
+### The decision this amendment exists to record: the flock
+
+The route's old justification for the subprocess read: *the subprocess
+exists so the advisory `trunk.lock` flock binds inside the tenant
+container.* Moving in-process, the I1 WRITER-UNIQUE invariant is preserved
+by fixing **where the flock binds**, not which process binds it:
+
+**The `trunk.lock` flock binds exactly once per harvest, at the effect
+boundary.** Concretely:
+
+1. An effect that owns an effect boundary of its own — the sealed `cs done`
+   transaction, whether reached in-process or as a subprocess — acquires
+   the flock there, where ADR-172 D3 re-derives every fact under the lock.
+   Such an effect declares `binds_trunk_lock`, and the door **must not**
+   hold the lock across the call: `flock(2)` does not nest — a child
+   process blocks forever against its parent's descriptor, and a second
+   descriptor in the same process blocks against the first — so a door
+   that held it would deadlock the harvest, not serialize it.
+2. An effect with no boundary of its own is serialized **by the door**,
+   which wraps it in the existing `StateStore::lock_trunk` helper — the
+   same `.cosmon/state/trunk.lock` path, the same blocking semantics, no
+   new lock code — whose RAII guard releases on every exit path including
+   panic (the guard drops on unwind).
+
+The validity condition the old comment gestured at is a *filesystem*
+condition, not a process one: the adapter process and any `cs` child flock
+the same file on the same kernel, so an in-process acquisition excludes a
+concurrent subprocess holder and vice versa. What actually mattered was
+that *somebody* binds it, exactly once, around the mutation.
+
+**Falsifier** (in force, verified red-then-green):
+`harvest_door::tests::two_concurrent_in_process_lands_serialize` runs two
+concurrent in-process `land` calls against one kernel through two
+independent store handles and asserts the effect never observes a second
+caller inside it. Removing the door's `lock_trunk` acquisition makes the
+overlap observable and the test fails (exit 101, verified before landing).
+A companion test pins the panic-release property, and a third pins that a
+`binds_trunk_lock` effect can take its own boundary lock — i.e. that the
+door is not holding it.
+
+### What does not change
+
+The closed list (§D4) is untouched: the library entry takes the molecule
+and the effect, nothing else, and the route still refuses any request body.
+The seven refusals, their labels, their exit codes 70–76 and their HTTP
+statuses are byte-identical; the only observable route change beside
+latency is that a well-formed molecule id the tenant's store has never
+seen now answers `404 not_found` from the decision half — the same
+no-existence-oracle boundary the rest of the surface holds — where it
+previously fell through to the subprocess's anonymous failure.
+
+## 12 · Amendment — the effect half is a typed refusal until the port has a library implementation (issue #54 U6)
+
+**Status: adopted, 2026-09-05 (`task-20260905-b954`).**
+
+The subprocess §11 named as "the one subprocess this route still owns" is
+retired with the rest of the ADR-080 §3.5 clause (e) envelope. The
+`SealedHarvestEffect` port did **not** gain a library implementation in the
+same unit: the sealed `cs done` path in `cmd/done.rs` is ~1 600 lines whose
+provenance gates, lineage trailers and teardown do not move cleanly behind
+the existing ports without forking the door — the exact drift §11 refuses.
+
+Until the port has its library implementation, a harvest the in-process
+decision half ADMITS answers the typed refusal
+**`501 land_effect_unavailable`** — a new label, deliberately **outside** the
+seven-name closed set (`DoorRefusal` stays closed; the parity gap has its own
+name so no client can mistake "this adapter build cannot integrate yet" for a
+door refusal). Never a silent `cs` fallback, and never a 202: the answer is
+synchronous and true, which is the issue #51 property this route exists for.
+
+What still answers in full, in-process: every pre-effect refusal
+(`not_authorized`, `not_completed`, `reservation_requires_seal`,
+`backlog_full`), the `already_landed` idempotent success, and the
+no-existence-oracle 404. The three execution refusals (`merge_conflict`,
+`base_not_fast_forward`, `pre_done_refused`) belong to the sealed transaction
+and return with its library implementation — the named follow-up, tracked in
+ADR-080 §3.5.3's enumerated parity gap alongside the drain's teardown leg.

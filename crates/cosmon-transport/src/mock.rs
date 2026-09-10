@@ -13,13 +13,31 @@ use cosmon_core::transport::{
 /// Recorded call to the mock backend (for assertions in tests).
 #[derive(Debug, Clone)]
 pub enum MockCall {
-    Spawn { agent_id: String },
-    Terminate { worker_id: String },
-    IsAlive { worker_id: String },
-    SendInput { worker_id: String, input: String },
-    CaptureOutput { worker_id: String, lines: usize },
+    Spawn {
+        agent_id: String,
+        /// The working directory the spawn was asked to use, recorded so a
+        /// test can assert the ADR-079 §5 obligation-3 cwd actually reached
+        /// the port rather than merely being computed by the caller.
+        cwd: Option<std::path::PathBuf>,
+    },
+    Terminate {
+        worker_id: String,
+    },
+    IsAlive {
+        worker_id: String,
+    },
+    SendInput {
+        worker_id: String,
+        input: String,
+    },
+    CaptureOutput {
+        worker_id: String,
+        lines: usize,
+    },
     ListSessions,
-    GracefulExit { worker_id: String },
+    GracefulExit {
+        worker_id: String,
+    },
 }
 
 /// Mutable state shared across clones of a `MockBackend`.
@@ -31,6 +49,13 @@ struct MockState {
     canned_output: String,
     /// If set, `spawn` will return this error.
     spawn_error: Option<String>,
+    /// If set, `send_input` (and thus `send_input_observed`) will return
+    /// this error — the *post-spawn* failure shape: the session exists, the
+    /// prompt does not reach it.
+    send_input_error: Option<String>,
+    /// If set, `terminate` will return this error, so a test can exercise
+    /// the path where the post-spawn teardown itself cannot be confirmed.
+    terminate_error: Option<String>,
 }
 
 /// In-memory mock backend for testing higher layers without tmux.
@@ -69,6 +94,33 @@ impl MockBackend {
         self.state.lock().unwrap().spawn_error = Some(msg.into());
     }
 
+    /// Configure `send_input` — and therefore `send_input_observed` — to
+    /// fail with the given message while `spawn` still succeeds.
+    ///
+    /// This is the *failed prompt delivery after a successful spawn* shape:
+    /// the transport committed a live session to the operating system and
+    /// then could not deliver its briefing. It exists so a caller's
+    /// post-spawn teardown obligation (§8ab) has a falsifier.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn set_send_input_error(&self, msg: impl Into<String>) {
+        self.state.lock().unwrap().send_input_error = Some(msg.into());
+    }
+
+    /// Configure `terminate` to fail with the given message.
+    ///
+    /// Pairs with [`Self::set_send_input_error`] to produce the worst case:
+    /// a session that was spawned, could not be briefed, and could not be
+    /// torn down — the case where a caller must RETAIN its record rather
+    /// than roll it back.
+    ///
+    /// # Panics
+    /// Panics if the internal mutex is poisoned.
+    pub fn set_terminate_error(&self, msg: impl Into<String>) {
+        self.state.lock().unwrap().terminate_error = Some(msg.into());
+    }
+
     /// Return a snapshot of all recorded calls.
     ///
     /// # Panics
@@ -89,6 +141,7 @@ impl TransportBackend for MockBackend {
 
         state.calls.push(MockCall::Spawn {
             agent_id: agent.id.to_string(),
+            cwd: agent.cwd.clone(),
         });
 
         if let Some(ref msg) = state.spawn_error {
@@ -109,6 +162,12 @@ impl TransportBackend for MockBackend {
         Ok(SpawnHandle {
             id: worker_id,
             session_name,
+            // The mock's stand-in PID witness is the test process itself:
+            // a real, live PID whose launch fingerprint
+            // (`cosmon_process_witness::process_start_time`) resolves on
+            // every platform, so ledger-stamping tests can assert both the
+            // pid and its start time without spawning anything.
+            pid: Some(std::process::id()),
         })
     }
 
@@ -118,6 +177,10 @@ impl TransportBackend for MockBackend {
         state.calls.push(MockCall::Terminate {
             worker_id: id.to_string(),
         });
+
+        if let Some(ref msg) = state.terminate_error {
+            return Err(TransportError::Io(msg.clone()));
+        }
 
         state
             .sessions
@@ -144,6 +207,10 @@ impl TransportBackend for MockBackend {
             worker_id: id.to_string(),
             input: input.to_owned(),
         });
+
+        if let Some(ref msg) = state.send_input_error {
+            return Err(TransportError::Io(msg.clone()));
+        }
 
         if !state.sessions.contains_key(id.as_str()) {
             return Err(TransportError::NotFound(id.clone()));
@@ -207,6 +274,7 @@ mod tests {
             role: AgentRole::Implementation,
             command: "echo".to_owned(),
             args: vec!["hello".to_owned()],
+            cwd: None,
         }
     }
 

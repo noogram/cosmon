@@ -300,15 +300,6 @@ fn sanitise_for_filename(s: &str) -> String {
         .collect()
 }
 
-/// Absolute path to the `fake-cs` binary built alongside this crate
-/// by `build.rs`. Use it as the `cs_path` for
-/// `cosmon-rpp-adapter::AppState` in integration tests that exercise
-/// the subprocess envelope without rebuilding the real `cs` binary.
-#[must_use]
-pub fn fake_cs_path() -> PathBuf {
-    PathBuf::from(env!("COSMON_OIDC_TESTKIT_FAKE_CS"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

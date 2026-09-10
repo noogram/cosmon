@@ -34,10 +34,14 @@
 pub mod cas;
 pub mod event;
 pub mod harvest_authority;
+pub mod harvest_door;
 pub mod operator_trust;
 pub mod pilot_lease_store;
 pub mod pilot_mailbox;
 pub mod presence_store;
+// Project materialization (`cs init --upgrade` as a library) — see the
+// module docs for why it left the CLI.
+pub mod project_upgrade;
 pub mod resolve;
 
 pub use harvest_authority::{
@@ -969,6 +973,22 @@ pub fn resolve_repo_path(repo: &str, project_root: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+/// Serialise tests that touch the process-global
+/// `COSMON_TRUNK_LOCK_NONBLOCKING` toggle. `std::env::set_var` mutates
+/// the whole test process, and cargo runs `#[test]`s in parallel — a
+/// harvest-door test flipping the toggle mid-flight turns the blocking
+/// `trunk_lock_serialises_concurrent_acquirers` acquisition into a
+/// fast-fail (observed as a rare red on full-suite runs). Every test
+/// that SETS the toggle and every test that DEPENDS on it being unset
+/// takes this guard first, so the two populations never interleave.
+pub(crate) fn trunk_lock_env_serial() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
@@ -1735,6 +1755,10 @@ mod tests {
         use std::thread;
         use std::time::{Duration, Instant};
 
+        // This test needs BLOCKING acquisition: hold the crate's
+        // env-serialisation guard so no parallel test can flip
+        // `COSMON_TRUNK_LOCK_NONBLOCKING` mid-flight.
+        let _env = crate::trunk_lock_env_serial();
         let (tmp, _store) = make_store();
         let path: PathBuf = tmp.path().to_path_buf();
         let hold = Duration::from_millis(200);

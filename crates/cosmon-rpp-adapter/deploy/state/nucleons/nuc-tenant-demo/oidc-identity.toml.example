@@ -38,5 +38,11 @@ sealed_at = "REPLACE_ME_SEALED_AT"
 # Binding-granted scopes (T23). The upstream IdP may be unable to mint
 # `cosmon:*` scopes; granting them here closes that gap for this
 # `(iss, sub, aud)` alone. Trim the list to what the tenant may do.
+#
+# `cosmon:worker:spawn` is deliberately ABSENT from the default pair.
+# It is a third grant, required by composition (AND) alongside
+# `cosmon:molecule:write` for `POST /v1/molecules/:id/tackle`, and it
+# is what lets a tenant spend the operator's model budget. Add it only
+# for a tenant you mean to let dispatch workers.
 [scopes]
 allowed = ["cosmon:molecule:read", "cosmon:molecule:write"]

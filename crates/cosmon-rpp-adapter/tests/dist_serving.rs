@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
-use cosmon_oidc_testkit::{fake_cs_path, OidcMock, TenantWorkspaces};
+use cosmon_oidc_testkit::{OidcMock, TenantWorkspaces};
 use cosmon_rpp_adapter::deny_list::DenyList;
 use cosmon_rpp_adapter::nucleon_map::HabilitationMap;
 use cosmon_rpp_adapter::rate_limit::IngressRateLimiter;
@@ -36,7 +36,9 @@ async fn make_state_with_dist_root(
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
     let tenants = TenantWorkspaces::new();
     AppState {
-        cs_path: fake_cs_path(),
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(std::sync::Arc::new(
+            cosmon_transport::MockBackend::new(),
+        )),
         state_dir: security_dir.to_path_buf(),
         inbox_root: security_dir.join("whispers/inbox"),
         galaxies_root: tenants.galaxies_root().to_path_buf(),
@@ -47,7 +49,7 @@ async fn make_state_with_dist_root(
         rate_limiter: Arc::new(rate_limiter),
         deny_list: Arc::new(deny_list),
         posture: Posture::Prepared,
-        subprocess_timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(5),
         anthropic_api_key: None,
         claude_model: None,
         backend_health: Arc::new(BackendHealthRegistry::new()),

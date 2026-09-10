@@ -19,7 +19,112 @@ this stage.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A tenant drain whose ready molecule sits on an uncovered step kind
+  terminates with the named `unsupported_step` token instead of busy-looping
+  to `timeout`** (PR #57 review, findings 1–5). The permanent
+  `UnsupportedStep` refusal now maps to the non-retryable
+  `RuntimeError::DispatchRefused`; the runtime loop stops on the tick that
+  observes it (`ShutdownReason::DispatchRefused`, `cs run` exit `94`), and
+  `drain.terminated` names the refused molecule and step kind in its
+  `detail`. Companion fixes from the same review: the library dispatch path
+  now stamps the PID witness on the ledger from the spawn handle's
+  witnessed pane PID (`SpawnHandle::pid`), restoring `orphan_scan`'s PID
+  liveness axis for adapter-dispatched molecules; every post-worktree error
+  path in the library executor rolls the worktree and branch back (the
+  identifier and ledger error paths used to leak them); the executor's one
+  spawn seam now takes the `DispatchRecorded` token by reference, making the
+  documented spawn-before-record claim true on the library path; the worker
+  envelope re-states `PWD` from the worker's own worktree (or drops it)
+  instead of leaking the adapter's; and the drain resolves the tenant
+  state/formulas directories through the same deterministic helper as the
+  envelope's `COSMON_STATE_DIR` pin.
+
+### Changed
+
+- **The Remote Pilot Port no longer spawns the `cs` binary — the ADR-080
+  §3.5 clause (e) subprocess envelope is retired** (issue #54 U6,
+  [ADR-080 §3.5.3](docs/adr/080-remote-pilot-port-https-oidc.md)). `POST
+  /v1/molecules/{id}/tackle` dispatches **in-process** through the library
+  tackle executor over the tmux transport port; `POST /v1/molecules/{id}/run`
+  drains through the same in-process DAG loop `cs run <root>` executes, with
+  the identical named termination tokens; the `land` route's decision half is
+  unchanged and its sealed effect answers the typed
+  `501 land_effect_unavailable` until the harvest transaction is
+  library-callable ([ADR-176 §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)).
+  A formula step kind the library executor does not cover yet answers the
+  typed `501 tackle_unsupported_step` with the step kind named — never a
+  silent subprocess fallback. The env-hygiene allow-list survives at the new
+  boundary: every worker spawn is clamped to the §3.5 allow-list plus the
+  set-half (`COSMON_STATE_DIR` tenant pin, `COSMON_ARTIFACT_DIR`, the
+  Anthropic key/model, and `COSMON_EGRESS_EXPOSED=1` — the ADR-155 exposed
+  posture, re-homed off the retired `COSMON_API_REQUEST` marker). Wire
+  changes: `subprocess_timeout` / `subprocess_spawn_failed` /
+  `worker_credential_missing` / `adapter_backend_unreachable` labels are
+  retired on the tackle route (`worker_spawn_failed`, `not_tackleable` and
+  the two 501 labels replace them; `tackle_unavailable` remains the stable
+  fallback); the drain's `teardown_failed` token is not emitted by the
+  library drain (harvest is not attempted — the enumerated follow-up). The
+  `COSMON_RPP_CS` env knob and the `cs_path` / `subprocess_timeout_sec`
+  config keys are retired (the latter is still parsed and ignored). The
+  container image now carries `git` and `tmux` (the dispatch substrate) and
+  its "no `cs` binary" header is a statement of fact.
+
 ### Added
+
+- **The container smoke now dispatches a real worker — the `tackle` leg that
+  proves the shipped image is library-direct** (issue #54 U7). Until U6 the
+  adapter reached `tackle`, `run` and `land` by running the `cs` binary, which
+  its own Dockerfile has never shipped: every in-process suite was green while
+  all three routes failed against the image an operator deploys. U6 cut
+  dispatch over to the library executor; whether that is true *of the image* is
+  not a claim any in-process test can make. `scripts/rpp-remote-e2e.sh` now
+  makes it, in the container: `tackle` (a worker pane really opened, a git
+  worktree really cut, the briefing really pasted in), a wait for the molecule
+  to reach `completed`, then `land`. The falsifier is one knob, not a second
+  script — `RPP_E2E_BUILD_ROOT` points the image build at a checkout that
+  predates the cut-over and `RPP_E2E_EXPECT_TACKLE_LABEL` names the refusal it
+  must return, so the same scenario walks both sides of the change.
+  `RPP_E2E_EXPECT_LAND_LABEL` moves with it: the script now arms
+  `[harvest_authority] required` in its throwaway galaxy, so the door's
+  decision half *admits* the harvest and the pinned refusal is the effect
+  half's `land_effect_unavailable` ([ADR-176
+  §12](docs/adr/176-remote-harvest-authority-is-a-sealed-capability.md)) — no
+  longer `subprocess_spawn_failed`, which named a missing binary rather than a
+  missing implementation. Two staging steps became load-bearing and are now
+  explicit: the tenant galaxy is `git init`-ed (the library executor resolves a
+  repo root from it before cutting the worktree) and the staged compose file's
+  build context is rewritten to an absolute path, which also removes the
+  `context: ../../..` that only resolved because the run directory happened to
+  sit two levels under the repo. The run binding is still materialised from the
+  tracked `oidc-identity.toml.example` (issue #53's review fix); what the smoke
+  adds on top of it is the third grant `tackle` needs,
+  `cosmon:worker:spawn`, applied to its own throwaway binding and asserted
+  there. The template keeps the least-privilege pair, because an operator who
+  copies it untrimmed must not thereby hand out worker dispatch.
+
+  **Nothing of this is in the image you deploy.** The dummy agent and the
+  worker-side `cs` live in a new `e2e` Dockerfile stage — a `FROM runtime`
+  layer, tagged `cs-rpp-adapter:e2e`, selected only by the new
+  `crates/cosmon-rpp-adapter/deploy/docker-compose.e2e.yml` (`target: e2e`,
+  `COSMON_DEFAULT_ADAPTER=claude`). The shipped `runtime` stage is byte-identical
+  whether or not the test stage is built, and still contains no `cs` and no
+  agent CLI. The stage adds three things and each is named for a reason: a
+  `cs` built from the same workspace and lockfile (the worker's job *is*
+  `cs complete`; the claim is that the adapter spawns no `cs`, not that none
+  exists anywhere), `tests/fakes/fake-claude` installed as `claude` behind a
+  wrapper that bakes its mode in (`FAKE_CLAUDE_MODE` is not on the §3.5
+  allow-list and must not be — an allow-list with a hole for a test fixture is
+  no longer the thing under test), and a `safe.directory` waiver for git. That
+  last one is test-stage provisioning of a real deployment concern: a
+  bind-mounted galaxy carries the *host's* uid, and `git worktree add` refuses a
+  repository it considers someone else's — an operator mounting a galaxy owned
+  by another uid needs the same waiver, or matching ownership.
+  `tests/fakes/fake-claude` gained the `complete-molecule` mode this needs: the
+  only mode that succeeds at the job rather than reproducing a way of failing
+  at it, reading the briefing off the pane and running `cs complete` on the id
+  it finds.
 
 - **`scripts/rpp-remote-e2e.sh` — a container-level smoke of the Remote Pilot
   Port, and a nightly CI job that runs it.** The third part of GitHub issue #53.
@@ -82,6 +187,20 @@ this stage.
   test would make the suite unusable.
 
 ### Fixed
+
+- **No worker could ever start in the adapter image: tmux ran every pane
+  command through `/usr/sbin/nologin`.** The service account's login shell is
+  `nologin` on purpose, and tmux runs a pane's command with the account's login
+  shell — so `new-session` returned 0, `nologin` printed its line and exited,
+  the tmux server exited with it, and the dispatch failed one step later with
+  `worker not found`: a message about the missing session, not about why it was
+  missing. Every route-level suite was green throughout, because they inject an
+  in-memory backend; the only test that runs a worker in this image is the
+  container smoke, and it found this on its first honest run. The fix is
+  `set -g default-shell /bin/sh` in the image's `tmux.conf`, which moves what
+  tmux *execs* without touching what `/etc/passwd` says the account may log in
+  as — the hardening the `nologin` line exists for is unchanged. Shipped in the
+  `runtime` stage, not the test stage: the defect is the deployed image's.
 
 - **Pre-merge review of the issue-#53 work: the container smoke now provisions
   from the operator's own artefact, and the mock IdP requires what RFC 6749

@@ -274,6 +274,8 @@ pub mod spec;
 #[doc(hidden)]
 pub mod tackle;
 #[doc(hidden)]
+pub mod tackle_plan;
+#[doc(hidden)]
 pub mod toposort;
 #[doc(hidden)]
 pub mod transport;

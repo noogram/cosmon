@@ -50,9 +50,7 @@ mod mock;
 mod workspace;
 
 pub use idp::{router, IdpConfig, MockIdp};
-pub use mock::{
-    fake_cs_path, IssueJwt, OidcMock, OidcMockConfig, DEFAULT_AUDIENCE, DEFAULT_ISSUER, DEFAULT_KID,
-};
+pub use mock::{IssueJwt, OidcMock, OidcMockConfig, DEFAULT_AUDIENCE, DEFAULT_ISSUER, DEFAULT_KID};
 pub use workspace::{tenant_workspace, TenantPath, TenantWorkspace, TenantWorkspaces};
 
 /// Public RSA test key (PEM). Embedded so consumers can install it as

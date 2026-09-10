@@ -12,10 +12,16 @@
 //!
 //! ## Discipline (already-decided constraints — do not drift)
 //!
-//! - **Shell-out, not re-implementation.** `cs init --upgrade` and `git
-//!   init` stay the authority; this module only *orchestrates* them,
-//!   per-noyau, at boot. No `rusqlite` / `neurion_core` are pulled into
-//!   the adapter — exactly the dependency creep the shell-out avoids.
+//! - **One implementation, called two ways.** `cs init --upgrade` and
+//!   this module now run the *same code*:
+//!   [`cosmon_filestore::project_upgrade::upgrade_project`]. Until
+//!   issue #54 this module shelled out to a `cs` binary instead, on the
+//!   reasoning that a subprocess kept `rusqlite` / `neurion_core` out of
+//!   the adapter. The image does not ship a `cs` binary, so what the
+//!   shell-out actually bought was a step that failed on every boot of
+//!   the shipped container while reporting only an exit code. The
+//!   dependency is the honest price of the step working. `git init`
+//!   remains a subprocess — git is not a library here.
 //! - **multi-nucléon = multi-`noyau` materialization.** The binding
 //!   layer is already plural ([`crate::HabilitationMap`]); what was missing is
 //!   the per-`noyau` materialization. The loop iterates the noyaux of the
@@ -107,7 +113,10 @@ pub struct NoyauReport {
     pub noyau: String,
     /// Step 2 — `.cosmon/state/{events,molecules,fleets/default}`.
     pub state_dirs: StepOutcome,
-    /// Step 2a — `cs init --upgrade` (shell-out).
+    /// Step 2a — the `cs init --upgrade` materialization, run in-process
+    /// via [`cosmon_filestore::project_upgrade::upgrade_project`]. It was a
+    /// `cs` shell-out until issue #54; the image ships no `cs` binary, so
+    /// the subprocess failed on every boot.
     pub cs_init: StepOutcome,
     /// Step 2b — `git init` + initial commit (shell-out).
     pub git_init: StepOutcome,
@@ -176,18 +185,16 @@ fn log_step(event: &str, outcome: &StepOutcome) {
     }
 }
 
-/// Boot-time state-tree materializer. Holds the resolved roots and the
-/// `cs` binary path; [`Self::run`] does the work for a list of noyaux.
+/// Boot-time state-tree materializer. Holds the resolved roots;
+/// [`Self::run`] does the work for a list of noyaux.
 #[derive(Clone, Debug)]
 pub struct ImageInit {
     /// Whispers ingestion dropbox (instance-level, step 1).
     pub inbox_root: PathBuf,
     /// Tenant galaxy root; the per-noyau dir is `galaxies_root/<noyau>`,
-    /// the same path [`crate::subprocess::SystemInvoker::cwd_for_spark`]
-    /// pins as the subprocess `cwd` (ADR-080 §3.5).
+    /// the same tenant root the library-direct routes resolve their
+    /// store and worker envelope from (ADR-080 §3.5 as amended, U6).
     pub galaxies_root: PathBuf,
-    /// Path to the `cs` binary shelled out for `cs init --upgrade`.
-    pub cs_path: PathBuf,
     /// `$HOME` whose `.claude.json` / `.claude/settings.json` the
     /// spawned worker reads (Famille B, steps 3a/3b).
     pub claude_home: PathBuf,
@@ -228,8 +235,9 @@ impl ImageInit {
         // Step 2 — state subtree. Creates `.cosmon/` as a side effect,
         // which `cs init --upgrade` requires to exist.
         let state_dirs = ensure_state_subtree(&root);
-        // Step 2a — `cs init --upgrade` (only when config.toml absent).
-        let cs_init = ensure_cs_init(&self.cs_path, &root);
+        // Step 2a — the `cs init --upgrade` materialization, in-process
+        // (only when config.toml absent).
+        let cs_init = ensure_cs_init(&root);
         // Step 2b — `git init` + commit (only when `.git` absent). Run
         // after cs init so the initial commit captures the seeded tree.
         let git_init = ensure_git_init(&root, noyau);
@@ -280,30 +288,29 @@ fn ensure_state_subtree(root: &Path) -> StepOutcome {
     }
 }
 
-/// Step 2a — shell-out `cs init --upgrade` in `root` when
-/// `config.toml` is absent. `cs init` stays the single authority for
-/// `project_id` / formulas / registry; this only invokes it.
-fn ensure_cs_init(cs_path: &Path, root: &Path) -> StepOutcome {
+/// Step 2a — run the `cs init --upgrade` materialization in `root`
+/// when `config.toml` is absent.
+///
+/// Calls [`cosmon_filestore::project_upgrade::upgrade_project`]
+/// directly: the same function `cs init --upgrade` calls, one stack
+/// frame away instead of one process away. No `cs` binary is consulted,
+/// so this step works inside the shipped image, which carries none.
+///
+/// The `config.toml` guard is kept even though `upgrade_project` is
+/// itself idempotent — it is what makes this step report
+/// `AlreadyPresent` rather than `Done` on a container restart, which is
+/// the signal the boot log and the idempotence tests read.
+fn ensure_cs_init(root: &Path) -> StepOutcome {
     let config = root.join(".cosmon").join("config.toml");
     if config.is_file() {
         return StepOutcome::AlreadyPresent;
     }
-    let output = Command::new(cs_path)
-        .arg("init")
-        .arg("--upgrade")
-        .current_dir(root)
-        .output();
-    match output {
-        Ok(out) if out.status.success() => StepOutcome::Done,
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let excerpt: String = stderr.chars().take(256).collect();
-            StepOutcome::Failed(format!(
-                "cs init --upgrade exit {:?}: {excerpt}",
-                out.status.code()
-            ))
-        }
-        Err(e) => StepOutcome::Failed(format!("spawn cs init: {e}")),
+    match cosmon_filestore::project_upgrade::upgrade_project(
+        root,
+        &cosmon_filestore::project_upgrade::UpgradeOptions::default(),
+    ) {
+        Ok(_report) => StepOutcome::Done,
+        Err(e) => StepOutcome::Failed(format!("init --upgrade: {e}")),
     }
 }
 

@@ -55,8 +55,10 @@ use cosmon_core::molecule::MoleculeStatus;
 use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 
 mod dag_policy;
+pub mod dispatch_ledger;
 pub mod guard;
 pub mod resident;
+pub mod tackle_exec;
 pub mod witness;
 
 pub use dag_policy::{
@@ -73,6 +75,7 @@ pub use resident::{
     ResidentError, ResidentScheduler, RunSummary, RuntimeLoop, RuntimeLoopConfig,
     TEARDOWN_ATTEMPT_CEILING, TEARDOWN_BACKOFF_BASE, TEARDOWN_BACKOFF_CAP,
 };
+pub use tackle_exec::{LibraryExecutor, TackleExecError, TackleReceipt, TenantPaths};
 pub use witness::{
     canonical_attestation_record, compute_attestation_b3, refuse_if_same_session,
     resolve_witness_id, resolve_witness_id_from, SameSessionRefusal, ATTESTATION_RECORD_SCHEMA,
@@ -100,11 +103,35 @@ pub enum RuntimeError {
 
     /// Worker dispatch failed (e.g. `cs tackle` could not be spawned or
     /// exited with an error).
+    ///
+    /// This is the **retryable** class: the failure is circumstantial (a
+    /// git/worktree race, a transport hiccup) and an identical retry on a
+    /// later tick can legitimately succeed, so the loop treats it as
+    /// transient and keeps running.
     #[error("dispatch failed for molecule {id}: {reason}")]
     Dispatch {
         /// The molecule that failed to dispatch.
         id: MoleculeId,
         /// Human-readable reason for the failure.
+        reason: String,
+    },
+
+    /// Worker dispatch was **refused**: a permanent condition an identical
+    /// retry reproduces exactly (e.g. the molecule's current formula step is
+    /// an execution kind the executor does not cover).
+    ///
+    /// Distinct from [`Self::Dispatch`] because the two classes demand
+    /// opposite loop behaviour: a transient failure is retried next tick,
+    /// while retrying a refusal busy-loops the runtime until `max_runtime`
+    /// and then reports the permanent condition as a bound — a false
+    /// verdict. The loop stops on this variant with
+    /// [`ShutdownReason::DispatchRefused`] instead.
+    #[error("dispatch refused for molecule {id}: {reason}")]
+    DispatchRefused {
+        /// The molecule whose dispatch was refused.
+        id: MoleculeId,
+        /// Human-readable reason for the refusal (names the step kind for
+        /// an unsupported-step refusal).
         reason: String,
     },
 }
@@ -349,6 +376,18 @@ pub trait Executor {
 /// fleet worker entry for the molecule, then returns immediately. The worker
 /// runs independently; the runtime observes its progress through the shared
 /// [`StateStore`] on subsequent ticks.
+///
+/// # Deprecation path (issue #54 / U5)
+///
+/// The subprocess envelope this executor embodies (ADR-080 §3.5 clause (e))
+/// is being retired: [`tackle_exec::LibraryExecutor`] performs the same
+/// `plan → execute` sequence in-process over an injectable transport
+/// backend, with no `cs` binary on `PATH`. This executor remains the
+/// default for one more release because `cs tackle` still owns the
+/// execution kinds the library path refuses (gate / native / query / llm
+/// steps and the per-adapter spawn arms); once the U6 cut-over closes that
+/// parity gap, the library executor becomes the default and this one stays
+/// available behind this explicit constructor only.
 ///
 /// The [`quiet`](Self::quiet) flag silences child stdout/stderr so callers
 /// like `cs run` that render their own event log aren't flooded by the
@@ -1048,6 +1087,29 @@ pub enum ShutdownReason {
     /// diagnosability: a DAG that dies by width says something
     /// different from one that dies by budget.
     MoleculeQuotaExceeded,
+    /// A dispatch was refused with a **permanent** condition
+    /// ([`RuntimeError::DispatchRefused`]) — e.g. the ready molecule's
+    /// current step is an execution kind the executor does not cover.
+    /// Retrying cannot succeed, so the loop stops on the first tick that
+    /// observes the refusal rather than re-dispatching every poll interval
+    /// until `max_runtime` and reporting the condition as a timeout.
+    /// [`RunReport::refusal`] carries the refused molecule and the reason.
+    DispatchRefused,
+}
+
+/// The permanent-refusal detail carried on a [`RunReport`] whose reason is
+/// [`ShutdownReason::DispatchRefused`].
+///
+/// Split from the (deliberately `Copy`) [`ShutdownReason`] so the reason
+/// stays a cheap tag while the caller — the rpp-adapter's drain event, a
+/// CLI summary — can still name the refused molecule and the step kind in
+/// its report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchRefusal {
+    /// The molecule whose dispatch was refused.
+    pub molecule: MoleculeId,
+    /// The refusal text (names the step kind for an unsupported step).
+    pub reason: String,
 }
 
 /// Observable result of a single [`Runtime::run`] invocation.
@@ -1065,6 +1127,10 @@ pub struct RunReport {
     pub ticks: u64,
     /// Number of [`RuntimeAction`]s the runtime applied (not counting `NoOp`).
     pub actions_applied: u64,
+    /// The permanent refusal that stopped the loop, when
+    /// [`Self::reason`] is [`ShutdownReason::DispatchRefused`];
+    /// `None` for every other reason.
+    pub refusal: Option<DispatchRefusal>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1259,6 +1325,7 @@ impl Runtime {
                     reason: ShutdownReason::SignalTripped,
                     ticks,
                     actions_applied,
+                    refusal: None,
                 });
             }
             if let Some(deadline) = self.config.max_runtime {
@@ -1267,6 +1334,7 @@ impl Runtime {
                         reason: ShutdownReason::Deadline,
                         ticks,
                         actions_applied,
+                        refusal: None,
                     });
                 }
             }
@@ -1285,6 +1353,7 @@ impl Runtime {
                         reason: ShutdownReason::MoleculeQuotaExceeded,
                         ticks,
                         actions_applied,
+                        refusal: None,
                     });
                 }
             }
@@ -1549,6 +1618,7 @@ impl Runtime {
                         reason: ShutdownReason::PolicyDrained,
                         ticks,
                         actions_applied,
+                        refusal: None,
                     });
                 }
                 // Rescue surfaced runnable work — fall through to dispatch it
@@ -1573,6 +1643,7 @@ impl Runtime {
                             reason: ShutdownReason::BudgetExhausted,
                             ticks,
                             actions_applied,
+                            refusal: None,
                         });
                     }
                 }
@@ -1603,6 +1674,25 @@ impl Runtime {
                                     "⚠ {e} — rolled back to Pending, retrying next tick (non-fatal)"
                                 );
                                 continue;
+                            }
+                            // A PERMANENT refusal is known in full on this
+                            // very tick and an identical retry reproduces it
+                            // exactly, so retrying is a busy-loop that runs
+                            // to `max_runtime` and then reports a permanent
+                            // condition as a timeout — a false verdict (I4:
+                            // a named exit, never a stall). Stop now with the
+                            // typed reason; `apply_evolve` already rolled the
+                            // molecule back to `Pending` for the operator.
+                            Err(RuntimeError::DispatchRefused { id, reason }) => {
+                                return Ok(RunReport {
+                                    reason: ShutdownReason::DispatchRefused,
+                                    ticks,
+                                    actions_applied,
+                                    refusal: Some(DispatchRefusal {
+                                        molecule: id,
+                                        reason,
+                                    }),
+                                });
                             }
                             Err(e) => return Err(e),
                         }

@@ -37,6 +37,8 @@ chrono = { workspace = true }
 insta = { workspace = true }
 cosmon-rpp-adapter = { path = "../cosmon-rpp-adapter" }
 cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
+# In-memory transport mock for `AppState.worker_backend` (issue #54 U6).
+cosmon-transport = { workspace = true, features = ["test-support"] }
 
 [lints]
 workspace = true

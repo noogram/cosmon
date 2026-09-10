@@ -116,6 +116,17 @@ class RemoteCli:
         """``GET /v1/molecules/:id``."""
         return self.json("molecule", "get", molecule_id, step="observe")
 
+    def tackle(self, molecule_id: str) -> Tuple[int, Any, str]:
+        """``POST /v1/molecules/:id/tackle`` — dispatch a real worker.
+
+        Library-direct since issue #54 U6: the adapter resolves the
+        molecule and its formula in-process, cuts a git worktree, writes
+        the dispatch ledger entry BEFORE the spawn, opens a tmux session
+        under the worker envelope's ``env -i`` and pastes the briefing
+        into it — with no ``cs`` binary anywhere in its own image.
+        """
+        return self.json("molecule", "tackle", molecule_id, step="tackle")
+
     def land(self, molecule_id: str) -> Tuple[int, Any, str]:
         """``POST /v1/molecules/:id/land`` — the harvest door."""
         return self.json("molecule", "land", molecule_id, step="land")
