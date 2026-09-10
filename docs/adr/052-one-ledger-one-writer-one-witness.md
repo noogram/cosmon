@@ -816,6 +816,27 @@ rejected, naming that inner commit; and a slugged PR subject whose
 number disagrees with the branch's issue number still falls through to
 the ordinary refusal.
 
+**Amendment (2026-09-10) — the PR number is not the issue identity.**
+The rule two paragraphs up, that a PR-wrapped landing counts only when
+`#<N>` and `feat/issue-<N>` carry the same `<N>`, is retired: the issue
+number is read from the branch name and is no longer compared against
+the pull-request number. Reading the branch name is what anchors the
+match — it is the same name the second-parent walk inspects — so the
+comparison added no anchoring and instead asserted "one issue, one pull
+request, opened back to back", which is not part of §I9. The assertion
+was false in both directions on the 2026-09-09/10 stack: numbering
+drift (PR #55 answered issue #52, #66 answered #60) and several pull
+requests per issue (#62, #63 and #64 all answered issue #51). Its
+measured cost was that GitHub's merge button could not land any
+integration branch on this repository — every landing had to be a local
+signed `git merge --no-ff`, excluding reviewers, the web UI, and
+external contributors, while a PR-button merge would have been recorded
+as a permanent FAIL in main's history. Nothing else moves: a subject
+whose branch is not `feat/issue-<N>(-<slug>)?` still falls through to
+the ordinary refusal, and a recognised landing whose second parent
+carries a non-clean merge is still rejected, naming that commit.
+Covered by scenarios 5, 10 and 11-13 of the same harness.
+
 ### D6. Cross-galaxy inscription — syzygie
 
 Per the syzygie protocol,

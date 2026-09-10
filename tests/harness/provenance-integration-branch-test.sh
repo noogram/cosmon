@@ -34,8 +34,9 @@
 #      branch is itself clean → the two-level recursion accepts the
 #      final PR-shaped landing of issue-10.
 #   5. PR-shaped subject where the PR number and the issue number in
-#      the branch name disagree → NOT recognised as this shape, falls
-#      through to the ordinary "subject does not match" rejection.
+#      the branch name disagree → still recognised (2026-09-10): the
+#      issue number is read from the branch name, and a clean second
+#      parent is accepted.
 #   6. A bare base-sync onto `feat/issue-<N>` (`Merge branch 'main'
 #      into feat/issue-<N>`), scanned directly (not nested inside a PR
 #      landing) → accepted, mirroring the existing `feat/<mol_id>`
@@ -53,9 +54,16 @@
 #   9. The slug buys no leniency: a suffixed integration branch whose
 #      second parent carries a plain, non-provenance merge is still
 #      rejected, naming that inner commit.
-#  10. Nor does it weaken the agreement rule: a PR-shaped subject with a
-#      slug whose PR number disagrees with the branch's issue number
-#      still falls through to the ordinary rejection.
+#  10. A suffixed branch whose PR number disagrees with its issue number
+#      is likewise recognised and accepted when clean (2026-09-10).
+#  11. The real 2026-09-09/10 shape: `Merge pull request #64 from
+#      owner/feat/issue-51-status`, one issue answered by three chained
+#      PRs, over a clean second parent → accepted.
+#  12. The complementary case: the same subject over a second parent
+#      carrying a non-provenance merge → still rejected, naming it.
+#  13. Nothing else widens: a PR-shaped subject whose branch is not
+#      `feat/issue-<N>(-<slug>)?` still falls through to the ordinary
+#      "subject does not match" rejection.
 #
 # Exit codes: 0 all passed | 1 a scenario failed | 2 harness setup error
 
@@ -177,7 +185,7 @@ git checkout -q main
 git merge -q --no-ff --no-edit -m "Merge pull request #10 from noogram/feat/issue-10" feat/issue-10
 pr_stacked=$(git rev-parse HEAD)
 
-# --- Scenario 5: PR number and issue number disagree.
+# --- Scenario 5: PR number and issue number disagree, branch is clean.
 mol_5="task-20260905-a006"
 git checkout -q -b feat/issue-12 main
 echo w5 > w5.txt && git add w5.txt && git commit -q -m "evolve($mol_5): work"
@@ -244,12 +252,56 @@ git merge -q --no-ff --no-edit -m "Merge branch 'feat/issue-22-status'" feat/iss
 local_suffixed_dirty=$(git rev-parse HEAD)
 
 # --- Scenario 10: suffixed branch, PR number disagrees with issue number.
+#     Recognised the same way since 2026-09-10; the branch is clean.
 git checkout -q -b feat/issue-23-review main
 echo w10 > w10.txt && git add w10.txt && git commit -q -m "evolve(task-20260909-a011): work"
 git checkout -q main
 git merge -q --no-ff --no-edit \
     -m "Merge pull request #98 from noogram/feat/issue-23-review" feat/issue-23-review
 pr_suffixed_mismatch=$(git rev-parse HEAD)
+
+# --- Scenario 11: the real 2026-09-09/10 shape. Issue #51 was answered by
+#     PRs #62/#63/#64 on branches `feat/issue-51-done`, `-session`,
+#     `-status`; #64's landing subject names a PR number the issue never
+#     had. The branch is clean, so it lands.
+mol_11="task-20260910-a012"
+git checkout -q -b feat/issue-51-status main
+git checkout -q -b "feat/$mol_11"
+echo w11 > w11.txt && git add w11.txt && git commit -q -m "evolve($mol_11): work"
+git checkout -q feat/issue-51-status
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_11'" "feat/$mol_11"
+
+git checkout -q main
+git merge -q --no-ff --no-edit \
+    -m "Merge pull request #64 from owner/feat/issue-51-status" feat/issue-51-status
+pr_renumbered=$(git rev-parse HEAD)
+
+# --- Scenario 12: same subject shape, second parent not provenance-clean.
+mol_12="task-20260910-a013"
+git checkout -q -b feat/issue-52-status main
+git checkout -q -b "feat/$mol_12"
+echo w12 > w12.txt && git add w12.txt && git commit -q -m "evolve($mol_12): work"
+git checkout -q feat/issue-52-status
+git merge -q --no-ff --no-edit -m "Merge branch 'feat/$mol_12'" "feat/$mol_12"
+
+git checkout -q -b rogue-52 main
+echo r52 > r52.txt && git add r52.txt && git commit -q -m "unreviewed material"
+git checkout -q feat/issue-52-status
+git merge -q --no-ff --no-edit -m "fix: sneak it in behind a renumbered PR" rogue-52
+bad_inner_renumbered=$(git rev-parse HEAD)
+
+git checkout -q main
+git merge -q --no-ff --no-edit \
+    -m "Merge pull request #65 from owner/feat/issue-52-status" feat/issue-52-status
+pr_renumbered_dirty=$(git rev-parse HEAD)
+
+# --- Scenario 13: PR-shaped subject whose branch is not an issue branch.
+git checkout -q -b not-an-issue-branch main
+echo w13 > w13.txt && git add w13.txt && git commit -q -m "evolve(task-20260910-a014): work"
+git checkout -q main
+git merge -q --no-ff --no-edit \
+    -m "Merge pull request #64 from owner/not-an-issue-branch" not-an-issue-branch
+pr_bad_branch=$(git rev-parse HEAD)
 
 out=$(run_gate)
 
@@ -268,10 +320,10 @@ verdict "3. clean landing without GitHub's PR wrapper accepted" 0 "$r"
 grep -q "^ok    $pr_stacked" <<<"$out" && r=0 || r=1
 verdict "4. stacked integration branches (two-level recursion) accepted" 0 "$r"
 
-grep -q "^FAIL  $pr_mismatch" <<<"$out" && r=0 || r=1
-verdict "5. PR-number/issue-number mismatch falls through to plain FAIL" 0 "$r"
-grep -A3 "^FAIL  $pr_mismatch" <<<"$out" | grep -q "subject does not match" && r=0 || r=1
-verdict "5b. mismatch is refused as an ordinary bad subject, not an integration shape" 0 "$r"
+grep -q "^ok    $pr_mismatch" <<<"$out" && r=0 || r=1
+verdict "5. PR-number/issue-number mismatch still recognised, clean branch accepted" 0 "$r"
+grep -q "^ok    $pr_mismatch  (issue-12)" <<<"$out" && r=0 || r=1
+verdict "5b. verdict keys on the branch's <N>, not the PR number" 0 "$r"
 
 grep -q "^ok    $basesync_issue" <<<"$out" && r=0 || r=1
 verdict "6. base-sync onto feat/issue-<N> accepted" 0 "$r"
@@ -288,10 +340,23 @@ verdict "9a. suffixed branch with a bad inner merge still rejected" 0 "$r"
 grep -A3 "^FAIL  $local_suffixed_dirty" <<<"$out" | grep -q "$bad_inner_suffixed" && r=0 || r=1
 verdict "9b. rejection names the offending inner commit" 0 "$r"
 
-grep -q "^FAIL  $pr_suffixed_mismatch" <<<"$out" && r=0 || r=1
-verdict "10a. suffixed PR-number/issue-number mismatch still refused" 0 "$r"
-grep -A3 "^FAIL  $pr_suffixed_mismatch" <<<"$out" | grep -q "subject does not match" && r=0 || r=1
-verdict "10b. mismatch refused as an ordinary bad subject" 0 "$r"
+grep -q "^ok    $pr_suffixed_mismatch" <<<"$out" && r=0 || r=1
+verdict "10a. suffixed branch with a renumbered PR accepted when clean" 0 "$r"
+grep -q "^ok    $pr_suffixed_mismatch  (issue-23)" <<<"$out" && r=0 || r=1
+verdict "10b. verdict keys on the branch's <N>, not the PR number" 0 "$r"
+
+grep -q "^ok    $pr_renumbered" <<<"$out" && r=0 || r=1
+verdict "11. #64 from feat/issue-51-status over a clean second parent accepted" 0 "$r"
+
+grep -q "^FAIL  $pr_renumbered_dirty" <<<"$out" && r=0 || r=1
+verdict "12a. same shape over a non-clean second parent still rejected" 0 "$r"
+grep -A3 "^FAIL  $pr_renumbered_dirty" <<<"$out" | grep -q "$bad_inner_renumbered" && r=0 || r=1
+verdict "12b. rejection names the offending inner commit" 0 "$r"
+
+grep -q "^FAIL  $pr_bad_branch" <<<"$out" && r=0 || r=1
+verdict "13a. PR-shaped subject with a non-issue branch still refused" 0 "$r"
+grep -A3 "^FAIL  $pr_bad_branch" <<<"$out" | grep -q "subject does not match" && r=0 || r=1
+verdict "13b. refused as an ordinary bad subject, not an integration shape" 0 "$r"
 
 if [ "$failed" -ne 0 ]; then
     printf '%s\n' "$out" | sed 's/^/      /'
