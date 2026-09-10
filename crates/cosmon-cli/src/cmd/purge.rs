@@ -2152,4 +2152,157 @@ mod tests {
         assert!(ahead.dirty_files.is_empty());
         assert_eq!(ahead.branch, "feat/task-20260802-16bf");
     }
+
+    #[test]
+    fn issue61_existing_guard_selection_and_ancestry_differential() -> anyhow::Result<()> {
+        // This is a witness for the EXISTING collapse guard, not a reclaim
+        // planner. In particular, do not reinterpret its output as permission
+        // to remove worktrees: registration and cargo locks are not inputs.
+        let tmp = TempDir::new()?;
+        let store = FileStore::new(tmp.path());
+        let mut fleet = Fleet::new();
+        let mut stale = Vec::new();
+        for name in [
+            "task-20260910-0000",
+            "task-20260910-0001",
+            "task-20260910-0002",
+        ] {
+            let mol = sample_mol(name, MoleculeStatus::Running);
+            store.save_molecule(&mol.id, &mol)?;
+            let w = worker_with_mol(name, name);
+            stale.push(w.id.clone());
+            fleet.workers.insert(w.id.clone(), w);
+            std::fs::create_dir_all(tmp.path().join(".worktrees").join(name))?;
+        }
+
+        struct Observed {
+            merged_ahead: usize,
+        }
+        impl HarvestProbe for Observed {
+            fn unharvested(
+                &self,
+                mol: &MoleculeId,
+                _base: Option<&str>,
+            ) -> Option<UnharvestedWork> {
+                let ahead = match mol.as_str() {
+                    "task-20260910-0001" => 2,
+                    "task-20260910-0000" => self.merged_ahead,
+                    _ => 0,
+                };
+                let dirty = mol.as_str() == "task-20260910-0002";
+                (ahead > 0 || dirty).then(|| UnharvestedWork {
+                    branch: format!("feat/{mol}"),
+                    commits_ahead: ahead,
+                    dirty_files: if dirty {
+                        vec!["note.md".into()]
+                    } else {
+                        vec![]
+                    },
+                    probe_error: None,
+                })
+            }
+        }
+
+        let selected = |probe: &Observed| {
+            let (eligible, _) = withhold_unharvested(&fleet, &store, probe, stale.clone());
+            eligible
+                .iter()
+                .map(|id| PathBuf::from(".worktrees").join(id.as_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            selected(&Observed { merged_ahead: 0 }),
+            std::collections::BTreeSet::from([PathBuf::from(".worktrees/task-20260910-0000")]),
+        );
+        // Only the ancestry observation changes: same path, status, dirt,
+        // roster and store. Both unsafe controls remain excluded.
+        assert_eq!(
+            selected(&Observed { merged_ahead: 1 }),
+            std::collections::BTreeSet::new(),
+        );
+        for name in [
+            "task-20260910-0000",
+            "task-20260910-0001",
+            "task-20260910-0002",
+        ] {
+            assert!(tmp.path().join(".worktrees").join(name).is_dir());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn issue61_characterize_ignored_note_and_moleculeless_directory() -> anyhow::Result<()> {
+        // Characterization of a known hole, NOT a safety approval. These
+        // assertions must change when the probe learns about ignored content.
+        // No molecule or cs done is involved in either fixture.
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        let git = |cwd: &Path, args: &[&str]| -> anyhow::Result<String> {
+            let out = Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-C", &cwd.to_string_lossy()])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(out.status.success(), "git {args:?}: {:?}", out.stderr);
+            Ok(String::from_utf8(out.stdout)?)
+        };
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        git(&repo, &["config", "user.name", "Noogram"])?;
+        git(&repo, &["config", "user.email", "test@noogram.org"])?;
+        std::fs::write(repo.join(".gitignore"), ".worktrees/\noperator-note.txt\n")?;
+        git(&repo, &["add", ".gitignore"])?;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-qm", "test: seed"],
+        )?;
+        let mol = MoleculeId::new("task-20260910-0003")?;
+        let wt = repo.join(".worktrees/task-20260910-0003");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "feat/task-20260910-0003",
+                &wt.to_string_lossy(),
+            ],
+        )?;
+        std::fs::write(
+            wt.join("operator-note.txt"),
+            "the only copy of an operator note",
+        )?;
+        let probe = GitHarvestProbe {
+            repo_root: Some(repo.clone()),
+            configured_trunk: Some("main".into()),
+        };
+        assert_eq!(probe.unharvested(&mol, Some("main")), None);
+        assert_eq!(
+            git(&wt, &["ls-files", "--others", "--exclude-standard"])?,
+            ""
+        );
+        assert_eq!(
+            git(
+                &wt,
+                &["ls-files", "--others", "--ignored", "--exclude-standard"]
+            )?,
+            "operator-note.txt\n"
+        );
+        assert!(wt.join("operator-note.txt").is_file());
+
+        let scratch = repo.join(".worktrees/task-20260910-0004");
+        std::fs::create_dir(&scratch)?;
+        std::fs::write(scratch.join("operator-note.txt"), "another unique note")?;
+        let registrations = git(&repo, &["worktree", "list", "--porcelain"])?;
+        assert!(!registrations.contains(scratch.to_string_lossy().as_ref()));
+        // Git walks up into the parent repository; that is not evidence
+        // about ownership or reachability of the scratch directory's bytes.
+        assert_eq!(
+            probe.unharvested(&MoleculeId::new("task-20260910-0004")?, Some("main")),
+            None
+        );
+        assert!(scratch.join("operator-note.txt").is_file());
+        Ok(())
+    }
 }
