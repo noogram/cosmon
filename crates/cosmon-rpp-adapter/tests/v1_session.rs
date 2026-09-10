@@ -102,7 +102,7 @@ async fn fixture() -> Fixture {
 
     let state = AppState {
         harvest_effect: Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect),
-        worker_backend: cosmon_rpp_adapter::worker_env::SharedBackend(Arc::new(
+        worker_backend: cosmon_rpp_adapter::worker_env::WorkerBackends::fixed(Arc::new(
             cosmon_transport::MockBackend::new(),
         )),
         state_dir: security_dir.path().to_path_buf(),
