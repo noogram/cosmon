@@ -1,0 +1,14 @@
+---
+source: crates/cosmon-cli/tests/help_goldens.rs
+expression: stdout
+---
+Check that `.cosmon/.gitignore` tracks the archive it claims to
+
+Usage: cs doctor gitignore [OPTIONS]
+
+Options:
+      --config <PATH>  Path to configuration file
+      --root <ROOT>    Override the galaxy root (the directory containing `.cosmon/`)
+  -v, --verbose        Enable verbose output
+      --json           Output in JSON format
+  -h, --help           Print help

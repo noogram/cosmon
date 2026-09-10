@@ -29,11 +29,23 @@ operators get a knob (`[archive.retention]`) to control disk growth.
 
 ## Enabling the archive
 
-The archive is **opt-in per project**. Add to `.cosmon/config.toml`:
+The archive is **on by default** since 2026-09 (issue #60). A galaxy with
+no `[archive]` section at all archives; nothing has to be added to
+`.cosmon/config.toml` to get it.
+
+The decision behind the default: losing a molecule's artifacts is silent
+and irreversible — `cs done` tears the worktree down and every synthesis,
+per-persona response, outcome and report written outside the diff goes
+with it, with no way to recover them afterwards. The cost of keeping them
+is small (a galaxy of ~500 molecules including full panel deliberations
+measures 29 MB across 2561 files, almost entirely markdown) and bounded by
+a retention policy that defaults to keeping everything.
+
+To opt out, or to arm retention:
 
 ```toml
 [archive]
-enabled = true
+enabled = false                    # opt out; the default is true
 
 # Optional retention policy (defaults keep everything forever).
 [archive.retention]
@@ -43,9 +55,59 @@ max_total_mb  = 512                # 0 disables the size rule
 keep_kinds    = ["decision", "deliberation"]
 ```
 
-With `enabled = false` (the default), terminal transitions are no-ops
-against `.cosmon/state/archive/`. With `enabled = true`, every
-`cs done` / `cs collapse` / `cs freeze` / `cs stuck` writes one entry.
+With `enabled = true`, every `cs done` / `cs collapse` / `cs freeze` /
+`cs stuck` writes one entry. With `enabled = false`, those transitions are
+no-ops against `.cosmon/state/archive/`.
+
+**Activation is not retroactive.** Turning the archive on — including by
+picking up the new default — archives molecules that terminate *from then
+on*. Molecules that terminated while it was off left no data behind to
+archive; that data no longer exists. `cs migrate --archive-past` back-fills
+only what is still in `state/` on disk.
+
+**An existing galaxy needs no command for the default itself.** The default
+is applied when `config.toml` is parsed, so a galaxy whose config has no
+`[archive] enabled` line picks it up on its next `cs` invocation. One
+command is worth running once, though:
+
+```
+cs init --upgrade
+```
+
+which repairs `.cosmon/.gitignore` so the archive it now writes is
+actually visible to git — see below. A galaxy that wrote
+`enabled = false` explicitly keeps the archive off: a default is not an
+override.
+
+## Is the archive reaching git?
+
+`.cosmon/.gitignore` ignores cosmon's ephemeral runtime state in bulk and
+re-includes `state/archive/` by negation. That negation is easy to write
+in a form that does nothing, and did:
+
+```
+state/            # excludes the directory — git never descends into it
+!state/archive/   # …so this matches nothing
+```
+
+The working form is `state/*`, which excludes the *children* while letting
+git descend, at which point the negation binds. The shipped block also
+opens with `!state/`, so it still binds when a broader rule precedes it.
+
+Two ways a galaxy ends up hiding its own archive: it was created before
+this was fixed, or its ignore file was hand-edited into a chain of rules
+that ignore and re-include each other. Both are invisible — the archive
+keeps being written and simply never appears in `git status`. Ask:
+
+```
+cs doctor gitignore
+```
+
+It puts the question to real git (`git check-ignore`) and names the rule
+responsible. The repair is `cs init --upgrade`, which rewrites the
+cosmon-managed block — delimited by `# cosmon:gitignore:start` /
+`# cosmon:gitignore:end` — or appends one below your own rules, preserving
+every line you wrote byte for byte.
 
 Writes are **non-fatal**: an archive failure logs to stderr prefixed
 with `archive:` and lets the terminal transition succeed. The archive
@@ -202,7 +264,7 @@ and emits a JSON / plaintext summary with sizes freed.
 
 ## Fresh-clone semantics
 
-Clone a repo that has `[archive] enabled = true` and the archive is
+Clone a repo whose archive is enabled and the archive is
 already populated from git; `state/` is empty. The first `cs`
 invocation lands in the **Inert regime** (ADR-016). `cs observe` and
 `cs reconcile` work read-only over `archive/`. A future `cs replay`
@@ -233,7 +295,10 @@ survives a month-rollover.
 
 ## Upgrading an existing project
 
-1. **Opt in.** Add `[archive] enabled = true` to `.cosmon/config.toml`.
+1. **Confirm it is on.** Nothing to do unless the galaxy explicitly wrote
+   `[archive] enabled = false`; the default is `true`. Then run
+   `cs init --upgrade` once so `.cosmon/.gitignore` stops hiding the
+   archive, and `cs doctor gitignore` to confirm.
 2. **Back-fill.** Run `cs migrate --archive-past` to iterate every
    terminal molecule currently in `state/` and write its archive entry
    idempotently. Pre-existing molecules will lack response hashes for
@@ -247,9 +312,9 @@ survives a month-rollover.
    `max_total_mb` to the operator's preference. Always run
    `cs archive prune --dry-run` before the first real prune.
 
-Projects that started after archive shipped already have the subsystem
-wired and `[archive] enabled = true` included in the `cs init` template
-when the operator opts in.
+Projects created by a current `cs init` archive from their first
+molecule, and their `.cosmon/.gitignore` tracks the subtree, with no
+opt-in step at all.
 
 ## Invariants preserved
 

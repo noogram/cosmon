@@ -611,7 +611,8 @@ mod tests {
 
     #[test]
     fn collapse_skips_archive_when_disabled() {
-        // [archive] enabled = false (default). collapse must not touch
+        // [archive] enabled = false, written explicitly since the
+        // default flipped to true (issue #60). collapse must not touch
         // the archive directory even for a brand-new molecule.
         let tmp = tempfile::tempdir().unwrap();
         let cosmon_dir = tmp.path().join(".cosmon");
@@ -619,7 +620,7 @@ mod tests {
         std::fs::create_dir_all(&state_dir).unwrap();
         std::fs::write(
             cosmon_dir.join("config.toml"),
-            "[project]\nproject_id = \"test-col\"\n",
+            "[project]\nproject_id = \"test-col\"\n\n[archive]\nenabled = false\n",
         )
         .unwrap();
 

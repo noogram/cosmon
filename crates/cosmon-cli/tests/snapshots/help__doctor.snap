@@ -12,6 +12,7 @@ Commands:
   worktrees    Audit `.worktrees/` for perm/symlink/untracked hazards
   mcp          Audit MCP servers registered in the configured service registry
   deps         Flag unpinned or mutable dependency declarations
+  gitignore    Check that `.cosmon/.gitignore` tracks the archive it claims to
   supervision  Detect binaries supervised by both cosmon and a `LaunchAgent`
   security     Run every security probe and aggregate findings
 

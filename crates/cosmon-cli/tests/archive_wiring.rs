@@ -234,7 +234,7 @@ fn collapse_through_cli_leaves_archive_alone_when_disabled() {
     fs::create_dir_all(&formulas_dir).unwrap();
     fs::write(
         cosmon_dir.join("config.toml"),
-        "[project]\nproject_id = \"test-m3-off\"\n",
+        "[project]\nproject_id = \"test-m3-off\"\n\n[archive]\nenabled = false\n",
     )
     .unwrap();
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
