@@ -239,6 +239,24 @@ pub struct Args {
     #[arg(long, value_name = "ROLE")]
     pub role_hint: Option<String>,
 
+    /// Reclaim derived build output from other worktrees before spawning
+    /// (issue 61, ADR-177).
+    ///
+    /// The pre-spawn pressure check. A dispatch is the one moment cosmon is
+    /// guaranteed to be running *and* the moment disk demand grows — a new
+    /// worktree and a new build directory — so it is where the actor that
+    /// creates the leak pays for it. Nothing runs it on a timer: there is no
+    /// daemon, no LRU and no background sweep, because nothing destructive
+    /// may run unobserved.
+    ///
+    /// It governs **tier 1 only**: rebuildable payload under the
+    /// `[worktree_reclaim].evict` roots of worktrees whose molecule is
+    /// terminal (or absent) and whose build lock it could acquire. It cannot
+    /// reach durable content — `cs tackle` never consults durable
+    /// eligibility, and no path in this workspace removes a worktree.
+    #[arg(long)]
+    pub reclaim_derived: bool,
+
     /// Loud opt-in fallback from the local default to a remote oracle after
     /// a *decidable* local hard-failure (Q5b).
     ///
@@ -1368,6 +1386,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             || repo_root.join(".worktrees").join(mol_id.as_str()),
             PathBuf::from,
         );
+        // PLACEHOLDER (red): the flag is parsed and documented; nothing on
+        // the dispatch path runs the check yet. Wired in the green commit.
         create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;
         wt_dir
     };
@@ -3696,6 +3716,39 @@ pub(super) fn find_repo_root() -> anyhow::Result<PathBuf> {
 /// cosmon DAG: a reviewer's worktree branches from the writer's branch,
 /// so it sees the writer's output without requiring a merge into main
 /// first. Information flows through branch topology.
+/// The pre-spawn pressure check: reclaim derived output, and nothing else.
+///
+/// Failures are reported and swallowed: a dispatch must not be blocked
+/// because a build directory could not be tidied. The inverse — reclaiming
+/// more than the derived tier to make room — is what is structurally
+/// impossible here, since this function never reads
+/// [`durable_eligibility`](cosmon_core::worktree_reclaim::durable_eligibility)
+/// and the pass it calls removes no worktree under any flag (ADR-177).
+fn run_pressure_check(ctx: &Context, store: &dyn cosmon_state::StateStore, repo_root: &Path) {
+    let base = super::worktree_reclaim::base_branch(ctx, repo_root);
+    let evict = super::worktree_reclaim::evict_roots(ctx);
+    match super::worktree_reclaim::run_pass(repo_root, &base, store, &evict, true) {
+        Ok(pass) => {
+            if pass.removed.is_empty() {
+                println!(
+                    "pressure check: nothing reclaimable ({} worktree(s) withheld).",
+                    pass.withheld.len()
+                );
+            } else {
+                println!(
+                    "pressure check: reclaimed derived output from {} worktree(s), {} entr(ies).",
+                    pass.selected.len(),
+                    pass.removed.len()
+                );
+            }
+            for f in &pass.failures {
+                eprintln!("  pressure check failure: {}", f.describe());
+            }
+        }
+        Err(e) => eprintln!("pressure check skipped: {e}"),
+    }
+}
+
 pub(super) fn create_worktree(
     repo_root: &std::path::Path,
     worktree_path: &std::path::Path,
@@ -8773,6 +8826,61 @@ fn hash_artifact(mol_dir: &Path) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod issue61_pressure_check {
+    /// Falsifier 5 — the pressure check fires **before** the spawn.
+    ///
+    /// Asserted on source order because the property is an ordering, and the
+    /// only alternative — driving a real dispatch — needs tmux and a live
+    /// adapter, which is exactly the thing that is not running when this
+    /// matters. The two anchors are the call itself and the worktree
+    /// creation it must precede; moving either past the other fails here.
+    #[test]
+    fn the_pressure_check_precedes_worktree_creation() {
+        let src = include_str!("tackle.rs");
+        let check = src
+            .find("run_pressure_check(ctx, &store, &repo_root);")
+            .expect("the pressure check must be called from the dispatch path");
+        let create = src
+            .find("create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;")
+            .expect("the dispatch path must still create the worktree");
+        assert!(
+            check < create,
+            "the pressure check must run before the worktree it makes room for"
+        );
+    }
+
+    /// …and it may never reach durable content. `cs tackle` does not name
+    /// `durable_eligibility`, `advisory_durable_paths` or any whole-worktree
+    /// removal at all: the tier-1 limit is a fact about this file, not a
+    /// promise in a comment (ADR-177).
+    #[test]
+    fn the_dispatch_path_never_names_the_durable_predicate() {
+        // Comments are excluded: a doc link that *names* the predicate to say
+        // this file must not call it is documentation, not a call. What is
+        // scanned is the code.
+        let src: String = include_str!("tackle.rs")
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let src = src.as_str();
+        for forbidden in [
+            ["durable", "eligibility"].join("_"),
+            ["advisory", "durable", "paths"].join("_"),
+            ["durable", "advisory"].join("_"),
+            ["remove", "dir", "all"].join("_"),
+        ] {
+            let hits = src.matches(forbidden.as_str()).count();
+            assert_eq!(
+                hits, 0,
+                "cs tackle must not reach `{forbidden}` — the pressure check \
+                 governs the derived tier only"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use std::collections::HashMap;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
@@ -12135,6 +12243,7 @@ mod tests {
             adapter: None,
             model: None,
             role_hint: None,
+            reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
         };
@@ -12173,6 +12282,7 @@ mod tests {
             adapter: None,
             model: None,
             role_hint: None,
+            reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
         };
@@ -13178,6 +13288,7 @@ prompt = "Custom fleet prompt."
             adapter: None,
             model: None,
             role_hint: None,
+            reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
         };
@@ -13223,6 +13334,7 @@ prompt = "Custom fleet prompt."
             adapter: None,
             model: None,
             role_hint: None,
+            reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
         };
@@ -13275,6 +13387,7 @@ prompt = "Custom fleet prompt."
             adapter: None,
             model: None,
             role_hint: None,
+            reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
         };

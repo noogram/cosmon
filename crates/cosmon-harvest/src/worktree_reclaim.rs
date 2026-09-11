@@ -64,6 +64,11 @@ pub struct GitWorktreeObserver<'a> {
     derived_roots: Vec<PathBuf>,
     /// Acquired `flock` guards, keyed by candidate.
     guards: Mutex<HashMap<PathBuf, File>>,
+    /// Roots that passed validation but whose **exclusion** could not be
+    /// established, by candidate, with the reason. Recorded rather than
+    /// dropped: a root that silently vanishes from the selection is the same
+    /// invisible leak in the other direction.
+    withheld_roots: Mutex<HashMap<PathBuf, Vec<(PathBuf, String)>>>,
 }
 
 impl<'a> GitWorktreeObserver<'a> {
@@ -93,6 +98,7 @@ impl<'a> GitWorktreeObserver<'a> {
             store,
             derived_roots: validated,
             guards: Mutex::new(HashMap::new()),
+            withheld_roots: Mutex::new(HashMap::new()),
         })
     }
 
@@ -157,6 +163,50 @@ impl<'a> GitWorktreeObserver<'a> {
                 ),
             ))
         }
+    }
+
+    /// Whether this observer can establish exclusion over one derived root.
+    ///
+    /// The only exclusion cosmon holds is Cargo's own build lock
+    /// ([`LOCK_ANCHOR`]), and a lock excludes exactly the producers that take
+    /// it. That is Cargo, writing into the build directory the anchor lives
+    /// in. A root that does not contain the anchor — `build/ios` for a galaxy
+    /// that also ships an iOS staticlib — has *no* established exclusion: the
+    /// acquired flock says nothing about `xcodebuild`, which never asked for
+    /// it. Such a root is withheld with that reason rather than reclaimed
+    /// under a lock that does not cover it.
+    fn exclusion_established(_root: &Path) -> bool {
+        // PLACEHOLDER (red): the pre-P3 assumption — a configured root is a
+        // reclaimable root. Implemented in the green commit.
+        true
+    }
+
+    /// The reason a root without established exclusion is withheld.
+    ///
+    /// One function so the operator-facing register and the docs cannot
+    /// drift: whatever an operator reads is this sentence.
+    fn no_exclusion_reason(root: &Path) -> String {
+        format!(
+            "no exclusion protocol covers `{}`: the acquired lock is Cargo's \
+             own build lock at `{LOCK_ANCHOR}`, which excludes Cargo and no \
+             other producer",
+            root.display()
+        )
+    }
+
+    /// Roots enumerated for `candidate` that were withheld for want of an
+    /// establishable exclusion, with the reason for each.
+    ///
+    /// Public because the withheld register is a user-facing obligation: a
+    /// root cosmon declines to reclaim must be named with its reason, or the
+    /// configuration silently does nothing and nobody finds out.
+    #[must_use]
+    pub fn withheld_roots(&self, candidate: &Path) -> Vec<(PathBuf, String)> {
+        self.withheld_roots
+            .lock()
+            .ok()
+            .and_then(|m| m.get(candidate).cloned())
+            .unwrap_or_default()
     }
 
     /// `true` when `path` is the lock anchor or one of its ancestors.
@@ -434,8 +484,16 @@ impl WorktreeObservationPort for GitWorktreeObserver<'_> {
             }
         };
         let mut roots = BTreeSet::new();
+        let mut withheld = Vec::new();
         for root in &self.derived_roots {
             let path = candidate.join(root);
+            if !Self::exclusion_established(root) {
+                // Enumerated, reported, not selected. The contract's
+                // "adapters must establish their applicable exclusion or
+                // withhold those roots" is this branch.
+                withheld.push((path, Self::no_exclusion_reason(root)));
+                continue;
+            }
             if !path.exists() {
                 // A known-absent derived path contributes the empty set; it
                 // is not a failure.
@@ -461,6 +519,9 @@ impl WorktreeObservationPort for GitWorktreeObserver<'_> {
                     ))
                 }
             }
+        }
+        if let Ok(mut register) = self.withheld_roots.lock() {
+            register.insert(candidate.to_path_buf(), withheld);
         }
         DerivedRoots::Validated(roots)
     }
@@ -523,6 +584,181 @@ pub fn observe_dirty(worktree: &Path) -> DirtyObservation {
         DirtyObservation::Clean
     } else {
         DirtyObservation::Dirty(lines)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The enumeration root
+// ---------------------------------------------------------------------------
+
+/// The result of listing `<repo>/.worktrees/`.
+///
+/// Three-valued for the same reason every axis above is: "there is no
+/// `.worktrees/` directory" and "I could not read `.worktrees/`" are opposite
+/// answers, and a single `Vec` that is empty in both cases is exactly the
+/// fail-open this issue exists to close.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorktreeDirs {
+    /// There is no `.worktrees/` directory. Nothing to enumerate.
+    Absent,
+    /// The directories found, in readdir order filtered to directories.
+    Listed(Vec<PathBuf>),
+    /// The listing itself failed.
+    Unreadable(ObservationError),
+}
+
+/// List the immediate subdirectories of `<repo>/.worktrees/`.
+///
+/// **The** readdir walker over the worktree root. `cs doctor worktrees` and
+/// `cs purge --worktrees` both call it, because two walkers over the same
+/// directory are two opportunities to disagree about what a worktree *is* —
+/// and the disagreement is invisible until an operator compares two commands'
+/// output by hand.
+#[must_use]
+pub fn read_worktree_dirs(worktrees_root: &Path) -> WorktreeDirs {
+    if !worktrees_root.exists() {
+        return WorktreeDirs::Absent;
+    }
+    let entries = match std::fs::read_dir(worktrees_root) {
+        Ok(it) => it,
+        Err(e) => {
+            return WorktreeDirs::Unreadable(ObservationError::new(
+                "read .worktrees/",
+                worktrees_root,
+                e.to_string(),
+            ))
+        }
+    };
+    let mut dirs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    WorktreeDirs::Listed(dirs)
+}
+
+/// Where a candidate was found.
+///
+/// Carried because the two halves of the union answer different questions.
+/// A directory Git does not know about is not thereby safe to remove — it is
+/// precisely the class that has no molecule, no registration and no owner,
+/// and the class the pre-issue-61 roster could not see at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CandidateSource {
+    /// Present under `.worktrees/` but absent from `git worktree list`.
+    FilesystemOnly,
+    /// Registered with Git but with no directory under `.worktrees/`.
+    RegistrationOnly,
+    /// Both — the ordinary case for a live worker.
+    Both,
+}
+
+impl CandidateSource {
+    /// The operator-facing name of this provenance.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FilesystemOnly => "on disk, unregistered",
+            Self::RegistrationOnly => "registered, no directory",
+            Self::Both => "on disk and registered",
+        }
+    }
+}
+
+/// One enumerated candidate directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EnumeratedCandidate {
+    /// The candidate directory.
+    pub path: PathBuf,
+    /// Which half (or both) of the union produced it.
+    pub source: CandidateSource,
+}
+
+/// Every candidate directory, and every failure met while finding them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Enumeration {
+    /// The union, sorted by path.
+    pub candidates: Vec<EnumeratedCandidate>,
+    /// Failures that may have hidden candidates. A non-empty list means the
+    /// enumeration is **incomplete**, and a caller must say so rather than
+    /// present a partial list as the whole population.
+    pub errors: Vec<ObservationError>,
+}
+
+/// Enumerate reclamation candidates: `readdir(.worktrees/)` ∪
+/// `git worktree list --porcelain`.
+///
+/// Every prior mechanism in this workspace was keyed by *molecule* or by
+/// *worker*, so a directory with neither was unreachable by construction —
+/// on this repository the worker roster saw 2 of 14 directories and 5 had no
+/// molecule at all. The enumeration root is therefore the filesystem and
+/// Git's own registry; the molecule is consulted afterwards, as a **veto**
+/// (`consideration_gate`), never as the way a candidate is found.
+///
+/// The repository root itself is excluded: it is the checkout, not a
+/// reclamation candidate.
+#[must_use]
+pub fn enumerate_candidates(_repo_root: &Path) -> Enumeration {
+    // PLACEHOLDER (red): nothing enumerates candidates yet — every prior
+    // mechanism was keyed by molecule or by worker, so the population is
+    // empty here. Implemented in the green commit.
+    Enumeration::default()
+}
+
+/// Bytes occupied under `path`, following no symlink.
+///
+/// Presentation only. The selection sets are path sets and no decision in
+/// this module reads a byte count — but an operator deciding whether to act
+/// on a withheld register needs to know whether it is holding a megabyte or
+/// forty gigabytes, and "N worktrees withheld" alone does not say.
+/// Unreadable entries are skipped: a size that is approximate and cheap is
+/// worth more here than one that can fail.
+#[must_use]
+pub fn approximate_size_bytes(path: &Path) -> u64 {
+    let mut total = 0_u64;
+    let mut stack = vec![path.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_symlink() {
+                continue;
+            }
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total += meta.len();
+            }
+        }
+    }
+    total
+}
+
+/// Render a byte count the way an operator reads one.
+///
+/// Alongside [`approximate_size_bytes`] so the unit and the number are chosen
+/// in one place; a register that prints raw bytes for a 40 GiB worktree is a
+/// number nobody parses at a glance.
+#[must_use]
+pub fn describe_size(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let b = bytes as f64;
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
+    if b >= GIB {
+        format!("{:.1} GiB", b / GIB)
+    } else if b >= MIB {
+        format!("{:.1} MiB", b / MIB)
+    } else if b >= KIB {
+        format!("{:.1} KiB", b / KIB)
+    } else {
+        format!("{bytes} B")
     }
 }
 
@@ -670,6 +906,134 @@ mod tests {
         assert!(!f.worktree.join("target/CACHEDIR.TAG").exists());
         // The worktree itself is never touched by any automatic path.
         assert!(f.worktree.join(".gitignore").is_file());
+    }
+
+    /// Falsifier 1 (P3) — the class every prior mechanism was blind to.
+    ///
+    /// A directory under `.worktrees/` with **no molecule record and no Git
+    /// registration**. Everything before issue 61's P3 was keyed by molecule
+    /// or by worker, so this directory was unreachable by construction; on
+    /// the reporting repository five of fourteen were in this class. The
+    /// enumeration root finds it, its durable axes resolve to `Unknown` /
+    /// `Unregistered` so eligibility **withholds**, and its derived payload
+    /// is still selectable once the lock is acquired.
+    #[test]
+    fn issue61_molecule_less_directory_is_enumerated_withheld_and_still_yields_derived() {
+        let f = fixture("collapsed");
+        // A leftover directory: a plausible molecule id, no record, and Git
+        // was never told about it.
+        let orphan = f.repo.join(".worktrees").join("task-20260101-dead");
+        std::fs::create_dir_all(orphan.join("target/debug")).unwrap();
+        std::fs::write(orphan.join(LOCK_ANCHOR), "").unwrap();
+        std::fs::write(orphan.join("target/debug/big.o"), "payload").unwrap();
+
+        let found = enumerate_candidates(&f.repo);
+        assert!(
+            found.errors.is_empty(),
+            "enumeration must be complete here: {:?}",
+            found.errors
+        );
+        let entry = found
+            .candidates
+            .iter()
+            .find(|c| c.path.ends_with("task-20260101-dead"))
+            .expect("the molecule-less directory must be enumerated");
+        assert_eq!(entry.source, CandidateSource::FilesystemOnly);
+        // The registered worktree is found too, by both halves.
+        let registered = found
+            .candidates
+            .iter()
+            .find(|c| c.path.ends_with(&f.id))
+            .expect("the registered worktree must be enumerated");
+        assert_eq!(registered.source, CandidateSource::Both);
+
+        let observer = f.observer();
+        let obs = observer.observe(&orphan);
+        assert_eq!(
+            obs.durable.registration,
+            RegistrationObservation::Unregistered
+        );
+        assert!(
+            matches!(obs.durable.ahead, AheadObservation::Unknown(_)),
+            "ancestry must be Unknown for a directory git does not own: {:?}",
+            obs.durable.ahead
+        );
+        assert_eq!(
+            durable_eligibility(&obs.durable),
+            DurableEligibility::Withhold,
+            "unregistered scratch can never pass durable eligibility"
+        );
+        assert!(advisory_durable_paths(&obs.durable).is_empty());
+
+        // …and yet the rebuildable half is available.
+        assert_eq!(obs.derived.lock, LockObservation::Acquired);
+        assert_eq!(
+            selected_derived_paths(&obs.derived),
+            BTreeSet::from([orphan.join("target")])
+        );
+        let report = reclaim_derived(&observer, &obs.derived).unwrap();
+        assert!(report.removed.contains(&orphan.join("target/debug/big.o")));
+        // The directory itself survives. It always does.
+        assert!(orphan.is_dir());
+    }
+
+    /// Falsifier 4 (P3) — a configured root whose exclusion cannot be
+    /// established is withheld, not selected.
+    ///
+    /// The acquired lock is Cargo's build lock. It excludes Cargo. A galaxy
+    /// that also ships an iOS staticlib can configure `build/ios`, and
+    /// `xcodebuild` never asked for that lock — so the root is enumerated,
+    /// reported with that reason, and left alone.
+    #[test]
+    fn issue61_root_without_establishable_exclusion_is_withheld_with_a_reason() {
+        let f = fixture("collapsed");
+        std::fs::create_dir_all(f.worktree.join("build/ios")).unwrap();
+        std::fs::write(f.worktree.join("build/ios/lib.a"), "archive").unwrap();
+
+        let observer =
+            GitWorktreeObserver::new(&f.repo, "main", &f.store, &["target", "build/ios"]).unwrap();
+        let obs = observer.observe(&f.worktree);
+
+        // Selected: the Cargo root only.
+        assert_eq!(
+            selected_derived_paths(&obs.derived),
+            BTreeSet::from([f.worktree.join("target")]),
+            "a non-Cargo root must not ride in on the Cargo lock"
+        );
+
+        // Withheld, by name, with the reason an operator will read.
+        let withheld = observer.withheld_roots(&f.worktree);
+        assert_eq!(withheld.len(), 1, "{withheld:?}");
+        let (path, reason) = &withheld[0];
+        assert_eq!(path, &f.worktree.join("build/ios"));
+        assert!(reason.contains("build/ios"), "{reason}");
+        assert!(reason.contains("no exclusion protocol"), "{reason}");
+        assert!(reason.contains(LOCK_ANCHOR), "{reason}");
+
+        // And the bytes are still there after a real reclamation.
+        reclaim_derived(&observer, &obs.derived).unwrap();
+        assert!(f.worktree.join("build/ios/lib.a").is_file());
+    }
+
+    /// The shared `.worktrees/` walker is three-valued, like every other
+    /// observation in this module: absent and unreadable are not the same
+    /// answer, and neither is an empty list.
+    #[test]
+    fn issue61_worktree_dir_listing_distinguishes_absent_from_unreadable() {
+        let tmp = TempDir::new().unwrap();
+        assert_eq!(
+            read_worktree_dirs(&tmp.path().join(".worktrees")),
+            WorktreeDirs::Absent
+        );
+        let root = tmp.path().join(".worktrees");
+        std::fs::create_dir(&root).unwrap();
+        assert_eq!(read_worktree_dirs(&root), WorktreeDirs::Listed(Vec::new()));
+        std::fs::create_dir(root.join("a")).unwrap();
+        std::fs::write(root.join("not-a-dir"), "x").unwrap();
+        assert_eq!(
+            read_worktree_dirs(&root),
+            WorktreeDirs::Listed(vec![root.join("a")])
+        );
     }
 
     /// Real exclusion: a **second process** holds the flock, the predicate
