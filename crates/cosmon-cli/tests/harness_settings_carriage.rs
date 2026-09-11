@@ -231,8 +231,7 @@ fn an_adapter_with_no_channel_refuses_and_names_itself() {
     let resolved = resolve_harness_settings(&flag, None);
 
     for adapter in ["opencode", "aider", "local", "openai", "anthropic"] {
-        let err = render_harness_args(adapter, &resolved)
-            .unwrap_err_named(adapter);
+        let err = render_harness_args(adapter, &resolved).unwrap_err_named(adapter);
         assert!(
             err.contains(adapter),
             "the refusal must name the adapter that cannot carry the map: {err}"
