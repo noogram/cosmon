@@ -82,8 +82,7 @@ fn make_state(
 
     let rate_limiter = IngressRateLimiter::new(security_dir.join("oidc-rate-limit"), 256.0, 0.0);
     let deny_list = DenyList::new(security_dir.to_path_buf()).with_ttl(Duration::from_secs(0));
-    let store: Arc<dyn SessionStore> =
-        Arc::new(FilesystemSessionStore::new(security_dir).unwrap());
+    let store: Arc<dyn SessionStore> = Arc::new(FilesystemSessionStore::new(security_dir).unwrap());
 
     AppState {
         harvest_effect: Arc::new(cosmon_rpp_adapter::harvest_effect::UnavailableHarvestEffect),
@@ -213,7 +212,10 @@ async fn post_tackle(app: axum::Router, jwt: &str) -> (StatusCode, Value) {
         .unwrap();
     let status = resp.status();
     let bytes = to_bytes(resp.into_body(), 8192).await.unwrap();
-    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+    (
+        status,
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null),
+    )
 }
 
 async fn auth_me(app: axum::Router, jwt: &str) -> Value {
@@ -248,7 +250,12 @@ async fn tackle_without_a_credential_is_refused_with_503() {
     // A home with no `.claude/.credentials.json` — the container that has
     // never completed a login, which is what the bake measured.
     let home = tempfile::tempdir().unwrap();
-    let app = router(make_state(&oidc, &tenants, security_dir.path(), home.path()));
+    let app = router(make_state(
+        &oidc,
+        &tenants,
+        security_dir.path(),
+        home.path(),
+    ));
 
     let (status, body) = post_tackle(app, &spawn_jwt(&oidc, "jti-no-credential")).await;
 
@@ -285,7 +292,12 @@ async fn tackle_with_a_usable_credential_clears_the_precondition() {
     let security_dir = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     provision_credential(home.path());
-    let app = router(make_state(&oidc, &tenants, security_dir.path(), home.path()));
+    let app = router(make_state(
+        &oidc,
+        &tenants,
+        security_dir.path(),
+        home.path(),
+    ));
 
     let (status, body) = post_tackle(app, &spawn_jwt(&oidc, "jti-credential-ok")).await;
 
@@ -314,14 +326,24 @@ async fn auth_me_and_tackle_agree_on_the_same_artifact() {
     // Red: no credential → auth/me says absent AND tackle refuses.
     let jwt = spawn_jwt(&oidc, "jti-coherence-red");
     let me = auth_me(
-        router(make_state(&oidc, &tenants, security_dir.path(), home.path())),
+        router(make_state(
+            &oidc,
+            &tenants,
+            security_dir.path(),
+            home.path(),
+        )),
         &jwt,
     )
     .await;
     assert_eq!(me["claude_credentials_present"], serde_json::json!(false));
     assert_eq!(me["claude_credentials_status"], serde_json::json!("absent"));
     let (_, refused) = post_tackle(
-        router(make_state(&oidc, &tenants, security_dir.path(), home.path())),
+        router(make_state(
+            &oidc,
+            &tenants,
+            security_dir.path(),
+            home.path(),
+        )),
         &jwt,
     )
     .await;
@@ -334,13 +356,23 @@ async fn auth_me_and_tackle_agree_on_the_same_artifact() {
     provision_credential(home.path());
     let jwt = spawn_jwt(&oidc, "jti-coherence-green");
     let me = auth_me(
-        router(make_state(&oidc, &tenants, security_dir.path(), home.path())),
+        router(make_state(
+            &oidc,
+            &tenants,
+            security_dir.path(),
+            home.path(),
+        )),
         &jwt,
     )
     .await;
     assert_eq!(me["claude_credentials_present"], serde_json::json!(true));
     let (_, dispatched) = post_tackle(
-        router(make_state(&oidc, &tenants, security_dir.path(), home.path())),
+        router(make_state(
+            &oidc,
+            &tenants,
+            security_dir.path(),
+            home.path(),
+        )),
         &jwt,
     )
     .await;

@@ -39,7 +39,7 @@
 //!    `CLAUDE_CONFIG_DIR` nor `CLAUDE_CODE_OAUTH_TOKEN`. A check that read
 //!    the adapter's copy of either would pass a dispatch whose worker will
 //!    never see it — the false *green* that mirrors the false 200.
-//!    [`WorkerCredentialPreflight`] therefore asks the question against
+//!    [`RppSpawnPreflight`] therefore asks the question against
 //!    the **enveloped** environment, compiled by the very function that
 //!    builds the spawn's env.
 //! 2. The backend a tenant's `local` adapter dials is a property of the
@@ -301,10 +301,11 @@ async fn probe_local_backend(
             resp.status()
         )));
     }
-    let parsed: ModelsResponse = resp
-        .json()
-        .await
-        .map_err(|e| unreachable(format!("unreadable /v1/models response from {base_url}: {e}")))?;
+    let parsed: ModelsResponse = resp.json().await.map_err(|e| {
+        unreachable(format!(
+            "unreadable /v1/models response from {base_url}: {e}"
+        ))
+    })?;
     let Some(model) = model else {
         // No pin: reachability is the whole precondition.
         return Ok(());

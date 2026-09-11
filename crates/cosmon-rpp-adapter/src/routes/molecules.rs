@@ -70,7 +70,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use cosmon_runtime::tackle_exec::TackleExecError;
-use cosmon_runtime::{DispatchPin, LibraryExecutor};
+use cosmon_runtime::{DispatchPin, LibraryExecutor, PreflightRefusal};
 
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
@@ -1713,27 +1713,23 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "subprocess_spawn_failed",
             request_id: Some(request_id.to_owned()),
         },
-        // NOT a spawn failure: the session WAS spawned, and only the
-        // briefing and the teardown failed. Folding it into
-        // `subprocess_spawn_failed` would tell a tenant nothing started
-        // when a paid process may still be running — the generic
-        // fallback is the honest answer, and the retention detail is in
-        // the log.
-        TackleExecError::OrphanRetained { .. } => ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "tackle_unavailable",
-            request_id: Some(request_id.to_owned()),
-        },
+
         // The rollback wrapper adds *what was preserved*, never a different
         // failure class: the wire label stays the one the underlying
         // failure earns, and the preservation detail lives in the log.
         TackleExecError::RolledBackPreserving { source, .. } => {
             tackle_exec_error_to_response(source, request_id)
         }
+        // The generic fallback. `OrphanRetained` belongs here and NOT
+        // with `Spawn`: the session WAS spawned, and only the briefing
+        // and the teardown failed. Calling that a spawn failure would
+        // tell a tenant nothing started while a paid process may still
+        // be running; the retention detail is in the log.
         TackleExecError::State(_)
         | TackleExecError::Id(_)
         | TackleExecError::Ledger(_)
         | TackleExecError::UnknownAdapter(_)
+        | TackleExecError::OrphanRetained { .. }
         | TackleExecError::Git(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tackle_unavailable",
@@ -2655,10 +2651,19 @@ mod tests {
         assert_eq!(err, "variables_not_object");
     }
 
-    /// Transport-level spawn failure maps to `worker_spawn_failed` —
+    /// Transport-level spawn failure maps to `subprocess_spawn_failed` —
     /// the ledger has already been rolled back when this surfaces.
+    ///
+    /// This assertion was `worker_spawn_failed` between issue #54 U6 and
+    /// task-20260911-be1e. The expectation, not the code, was the thing
+    /// that had drifted: U6 renamed a *contract identifier* while
+    /// rewriting the path that raises it, and the two names denote one
+    /// condition — the worker process could not be started. The older
+    /// name is the one an external consumer matches on (issue #48); the
+    /// newer one never reached a published image, so retiring it breaks
+    /// nobody. See the route's doc-comment for the full reconciliation.
     #[test]
-    fn spawn_failure_maps_to_worker_spawn_failed() {
+    fn spawn_failure_maps_to_subprocess_spawn_failed() {
         let api = tackle_exec_error_to_response(
             &TackleExecError::Spawn {
                 id: Box::new(MoleculeId::new("task-20260905-0001").unwrap()),
@@ -2667,7 +2672,64 @@ mod tests {
             "req-spawn",
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "worker_spawn_failed");
+        assert_eq!(api.label, "subprocess_spawn_failed");
+    }
+
+    /// Each precondition refusal carries its OWN stable label, and both
+    /// are 503 — the contract the v3.10 bake found missing.
+    ///
+    /// Asserted here on the mapping itself as well as end-to-end in
+    /// `tests/v1_tackle_credential_contract.rs`: a label is a string, and
+    /// a string is exactly what a refactor silently rewrites.
+    #[test]
+    fn preflight_refusals_carry_their_own_stable_labels() {
+        for (refusal, expected) in [
+            (
+                PreflightRefusal::WorkerCredentialMissing {
+                    adapter: "claude".to_owned(),
+                    detail: "absent".to_owned(),
+                    remedy: "log in".to_owned(),
+                },
+                "worker_credential_missing",
+            ),
+            (
+                PreflightRefusal::AdapterBackendUnreachable {
+                    adapter: "local".to_owned(),
+                    detail: "connection refused".to_owned(),
+                },
+                "adapter_backend_unreachable",
+            ),
+        ] {
+            let api = tackle_exec_error_to_response(
+                &TackleExecError::Preflight {
+                    id: Box::new(MoleculeId::new("task-20260905-0004").unwrap()),
+                    refusal,
+                },
+                "req-preflight",
+            );
+            assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(api.label, expected);
+        }
+    }
+
+    /// A session that spawned and could not be torn down is NOT a spawn
+    /// failure: it takes the generic fallback, because telling a tenant
+    /// "nothing started" while a paid process may still be running is the
+    /// one thing the retention exists to avoid.
+    #[test]
+    fn orphan_retained_is_not_reported_as_a_spawn_failure() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::OrphanRetained {
+                id: Box::new(MoleculeId::new("task-20260905-0005").unwrap()),
+                session_name: "task-20260905-0005".to_owned(),
+                reason: "send-keys failed".to_owned(),
+                termination: "kill-session failed".to_owned(),
+                worktree: std::path::PathBuf::from("/tmp/wt"),
+            },
+            "req-orphan",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "tackle_unavailable");
     }
 
     /// A terminal molecule is a 409 with its own name — not the old

@@ -302,10 +302,9 @@ impl std::fmt::Display for PreflightRefusal {
                 f,
                 "refusing to spawn a {adapter} worker: {detail}. {remedy}"
             ),
-            Self::AdapterBackendUnreachable { adapter, detail } => write!(
-                f,
-                "refusing to dispatch to the {adapter} adapter: {detail}"
-            ),
+            Self::AdapterBackendUnreachable { adapter, detail } => {
+                write!(f, "refusing to dispatch to the {adapter} adapter: {detail}")
+            }
         }
     }
 }
@@ -732,25 +731,11 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             harness_flag: &cosmon_core::harness_settings::HarnessMap::new(),
         })?;
 
-        // PRECONDITIONS (issue #48, restored on this seam by
-        // task-20260911-be1e). The adapter is now known, so the
-        // per-adapter checks can run — and nothing has been spent yet, so
-        // a refusal costs the molecule nothing. Deliberately ahead of the
-        // attribution emission as well as the worktree: a dispatch that
-        // never happened should not leave an `AdapterSelected` in the
-        // event log claiming it did.
-        if let Some(preflight) = self.preflight.as_ref() {
-            preflight
-                .check(&PreflightContext {
-                    molecule: id,
-                    adapter: selection.adapter.as_str(),
-                    model: selection.preferred_model.as_deref(),
-                })
-                .map_err(|refusal| TackleExecError::Preflight {
-                    id: Box::new(id.clone()),
-                    refusal,
-                })?;
-        }
+        self.run_preflight(
+            id,
+            selection.adapter.as_str(),
+            selection.preferred_model.as_deref(),
+        )?;
 
         // Attribution events, co-minted with the dispatch exactly as the
         // CLI does — before any filesystem side effect, best-effort by the
@@ -794,6 +779,41 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         );
 
         self.execute(&store, &state_dir, &repo_root, &mol, &plan)
+    }
+
+    /// Evaluate the dispatch preconditions, if this embedder stated any
+    /// (issue #48, restored on this seam by task-20260911-be1e).
+    ///
+    /// Called from [`Self::tackle`] the moment the adapter is known — the
+    /// per-adapter checks cannot run before that — and before the FIRST
+    /// side effect of any kind. That placement is the whole point:
+    /// deliberately ahead of the attribution emission as well as the
+    /// worktree, the ledger and the spawn, so a dispatch that never
+    /// happened leaves no `AdapterSelected` in the event log claiming it
+    /// did, and the molecule is found exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`TackleExecError::Preflight`] carrying the typed refusal.
+    fn run_preflight(
+        &self,
+        id: &MoleculeId,
+        adapter: &str,
+        model: Option<&str>,
+    ) -> Result<(), TackleExecError> {
+        let Some(preflight) = self.preflight.as_ref() else {
+            return Ok(());
+        };
+        preflight
+            .check(&PreflightContext {
+                molecule: id,
+                adapter,
+                model,
+            })
+            .map_err(|refusal| TackleExecError::Preflight {
+                id: Box::new(id.clone()),
+                refusal,
+            })
     }
 
     /// The effect half proper: worktree → ledger → spawn, with the
