@@ -18,7 +18,7 @@
 //! 2. **Observe** each candidate across the contract's seven axes.
 //! 3. **Decide** with the two pure predicates. `derived_selection` may select
 //!    a rebuildable payload; `durable_eligibility` is advisory and **nothing
-//!    here acts on it** (ADR-177).
+//!    here acts on it** (ADR-178).
 //! 4. **Report** — including every withheld candidate with a concrete reason.
 //!    A withheld set nobody can see is the same invisible leak in the other
 //!    direction, which is how 5 molecule-less directories went unnoticed.
@@ -140,7 +140,7 @@ pub(crate) fn derived_reason(obs: &CandidateObservation) -> Option<String> {
 
 /// Why this candidate's **durable** content is not reachable elsewhere.
 ///
-/// Always reported, never acted on. Eligibility is advisory (ADR-177): this
+/// Always reported, never acted on. Eligibility is advisory (ADR-178): this
 /// string tells an operator what a manual `git worktree remove` would be
 /// risking, and authorises nothing.
 pub(crate) fn durable_reason(obs: &CandidateObservation) -> Option<String> {
@@ -375,7 +375,7 @@ pub(crate) fn report(pass: &ReclaimPass) {
     }
     println!(
         "  No path in this command removes a worktree; durable content is \
-         reported, never reclaimed (ADR-177)."
+         reported, never reclaimed (ADR-178)."
     );
 }
 

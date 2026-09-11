@@ -767,7 +767,7 @@ reason = "integration base branch persisted on the molecule (task-20260725-61fa)
 [[flag_only_in_cs]]
 verb = "tackle"
 flag = "--reclaim-derived"
-reason = "pre-spawn disk-pressure check over the local `.worktrees/` tree (issue 61, ADR-177) — it acquires a local flock and deletes local build output. A remote tenant has no local checkout and no worktrees; the bytes it would reclaim do not exist on its side of the wire."
+reason = "pre-spawn disk-pressure check over the local `.worktrees/` tree (issue 61, ADR-178) — it acquires a local flock and deletes local build output. A remote tenant has no local checkout and no worktrees; the bytes it would reclaim do not exist on its side of the wire."
 
 [[flag_only_in_cs]]
 verb = "tackle"

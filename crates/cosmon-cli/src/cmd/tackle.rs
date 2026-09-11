@@ -240,7 +240,7 @@ pub struct Args {
     pub role_hint: Option<String>,
 
     /// Reclaim derived build output from other worktrees before spawning
-    /// (issue 61, ADR-177).
+    /// (issue 61, ADR-178).
     ///
     /// The pre-spawn pressure check. A dispatch is the one moment cosmon is
     /// guaranteed to be running *and* the moment disk demand grows — a new
@@ -3726,7 +3726,7 @@ pub(super) fn find_repo_root() -> anyhow::Result<PathBuf> {
 /// more than the derived tier to make room — is what is structurally
 /// impossible here, since this function never reads
 /// [`durable_eligibility`](cosmon_core::worktree_reclaim::durable_eligibility)
-/// and the pass it calls removes no worktree under any flag (ADR-177).
+/// and the pass it calls removes no worktree under any flag (ADR-178).
 fn run_pressure_check(ctx: &Context, store: &dyn cosmon_state::StateStore, repo_root: &Path) {
     let base = super::worktree_reclaim::base_branch(ctx, repo_root);
     let evict = super::worktree_reclaim::evict_roots(ctx);
@@ -8855,7 +8855,7 @@ mod issue61_pressure_check {
     /// …and it may never reach durable content. `cs tackle` does not name
     /// `durable_eligibility`, `advisory_durable_paths` or any whole-worktree
     /// removal at all: the tier-1 limit is a fact about this file, not a
-    /// promise in a comment (ADR-177).
+    /// promise in a comment (ADR-178).
     #[test]
     fn the_dispatch_path_never_names_the_durable_predicate() {
         // Comments are excluded: a doc link that *names* the predicate to say

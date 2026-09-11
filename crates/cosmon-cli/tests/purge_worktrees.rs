@@ -11,7 +11,7 @@
 //!   count stays right while the sentence rots;
 //! * **no path removes a worktree** — the executing run takes the derived
 //!   payload and leaves the directory, the lock anchor and the durable files
-//!   exactly where they were (ADR-177).
+//!   exactly where they were (ADR-178).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -129,7 +129,7 @@ fn withheld_register_names_a_concrete_reason() {
     );
     assert!(
         stdout.contains("No path in this command removes a worktree"),
-        "the surface must state its own limit (ADR-177):\n{stdout}"
+        "the surface must state its own limit (ADR-178):\n{stdout}"
     );
 }
 

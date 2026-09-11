@@ -493,7 +493,7 @@ pub struct Args {
     /// nothing; `--allow-unharvested` — the same gesture the sweep already
     /// uses, not a second one — executes the derived half. Durable content
     /// is never removed by any path in this command, whatever the flags
-    /// (ADR-177): the eligibility verdict is advisory and is printed, not
+    /// (ADR-178): the eligibility verdict is advisory and is printed, not
     /// acted on.
     #[arg(long)]
     pub worktrees: bool,

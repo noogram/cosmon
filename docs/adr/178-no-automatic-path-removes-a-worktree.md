@@ -1,5 +1,5 @@
 <!-- SPDX-License-Identifier: AGPL-3.0-only -->
-# ADR-177 — No automatic path removes a worktree; durable eligibility is advisory
+# ADR-178 — No automatic path removes a worktree; durable eligibility is advisory
 
 **Status:** Accepted (2026-09-11).
 **Date:** 2026-09-11.
