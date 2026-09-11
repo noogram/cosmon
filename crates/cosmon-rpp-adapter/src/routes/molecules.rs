@@ -70,7 +70,7 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 
 use cosmon_runtime::tackle_exec::TackleExecError;
-use cosmon_runtime::{DispatchPin, LibraryExecutor, PreflightRefusal};
+use cosmon_runtime::{DispatchPin, LibraryExecutor};
 
 use crate::admission::{http_request_to_spark, AdmissionRig, Spark, Verb};
 use crate::audit::new_request_id;
@@ -2577,6 +2577,7 @@ fn parse_variables(raw: Option<&Value>) -> Result<Vec<(String, String)>, &'stati
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use cosmon_runtime::PreflightRefusal;
 
     #[test]
     fn extracts_bearer_token() {
