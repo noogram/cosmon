@@ -110,10 +110,32 @@ impl ReclaimPass {
 /// `None` when it *was* selected. Pure over the observation so the string an
 /// operator will read is asserted directly in a test, rather than inferred
 /// from a count that stays right while the sentence rots.
-pub(crate) fn derived_reason(_obs: &CandidateObservation) -> Option<String> {
-    // PLACEHOLDER (red): the withheld set carries no reason — a count, which
-    // is what an operator had before. Implemented in the green commit.
-    None
+pub(crate) fn derived_reason(obs: &CandidateObservation) -> Option<String> {
+    let d = &obs.derived;
+    if consideration_gate(&d.molecule, &d.status) == Consideration::No {
+        return Some(gate_reason(&d.molecule, &d.status));
+    }
+    match &d.lock {
+        LockObservation::Held => Some(format!(
+            "another process holds the build lock at {} — reclaiming under \
+             contention would delete a running build's output",
+            d.path.join(LOCK_ANCHOR).display()
+        )),
+        LockObservation::ProbeFailed(e) => Some(format!(
+            "the build lock could not be probed: {} — no exclusion, no removal",
+            e.describe()
+        )),
+        LockObservation::Acquired => match &d.derived_set {
+            DerivedRoots::Unavailable(e) => Some(format!(
+                "the derived roots could not be inventoried: {}",
+                e.describe()
+            )),
+            DerivedRoots::Validated(roots) if roots.is_empty() => {
+                Some("no configured derived root is present here".to_owned())
+            }
+            DerivedRoots::Validated(_) => None,
+        },
+    }
 }
 
 /// Why this candidate's **durable** content is not reachable elsewhere.
@@ -121,10 +143,66 @@ pub(crate) fn derived_reason(_obs: &CandidateObservation) -> Option<String> {
 /// Always reported, never acted on. Eligibility is advisory (ADR-177): this
 /// string tells an operator what a manual `git worktree remove` would be
 /// risking, and authorises nothing.
-pub(crate) fn durable_reason(_obs: &CandidateObservation) -> Option<String> {
-    // PLACEHOLDER (red): the withheld set carries no reason — a count, which
-    // is what an operator had before. Implemented in the green commit.
-    None
+pub(crate) fn durable_reason(obs: &CandidateObservation) -> Option<String> {
+    let h = &obs.durable;
+    if durable_eligibility(h) == DurableEligibility::Eligible {
+        return None;
+    }
+    if consideration_gate(&h.molecule, &h.status) == Consideration::No {
+        return Some(gate_reason(&h.molecule, &h.status));
+    }
+    match &h.registration {
+        RegistrationObservation::Unregistered => {
+            return Some(
+                "git does not know this directory as a worktree — unregistered \
+                 scratch, whose contents nothing else holds a copy of"
+                    .to_owned(),
+            )
+        }
+        RegistrationObservation::Unknown(e) => {
+            return Some(format!("registration is unknown: {}", e.describe()))
+        }
+        RegistrationObservation::Registered => {}
+    }
+    match &h.ahead {
+        AheadObservation::Positive(n) => {
+            return Some(format!(
+                "{n} commit(s) are not reachable from the base branch"
+            ))
+        }
+        AheadObservation::Unknown(e) => {
+            return Some(format!(
+                "ancestry is unknown: {} — a ref that cannot be proven merged is not merged",
+                e.describe()
+            ))
+        }
+        AheadObservation::Zero => {}
+    }
+    match &h.dirty {
+        DirtyObservation::Dirty(paths) => {
+            return Some(format!(
+                "{} uncommitted file(s) in the worktree: {}",
+                paths.len(),
+                paths.join(", ")
+            ))
+        }
+        DirtyObservation::Unknown(e) => {
+            return Some(format!("the worktree status is unknown: {}", e.describe()))
+        }
+        DirtyObservation::Clean => {}
+    }
+    match &h.ignored_durable {
+        IgnoredDurableObservation::Present(paths) => Some(format!(
+            "{} ignored but durable path(s) live here: {}",
+            paths.len(),
+            paths.join(", ")
+        )),
+        IgnoredDurableObservation::Unknown(e) => Some(format!(
+            "the ignored-content inventory is unknown: {}",
+            e.describe()
+        )),
+        IgnoredDurableObservation::Absent => None,
+    }
 }
 
 /// The `G` veto, said in the operator's words.

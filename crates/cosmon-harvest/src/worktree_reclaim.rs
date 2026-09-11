@@ -175,10 +175,8 @@ impl<'a> GitWorktreeObserver<'a> {
     /// acquired flock says nothing about `xcodebuild`, which never asked for
     /// it. Such a root is withheld with that reason rather than reclaimed
     /// under a lock that does not cover it.
-    fn exclusion_established(_root: &Path) -> bool {
-        // PLACEHOLDER (red): the pre-P3 assumption — a configured root is a
-        // reclaimable root. Implemented in the green commit.
-        true
+    fn exclusion_established(root: &Path) -> bool {
+        Path::new(LOCK_ANCHOR).starts_with(root)
     }
 
     /// The reason a root without established exclusion is withheld.
@@ -701,11 +699,83 @@ pub struct Enumeration {
 /// The repository root itself is excluded: it is the checkout, not a
 /// reclamation candidate.
 #[must_use]
-pub fn enumerate_candidates(_repo_root: &Path) -> Enumeration {
-    // PLACEHOLDER (red): nothing enumerates candidates yet — every prior
-    // mechanism was keyed by molecule or by worker, so the population is
-    // empty here. Implemented in the green commit.
-    Enumeration::default()
+pub fn enumerate_candidates(repo_root: &Path) -> Enumeration {
+    let mut out = Enumeration::default();
+    let repo_real = std::fs::canonicalize(repo_root).unwrap_or_else(|_| repo_root.to_path_buf());
+
+    // Half 1 — the filesystem.
+    let mut from_fs: BTreeSet<PathBuf> = BTreeSet::new();
+    match read_worktree_dirs(&repo_root.join(".worktrees")) {
+        WorktreeDirs::Absent => {}
+        WorktreeDirs::Listed(dirs) => from_fs.extend(dirs),
+        WorktreeDirs::Unreadable(e) => out.errors.push(e),
+    }
+
+    // Half 2 — Git's registry.
+    let mut from_git: BTreeSet<PathBuf> = BTreeSet::new();
+    let listing = Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .args(["worktree", "list", "--porcelain"])
+        .output();
+    match listing {
+        Ok(o) if o.status.success() => {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                if let Some(p) = line.strip_prefix("worktree ") {
+                    let path = PathBuf::from(p.trim());
+                    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                    if real == repo_real {
+                        continue;
+                    }
+                    from_git.insert(path);
+                }
+            }
+        }
+        Ok(o) => out.errors.push(ObservationError::new(
+            "git worktree list --porcelain",
+            repo_root,
+            format!(
+                "exit {}: {}",
+                o.status.code().unwrap_or(-1),
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+        )),
+        Err(e) => out.errors.push(ObservationError::new(
+            "git worktree list --porcelain",
+            repo_root,
+            e.to_string(),
+        )),
+    }
+
+    // The union, matched on canonical identity so the same directory reached
+    // by two spellings is one candidate rather than two.
+    let git_real: BTreeSet<PathBuf> = from_git
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+    let fs_real: BTreeSet<PathBuf> = from_fs
+        .iter()
+        .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()))
+        .collect();
+
+    let mut seen: BTreeSet<PathBuf> = BTreeSet::new();
+    for path in from_fs.iter().chain(from_git.iter()) {
+        let real = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        if !seen.insert(real.clone()) {
+            continue;
+        }
+        let source = match (fs_real.contains(&real), git_real.contains(&real)) {
+            (true, true) => CandidateSource::Both,
+            (true, false) => CandidateSource::FilesystemOnly,
+            (false, _) => CandidateSource::RegistrationOnly,
+        };
+        out.candidates.push(EnumeratedCandidate {
+            path: path.clone(),
+            source,
+        });
+    }
+    out.candidates.sort_by(|a, b| a.path.cmp(&b.path));
+    out
 }
 
 /// Bytes occupied under `path`, following no symlink.

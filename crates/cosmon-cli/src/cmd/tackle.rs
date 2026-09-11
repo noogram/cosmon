@@ -1386,8 +1386,11 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             || repo_root.join(".worktrees").join(mol_id.as_str()),
             PathBuf::from,
         );
-        // PLACEHOLDER (red): the flag is parsed and documented; nothing on
-        // the dispatch path runs the check yet. Wired in the green commit.
+        // The pressure check fires *before* the new worktree exists, so the
+        // bytes it frees are available to the build that is about to start.
+        if args.reclaim_derived {
+            run_pressure_check(ctx, &store, &repo_root);
+        }
         create_worktree(&repo_root, &wt_dir, &branch_name, start_point.as_deref())?;
         wt_dir
     };

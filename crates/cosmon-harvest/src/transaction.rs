@@ -3604,11 +3604,10 @@ fn preview_dirty(worktree_exists: bool, worktree_path: &Path) -> (Vec<String>, O
     if !worktree_exists {
         return (Vec::new(), None);
     }
-    // PLACEHOLDER (red): the third fail-open, verbatim — a failed probe
-    // renders exactly like a clean tree. Closed in the green commit.
     match observe_dirty(worktree_path) {
-        DirtyObservation::Clean | DirtyObservation::Unknown(_) => (Vec::new(), None),
+        DirtyObservation::Clean => (Vec::new(), None),
         DirtyObservation::Dirty(paths) => (paths, None),
+        DirtyObservation::Unknown(e) => (Vec::new(), Some(e.describe())),
     }
 }
 
