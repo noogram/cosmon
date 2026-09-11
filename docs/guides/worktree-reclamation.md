@@ -6,7 +6,7 @@ and, when asked, reclaims the rebuildable part of it. This guide is about the
 one question everything else hangs off: **what the build lock does and does not
 cover.**
 
-Related: [ADR-177](../adr/177-no-automatic-path-removes-a-worktree.md) (no
+Related: [ADR-178](../adr/178-no-automatic-path-removes-a-worktree.md) (no
 automatic path removes a worktree) and the working contract at
 [`docs/design/worktree-reclaim/CONTRACT.md`](../design/worktree-reclaim/CONTRACT.md).
 
@@ -103,7 +103,7 @@ report the bytes and keep them.
 
 ## What is never reclaimed
 
-No path in cosmon removes a worktree automatically (ADR-177). The durable
+No path in cosmon removes a worktree automatically (ADR-178). The durable
 eligibility verdict — registered, provably zero commits ahead of base, clean
 status, no ignored-but-durable content — is computed, printed, and acted on by
 nobody. Every conjunct in it is an observation, and an observation is a claim

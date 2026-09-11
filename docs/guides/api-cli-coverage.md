@@ -95,7 +95,7 @@ advance → terminate → infrastructure → introspection.
 | `cs release` | NO | — | Releases a pilot claim, returning the molecule to the runtime frontier. Mirror of `cs claim`; operator/pilot-driven. |
 | `cs resurrect` | NO | — | Recover a dead worker; operator-driven. |
 | `cs teardown` | NO | — | Infrastructure teardown; operator-only. |
-| `cs purge` | **NO (NEVER)** | — | Destroys cosmon state. Catastrophic, irreversible. Operator-only by definition. ADR-080 §5.1. Its `--worktrees` reclamation pass and `--dry-run` (issue 61) add no route and change nothing here: the pass acquires a local `flock` and deletes local build output, which a remote tenant has neither of. It removes no worktree under any flag ([ADR-177](../adr/177-no-automatic-path-removes-a-worktree.md)). |
+| `cs purge` | **NO (NEVER)** | — | Destroys cosmon state. Catastrophic, irreversible. Operator-only by definition. ADR-080 §5.1. Its `--worktrees` reclamation pass and `--dry-run` (issue 61) add no route and change nothing here: the pass acquires a local `flock` and deletes local build output, which a remote tenant has neither of. It removes no worktree under any flag ([ADR-178](../adr/178-no-automatic-path-removes-a-worktree.md)). |
 | `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |

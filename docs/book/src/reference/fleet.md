@@ -67,7 +67,7 @@ SEE ALSO: cs freeze (graceful + state preservation), cs teardown
 
    Enumerates `readdir(.worktrees/) ∪ git worktree list --porcelain` — the filesystem and Git's own registry, not the worker roster, which is keyed by molecule and could not see a directory that has none. Reports every candidate: the reclaimable derived output on one side, and on the other every worktree withheld **with its reason**.
 
-   Reclamation is opt-in and one tier deep. On its own this flag removes nothing; `--allow-unharvested` — the same gesture the sweep already uses, not a second one — executes the derived half. Durable content is never removed by any path in this command, whatever the flags (ADR-177): the eligibility verdict is advisory and is printed, not acted on.
+   Reclamation is opt-in and one tier deep. On its own this flag removes nothing; `--allow-unharvested` — the same gesture the sweep already uses, not a second one — executes the derived half. Durable content is never removed by any path in this command, whatever the flags (ADR-178): the eligibility verdict is advisory and is printed, not acted on.
 * `--dry-run` — Report what would change and change nothing.
 
    Applies to the whole command: no fleet entry is removed, no molecule is collapsed, no event is emitted and no byte is reclaimed. The `--worktrees` pass is dry by default and stays dry here.
