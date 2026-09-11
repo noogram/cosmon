@@ -776,11 +776,39 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
+        "501":
+          description: |
+            `tackle_unsupported_step` — the molecule's current formula
+            step is an execution kind the library executor does not
+            cover (gate / native / query / llm). The body names the
+            step kind; the refusal is typed, never a silent fallback.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
         "503":
           description: |
-            `tackle_unavailable` — `cs` binary missing, subprocess
-            spawn failed, or Claude Code not installed in the
-            container.
+            One of four stable labels. The first two are
+            **preconditions**: refused before any effect, so the
+            molecule is untouched and still tacklable.
+
+            `worker_credential_missing` — the worker this dispatch
+            would spawn has no credential it could use. Same verdict,
+            on the same artifact, that `GET /v1/auth/me` reports under
+            `claude_credentials_status`. Repair: complete the Claude
+            login on the instance.
+
+            `adapter_backend_unreachable` — the resolved adapter's
+            configured backend did not answer, or cannot serve the
+            pinned model. Repair: start the backend, or pull the model.
+
+            `subprocess_spawn_failed` — the worker process could not be
+            started. The dispatch ledger has been rolled back.
+
+            `tackle_unavailable` — stable generic fallback for any
+            other dispatch failure (store fault, git fault, unknown
+            adapter, a session that spawned but whose briefing and
+            teardown both failed).
           content:
             application/json:
               schema:

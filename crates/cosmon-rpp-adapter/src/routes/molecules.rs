@@ -1395,10 +1395,34 @@ pub async fn stuck_molecule(
 ///   step is an execution kind the library executor does not cover yet
 ///   (gate / native / query / llm). The refusal is TYPED and names the
 ///   step kind in the body — never a silent fallback to a subprocess.
-/// - **503 `worker_spawn_failed`** — the transport backend could not
+/// - **503 `worker_credential_missing`** — a precondition: the worker
+///   this dispatch would spawn has no credential it could use. Refused
+///   before any effect; the molecule is untouched and still tacklable
+///   (issue #48, restored on the library seam by task-20260911-be1e —
+///   see [`crate::preflight`]).
+/// - **503 `adapter_backend_unreachable`** — a precondition: the
+///   resolved adapter's backend did not answer, or cannot serve the
+///   pinned model. Also refused before any effect.
+/// - **503 `subprocess_spawn_failed`** — the transport backend could not
 ///   open the worker session (the ledger has been rolled back).
 /// - **503 `tackle_unavailable`** — stable fallback for any other
-///   dispatch failure (store fault, git fault, unknown adapter).
+///   dispatch failure (store fault, git fault, unknown adapter, a
+///   session spawned whose briefing and teardown both failed).
+///
+/// # The two taxonomies, reconciled
+///
+/// Issue #54 U6 replaced the subprocess envelope and, with it, renamed
+/// the OS-level spawn failure from `subprocess_spawn_failed` to
+/// `worker_spawn_failed`. The two name the *same* condition — the worker
+/// process could not be started — so keeping both would leave two
+/// taxonomies overlapping in silence. `subprocess_spawn_failed` is the
+/// one restored: it is the identifier the issue-#48 reporter consumes,
+/// and `worker_spawn_failed` never reached a published image (v3.9
+/// `de97ff2d` predates U6; the v3.10 bake that first carried it was not
+/// published, precisely because of this regression). Retiring the newer
+/// name breaks no consumer; dropping the older one breaks the reporter.
+/// `tackle_unavailable` survives underneath both as the generic
+/// fallback, deliberately without a client-side hint.
 #[allow(clippy::too_many_lines)] // Authentication, admission, and spawn stay auditable in order.
 pub async fn tackle_molecule(
     State(state): State<Arc<AppState>>,
@@ -1543,6 +1567,19 @@ pub async fn tackle_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
+    // The preconditions the RPP publishes as `503` contract labels
+    // (issue #48). Built from the SAME envelope the spawn is clamped
+    // with, so "does the worker have a credential" is asked of the
+    // environment the worker will actually read — see
+    // [`crate::preflight`].
+    let preflight = std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
+        envelope.clone(),
+        &tenant_root,
+        state
+            .auth_claude
+            .as_ref()
+            .map(|ac| ac.config.credentials_path.clone()),
+    ));
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // The paths are pinned to the admitted tenant, not resolved from the
     // adapter process's environment: this dispatch must read the very store
@@ -1553,7 +1590,8 @@ pub async fn tackle_molecule(
     // already performed.
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
-        .with_tackled_by(cosmon_core::tackle::TackledBy::Human);
+        .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
+        .with_preflight(preflight);
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
     // holds; unboxed again at the match below.
@@ -1660,9 +1698,30 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_harness",
             request_id: Some(request_id.to_owned()),
         },
-        TackleExecError::Spawn { .. } | TackleExecError::OrphanRetained { .. } => ApiError {
+        // The precondition refusals carry their own contract label
+        // (issue #48): `worker_credential_missing` /
+        // `adapter_backend_unreachable`. The detail and the remedy stay
+        // in the server log — the wire gets the identifier only
+        // (turing G9).
+        TackleExecError::Preflight { refusal, .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "worker_spawn_failed",
+            label: refusal.label(),
+            request_id: Some(request_id.to_owned()),
+        },
+        TackleExecError::Spawn { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+        // NOT a spawn failure: the session WAS spawned, and only the
+        // briefing and the teardown failed. Folding it into
+        // `subprocess_spawn_failed` would tell a tenant nothing started
+        // when a paid process may still be running — the generic
+        // fallback is the honest answer, and the retention detail is in
+        // the log.
+        TackleExecError::OrphanRetained { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "tackle_unavailable",
             request_id: Some(request_id.to_owned()),
         },
         // The rollback wrapper adds *what was preserved*, never a different

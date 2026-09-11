@@ -81,6 +81,7 @@ pub mod nucleon_map;
 pub mod oauth_discovery;
 pub mod phone_home;
 pub mod portee;
+pub mod preflight;
 pub mod provisioner;
 pub mod rate_limit;
 pub mod reload;
