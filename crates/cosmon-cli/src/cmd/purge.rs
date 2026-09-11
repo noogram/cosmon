@@ -433,7 +433,12 @@ fn collapse_stale_zombies(
 }
 
 /// Arguments for the `purge` subcommand.
+///
+/// The bool count is clap's shape, not a state machine waiting to be
+/// discovered: each flag is an independent operator gesture with its own help
+/// text, and folding them into enums would hide the surface the goldens lock.
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Optional worker ID — when given, targeted purge of that worker only.
     ///
@@ -475,6 +480,31 @@ pub struct Args {
     /// after a reboot with up to three commits each still unmerged).
     #[arg(long)]
     pub allow_unharvested: bool,
+
+    /// Also run the `.worktrees/` reclamation pass (issue 61).
+    ///
+    /// Enumerates `readdir(.worktrees/) ∪ git worktree list --porcelain` —
+    /// the filesystem and Git's own registry, not the worker roster, which
+    /// is keyed by molecule and could not see a directory that has none.
+    /// Reports every candidate: the reclaimable derived output on one side,
+    /// and on the other every worktree withheld **with its reason**.
+    ///
+    /// Reclamation is opt-in and one tier deep. On its own this flag removes
+    /// nothing; `--allow-unharvested` — the same gesture the sweep already
+    /// uses, not a second one — executes the derived half. Durable content
+    /// is never removed by any path in this command, whatever the flags
+    /// (ADR-177): the eligibility verdict is advisory and is printed, not
+    /// acted on.
+    #[arg(long)]
+    pub worktrees: bool,
+
+    /// Report what would change and change nothing.
+    ///
+    /// Applies to the whole command: no fleet entry is removed, no molecule
+    /// is collapsed, no event is emitted and no byte is reclaimed. The
+    /// `--worktrees` pass is dry by default and stays dry here.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 fn parse_worker_role(s: &str) -> Result<WorkerRole, String> {
@@ -490,20 +520,47 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // Targeted mode — `cs purge <worker> [--force]` (supersedes `cs kill`).
     if let Some(ref worker_name) = args.worker {
-        return run_targeted(
-            ctx,
-            store.as_ref(),
-            &state_dir,
-            worker_name,
-            args.force,
-            args.allow_unharvested,
-            &probe,
-        );
+        run_targeted(ctx, store.as_ref(), &state_dir, worker_name, args, &probe)?;
+    } else {
+        let socket = super::tmux_socket_name(ctx);
+        let backend = TmuxBackend::new(&socket);
+        run_sweep(ctx, store.as_ref(), &state_dir, &backend, &probe, args)?;
     }
 
-    let socket = super::tmux_socket_name(ctx);
-    let backend = TmuxBackend::new(&socket);
-    run_sweep(ctx, store.as_ref(), &state_dir, &backend, &probe, args)
+    if args.worktrees {
+        run_worktree_pass(ctx, store.as_ref(), args)?;
+    }
+    Ok(())
+}
+
+/// The `.worktrees/` reclamation pass behind `--worktrees` (issue 61).
+///
+/// Separated from the worker sweep because it answers a different question
+/// about a different population: the sweep is keyed by *worker*, and the
+/// directories this pass finds are precisely the ones no worker and no
+/// molecule points at. They shared a verb — not a mechanism — deliberately:
+/// a second verb would be a second copy of the safety question.
+///
+/// `--dry-run` and the absence of `--allow-unharvested` both keep it dry.
+fn run_worktree_pass(ctx: &Context, store: &dyn StateStore, args: &Args) -> anyhow::Result<()> {
+    let Some(repo_root) = super::worktree_reclaim::discover_repo_root() else {
+        if !ctx.json {
+            println!("\n.worktrees/ reclamation: not inside a git repository — nothing to scan.");
+        }
+        return Ok(());
+    };
+    let base = super::worktree_reclaim::base_branch(ctx, &repo_root);
+    let evict = super::worktree_reclaim::evict_roots(ctx);
+    // The derived tier is opt-in twice over: `--allow-unharvested` asks for
+    // it, `--dry-run` overrides the ask.
+    let execute = args.allow_unharvested && !args.dry_run;
+    let pass = super::worktree_reclaim::run_pass(&repo_root, &base, store, &evict, execute)?;
+    if ctx.json {
+        println!("{}", super::worktree_reclaim::to_json(&pass));
+    } else {
+        super::worktree_reclaim::report(&pass);
+    }
+    Ok(())
 }
 
 /// Populations produced by [`classify_sweep`] — one vec per reason code
@@ -598,6 +655,30 @@ fn classify_sweep<B: TransportBackend>(
     buckets
 }
 
+/// The targeted mode's `--dry-run` report.
+///
+/// Reached only *after* every refusal above has run: a dry run that skipped
+/// the unharvested guard would be answering a different question from the one
+/// the real command answers, and would be useless as a preview of it.
+fn report_targeted_dry_run(ctx: &Context, worker_id: &WorkerId, force: bool) {
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "command": "purge",
+                "dry_run": true,
+                "worker": worker_id.as_str(),
+                "would_force_kill": force,
+            })
+        );
+    } else {
+        println!(
+            "🔍 dry-run: would purge worker {worker_id}{}.",
+            if force { " (SIGKILL tmux first)" } else { "" }
+        );
+    }
+}
+
 /// Sweep-mode purge, parameterised over the transport backend so tests
 /// can inject `MockBackend` without spinning up a real tmux server.
 #[allow(clippy::too_many_lines)]
@@ -644,6 +725,35 @@ fn run_sweep<B: TransportBackend>(
             );
         } else {
             println!("Nothing to purge.");
+        }
+        return Ok(());
+    }
+
+    if args.dry_run {
+        // Classification, withholding and the operator-facing register all
+        // happened above; only the writes are skipped.
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "command": "purge",
+                    "dry_run": true,
+                    "would_purge": total,
+                    "terminal": terminal.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "stale": stale.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "orphan": orphan.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "withheld": withheld.iter().map(|w| w.worker.as_str().to_owned())
+                        .collect::<Vec<_>>(),
+                })
+            );
+        } else {
+            println!("🔍 dry-run: would purge {total} worker(s).");
+            for wid in terminal.iter().chain(stale.iter()).chain(orphan.iter()) {
+                println!("  - {wid}");
+            }
+            for w in &withheld {
+                println!("  WITHHELD {} → {}", w.worker, w.work.describe());
+            }
         }
         return Ok(());
     }
@@ -846,10 +956,10 @@ fn run_targeted(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
     worker_name: &str,
-    force: bool,
-    allow_unharvested: bool,
+    args: &Args,
     probe: &dyn HarvestProbe,
 ) -> anyhow::Result<()> {
+    let (force, allow_unharvested, dry_run) = (args.force, args.allow_unharvested, args.dry_run);
     let worker_id = WorkerId::new(worker_name)?;
 
     let mut fleet = store.load_fleet()?;
@@ -879,6 +989,11 @@ fn run_targeted(
     }
     if !allow_unharvested {
         refuse_if_unharvested(&fleet, store, probe, &worker_id)?;
+    }
+
+    if dry_run {
+        report_targeted_dry_run(ctx, &worker_id, force);
+        return Ok(());
     }
 
     let Some(worker) = fleet.workers.get_mut(&worker_id) else {
@@ -1137,6 +1252,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1172,6 +1289,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1214,6 +1333,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1243,6 +1364,8 @@ mod tests {
             status: Some("running".to_owned()),
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1287,6 +1410,8 @@ mod tests {
             status: None,
             role: Some(WorkerRole::Cognition),
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1315,6 +1440,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1335,6 +1462,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
 
         let err = run(&ctx, &args).unwrap_err();
@@ -1361,6 +1490,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1445,6 +1576,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &ErrBackend, &NoWork, &args).unwrap();
 
@@ -1501,6 +1634,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1544,6 +1679,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1576,6 +1713,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1613,6 +1752,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1657,6 +1798,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1712,6 +1855,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1747,6 +1892,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1785,6 +1932,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1833,6 +1982,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &backend, &commits_ahead(1), &args)
             .expect_err("purge must fail closed on unharvested work");
@@ -1893,6 +2044,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args)
             .expect_err("a dirty worktree must fail closed too");
@@ -1923,6 +2076,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: true,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(
             &ctx,
@@ -1963,6 +2118,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let _ = run_sweep(
             &ctx,
@@ -1999,16 +2156,17 @@ mod tests {
         let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-0c2d", "target");
 
         let ctx = ctx_for(&tmp, false);
-        let err = run_targeted(
-            &ctx,
-            &store,
-            tmp.path(),
-            "target",
-            true,
-            false,
-            &commits_ahead(2),
-        )
-        .expect_err("targeted --force must not discard unharvested work");
+        let args = Args {
+            worker: Some("target".to_owned()),
+            force: true,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
+        };
+        let err = run_targeted(&ctx, &store, tmp.path(), "target", &args, &commits_ahead(2))
+            .expect_err("targeted --force must not discard unharvested work");
 
         assert_eq!(
             store.load_molecule(&mol_id).unwrap().status,
@@ -2033,7 +2191,16 @@ mod tests {
         let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-clea", "clean");
 
         let ctx = ctx_for(&tmp, false);
-        run_targeted(&ctx, &store, tmp.path(), "clean", false, false, &NoWork).unwrap();
+        let args = Args {
+            worker: Some("clean".to_owned()),
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
+        };
+        run_targeted(&ctx, &store, tmp.path(), "clean", &args, &NoWork).unwrap();
 
         assert!(store.load_fleet().unwrap().workers.is_empty());
         assert_eq!(
@@ -2064,6 +2231,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(
             &ctx,
@@ -2100,6 +2269,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         assert!(run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args).is_err());
         assert_eq!(

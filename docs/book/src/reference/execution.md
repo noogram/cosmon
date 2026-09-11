@@ -79,6 +79,11 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 * `--role-hint <ROLE>` — Forensic-only role-of-origin hint propagated through to [`EventV2::AdapterSelected`](cosmon_core::event_v2::EventV2::AdapterSelected) (ADR-097 / C6).
 
    Cosmon does not interpret this value — it is the academy-shim's channel for preserving the driver's vocabulary (a `--role researcher` invocation on the driver side becomes `role_hint: "researcher"` on the cosmon event), so the role of origin survives the seam between driver (roles) and cosmon (adapters). Optional; absent for direct operator invocations.
+* `--reclaim-derived` — Reclaim derived build output from other worktrees before spawning (issue 61, ADR-177).
+
+   The pre-spawn pressure check. A dispatch is the one moment cosmon is guaranteed to be running *and* the moment disk demand grows — a new worktree and a new build directory — so it is where the actor that creates the leak pays for it. Nothing runs it on a timer: there is no daemon, no LRU and no background sweep, because nothing destructive may run unobserved.
+
+   It governs **tier 1 only**: rebuildable payload under the `[worktree_reclaim].evict` roots of worktrees whose molecule is terminal (or absent) and whose build lock it could acquire. It cannot reach durable content — `cs tackle` never consults durable eligibility, and no path in this workspace removes a worktree.
 * `--fallback-from-local <CAUSE>` — Loud opt-in fallback from the local default to a remote oracle after a *decidable* local hard-failure (Q5b).
 
    Pass a [`LocalFailureCause`](cosmon_core::egress::LocalFailureCause) token — `crash`, `oom`, `timeout`, `connection-refused`, or any bespoke string (recorded verbatim as `Other`). This flag is the ONLY path from a local hard-failure to a remote oracle: there is no automatic in-loop fallback. It is meaningful only alongside a remote `--adapter` (claude / openai / anthropic / aider) — combining it with a local adapter is a contradiction and aborts the dispatch.

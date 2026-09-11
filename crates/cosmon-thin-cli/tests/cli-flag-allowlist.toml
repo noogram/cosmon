@@ -766,6 +766,11 @@ reason = "integration base branch persisted on the molecule (task-20260725-61fa)
 
 [[flag_only_in_cs]]
 verb = "tackle"
+flag = "--reclaim-derived"
+reason = "pre-spawn disk-pressure check over the local `.worktrees/` tree (issue 61, ADR-177) — it acquires a local flock and deletes local build output. A remote tenant has no local checkout and no worktrees; the bytes it would reclaim do not exist on its side of the wire."
+
+[[flag_only_in_cs]]
+verb = "tackle"
 flag = "--by"
 reason = "anti-preemption lease owner (human | runtime:<pid>, task-20260531-a12f) — local-dispatch plumbing. Over RPP the dispatcher identity IS the JWT sub, so --by is intentionally cs-only."
 
