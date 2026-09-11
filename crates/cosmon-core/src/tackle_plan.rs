@@ -58,6 +58,7 @@ use crate::config::{
 };
 use crate::event_v2::{AdapterSelectionSource, ModelSelectionSource};
 use crate::formula::Formula;
+use crate::harness_settings::{resolve_harness_settings, HarnessMap, ResolvedHarness};
 use crate::id::{FormulaId, MoleculeId};
 use crate::kind::MoleculeKind;
 use crate::spawn_seam::{
@@ -129,6 +130,13 @@ pub struct SelectionRequest<'a> {
     /// folded into `Default` fallback reasons so they name the real cause
     /// (task-20260725-eb3b).
     pub formula_absence: Option<&'a str>,
+    /// The `cs tackle --harness k=v` flags, already parsed (ADR-177 / #65).
+    ///
+    /// Rank 1 of the three-level harness chain, merged **per key** over the
+    /// executing step's `[steps.harness]` table. An empty map means the
+    /// operator pinned nothing in the moment, which is not the same as
+    /// overriding the step with nothing.
+    pub harness_flag: &'a HarnessMap,
 }
 
 /// The resolved **who-runs-this** half of a tackle decision: adapter, model,
@@ -154,6 +162,15 @@ pub struct TackleSelection {
     pub preferred_model: Option<String>,
     /// Where the model pin came from.
     pub model_source: ModelSelectionSource,
+    /// The opaque harness settings this dispatch resolved, per key, with the
+    /// level each came from (ADR-177 / issue #65).
+    ///
+    /// Empty is the common case and means cosmon passes no harness key at all
+    /// — the only way the harness's own config can apply. Rendering the map
+    /// onto a concrete adapter's channel happens at the spawn boundary, not
+    /// here, because that step can *fail* (an adapter with no carrier) and a
+    /// resolution is not a place to fail a dispatch.
+    pub harness: ResolvedHarness,
 }
 
 /// Resolve the adapter, model, and spawn axes for a tackle — the pure
@@ -232,6 +249,17 @@ pub fn resolve_selection(req: &SelectionRequest<'_>) -> Result<TackleSelection, 
     );
     let model_source = sharpen_model_fallback(model_source, req.formula_absence);
 
+    // The harness map, read from the same step as the two pins above. The
+    // per-key merge is the load-bearing half (ADR-177 Decision 2): a flag
+    // naming one key must not drop the step's other keys.
+    let formula_step_harness: Option<(&HarnessMap, &str, &str)> = req.formula.and_then(|f| {
+        f.steps
+            .get(req.current_step)
+            .filter(|step| !step.harness.is_empty())
+            .map(|step| (&step.harness, f.name.as_str(), step.id.as_str()))
+    });
+    let harness = resolve_harness_settings(req.harness_flag, formula_step_harness);
+
     Ok(TackleSelection {
         adapter,
         adapter_source,
@@ -240,6 +268,7 @@ pub fn resolve_selection(req: &SelectionRequest<'_>) -> Result<TackleSelection, 
         ownership_warning,
         preferred_model,
         model_source,
+        harness,
     })
 }
 
@@ -310,6 +339,14 @@ pub struct TacklePlan {
     /// The full bootstrap prompt handed to the worker. This is also the
     /// exact `--dry-run` rendering.
     pub prompt: String,
+    /// The opaque harness settings resolved for this dispatch, per key
+    /// (ADR-177 / issue #65) — carried through to the spawn seam, where they
+    /// are rendered onto the adapter's own override channel or refused.
+    ///
+    /// Empty on the overwhelming majority of dispatches, and an empty map
+    /// renders to nothing on every adapter, so a dispatch that pins no harness
+    /// setting produces a byte-identical command to the pre-#65 shape.
+    pub harness: ResolvedHarness,
 }
 
 impl TacklePlan {
@@ -352,6 +389,7 @@ impl TacklePlan {
             preferred_model: selection.preferred_model,
             model_source: selection.model_source,
             prompt,
+            harness: selection.harness,
         }
     }
 
@@ -1544,6 +1582,7 @@ mod tests {
             global_adapters: None,
             global_config_path: Path::new("/home/.config/cosmon/config.toml"),
             formula_absence: None,
+            harness_flag: &HarnessMap::new(),
         };
         let prompt_req = PromptRequest {
             molecule,
@@ -1598,6 +1637,7 @@ mod tests {
             global_adapters: None,
             global_config_path: Path::new("/home/.config/cosmon/config.toml"),
             formula_absence: None,
+            harness_flag: &HarnessMap::new(),
         };
         let err = resolve_selection(&req).expect_err("unknown adapter must refuse");
         assert!(err.to_string().contains("definitely-not-an-adapter"));
@@ -1620,6 +1660,7 @@ mod tests {
             global_adapters: None,
             global_config_path: Path::new("/home/.config/cosmon/config.toml"),
             formula_absence: None,
+            harness_flag: &HarnessMap::new(),
         };
         let selection = resolve_selection(&req).expect("the floor adapter is built-in");
         assert_eq!(selection.adapter.as_str(), BUILTIN_FLOOR_ADAPTER);

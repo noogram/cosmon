@@ -59,6 +59,7 @@ use std::path::{Path, PathBuf};
 
 use cosmon_core::config::AdaptersConfig;
 use cosmon_core::error::CosmonError;
+use cosmon_core::harness_settings::UnsupportedHarnessCarrier;
 use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
 use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
 use cosmon_core::spawn_seam::UnknownAdapter;
@@ -99,6 +100,15 @@ pub enum TackleExecError {
     /// The resolved adapter name is not in the dispatch registry.
     #[error(transparent)]
     UnknownAdapter(#[from] UnknownAdapter),
+
+    /// The executing step pinned `[steps.harness]` settings and the resolved
+    /// adapter has no channel to carry them (ADR-177 / issue #65).
+    ///
+    /// Refused rather than dropped: a spore whose harness pin looks honoured on
+    /// every adapter and is honoured on two is worse than one that refuses
+    /// loudly on the adapters it cannot serve.
+    #[error(transparent)]
+    UnsupportedHarnessCarrier(#[from] UnsupportedHarnessCarrier),
 
     /// The molecule is in a terminal state and cannot be tackled.
     #[error("molecule {id} is {status} — cannot tackle a terminal molecule")]
@@ -538,6 +548,11 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             global_adapters: global_adapters.as_ref(),
             global_config_path: &global_cfg_path,
             formula_absence: None,
+            // No `--harness` rung on this path: the in-process executor has no
+            // CLI flag. A `[steps.harness]` pin still resolves below and is
+            // refused at the spawn seam rather than dropped (ADR-177: a setting
+            // is never silently dropped).
+            harness_flag: &cosmon_core::harness_settings::HarnessMap::new(),
         })?;
 
         // Attribution events, co-minted with the dispatch exactly as the
@@ -653,6 +668,18 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         plan: &TacklePlan,
         worktree_path: &Path,
     ) -> Result<TackleReceipt, TackleExecError> {
+        // Harness settings (ADR-177 / issue #65). This executor spawns through
+        // the agent-definition seam, which carries no per-adapter override
+        // channel, so a `[steps.harness]` pin that reached here has nowhere to
+        // go. Refuse before the ledger commit, naming the adapter — never drop
+        // it. An empty map (every dispatch that pins nothing) renders to an
+        // empty slice and this is a no-op.
+        let _harness_args = cosmon_core::harness_settings::render_harness_args(
+            plan.adapter.as_str(),
+            &plan.harness,
+        )
+        .map_err(TackleExecError::UnsupportedHarnessCarrier)?;
+
         let session_name =
             cosmon_core::slugify::session_name_for(mol.display_topic(), plan.molecule_id.as_str());
         let wid = WorkerId::new(&session_name)?;

@@ -47,6 +47,7 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         pre_existing_worker: None,
         git_identity: None,
         writable_roots: vec![],
+        harness_args: vec![],
     }
 }
 

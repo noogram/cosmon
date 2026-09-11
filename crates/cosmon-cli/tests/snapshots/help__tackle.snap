@@ -99,6 +99,25 @@ Options:
           
           [default: human]
 
+      --harness <KEY=VALUE>
+          Per-dispatch **harness setting** — `key=value`, repeatable (ADR-177 / issue #65).
+          
+          `--model` pins *which model* runs; this pins *how it runs*, by handing the pair to the adapter's own override channel:
+          
+          - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
+          
+          # cosmon recognises no keys
+          
+          The pair is carried **verbatim** to the harness and logged verbatim as sent. cosmon never normalises a key, rewrites a value, or keeps an allowlist — an unknown key fails in the harness's own parser, at launch, loudly, which is where knowledge about that harness's keys lives and stays current. A key cosmon *recognised* would become public API carried in files on other people's disks, with no mechanism by which its removal could be announced.
+          
+          # Precedence, merged per key
+          
+          This flag → the executing step's `[steps.harness]` table → the harness's own config. Merged **key by key**, never wholesale: overriding one key leaves every other key the step pinned exactly where it was. Rank 3 is not a cosmon surface — cosmon passing no key is the only way the harness's own default can apply.
+          
+          # What the audit trail claims, and what it does not
+          
+          Each resolved key lands on `events.jsonl` as a `harness_setting_selected` line carrying its source, the realized argv fragment, the channel, the harness version and the launch status. That receipt is **ex-ante**: it records what cosmon *dispatched*, minted before the process exists. Paired with the harness's own echo, the strongest true sentence is *"cosmon requested E through channel C; the harness's own log reported E"* — a two-party agreement, not a proof of behaviour. Nothing here supports "the step **ran** at E".
+
   -h, --help
           Print help (see a summary with '-h')
 
