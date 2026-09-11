@@ -232,9 +232,7 @@ impl HarvestProbe for GitHarvestProbe {
                     .collect(),
                 None,
             ),
-            // RED placeholder — the retired fail-open: an unreadable status
-            // reads as a clean worktree.
-            DirtyObservation::Unknown(_) => (Vec::new(), None),
+            DirtyObservation::Unknown(e) => (Vec::new(), Some(e)),
         };
 
         let (commits_ahead, probe_error) = if branch_exists(repo_root, &branch) {

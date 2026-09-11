@@ -270,10 +270,10 @@ pub enum DerivedSelection {
 /// keep the content.
 #[must_use]
 pub fn derived_selection(obs: &DerivedObservation) -> DerivedSelection {
-    // RED placeholder — signature only; the truth table is the specification
-    // and it is not implemented yet.
-    let _ = consideration_gate(&obs.molecule, &obs.status);
-    DerivedSelection::Keep
+    match (consideration_gate(&obs.molecule, &obs.status), &obs.lock) {
+        (Consideration::Yes, LockObservation::Acquired) => DerivedSelection::ReclaimDerived,
+        _ => DerivedSelection::Keep,
+    }
 }
 
 /// The exact path set [`derived_selection`] selects.
@@ -332,8 +332,21 @@ pub enum DurableEligibility {
 /// up into the parent repository is not evidence about a scratch directory.
 #[must_use]
 pub fn durable_eligibility(obs: &DurableObservation) -> DurableEligibility {
-    // RED placeholder — the pre-contract behavior: every conjunct fails open.
-    let _ = consideration_gate(&obs.molecule, &obs.status);
+    if consideration_gate(&obs.molecule, &obs.status) == Consideration::No {
+        return DurableEligibility::Withhold;
+    }
+    if obs.registration != RegistrationObservation::Registered {
+        return DurableEligibility::Withhold;
+    }
+    if obs.ahead != AheadObservation::Zero {
+        return DurableEligibility::Withhold;
+    }
+    if obs.dirty != DirtyObservation::Clean {
+        return DurableEligibility::Withhold;
+    }
+    if obs.ignored_durable != IgnoredDurableObservation::Absent {
+        return DurableEligibility::Withhold;
+    }
     DurableEligibility::Eligible
 }
 
@@ -479,12 +492,12 @@ pub enum WorktreeRemovalDecision {
 /// is one, and its `Unknown` arm keeps the bytes.
 #[must_use]
 pub fn worktree_removal_decision(dirty: &DirtyObservation, force: bool) -> WorktreeRemovalDecision {
-    // RED placeholder — the retired fail-open: a failed probe proceeds.
     match dirty {
+        DirtyObservation::Unknown(err) => WorktreeRemovalDecision::Withhold(err.clone()),
         DirtyObservation::Dirty(paths) if !force => {
             WorktreeRemovalDecision::RefuseDirty(paths.clone())
         }
-        _ => WorktreeRemovalDecision::Remove,
+        DirtyObservation::Dirty(_) | DirtyObservation::Clean => WorktreeRemovalDecision::Remove,
     }
 }
 
