@@ -53,6 +53,9 @@ use cosmon_core::worker::{DesiredState, WorkerRole, WorkerStatus};
 use cosmon_state::StateStore;
 use cosmon_transport::TmuxBackend;
 
+use cosmon_core::worktree_reclaim::{DirtyObservation, ObservationError};
+use cosmon_harvest::worktree_reclaim::observe_dirty;
+
 use super::Context;
 
 /// Evidence that a molecule's deliverable is still only on its own branch or
@@ -79,6 +82,16 @@ pub(crate) struct UnharvestedWork {
     /// it counts as unharvested: the whole point of the guard is that
     /// "I could not check" must not read the same as "there is nothing there".
     pub probe_error: Option<String>,
+    /// Set when `git status` in the worktree could not be observed (issue 61).
+    ///
+    /// The dirty probe used to return an empty list on failure — deliberately,
+    /// with a comment saying the branch probe was the load-bearing half. It
+    /// was not: a worktree whose status cannot be read may hold the only copy
+    /// of uncommitted work, and an empty list reads exactly like a clean tree.
+    /// The sweep now withholds until an observation succeeds, which may leave
+    /// a stale worker record in place. That is the price, and it is the right
+    /// way round.
+    pub dirty_error: Option<ObservationError>,
 }
 
 impl UnharvestedWork {
@@ -103,6 +116,9 @@ impl UnharvestedWork {
                 "branch {} present but unprobeable: {err}",
                 self.branch
             ));
+        }
+        if let Some(err) = &self.dirty_error {
+            parts.push(format!("worktree unobservable: {}", err.describe()));
         }
         parts.join("; ")
     }
@@ -187,30 +203,17 @@ fn commits_ahead_of(repo_root: &Path, base: &str, branch: &str) -> Option<usize>
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-/// Paths reported by `git status --porcelain` in a molecule's worktree.
+/// Paths reported by `git status --porcelain` in a molecule's worktree, or
+/// the error that stopped the probe.
 ///
-/// An absent worktree is not dirty. A `git status` that fails is reported as
-/// clean here on purpose: the branch probe is the load-bearing half, and a
-/// failing status in a directory that may not even be a worktree would
-/// otherwise withhold every purge on the host.
-fn dirty_paths(worktree: &Path) -> Vec<String> {
-    if !worktree.is_dir() {
-        return Vec::new();
-    }
-    let Ok(out) = Command::new("git")
-        .args(["-C", &worktree.to_string_lossy(), "status", "--porcelain"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.get(3..).map(str::trim).filter(|p| !p.is_empty()))
-        .map(str::to_owned)
-        .collect()
+/// An absent worktree is not dirty — proven absence. A `git status` that
+/// *fails* is [`DirtyObservation::Unknown`], carrying its diagnostic: the
+/// deliberate fail-open this function used to implement is retired (issue 61,
+/// `docs/design/worktree-reclaim/CONTRACT.md` § Existing consumers). The
+/// observation itself is the one both `cs purge` and the harvest teardown
+/// share, so there is no second copy of the safety question to drift.
+fn dirty_observation(worktree: &Path) -> DirtyObservation {
+    observe_dirty(worktree)
 }
 
 impl HarvestProbe for GitHarvestProbe {
@@ -218,7 +221,19 @@ impl HarvestProbe for GitHarvestProbe {
         let repo_root = self.repo_root.as_ref()?;
         let branch = format!("feat/{mol_id}");
         let worktree = repo_root.join(".worktrees").join(mol_id.as_str());
-        let dirty_files = dirty_paths(&worktree);
+        let (dirty_files, dirty_error) = match dirty_observation(&worktree) {
+            DirtyObservation::Clean => (Vec::new(), None),
+            // The porcelain line is `XY <path>`; the alert names the path.
+            DirtyObservation::Dirty(lines) => (
+                lines
+                    .iter()
+                    .filter_map(|l| l.get(3..).map(str::trim).filter(|p| !p.is_empty()))
+                    .map(str::to_owned)
+                    .collect(),
+                None,
+            ),
+            DirtyObservation::Unknown(e) => (Vec::new(), Some(e)),
+        };
 
         let (commits_ahead, probe_error) = if branch_exists(repo_root, &branch) {
             let base =
@@ -234,7 +249,11 @@ impl HarvestProbe for GitHarvestProbe {
             (0, None)
         };
 
-        if commits_ahead == 0 && dirty_files.is_empty() && probe_error.is_none() {
+        if commits_ahead == 0
+            && dirty_files.is_empty()
+            && probe_error.is_none()
+            && dirty_error.is_none()
+        {
             return None;
         }
         Some(UnharvestedWork {
@@ -242,6 +261,7 @@ impl HarvestProbe for GitHarvestProbe {
             commits_ahead,
             dirty_files,
             probe_error,
+            dirty_error,
         })
     }
 }
@@ -704,6 +724,7 @@ fn run_sweep<B: TransportBackend>(
                 "branch": w.work.branch,
                 "commits_ahead": w.work.commits_ahead,
                 "dirty_files": w.work.dirty_files,
+                "dirty_error": w.work.dirty_error.as_ref().map(ObservationError::describe),
                 "probe_error": w.work.probe_error,
             })).collect::<Vec<_>>(),
         });
@@ -1059,6 +1080,7 @@ mod tests {
             branch: "feat/task-20260802-16bf".to_owned(),
             commits_ahead: n,
             dirty_files: Vec::new(),
+            dirty_error: None,
             probe_error: None,
         })
     }
@@ -1861,6 +1883,7 @@ mod tests {
             branch: "feat/task-20260802-7582".to_owned(),
             commits_ahead: 0,
             dirty_files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+            dirty_error: None,
             probe_error: None,
         });
         let ctx = ctx_for(&tmp, false);
@@ -2067,6 +2090,7 @@ mod tests {
             branch: "feat/task-20260802-dark".to_owned(),
             commits_ahead: 0,
             dirty_files: Vec::new(),
+            dirty_error: None,
             probe_error: Some("git rev-list failed".to_owned()),
         });
         let ctx = ctx_for(&tmp, false);
@@ -2199,6 +2223,7 @@ mod tests {
                         vec![]
                     },
                     probe_error: None,
+                    dirty_error: None,
                 })
             }
         }
@@ -2303,6 +2328,106 @@ mod tests {
             None
         );
         assert!(scratch.join("operator-note.txt").is_file());
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue 61 — consumer regression: the sweep's dirty probe
+    // ---------------------------------------------------------------------
+
+    /// A `git status` that cannot run makes the sweep **withhold**, naming
+    /// the failed operation — it no longer reads as a clean worktree.
+    ///
+    /// The fixture is the honest one: a candidate directory that is not
+    /// inside any repository, which is exactly the shape (`not a git
+    /// repository`) the retired fail-open swallowed.
+    #[test]
+    fn issue61_failed_dirty_probe_withholds_the_sweep() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let mol_id = MoleculeId::new("task-20260911-0005")?;
+        let worktree = tmp.path().join(".worktrees").join(mol_id.as_str());
+        std::fs::create_dir_all(&worktree)?;
+        let probe = GitHarvestProbe {
+            // Not a repository: the ahead probe finds no branch and the
+            // status probe fails. Only the second is at issue here.
+            repo_root: Some(tmp.path().to_path_buf()),
+            configured_trunk: Some("main".into()),
+        };
+        let work = probe
+            .unharvested(&mol_id, Some("main"))
+            .expect("a failed dirty probe must count as unharvested");
+        assert!(work.dirty_files.is_empty(), "no dirty path was observed");
+        let err = work.dirty_error.as_ref().expect("the error is preserved");
+        assert_eq!(err.operation, "git status --porcelain");
+        assert_eq!(err.path, worktree);
+        let described = work.describe();
+        assert!(described.contains("worktree unobservable"), "{described}");
+        assert!(described.contains("git status --porcelain"), "{described}");
+
+        // And the sweep withholds the worker rather than collapsing it.
+        let store = FileStore::new(tmp.path());
+        let mol = sample_mol(mol_id.as_str(), MoleculeStatus::Running);
+        store.save_molecule(&mol.id, &mol)?;
+        let mut fleet = Fleet::new();
+        let w = worker_with_mol(mol_id.as_str(), mol_id.as_str());
+        let wid = w.id.clone();
+        fleet.workers.insert(w.id.clone(), w);
+        let (keep, withheld) = withhold_unharvested(&fleet, &store, &probe, vec![wid.clone()]);
+        assert!(keep.is_empty());
+        assert_eq!(withheld.len(), 1);
+        assert_eq!(withheld[0].worker, wid);
+        assert!(worktree.is_dir(), "withholding removes nothing");
+        Ok(())
+    }
+
+    /// The same probe still reports a *successful* clean observation as
+    /// harvested: withholding on failure must not withhold on everything.
+    #[test]
+    fn issue61_successful_clean_probe_still_permits_the_sweep() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "Noogram"],
+            vec!["config", "user.email", "maintainers@noogram.org"],
+        ] {
+            assert!(Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()?
+                .status
+                .success());
+        }
+        std::fs::write(repo.join("seed.md"), "seed")?;
+        assert!(Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "seed.md"])
+            .output()?
+            .status
+            .success());
+        assert!(Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", "test: seed"])
+            .output()?
+            .status
+            .success());
+        let probe = GitHarvestProbe {
+            repo_root: Some(repo.clone()),
+            configured_trunk: Some("main".into()),
+        };
+        // No worktree directory at all: proven absence, not a failed probe.
+        let mol_id = MoleculeId::new("task-20260911-0006")?;
+        assert_eq!(probe.unharvested(&mol_id, Some("main")), None);
         Ok(())
     }
 }
