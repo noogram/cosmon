@@ -451,6 +451,35 @@ pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run se
              The claude adapter carries the pin through the ANTHROPIC_MODEL \
              per-session closure-shadow at spawn (no shared-state mutation); \
              the Direct-API adapters take it above their config default_model.\n\n\
+             HARNESS SETTINGS (per-step, how the model runs — ADR-177). \
+             The model axis pins WHICH model runs; this pins HOW it runs, by \
+             handing an opaque 'key=value' pair to the adapter's own override \
+             channel. Cosmon recognises ZERO keys: the pair is carried \
+             verbatim and logged verbatim as sent, never normalised, and an \
+             unknown key fails in the harness's own parser at launch rather \
+             than against a cosmon allowlist nobody can version.\n  \
+             'cs tackle --harness <KEY>=<VALUE>'  → repeatable; CLI flag \
+             wins.\n  \
+             formula step '[steps.harness]'       → the per-workflow pin a \
+             spore carries.\n  \
+             the harness's own config            → reached by cosmon \
+             emitting NO key; it is silence, not a cosmon surface.\n\n\
+             Merged PER KEY, never wholesale: overriding one key leaves every \
+             sibling the step pinned exactly where it was. Carriers: codex \
+             takes one '-c key=value' per entry, claude takes '--<key> \
+             <value>'; any other adapter REFUSES a non-empty map at launch, \
+             naming itself — a setting is never silently dropped. The \
+             '[adapters.<name>.harness]' config level is deferred (it would \
+             sit beside the wholesale-replace 'extra_args' on the same node).\n\n\
+             Each resolved key mints one 'harness_setting_selected' line \
+             carrying { key, value, selection_source (flag|formula), \
+             argv_fragment, channel, harness_version?, launch_status }. That \
+             receipt is EX-ANTE: read it as DISPATCHED at, never \"ran at\". \
+             Paired with the harness's own echo ('effort_observed', parsed \
+             from the harness log and never inferred from the pin), the \
+             strongest true sentence is \"cosmon requested E through channel \
+             C; the harness's own log reported E\" — a two-party agreement, \
+             not a proof of behaviour.\n\n\
              MODEL BUDGET (fail-closed strong-dispatch ceiling, ADR-097). \
              Declare which ids are STRONG (expensive) per adapter and \
              cap strong dispatches per window — both opt-in:\n  \

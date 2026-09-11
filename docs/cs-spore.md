@@ -241,6 +241,15 @@ wiring always resolves on disk.
 `cs spore validate` reports the seal label read-only and never refuses;
 the gate is a `run`-time concern.
 
+A formula step's `[steps.harness]` table (ADR-177 / issue #65) is carried
+**opaquely** and **does not affect the seal**, exactly as a step's `model`
+pin already does not: both name how a worker is dispatched, not what the
+polymer's lifecycle does, and the TLA+ module reads the lifecycle. A
+recipient's spore therefore germinates and verifies identically whether or
+not its steps pin harness settings — and the settings are still carried to
+the recipient's adapter, which is the point of pinning them in a spore
+rather than in the sender's machine-wide harness config.
+
 The bundle hash from `cs spore export` is content-addressed: a stable
 `blake3:` id over the manifest and every recipe and seal file it
 references, in sorted order. The same bundle content always yields the

@@ -348,6 +348,29 @@ pub struct CodexSessionConfig {
     /// Empty (the absence-default) emits no `--add-dir` and leaves the command
     /// byte-identical to the pre-fix shape.
     pub writable_roots: Vec<PathBuf>,
+
+    /// Pre-rendered **harness-setting** argv tokens (ADR-177 / issue #65):
+    /// one `-c`, one `key=value`, per resolved key, in the order the resolver
+    /// produced them.
+    ///
+    /// Carried **verbatim**. This transport neither parses nor validates a
+    /// token: `-c` accepts any dotted key and TOML-parses the value, so there
+    /// is no unknown-key set to reject against, and an allowlist here would be
+    /// enumerating a set codex does not have. A key codex cannot use fails in
+    /// codex's own parser, at launch, loudly.
+    ///
+    /// **Structural, like [`Self::writable_roots`].** These tokens are emitted
+    /// in *both* launch modes and are **not** part of the
+    /// [`DEFAULT_INTERACTIVE_ARGS`] set an `[adapters.codex].extra_args` row
+    /// replaces: an operator overriding the interactive flags must not thereby
+    /// lose the effort their formula step pinned. The two surfaces have
+    /// opposite merge semantics on purpose — `extra_args` replaces wholesale,
+    /// harness settings merge per key — and keeping them disjoint is what stops
+    /// them being one mechanism wearing two names (ADR-177 Decision 3).
+    ///
+    /// Empty (the absence-default) appends nothing and leaves the command
+    /// byte-identical to the pre-#65 shape.
+    pub harness_args: Vec<String>,
 }
 
 /// An operator git identity — the `(name, email)` pinned into the author and
@@ -387,6 +410,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             cmd.push_str(" exec");
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
+            push_harness_args(&mut cmd, &config.harness_args);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -405,6 +429,7 @@ pub fn build_codex_command(config: &CodexSessionConfig) -> String {
             let mut cmd = format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} {bin}");
             push_no_update_override(&mut cmd);
             push_writable_roots(&mut cmd, &config.writable_roots);
+            push_harness_args(&mut cmd, &config.harness_args);
             if let Some(ref model) = config.model {
                 cmd.push_str(" --model ");
                 cmd.push_str(&shell_escape(model));
@@ -450,6 +475,21 @@ fn push_writable_roots(cmd: &mut String, roots: &[PathBuf]) {
     for root in roots {
         cmd.push_str(" --add-dir ");
         cmd.push_str(&shell_escape(&root.to_string_lossy()));
+    }
+}
+
+/// Append the pre-rendered harness-setting tokens (`-c key=value` pairs) to an
+/// in-flight command string (ADR-177 / issue #65). Each token is
+/// [`shell_escape`]d, so a value carrying a space or a quote is carried to
+/// codex intact rather than becoming a second argument.
+///
+/// Emitted in both launch modes and outside the `extra_args` replacement set —
+/// see [`CodexSessionConfig::harness_args`] for why that is structural. An
+/// empty slice appends nothing.
+fn push_harness_args(cmd: &mut String, args: &[String]) {
+    for token in args {
+        cmd.push(' ');
+        cmd.push_str(&shell_escape(token));
     }
 }
 
@@ -989,6 +1029,7 @@ mod tests {
             pre_existing_worker: None,
             git_identity: None,
             writable_roots: vec![],
+            harness_args: vec![],
         }
     }
 

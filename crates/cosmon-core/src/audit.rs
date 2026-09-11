@@ -147,6 +147,15 @@ impl Action {
             // concrete model an adapter actually ran. It observes the run
             // without driving a spec transition.
             | EventV2::ModelObserved { .. }
+            // The harness-settings pair (ADR-177 / issue #65): the ex-ante
+            // receipt of what cosmon dispatched through an adapter's own
+            // override channel, and the ex-post echo the harness's log
+            // reported. Neither drives a spec transition — the carriage of a
+            // harness setting is opaque to the state machine, exactly as model
+            // pins are, which is why `[steps.harness]` does not affect the TLA+
+            // seal.
+            | EventV2::HarnessSettingSelected { .. }
+            | EventV2::EffortObserved { .. }
             // Its negative sibling (task-20260727-3f46): a forensic receipt
             // that the observation seam itself is broken (session-log root
             // absent). It records the *inability* to observe; like the
