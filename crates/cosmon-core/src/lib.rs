@@ -286,6 +286,8 @@ pub mod transport;
 pub mod visual;
 #[doc(hidden)]
 pub mod vitality;
+#[doc(hidden)]
+pub mod worktree_reclaim;
 
 // ---------------------------------------------------------------------------
 // Crate-private modules — zero external consumers. (Partition 3)

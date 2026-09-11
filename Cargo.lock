@@ -1181,6 +1181,7 @@ dependencies = [
  "cosmon-state",
  "cosmon-transport",
  "dirs",
+ "fs2",
  "globset",
  "ignore",
  "nix 0.31.2",
