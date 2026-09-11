@@ -555,3 +555,103 @@ fn unconfirmed_termination_retains_the_record_and_the_worktree() {
         "the worktree of a possibly-live worker must not be removed"
     );
 }
+
+/// A precondition refusal costs the molecule NOTHING: no worktree, no
+/// branch, no ledger record, no spawn, and no attribution event.
+///
+/// The ordering is the whole point of the port (issue #48, restored on
+/// this seam by task-20260911-be1e). A refusal placed after the worktree
+/// would still answer the right label while leaving a branch and a
+/// directory behind for a dispatch that never happened; a refusal placed
+/// after the ledger would leave a record of a worker that was never
+/// spawned. So the test asserts the absences, not merely the error.
+#[test]
+fn a_refused_precondition_leaves_nothing_behind() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260911-be1e");
+    let backend = MockBackend::new();
+
+    /// A preflight that refuses everything, naming the adapter it saw so
+    /// the test can prove the check ran AFTER selection resolved.
+    #[derive(Debug)]
+    struct AlwaysRefuses;
+    impl cosmon_runtime::SpawnPreflight for AlwaysRefuses {
+        fn check(
+            &self,
+            ctx: &cosmon_runtime::PreflightContext<'_>,
+        ) -> Result<(), cosmon_runtime::PreflightRefusal> {
+            Err(cosmon_runtime::PreflightRefusal::WorkerCredentialMissing {
+                adapter: ctx.adapter.to_owned(),
+                detail: "no credential in this fixture".to_owned(),
+                remedy: "provision one".to_owned(),
+            })
+        }
+    }
+
+    let executor = LibraryExecutor::new(&project, backend.clone())
+        .with_preflight(std::sync::Arc::new(AlwaysRefuses));
+
+    let err = executor
+        .dispatch(&mol.id)
+        .expect_err("a refused precondition must fail the dispatch");
+    assert!(
+        err.to_string().contains("no credential in this fixture"),
+        "the refusal's cause must reach the caller: {err}"
+    );
+
+    assert!(
+        backend.calls().is_empty(),
+        "nothing may be spawned once the precondition is refused: {:?}",
+        backend.calls()
+    );
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert!(
+        observed.process.is_none(),
+        "no dispatch record may survive a refusal — an effectless record is \
+         a worker the fleet will look for and never find"
+    );
+    assert!(
+        !project.join(".worktrees").join(mol.id.as_str()).exists(),
+        "no worktree may survive a refusal"
+    );
+}
+
+/// Inside a drain, a precondition refusal STOPS the loop with the cause
+/// named rather than being retried every tick.
+///
+/// Same treatment as an unsupported step kind, for a different reason
+/// that lands in the same place: a missing credential is repairable, but
+/// not by this drain and not within its budget. Retrying it until
+/// `max_runtime` is how a stated cause becomes an unexplained `timeout` —
+/// the defect PR #57 finding 1 fixed for the step-kind refusal.
+#[test]
+fn a_drain_stops_on_a_precondition_refusal_rather_than_retrying_it() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260911-be1f");
+
+    #[derive(Debug)]
+    struct AlwaysRefuses;
+    impl cosmon_runtime::SpawnPreflight for AlwaysRefuses {
+        fn check(
+            &self,
+            _ctx: &cosmon_runtime::PreflightContext<'_>,
+        ) -> Result<(), cosmon_runtime::PreflightRefusal> {
+            Err(cosmon_runtime::PreflightRefusal::AdapterBackendUnreachable {
+                adapter: "local".to_owned(),
+                detail: "connection refused".to_owned(),
+            })
+        }
+    }
+
+    let executor = LibraryExecutor::new(&project, MockBackend::new())
+        .with_preflight(std::sync::Arc::new(AlwaysRefuses));
+    let err = cosmon_runtime::Executor::dispatch(&executor, &mol.id)
+        .expect_err("a refused precondition must fail the dispatch");
+
+    assert!(
+        matches!(err, cosmon_runtime::RuntimeError::DispatchRefused { .. }),
+        "a precondition refusal must be the non-retryable class, or the \
+         drain spins until max_runtime and reports a timeout it knew the \
+         cause of at the first tick: {err:?}"
+    );
+}

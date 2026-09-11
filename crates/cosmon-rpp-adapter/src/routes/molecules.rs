@@ -1907,6 +1907,22 @@ pub async fn run_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
+    // The SAME preconditions the tackle route installs (issue #48). The
+    // drain dispatches workers through the same seam, so without this it
+    // reproduces the regression one layer down — spawning a worker per
+    // ready node, each of them unable to work and each reading as
+    // healthy. A refusal stops the drain on the tick that observes it,
+    // with the cause named — the operator repairs and re-runs, rather
+    // than watching the loop spin to `max_runtime` and report a `timeout`
+    // it knew the real cause of at the first tick.
+    let preflight = std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
+        envelope.clone(),
+        &tenant_root,
+        state
+            .auth_claude
+            .as_ref()
+            .map(|ac| ac.config.credentials_path.clone()),
+    ));
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // Default actor class: `runtime:<pid>` — the drain's dispatches are
     // runtime claims (never sticky), exactly as `cs run`'s were.
@@ -1914,7 +1930,8 @@ pub async fn run_molecule(
     // the deterministic tenant store, and every dispatch it makes must read
     // that store too.
     let executor = LibraryExecutor::new(&tenant_root, backend)
-        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root));
+        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
+        .with_preflight(preflight);
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,

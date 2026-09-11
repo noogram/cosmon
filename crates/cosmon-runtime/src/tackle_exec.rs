@@ -1069,12 +1069,20 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 // until `max_runtime` and report the known-at-first-tick refusal
                 // as a timeout. The non-retryable class stops the loop with a
                 // typed reason instead ([`RuntimeError::DispatchRefused`]).
-                refusal @ TackleExecError::UnsupportedStep { .. } => {
-                    RuntimeError::DispatchRefused {
-                        id: id.clone(),
-                        reason: refusal.to_string(),
-                    }
-                }
+                //
+                // A PRECONDITION refusal joins it, for a different reason
+                // that lands in the same place. A missing credential or a
+                // dead backend is not permanent in the way a formula is —
+                // an operator can repair it — but it will not repair
+                // itself inside this drain's budget, and retrying it every
+                // poll interval is precisely how a stated cause becomes an
+                // unexplained `timeout`. Stopping with the cause named
+                // lets the operator fix it and re-run; spinning does not.
+                refusal @ (TackleExecError::UnsupportedStep { .. }
+                | TackleExecError::Preflight { .. }) => RuntimeError::DispatchRefused {
+                    id: id.clone(),
+                    reason: refusal.to_string(),
+                },
                 other => RuntimeError::Dispatch {
                     id: id.clone(),
                     reason: other.to_string(),
