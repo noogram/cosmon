@@ -77,7 +77,7 @@ advance → terminate → infrastructure → introspection.
 | `cs inbox` | NO (V1 TBD) | — | Subset of `cs ensemble --tag temp:hot`; re-evaluate V1 if tenant_auditor asks. |
 | `cs init` | NO | — | Bootstrap of a new galaxy; operator-only, hardware/filesystem-bound. |
 | `cs trust` | NO | — | Per-repo, human trust grant for repo-supplied shell (B5, RCE-by-clone). The `direnv allow` of cosmon; a local operator gesture recorded outside the repo. Never on the wire — a remote tenant granting trust would defeat the gate. |
-| `cs tackle` | V1 (TBD) | `POST /v1/molecules/:id/transitions` (`transition=tackle`) | Operator → propelled. V1 mutation. |
+| `cs tackle` | V1 (TBD) | `POST /v1/molecules/:id/transitions` (`transition=tackle`) | Operator → propelled. V1 mutation. `--reclaim-derived` (the pre-spawn disk-pressure check, issue 61) is cs-only and allowlisted in `crates/cosmon-thin-cli/tests/cli-flag-allowlist.toml`: it reclaims bytes in a local `.worktrees/` tree a remote tenant does not have. |
 | `cs evolve` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs complete` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs collapse` | V2 (TBD) | `POST /v1/molecules/:id/transitions` (`transition=collapse`) | Re-evaluate at V2; currently no tenant_auditor use case. |
@@ -95,7 +95,7 @@ advance → terminate → infrastructure → introspection.
 | `cs release` | NO | — | Releases a pilot claim, returning the molecule to the runtime frontier. Mirror of `cs claim`; operator/pilot-driven. |
 | `cs resurrect` | NO | — | Recover a dead worker; operator-driven. |
 | `cs teardown` | NO | — | Infrastructure teardown; operator-only. |
-| `cs purge` | **NO (NEVER)** | — | Destroys cosmon state. Catastrophic, irreversible. Operator-only by definition. ADR-080 §5.1. |
+| `cs purge` | **NO (NEVER)** | — | Destroys cosmon state. Catastrophic, irreversible. Operator-only by definition. ADR-080 §5.1. Its `--worktrees` reclamation pass and `--dry-run` (issue 61) add no route and change nothing here: the pass acquires a local `flock` and deletes local build output, which a remote tenant has neither of. It removes no worktree under any flag ([ADR-178](../adr/178-no-automatic-path-removes-a-worktree.md)). |
 | `cs prime` | NO | — | Pre-flight checks; local-shell convenience. |
 | `cs migrate` | NO | — | Schema/state migration; operator-only. |
 | `cs harvest` | NO | — | Scheduler-only (cron-driven); not a remote act. |

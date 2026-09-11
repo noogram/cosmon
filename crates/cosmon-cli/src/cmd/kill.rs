@@ -42,6 +42,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             // had a way to say "discard unharvested work", and inventing one
             // here would let `cs kill` bypass the guard `cs purge` enforces.
             allow_unharvested: false,
+            // The alias is worker teardown and nothing else; `.worktrees/`
+            // reclamation is a `cs purge` surface it never had.
+            worktrees: false,
+            dry_run: false,
         },
     )
 }

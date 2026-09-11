@@ -161,4 +161,5 @@
 | 174-per-worker-storage-is-deferred-until-a-named-use-case | [174-per-worker-storage-is-deferred-until-a-named-use-case.md](174-per-worker-storage-is-deferred-until-a-named-use-case.md) |
 | 175-the-operator-carnet-is-cs-journal | [175-the-operator-carnet-is-cs-journal.md](175-the-operator-carnet-is-cs-journal.md) |
 | 176-remote-harvest-authority-is-a-sealed-capability | [176-remote-harvest-authority-is-a-sealed-capability.md](176-remote-harvest-authority-is-a-sealed-capability.md) |
+| 178-no-automatic-path-removes-a-worktree | [178-no-automatic-path-removes-a-worktree.md](178-no-automatic-path-removes-a-worktree.md) |
 

@@ -65,7 +65,12 @@ use cosmon_core::config::{
 };
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::transport::TransportBackend;
+use cosmon_core::worktree_reclaim::{
+    worktree_removal_decision, DirtyObservation, ObservationError, WorktreeRemovalDecision,
+};
 use cosmon_filestore::FileStore;
+
+use crate::worktree_reclaim::observe_dirty;
 use cosmon_state::{MoleculeData, StateStore};
 use cosmon_transport::TmuxBackend;
 
@@ -486,7 +491,21 @@ pub struct TeardownPlan {
     /// Whether the worktree directory exists on disk.
     pub worktree_exists: bool,
     /// Dirty files in the worktree (empty if clean or absent).
+    ///
+    /// Empty is only meaningful together with
+    /// [`worktree_dirty_error`](Self::worktree_dirty_error): until issue 61's
+    /// P3 this field was filled with `unwrap_or_default()`, so a worktree
+    /// whose `git status` could not be run rendered identically to a clean
+    /// one. The preview authorises no mutation — the removal arm re-observes
+    /// — but it was telling the operator something it did not know.
     pub worktree_dirty_files: Vec<String>,
+    /// Set when the worktree's status could not be observed at all.
+    ///
+    /// `Some(_)` means [`worktree_dirty_files`](Self::worktree_dirty_files)
+    /// is empty because nothing could be read, **not** because the tree is
+    /// clean. The preview reports `unknown` rather than `clean`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dirty_error: Option<String>,
     /// Whether the worker's branch exists locally.
     pub branch_exists: bool,
     /// Whether the branch is already merged into the current HEAD.
@@ -545,11 +564,14 @@ fn compute_teardown_plan(
 
     // Worktree state.
     let worktree_exists = worktree_path.exists();
-    let worktree_dirty_files = if worktree_exists {
-        worktree_is_dirty(&worktree_path).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let (worktree_dirty_files, worktree_dirty_error) =
+        preview_dirty(worktree_exists, &worktree_path);
+    if let Some(err) = &worktree_dirty_error {
+        warnings.push(format!(
+            "worktree status could not be observed ({err}) — teardown will \
+             preserve it for retry, not remove it"
+        ));
+    }
     if !worktree_dirty_files.is_empty() && !args.force {
         warnings.push(format!(
             "worktree has {} uncommitted file(s) — will refuse without --force",
@@ -633,6 +655,7 @@ fn compute_teardown_plan(
         is_terminal,
         worktree_exists,
         worktree_dirty_files,
+        worktree_dirty_error,
         branch_exists: branch_present,
         branch_already_merged: branch_merged,
         branch_is_empty,
@@ -3250,8 +3273,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         prune_worktrees(&repo_root);
     }
     if !args.no_worktree_remove && worktree_path.exists() {
-        match worktree_is_dirty(&worktree_path) {
-            Ok(dirty_files) if !dirty_files.is_empty() && !args.force => {
+        match worktree_removal_decision(&observe_dirty(&worktree_path), args.force) {
+            WorktreeRemovalDecision::RefuseDirty(dirty_files) => {
                 let listing = dirty_files.join("\n  ");
                 report(ctx, &mol_id, &actions, &warnings, mol.nudge_count);
                 return Err(anyhow::anyhow!(
@@ -3260,7 +3283,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     listing,
                 ));
             }
-            Ok(_) => {
+            WorktreeRemovalDecision::Remove => {
                 // Rescue untracked files before worktree removal destroys them.
                 let molecule_dir = store.molecule_dir(&mol_id);
                 match rescue_untracked_files(&worktree_path, &molecule_dir) {
@@ -3278,12 +3301,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     Err(e) => warnings.push(format!("worktree remove failed: {e}")),
                 }
             }
-            Err(e) => {
-                warnings.push(format!("dirty check failed: {e} — proceeding with removal"));
-                match remove_worktree(&repo_root, &worktree_path) {
-                    Ok(()) => actions.push("removed_worktree".to_owned()),
-                    Err(e2) => warnings.push(format!("worktree remove failed: {e2}")),
-                }
+            // Issue 61: a failed observation is not evidence of a clean tree.
+            // This arm used to warn and remove the worktree anyway; it now
+            // preserves it and reports the failed operation, at the price of
+            // leaving a worktree behind until an observation succeeds.
+            WorktreeRemovalDecision::Withhold(e) => {
+                warnings.push(withheld_worktree_warning(&e));
             }
         }
     }
@@ -3567,6 +3590,48 @@ fn format_conflict_recovery(mol_id: &MoleculeId, worktree_path: &Path, files: &[
 // Output
 // ---------------------------------------------------------------------------
 
+/// The preview's three-valued read of a worktree's status (issue 61, P3).
+///
+/// Named and separate from [`compute_teardown_plan`] because it is the fix
+/// for the third fail-open: the preview used to call
+/// `worktree_is_dirty(...).unwrap_or_default()`, so a tree whose `git status`
+/// could not be run printed as **clean**. It authorised no mutation — the
+/// removal arm re-observes and withholds — but it told the operator something
+/// it did not know, and the plan is what the operator decides from.
+///
+/// Returns `(dirty files, failure)`. Exactly one of the two is ever non-empty.
+fn preview_dirty(worktree_exists: bool, worktree_path: &Path) -> (Vec<String>, Option<String>) {
+    if !worktree_exists {
+        return (Vec::new(), None);
+    }
+    match observe_dirty(worktree_path) {
+        DirtyObservation::Clean => (Vec::new(), None),
+        DirtyObservation::Dirty(paths) => (paths, None),
+        DirtyObservation::Unknown(e) => (Vec::new(), Some(e.describe())),
+    }
+}
+
+/// The preview's worktree-status lines, as an operator reads them.
+///
+/// A function rather than inline `println!`s so the regression test asserts
+/// the *sentence* — "unknown", never "clean" — instead of a field's value.
+fn plan_worktree_status_lines(plan: &TeardownPlan) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(err) = &plan.worktree_dirty_error {
+        lines.push(format!("  worktree dirty:   unknown — {err}"));
+    }
+    if !plan.worktree_dirty_files.is_empty() {
+        lines.push(format!(
+            "  worktree dirty:   {} file(s)",
+            plan.worktree_dirty_files.len()
+        ));
+        for f in &plan.worktree_dirty_files {
+            lines.push(format!("    {f}"));
+        }
+    }
+    lines
+}
+
 /// Display a computed [`TeardownPlan`] in JSON or human-readable form.
 fn report_plan(ctx: &Context, plan: &TeardownPlan) {
     if ctx.json {
@@ -3578,14 +3643,8 @@ fn report_plan(ctx: &Context, plan: &TeardownPlan) {
             plan.molecule_status, plan.is_terminal
         );
         println!("  worktree exists:  {}", plan.worktree_exists);
-        if !plan.worktree_dirty_files.is_empty() {
-            println!(
-                "  worktree dirty:   {} file(s)",
-                plan.worktree_dirty_files.len()
-            );
-            for f in &plan.worktree_dirty_files {
-                println!("    {f}");
-            }
+        for line in plan_worktree_status_lines(plan) {
+            println!("{line}");
         }
         println!("  branch exists:    {}", plan.branch_exists);
         println!("  already merged:   {}", plan.branch_already_merged);
@@ -4798,26 +4857,26 @@ fn delete_branch(repo_root: &Path, branch: &str) -> anyhow::Result<()> {
 /// files — untracked files (e.g. `synthesis.md`) are destroyed silently.
 /// This porcelain check catches both categories.
 fn worktree_is_dirty(worktree_path: &Path) -> Result<Vec<String>, anyhow::Error> {
-    let out = Command::new("git")
-        .args([
-            "-C",
-            &worktree_path.to_string_lossy(),
-            "status",
-            "--porcelain",
-        ])
-        .output()?;
-    if !out.status.success() {
-        return Err(anyhow::anyhow!(
-            "git status failed in worktree: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    match observe_dirty(worktree_path) {
+        DirtyObservation::Clean => Ok(Vec::new()),
+        DirtyObservation::Dirty(paths) => Ok(paths),
+        DirtyObservation::Unknown(e) => Err(anyhow::anyhow!("{}", e.describe())),
     }
-    let dirty: Vec<String> = String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter(|l| !l.is_empty())
-        .map(ToOwned::to_owned)
-        .collect();
-    Ok(dirty)
+}
+
+/// The operator-facing line for a worktree the teardown refused to remove
+/// because it could not observe it.
+///
+/// Named rather than inlined so the regression test asserts the *diagnostic*
+/// an operator will read, not just the decision: before issue 61 this arm
+/// said "dirty check failed — proceeding with removal" and then removed the
+/// worktree, which is the fail-open the contract retires.
+fn withheld_worktree_warning(err: &ObservationError) -> String {
+    format!(
+        "withheld worktree removal: {} — the worktree is preserved for retry; \
+         --force overrides a known-dirty tree, never a failed observation",
+        err.describe()
+    )
 }
 
 /// Rescue untracked files from a worktree before it is destroyed.
@@ -13185,6 +13244,170 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
         assert!(
             !unmerged_work_remains(repo, "feat/1b35", "main"),
             "once the work is on base, the guard must not fire (kept branch is empty rel. base)"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue 61 — consumer regression: the teardown's dirty probe
+    // ---------------------------------------------------------------------
+
+    /// A failing `git status` yields `Unknown`, withholds the removal, and
+    /// surfaces the diagnostic — with or without `--force`.
+    ///
+    /// Before this, the same input produced "dirty check failed: … —
+    /// proceeding with removal" and the worktree was deleted on the strength
+    /// of an observation that never succeeded.
+    #[test]
+    fn issue61_failed_dirty_probe_withholds_worktree_removal() {
+        let tmp = TempDir::new().unwrap();
+        let not_a_repo = tmp.path().join("not-a-repo");
+        std::fs::create_dir(&not_a_repo).unwrap();
+        let observed = observe_dirty(&not_a_repo);
+        let DirtyObservation::Unknown(ref err) = observed else {
+            panic!("expected Unknown, got {observed:?}");
+        };
+        for force in [false, true] {
+            assert_eq!(
+                worktree_removal_decision(&observed, force),
+                WorktreeRemovalDecision::Withhold(err.clone()),
+                "force={force} must not reinterpret a failed observation",
+            );
+        }
+        let warning = withheld_worktree_warning(err);
+        assert!(warning.contains("git status --porcelain"), "{warning}");
+        assert!(
+            warning.contains(&not_a_repo.display().to_string()),
+            "{warning}"
+        );
+        assert!(warning.contains("preserved for retry"), "{warning}");
+        // The directory is still there: withholding removes nothing.
+        assert!(not_a_repo.is_dir());
+    }
+
+    /// Falsifier 6 (issue 61 P3) — the plan preview reports `Unknown`
+    /// instead of "clean" when `git status` fails.
+    ///
+    /// The third fail-open. It authorised no mutation, which is why it
+    /// outlived the other two: the removal arm re-observes and withholds. It
+    /// still lied to the operator, and `--dry-run` exists to be believed.
+    #[test]
+    fn issue61_plan_preview_reports_unknown_not_clean() {
+        let tmp = TempDir::new().unwrap();
+        let not_a_repo = tmp.path().join("not-a-repo");
+        std::fs::create_dir(&not_a_repo).unwrap();
+
+        let (files, error) = preview_dirty(true, &not_a_repo);
+        assert!(
+            files.is_empty(),
+            "a failed probe reports no files — that is the whole trap"
+        );
+        let error = error.expect("a failed probe must be visible in the plan");
+        assert!(error.contains("git status --porcelain"), "{error}");
+        assert!(error.contains(&not_a_repo.display().to_string()), "{error}");
+
+        // And the rendered plan says so, rather than rendering as a clean tree.
+        let plan = TeardownPlan {
+            molecule: "task-20260911-2224".to_owned(),
+            molecule_status: "Completed".to_owned(),
+            is_terminal: true,
+            worktree_exists: true,
+            worktree_dirty_files: files,
+            worktree_dirty_error: Some(error),
+            branch_exists: false,
+            branch_already_merged: false,
+            branch_is_empty: false,
+            merge_needed: false,
+            session_alive: false,
+            worker_registered: false,
+            planned_actions: Vec::new(),
+            warnings: Vec::new(),
+        };
+        let rendered = plan_worktree_status_lines(&plan).join("\n");
+        assert!(rendered.contains("worktree dirty:   unknown"), "{rendered}");
+        assert!(rendered.contains("not a git repository"), "{rendered}");
+
+        // The two decidable cases still render as before.
+        let clean = TeardownPlan {
+            worktree_dirty_error: None,
+            ..plan
+        };
+        assert!(
+            plan_worktree_status_lines(&clean).is_empty(),
+            "a clean tree adds no status line, as it never did"
+        );
+    }
+
+    /// The same preview still answers when the probe succeeds — withholding
+    /// judgement on failure must not degenerate into withholding it always.
+    #[test]
+    fn issue61_plan_preview_still_reports_a_readable_tree() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "Noogram"],
+            vec!["config", "user.email", "maintainers@noogram.org"],
+        ] {
+            assert!(Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        assert_eq!(preview_dirty(true, &repo), (Vec::new(), None));
+        std::fs::write(repo.join("new.txt"), "x").unwrap();
+        let (files, error) = preview_dirty(true, &repo);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(files.len(), 1, "{files:?}");
+        // A worktree that is not there is proven absence, not a failed probe.
+        assert_eq!(preview_dirty(false, &repo), (Vec::new(), None));
+    }
+
+    /// The same probe still answers the two decidable cases, so withholding
+    /// on failure does not withhold on everything.
+    #[test]
+    fn issue61_successful_dirty_probe_still_decides() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "Noogram"],
+            vec!["config", "user.email", "maintainers@noogram.org"],
+        ] {
+            assert!(Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()
+                .unwrap()
+                .status
+                .success());
+        }
+        assert_eq!(
+            worktree_removal_decision(&observe_dirty(&repo), false),
+            WorktreeRemovalDecision::Remove
+        );
+        std::fs::write(repo.join("untracked.md"), "work").unwrap();
+        match worktree_removal_decision(&observe_dirty(&repo), false) {
+            WorktreeRemovalDecision::RefuseDirty(paths) => {
+                assert_eq!(paths.len(), 1);
+                assert!(paths[0].contains("untracked.md"), "{paths:?}");
+            }
+            other => panic!("expected RefuseDirty, got {other:?}"),
+        }
+        assert_eq!(
+            worktree_removal_decision(&observe_dirty(&repo), true),
+            WorktreeRemovalDecision::Remove,
+            "--force still overrides a KNOWN dirty tree",
         );
     }
 }
