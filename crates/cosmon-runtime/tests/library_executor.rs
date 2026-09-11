@@ -636,10 +636,12 @@ fn a_drain_stops_on_a_precondition_refusal_rather_than_retrying_it() {
             &self,
             _ctx: &cosmon_runtime::PreflightContext<'_>,
         ) -> Result<(), cosmon_runtime::PreflightRefusal> {
-            Err(cosmon_runtime::PreflightRefusal::AdapterBackendUnreachable {
-                adapter: "local".to_owned(),
-                detail: "connection refused".to_owned(),
-            })
+            Err(
+                cosmon_runtime::PreflightRefusal::AdapterBackendUnreachable {
+                    adapter: "local".to_owned(),
+                    detail: "connection refused".to_owned(),
+                },
+            )
         }
     }
 

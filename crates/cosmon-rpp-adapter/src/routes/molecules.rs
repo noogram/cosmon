@@ -1567,19 +1567,7 @@ pub async fn tackle_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
-    // The preconditions the RPP publishes as `503` contract labels
-    // (issue #48). Built from the SAME envelope the spawn is clamped
-    // with, so "does the worker have a credential" is asked of the
-    // environment the worker will actually read — see
-    // [`crate::preflight`].
-    let preflight = std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
-        envelope.clone(),
-        &tenant_root,
-        state
-            .auth_claude
-            .as_ref()
-            .map(|ac| ac.config.credentials_path.clone()),
-    ));
+    let preflight = tenant_preflight(&state, &envelope, &tenant_root);
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // The paths are pinned to the admitted tenant, not resolved from the
     // adapter process's environment: this dispatch must read the very store
@@ -1659,6 +1647,36 @@ pub async fn tackle_molecule(
         "tackle": body,
     }))
     .into_response())
+}
+
+/// Build the dispatch preconditions the RPP publishes as `503` contract
+/// labels (issue #48, restored on the library seam by
+/// task-20260911-be1e).
+///
+/// One helper for both dispatching routes on purpose. `tackle` and the
+/// `run` drain spawn workers through the same seam, so a precondition
+/// installed on one and not the other reproduces the regression one layer
+/// down — a DAG filled with workers that cannot work, each reading as
+/// healthy to every liveness probe. Two call sites that must agree are
+/// two call sites that eventually will not.
+///
+/// Built from the SAME envelope the spawn is clamped with, so "does the
+/// worker have a credential" is asked of the environment the worker will
+/// actually read — see [`crate::preflight`] for why the adapter's own is
+/// the wrong one.
+fn tenant_preflight(
+    state: &AppState,
+    envelope: &WorkerEnvelope,
+    tenant_root: &std::path::Path,
+) -> std::sync::Arc<crate::preflight::RppSpawnPreflight> {
+    std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
+        envelope.clone(),
+        tenant_root,
+        state
+            .auth_claude
+            .as_ref()
+            .map(|ac| ac.config.credentials_path.clone()),
+    ))
 }
 
 /// Map a library-dispatch failure onto the wire.
@@ -1907,22 +1925,7 @@ pub async fn run_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
-    // The SAME preconditions the tackle route installs (issue #48). The
-    // drain dispatches workers through the same seam, so without this it
-    // reproduces the regression one layer down — spawning a worker per
-    // ready node, each of them unable to work and each reading as
-    // healthy. A refusal stops the drain on the tick that observes it,
-    // with the cause named — the operator repairs and re-runs, rather
-    // than watching the loop spin to `max_runtime` and report a `timeout`
-    // it knew the real cause of at the first tick.
-    let preflight = std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
-        envelope.clone(),
-        &tenant_root,
-        state
-            .auth_claude
-            .as_ref()
-            .map(|ac| ac.config.credentials_path.clone()),
-    ));
+    let preflight = tenant_preflight(&state, &envelope, &tenant_root);
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // Default actor class: `runtime:<pid>` — the drain's dispatches are
     // runtime claims (never sticky), exactly as `cs run`'s were.
