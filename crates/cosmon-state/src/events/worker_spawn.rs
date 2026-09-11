@@ -32,8 +32,9 @@ use chrono::{DateTime, Utc};
 use cosmon_core::algorithmic_provenance::AlgorithmicProvenance;
 use cosmon_core::event_v2::{
     AdapterHandleState, AdapterProbeKind, AdapterProbeResult, AdapterSelectionSource, EventV2,
-    LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
+    HarnessLaunchStatus, LoopOwnershipTag, ModelSelectionSource, PerturbationChannel,
 };
+use cosmon_core::harness_settings::HarnessArg;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::ModelObservationSource;
 use cosmon_core::spawn_seam::LoopOwnership;
@@ -348,6 +349,90 @@ pub fn emit_model_selected(
     write_event(state_dir, event);
 }
 
+/// Emit one [`EventV2::HarnessSettingSelected`] per resolved harness key
+/// (ADR-177 / issue #65) — the ex-ante receipt for the `[steps.harness]` /
+/// `--harness` axis.
+///
+/// Called by `cs tackle` **after** the spawn attempt returns, which is what
+/// lets `launch_status` be a fact. Emitting it before the spawn would leave the
+/// field a guess, and the field exists precisely to keep "the harness rejected
+/// the flag at launch" from reading as "the setting was silently accepted".
+///
+/// One event per key, not one per map: two keys of the same map may come from
+/// different levels of the precedence table and leave through different
+/// channels, and a reader must not have to infer which. An empty `args` emits
+/// nothing at all — silence is how rank 3, the harness's own default, is
+/// expressed.
+///
+/// `harness_version` is the harness's self-reported version at spawn, or `None`
+/// when the probe could not run: an echo is only interpretable against the
+/// version that produced it. `None` is an absence, never a claim.
+///
+/// The wording on every surface this feeds is **"dispatched at"**, never "ran
+/// at" — see [`EventV2::HarnessSettingSelected`] for why the distinction is
+/// structural rather than editorial.
+///
+/// The hot path must not fail because telemetry is unhappy: write errors are
+/// swallowed (same trace-not-lock discipline as the other Worker-Spawn
+/// helpers).
+pub fn emit_harness_settings_selected(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+    args: &[HarnessArg],
+    harness_version: Option<&str>,
+    launch_status: HarnessLaunchStatus,
+) {
+    for arg in args {
+        let event = EventV2::HarnessSettingSelected {
+            mol_id: mol_id.clone(),
+            worker_id: Some(worker_id.clone()),
+            adapter_name: adapter_name.to_owned(),
+            key: arg.key.clone(),
+            value: arg.value.clone(),
+            selection_source: arg.selection_source.clone(),
+            argv_fragment: arg.argv_fragment(),
+            channel: arg.channel.as_str().to_owned(),
+            harness_version: harness_version.map(ToOwned::to_owned),
+            launch_status,
+            selected_at: Utc::now(),
+        };
+        write_event(state_dir, event);
+    }
+}
+
+/// Emit an [`EventV2::EffortObserved`] (ADR-177 / issue #65) — the ex-post
+/// sibling of [`emit_harness_settings_selected`].
+///
+/// `effort` is a **bare `&str`**, never optional: this helper is called *only*
+/// when a concrete value was read from the harness's own log, so silence is
+/// expressed by not calling it. There is no `EffortObserved` line meaning "ran
+/// but unknown", and the realized axis is never back-filled from the pin — the
+/// `reasoning_effort_is_never_inferred` discipline applied to the axis it was
+/// named after.
+///
+/// The hot path must not fail because telemetry is unhappy: write errors are
+/// swallowed.
+pub fn emit_effort_observed(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+    effort: &str,
+    observed_source: ModelObservationSource,
+) {
+    let event = EventV2::EffortObserved {
+        mol_id: mol_id.clone(),
+        worker_id: Some(worker_id.clone()),
+        adapter_name: adapter_name.to_owned(),
+        effort: effort.to_owned(),
+        observed_source,
+        observed_at: Utc::now(),
+    };
+    write_event(state_dir, event);
+}
+
 /// Emit an [`EventV2::ModelObserved`] (delib-20260718-c70e / realized-model).
 ///
 /// The ex-post empirical sibling of [`emit_model_selected`]: `ModelSelected`
@@ -456,6 +541,84 @@ pub fn emit_new_model_observations(
             provenance,
         );
     }
+}
+
+/// Emit the **newly-observed tail** of a realized-effort trajectory for one
+/// dispatch (ADR-177 / issue #65) — the effort sibling of
+/// [`emit_new_model_observations`], with the identical first-observation +
+/// on-change cadence and the identical `(mol_id, worker_id, adapter_name)`
+/// scoping.
+///
+/// Reads back the [`EventV2::EffortObserved`] lines already on the wire for
+/// exactly this scope, computes the suffix of `observed` not yet recorded, and
+/// emits one event per new value. Idempotent: replaying the same trajectory
+/// emits nothing. Every element of `observed` is a non-empty
+/// [`EffortLevel`](cosmon_core::model_realization::EffortLevel), so a blank
+/// realization can never reach the log — and an empty `observed` emits nothing
+/// at all, which is how "the harness reported no effort" is expressed.
+///
+/// Runs under the same cross-process observation-emit lock as the model axis,
+/// so two watchers polling one molecule do not both write the first
+/// observation.
+///
+/// Best-effort: an unreadable log is treated as "nothing recorded yet"
+/// (trace-not-lock).
+pub fn emit_new_effort_observations(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+    observed: &[cosmon_core::model_realization::EffortLevel],
+    observed_source: ModelObservationSource,
+) {
+    if observed.is_empty() {
+        return;
+    }
+    let _guard = ObservationEmitLock::acquire(state_dir);
+    let recorded = recorded_effort_observations(state_dir, mol_id, worker_id, adapter_name);
+    for effort in newly_observed(&recorded, observed) {
+        emit_effort_observed(
+            state_dir,
+            mol_id,
+            worker_id,
+            adapter_name,
+            effort.as_str(),
+            observed_source,
+        );
+    }
+}
+
+/// The realized-effort trajectory already on the wire for one dispatch scope.
+///
+/// Legacy unscoped lines (`worker_id: None`) are matched fail-closed exactly as
+/// on the model axis: they belong to no identifiable attempt and therefore
+/// suppress nothing.
+#[must_use]
+fn recorded_effort_observations(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker_id: &WorkerId,
+    adapter_name: &str,
+) -> Vec<cosmon_core::model_realization::EffortLevel> {
+    let log_path = resolve_events_log_path(state_dir);
+    let Ok(envelopes) = crate::event_log::read_all(&log_path) else {
+        return Vec::new();
+    };
+    envelopes
+        .into_iter()
+        .filter_map(|env| match env.event {
+            EventV2::EffortObserved {
+                mol_id: ref m,
+                worker_id: Some(ref w),
+                adapter_name: ref a,
+                ref effort,
+                ..
+            } if m == mol_id && a == adapter_name && w == worker_id => {
+                cosmon_core::model_realization::EffortLevel::new(effort)
+            }
+            _ => None,
+        })
+        .collect()
 }
 
 /// Emit an [`EventV2::ModelObservationUnavailable`] **at most once** for one
@@ -606,10 +769,7 @@ fn recorded_model_observations(
 /// `observed[recorded.len()..]`. When the sequences diverge (they should not,
 /// given the collapse-consecutive parse), nothing is emitted — silence is safer
 /// than a fabricated re-observation.
-fn newly_observed<'a>(
-    recorded: &[cosmon_core::model_realization::ModelId],
-    observed: &'a [cosmon_core::model_realization::ModelId],
-) -> &'a [cosmon_core::model_realization::ModelId] {
+fn newly_observed<'a, T: PartialEq>(recorded: &[T], observed: &'a [T]) -> &'a [T] {
     if recorded.is_empty() {
         return observed;
     }
