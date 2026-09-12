@@ -42,6 +42,12 @@ new_repo() {
   mkdir -p "$d/scripts" "$d/.cosmon" "$d/assets" || return 1
   cp "$GATE" "$d/scripts/publish.sh"
   cp "$AUDIT" "$d/scripts/artifact-map-audit.py"
+  # Check G's rules live in a library shared with check-no-session-ids.sh, and
+  # the gate sources it relative to its own directory. A fixture without it is
+  # a fixture where the gate dies at line 1 and every case below reports the
+  # wrong thing.
+  mkdir -p "$d/scripts/lib"
+  cp "$ROOT/scripts/lib/session-id-patterns.sh" "$d/scripts/lib/session-id-patterns.sh"
   cat >"$d/.cosmon/artifact-map.toml" <<'MAP'
 [runtime-state]
 location = [".cosmon/state/**/*"]
@@ -443,6 +449,64 @@ if [ "$rc" = "2" ] && grep -qF 'operator-identity CANARY FAILED' "$WORK/out.txt"
   ok "F′′′. an allowlist that accepts a routable domain reddens the build"
 else
   bad "F′′′. a widened allowlist was accepted - exit $rc, and the hit is now invisible"
+  sed 's/^/      /' "$WORK/out.txt" | head -20
+fi
+
+# ── G. an agent-harness session identifier in a tracked file ────────────────
+# The 2026-09-10 finding, reproduced: a deep link into a private conversation,
+# in a file a public clone inherits. Synthetic id by construction.
+d="$(new_repo case-session-id)" || exit 2
+printf 'see https://claude.ai/code/session_0123456789abcdef for context\n' >"$d/NOTES.md"
+expect_fail "G. a console deep link in a tracked file reddens the gate" "$d" "NOTES.md"
+
+# …and, as with B and F, the gate must not republish what it found. Printing
+# the identifier moves the pointer from one tracked file into every CI log.
+run_gate "$d"
+if grep -qF "session_0123456789abcdef" "$WORK/out.txt"; then
+  bad "G. the gate PRINTED the session identifier — a scrub gate must never disclose"
+else
+  ok "G. session identifier reported without disclosing its value"
+fi
+
+# ── G′. by CLASS, not by vendor ─────────────────────────────────────────────
+# "No Claude-Session: trailer" is defeated the first time a codex-piloted
+# session invents its own spelling. Each shape gets its own fixture so a
+# regression names the rule that died.
+d="$(new_repo case-session-codex)" || exit 2
+printf 'Codex-Thread: https://chatgpt.com/codex/threads/abc\n' >"$d/NOTES.md"
+expect_fail "G′. a non-Claude vendor shape reddens the gate" "$d" "NOTES.md"
+
+d="$(new_repo case-session-bare)" || exit 2
+printf 'Session-Id: 01JYC5FTFWTGOGUHKOGJDM4X\n' >"$d/NOTES.md"
+expect_fail "G′. a vendorless Session-Id trailer reddens the gate" "$d" "NOTES.md"
+
+# ── G′′. the per-line waiver, and its limits ────────────────────────────────
+# cosmon's own detector must contain the shapes it detects (ADR-127 §6), so the
+# hatch has to work — and must not bleed to the next line, which is the
+# whole-file exclusion this gate refuses by name.
+d="$(new_repo case-session-waived)" || exit 2
+printf 'https://claude.ai/code/session_0123456789abcdef # publish: allow — synthetic sample\n' >"$d/NOTES.md"
+run_gate "$d"
+if [ "$(cat "$WORK/rc.txt")" = "0" ]; then
+  ok "G′′. an inline 'publish: allow' waiver clears that line"
+else
+  bad "G′′. waived line still red — the escape hatch does not work"
+  sed 's/^/      /' "$WORK/out.txt" | head -20
+fi
+printf 'https://claude.ai/code/session_fedcba9876543210\n' >>"$d/NOTES.md"
+expect_fail "G′′. the waiver does NOT cover the next line" "$d" "NOTES.md"
+
+# ── G′′′. no false red ──────────────────────────────────────────────────────
+# A rule that fires on the WORD teaches its operator to ignore the gate. What
+# makes a link a leak is the opaque id, not the noun.
+d="$(new_repo case-session-prose)" || exit 2
+printf 'The session cache is documented at https://github.com/noogram/cosmon/issues/48.\n' >"$d/NOTES.md"
+printf 'Molecule provenance is the merge shape, never a vendor bookmark.\n' >>"$d/NOTES.md"
+run_gate "$d"
+if [ "$(cat "$WORK/rc.txt")" = "0" ]; then
+  ok "G′′′. ordinary prose about sessions does not red the gate"
+else
+  bad "G′′′. prose reddened the gate — a noisy rule is an ignored rule"
   sed 's/^/      /' "$WORK/out.txt" | head -20
 fi
 

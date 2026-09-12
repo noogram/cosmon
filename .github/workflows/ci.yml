@@ -780,6 +780,53 @@ jobs:
       - name: Self-test the external-issue integration-branch shapes (ADR-052 §D7)
         run: bash tests/harness/provenance-integration-branch-test.sh
 
+  session-id-gate:
+    # Refuses agent-harness session identifiers in the surfaces publish.sh
+    # cannot see: the commit messages a PR adds, and the PR title + body.
+    #
+    # WHY IT IS A SEPARATE JOB. It judges a different property from the
+    # provenance gate — that one asks "did this merge come from a molecule",
+    # this one asks "does this change publish a pointer at a private
+    # conversation" — and a reader of a red build should be able to tell the
+    # two apart from the job name alone.
+    #
+    # SCOPE. A range, never a walk of history. The 84 historical
+    # `Claude-Session:` trailers on main stay (rewriting them means a
+    # force-push that breaks every clone and invalidates the SHAs cited in ADRs
+    # and chronicles), and they are below every future PR's base, so they are
+    # never in scope.
+    #
+    # WHAT IT DOES NOT COVER, so no one reads it as more than it is: a PR body
+    # EDITED AFTER this run, and any COMMENT, which fires no commit event at
+    # all. The 2026-09-10 finding was in a comment. See the script header.
+    name: Session-identifier gate (no harness session ids in the public record)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+        with:
+          fetch-depth: 0
+      # The PR title and body reach the step through `env:` and are written to
+      # a file by the shell, never substituted into a run body — a PR body is
+      # attacker-controlled and multi-line, and an expression inside a script
+      # (comment included) is injected as source. See scripts/check-workflow-yaml.sh.
+      - name: Materialise the PR title and body for scanning
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title || '' }}
+          PR_BODY: ${{ github.event.pull_request.body || '' }}
+        run: |
+          { printf '%s\n' "$PR_TITLE"; printf '%s\n' "$PR_BODY"; } > pr-body.txt
+      - name: Refuse session identifiers in what this change adds
+        env:
+          # On pull_request events GITHUB_SHA is GitHub's synthetic test-merge
+          # commit, which the contributor never wrote. Judge the real HEAD.
+          COSMON_SESSION_SCAN_HEAD: ${{ github.event.pull_request.head.sha || '' }}
+          COSMON_SESSION_SCAN_BODY_FILE: pr-body.txt
+        run: bash scripts/check-no-session-ids.sh
+      - name: Self-test the gate in both directions
+        run: bash tests/harness/session-id-gate-test.sh
+
   license-partition:
     # Living per-crate license table gate. The script in
     # scripts/license-table.sh walks every crates/*/Cargo.toml,

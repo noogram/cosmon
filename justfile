@@ -194,6 +194,11 @@ quick:
     ./scripts/no-pilot-env.sh env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
     ./scripts/no-pilot-env.sh python3 scripts/spdx-headers.py --check
     ./scripts/no-pilot-env.sh ./scripts/publish.sh --check
+    # Tracked files are publish.sh's surface; commit messages are not in any
+    # tree, and that is where the 84 `Claude-Session:` trailers on public main
+    # came from. Judges what this branch adds (main..HEAD locally), so a clean
+    # trunk stays clean and history is never rewritten to satisfy it.
+    ./scripts/no-pilot-env.sh ./scripts/check-no-session-ids.sh
 
 # `--no-fail-fast` is deliberate: cargo stops at the first red target by
 # default, which hides every later failure at identical wall-clock. A run that

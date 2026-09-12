@@ -109,7 +109,7 @@ trap 'rm -f "$findings"' EXIT
 
 echo "============================================================================"
 echo " publish --check — structural release membrane (runtime state · credentials"
-echo "                   · machine paths · binary assets · residence · identity)"
+echo "                   · machine paths · binaries · residence · identity · session ids)"
 echo "============================================================================"
 
 # ── Shared: the tracked text surface, and the tracked symlink surface ────────
@@ -721,6 +721,99 @@ if [ "$ident_hits" -gt 0 ]; then
   fail "F. ${ident_hits} routable contact address(es) in the tracked tree (local parts withheld)"
 else
   pass "F. no routable contact addresses in tracked content (both canary directions held)"
+fi
+
+# ── G. HARNESS SESSION IDENTIFIERS ───────────────────────────────────────────
+# WHY THIS RULE EXISTS, MEASURED
+# ------------------------------
+# On 2026-09-10 a `https://claude.ai/code/session_<id>` link was found in a PR
+# comment on the public repository, pointing at one of the operator's private
+# conversations. Nine PR bodies and one issue body were stripped the same day.
+# 84 commit messages on public `main` still carry a `Claude-Session:` trailer —
+# 54 distinct identifiers. Probed unauthenticated they answer 403, so they are
+# not content leaks. They are private session identifiers, in clear text, in a
+# permanent public record: a durable pointer at something private, which is
+# what a leak is even while the endpoint refuses anonymous readers.
+#
+# It belongs here because the guide's clause is "runtime state, credentials,
+# machine paths, internal identifiers … must never be tracked", and a harness
+# session id is exactly an internal identifier. Check F could not have caught
+# it: F reads contact ADDRESSES, and a console URL is not one.
+#
+# BY CLASS, NOT BY VENDOR. The rules live in scripts/lib/session-id-patterns.sh
+# and key on the grammar — `<Vendor>-Session:`, `<Vendor>-Thread:`,
+# `Session-Id:`, and any `…/session[_/]<opaque-id>` console deep link — because
+# "no `Claude-Session:` trailer" is defeated the first time a codex-piloted
+# session invents `Codex-Thread:`. That file is shared with
+# `scripts/check-no-session-ids.sh`, which covers the surfaces no tree scan can
+# see: commit messages and a pull-request body.
+#
+# WAIVER. The per-line marker, as everywhere else here: the detector must
+# contain the shapes it detects (ADR-127 §6), so the one line in the pattern
+# library carrying a literally-matching sample declares itself with
+# `publish: allow — <reason>` and is skipped. No sidecar hatch: every format
+# this rule can hit has a comment syntax, and adding a whole-file waiver where
+# a per-line one works is the blind spot the doctrine refuses.
+#
+# WHAT IT REPORTS. Path, line, rule name, and a digest — never the identifier.
+# Printing it would move the pointer from one tracked file into every CI log
+# that ran the gate.
+# shellcheck source=lib/session-id-patterns.sh
+. "$(cd "$(dirname "$0")" && pwd)/lib/session-id-patterns.sh"
+
+SESSION_EXCLUDE=(
+  ':(exclude)scripts/publish.sh'
+  ':(exclude)scripts/publish.test.sh'
+  ':(exclude)scripts/check-no-session-ids.sh'
+)
+
+# CANARY, through the SAME engine the scan uses, for the reason B's canary
+# spells out: a rule that silently stopped matching reports a clean tree it
+# never searched. One synthetic sample per rule, in a throwaway repository.
+session_canary_dir="$(mktemp -d)" || exit 2
+session_canary_fail() {
+  rm -rf "$session_canary_dir"
+  echo "publish: session-identifier CANARY FAILED — $1" >&2
+  echo "  Refusing to report a clean tree we did not actually scan." >&2
+  exit 2
+}
+git -C "$session_canary_dir" init -q >/dev/null 2>&1 ||
+  session_canary_fail "could not create the throwaway git repository the canary scans"
+{
+  printf 'Claude-Session: x\n'
+  printf 'Session-Id: x\n'
+  printf 'see https://claude.ai/code/session_0123456789abcdef\n'
+  printf 'see https://chatgpt.com/codex/threads/abc\n'
+} >"$session_canary_dir/canary.txt"
+git -C "$session_canary_dir" add -A >/dev/null 2>&1 ||
+  session_canary_fail "could not track the canary file"
+while IFS=$'\t' read -r srule sre; do
+  [ -z "$srule" ] && continue
+  git -C "$session_canary_dir" grep -nIE -e "$sre" -- canary.txt >/dev/null 2>&1 ||
+    session_canary_fail "rule '$srule' no longer matches its own synthetic sample"
+done <<<"$SESSION_ID_RULES"
+rm -rf "$session_canary_dir"
+
+session_hits=0
+while IFS=$'\t' read -r srule sre; do
+  [ -z "$srule" ] && continue
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    loc="${line%%:*}"; rest="${line#*:}"; lno="${rest%%:*}"; body="${rest#*:}"
+    case "$body" in *"$OPTOUT_RE"*) continue ;; esac
+    val="$(printf '%s' "$body" | grep -oE -e "$sre" | head -1)"
+    d="$(printf '%s' "$val" | digest)"
+    unset val body
+    printf '  session-id: %s:%s: %s (value withheld, sha256:%s)\n' \
+      "$loc" "$lno" "$srule" "$d" >>"$findings"
+    session_hits=$((session_hits + 1))
+  done < <(git grep -nIE -e "$sre" -- . "${SESSION_EXCLUDE[@]}" 2>/dev/null)
+done <<<"$SESSION_ID_RULES"
+
+if [ "$session_hits" -gt 0 ]; then
+  fail "G. ${session_hits} agent-harness session identifier(s) in the tracked tree (values withheld)"
+else
+  pass "G. no agent-harness session identifiers in tracked content (every rule canaried)"
 fi
 
 echo "----------------------------------------------------------------------------"
