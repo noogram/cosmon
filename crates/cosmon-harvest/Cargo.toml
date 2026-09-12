@@ -22,6 +22,9 @@ cosmon-hash.workspace = true
 cosmon-state.workspace = true
 cosmon-transport.workspace = true
 dirs.workspace = true
+# `fs2` supplies the nonblocking exclusive `flock` the reclaim adapter uses
+# as its exclusion probe on `target/debug/.cargo-lock`.
+fs2.workspace = true
 globset.workspace = true
 ignore.workspace = true
 # `nix` (signal feature) lets the post-merge gate SIGKILL a timed-out cargo

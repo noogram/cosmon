@@ -73,6 +73,7 @@ One-line map of the how-to guides in `docs/guides/`. These are goal-oriented rec
   (`cosmon/guides/ux-cli-parity-audit.md`); it tracks internal pilot
   surfaces and does not ship with the public repo.
 - [Visual-QA Gate (`G_visual`) — operator & worker guide](visual-qa-gate.md)
+- [Reclaiming disk from `.worktrees/` — what the build lock covers](worktree-reclamation.md)
 - [Visual snapshots — reviewing the pastille](visual-snapshots.md)
 - [vllm-mlx — local-inference offramp (operator runbook)](vllm-mlx-offramp.md)
 - [Whisper → Done — end-to-end walkthrough](whisper-to-done-walkthrough.md)

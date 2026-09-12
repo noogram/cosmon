@@ -24,6 +24,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use cosmon_harvest::worktree_reclaim::{read_worktree_dirs, WorktreeDirs};
+
 use super::findings::{Finding, ProbeReport, Severity};
 
 const PROBE: &str = "worktrees";
@@ -45,35 +47,34 @@ pub struct Args {
 pub fn scan(root: &Path) -> anyhow::Result<ProbeReport> {
     let mut report = ProbeReport::new(PROBE);
     let worktrees_root = root.join(".worktrees");
-    if !worktrees_root.exists() {
-        report.findings.push(Finding::new(
-            PROBE,
-            Severity::Info,
-            "no .worktrees/ directory — nothing to audit",
-        ));
-        return Ok(report);
-    }
-
-    let entries = match fs::read_dir(&worktrees_root) {
-        Ok(it) => it,
-        Err(e) => {
+    // One walker over `.worktrees/`, shared with `cs purge --worktrees`
+    // (issue 61). Two copies of "what counts as a worktree directory" drift,
+    // and the drift only shows when an operator compares two commands' output
+    // by hand.
+    let dirs = match read_worktree_dirs(&worktrees_root) {
+        WorktreeDirs::Absent => {
+            report.findings.push(Finding::new(
+                PROBE,
+                Severity::Info,
+                "no .worktrees/ directory — nothing to audit",
+            ));
+            return Ok(report);
+        }
+        WorktreeDirs::Unreadable(e) => {
             report.findings.push(
                 Finding::new(
                     PROBE,
                     Severity::Warning,
-                    format!("cannot read .worktrees/: {e}"),
+                    format!("cannot read .worktrees/: {}", e.cause),
                 )
                 .with_path(&worktrees_root),
             );
             return Ok(report);
         }
+        WorktreeDirs::Listed(dirs) => dirs,
     };
 
-    for entry in entries.flatten() {
-        let wt = entry.path();
-        if !wt.is_dir() {
-            continue;
-        }
+    for wt in dirs {
         report.scanned += 1;
         audit_worktree(root, &wt, &mut report);
     }

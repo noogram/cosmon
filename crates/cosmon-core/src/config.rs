@@ -172,6 +172,18 @@ pub struct ProjectConfig {
     /// slot). See [`AttributionConfig`] and ADR-128.
     #[serde(default)]
     pub attribution: AttributionConfig,
+
+    /// Derived-content reclamation policy for `.worktrees/` (issue 61).
+    ///
+    /// Names the rebuildable roots `cs purge --worktrees` may reclaim under a
+    /// candidate worktree. Configurable rather than hardcoded because
+    /// `target/` is a Cargo fact, not a universal one: a galaxy that builds an
+    /// iOS staticlib alongside its Rust crates carries derived artefacts
+    /// outside `target/`, and a hardcoded list would either miss them or
+    /// invite a galaxy-specific fork of the reclamation path. See
+    /// [`WorktreeReclaimConfig`].
+    #[serde(default)]
+    pub worktree_reclaim: WorktreeReclaimConfig,
 }
 
 /// Per-project defaults for the molecule-level `StepBudget` circuit breaker
@@ -579,6 +591,58 @@ pub struct ScopeGuardConfig {
     /// warning. Default `false` (advisory) — the §8b-aligned honest default.
     #[serde(default)]
     pub strict: bool,
+}
+
+/// The derived roots `cs purge --worktrees` may reclaim under a worktree.
+///
+/// ```toml
+/// [worktree_reclaim]
+/// evict = ["target", "build/ios"]
+/// ```
+///
+/// # Why this is configuration and not a constant
+///
+/// The default `["target"]` is the Cargo answer, and cosmon's own galaxy is a
+/// Rust workspace, so a constant would have been invisible here. The
+/// downstream galaxy this came from is Rust **and** an iOS staticlib: its
+/// rebuildable bytes do not all live under `target/`. A list a galaxy can
+/// state is the difference between reclaiming its build output and forking
+/// the reclamation path.
+///
+/// # What configuring a root does *not* buy
+///
+/// Naming a root does not make it reclaimable. Every root is validated as a
+/// rebuildable, worktree-local relative path
+/// ([`crate::worktree_reclaim::validate_derived_root`]), and the adapter must
+/// additionally establish **exclusion** over it — proof that no producer is
+/// writing into it while its payload is removed. cosmon's exclusion is
+/// Cargo's own build lock, which excludes Cargo and nothing else: a
+/// non-Cargo root such as `build/ios` is enumerated, reported, and
+/// **withheld** with that reason until an exclusion protocol for it exists.
+/// Configuration widens what may be *considered*, never what is *proven*.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorktreeReclaimConfig {
+    /// Worktree-relative derived roots, in the galaxy's own order.
+    /// Default: `["target"]`.
+    #[serde(default = "default_evict_roots")]
+    pub evict: Vec<String>,
+}
+
+impl Default for WorktreeReclaimConfig {
+    fn default() -> Self {
+        Self {
+            evict: default_evict_roots(),
+        }
+    }
+}
+
+/// Default for [`WorktreeReclaimConfig::evict`] — `["target"]`.
+///
+/// Named rather than inlined because `serde(default = "...")` needs a path,
+/// and because this is the single place the "Cargo's build directory is the
+/// one root cosmon can prove exclusion over" decision is written down.
+fn default_evict_roots() -> Vec<String> {
+    vec!["target".to_owned()]
 }
 
 /// Whether `cs done` requires an operator-sealed harvest authorisation

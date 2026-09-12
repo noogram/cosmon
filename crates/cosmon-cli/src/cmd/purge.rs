@@ -53,6 +53,9 @@ use cosmon_core::worker::{DesiredState, WorkerRole, WorkerStatus};
 use cosmon_state::StateStore;
 use cosmon_transport::TmuxBackend;
 
+use cosmon_core::worktree_reclaim::{DirtyObservation, ObservationError};
+use cosmon_harvest::worktree_reclaim::observe_dirty;
+
 use super::Context;
 
 /// Evidence that a molecule's deliverable is still only on its own branch or
@@ -79,6 +82,16 @@ pub(crate) struct UnharvestedWork {
     /// it counts as unharvested: the whole point of the guard is that
     /// "I could not check" must not read the same as "there is nothing there".
     pub probe_error: Option<String>,
+    /// Set when `git status` in the worktree could not be observed (issue 61).
+    ///
+    /// The dirty probe used to return an empty list on failure — deliberately,
+    /// with a comment saying the branch probe was the load-bearing half. It
+    /// was not: a worktree whose status cannot be read may hold the only copy
+    /// of uncommitted work, and an empty list reads exactly like a clean tree.
+    /// The sweep now withholds until an observation succeeds, which may leave
+    /// a stale worker record in place. That is the price, and it is the right
+    /// way round.
+    pub dirty_error: Option<ObservationError>,
 }
 
 impl UnharvestedWork {
@@ -103,6 +116,9 @@ impl UnharvestedWork {
                 "branch {} present but unprobeable: {err}",
                 self.branch
             ));
+        }
+        if let Some(err) = &self.dirty_error {
+            parts.push(format!("worktree unobservable: {}", err.describe()));
         }
         parts.join("; ")
     }
@@ -187,30 +203,17 @@ fn commits_ahead_of(repo_root: &Path, base: &str, branch: &str) -> Option<usize>
     String::from_utf8_lossy(&out.stdout).trim().parse().ok()
 }
 
-/// Paths reported by `git status --porcelain` in a molecule's worktree.
+/// Paths reported by `git status --porcelain` in a molecule's worktree, or
+/// the error that stopped the probe.
 ///
-/// An absent worktree is not dirty. A `git status` that fails is reported as
-/// clean here on purpose: the branch probe is the load-bearing half, and a
-/// failing status in a directory that may not even be a worktree would
-/// otherwise withhold every purge on the host.
-fn dirty_paths(worktree: &Path) -> Vec<String> {
-    if !worktree.is_dir() {
-        return Vec::new();
-    }
-    let Ok(out) = Command::new("git")
-        .args(["-C", &worktree.to_string_lossy(), "status", "--porcelain"])
-        .output()
-    else {
-        return Vec::new();
-    };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .filter_map(|l| l.get(3..).map(str::trim).filter(|p| !p.is_empty()))
-        .map(str::to_owned)
-        .collect()
+/// An absent worktree is not dirty — proven absence. A `git status` that
+/// *fails* is [`DirtyObservation::Unknown`], carrying its diagnostic: the
+/// deliberate fail-open this function used to implement is retired (issue 61,
+/// `docs/design/worktree-reclaim/CONTRACT.md` § Existing consumers). The
+/// observation itself is the one both `cs purge` and the harvest teardown
+/// share, so there is no second copy of the safety question to drift.
+fn dirty_observation(worktree: &Path) -> DirtyObservation {
+    observe_dirty(worktree)
 }
 
 impl HarvestProbe for GitHarvestProbe {
@@ -218,7 +221,19 @@ impl HarvestProbe for GitHarvestProbe {
         let repo_root = self.repo_root.as_ref()?;
         let branch = format!("feat/{mol_id}");
         let worktree = repo_root.join(".worktrees").join(mol_id.as_str());
-        let dirty_files = dirty_paths(&worktree);
+        let (dirty_files, dirty_error) = match dirty_observation(&worktree) {
+            DirtyObservation::Clean => (Vec::new(), None),
+            // The porcelain line is `XY <path>`; the alert names the path.
+            DirtyObservation::Dirty(lines) => (
+                lines
+                    .iter()
+                    .filter_map(|l| l.get(3..).map(str::trim).filter(|p| !p.is_empty()))
+                    .map(str::to_owned)
+                    .collect(),
+                None,
+            ),
+            DirtyObservation::Unknown(e) => (Vec::new(), Some(e)),
+        };
 
         let (commits_ahead, probe_error) = if branch_exists(repo_root, &branch) {
             let base =
@@ -234,7 +249,11 @@ impl HarvestProbe for GitHarvestProbe {
             (0, None)
         };
 
-        if commits_ahead == 0 && dirty_files.is_empty() && probe_error.is_none() {
+        if commits_ahead == 0
+            && dirty_files.is_empty()
+            && probe_error.is_none()
+            && dirty_error.is_none()
+        {
             return None;
         }
         Some(UnharvestedWork {
@@ -242,6 +261,7 @@ impl HarvestProbe for GitHarvestProbe {
             commits_ahead,
             dirty_files,
             probe_error,
+            dirty_error,
         })
     }
 }
@@ -413,7 +433,12 @@ fn collapse_stale_zombies(
 }
 
 /// Arguments for the `purge` subcommand.
+///
+/// The bool count is clap's shape, not a state machine waiting to be
+/// discovered: each flag is an independent operator gesture with its own help
+/// text, and folding them into enums would hide the surface the goldens lock.
 #[derive(clap::Args)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct Args {
     /// Optional worker ID — when given, targeted purge of that worker only.
     ///
@@ -455,6 +480,31 @@ pub struct Args {
     /// after a reboot with up to three commits each still unmerged).
     #[arg(long)]
     pub allow_unharvested: bool,
+
+    /// Also run the `.worktrees/` reclamation pass (issue 61).
+    ///
+    /// Enumerates `readdir(.worktrees/) ∪ git worktree list --porcelain` —
+    /// the filesystem and Git's own registry, not the worker roster, which
+    /// is keyed by molecule and could not see a directory that has none.
+    /// Reports every candidate: the reclaimable derived output on one side,
+    /// and on the other every worktree withheld **with its reason**.
+    ///
+    /// Reclamation is opt-in and one tier deep. On its own this flag removes
+    /// nothing; `--allow-unharvested` — the same gesture the sweep already
+    /// uses, not a second one — executes the derived half. Durable content
+    /// is never removed by any path in this command, whatever the flags
+    /// (ADR-178): the eligibility verdict is advisory and is printed, not
+    /// acted on.
+    #[arg(long)]
+    pub worktrees: bool,
+
+    /// Report what would change and change nothing.
+    ///
+    /// Applies to the whole command: no fleet entry is removed, no molecule
+    /// is collapsed, no event is emitted and no byte is reclaimed. The
+    /// `--worktrees` pass is dry by default and stays dry here.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 fn parse_worker_role(s: &str) -> Result<WorkerRole, String> {
@@ -470,20 +520,47 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // Targeted mode — `cs purge <worker> [--force]` (supersedes `cs kill`).
     if let Some(ref worker_name) = args.worker {
-        return run_targeted(
-            ctx,
-            store.as_ref(),
-            &state_dir,
-            worker_name,
-            args.force,
-            args.allow_unharvested,
-            &probe,
-        );
+        run_targeted(ctx, store.as_ref(), &state_dir, worker_name, args, &probe)?;
+    } else {
+        let socket = super::tmux_socket_name(ctx);
+        let backend = TmuxBackend::new(&socket);
+        run_sweep(ctx, store.as_ref(), &state_dir, &backend, &probe, args)?;
     }
 
-    let socket = super::tmux_socket_name(ctx);
-    let backend = TmuxBackend::new(&socket);
-    run_sweep(ctx, store.as_ref(), &state_dir, &backend, &probe, args)
+    if args.worktrees {
+        run_worktree_pass(ctx, store.as_ref(), args)?;
+    }
+    Ok(())
+}
+
+/// The `.worktrees/` reclamation pass behind `--worktrees` (issue 61).
+///
+/// Separated from the worker sweep because it answers a different question
+/// about a different population: the sweep is keyed by *worker*, and the
+/// directories this pass finds are precisely the ones no worker and no
+/// molecule points at. They shared a verb — not a mechanism — deliberately:
+/// a second verb would be a second copy of the safety question.
+///
+/// `--dry-run` and the absence of `--allow-unharvested` both keep it dry.
+fn run_worktree_pass(ctx: &Context, store: &dyn StateStore, args: &Args) -> anyhow::Result<()> {
+    let Some(repo_root) = super::worktree_reclaim::discover_repo_root() else {
+        if !ctx.json {
+            println!("\n.worktrees/ reclamation: not inside a git repository — nothing to scan.");
+        }
+        return Ok(());
+    };
+    let base = super::worktree_reclaim::base_branch(ctx, &repo_root);
+    let evict = super::worktree_reclaim::evict_roots(ctx);
+    // The derived tier is opt-in twice over: `--allow-unharvested` asks for
+    // it, `--dry-run` overrides the ask.
+    let execute = args.allow_unharvested && !args.dry_run;
+    let pass = super::worktree_reclaim::run_pass(&repo_root, &base, store, &evict, execute)?;
+    if ctx.json {
+        println!("{}", super::worktree_reclaim::to_json(&pass));
+    } else {
+        super::worktree_reclaim::report(&pass);
+    }
+    Ok(())
 }
 
 /// Populations produced by [`classify_sweep`] — one vec per reason code
@@ -578,6 +655,30 @@ fn classify_sweep<B: TransportBackend>(
     buckets
 }
 
+/// The targeted mode's `--dry-run` report.
+///
+/// Reached only *after* every refusal above has run: a dry run that skipped
+/// the unharvested guard would be answering a different question from the one
+/// the real command answers, and would be useless as a preview of it.
+fn report_targeted_dry_run(ctx: &Context, worker_id: &WorkerId, force: bool) {
+    if ctx.json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "command": "purge",
+                "dry_run": true,
+                "worker": worker_id.as_str(),
+                "would_force_kill": force,
+            })
+        );
+    } else {
+        println!(
+            "🔍 dry-run: would purge worker {worker_id}{}.",
+            if force { " (SIGKILL tmux first)" } else { "" }
+        );
+    }
+}
+
 /// Sweep-mode purge, parameterised over the transport backend so tests
 /// can inject `MockBackend` without spinning up a real tmux server.
 #[allow(clippy::too_many_lines)]
@@ -624,6 +725,35 @@ fn run_sweep<B: TransportBackend>(
             );
         } else {
             println!("Nothing to purge.");
+        }
+        return Ok(());
+    }
+
+    if args.dry_run {
+        // Classification, withholding and the operator-facing register all
+        // happened above; only the writes are skipped.
+        if ctx.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "command": "purge",
+                    "dry_run": true,
+                    "would_purge": total,
+                    "terminal": terminal.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "stale": stale.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "orphan": orphan.iter().map(|w| w.as_str().to_owned()).collect::<Vec<_>>(),
+                    "withheld": withheld.iter().map(|w| w.worker.as_str().to_owned())
+                        .collect::<Vec<_>>(),
+                })
+            );
+        } else {
+            println!("🔍 dry-run: would purge {total} worker(s).");
+            for wid in terminal.iter().chain(stale.iter()).chain(orphan.iter()) {
+                println!("  - {wid}");
+            }
+            for w in &withheld {
+                println!("  WITHHELD {} → {}", w.worker, w.work.describe());
+            }
         }
         return Ok(());
     }
@@ -704,6 +834,7 @@ fn run_sweep<B: TransportBackend>(
                 "branch": w.work.branch,
                 "commits_ahead": w.work.commits_ahead,
                 "dirty_files": w.work.dirty_files,
+                "dirty_error": w.work.dirty_error.as_ref().map(ObservationError::describe),
                 "probe_error": w.work.probe_error,
             })).collect::<Vec<_>>(),
         });
@@ -825,10 +956,10 @@ fn run_targeted(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
     worker_name: &str,
-    force: bool,
-    allow_unharvested: bool,
+    args: &Args,
     probe: &dyn HarvestProbe,
 ) -> anyhow::Result<()> {
+    let (force, allow_unharvested, dry_run) = (args.force, args.allow_unharvested, args.dry_run);
     let worker_id = WorkerId::new(worker_name)?;
 
     let mut fleet = store.load_fleet()?;
@@ -858,6 +989,11 @@ fn run_targeted(
     }
     if !allow_unharvested {
         refuse_if_unharvested(&fleet, store, probe, &worker_id)?;
+    }
+
+    if dry_run {
+        report_targeted_dry_run(ctx, &worker_id, force);
+        return Ok(());
     }
 
     let Some(worker) = fleet.workers.get_mut(&worker_id) else {
@@ -1059,6 +1195,7 @@ mod tests {
             branch: "feat/task-20260802-16bf".to_owned(),
             commits_ahead: n,
             dirty_files: Vec::new(),
+            dirty_error: None,
             probe_error: None,
         })
     }
@@ -1115,6 +1252,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1150,6 +1289,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1192,6 +1333,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1221,6 +1364,8 @@ mod tests {
             status: Some("running".to_owned()),
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1265,6 +1410,8 @@ mod tests {
             status: None,
             role: Some(WorkerRole::Cognition),
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1293,6 +1440,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1313,6 +1462,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
 
         let err = run(&ctx, &args).unwrap_err();
@@ -1339,6 +1490,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1423,6 +1576,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &ErrBackend, &NoWork, &args).unwrap();
 
@@ -1479,6 +1634,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1522,6 +1679,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1554,6 +1713,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1591,6 +1752,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1635,6 +1798,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1690,6 +1855,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
 
@@ -1725,6 +1892,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1763,6 +1932,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run(&ctx, &args).unwrap();
 
@@ -1811,6 +1982,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &backend, &commits_ahead(1), &args)
             .expect_err("purge must fail closed on unharvested work");
@@ -1861,6 +2034,7 @@ mod tests {
             branch: "feat/task-20260802-7582".to_owned(),
             commits_ahead: 0,
             dirty_files: vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()],
+            dirty_error: None,
             probe_error: None,
         });
         let ctx = ctx_for(&tmp, false);
@@ -1870,6 +2044,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args)
             .expect_err("a dirty worktree must fail closed too");
@@ -1900,6 +2076,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: true,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(
             &ctx,
@@ -1940,6 +2118,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         let _ = run_sweep(
             &ctx,
@@ -1976,16 +2156,17 @@ mod tests {
         let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-0c2d", "target");
 
         let ctx = ctx_for(&tmp, false);
-        let err = run_targeted(
-            &ctx,
-            &store,
-            tmp.path(),
-            "target",
-            true,
-            false,
-            &commits_ahead(2),
-        )
-        .expect_err("targeted --force must not discard unharvested work");
+        let args = Args {
+            worker: Some("target".to_owned()),
+            force: true,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
+        };
+        let err = run_targeted(&ctx, &store, tmp.path(), "target", &args, &commits_ahead(2))
+            .expect_err("targeted --force must not discard unharvested work");
 
         assert_eq!(
             store.load_molecule(&mol_id).unwrap().status,
@@ -2010,7 +2191,16 @@ mod tests {
         let mol_id = stale_worker_with_running_molecule(&store, "task-20260802-clea", "clean");
 
         let ctx = ctx_for(&tmp, false);
-        run_targeted(&ctx, &store, tmp.path(), "clean", false, false, &NoWork).unwrap();
+        let args = Args {
+            worker: Some("clean".to_owned()),
+            force: false,
+            status: None,
+            role: None,
+            allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
+        };
+        run_targeted(&ctx, &store, tmp.path(), "clean", &args, &NoWork).unwrap();
 
         assert!(store.load_fleet().unwrap().workers.is_empty());
         assert_eq!(
@@ -2041,6 +2231,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         run_sweep(
             &ctx,
@@ -2067,6 +2259,7 @@ mod tests {
             branch: "feat/task-20260802-dark".to_owned(),
             commits_ahead: 0,
             dirty_files: Vec::new(),
+            dirty_error: None,
             probe_error: Some("git rev-list failed".to_owned()),
         });
         let ctx = ctx_for(&tmp, false);
@@ -2076,6 +2269,8 @@ mod tests {
             status: None,
             role: None,
             allow_unharvested: false,
+            worktrees: false,
+            dry_run: false,
         };
         assert!(run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args).is_err());
         assert_eq!(
@@ -2151,5 +2346,259 @@ mod tests {
         assert_eq!(ahead.commits_ahead, 1);
         assert!(ahead.dirty_files.is_empty());
         assert_eq!(ahead.branch, "feat/task-20260802-16bf");
+    }
+
+    #[test]
+    fn issue61_existing_guard_selection_and_ancestry_differential() -> anyhow::Result<()> {
+        // This is a witness for the EXISTING collapse guard, not a reclaim
+        // planner. In particular, do not reinterpret its output as permission
+        // to remove worktrees: registration and cargo locks are not inputs.
+        let tmp = TempDir::new()?;
+        let store = FileStore::new(tmp.path());
+        let mut fleet = Fleet::new();
+        let mut stale = Vec::new();
+        for name in [
+            "task-20260910-0000",
+            "task-20260910-0001",
+            "task-20260910-0002",
+        ] {
+            let mol = sample_mol(name, MoleculeStatus::Running);
+            store.save_molecule(&mol.id, &mol)?;
+            let w = worker_with_mol(name, name);
+            stale.push(w.id.clone());
+            fleet.workers.insert(w.id.clone(), w);
+            std::fs::create_dir_all(tmp.path().join(".worktrees").join(name))?;
+        }
+
+        struct Observed {
+            merged_ahead: usize,
+        }
+        impl HarvestProbe for Observed {
+            fn unharvested(
+                &self,
+                mol: &MoleculeId,
+                _base: Option<&str>,
+            ) -> Option<UnharvestedWork> {
+                let ahead = match mol.as_str() {
+                    "task-20260910-0001" => 2,
+                    "task-20260910-0000" => self.merged_ahead,
+                    _ => 0,
+                };
+                let dirty = mol.as_str() == "task-20260910-0002";
+                (ahead > 0 || dirty).then(|| UnharvestedWork {
+                    branch: format!("feat/{mol}"),
+                    commits_ahead: ahead,
+                    dirty_files: if dirty {
+                        vec!["note.md".into()]
+                    } else {
+                        vec![]
+                    },
+                    probe_error: None,
+                    dirty_error: None,
+                })
+            }
+        }
+
+        let selected = |probe: &Observed| {
+            let (eligible, _) = withhold_unharvested(&fleet, &store, probe, stale.clone());
+            eligible
+                .iter()
+                .map(|id| PathBuf::from(".worktrees").join(id.as_str()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert_eq!(
+            selected(&Observed { merged_ahead: 0 }),
+            std::collections::BTreeSet::from([PathBuf::from(".worktrees/task-20260910-0000")]),
+        );
+        // Only the ancestry observation changes: same path, status, dirt,
+        // roster and store. Both unsafe controls remain excluded.
+        assert_eq!(
+            selected(&Observed { merged_ahead: 1 }),
+            std::collections::BTreeSet::new(),
+        );
+        for name in [
+            "task-20260910-0000",
+            "task-20260910-0001",
+            "task-20260910-0002",
+        ] {
+            assert!(tmp.path().join(".worktrees").join(name).is_dir());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn issue61_characterize_ignored_note_and_moleculeless_directory() -> anyhow::Result<()> {
+        // Characterization of a known hole, NOT a safety approval. These
+        // assertions must change when the probe learns about ignored content.
+        // No molecule or cs done is involved in either fixture.
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        let git = |cwd: &Path, args: &[&str]| -> anyhow::Result<String> {
+            let out = Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(["-C", &cwd.to_string_lossy()])
+                .args(args)
+                .output()?;
+            anyhow::ensure!(out.status.success(), "git {args:?}: {:?}", out.stderr);
+            Ok(String::from_utf8(out.stdout)?)
+        };
+        git(&repo, &["init", "-q", "-b", "main"])?;
+        git(&repo, &["config", "user.name", "Noogram"])?;
+        git(&repo, &["config", "user.email", "test@noogram.org"])?;
+        std::fs::write(repo.join(".gitignore"), ".worktrees/\noperator-note.txt\n")?;
+        git(&repo, &["add", ".gitignore"])?;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-qm", "test: seed"],
+        )?;
+        let mol = MoleculeId::new("task-20260910-0003")?;
+        let wt = repo.join(".worktrees/task-20260910-0003");
+        git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "feat/task-20260910-0003",
+                &wt.to_string_lossy(),
+            ],
+        )?;
+        std::fs::write(
+            wt.join("operator-note.txt"),
+            "the only copy of an operator note",
+        )?;
+        let probe = GitHarvestProbe {
+            repo_root: Some(repo.clone()),
+            configured_trunk: Some("main".into()),
+        };
+        assert_eq!(probe.unharvested(&mol, Some("main")), None);
+        assert_eq!(
+            git(&wt, &["ls-files", "--others", "--exclude-standard"])?,
+            ""
+        );
+        assert_eq!(
+            git(
+                &wt,
+                &["ls-files", "--others", "--ignored", "--exclude-standard"]
+            )?,
+            "operator-note.txt\n"
+        );
+        assert!(wt.join("operator-note.txt").is_file());
+
+        let scratch = repo.join(".worktrees/task-20260910-0004");
+        std::fs::create_dir(&scratch)?;
+        std::fs::write(scratch.join("operator-note.txt"), "another unique note")?;
+        let registrations = git(&repo, &["worktree", "list", "--porcelain"])?;
+        assert!(!registrations.contains(scratch.to_string_lossy().as_ref()));
+        // Git walks up into the parent repository; that is not evidence
+        // about ownership or reachability of the scratch directory's bytes.
+        assert_eq!(
+            probe.unharvested(&MoleculeId::new("task-20260910-0004")?, Some("main")),
+            None
+        );
+        assert!(scratch.join("operator-note.txt").is_file());
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue 61 — consumer regression: the sweep's dirty probe
+    // ---------------------------------------------------------------------
+
+    /// A `git status` that cannot run makes the sweep **withhold**, naming
+    /// the failed operation — it no longer reads as a clean worktree.
+    ///
+    /// The fixture is the honest one: a candidate directory that is not
+    /// inside any repository, which is exactly the shape (`not a git
+    /// repository`) the retired fail-open swallowed.
+    #[test]
+    fn issue61_failed_dirty_probe_withholds_the_sweep() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let mol_id = MoleculeId::new("task-20260911-0005")?;
+        let worktree = tmp.path().join(".worktrees").join(mol_id.as_str());
+        std::fs::create_dir_all(&worktree)?;
+        let probe = GitHarvestProbe {
+            // Not a repository: the ahead probe finds no branch and the
+            // status probe fails. Only the second is at issue here.
+            repo_root: Some(tmp.path().to_path_buf()),
+            configured_trunk: Some("main".into()),
+        };
+        let work = probe
+            .unharvested(&mol_id, Some("main"))
+            .expect("a failed dirty probe must count as unharvested");
+        assert!(work.dirty_files.is_empty(), "no dirty path was observed");
+        let err = work.dirty_error.as_ref().expect("the error is preserved");
+        assert_eq!(err.operation, "git status --porcelain");
+        assert_eq!(err.path, worktree);
+        let described = work.describe();
+        assert!(described.contains("worktree unobservable"), "{described}");
+        assert!(described.contains("git status --porcelain"), "{described}");
+
+        // And the sweep withholds the worker rather than collapsing it.
+        let store = FileStore::new(tmp.path());
+        let mol = sample_mol(mol_id.as_str(), MoleculeStatus::Running);
+        store.save_molecule(&mol.id, &mol)?;
+        let mut fleet = Fleet::new();
+        let w = worker_with_mol(mol_id.as_str(), mol_id.as_str());
+        let wid = w.id.clone();
+        fleet.workers.insert(w.id.clone(), w);
+        let (keep, withheld) = withhold_unharvested(&fleet, &store, &probe, vec![wid.clone()]);
+        assert!(keep.is_empty());
+        assert_eq!(withheld.len(), 1);
+        assert_eq!(withheld[0].worker, wid);
+        assert!(worktree.is_dir(), "withholding removes nothing");
+        Ok(())
+    }
+
+    /// The same probe still reports a *successful* clean observation as
+    /// harvested: withholding on failure must not withhold on everything.
+    #[test]
+    fn issue61_successful_clean_probe_still_permits_the_sweep() -> anyhow::Result<()> {
+        let tmp = TempDir::new()?;
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir(&repo)?;
+        for args in [
+            vec!["init", "-q", "-b", "main"],
+            vec!["config", "user.name", "Noogram"],
+            vec!["config", "user.email", "maintainers@noogram.org"],
+        ] {
+            assert!(Command::new("git")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .arg("-C")
+                .arg(&repo)
+                .args(&args)
+                .output()?
+                .status
+                .success());
+        }
+        std::fs::write(repo.join("seed.md"), "seed")?;
+        assert!(Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "seed.md"])
+            .output()?
+            .status
+            .success());
+        assert!(Command::new("git")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .arg("-C")
+            .arg(&repo)
+            .args(["-c", "commit.gpgsign=false", "commit", "-qm", "test: seed"])
+            .output()?
+            .status
+            .success());
+        let probe = GitHarvestProbe {
+            repo_root: Some(repo.clone()),
+            configured_trunk: Some("main".into()),
+        };
+        // No worktree directory at all: proven absence, not a failed probe.
+        let mol_id = MoleculeId::new("task-20260911-0006")?;
+        assert_eq!(probe.unharvested(&mol_id, Some("main")), None);
+        Ok(())
     }
 }
