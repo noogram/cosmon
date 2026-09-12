@@ -91,6 +91,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [dev-dependencies]
+syn = { workspace = true }
 cosmon-oidc-testkit = { path = "../cosmon-oidc-testkit" }
 # The in-memory transport mock the integration tests hand to
 # `AppState.worker_backend` (issue #54 U6) — no tmux, spawn calls

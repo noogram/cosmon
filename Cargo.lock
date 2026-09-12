@@ -1461,6 +1461,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "subtle",
+ "syn",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

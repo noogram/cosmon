@@ -3,53 +3,24 @@ info:
   title: Cosmon Remote Pilot Port (RPP) — V0+V1
   version: "0.5.0"
   description: |
-    Hand-written OpenAPI for the V0 read-only + V1 mutation cuts of the
-    Cosmon Remote Pilot Port (ADR-080, §8j HTTPS+OIDC instantiation).
-    The §8p-pinned wire surface is **nineteen routes** (8 molecule +
-    3 artifact + 5 auth-claude + 1 auth-me + 1 SSE events + 1 quota) —
-    pinned by the freeze test in `tests/api_surface_freeze.rs` and
-    held by the §8p invariant
-    ("API surface ⊊ CLI surface"). The artifact endpoints (e653 spec,
-    `task-20260522-ef4f`) are filesystem-mediated rather than
-    state-mediated and exempt from the §8p CLI-bijection check. The
-    SSE events route (`task-20260522-c46a`) is HTTP-only — there is
-    no `cs events stream` verb and durable history lives in the
-    per-tenant filesystem state, not on the bus.
+    Hand-curated tenant client contract for the Remote Pilot Port. Requests
+    execute through the admission boundary and injectable library ports.
+    Worker dispatch may spawn processes; tenant state remains isolated.
 
-    Three **operational** endpoints sit *outside* `/v1/` and never
-    count toward the §8p surface — `/healthz` (minimal liveness),
-    `/metrics` (Prometheus text), `/diagnostics` (JSON snapshot of
-    in-RAM projections). They are unauthenticated and carry no
-    per-tenant data — aggregate counters and projection sizes only
-    (task-20260523-d820, gap report ae3d §i).
+    The registered surface is partitioned between this document and exact
+    entries in openapi/exclusions.json, each with a reviewed reason. The
+    cargo integration test openapi_surface checks both directions of path
+    coverage directly against src/lib.rs, independently of the event canon.
+    This file is not generated from Rust types. Path coverage does not prove
+    method, schema or behavioral parity; handler changes still require review.
 
-    Eight of the nine routes are library-direct (T-RPP-LIB-DIRECT,
-    2026-05-04): the adapter calls
-    `cosmon_state::ops::{observe,nucleate,tag,ensemble,collapse,freeze,thaw,stuck}`
-    in-process. There is no subprocess, no in-image `cs` binary
-    invocation, no shell-out per request on those routes. The
-    ninth route (`POST /v1/molecules/{id}/tackle`, T9 Tenant-Demo V2,
-    `task-20260512-c6de`) re-instates the original ADR-080 §3.5
-    subprocess envelope because spawning an external agent (Claude
-    Code via tmux) is fundamentally out-of-process. Cross-noyau
-    isolation remains structural — every request resolves a
-    per-tenant `<galaxies_root>/<noyau>/.cosmon/state/` from the JWT
-    and the adapter never walks outside that root.
-
-    This file is **hand-curated** (R6 of ADR-080). It is not generated
-    from the Rust types. Drift between this file and the implementation
-    must be caught by the surface-freeze test and resolved by editing
-    the YAML in the same PR that touches a route.
-
-    ## What this spec is not
-
-    It is not the full Cosmon CLI surface. The §8p invariant forbids
-    exposing operator-only verbs (`done`, `evolve`, `complete`,
-    `security`, `run`, `kill`, `purge`, `reconcile`, `verify`,
-    `whisper`, `drop`) over the network. Adding any of them here is a
-    structural breach.
+    Bounded run (ADR-124) and sealed done (ADR-176 as amended) are tenant
+    request doors. Their presence does not expose the whole CLI. Operator
+    provisioning, bootstrap distribution and the separate MCP protocol are
+    outside this published REST contract. Existing healthz, metrics and
+    diagnostics remain documented operational endpoints without tenant data.
   contact:
-    name: Cosmon — Remote Pilot Port
+    name: Noogram
     url: https://github.com/noogram/cosmon
   license:
     name: GNU Affero General Public License v3.0 only
@@ -1135,6 +1106,24 @@ paths:
         molecule⇔verb bijection check exempts it automatically (same
         class as `/v1/auth/claude/*`).
       tags: [auth]
+      responses:
+        "200":
+          description: |
+            The validated JWT, projected to the whoami envelope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthMeResponse"
+        "401":
+          description: |
+            Missing / malformed `Authorization` header, JWT signature
+            invalid, expired, unknown issuer, or audience mismatch.
+            One stable label per reject reason; the wire body never
+            leaks `sub` / nucleon / tenant identity.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/quota:
     get:
       summary: |
@@ -1171,17 +1160,46 @@ paths:
       responses:
         "200":
           description: |
-            The validated JWT, projected to the whoami envelope.
+            Successful snapshot. Body and `X-RateLimit-*` headers
+            describe the same accounting moment.
+          headers:
+            X-RateLimit-Limit:
+              schema: { type: integer, format: int64, minimum: 0 }
+              description: |
+                Burst capacity (max tokens the bucket can hold). V0
+                production default: 30.
+            X-RateLimit-Remaining:
+              schema: { type: integer, format: int64, minimum: 0 }
+              description: |
+                Tokens still available before the next request
+                would overflow (`floor(capacity − level)`).
+            X-RateLimit-Reset:
+              schema: { type: string, format: date-time }
+              description: |
+                Wall-clock at which the bucket will be fully drained
+                back to zero. ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/AuthMeResponse"
+                $ref: "#/components/schemas/QuotaResponse"
         "401":
-          description: |
-            Missing / malformed `Authorization` header, JWT signature
-            invalid, expired, unknown issuer, or audience mismatch.
-            One stable label per reject reason; the wire body never
-            leaks `sub` / nucleon / tenant identity.
+          description: Missing or invalid JWT or tenant admission failure.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "403":
+          description: Missing cosmon:molecule:read or cosmon:molecule:write scope.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
+        "429":
+          description: rate_limited or noyau_budget_exhausted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ApiError"
   /v1/events:
     get:
       operationId: streamEvents
@@ -1271,59 +1289,25 @@ paths:
                 type: string
                 description: SSE-encoded event stream (see description).
         "400":
-          description: Malformed query parameter.
+          description: Malformed query parameter (framework rejection).
           content:
-            application/json:
+            text/plain:
               schema:
-                $ref: "#/components/schemas/ApiError"
+                type: string
         "401":
-          description: |
-            Missing or malformed `Authorization` header / invalid JWT
-            / unknown `sub`.
-            Successful snapshot. Body and `X-RateLimit-*` headers
-            describe the same accounting moment.
-          headers:
-            X-RateLimit-Limit:
-              schema: { type: integer, format: int64, minimum: 0 }
-              description: |
-                Burst capacity (max tokens the bucket can hold). V0
-                production default: 30.
-            X-RateLimit-Remaining:
-              schema: { type: integer, format: int64, minimum: 0 }
-              description: |
-                Tokens still available before the next request
-                would overflow (`floor(capacity − level)`).
-            X-RateLimit-Reset:
-              schema: { type: string, format: date-time }
-              description: |
-                Wall-clock at which the bucket will be fully drained
-                back to zero. ISO-8601 (`YYYY-MM-DDTHH:MM:SSZ`).
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/QuotaResponse"
-        "401":
-          description: |
-            Missing / invalid JWT, expired, mis-audienced, or
-            unknown `sub`. Header triplet is **not** emitted on this
-            response — only validated JWTs receive the snapshot.
+          description: Missing or invalid JWT or tenant admission failure.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "403":
-          description: Missing `cosmon:events:subscribe` scope.
-          description: |
-            JWT lacks `cosmon:molecule:read` (or `:write`).
+          description: Missing cosmon:events:subscribe scope.
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/ApiError"
         "429":
-          description: |
-            The admission rate-limit already exceeded — the wire
-            response still carries `X-RateLimit-*` headers + a
-            `Retry-After` so the client knows when to retry.
+          description: rate_limited or noyau_budget_exhausted.
           content:
             application/json:
               schema:
@@ -1560,6 +1544,1241 @@ paths:
               schema:
                 $ref: "#/components/schemas/ApiError"
 
+  /v1/molecules/{id}/status:
+    get:
+      operationId: "getMoleculeStatus"
+      summary: "Poll one molecule"
+      description: "Requires cosmon:molecule:read or cosmon:molecule:write. Tenant-isolated admission applies. Reads state without scanning append-only logs. Send the weak ETag back in If-None-Match; comparison accepts weak/strong tags, comma-separated lists and *. No request body."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "If-None-Match", "in": "header", "required": false, "description": "Previously returned entity tag, a list of tags, or *.", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. internal."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed, global_kill or store_unavailable."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "not_found (including malformed ids)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Current status."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/StatusEnvelope"
+          headers:
+            ETag:
+              schema:
+                type: "string"
+              description: "Weak validator of status and updated_at."
+            Cache-Control:
+              schema:
+                type: "string"
+              description: "no-cache"
+            Last-Modified:
+              schema:
+                type: "string"
+              description: "Last state update, in HTTP date form."
+        "304":
+          description: "Unchanged; no response body."
+          headers:
+            ETag:
+              schema:
+                type: "string"
+              description: "Weak validator of status and updated_at."
+            Cache-Control:
+              schema:
+                type: "string"
+              description: "no-cache"
+            Last-Modified:
+              schema:
+                type: "string"
+              description: "Last state update, in HTTP date form."
+  /v1/molecules/{id}/session:
+    get:
+      operationId: "getMoleculeSession"
+      summary: "Read the worker message thread"
+      description: "Requires cosmon:logs:subscribe. Read-only, non-streaming and retrievable after worker exit. No request body. A source of none explicitly reports no retrievable transcript. tail wins over offset/limit; tail and limit are clamped to 0..2000. total and ordinals describe the bounded transcript read, not necessarily the entire on-disk history; truncated marks the transcript read budget ceiling. waiting is an observation with attributed evidence, not a lifecycle transition."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "tail", "in": "query", "required": false, "description": "Last N entries; overrides offset/limit.", "schema": {"type": "integer", "minimum": 0}}, {"name": "offset", "in": "query", "required": false, "description": "offset", "schema": {"type": "integer", "minimum": 0, "default": 0}}, {"name": "limit", "in": "query", "required": false, "description": "Page size, clamped to 0..2000.", "schema": {"type": "integer", "minimum": 0, "default": 200}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. internal."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed, global_kill or store_unavailable."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "Malformed query parameters produce a framework text rejection, not ApiError."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Ordered thread page."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/SessionEnvelope"
+  /v1/molecules/{id}/done:
+    post:
+      operationId: "doneMolecule"
+      summary: "Close and conditionally integrate one molecule"
+      description: "Requires cosmon:molecule:write and an operator-sealed harvest authority for the effect. Enabling auto-propel (no_auto_propel=false and max_retries>0) also requires cosmon:worker:spawn. The response is synchronous, never 202. A 200 does not imply integration: inspect merged and non_integration. Unknown fields, malformed JSON and unknown strategies are refused. Empty bodies and missing/blank reasons return missing_reason. if_completed permits a no_op. no_merge closes without integration; teardown flags preserve the named resources."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              "$ref": "#/components/schemas/DoneBody"
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent). not_authorized or reservation_requires_seal."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted. backlog_full or pre_done_refused."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. harvest_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill. base_not_fast_forward."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "unsupported_parameter or missing_reason."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "not_completed or merge_conflict."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "501":
+          description: "harvest_effect_unavailable (only a deployment injecting an unavailable effect; stock builds have the library effect)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Harvest outcome, including idempotent retries and no-op closure."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/DoneEnvelope"
+  /v1/molecules/{id}/run:
+    post:
+      operationId: "runMolecule"
+      summary: "Start a bounded resident drain"
+      description: "Requires BOTH cosmon:molecule:write and cosmon:worker:spawn. No request body or client-supplied bounds. Bounds come from the sealed binding. 202 acknowledges dispatch, not completion; drain.started and drain.terminated events report progress and the termination reason. Only one drain per noyau."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "not_found (malformed id or absent tenant root)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "drain_already_active."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "202":
+          description: "Resident drain dispatched."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/RunEnvelope"
+  /v1/molecules/{id}/result:
+    get:
+      operationId: "getMoleculeResult"
+      summary: "Retrieve the canonical deliverable"
+      description: "Requires cosmon:molecule:read or cosmon:molecule:write. Tenant-isolated admission applies. No request body. Resolves the persistent molecule directory first, then the artifact directory. result=null is a successful observation when no deliverable is available; result_status, liveness and integration explain the state. Binary content is base64-encoded."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. internal."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed, global_kill or store_unavailable."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Deliverable and lifecycle/integration observations."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ResultEnvelope"
+  /v1/molecules/{id}/logs:
+    get:
+      operationId: "streamMoleculeLogs"
+      summary: "Tail the live worker pane"
+      description: "Requires cosmon:logs:subscribe. No request body. SSE log.line events carry JSON {molecule_id, line, timestamp} and numeric ids; keep-alive comments every 30 seconds. A missing/ended pane closes the stream, rather than returning transcript history. Last-Event-ID filters emitted ids; it is not durable replay."
+      tags: ["molecules"]
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}, {"name": "follow", "in": "query", "required": false, "description": "follow", "schema": {"type": "boolean", "default": true}}, {"name": "poll_ms", "in": "query", "required": false, "description": "Cadence clamped to 50..5000 milliseconds.", "schema": {"type": "integer", "minimum": 0, "default": 500}}, {"name": "Last-Event-ID", "in": "header", "required": false, "description": "Numeric reconnect floor; malformed values are ignored.", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent). forbidden."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "invalid_path_segment; malformed query parameters produce framework text."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Live SSE stream."
+          content:
+            text/event-stream:
+              schema:
+                type: "string"
+  /v1/molecules/{id}/thaw:
+    post:
+      operationId: "removedThawMolecule"
+      summary: "Migration response for the retired thaw endpoint"
+      description: "No body is required or read. Use POST /v1/molecules/{id}/freeze with state=active and a reason. The handler remains registered solely to return the migration response; the historical fallback_until value is not a removal schedule."
+      tags: ["molecules"]
+      security: []
+      parameters: [{"name": "id", "in": "path", "required": true, "description": "id", "schema": {"type": "string"}}]
+      responses:
+        "410":
+          description: "endpoint_removed."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["error", "hint", "removed_in", "fallback_until"]
+                properties:
+                  error:
+                    type: "string"
+                    enum: ["endpoint_removed"]
+                  hint:
+                    type: "string"
+                  removed_in:
+                    type: "string"
+                  fallback_until:
+                    type: "string"
+      deprecated: true
+  /v1/auth/claude/start:
+    post:
+      operationId: "startClaudeAuth"
+      summary: "Start a credential authorization session"
+      description: "No handler-level JWT or scope check; deployment access controls apply. Disabled auth-claude returns 503. No request body."
+      tags: ["auth-claude"]
+      security: []
+      responses:
+        "429":
+          description: "rate_limit_exceeded (five concurrent open sessions)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "503":
+          description: "service_unavailable (disabled surface or storage failure)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "200":
+          description: "Current authorization outcome."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["session_id", "state", "created_at", "ttl_at"]
+                properties:
+                  session_id:
+                    type: "string"
+                  state:
+                    type: "string"
+                  created_at:
+                    type: "string"
+                    format: "date-time"
+                  ttl_at:
+                    type: "string"
+                    format: "date-time"
+  /v1/auth/claude/email:
+    post:
+      operationId: "emailClaudeAuth"
+      summary: "Attach email and obtain the authorization URL"
+      description: "No handler-level JWT or scope check; deployment access controls apply. Disabled auth-claude returns 503. JSON body required; framework extraction errors are plain text."
+      tags: ["auth-claude"]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["session_id", "email"]
+              properties:
+                session_id:
+                  type: "string"
+                email:
+                  type: "string"
+      responses:
+        "400":
+          description: "invalid_request."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "session_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "409":
+          description: "session_state_mismatch."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "410":
+          description: "session_expired."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "503":
+          description: "service_unavailable (disabled surface or storage failure)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Current authorization outcome."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["session_id", "state", "verification_url", "oauth_state", "expires_at"]
+                properties:
+                  session_id:
+                    type: "string"
+                  state:
+                    type: "string"
+                  verification_url:
+                    type: "string"
+                  oauth_state:
+                    type: "string"
+                  expires_at:
+                    type: "string"
+                    format: "date-time"
+        "415":
+          description: "Missing or unsupported JSON Content-Type; framework text rejection."
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "422":
+          description: "JSON fields fail deserialization; framework text rejection."
+          content:
+            text/plain:
+              schema:
+                type: "string"
+  /v1/auth/claude/{session_id}:
+    get:
+      operationId: "getClaudeAuthSession"
+      summary: "Poll credential authorization"
+      description: "No handler-level JWT or scope check; deployment access controls apply. Disabled auth-claude returns 503. No request body."
+      tags: ["auth-claude"]
+      security: []
+      parameters: [{"name": "session_id", "in": "path", "required": true, "description": "session_id", "schema": {"type": "string"}}]
+      responses:
+        "404":
+          description: "session_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "503":
+          description: "service_unavailable (disabled surface or storage failure)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "200":
+          description: "Current authorization outcome."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthSession"
+    delete:
+      operationId: "deleteClaudeAuthSession"
+      summary: "Cancel credential authorization"
+      description: "No handler-level JWT or scope check; deployment access controls apply. Disabled auth-claude returns 503. No request body."
+      tags: ["auth-claude"]
+      security: []
+      parameters: [{"name": "session_id", "in": "path", "required": true, "description": "session_id", "schema": {"type": "string"}}]
+      responses:
+        "404":
+          description: "session_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "503":
+          description: "service_unavailable (disabled surface or storage failure)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "200":
+          description: "Current authorization outcome."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["ok"]
+                properties:
+                  ok:
+                    type: "boolean"
+  /v1/auth/claude/confirm:
+    post:
+      operationId: "confirmClaudeAuth"
+      summary: "Exchange the pasted authorization code"
+      description: "No handler-level JWT or scope check; deployment access controls apply. Disabled auth-claude returns 503. JSON body required; framework extraction errors are plain text."
+      tags: ["auth-claude"]
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["session_id", "authorization_code"]
+              properties:
+                session_id:
+                  type: "string"
+                authorization_code:
+                  type: "string"
+                  description: "Full authorizationCode#state copied from the authorization page."
+      responses:
+        "400":
+          description: "invalid_request (including absent/mismatched state)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+            text/plain:
+              schema:
+                type: "string"
+        "404":
+          description: "session_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "409":
+          description: "session_state_mismatch."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "410":
+          description: "session_expired."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "500":
+          description: "anthropic_unreachable."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "502":
+          description: "token_exchange_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "503":
+          description: "service_unavailable (disabled surface or storage failure)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ClaudeAuthError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Current authorization outcome."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["ok", "state"]
+                properties:
+                  ok:
+                    type: "boolean"
+                  state:
+                    type: "string"
+                  account_email:
+                    type: "string"
+        "415":
+          description: "Missing or unsupported JSON Content-Type; framework text rejection."
+          content:
+            text/plain:
+              schema:
+                type: "string"
+        "422":
+          description: "JSON fields fail deserialization; framework text rejection."
+          content:
+            text/plain:
+              schema:
+                type: "string"
+  /v1/avatar/converse:
+    post:
+      operationId: "converseAvatar"
+      summary: "Send a typed message to a bound avatar"
+      description: "Requires cosmon:pilote:converse. Acceptance only: persistence and synchronous avatar answers are deferred. request hop must be below the binding max_hops (default 8); announce is exempt."
+      tags: ["avatar"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["avatar_id", "message", "kind"]
+              properties:
+                avatar_id:
+                  type: "string"
+                message: {}
+                kind:
+                  type: "string"
+                  enum: ["request", "announce"]
+                hop:
+                  type: "integer"
+                  minimum: 0
+                  maximum: 4294967295
+                  default: 0
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill. tenant_unavailable or no_binding."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "invalid_json_body, missing_avatar_id or missing_message."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "max_hops_exceeded."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "converse"]
+                properties:
+                  request_id:
+                    type: "string"
+                  converse:
+                    type: "object"
+                    required: ["message_id", "accepted"]
+                    properties:
+                      message_id:
+                        type: "string"
+                      accepted:
+                        type: "boolean"
+                      response: {}
+  /v1/avatar/perceive:
+    post:
+      operationId: "perceiveAvatar"
+      summary: "Submit a perception to an enabled source"
+      description: "Requires cosmon:world:observe. Off by default per source. Acceptance only: payload persistence is deferred. integrity is BLAKE3 hex over serde_json serialization of data, including quotes when data is a string; the current handler does not decode base64 before hashing."
+      tags: ["avatar"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["source", "data", "integrity"]
+              properties:
+                source:
+                  type: "string"
+                data: {}
+                integrity:
+                  type: "string"
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill. tenant_unavailable or source_not_enabled."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "invalid_json_body, missing_source, missing_data, missing_integrity or integrity_mismatch."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "perceive"]
+                properties:
+                  request_id:
+                    type: "string"
+                  perceive:
+                    type: "object"
+                    required: ["perception_id", "accepted"]
+                    properties:
+                      perception_id:
+                        type: "string"
+                      accepted:
+                        type: "boolean"
+  /v1/avatar/{instance_id}/status:
+    get:
+      operationId: "getAvatarStatus"
+      summary: "Read avatar lifecycle state"
+      description: "Requires cosmon:world:observe. Absent or unreadable ledger projects as mould; incarnation fields appear only for avatar state. No request body."
+      tags: ["avatar"]
+      parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "avatar_status"]
+                properties:
+                  request_id:
+                    type: "string"
+                  avatar_status:
+                    type: "object"
+                    required: ["instance_id", "state"]
+                    properties:
+                      instance_id:
+                        type: "string"
+                      cicatrice:
+                        type: "string"
+                      pilote_id:
+                        type: "string"
+                      juridiction:
+                        type: "string"
+                      tenant_id:
+                        type: "string"
+                      incarnated_at:
+                        type: "string"
+                        format: "date-time"
+                      state:
+                        type: "string"
+                        enum: ["mould", "avatar"]
+  /v1/avatar/{instance_id}/incarnate:
+    post:
+      operationId: "incarnateAvatar"
+      summary: "Bind a mould into an avatar"
+      description: "Requires cosmon:pilote:converse. Appends the incarnation event to the instance ledger."
+      tags: ["avatar"]
+      parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["pilote_id", "tenant_id", "juridiction"]
+              properties:
+                pilote_id:
+                  type: "string"
+                tenant_id:
+                  type: "string"
+                juridiction:
+                  type: "string"
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. serialization_error or io_error."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "invalid_json_body, invalid_pilote_id, invalid_juridiction, invalid_tenant_id or invalid_instance_id."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "already_incarnated."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "incarnate"]
+                properties:
+                  request_id:
+                    type: "string"
+                  incarnate:
+                    type: "object"
+                    required: ["instance_id", "cicatrice", "pilote_id", "juridiction", "tenant_id", "incarnated_at"]
+                    properties:
+                      instance_id:
+                        type: "string"
+                      cicatrice:
+                        type: "string"
+                      pilote_id:
+                        type: "string"
+                      juridiction:
+                        type: "string"
+                      tenant_id:
+                        type: "string"
+                      incarnated_at:
+                        type: "string"
+                        format: "date-time"
+  /v1/avatar/{instance_id}/grant:
+    post:
+      operationId: "grantAvatar"
+      summary: "Grant an incarnation canal"
+      description: "Requires cosmon:pilote:converse. Persists the canal binding for an incarnated instance."
+      tags: ["avatar"]
+      parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: "object"
+              required: ["canal", "target"]
+              properties:
+                canal:
+                  type: "string"
+                  enum: ["b", "c", "d"]
+                target:
+                  type: "string"
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed. io_error."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "400":
+          description: "invalid_json_body or invalid_canal."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "instance_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "not_incarnated."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "413":
+          description: "Request body exceeds the adapter limit (1 MiB); framework rejection, not an ApiError envelope."
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "grant"]
+                properties:
+                  request_id:
+                    type: "string"
+                  grant:
+                    type: "object"
+                    required: ["instance_id", "canal", "target", "granted"]
+                    properties:
+                      instance_id:
+                        type: "string"
+                      canal:
+                        type: "string"
+                      target:
+                        type: "string"
+                      granted:
+                        type: "boolean"
+  /v1/avatar/{instance_id}/audit:
+    get:
+      operationId: "auditAvatar"
+      summary: "Read the incarnation ledger"
+      description: "Requires cosmon:world:observe. Incarnation details appear only for avatar state. Events are the parsed ledger entries. No request body."
+      tags: ["avatar"]
+      parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "404":
+          description: "instance_not_found."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "audit"]
+                properties:
+                  request_id:
+                    type: "string"
+                  audit:
+                    type: "object"
+                    required: ["instance_id", "state", "events"]
+                    properties:
+                      instance_id:
+                        type: "string"
+                      state:
+                        type: "string"
+                        enum: ["mould", "avatar"]
+                      cicatrice:
+                        type: "string"
+                      incarnation:
+                        type: "object"
+                        required: ["pilote_id", "juridiction", "tenant_id", "ts"]
+                        properties:
+                          pilote_id:
+                            type: "string"
+                          juridiction:
+                            type: "string"
+                          tenant_id:
+                            type: "string"
+                          ts:
+                            type: "string"
+                            format: "date-time"
+                      events:
+                        type: "array"
+                        items: {}
+  /v1/avatar/{instance_id}/mould-info:
+    get:
+      operationId: "getAvatarMouldInfo"
+      summary: "Read pre-incarnation configuration"
+      description: "Requires cosmon:world:observe. config is the mould TOML projected to JSON, or null when absent/unreadable. No request body."
+      tags: ["avatar"]
+      parameters: [{"name": "instance_id", "in": "path", "required": true, "description": "instance_id", "schema": {"type": "string"}}]
+      responses:
+        "401":
+          description: "missing_authorization, malformed_jwt, unsupported_alg, signature_invalid, expired, not_yet_valid, audience_mismatch, ambiguous_audience, issuer_not_pinned, unknown_sub, seal_broken, cross_tenant_pivot, sub_killed, jti_killed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "403":
+          description: "forbidden (required scope absent)."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "429":
+          description: "rate_limited or noyau_budget_exhausted."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "500":
+          description: "inbox_materialization_failed."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "503":
+          description: "noyau_killed or global_kill."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "409":
+          description: "already_incarnated."
+          content:
+            application/json:
+              schema:
+                "$ref": "#/components/schemas/ApiError"
+        "200":
+          description: "Avatar projection or acceptance."
+          content:
+            application/json:
+              schema:
+                type: "object"
+                required: ["request_id", "mould_info"]
+                properties:
+                  request_id:
+                    type: "string"
+                  mould_info:
+                    type: "object"
+                    required: ["instance_id", "state", "config", "ready_for_incarnation"]
+                    properties:
+                      instance_id:
+                        type: "string"
+                      state:
+                        type: "string"
+                        enum: ["mould"]
+                      config: {}
+                      ready_for_incarnation:
+                        type: "boolean"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -1573,6 +2792,273 @@ components:
         `RS384`, `RS512` are rejected at parse time.
 
   schemas:
+    StatusEnvelope:
+      type: "object"
+      required: ["request_id", "molecule_id", "status", "phase", "updated_at", "terminal"]
+      properties:
+        request_id:
+          type: "string"
+        molecule_id:
+          type: "string"
+        status:
+          type: "string"
+        phase:
+          type: "string"
+        updated_at:
+          type: "string"
+          format: "date-time"
+        terminal:
+          type: "boolean"
+    SessionEnvelope:
+      type: "object"
+      required: ["request_id", "molecule_id", "status", "adapter", "source", "retrospective", "live", "total", "offset", "returned", "truncated", "waiting", "entries"]
+      properties:
+        request_id:
+          type: "string"
+        molecule_id:
+          type: "string"
+        status:
+          type: "string"
+        adapter:
+          anyOf: [{"type": "string"}, {"type": "null"}]
+        source:
+          type: "string"
+          enum: ["claude-transcript", "codex-rollout", "tmux-scrollback", "none"]
+        retrospective:
+          type: "boolean"
+        live:
+          type: "boolean"
+        total:
+          type: "integer"
+          minimum: 0
+        offset:
+          type: "integer"
+          minimum: 0
+        returned:
+          type: "integer"
+          minimum: 0
+        truncated:
+          type: "boolean"
+        waiting:
+          type: "object"
+          required: ["waiting", "class", "evidence", "evidence_source", "awaiting_operator"]
+          properties:
+            waiting:
+              type: "boolean"
+            class:
+              type: "string"
+            evidence:
+              anyOf: [{"type": "string"}, {"type": "null"}]
+            evidence_source:
+              type: "string"
+            awaiting_operator:
+              type: "boolean"
+        entries:
+          type: "array"
+          items:
+            type: "object"
+            required: ["ordinal", "at", "origin", "text"]
+            properties:
+              ordinal:
+                type: "integer"
+                minimum: 1
+              at:
+                anyOf: [{"type": "string", "format": "date-time"}, {"type": "null"}]
+              origin:
+                type: "string"
+                enum: ["worker", "operator", "system"]
+              text:
+                type: "string"
+    DoneBody:
+      type: "object"
+      required: ["reason"]
+      properties:
+        reason:
+          type: "string"
+          minLength: 1
+          description: "Required non-blank explanation; whitespace-only is missing_reason."
+        strategy:
+          type: "string"
+          enum: ["merge", "ff-only"]
+          default: "merge"
+        force:
+          type: "boolean"
+          default: false
+        if_completed:
+          type: "boolean"
+          default: false
+        no_merge:
+          type: "boolean"
+          default: false
+        no_worktree_remove:
+          type: "boolean"
+          default: false
+        no_branch_delete:
+          type: "boolean"
+          default: false
+        no_kill:
+          type: "boolean"
+          default: false
+        no_auto_propel:
+          type: "boolean"
+          default: true
+        skip_pre_done_hook:
+          type: "boolean"
+          default: false
+        deploy_off_trunk:
+          type: "boolean"
+          default: false
+        propel_message:
+          type: "string"
+        max_retries:
+          type: "integer"
+          minimum: 0
+          maximum: 4294967295
+          default: 0
+      additionalProperties: false
+    DoneEnvelope:
+      type: "object"
+      required: ["request_id", "harvest"]
+      properties:
+        request_id:
+          type: "string"
+        harvest:
+          type: "object"
+          required: ["molecule", "outcome", "merged", "non_integration"]
+          properties:
+            molecule:
+              type: "string"
+            outcome:
+              type: "string"
+              enum: ["landed", "closed_without_merge", "already_landed", "no_op"]
+            merged:
+              type: "boolean"
+            non_integration:
+              anyOf: [{"type": "string"}, {"type": "null"}]
+    RunEnvelope:
+      type: "object"
+      required: ["request_id", "drain"]
+      properties:
+        request_id:
+          type: "string"
+        drain:
+          type: "object"
+          required: ["root", "status", "bounds", "timeout_secs", "started_at"]
+          properties:
+            root:
+              type: "string"
+            status:
+              type: "string"
+              enum: ["started"]
+            bounds:
+              type: "object"
+              required: ["budget", "max_depth", "max_molecules"]
+              properties:
+                budget:
+                  type: "integer"
+                  minimum: 0
+                max_depth:
+                  type: "integer"
+                  minimum: 0
+                max_molecules:
+                  type: "integer"
+                  minimum: 0
+            timeout_secs:
+              type: "integer"
+              minimum: 0
+            started_at:
+              type: "string"
+              format: "date-time"
+    ResultEnvelope:
+      type: "object"
+      required: ["request_id", "molecule_id", "status", "result_status", "liveness", "integration", "result"]
+      properties:
+        request_id:
+          type: "string"
+        molecule_id:
+          type: "string"
+        status:
+          type: "string"
+        result_status:
+          type: "string"
+        liveness:
+          type: "object"
+          required: ["process", "heartbeat_at", "tackled_at", "stale_after_s"]
+          properties:
+            process: {}
+            heartbeat_at:
+              anyOf: [{"type": "string", "format": "date-time"}, {"type": "null"}]
+            tackled_at:
+              anyOf: [{"type": "string", "format": "date-time"}, {"type": "null"}]
+            stale_after_s:
+              type: "integer"
+              minimum: 0
+        integration:
+          type: "object"
+          required: ["merged_at", "reason", "observed_at", "base_branch", "detail", "retryable"]
+          properties:
+            merged_at:
+              anyOf: [{"type": "string", "format": "date-time"}, {"type": "null"}]
+            reason:
+              anyOf: [{"type": "string"}, {"type": "null"}]
+            observed_at:
+              anyOf: [{"type": "string", "format": "date-time"}, {"type": "null"}]
+            base_branch:
+              anyOf: [{"type": "string"}, {"type": "null"}]
+            detail:
+              anyOf: [{"type": "string"}, {"type": "null"}]
+            retryable:
+              anyOf: [{"type": "boolean"}, {"type": "null"}]
+        result:
+          anyOf: [{"type": "object", "required": ["source", "content_type", "encoding", "content", "size_bytes", "integrity"], "properties": {"source": {"type": "string"}, "content_type": {"type": "string"}, "encoding": {"type": "string", "enum": ["utf8", "base64"]}, "content": {"type": "string"}, "size_bytes": {"type": "integer", "minimum": 0}, "integrity": {"$ref": "#/components/schemas/IntegrityHash"}}}, {"type": "null"}]
+    ClaudeAuthError:
+      type: "object"
+      required: ["error"]
+      properties:
+        error:
+          type: "object"
+          required: ["code", "message"]
+          properties:
+            code:
+              type: "string"
+            message:
+              type: "string"
+            session_id:
+              type: "string"
+            current_state:
+              type: "string"
+    ClaudeAuthSession:
+      type: "object"
+      required: ["session_id", "state", "created_at", "ttl_at"]
+      properties:
+        session_id:
+          type: "string"
+        state:
+          type: "string"
+        created_at:
+          type: "string"
+          format: "date-time"
+        ttl_at:
+          type: "string"
+          format: "date-time"
+        verification_url:
+          type: "string"
+          format: "uri"
+        oauth_state:
+          type: "string"
+        expires_at:
+          type: "string"
+          format: "date-time"
+        account_email:
+          type: "string"
+        error:
+          type: "object"
+          required: ["code", "message"]
+          properties:
+            code:
+              type: "string"
+            message:
+              type: "string"
     NucleateBody:
       type: object
       required: [formula]
@@ -2185,28 +3671,6 @@ components:
           enum: [prepared, active]
           description: Adapter posture (ADR-076 §3).
         uptime_seconds:
-    WorkersResponse:
-      type: object
-      required: [request_id, workers, count]
-      description: |
-        Response body for `GET /v1/workers` (`task-20260523-f82b`,
-        gap report ae3d workflow §e priority 5). Lists the active
-        workers in the caller's noyau.
-      properties:
-        request_id:
-          type: string
-          description: |
-            Audit-correlation id for the inbox-materialised admission
-            row of this `/v1/workers` call.
-        workers:
-          type: array
-          description: |
-            Active workers, sorted by `started_at` ascending so a
-            paginating client sees a deterministic enumeration.
-            Empty when no molecule carries a live process record.
-          items:
-            $ref: "#/components/schemas/WorkerEntry"
-        count:
           type: integer
           format: int64
           minimum: 0
@@ -2347,8 +3811,33 @@ components:
               type: integer
               format: int64
               minimum: 0
-            `workers.length`. Pre-computed server-side so a tenant
-            can render a count without parsing the array.
+
+    WorkersResponse:
+      type: object
+      required: [request_id, workers, count]
+      description: |
+        Response body for `GET /v1/workers` (`task-20260523-f82b`,
+        gap report ae3d workflow §e priority 5). Lists the active
+        workers in the caller's noyau.
+      properties:
+        request_id:
+          type: string
+          description: |
+            Audit-correlation id for the inbox-materialised admission
+            row of this `/v1/workers` call.
+        workers:
+          type: array
+          description: |
+            Active workers, sorted by `started_at` ascending so a
+            paginating client sees a deterministic enumeration.
+            Empty when no molecule carries a live process record.
+          items:
+            $ref: "#/components/schemas/WorkerEntry"
+        count:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Number of active workers (workers.length).
 
     WorkerEntry:
       type: object
