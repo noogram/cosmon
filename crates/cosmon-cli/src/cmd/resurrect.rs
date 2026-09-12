@@ -273,6 +273,10 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // cosmon's intrinsic `DEFAULT_STRONG_MODELS` still keeps a cheap
         // pin's fallback tail off the strong model (task-20260705-ba98).
         &[],
+        // No harness settings on the resurrect path: `cs resurrect` re-spawns a
+        // recorded dispatch and carries no `--harness` flag of its own. An
+        // empty slice leaves the spawned command byte-identical (ADR-177 / #65).
+        &[],
         &recorded,
         // `cs resurrect` starts the profile here, at the spawn. Everything this
         // command did first — worktree repair, model resolution, the ledger

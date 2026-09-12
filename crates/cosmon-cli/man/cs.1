@@ -199,6 +199,15 @@ MODEL SELECTION (per\-molecule, ADR\-097). A model pin is the sibling of the ada
 .PP
 The id is carried opaquely. A recognisable cross\-family pair prints a non\-blocking advisory, but cosmon still dispatches: a custom Adapter endpoint may legitimately serve another family\*(Aqs model, so the Adapter remains authoritative. The claude adapter carries the pin through the ANTHROPIC_MODEL per\-session closure\-shadow at spawn (no shared\-state mutation); the Direct\-API adapters take it above their config default_model.
 .PP
+HARNESS SETTINGS (per\-step, how the model runs — ADR\-177). The model axis pins WHICH model runs; this pins HOW it runs, by handing an opaque \*(Aqkey=value\*(Aq pair to the adapter\*(Aqs own override channel. Cosmon recognises ZERO keys: the pair is carried verbatim and logged verbatim as sent, never normalised, and an unknown key fails in the harness\*(Aqs own parser at launch rather than against a cosmon allowlist nobody can version.
+  \*(Aqcs tackle \-\-harness <KEY>=<VALUE>\*(Aq  → repeatable; CLI flag wins.
+  formula step \*(Aq[steps.harness]\*(Aq       → the per\-workflow pin a spore carries.
+  the harness\*(Aqs own config            → reached by cosmon emitting NO key; it is silence, not a cosmon surface.
+.PP
+Merged PER KEY, never wholesale: overriding one key leaves every sibling the step pinned exactly where it was. Carriers: codex takes one \*(Aq\-c key=value\*(Aq per entry, claude takes \*(Aq\-\-<key> <value>\*(Aq; any other adapter REFUSES a non\-empty map at launch, naming itself — a setting is never silently dropped. The \*(Aq[adapters.<name>.harness]\*(Aq config level is deferred (it would sit beside the wholesale\-replace \*(Aqextra_args\*(Aq on the same node).
+.PP
+Each resolved key mints one \*(Aqharness_setting_selected\*(Aq line carrying { key, value, selection_source (flag|formula), argv_fragment, channel, harness_version?, launch_status }. That receipt is EX\-ANTE: read it as DISPATCHED at, never "ran at". Paired with the harness\*(Aqs own echo (\*(Aqeffort_observed\*(Aq, parsed from the harness log and never inferred from the pin), the strongest true sentence is "cosmon requested E through channel C; the harness\*(Aqs own log reported E" — a two\-party agreement, not a proof of behaviour.
+.PP
 MODEL BUDGET (fail\-closed strong\-dispatch ceiling, ADR\-097). Declare which ids are STRONG (expensive) per adapter and cap strong dispatches per window — both opt\-in:
   \*(Aq[adapters.<name>].strong = ["<id>", ...]\*(Aq  → the strong cost\-class set. FAIL\-OPEN: an unlisted id is non\-strong (cheap); a cost\-class annotation, NOT a validity table.
   \*(Aq[model_budget] strong_dispatch_cap = <K>\*(Aq  → at most K strong dispatches per \*(Aqwindow_hours\*(Aq (default 24); absent ⇒ no ceiling. \*(Aqon_overflow\*(Aq = "downgrade" (default — drop to the safe floor) or "abort" (refuse).

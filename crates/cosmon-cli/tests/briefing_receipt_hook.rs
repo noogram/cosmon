@@ -188,6 +188,7 @@ fn the_spawn_command_installs_the_overlay_and_names_the_compiled_binary() {
         &[],
         &RootSpawnDecision::SpawnAsIs,
         Some(overlay.as_path()),
+        &[],
         || None,
         |_| None,
     );
@@ -222,6 +223,7 @@ fn a_worker_without_an_overlay_spawns_byte_identically() {
         &[],
         &RootSpawnDecision::SpawnAsIs,
         None,
+        &[],
         || None,
         |_| None,
     );

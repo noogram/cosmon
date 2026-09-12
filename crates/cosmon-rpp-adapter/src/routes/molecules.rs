@@ -1649,6 +1649,17 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_step",
             request_id: Some(request_id.to_owned()),
         },
+        // ADR-177 / issue #65: the step pinned `[steps.harness]` settings and
+        // the resolved adapter has no channel to carry them. A distinct label
+        // from `tackle_unsupported_step` on purpose — the two are both
+        // capability gaps, but the remedy differs (drop the pin or change the
+        // adapter, versus wait for the U6 cut-over), and a caller that cannot
+        // tell them apart cannot act on either.
+        TackleExecError::UnsupportedHarnessCarrier(_) => ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "tackle_unsupported_harness",
+            request_id: Some(request_id.to_owned()),
+        },
         TackleExecError::Spawn { .. } | TackleExecError::OrphanRetained { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "worker_spawn_failed",

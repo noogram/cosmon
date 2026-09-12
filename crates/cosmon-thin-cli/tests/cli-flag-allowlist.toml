@@ -816,6 +816,13 @@ reason = "worktree suppression — local plumbing; cs-thin never tackles."
 
 [[flag_only_in_cs]]
 verb = "tackle"
+flag = "--harness"
+reason = """
+harness settings (ADR-177 / issue #65) reach an adapter's own override channel at spawn — local plumbing cs-thin never performs. Exposing it remotely would mean minting a wire vocabulary for a map cosmon deliberately does not interpret; the RPP tackle route refuses a `[steps.harness]` pin it cannot carry (501 tackle_unsupported_harness) rather than dropping it.
+"""
+
+[[flag_only_in_cs]]
+verb = "tackle"
 flag = "--permission-mode"
 reason = "claude-code permission-mode passthrough — local plumbing; cs-thin never tackles."
 
