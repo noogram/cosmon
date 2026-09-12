@@ -15,9 +15,14 @@
 # public pointers at private conversations, which is the definition this gate
 # refuses.
 #
+# The 84 was the count on 2026-09-10. Re-measured on 2026-09-13, when this gate
+# was written: 94 commits, 58 distinct identifiers, 2026-08-31 to 2026-09-12.
+# Ten more landed in three days, which is the argument for a gate rather than a
+# paragraph — the production rate is the problem, not the backlog.
+#
 # SCOPE — WHAT A PR ADDS, NEVER WHAT HISTORY CONTAINS
 # ---------------------------------------------------
-# The 84 historical trailers STAY. Rewriting them means a force-push that
+# The historical trailers STAY. Rewriting them means a force-push that
 # breaks every clone and invalidates the SHAs cited in ADRs and chronicles, and
 # the contributor guide forbids rewriting the development repository in place.
 # So the scope is a RANGE, never a walk of history: this gate judges the

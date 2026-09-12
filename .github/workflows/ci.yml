@@ -790,7 +790,7 @@ jobs:
     # conversation" — and a reader of a red build should be able to tell the
     # two apart from the job name alone.
     #
-    # SCOPE. A range, never a walk of history. The 84 historical
+    # SCOPE. A range, never a walk of history. The 94 historical
     # `Claude-Session:` trailers on main stay (rewriting them means a
     # force-push that breaks every clone and invalidates the SHAs cited in ADRs
     # and chronicles), and they are below every future PR's base, so they are

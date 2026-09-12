@@ -729,8 +729,10 @@ fi
 # On 2026-09-10 a `https://claude.ai/code/session_<id>` link was found in a PR
 # comment on the public repository, pointing at one of the operator's private
 # conversations. Nine PR bodies and one issue body were stripped the same day.
-# 84 commit messages on public `main` still carry a `Claude-Session:` trailer —
-# 54 distinct identifiers. Probed unauthenticated they answer 403, so they are
+# 94 commit messages on public `main` still carry a `Claude-Session:` trailer —
+# 58 distinct identifiers, 2026-08-31 to 2026-09-12 (measured 2026-09-13; it was
+# 84/54 three days earlier, which is the argument for a gate rather than a
+# paragraph). Probed unauthenticated they answer 403, so they are
 # not content leaks. They are private session identifiers, in clear text, in a
 # permanent public record: a durable pointer at something private, which is
 # what a leak is even while the endpoint refuses anonymous readers.
