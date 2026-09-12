@@ -1,0 +1,62 @@
+[
+  {
+    "path": "/",
+    "reason": "Informational HTML landing page; presentation content is not the v1 tenant REST contract."
+  },
+  {
+    "path": "/.well-known/cosmon-oauth-clients",
+    "reason": "Public OAuth bootstrap discovery document with its own schema version; not a v1 tenant operation."
+  },
+  {
+    "path": "/api/healthz",
+    "reason": "Legacy deployment liveness alias; the canonical /healthz operation is already documented."
+  },
+  {
+    "path": "/dist/CLAUDE.md",
+    "reason": "Downloadable client guidance asset; its prose is not a versioned REST schema."
+  },
+  {
+    "path": "/dist/binary/{platform}/cosmon-remote",
+    "reason": "Platform binary distribution asset with release integrity metadata, not a v1 REST operation."
+  },
+  {
+    "path": "/dist/justfile",
+    "reason": "Downloadable client bootstrap asset, not a tenant REST operation."
+  },
+  {
+    "path": "/health/backends",
+    "reason": "Deployment backend probe diagnostics; operator observations are outside the tenant client contract."
+  },
+  {
+    "path": "/install.sh",
+    "reason": "Executable bootstrap distribution asset, versioned with the release rather than the v1 REST API."
+  },
+  {
+    "path": "/mcp",
+    "reason": "Nested Streamable HTTP protocol service (including its fallback suffixes), governed by the MCP tool contract rather than REST OpenAPI."
+  },
+  {
+    "path": "/v1/admin/federations",
+    "reason": "Host-sealed operator creation and inspection of federation relations; outside the tenant client promise."
+  },
+  {
+    "path": "/v1/admin/federations/{id}",
+    "reason": "Host-sealed operator dissolution of a federation relation; outside the tenant client promise."
+  },
+  {
+    "path": "/v1/admin/federations/{id}/galaxies/{galaxy}",
+    "reason": "Host-sealed operator revocation of one federation galaxy; outside the tenant client promise."
+  },
+  {
+    "path": "/v1/admin/habilitations",
+    "reason": "Host-sealed operator provisioning and inspection of bindings; outside tenant authorization and the tenant client promise."
+  },
+  {
+    "path": "/v1/admin/habilitations/{id}",
+    "reason": "Host-sealed operator revocation of a binding; outside the tenant client promise."
+  },
+  {
+    "path": "/v1/admin/reload",
+    "reason": "Host-sealed operator action that reloads authorization bindings; tenant JWTs cannot authorize it."
+  }
+]

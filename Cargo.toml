@@ -164,6 +164,8 @@ colored = "3"
 rand = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Syntax-aware router contract checks reuse the workspace's existing syn version.
+syn = { version = "2", features = ["full", "visit"] }
 # `bytes` provides `Bytes::from_owner`, which lets `cosmon-remote` hand reqwest
 # a zero-copy view over the wipe-on-drop `Zeroizing<Vec<u8>>` that carries the
 # OIDC token-endpoint form body (plaintext refresh token). The body is built
