@@ -356,6 +356,7 @@ pub fn build_claude_command<C, F>(
     writable_roots: &[std::path::PathBuf],
     decision: &RootSpawnDecision,
     receipt_overlay: Option<&std::path::Path>,
+    harness_args: &[String],
     cb_runner: C,
     env_lookup: F,
 ) -> String
@@ -459,8 +460,22 @@ where
     let settings = receipt_overlay.map_or_else(String::new, |path| {
         format!(" --settings {}", shell_quote(&path.to_string_lossy()))
     });
+    // Harness settings (ADR-177 / issue #65), pre-rendered by
+    // `cosmon_core::harness_settings::render_harness_args` as `--<key> <value>`
+    // token pairs and appended **verbatim**, each shell-quoted. There is
+    // deliberately no allowlist: an unknown flag is rejected by Claude Code's
+    // own parser at launch, loudly, and cosmon names the adapter alongside it.
+    // A key cosmon recognised would be public API carried in spore files on
+    // other people's disks, with no way to announce its removal. Empty (the
+    // common case) contributes nothing and leaves the command byte-identical to
+    // the pre-#65 shape.
+    let mut harness = String::new();
+    for token in harness_args {
+        harness.push(' ');
+        harness.push_str(&shell_quote(token));
+    }
     format!(
-        "{prefix}{demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings} \
+        "{prefix}{demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings}{harness} \
          {disallowed}2> {worker_stderr}"
     )
 }
@@ -523,6 +538,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -561,6 +577,7 @@ mod tests {
             std::slice::from_ref(&state),
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -590,6 +607,7 @@ mod tests {
                 std::slice::from_ref(&state),
                 &RootSpawnDecision::SpawnAsIs,
                 None,
+                &[],
                 cb_absent,
                 |_| None,
             );
@@ -613,6 +631,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -635,6 +654,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -666,6 +686,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -689,6 +710,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -721,6 +743,7 @@ mod tests {
             &[],
             &decision,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -757,6 +780,7 @@ mod tests {
                 &[],
                 decision,
                 None,
+                &[],
                 cb_absent,
                 |_| None,
             )
@@ -787,6 +811,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -820,6 +845,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -841,6 +867,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "IS_SANDBOX" {
@@ -866,6 +893,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -888,6 +916,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -912,6 +941,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             || Some("user-b@example.org".to_owned()),
             |k| match k {
                 "HOME" => Some("/Users/you".to_owned()),
@@ -935,6 +965,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             || None, // cb failed
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -957,6 +988,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             || Some("  \n".to_owned()), // whitespace-only
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -979,6 +1011,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -1001,6 +1034,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "CLAUDE_CONFIG_DIR" {
@@ -1023,6 +1057,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             || Some("user+tag@example.com".to_owned()),
             |k| {
                 if k == "HOME" {
@@ -1048,6 +1083,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -1086,6 +1122,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1113,6 +1150,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -1129,6 +1167,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| {
                 if k == "ANTHROPIC_MODEL" {
@@ -1174,6 +1213,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| (k == "CB_DEPTH").then(|| "2".to_owned()),
         );
@@ -1190,6 +1230,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -1206,6 +1247,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -1228,6 +1270,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |k| (k == "COSMON_API_REQUEST").then(|| "1".to_owned()),
         );
@@ -1250,6 +1293,7 @@ mod tests {
             &[],
             &RootSpawnDecision::SpawnAsIs,
             None,
+            &[],
             cb_absent,
             |_| None,
         );
@@ -1345,6 +1389,7 @@ mod tests {
                 &[],
                 &decision,
                 None,
+                &[],
                 cb_absent,
                 |k| (k == var).then(|| hostile.clone()),
             );
@@ -1387,6 +1432,7 @@ mod tests {
             &[],
             &decision,
             None,
+            &[],
             cb_absent,
             |_| None,
         );

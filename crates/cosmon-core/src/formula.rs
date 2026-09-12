@@ -37,7 +37,7 @@
 //! assert_eq!(formula.steps[1].id, "test");
 //! ```
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 
 use serde::Deserialize;
@@ -361,6 +361,19 @@ struct RawStep {
     /// every default in `resolve_model_selection` (delib-20260704-b476 C1).
     #[serde(default)]
     model: Option<String>,
+    /// Optional per-step `[steps.harness]` table — opaque harness settings
+    /// carried verbatim to the adapter's own override channel (ADR-177,
+    /// issue #65). TOML form:
+    ///
+    /// ```toml
+    /// [steps.harness]
+    /// model_reasoning_effort = "high"
+    /// ```
+    ///
+    /// Threads into [`Step::harness`]. Absent = an empty map = cosmon passes
+    /// nothing, which is the only way the harness's own default can apply.
+    #[serde(default)]
+    harness: BTreeMap<String, String>,
     #[serde(flatten)]
     _extra: HashMap<String, toml::Value>,
 }
@@ -744,6 +757,28 @@ pub struct Step {
     /// across nucleation: a child molecule resolves from its own formula,
     /// never inheriting a parent step's pin (C4 Ghost D).
     pub model: Option<String>,
+    /// Opaque **harness settings** this step pins, carried verbatim to the
+    /// adapter's own native override channel (ADR-177 / issue #65).
+    ///
+    /// `model` pins *which model* runs; this pins *how it runs* — codex's
+    /// `model_reasoning_effort`, a Claude Code flag, anything the harness
+    /// itself understands. cosmon recognises **zero** keys: the map is carried
+    /// verbatim, logged verbatim as sent, never normalised and never
+    /// summarised. An unknown key fails in the harness's own parser at launch,
+    /// loudly, which is where knowledge about that harness's keys lives and
+    /// stays current — a key cosmon *recognised* would be public API carried
+    /// in files on other people's disks, with no mechanism to announce its
+    /// removal.
+    ///
+    /// This is rank 2 of the three-level chain: it ranks *below* an explicit
+    /// `cs tackle --harness k=v` flag and *above* the harness's own config,
+    /// merged **per key** — see [`crate::harness_settings`]. An empty map (the
+    /// absence-default) emits nothing, leaving the spawn command
+    /// byte-identical to the pre-#65 shape.
+    ///
+    /// Only meaningful for worker-spawn steps, and carried opaquely: it does
+    /// not affect the TLA+ seal, exactly as model pins do not.
+    pub harness: BTreeMap<String, String>,
 }
 
 /// Where a [`QuerySpec`] resolves its JSON document from.
@@ -1079,6 +1114,7 @@ impl Formula {
                     llm,
                     adapter: s.adapter,
                     model: s.model,
+                    harness: s.harness,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;

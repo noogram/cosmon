@@ -381,13 +381,23 @@ pub fn capture_realized_from_cwd_under(
             .unwrap_or_default(),
             ModelObservationSource::ClaudeStreamJson,
         ),
-        Some("codex") => (
-            resolve_codex_session_by_cwd(cwd)
+        Some("codex") => {
+            let content = resolve_codex_session_by_cwd(cwd)
                 .and_then(|p| std::fs::read_to_string(p).ok())
-                .map(|c| realized_models_from_codex_session(&c))
-                .unwrap_or_default(),
-            ModelObservationSource::CodexSessionMeta,
-        ),
+                .unwrap_or_default();
+            // The ex-post half of ADR-177 Decision 5, read from the same bytes
+            // the model axis already reads: codex names the effort on the
+            // session-opening `turn_context` and on every later
+            // `thread_settings_applied`. Emitted here rather than beside the
+            // model emission below because an effort trajectory can be present
+            // while the model trajectory is empty (and vice versa), and neither
+            // axis may be inferred from the other.
+            emit_realized_efforts(state_dir, mol_id, &worker, &content);
+            (
+                realized_models_from_codex_session(&content),
+                ModelObservationSource::CodexSessionMeta,
+            )
+        }
         // In-process providers emit at their own response seam.
         _ => return,
     };
@@ -408,6 +418,35 @@ pub fn capture_realized_from_cwd_under(
         &observed,
         source,
         &provenance,
+    );
+}
+
+/// Emit the newly-observed tail of the realized **reasoning-effort**
+/// trajectory a codex session log reports (ADR-177 / issue #65).
+///
+/// Separate from the model emission on purpose: the two axes are disjoint. A
+/// session may name an effort and no model, or a model and no effort, and
+/// neither is ever back-filled from the other — nor from the pin, which is the
+/// `reasoning_effort_is_never_inferred` discipline applied to the axis it was
+/// named after.
+///
+/// An empty trajectory emits nothing. That silence is the honest floor: what
+/// remains for the reader is the ex-ante `harness_setting_selected` receipt,
+/// whose wording is *dispatched at*, never *ran at*.
+fn emit_realized_efforts(
+    state_dir: &Path,
+    mol_id: &MoleculeId,
+    worker: &cosmon_core::id::WorkerId,
+    content: &str,
+) {
+    let efforts = cosmon_core::model_realization::realized_efforts_from_codex_session(content);
+    cosmon_state::events::worker_spawn::emit_new_effort_observations(
+        state_dir,
+        mol_id,
+        worker,
+        "codex",
+        &efforts,
+        ModelObservationSource::CodexSessionMeta,
     );
 }
 

@@ -361,6 +361,54 @@ The `COSMON_RPP_CS` knob, `cfg.cs_path`, `AppState.cs_path`, and the
 `SystemInvoker` machinery are deleted; the shipped image carries no `cs`
 binary and its Dockerfile header is now a statement of fact.
 
+**Amendment (task-20260911-be1e, 2026-09-11) — the preflight half of that gap
+was not merely missing, it was load-bearing.** Follow-up (1) above named the
+readiness pipeline as future work. What the enumeration did not say is that
+one item on the list, *the adapter preflight*, was not an optional
+convenience: it carried the whole **fail-closed** property of a dispatch, and
+the three `503` labels issue #48 published as a wire contract were its
+observable form. Before U6 the adapter recovered them by substring-matching
+`cs tackle`'s stderr; the cut-over removed the stderr, and with it the checks.
+The forgeron bake of 2026-09-10 measured the consequence on both arches under
+the shipped Compose: a `tackle` with no Claude credential answered `200` and a
+receipt where the published v3.9 answered `503 worker_credential_missing`. The
+worker booted, sat on `Not logged in · Run /login`, and read as healthy to
+every liveness probe cosmon has — the exact mute hang the refusal exists to
+prevent, now reachable through the API.
+
+The repair does not port the CLI's arms. It adds an injectable port,
+`cosmon_runtime::SpawnPreflight`, evaluated between adapter selection and the
+**first** side effect — ahead of the attribution events as well as the
+worktree, the ledger and the spawn — so a refused dispatch leaves the molecule
+exactly as it was found. A port rather than a call because the checks are I/O
+(a keychain probe, a `stat(2)`, an HTTP request) and `cosmon-runtime` sits on
+the I/O-free side of that boundary, and because each embedder has a different
+*truthful* answer: `cs tackle` reads the operator's ambient environment, while
+the adapter must ask about the environment the **enveloped** worker will read
+(neither `CLAUDE_CONFIG_DIR` nor `CLAUDE_CODE_OAUTH_TOKEN` crosses
+`PASSTHROUGH_VARS`) and about the tenant's own configured backend, never the
+server's loopback. The adapter's implementation reads the credentials file the
+deployment declares through the same classifier `GET /v1/auth/me` uses, so the
+two halves issue #48 shipped now cohere by construction rather than by two
+checks that happen to agree.
+
+**The two taxonomies, reconciled.** U6 also renamed the OS-level spawn failure
+from `subprocess_spawn_failed` to `worker_spawn_failed`. The two name one
+condition — the worker process could not be started — so keeping both would
+leave two taxonomies overlapping in silence, which is the failure mode this
+amendment exists to close, not to duplicate. `subprocess_spawn_failed` is
+restored as the wire label: it is the identifier the issue-#48 reporter
+consumes, and `worker_spawn_failed` never reached a published image (v3.9
+`de97ff2d` predates U6; the v3.10 bake that first carried it was withheld
+precisely over this regression), so retiring the newer name breaks no
+consumer while dropping the older one breaks the reporter. The label survives
+the rewrite of the path that raises it, which is what makes it a contract.
+`TackleExecError::OrphanRetained` moves to the generic `tackle_unavailable`:
+the session *did* spawn, and reporting a spawn failure while a paid process
+may still be running is the one thing the §8ab retention exists to avoid.
+`tackle_unavailable` keeps its role as the stable fallback with deliberately
+no client-side hint.
+
 ### 3.6 Reject taxonomy
 
 ```rust

@@ -1395,10 +1395,34 @@ pub async fn stuck_molecule(
 ///   step is an execution kind the library executor does not cover yet
 ///   (gate / native / query / llm). The refusal is TYPED and names the
 ///   step kind in the body — never a silent fallback to a subprocess.
-/// - **503 `worker_spawn_failed`** — the transport backend could not
+/// - **503 `worker_credential_missing`** — a precondition: the worker
+///   this dispatch would spawn has no credential it could use. Refused
+///   before any effect; the molecule is untouched and still tacklable
+///   (issue #48, restored on the library seam by task-20260911-be1e —
+///   see [`crate::preflight`]).
+/// - **503 `adapter_backend_unreachable`** — a precondition: the
+///   resolved adapter's backend did not answer, or cannot serve the
+///   pinned model. Also refused before any effect.
+/// - **503 `subprocess_spawn_failed`** — the transport backend could not
 ///   open the worker session (the ledger has been rolled back).
 /// - **503 `tackle_unavailable`** — stable fallback for any other
-///   dispatch failure (store fault, git fault, unknown adapter).
+///   dispatch failure (store fault, git fault, unknown adapter, a
+///   session spawned whose briefing and teardown both failed).
+///
+/// # The two taxonomies, reconciled
+///
+/// Issue #54 U6 replaced the subprocess envelope and, with it, renamed
+/// the OS-level spawn failure from `subprocess_spawn_failed` to
+/// `worker_spawn_failed`. The two name the *same* condition — the worker
+/// process could not be started — so keeping both would leave two
+/// taxonomies overlapping in silence. `subprocess_spawn_failed` is the
+/// one restored: it is the identifier the issue-#48 reporter consumes,
+/// and `worker_spawn_failed` never reached a published image (v3.9
+/// `de97ff2d` predates U6; the v3.10 bake that first carried it was not
+/// published, precisely because of this regression). Retiring the newer
+/// name breaks no consumer; dropping the older one breaks the reporter.
+/// `tackle_unavailable` survives underneath both as the generic
+/// fallback, deliberately without a client-side hint.
 #[allow(clippy::too_many_lines)] // Authentication, admission, and spawn stay auditable in order.
 pub async fn tackle_molecule(
     State(state): State<Arc<AppState>>,
@@ -1543,6 +1567,7 @@ pub async fn tackle_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
+    let preflight = tenant_preflight(&state, &envelope, &tenant_root);
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // The paths are pinned to the admitted tenant, not resolved from the
     // adapter process's environment: this dispatch must read the very store
@@ -1553,7 +1578,8 @@ pub async fn tackle_molecule(
     // already performed.
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
-        .with_tackled_by(cosmon_core::tackle::TackledBy::Human);
+        .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
+        .with_preflight(preflight);
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
     // holds; unboxed again at the match below.
@@ -1623,6 +1649,36 @@ pub async fn tackle_molecule(
     .into_response())
 }
 
+/// Build the dispatch preconditions the RPP publishes as `503` contract
+/// labels (issue #48, restored on the library seam by
+/// task-20260911-be1e).
+///
+/// One helper for both dispatching routes on purpose. `tackle` and the
+/// `run` drain spawn workers through the same seam, so a precondition
+/// installed on one and not the other reproduces the regression one layer
+/// down — a DAG filled with workers that cannot work, each reading as
+/// healthy to every liveness probe. Two call sites that must agree are
+/// two call sites that eventually will not.
+///
+/// Built from the SAME envelope the spawn is clamped with, so "does the
+/// worker have a credential" is asked of the environment the worker will
+/// actually read — see [`crate::preflight`] for why the adapter's own is
+/// the wrong one.
+fn tenant_preflight(
+    state: &AppState,
+    envelope: &WorkerEnvelope,
+    tenant_root: &std::path::Path,
+) -> std::sync::Arc<crate::preflight::RppSpawnPreflight> {
+    std::sync::Arc::new(crate::preflight::RppSpawnPreflight::new(
+        envelope.clone(),
+        tenant_root,
+        state
+            .auth_claude
+            .as_ref()
+            .map(|ac| ac.config.credentials_path.clone()),
+    ))
+}
+
 /// Map a library-dispatch failure onto the wire.
 ///
 /// Every outcome is a stable label; no store/git/transport detail
@@ -1649,21 +1705,49 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_step",
             request_id: Some(request_id.to_owned()),
         },
-        TackleExecError::Spawn { .. } | TackleExecError::OrphanRetained { .. } => ApiError {
-            status: StatusCode::SERVICE_UNAVAILABLE,
-            label: "worker_spawn_failed",
+        // ADR-177 / issue #65: the step pinned `[steps.harness]` settings and
+        // the resolved adapter has no channel to carry them. A distinct label
+        // from `tackle_unsupported_step` on purpose — the two are both
+        // capability gaps, but the remedy differs (drop the pin or change the
+        // adapter, versus wait for the U6 cut-over), and a caller that cannot
+        // tell them apart cannot act on either.
+        TackleExecError::UnsupportedHarnessCarrier(_) => ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "tackle_unsupported_harness",
             request_id: Some(request_id.to_owned()),
         },
+        // The precondition refusals carry their own contract label
+        // (issue #48): `worker_credential_missing` /
+        // `adapter_backend_unreachable`. The detail and the remedy stay
+        // in the server log — the wire gets the identifier only
+        // (turing G9).
+        TackleExecError::Preflight { refusal, .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: refusal.label(),
+            request_id: Some(request_id.to_owned()),
+        },
+        TackleExecError::Spawn { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+
         // The rollback wrapper adds *what was preserved*, never a different
         // failure class: the wire label stays the one the underlying
         // failure earns, and the preservation detail lives in the log.
         TackleExecError::RolledBackPreserving { source, .. } => {
             tackle_exec_error_to_response(source, request_id)
         }
+        // The generic fallback. `OrphanRetained` belongs here and NOT
+        // with `Spawn`: the session WAS spawned, and only the briefing
+        // and the teardown failed. Calling that a spawn failure would
+        // tell a tenant nothing started while a paid process may still
+        // be running; the retention detail is in the log.
         TackleExecError::State(_)
         | TackleExecError::Id(_)
         | TackleExecError::Ledger(_)
         | TackleExecError::UnknownAdapter(_)
+        | TackleExecError::OrphanRetained { .. }
         | TackleExecError::Git(_) => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "tackle_unavailable",
@@ -1841,6 +1925,7 @@ pub async fn run_molecule(
         anthropic_api_key: state.anthropic_api_key.clone(),
         claude_model: state.claude_model.clone(),
     };
+    let preflight = tenant_preflight(&state, &envelope, &tenant_root);
     let backend = EnvelopedBackend::new(state.worker_backend.for_tenant(&tenant_root), &envelope);
     // Default actor class: `runtime:<pid>` — the drain's dispatches are
     // runtime claims (never sticky), exactly as `cs run`'s were.
@@ -1848,7 +1933,8 @@ pub async fn run_molecule(
     // the deterministic tenant store, and every dispatch it makes must read
     // that store too.
     let executor = LibraryExecutor::new(&tenant_root, backend)
-        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root));
+        .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
+        .with_preflight(preflight);
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,
@@ -2511,6 +2597,7 @@ fn parse_variables(raw: Option<&Value>) -> Result<Vec<(String, String)>, &'stati
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+    use cosmon_runtime::PreflightRefusal;
 
     #[test]
     fn extracts_bearer_token() {
@@ -2585,10 +2672,19 @@ mod tests {
         assert_eq!(err, "variables_not_object");
     }
 
-    /// Transport-level spawn failure maps to `worker_spawn_failed` —
+    /// Transport-level spawn failure maps to `subprocess_spawn_failed` —
     /// the ledger has already been rolled back when this surfaces.
+    ///
+    /// This assertion was `worker_spawn_failed` between issue #54 U6 and
+    /// task-20260911-be1e. The expectation, not the code, was the thing
+    /// that had drifted: U6 renamed a *contract identifier* while
+    /// rewriting the path that raises it, and the two names denote one
+    /// condition — the worker process could not be started. The older
+    /// name is the one an external consumer matches on (issue #48); the
+    /// newer one never reached a published image, so retiring it breaks
+    /// nobody. See the route's doc-comment for the full reconciliation.
     #[test]
-    fn spawn_failure_maps_to_worker_spawn_failed() {
+    fn spawn_failure_maps_to_subprocess_spawn_failed() {
         let api = tackle_exec_error_to_response(
             &TackleExecError::Spawn {
                 id: Box::new(MoleculeId::new("task-20260905-0001").unwrap()),
@@ -2597,7 +2693,64 @@ mod tests {
             "req-spawn",
         );
         assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(api.label, "worker_spawn_failed");
+        assert_eq!(api.label, "subprocess_spawn_failed");
+    }
+
+    /// Each precondition refusal carries its OWN stable label, and both
+    /// are 503 — the contract the v3.10 bake found missing.
+    ///
+    /// Asserted here on the mapping itself as well as end-to-end in
+    /// `tests/v1_tackle_credential_contract.rs`: a label is a string, and
+    /// a string is exactly what a refactor silently rewrites.
+    #[test]
+    fn preflight_refusals_carry_their_own_stable_labels() {
+        for (refusal, expected) in [
+            (
+                PreflightRefusal::WorkerCredentialMissing {
+                    adapter: "claude".to_owned(),
+                    detail: "absent".to_owned(),
+                    remedy: "log in".to_owned(),
+                },
+                "worker_credential_missing",
+            ),
+            (
+                PreflightRefusal::AdapterBackendUnreachable {
+                    adapter: "local".to_owned(),
+                    detail: "connection refused".to_owned(),
+                },
+                "adapter_backend_unreachable",
+            ),
+        ] {
+            let api = tackle_exec_error_to_response(
+                &TackleExecError::Preflight {
+                    id: Box::new(MoleculeId::new("task-20260905-0004").unwrap()),
+                    refusal,
+                },
+                "req-preflight",
+            );
+            assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+            assert_eq!(api.label, expected);
+        }
+    }
+
+    /// A session that spawned and could not be torn down is NOT a spawn
+    /// failure: it takes the generic fallback, because telling a tenant
+    /// "nothing started" while a paid process may still be running is the
+    /// one thing the retention exists to avoid.
+    #[test]
+    fn orphan_retained_is_not_reported_as_a_spawn_failure() {
+        let api = tackle_exec_error_to_response(
+            &TackleExecError::OrphanRetained {
+                id: Box::new(MoleculeId::new("task-20260905-0005").unwrap()),
+                session_name: "task-20260905-0005".to_owned(),
+                reason: "send-keys failed".to_owned(),
+                termination: "kill-session failed".to_owned(),
+                worktree: std::path::PathBuf::from("/tmp/wt"),
+            },
+            "req-orphan",
+        );
+        assert_eq!(api.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(api.label, "tackle_unavailable");
     }
 
     /// A terminal molecule is a 409 with its own name — not the old

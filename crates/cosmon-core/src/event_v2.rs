@@ -1679,6 +1679,126 @@ pub enum EventV2 {
         observed_at: DateTime<Utc>,
     },
 
+    /// **ADR-177 / issue #65** — one resolved **harness setting** was
+    /// dispatched to an adapter's native override channel.
+    ///
+    /// The ex-ante receipt for the `[steps.harness]` / `--harness` axis, one
+    /// event **per key** — not one per map, because two keys of the same map
+    /// may come from different levels and leave through different channels,
+    /// and a reader must not have to infer which.
+    ///
+    /// # What "dispatched" means here, precisely (ADR-177 Decision 4)
+    ///
+    /// `selection_source` records which branch of the resolver fired. It is
+    /// minted **before the process exists**, so it can never be evidence about
+    /// what the harness did — the resolver's output is identical whether the
+    /// harness later honours the setting, clamps it, ignores it, or crashes.
+    /// The strongest sentence an acceptance run may print, pairing this event
+    /// with its ex-post sibling, is:
+    ///
+    /// > cosmon requested effort *E* through channel *C*; the harness's own log
+    /// > reported *E*.
+    ///
+    /// That is a two-party agreement, not a proof of behaviour. The wording on
+    /// every surface is **"dispatched at"**, never "ran at".
+    ///
+    /// Emitted after the spawn attempt returns, so [`launch_status`](Self::HarnessSettingSelected::launch_status)
+    /// is a fact rather than a hope: a harness that rejected a flag at launch
+    /// produces no echo at all, and that absence must never read as "the
+    /// setting was silently accepted".
+    ///
+    /// The hot path must not fail because telemetry is unhappy: like the other
+    /// spawn-time receipts, write errors are swallowed (trace-not-lock).
+    HarnessSettingSelected {
+        /// The molecule the setting was dispatched for.
+        mol_id: MoleculeId,
+        /// The worker/dispatch the setting belongs to — the same per-attempt
+        /// scoping key [`Self::ModelObserved`] uses, so a re-tackle under
+        /// different settings is never confused with the previous attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<WorkerId>,
+        /// Adapter the setting was carried to. A harness key only has meaning
+        /// inside its harness.
+        adapter_name: String,
+        /// The key, **verbatim**. cosmon recognises no keys and normalises
+        /// none (ADR-177 Decision 1).
+        key: String,
+        /// The value, **verbatim as sent**. A normalised record would prove
+        /// that cosmon's normaliser ran, and nothing else.
+        value: String,
+        /// Which level of the three-level table supplied it — `flag` (rank 1)
+        /// or `formula` (rank 2). There is no `default` variant: rank 3 is the
+        /// harness's own config, reached by emitting no key at all, and a key
+        /// nobody set produces no event.
+        selection_source: crate::harness_settings::HarnessSelectionSource,
+        /// The argv fragment actually appended to the command line
+        /// (`-c model_reasoning_effort=high`, `--effort xhigh`). **The only
+        /// field that can be diffed against the harness's own echo**, which is
+        /// why it is recorded as sent rather than reconstructed.
+        argv_fragment: String,
+        /// *Which* override surface carried it (`codex:-c`, `claude:flag`).
+        channel: String,
+        /// The harness's self-reported version at spawn, or `None` when the
+        /// probe could not run. An echo is only interpretable against the
+        /// version that produced it, and flag semantics move between releases.
+        /// `None` is an absence, not a claim.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        harness_version: Option<String>,
+        /// Whether the process came up at all — [`HarnessLaunchStatus`].
+        launch_status: HarnessLaunchStatus,
+        /// Wall-clock time the dispatch was recorded.
+        selected_at: DateTime<Utc>,
+    },
+
+    /// **ADR-177 / issue #65** — an adapter reported the *concrete* reasoning
+    /// effort it actually ran at, read from the harness's own log.
+    ///
+    /// The effort sibling of [`Self::ModelObserved`], structured on it
+    /// deliberately rather than invented afresh: `HarnessSettingSelected`
+    /// records the *intention* (what cosmon asked for, ex-ante);
+    /// this records the *realization* (what the harness's own log says).
+    ///
+    /// # The honesty invariant, made structural
+    ///
+    /// [`effort`](Self::EffortObserved::effort) is a **bare `String`**, never
+    /// `Option`. Silence — a harness that reports no effort — is expressed by
+    /// *not emitting the event at all*, so there is no `EffortObserved` value
+    /// meaning "ran but unknown". The realized axis is **never** back-filled
+    /// from the pin or the config: that is the
+    /// `reasoning_effort_is_never_inferred` discipline
+    /// ([`crate::adapter_attribution`]) applied to the axis it was named after.
+    ///
+    /// # Cadence
+    ///
+    /// Emitted on the **first** record carrying a concrete value, and
+    /// re-emitted only on change — so a fold over the events in append order
+    /// reconstructs the realized trajectory, exactly as for the model axis.
+    ///
+    /// For adapters with no echo the ex-post half simply does not exist, and
+    /// the record says so by its absence. What remains is the version probe and
+    /// the launch status on [`Self::HarnessSettingSelected`].
+    EffortObserved {
+        /// The molecule whose worker reported the effort.
+        mol_id: MoleculeId,
+        /// The worker/dispatch the observation belongs to — the per-attempt
+        /// scoping key, mirroring [`Self::ModelObserved`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        worker_id: Option<WorkerId>,
+        /// Adapter the observation is scoped to.
+        adapter_name: String,
+        /// The concrete effort token the harness reported — a **bare
+        /// `String`**: the event is emitted only when a real value was
+        /// observed, so this can never be a fabricated placeholder. Carried
+        /// verbatim; cosmon has no effort vocabulary of its own (ADR-177
+        /// Decision 6).
+        effort: String,
+        /// Where the value was read from — the same per-adapter provenance
+        /// vocabulary the model axis uses.
+        observed_source: crate::model_realization::ModelObservationSource,
+        /// Wall-clock time the observation was recorded.
+        observed_at: DateTime<Utc>,
+    },
+
     /// **task-20260727-3f46** — the realized-model observer reported that it
     /// *cannot* observe: the session-log root it was given does not exist, so
     /// no [`Self::ModelObserved`] can ever arrive for this dispatch.
@@ -2613,6 +2733,8 @@ impl EventV2 {
             | Self::AdapterSelected { mol_id, .. }
             | Self::ModelSelected { mol_id, .. }
             | Self::ModelObserved { mol_id, .. }
+            | Self::HarnessSettingSelected { mol_id, .. }
+            | Self::EffortObserved { mol_id, .. }
             | Self::ModelObservationUnavailable { mol_id, .. }
             | Self::ModelCeilingHit { mol_id, .. }
             | Self::RemoteEgressOptIn { mol_id, .. }
@@ -3107,6 +3229,38 @@ pub enum AdapterHandleState {
 
 /// Where a `cs tackle` Adapter selection came from (ADR-097 / C6).
 ///
+/// Whether the harness process came up at all, recorded on every
+/// [`EventV2::HarnessSettingSelected`] (ADR-177 Decision 5).
+///
+/// This field exists because of an asymmetry that is easy to misread: a harness
+/// that **rejected** a flag at launch produces no ex-post echo — and so does a
+/// harness that launched fine and simply never reports the axis. Without this
+/// field the two are the same silence, and the second reading ("the setting was
+/// silently accepted") is the comfortable one. Naming the launch status makes
+/// the distinction decidable from the log alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HarnessLaunchStatus {
+    /// The spawn returned successfully: the process exists and the readiness
+    /// probe accepted it. Says nothing about whether the setting was honoured.
+    Launched,
+    /// The spawn failed. cosmon fails closed and names the adapter rather than
+    /// dropping the setting; this is the receipt that the dispatch carrying
+    /// these keys did not come up.
+    LaunchFailed,
+}
+
+impl HarnessLaunchStatus {
+    /// A compact, stable tag for logs and forensic tables.
+    #[must_use]
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Launched => "launched",
+            Self::LaunchFailed => "launch_failed",
+        }
+    }
+}
+
 /// Recorded on every [`EventV2::AdapterSelected`] emission so an audit
 /// can attribute the choice without correlating against shell history
 /// or config snapshots. The variants exhaust the resolution paths the
@@ -4135,6 +4289,33 @@ mod tests {
                     .unwrap()
                     .with_timezone(&Utc),
             },
+            EventV2::HarnessSettingSelected {
+                mol_id: mid("cs-20260411-aaaa"),
+                worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
+                adapter_name: "codex".to_owned(),
+                key: "model_reasoning_effort".to_owned(),
+                value: "high".to_owned(),
+                selection_source: crate::harness_settings::HarnessSelectionSource::Flag {
+                    raw: "model_reasoning_effort=high".to_owned(),
+                },
+                argv_fragment: "-c model_reasoning_effort=high".to_owned(),
+                channel: "codex:-c".to_owned(),
+                harness_version: Some("codex-cli 0.153.0".to_owned()),
+                launch_status: HarnessLaunchStatus::Launched,
+                selected_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
+            EventV2::EffortObserved {
+                mol_id: mid("cs-20260411-aaaa"),
+                worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
+                adapter_name: "codex".to_owned(),
+                effort: "high".to_owned(),
+                observed_source: crate::model_realization::ModelObservationSource::CodexSessionMeta,
+                observed_at: DateTime::parse_from_rfc3339("2026-04-11T10:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+            },
             EventV2::ModelObservationUnavailable {
                 mol_id: mid("cs-20260411-aaaa"),
                 worker_id: Some(WorkerId::new("worker-aaaa").unwrap()),
@@ -4416,6 +4597,8 @@ mod tests {
             | EventV2::AdapterSelected { .. }
             | EventV2::ModelSelected { .. }
             | EventV2::ModelObserved { .. }
+            | EventV2::HarnessSettingSelected { .. }
+            | EventV2::EffortObserved { .. }
             | EventV2::ModelObservationUnavailable { .. }
             | EventV2::ModelCeilingHit { .. }
             | EventV2::RemoteEgressOptIn { .. }

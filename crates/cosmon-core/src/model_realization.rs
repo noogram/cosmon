@@ -48,11 +48,20 @@
 //!   session `model`, and each `assistant` turn carries `message.model`.
 //!   Per-turn, so a quota fallback shows a *different* id on a later line: the
 //!   parser returns the whole trajectory, consecutive duplicates collapsed.
-//! - **codex** — best-effort but real. A live codex session writes the model on
-//!   the **`turn_context`** record (`payload.model`), re-emitted whenever the
-//!   turn context changes — so the parser follows the trajectory, not just the
-//!   first value. Legacy `session_meta` / top-level shapes are accepted as a
-//!   fallback for older codex versions.
+//! - **codex** — best-effort but real, and its record shape is **not** what
+//!   this module claimed until 2026-09-11. Measured on a live codex 0.153
+//!   session log (2026-09-10): `turn_context` is emitted **once per session**,
+//!   at start, carrying `payload.model` and `payload.effort`. It is *not*
+//!   "re-emitted whenever the turn context changes" — a mid-session `/model`
+//!   or `/effort` switch is recorded as
+//!   `{"type":"event_msg","payload":{"type":"thread_settings_applied",
+//!   "thread_settings":{"model":…,"reasoning_effort":…}}}` and nothing else.
+//!   A parser reading only `turn_context` therefore freezes the realized axis
+//!   on the initial pin and reports a switch that happened as a switch that did
+//!   not — an ex-post half that silently agrees with the ex-ante one is worth
+//!   less than no ex-post half at all. Both records are now read, in log order,
+//!   on both axes. Legacy `session_meta` / top-level shapes remain accepted as
+//!   a fallback for older codex versions.
 //! - **openai / anthropic / mistral** — authoritative. The provider HTTP
 //!   response body echoes a top-level `"model"` field cosmon already receives.
 
@@ -123,9 +132,11 @@ pub enum ModelObservationSource {
     /// (`system`/`init` model or `message.model` per assistant turn).
     /// Authoritative.
     ClaudeStreamJson,
-    /// Parsed from the codex session log — primarily the `turn_context`
-    /// record's `payload.model` (with legacy `session_meta` / top-level
-    /// fallbacks). Best-effort but real: follows per-turn context changes.
+    /// Parsed from the codex session log — the `turn_context` record's
+    /// `payload.model` at session start and any later
+    /// `thread_settings_applied` event (with legacy `session_meta` /
+    /// top-level fallbacks). Best-effort but real: follows mid-session
+    /// settings changes.
     CodexSessionMeta,
     /// Echoed in the provider HTTP response body's top-level `"model"` field
     /// (openai / anthropic / mistral in-process adapters). Authoritative.
@@ -144,14 +155,57 @@ impl ModelObservationSource {
     }
 }
 
+/// A **non-empty** reasoning-effort level as a harness reported it
+/// (`"high"`, `"xhigh"`, whatever token that harness uses).
+///
+/// Structurally identical to [`ModelId`] and for the identical reason: a
+/// realized effort is only ever constructed from a value that has real content,
+/// so `""` or a whitespace-only string can never be logged as an observation.
+/// The two are separate types rather than one shared newtype because they are
+/// separate axes — a function that takes an effort must not accept a model id
+/// by accident.
+///
+/// The token is carried **verbatim** (trimmed of surrounding whitespace only).
+/// cosmon has no effort vocabulary of its own — see
+/// [`crate::harness_settings`] and ADR-177 Decision 6 on why the portable
+/// alias is deferred rather than minted.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EffortLevel(String);
+
+impl EffortLevel {
+    /// Construct an `EffortLevel`, trimming surrounding whitespace and
+    /// rejecting an empty / whitespace-only value.
+    #[must_use]
+    pub fn new(raw: &str) -> Option<Self> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(Self(trimmed.to_owned()))
+        }
+    }
+
+    /// Borrow the level as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for EffortLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Collapse consecutive duplicate ids so the returned slice is the *trajectory*
 /// of distinct models that ran, in order. `[opus, opus, sonnet, sonnet]` →
 /// `[opus, sonnet]`; a stable single-model session → `[opus]`.
 ///
 /// Non-consecutive repeats are preserved (`[opus, sonnet, opus]` stays as-is):
 /// the model genuinely changed back, and that is a real trajectory, not noise.
-fn collapse_consecutive(ids: impl IntoIterator<Item = ModelId>) -> Vec<ModelId> {
-    let mut out: Vec<ModelId> = Vec::new();
+fn collapse_consecutive<T: PartialEq>(ids: impl IntoIterator<Item = T>) -> Vec<T> {
+    let mut out: Vec<T> = Vec::new();
     for id in ids {
         if out.last() != Some(&id) {
             out.push(id);
@@ -241,19 +295,76 @@ pub fn realized_models_from_claude_jsonl(content: &str) -> Vec<ModelId> {
 /// One line of a codex `rollout-*.jsonl`, decoded by its `type` discriminator.
 ///
 /// A live codex session carries the realized model on the `turn_context`
-/// record (`payload.model`), re-emitted on context change. Older codex versions
-/// used a top-level `model` or a `session_meta` object; both are accepted as a
+/// record (`payload.model`), emitted **once at session start**, and any later
+/// change on a `thread_settings_applied` `event_msg`. Older codex versions used
+/// a top-level `model` or a `session_meta` object; both are accepted as a
 /// fallback. Unknown record types fall through to [`Self::Other`].
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum CodexLine {
-    /// The authoritative per-turn context record (`payload.model`).
+    /// The session-opening context record (`payload.model`, `payload.effort`).
     TurnContext(CodexPayloadHolder),
     /// The legacy session-meta record (`payload.model` or nested `model`).
     SessionMeta(CodexPayloadHolder),
+    /// A codex UI event. The only subtype this parser reads is
+    /// `thread_settings_applied` — see [`CodexEventPayload`].
+    EventMsg(CodexEventMsg),
     /// Any other record type — ignored.
     #[serde(other)]
     Other,
+}
+
+/// A codex `event_msg` record, whose own `payload` is a second tagged union.
+#[derive(Debug, Deserialize)]
+struct CodexEventMsg {
+    #[serde(default)]
+    payload: Option<CodexEventPayload>,
+}
+
+/// The subtypes of a codex `event_msg` payload this parser understands.
+///
+/// Only `thread_settings_applied` carries a realization; every other subtype
+/// (`task_started`, `agent_message`, …) falls through to [`Self::Other`], so
+/// the parser survives codex schema growth without error and without
+/// mistaking a UI event for an observation.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum CodexEventPayload {
+    /// Emitted when the thread's settings change mid-session — the record a
+    /// `/model` or `/effort` switch produces.
+    ThreadSettingsApplied {
+        #[serde(default)]
+        thread_settings: Option<CodexThreadSettings>,
+    },
+    /// Any other event subtype — ignored.
+    #[serde(other)]
+    Other,
+}
+
+/// The `thread_settings` object of a `thread_settings_applied` event.
+///
+/// Note the field name: codex spells the effort `reasoning_effort` here and
+/// `effort` on `turn_context`. Two names for one axis in one log is exactly the
+/// kind of fact a parser must carry rather than a reader remember.
+#[derive(Debug, Deserialize)]
+struct CodexThreadSettings {
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+impl CodexEventMsg {
+    /// The `thread_settings` of a `thread_settings_applied` event, or `None`
+    /// for every other event subtype.
+    fn thread_settings(&self) -> Option<&CodexThreadSettings> {
+        match self.payload.as_ref()? {
+            CodexEventPayload::ThreadSettingsApplied { thread_settings } => {
+                thread_settings.as_ref()
+            }
+            CodexEventPayload::Other => None,
+        }
+    }
 }
 
 /// A codex record wrapping a `payload` object that may name the model.
@@ -271,6 +382,11 @@ struct CodexPayloadHolder {
 struct CodexPayload {
     #[serde(default)]
     model: Option<String>,
+    /// The reasoning effort the turn ran at, as codex's `turn_context` record
+    /// reports it (ADR-177 Decision 5, the ex-post half). Read from the same
+    /// record the model already comes from — no second log, no second parse.
+    #[serde(default)]
+    effort: Option<String>,
 }
 
 impl CodexPayloadHolder {
@@ -282,15 +398,25 @@ impl CodexPayloadHolder {
             .and_then(|p| p.model.as_deref())
             .or(self.model.as_deref())
     }
+
+    /// The reasoning effort named by this record's payload, if any. There is
+    /// no legacy top-level fallback: no codex version ever wrote one, and
+    /// inventing a shape to be tolerant of is how a parser starts reporting
+    /// realizations nobody observed.
+    fn effort(&self) -> Option<&str> {
+        self.payload.as_ref().and_then(|p| p.effort.as_deref())
+    }
 }
 
 /// Parse the realized-model **trajectory** from a codex session `*.jsonl`
 /// slice, following per-turn context changes.
 ///
-/// Reads the model from each `turn_context` record (`payload.model`) in order,
-/// falling back to a legacy `session_meta` / top-level `model` for older codex
-/// logs, and collapses consecutive duplicates. A mid-session model change in
-/// codex therefore surfaces as a two-element trajectory, exactly like claude.
+/// Reads the model from each `turn_context` record (`payload.model`) **and**
+/// from each `thread_settings_applied` event (`thread_settings.model`) in log
+/// order, falling back to a legacy `session_meta` / top-level `model` for older
+/// codex logs, and collapses consecutive duplicates. A mid-session `/model`
+/// switch — which codex records *only* on the `thread_settings_applied` event —
+/// therefore surfaces as a two-element trajectory, exactly like claude.
 ///
 /// Returns an empty vec when no record named a concrete model (the honest floor
 /// — the pin then surfaces as *intended, not confirmed*). Every element is a
@@ -304,11 +430,49 @@ pub fn realized_models_from_codex_session(content: &str) -> Vec<ModelId> {
         }
         let raw = match serde_json::from_str::<CodexLine>(line).ok()? {
             CodexLine::TurnContext(h) | CodexLine::SessionMeta(h) => h.model().map(str::to_owned),
+            CodexLine::EventMsg(e) => e
+                .thread_settings()
+                .and_then(|t| t.model.as_deref())
+                .map(str::to_owned),
             CodexLine::Other => None,
         };
         ModelId::new(raw.as_deref()?)
     });
     collapse_consecutive(ids)
+}
+
+/// Parse the realized **reasoning-effort** trajectory from a codex session
+/// `*.jsonl` slice — the ex-post half of ADR-177 Decision 5, applied to the
+/// axis the `reasoning_effort_is_never_inferred` discipline was named after.
+///
+/// Reads `payload.effort` from each `turn_context` record and
+/// `thread_settings.reasoning_effort` from each `thread_settings_applied`
+/// event, in log order, collapsing consecutive duplicates — the same
+/// trajectory shape [`realized_models_from_codex_session`] returns for the
+/// model axis.
+///
+/// Returns an empty vec when no record named a concrete effort. That is the
+/// honest floor: the pin then surfaces as *dispatched, not confirmed*, and the
+/// realized axis is **never** back-filled from the pin or the config. Every
+/// element is a non-empty [`EffortLevel`].
+#[must_use]
+pub fn realized_efforts_from_codex_session(content: &str) -> Vec<EffortLevel> {
+    let levels = content.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let raw = match serde_json::from_str::<CodexLine>(line).ok()? {
+            CodexLine::TurnContext(h) | CodexLine::SessionMeta(h) => h.effort().map(str::to_owned),
+            CodexLine::EventMsg(e) => e
+                .thread_settings()
+                .and_then(|t| t.reasoning_effort.as_deref())
+                .map(str::to_owned),
+            CodexLine::Other => None,
+        };
+        EffortLevel::new(raw.as_deref()?)
+    });
+    collapse_consecutive(levels)
 }
 
 // ---- Provider (openai / anthropic / mistral) ------------------------------
@@ -338,6 +502,13 @@ mod tests {
 
     fn ids(models: &[&str]) -> Vec<ModelId> {
         models.iter().map(|m| ModelId::new(m).unwrap()).collect()
+    }
+
+    fn efforts(levels: &[&str]) -> Vec<EffortLevel> {
+        levels
+            .iter()
+            .map(|e| EffortLevel::new(e).unwrap())
+            .collect()
     }
 
     // ---- ModelId newtype --------------------------------------------------
@@ -537,6 +708,59 @@ mod tests {
             r#"{"type":"event_msg","payload":{"type":"task_started"}}"#,
         );
         assert!(realized_models_from_codex_session(jsonl).is_empty());
+    }
+
+    #[test]
+    fn codex_thread_settings_applied_continues_the_model_trajectory() {
+        // FALSIFIER 4 (task-20260911-345c). Verified on a live codex 0.153
+        // session log, 2026-09-10: `turn_context` is emitted ONCE per session,
+        // at start. A mid-session `/model` switch is recorded as a
+        // `thread_settings_applied` event_msg and NOTHING else. A parser that
+        // reads only `turn_context` therefore freezes `realized` on the initial
+        // pin and reports a switch that happened as a switch that did not.
+        let jsonl = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-5-codex","effort":"low"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","reasoning_effort":"high"}}}"#,
+        );
+        assert_eq!(
+            realized_models_from_codex_session(jsonl),
+            ids(&["gpt-5-codex", "gpt-6-astra"]),
+            "a /model switch must extend the trajectory, not vanish"
+        );
+    }
+
+    #[test]
+    fn codex_effort_trajectory_reads_turn_context_then_thread_settings() {
+        // FALSIFIER 5 + the ex-post half of ADR-177 Decision 5: `effort` on
+        // `turn_context`, `reasoning_effort` on `thread_settings_applied`, in
+        // order, consecutive duplicates collapsed.
+        let jsonl = concat!(
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","effort":"high"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra","effort":"high"}}"#,
+            "\n",
+            r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","reasoning_effort":"xhigh"}}}"#,
+        );
+        assert_eq!(
+            realized_efforts_from_codex_session(jsonl),
+            efforts(&["high", "xhigh"])
+        );
+    }
+
+    #[test]
+    fn codex_effort_is_never_fabricated_from_silence() {
+        // The honesty floor, applied to the axis the discipline was named
+        // after: a session that never reported an effort yields no effort, and
+        // the empty string is not a value.
+        assert!(realized_efforts_from_codex_session(
+            r#"{"type":"turn_context","payload":{"model":"gpt-6-astra"}}"#
+        )
+        .is_empty());
+        assert!(realized_efforts_from_codex_session(
+            r#"{"type":"turn_context","payload":{"model":"m","effort":"  "}}"#
+        )
+        .is_empty());
     }
 
     #[test]

@@ -44,8 +44,8 @@ use cosmon_core::worker::WorkerStatus;
 use cosmon_filestore::FileStore;
 use cosmon_process_witness::process_start_time;
 use cosmon_state::events::worker_spawn::{
-    emit_adapter_selected, emit_model_ceiling_hit, emit_model_selected,
-    emit_worker_spawn_rolled_back,
+    emit_adapter_selected, emit_harness_settings_selected, emit_model_ceiling_hit,
+    emit_model_selected, emit_worker_spawn_rolled_back,
 };
 use cosmon_state::{MoleculeData, MoleculeFilter, StateStore};
 use cosmon_transport::TmuxBackend;
@@ -293,6 +293,49 @@ pub struct Args {
     /// the claim; honouring it is the walker's job.
     #[arg(long = "by", value_name = "ACTOR", default_value = "human")]
     pub by: String,
+
+    /// Per-dispatch **harness setting** — `key=value`, repeatable
+    /// (ADR-177 / issue #65).
+    ///
+    /// `--model` pins *which model* runs; this pins *how it runs*, by handing
+    /// the pair to the adapter's own override channel:
+    ///
+    /// - `codex` → one `-c key=value` per entry, e.g.
+    ///   `--harness model_reasoning_effort=high`;
+    /// - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`;
+    /// - any other adapter → the dispatch **fails at launch, naming the
+    ///   adapter**. A setting is never silently dropped.
+    ///
+    /// # cosmon recognises no keys
+    ///
+    /// The pair is carried **verbatim** to the harness and logged verbatim as
+    /// sent. cosmon never normalises a key, rewrites a value, or keeps an
+    /// allowlist — an unknown key fails in the harness's own parser, at launch,
+    /// loudly, which is where knowledge about that harness's keys lives and
+    /// stays current. A key cosmon *recognised* would become public API carried
+    /// in files on other people's disks, with no mechanism by which its removal
+    /// could be announced.
+    ///
+    /// # Precedence, merged per key
+    ///
+    /// This flag → the executing step's `[steps.harness]` table → the harness's
+    /// own config. Merged **key by key**, never wholesale: overriding one key
+    /// leaves every other key the step pinned exactly where it was. Rank 3 is
+    /// not a cosmon surface — cosmon passing no key is the only way the
+    /// harness's own default can apply.
+    ///
+    /// # What the audit trail claims, and what it does not
+    ///
+    /// Each resolved key lands on `events.jsonl` as a
+    /// `harness_setting_selected` line carrying its source, the realized argv
+    /// fragment, the channel, the harness version and the launch status. That
+    /// receipt is **ex-ante**: it records what cosmon *dispatched*, minted
+    /// before the process exists. Paired with the harness's own echo, the
+    /// strongest true sentence is *"cosmon requested E through channel C; the
+    /// harness's own log reported E"* — a two-party agreement, not a proof of
+    /// behaviour. Nothing here supports "the step **ran** at E".
+    #[arg(long = "harness", value_name = "KEY=VALUE")]
+    pub harness: Vec<String>,
 }
 
 /// Private payload for the detached local-worker transport.
@@ -708,6 +751,12 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Gap#5 `task-20260615-df30`; opencode — `task-20260615-556a` / ADR-125;
     // `local` — `task-20260530-821f`; `ollama` — `task-20260707-7d27` hole #1)
     // is on the rows of `BUILT_IN_AXES`, beside the names it explains.
+    // Parse `--harness k=v` before the chain runs, so a malformed pair aborts
+    // fail-fast with the grammar rather than being carried to a harness that
+    // would reject it far less legibly (ADR-177 / #65).
+    let harness_flag = cosmon_core::harness_settings::parse_harness_flags(&args.harness)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let selection = match cosmon_core::tackle_plan::resolve_selection(
         &cosmon_core::tackle_plan::SelectionRequest {
             adapter_flag: args.adapter.as_deref(),
@@ -721,6 +770,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             global_adapters: global_adapters.as_ref(),
             global_config_path: &global_cfg_path,
             formula_absence: formula_absence.as_deref(),
+            harness_flag: &harness_flag,
         },
     ) {
         Ok(selection) => selection,
@@ -734,6 +784,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         ownership_warning,
         mut preferred_model,
         mut model_source,
+        harness,
     } = selection;
     // Capability-aware formula gate (noogram/cosmon #4 clause 2). The
     // formula declares what its steps need of a worker
@@ -1181,6 +1232,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             ownership_warning: None,
             preferred_model,
             model_source,
+            harness,
         },
         &cosmon_core::tackle_plan::PromptRequest {
             molecule: molecule_brief(&mol),
@@ -1205,8 +1257,28 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         loop_ownership,
         preferred_model,
         prompt,
+        harness,
         ..
     } = plan;
+
+    // 5'. Render the resolved harness settings onto THIS adapter's own override
+    //     channel (ADR-177 / issue #65), and refuse here if it has none.
+    //
+    //     Placed before the worktree (step 7) and before the dry run, on
+    //     purpose. The refusal is the "fail closed at launch, naming the
+    //     adapter" posture of Decision 5 — the same shape as the illegal
+    //     adapter/model pair — and taking it here means a refused dispatch
+    //     leaves the molecule pending, re-tacklable, with nothing to clean up.
+    //     Running it under `--dry-run` too is the point of a dry run: the
+    //     operator inspecting what a dispatch *would* do learns that this pair
+    //     cannot work before spending a real one to find out.
+    //
+    //     An empty map (the overwhelmingly common case) renders to an empty
+    //     slice on every adapter, so this is a no-op for any dispatch that pins
+    //     no harness setting.
+    let harness_args =
+        cosmon_core::harness_settings::render_harness_args(adapter.as_str(), &harness)
+            .map_err(|e| anyhow::anyhow!("cs tackle: {e}"))?;
 
     // 6. Dry-run: just print the prompt.
     if args.dry_run {
@@ -1649,11 +1721,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         project_config.adapters.as_ref(),
         preferred_model.as_deref(),
         &current_strong_set,
+        &harness_args,
         &recorded,
         cmd_t0,
     ) {
         Ok(outcome) => outcome,
         Err(e) => {
+            // The ex-ante harness receipt, on the path where the process did
+            // NOT come up (ADR-177 Decision 5). Emitted *before* the rollback
+            // so the log carries what was dispatched and that it failed to
+            // launch: a harness that rejected a flag produces no echo at all,
+            // and that silence must never be readable as "the setting was
+            // silently accepted". No-op when nothing was pinned.
+            emit_harness_settings_selected(
+                &state_dir,
+                &mol_id,
+                &wid,
+                adapter.as_str(),
+                &harness_args,
+                harness_version(adapter.as_str()).as_deref(),
+                cosmon_core::event_v2::HarnessLaunchStatus::LaunchFailed,
+            );
             dispatch_ledger::rollback_dispatch(&store, &pre_dispatch_snapshot, &wid);
             emit_worker_spawn_rolled_back(&state_dir, &mol_id, &wid, adapter.as_str(), "spawn");
             cleanup_partial_tackle(
@@ -1667,6 +1755,27 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             return Err(e);
         }
     };
+
+    // The ex-ante harness receipt, on the path where the process DID come up.
+    // One `harness_setting_selected` line per resolved key, carrying its
+    // source, the realized argv fragment, the channel, the probed harness
+    // version and the launch status (ADR-177 Decision 5). Emitted after the
+    // spawn returns so `launch_status` is a fact rather than a hope.
+    //
+    // Read it as **dispatched at**, never "ran at": `selection_source` records
+    // which branch of the resolver fired, and the resolver's output is
+    // identical whether the harness later honours the setting, clamps it,
+    // ignores it, or crashes. The ex-post half is the harness's own echo,
+    // parsed separately.
+    emit_harness_settings_selected(
+        &state_dir,
+        &mol_id,
+        &wid,
+        adapter.as_str(),
+        &harness_args,
+        harness_version(adapter.as_str()).as_deref(),
+        cosmon_core::event_v2::HarnessLaunchStatus::Launched,
+    );
 
     // Two post-spawn steps below presuppose a tmux-backed worker —
     // install_harvest_hook (kernel-level pane-died witness) and the
@@ -4119,6 +4228,57 @@ pub(super) struct DetachedLocalWitness {
     pub pid_start_time: Option<u64>,
 }
 
+/// Probe the harness binary's self-reported version, for the ex-ante
+/// harness-settings receipt (ADR-177 Decision 5).
+///
+/// An echo is only interpretable against the version that produced it, and
+/// flag semantics move between releases: a `-c model_reasoning_effort=high`
+/// that a codex 0.153 honours may be spelled differently two releases later,
+/// and a reader diffing an argv fragment against an echo needs to know which
+/// release they are reading.
+///
+/// Returns `None` when the adapter has no probe-able binary, when the binary is
+/// absent, or when it exits non-zero — an **absence**, never a claim. This runs
+/// once per dispatch and only when at least one harness key was resolved, so it
+/// costs an ordinary dispatch nothing.
+fn harness_version(adapter: &str) -> Option<String> {
+    let binary = match adapter {
+        "codex" => "codex",
+        "claude" => "claude",
+        // Every other adapter reaches here only with an empty harness map (the
+        // render refuses a non-empty one), so there is nothing to interpret and
+        // nothing to probe.
+        _ => return None,
+    };
+    let output = std::process::Command::new(binary)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let line = text.lines().next()?.trim();
+    if line.is_empty() {
+        None
+    } else {
+        Some(line.to_owned())
+    }
+}
+
+/// Flatten the resolved harness settings into the flat argv token list a
+/// transport appends (ADR-177 / issue #65).
+///
+/// The structured [`HarnessArg`](cosmon_core::harness_settings::HarnessArg)
+/// values carry the key, the value, the source and the channel because the
+/// *event* needs all four; a command line needs only the tokens, in order. The
+/// order is the resolver's (a `BTreeMap`), so two dispatches of the same map
+/// produce the same command line — which is what makes the recorded argv
+/// fragment diffable against the harness's own echo.
+fn harness_argv(args: &[cosmon_core::harness_settings::HarnessArg]) -> Vec<String> {
+    args.iter().flat_map(|a| a.argv.iter().cloned()).collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 // One `if` per early-returning arm plus a match over the rest: the length is
 // the adapter roster, not a tangle. Splitting it would only move the roster.
@@ -4148,6 +4308,15 @@ pub(super) fn spawn_and_prompt(
     // to a strong model on a transient outage (task-20260705-ba98). Only the
     // claude branch pre-flights a fallback chain, so the other arms ignore it.
     strong_set: &[String],
+    // The harness settings this dispatch resolved, already rendered onto this
+    // adapter's own override channel by
+    // `cosmon_core::harness_settings::render_harness_args` (ADR-177 / #65).
+    // Empty on almost every dispatch, and an empty slice leaves every arm's
+    // command byte-identical to the pre-#65 shape. Only the two arms with a
+    // channel — codex (`-c k=v`) and claude (`--k v`) — can receive a non-empty
+    // slice: the render refuses any other adapter *before* the worktree lands,
+    // so a setting is never silently dropped on an arm that would ignore it.
+    harness_args: &[cosmon_core::harness_settings::HarnessArg],
     // Proof that this dispatch is already on the ledger. Unused by the body —
     // its whole job is to make "spawn a worker cosmon has not recorded"
     // unrepresentable. See [`super::dispatch_ledger`] for the six molecules
@@ -4221,6 +4390,7 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             preferred_model,
             strong_set,
+            &harness_argv(harness_args),
             dispatch_t0,
         )?;
         return Ok(SpawnOutcome {
@@ -4255,6 +4425,7 @@ pub(super) fn spawn_and_prompt(
             mol_state_dir,
             adapter_entry,
             preferred_model,
+            &harness_argv(harness_args),
         )
         .map(|()| SpawnOutcome::default()),
         // `task-20260615-556a` — opencode joins claude/aider/codex as the
@@ -4591,6 +4762,11 @@ fn spawn_claude_and_prompt(
     // the probe-fallback layer so a cheap pin never silently escalates to a
     // strong model (task-20260705-ba98).
     strong_set: &[String],
+    // Pre-rendered `--<key> <value>` token pairs for the harness settings this
+    // dispatch resolved (ADR-177 / #65), appended verbatim to the claude
+    // command. No allowlist: Claude Code's own parser rejects an unknown flag
+    // at launch, loudly. Empty leaves the command byte-identical.
+    harness_args: &[String],
     // `cs tackle`'s own entry instant, so every phase of the dispatch profile
     // shares one origin (COSMON #26-C).
     dispatch_t0: std::time::Instant,
@@ -4934,6 +5110,7 @@ fn spawn_claude_and_prompt(
         // leave the real worker running as uid 0 (task-20260723-778a A1).
         &root_decision,
         receipt_overlay,
+        harness_args,
         // The account was already resolved above; do not call `cb next`
         // a second time (it would double-advance the balancer).
         || None,
@@ -5854,6 +6031,12 @@ fn spawn_codex_and_prompt(
     mol_state_dir: &std::path::Path,
     adapter_entry: Option<&AdapterEntry>,
     preferred_model: Option<&str>,
+    // Pre-rendered `-c key=value` token pairs for the harness settings this
+    // dispatch resolved (ADR-177 / #65). Structural: emitted in both launch
+    // modes and outside the `extra_args` replacement set, so an operator who
+    // overrides the interactive flags does not thereby lose the effort their
+    // formula step pinned. Empty leaves the command byte-identical.
+    harness_args: &[String],
 ) -> anyhow::Result<()> {
     use cosmon_transport::codex;
     use cosmon_transport::readiness::LiveProbe as _;
@@ -5918,6 +6101,7 @@ fn spawn_codex_and_prompt(
         pre_existing_worker: None,
         git_identity,
         writable_roots,
+        harness_args: harness_args.to_vec(),
     };
 
     codex::spawn_codex_session(&config)
@@ -12249,6 +12433,7 @@ mod tests {
             reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
+            harness: Vec::new(),
         };
         let err = run(&ctx, &args).unwrap_err();
         assert!(err
@@ -12288,6 +12473,7 @@ mod tests {
             reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
+            harness: Vec::new(),
         };
         // dry_run should succeed without tmux.
         let result = run(&ctx, &args);
@@ -13294,6 +13480,7 @@ prompt = "Custom fleet prompt."
             reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
+            harness: Vec::new(),
         };
         // Dry-run completes successfully even with the deprecated flag.
         let result = run(&ctx, &args);
@@ -13340,6 +13527,7 @@ prompt = "Custom fleet prompt."
             reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
+            harness: Vec::new(),
         };
         let result = run(&ctx, &args);
         assert!(result.is_ok(), "tackle must accept --leaf silently");
@@ -13393,6 +13581,7 @@ prompt = "Custom fleet prompt."
             reclaim_derived: false,
             fallback_from_local: None,
             by: "human".to_owned(),
+            harness: Vec::new(),
         };
         let result = run(&ctx, &args);
         assert!(
