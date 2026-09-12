@@ -136,6 +136,23 @@ pub enum TackleExecError {
         kind: &'static str,
     },
 
+    /// A dispatch **precondition** did not hold: the resolved adapter
+    /// cannot do the work, and the refusal happened before any effect.
+    ///
+    /// Distinct from every other variant in one load-bearing way:
+    /// nothing was spent. No worktree exists, no ledger entry was
+    /// written, no paid probe ran, and the molecule is untouched and
+    /// still tacklable. The [`PreflightRefusal`] carries the stable
+    /// identifier the RPP publishes (issue #48) — see
+    /// [`PreflightRefusal::label`].
+    #[error("molecule {id}: {refusal}")]
+    Preflight {
+        /// The molecule whose dispatch was refused.
+        id: Box<MoleculeId>,
+        /// Which precondition failed, and its repair.
+        refusal: PreflightRefusal,
+    },
+
     /// A `git` invocation failed (worktree / branch creation, repo probe).
     #[error("git error: {0}")]
     Git(String),
@@ -200,6 +217,137 @@ pub enum TackleExecError {
         /// What was deliberately left in place.
         preserved: String,
     },
+}
+
+// ---------------------------------------------------------------------------
+// Spawn preflight — the dispatch preconditions (issue #48, restored on the
+// library seam by task-20260911-be1e)
+// ---------------------------------------------------------------------------
+
+/// Why a dispatch was refused **before any effect**, in the taxonomy the
+/// RPP publishes as a wire contract.
+///
+/// # Why this is typed, and why these two variants
+///
+/// Issue #48 shipped three stable `503` identifiers on
+/// `POST /v1/molecules/{id}/tackle`, and an external reporter consumes
+/// them by name. Two of the three are *preconditions*: conditions that
+/// are knowable before the dispatch spends anything, and whose repair is
+/// different in each case (provision a credential vs. start a backend).
+/// The third, `subprocess_spawn_failed`, is not a precondition — it is
+/// the outcome of an attempted spawn, and lives on
+/// [`TackleExecError::Spawn`].
+///
+/// Before issue #54 U6 these two were recovered by substring-matching
+/// `cs tackle`'s stderr inside the adapter. The library cut-over dropped
+/// both the match and — the part that actually mattered — the *checks*
+/// themselves, because they lived inside the CLI's spawn arms and the
+/// library executor never grew them (the module docs of this file
+/// enumerate "the adapter preflight probes" among the U5 parity gaps).
+/// The result was a `200` and a receipt for a dispatch whose worker
+/// could not work: the "everything works except the worker" failure the
+/// refusal exists to prevent. Typing the refusal, rather than a string,
+/// is what lets the label survive a rewrite of the path that raises it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreflightRefusal {
+    /// No credential the spawned worker could actually use was found.
+    ///
+    /// Fail-closed: an interactive agent with no credential does **not**
+    /// exit — it boots to its composer and waits, which every liveness
+    /// probe reads as a healthy worker. Refusing here is the only place
+    /// the condition is still cheap and visible.
+    WorkerCredentialMissing {
+        /// The adapter whose credential is missing.
+        adapter: String,
+        /// Which precondition failed, for the server log.
+        detail: String,
+        /// What an operator must do, for the server log.
+        remedy: String,
+    },
+
+    /// The adapter's backend answered nothing, or cannot serve the
+    /// resolved model. The work never had a chance to run.
+    AdapterBackendUnreachable {
+        /// The adapter whose backend is unusable.
+        adapter: String,
+        /// Which probe failed, for the server log.
+        detail: String,
+    },
+}
+
+impl PreflightRefusal {
+    /// The stable wire identifier for this refusal.
+    ///
+    /// `&'static str` on purpose: these are contract identifiers an
+    /// external consumer matches on, not renderable prose. Everything
+    /// operator-facing lives in the `detail` / `remedy` fields, which
+    /// stay on the server side of the boundary (turing G9).
+    #[must_use]
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::WorkerCredentialMissing { .. } => "worker_credential_missing",
+            Self::AdapterBackendUnreachable { .. } => "adapter_backend_unreachable",
+        }
+    }
+}
+
+impl std::fmt::Display for PreflightRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerCredentialMissing {
+                adapter,
+                detail,
+                remedy,
+            } => write!(
+                f,
+                "refusing to spawn a {adapter} worker: {detail}. {remedy}"
+            ),
+            Self::AdapterBackendUnreachable { adapter, detail } => {
+                write!(f, "refusing to dispatch to the {adapter} adapter: {detail}")
+            }
+        }
+    }
+}
+
+/// What a preflight is asked to judge: the resolved dispatch, before any
+/// effect has been performed.
+#[derive(Debug, Clone, Copy)]
+pub struct PreflightContext<'a> {
+    /// The molecule about to be dispatched.
+    pub molecule: &'a MoleculeId,
+    /// The adapter the selection chain resolved to (`claude`, `local`, …).
+    pub adapter: &'a str,
+    /// The model the selection chain resolved to, when one is pinned.
+    pub model: Option<&'a str>,
+}
+
+/// The injectable precondition port evaluated between selection and the
+/// first side effect.
+///
+/// # Why a port rather than a call
+///
+/// The checks are I/O — a keychain probe, a `stat(2)`, an HTTP request —
+/// and `cosmon-runtime` is on the I/O-free side of that boundary
+/// (`docs/architectural-invariants.md`); its only transport dependency is
+/// the injected [`TransportBackend`]. Each embedder also has a different
+/// *right* answer: the CLI resolves a credential through the operator's
+/// ambient environment, while a multi-tenant server must not let its own
+/// process environment decide a tenant's dispatch. A port keeps the
+/// *ordering* guarantee here — refuse before spending — and leaves the
+/// *predicate* with whoever can state it truthfully.
+///
+/// `Debug` is a supertrait so [`LibraryExecutor`] keeps its derived
+/// `Debug`; `Send + Sync` because the executor crosses a
+/// `spawn_blocking` boundary in the adapter.
+pub trait SpawnPreflight: std::fmt::Debug + Send + Sync {
+    /// Judge one resolved dispatch.
+    ///
+    /// # Errors
+    ///
+    /// A [`PreflightRefusal`] when a precondition of the dispatch does
+    /// not hold. Implementations MUST be fail-closed: an
+    /// *indeterminate* probe is a refusal, never an `Ok`.
+    fn check(&self, ctx: &PreflightContext<'_>) -> Result<(), PreflightRefusal>;
 }
 
 /// Which of a dispatch's filesystem resources **this attempt actually
@@ -409,6 +557,15 @@ pub struct LibraryExecutor<B> {
     backend: B,
     /// The actor class stamped on the anti-preemption lease.
     by: TackledBy,
+    /// The dispatch preconditions evaluated before any effect.
+    ///
+    /// `None` means "no embedder stated the preconditions", which is the
+    /// pre-issue-#48 behaviour and is deliberately NOT the same thing as
+    /// "the preconditions hold". Every embedder that can spawn a paid or
+    /// interactive worker MUST install one ([`Self::with_preflight`]);
+    /// the default exists for the hermetic tests and for embedders whose
+    /// backend is a mock.
+    preflight: Option<std::sync::Arc<dyn SpawnPreflight>>,
 }
 
 impl<B: TransportBackend> LibraryExecutor<B> {
@@ -428,7 +585,26 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                 pid: std::process::id(),
             },
             paths,
+            preflight: None,
         }
+    }
+
+    /// Install the dispatch preconditions this embedder can state.
+    ///
+    /// The port is evaluated after the adapter/model selection chains
+    /// resolve — the checks are per-adapter, so they cannot run before
+    /// the adapter is known — and **before** the first side effect: no
+    /// attribution event, no worktree, no ledger record, no spawn. A
+    /// refusal therefore leaves the molecule exactly as it was found.
+    ///
+    /// An embedder that spawns real workers must call this. Omitting it
+    /// restores the failure issue #48 named and issue #54 U6
+    /// reintroduced: a `200` and a receipt for a worker that cannot
+    /// work.
+    #[must_use]
+    pub fn with_preflight(mut self, preflight: std::sync::Arc<dyn SpawnPreflight>) -> Self {
+        self.preflight = Some(preflight);
+        self
     }
 
     /// Pin the state / formulas / config this executor reads, instead of
@@ -555,6 +731,12 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             harness_flag: &cosmon_core::harness_settings::HarnessMap::new(),
         })?;
 
+        self.run_preflight(
+            id,
+            selection.adapter.as_str(),
+            selection.preferred_model.as_deref(),
+        )?;
+
         // Attribution events, co-minted with the dispatch exactly as the
         // CLI does — before any filesystem side effect, best-effort by the
         // emit helpers' own contract.
@@ -597,6 +779,41 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         );
 
         self.execute(&store, &state_dir, &repo_root, &mol, &plan)
+    }
+
+    /// Evaluate the dispatch preconditions, if this embedder stated any
+    /// (issue #48, restored on this seam by task-20260911-be1e).
+    ///
+    /// Called from [`Self::tackle`] the moment the adapter is known — the
+    /// per-adapter checks cannot run before that — and before the FIRST
+    /// side effect of any kind. That placement is the whole point:
+    /// deliberately ahead of the attribution emission as well as the
+    /// worktree, the ledger and the spawn, so a dispatch that never
+    /// happened leaves no `AdapterSelected` in the event log claiming it
+    /// did, and the molecule is found exactly as it was.
+    ///
+    /// # Errors
+    ///
+    /// [`TackleExecError::Preflight`] carrying the typed refusal.
+    fn run_preflight(
+        &self,
+        id: &MoleculeId,
+        adapter: &str,
+        model: Option<&str>,
+    ) -> Result<(), TackleExecError> {
+        let Some(preflight) = self.preflight.as_ref() else {
+            return Ok(());
+        };
+        preflight
+            .check(&PreflightContext {
+                molecule: id,
+                adapter,
+                model,
+            })
+            .map_err(|refusal| TackleExecError::Preflight {
+                id: Box::new(id.clone()),
+                refusal,
+            })
     }
 
     /// The effect half proper: worktree → ledger → spawn, with the
@@ -852,12 +1069,20 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 // until `max_runtime` and report the known-at-first-tick refusal
                 // as a timeout. The non-retryable class stops the loop with a
                 // typed reason instead ([`RuntimeError::DispatchRefused`]).
-                refusal @ TackleExecError::UnsupportedStep { .. } => {
-                    RuntimeError::DispatchRefused {
-                        id: id.clone(),
-                        reason: refusal.to_string(),
-                    }
-                }
+                //
+                // A PRECONDITION refusal joins it, for a different reason
+                // that lands in the same place. A missing credential or a
+                // dead backend is not permanent in the way a formula is —
+                // an operator can repair it — but it will not repair
+                // itself inside this drain's budget, and retrying it every
+                // poll interval is precisely how a stated cause becomes an
+                // unexplained `timeout`. Stopping with the cause named
+                // lets the operator fix it and re-run; spinning does not.
+                refusal @ (TackleExecError::UnsupportedStep { .. }
+                | TackleExecError::Preflight { .. }) => RuntimeError::DispatchRefused {
+                    id: id.clone(),
+                    reason: refusal.to_string(),
+                },
                 other => RuntimeError::Dispatch {
                     id: id.clone(),
                     reason: other.to_string(),

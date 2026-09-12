@@ -40,16 +40,25 @@ pub fn for_api_error(status: u16, label: &str) -> Option<&'static str> {
         // are keyed on causes the server now actually distinguishes, so
         // they state rather than guess. The condition was the split, and
         // the split has happened — for these three labels and no others.
+        // Since issue #54 U6 the server no longer shells a `cs` binary:
+        // the dispatch is in-process and the spawn is the WORKER's, made
+        // through the transport. The label is unchanged — it is a contract
+        // identifier, and the condition it names (the worker process could
+        // not be started) is the same one — but the hint had to stop
+        // naming a binary that is no longer on the path, or it sends the
+        // reader to check something that cannot be the cause.
         (503, "subprocess_spawn_failed") => Some(
-            "the `cs` binary could not be started — it is missing or not executable in \
-             the container image.\n  verify: cosmon-remote doctor",
+            "the worker process could not be started — the instance's transport \
+             (tmux) or the agent binary is missing or not executable in the container \
+             image. Nothing was dispatched; the molecule is still tacklable.\n  \
+             verify: cosmon-remote doctor",
         ),
         (503, "worker_credential_missing") => Some(
-            "the container's Claude Code worker has no login credential. \
-             Provision one by: (a) exporting CLAUDE_CODE_OAUTH_TOKEN, \
-             (b) running `claude` interactively and completing `/login`, \
-             or (c) mounting `.credentials.json` into CLAUDE_CONFIG_DIR.\n  \
-             verify: cosmon-remote doctor",
+            "the instance's Claude Code worker has no login credential, so the \
+             dispatch was refused before anything was spawned. Complete the login on \
+             the instance (`cosmon-remote login claude`); `cosmon-remote auth me` \
+             reports the same verdict under claude_credentials_status. The molecule \
+             is untouched and still tacklable.\n  verify: cosmon-remote doctor",
         ),
         (503, "adapter_backend_unreachable") => Some(
             "the local adapter's backend (e.g. Ollama) is not reachable or cannot \
@@ -201,26 +210,48 @@ mod tests {
         assert!(for_api_error(503, "tenant_unavailable").is_some());
     }
 
-    /// `subprocess_spawn_failed` names the missing binary and points at doctor.
+    /// `subprocess_spawn_failed` names what could not start and points at
+    /// doctor.
+    ///
+    /// The assertion deliberately no longer demands the string `` `cs` ``:
+    /// since issue #54 U6 the server shells no `cs` binary, and a hint
+    /// that named one would send the reader to check something that
+    /// cannot be the cause. The LABEL is unchanged — it is the contract
+    /// identifier issue #48 shipped — and the condition it names is the
+    /// same: the worker process could not be started.
     #[test]
-    fn subprocess_spawn_failed_names_binary_and_doctor() {
+    fn subprocess_spawn_failed_names_what_could_not_start_and_doctor() {
         let hint = for_api_error(503, "subprocess_spawn_failed").unwrap();
-        assert!(hint.contains("`cs`"), "must name the binary");
+        assert!(
+            hint.contains("worker process"),
+            "must name what could not start"
+        );
+        assert!(
+            !hint.contains("`cs` binary"),
+            "must not send the reader after a binary the server no longer shells"
+        );
         assert!(hint.contains("doctor"));
     }
 
-    /// `worker_credential_missing` names all three credential provisioning paths.
+    /// `worker_credential_missing` names the login the INSTANCE needs and
+    /// the endpoint that corroborates the verdict.
+    ///
+    /// Not the dispatcher's `CLAUDE_CODE_OAUTH_TOKEN` / `CLAUDE_CONFIG_DIR`
+    /// any more: neither crosses the adapter's worker env allow-list
+    /// (`cosmon_rpp_adapter::worker_env::PASSTHROUGH_VARS`), so a reader
+    /// who followed that advice would provision something the worker
+    /// never reads and see the same refusal again.
     #[test]
-    fn worker_credential_missing_names_all_three_paths() {
+    fn worker_credential_missing_names_the_instance_login_and_its_witness() {
         let hint = for_api_error(503, "worker_credential_missing").unwrap();
+        assert!(hint.contains("login"), "must name the login gesture");
         assert!(
-            hint.contains("CLAUDE_CODE_OAUTH_TOKEN"),
-            "must name env var path"
+            hint.contains("claude_credentials_status"),
+            "must point at the field that corroborates the verdict"
         );
-        assert!(hint.contains("/login"), "must name interactive login path");
         assert!(
-            hint.contains(".credentials.json"),
-            "must name file mount path"
+            hint.contains("untouched"),
+            "must state the molecule survives the refusal"
         );
     }
 
