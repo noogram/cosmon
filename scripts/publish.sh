@@ -752,8 +752,9 @@ fi
 #
 # WAIVER. The per-line marker, as everywhere else here: the detector must
 # contain the shapes it detects (ADR-127 §6), so the one line in the pattern
-# library carrying a literally-matching sample declares itself with
-# `publish: allow — <reason>` and is skipped. No sidecar hatch: every format
+# library, and each canary vector and test fixture carrying a literally-matching
+# sample, declares itself with `publish: allow — <reason>` and is skipped —
+# this script and its test included. No path is excluded from the scan. No sidecar hatch: every format
 # this rule can hit has a comment syntax, and adding a whole-file waiver where
 # a per-line one works is the blind spot the doctrine refuses.
 #
@@ -762,12 +763,6 @@ fi
 # that ran the gate.
 # shellcheck source=lib/session-id-patterns.sh
 . "$(cd "$(dirname "$0")" && pwd)/lib/session-id-patterns.sh"
-
-SESSION_EXCLUDE=(
-  ':(exclude)scripts/publish.sh'
-  ':(exclude)scripts/publish.test.sh'
-  ':(exclude)scripts/check-no-session-ids.sh'
-)
 
 # CANARY, through the SAME engine the scan uses, for the reason B's canary
 # spells out: a rule that silently stopped matching reports a clean tree it
@@ -784,8 +779,8 @@ git -C "$session_canary_dir" init -q >/dev/null 2>&1 ||
 {
   printf 'Claude-Session: x\n'
   printf 'Session-Id: x\n'
-  printf 'see https://claude.ai/code/session_0123456789abcdef\n'
-  printf 'see https://chatgpt.com/codex/threads/abc\n'
+  printf 'see https://claude.ai/code/session_0123456789abcdef\n'  # publish: allow — synthetic canary vector for rule harness-session-deep-link
+  printf 'see https://chatgpt.com/codex/threads/abc\n'  # publish: allow — synthetic canary vector for rule vendor-console-deep-link
 } >"$session_canary_dir/canary.txt"
 git -C "$session_canary_dir" add -A >/dev/null 2>&1 ||
   session_canary_fail "could not track the canary file"
@@ -809,7 +804,7 @@ while IFS=$'\t' read -r srule sre; do
     printf '  session-id: %s:%s: %s (value withheld, sha256:%s)\n' \
       "$loc" "$lno" "$srule" "$d" >>"$findings"
     session_hits=$((session_hits + 1))
-  done < <(git grep -nIE -e "$sre" -- . "${SESSION_EXCLUDE[@]}" 2>/dev/null)
+  done < <(git grep -nIE -e "$sre" -- . 2>/dev/null)
 done <<<"$SESSION_ID_RULES"
 
 if [ "$session_hits" -gt 0 ]; then
