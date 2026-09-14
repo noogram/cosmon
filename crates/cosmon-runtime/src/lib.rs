@@ -252,6 +252,15 @@ pub struct DispatchPin {
     /// is `None`, the re-dispatch must reproduce the *floor* — i.e. strip
     /// ambient model env rather than let it bleed in.
     pub model: Option<String>,
+    /// The integration base a pin-less molecule must be cut from and merged
+    /// back into — the resident loop's `cs run --base` directive, or the
+    /// molecule's own persisted base echoed back (issue #69).
+    ///
+    /// Independent of [`Self::is_pinned`]: a base is not a record of a prior
+    /// dispatch but a destination, so it applies to a first dispatch too. A
+    /// molecule that already carries a persisted base keeps it; the executor
+    /// stamps this value only onto a molecule that has none.
+    pub base_branch: Option<String>,
 }
 
 impl DispatchPin {
@@ -265,6 +274,9 @@ impl DispatchPin {
             Some(process) => Self {
                 adapter: process.adapter_name.clone(),
                 model: process.model.clone(),
+                // The persisted base is read back by `cs tackle` itself; the
+                // pin need not repeat it.
+                base_branch: None,
             },
             None => Self::default(),
         }
@@ -449,6 +461,11 @@ impl SubprocessExecutor {
     /// A first (unpinned) dispatch leaves the command untouched, so its
     /// resolution chain — and ambient env — behave exactly as before.
     fn apply_dispatch_pin(cmd: &mut Command, pin: &DispatchPin) {
+        // The base is a destination, not a replayed resolution: it applies to
+        // a first dispatch as well, so it is stamped before the pinned check.
+        if let Some(base) = pin.base_branch.as_deref() {
+            cmd.arg("--base").arg(base);
+        }
         if !pin.is_pinned() {
             return;
         }

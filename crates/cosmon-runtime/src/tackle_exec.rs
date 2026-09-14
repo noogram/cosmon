@@ -653,7 +653,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     ) -> Result<TackleReceipt, TackleExecError> {
         let state_dir = self.paths.state_dir.clone();
         let store = FileStore::new(&state_dir);
-        let mol = store.load_molecule(id)?;
+        let mut mol = store.load_molecule(id)?;
         if !mol.status.is_alive() {
             return Err(TackleExecError::NotTackleable {
                 id: Box::new(id.clone()),
@@ -762,6 +762,9 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         let mol_dir = store.molecule_dir(id);
         let briefing = std::fs::read_to_string(mol_dir.join("briefing.md")).ok();
         let repo_root = git_repo_root(&self.cwd)?;
+        // After every refusal above, so a dispatch that never happened does
+        // not retarget the molecule.
+        stamp_run_base(&store, &mut mol, pin)?;
         let plan = TacklePlan::from_parts(
             selection,
             &PromptRequest {
@@ -1089,6 +1092,29 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 },
             })
     }
+}
+
+/// Stamp a run-wide base (`cs run --base`, carried on the [`DispatchPin`])
+/// onto a molecule that carries none, and persist it.
+///
+/// The per-molecule base wins: a molecule that already has one is left
+/// untouched. Persisting mirrors `cs tackle --base`, so the eventual
+/// `cs done` merges into the branch the worktree was cut from (issue #69).
+fn stamp_run_base(
+    store: &FileStore,
+    mol: &mut MoleculeData,
+    pin: &DispatchPin,
+) -> Result<(), TackleExecError> {
+    if mol.base_branch.is_some() {
+        return Ok(());
+    }
+    let Some(base) = pin.base_branch.as_deref() else {
+        return Ok(());
+    };
+    mol.base_branch = Some(base.to_owned());
+    mol.updated_at = chrono::Utc::now();
+    store.save_molecule(&mol.id, mol)?;
+    Ok(())
 }
 
 /// Create the worker's isolation worktree and its `feat/<mol>` branch.

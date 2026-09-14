@@ -136,6 +136,13 @@ pub(crate) struct MoleculeStateEntry {
     /// this directional routing choice rather than substituting its local floor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) adapter: Option<String>,
+    /// The molecule's persisted integration base
+    /// ([`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch)).
+    /// The resident scheduler reads it as the per-molecule base pin, so a
+    /// `cs run --resident --base <X>` directive stamps only molecules that
+    /// carry none. Absent (skipped) when the molecule has no base.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) base_branch: Option<String>,
 }
 
 /// Build the per-molecule projection consumed by machine readers.
@@ -176,6 +183,7 @@ pub(crate) fn build_molecule_states(
                         .as_ref()
                         .and_then(|process| process.adapter_name.clone())
                 }),
+                base_branch: m.base_branch.clone(),
             }
         })
         .collect();
@@ -1711,6 +1719,21 @@ mod tests {
         assert_eq!(states[0].adapter.as_deref(), Some("mistral"));
         assert_eq!(states[1].adapter.as_deref(), Some("claude"));
         assert_eq!(states[2].adapter.as_deref(), Some("mistral"));
+    }
+
+    /// The persisted base is projected verbatim, and a base-less molecule
+    /// projects none — the resident scheduler reads presence as "pinned".
+    #[test]
+    fn molecule_states_project_the_persisted_base() {
+        let mut based = make_molecule("aaaa", MoleculeStatus::Pending);
+        based.base_branch = Some("feat/x".into());
+        let baseless = make_molecule("bbbb", MoleculeStatus::Pending);
+
+        let states = build_molecule_states(&[based, baseless]);
+        assert_eq!(states[0].base_branch.as_deref(), Some("feat/x"));
+        assert_eq!(states[1].base_branch, None);
+        let json = serde_json::to_value(&states[1]).unwrap();
+        assert!(json.get("base_branch").is_none(), "absent base is skipped");
     }
 
     #[test]
