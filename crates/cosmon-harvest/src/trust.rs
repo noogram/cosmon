@@ -524,7 +524,7 @@ fn primary_surface_files(key_root: &Path) -> Vec<PathBuf> {
 /// when it goes stale. `cs done` intersects this set with a merge's diff to
 /// name the shell-surface paths a molecule branch changes (issue #74), so the
 /// operator reviews those files instead of guessing. It walks exactly the
-/// files [`surface_hash`] folds, via the same helpers.
+/// files `surface_hash` folds, via the same helpers.
 #[must_use]
 pub fn surface_paths(start: &Path) -> Vec<String> {
     let key_root = key_root_or_fallback(start);
