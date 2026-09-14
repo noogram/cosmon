@@ -38,6 +38,11 @@ pub mod realized_watcher;
 // silently breaks every `[`Item`]` the module writes about itself.
 pub mod briefing_backstop;
 
+// The briefing delivery postcondition (issue #40): observe the composer after
+// an injection, re-issue the submit, report a typed outcome. Documented by its
+// own `//!` header, for the reason given above.
+pub mod briefing_delivery;
+
 // Five modules the harvest transaction reads, re-exported from
 // `cosmon-harvest` rather than defined here.
 //
