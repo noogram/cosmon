@@ -110,6 +110,28 @@ pub enum TackleExecError {
     #[error(transparent)]
     UnsupportedHarnessCarrier(#[from] UnsupportedHarnessCarrier),
 
+    /// The selection chain resolved a model pin and the resolved adapter
+    /// cannot receive it on this executor's spawn seam (issue #72).
+    ///
+    /// This executor spawns through [`AgentDefinition`], whose `args` carry no
+    /// per-adapter model flag, so a pinned `opencode` dispatch would start
+    /// `opencode` with the pin dropped while `ModelSelected` recorded it as
+    /// honoured. Refused before any effect instead; dispatch it through
+    /// `cs tackle`, whose opencode arm carries `--model`.
+    #[error(
+        "molecule {id}: the {adapter} adapter was pinned to model '{model}', \
+         but the library executor has no channel to carry a model to {adapter} \
+         — refusing rather than dropping the pin; dispatch it through `cs tackle`"
+    )]
+    UnsupportedModelCarrier {
+        /// The refused molecule.
+        id: Box<MoleculeId>,
+        /// The resolved adapter that cannot receive the pin here.
+        adapter: String,
+        /// The resolved model pin that would have been dropped.
+        model: String,
+    },
+
     /// The molecule is in a terminal state and cannot be tackled.
     #[error("molecule {id} is {status} — cannot tackle a terminal molecule")]
     NotTackleable {
@@ -797,13 +819,17 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     ///
     /// # Errors
     ///
-    /// [`TackleExecError::Preflight`] carrying the typed refusal.
+    /// [`TackleExecError::Preflight`] carrying the typed refusal, or
+    /// [`TackleExecError::UnsupportedModelCarrier`] when the resolved model
+    /// pin cannot reach the resolved adapter on this seam (issue #72) — a
+    /// check this executor makes whether or not an embedder stated a port.
     fn run_preflight(
         &self,
         id: &MoleculeId,
         adapter: &str,
         model: Option<&str>,
     ) -> Result<(), TackleExecError> {
+        refuse_uncarried_model(id, adapter, model)?;
         let Some(preflight) = self.preflight.as_ref() else {
             return Ok(());
         };
@@ -1082,6 +1108,7 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 // unexplained `timeout`. Stopping with the cause named
                 // lets the operator fix it and re-run; spinning does not.
                 refusal @ (TackleExecError::UnsupportedStep { .. }
+                | TackleExecError::UnsupportedModelCarrier { .. }
                 | TackleExecError::Preflight { .. }) => RuntimeError::DispatchRefused {
                     id: id.clone(),
                     reason: refusal.to_string(),
@@ -1091,6 +1118,33 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                     reason: other.to_string(),
                 },
             })
+    }
+}
+
+/// Adapters whose model pin this executor's spawn seam cannot carry.
+///
+/// Listed rather than inferred: `opencode` is the adapter issue #72 found
+/// dropping its pin, and the only one this refusal is scoped to. It runs
+/// before the attribution events so a refused dispatch leaves no
+/// `ModelSelected` claiming the pin.
+const ADAPTERS_WITHOUT_MODEL_CARRIER: &[&str] = &["opencode"];
+
+/// Refuse a pinned dispatch onto an adapter in
+/// [`ADAPTERS_WITHOUT_MODEL_CARRIER`]; an unpinned one has nothing to drop.
+fn refuse_uncarried_model(
+    id: &MoleculeId,
+    adapter: &str,
+    model: Option<&str>,
+) -> Result<(), TackleExecError> {
+    match model {
+        Some(model) if ADAPTERS_WITHOUT_MODEL_CARRIER.contains(&adapter) => {
+            Err(TackleExecError::UnsupportedModelCarrier {
+                id: Box::new(id.clone()),
+                adapter: adapter.to_owned(),
+                model: model.to_owned(),
+            })
+        }
+        _ => Ok(()),
     }
 }
 

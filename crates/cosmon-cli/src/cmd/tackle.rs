@@ -4423,10 +4423,16 @@ pub(super) fn spawn_and_prompt(
         // fourth external-CLI subprocess adapter. Same tmux-pane shape as
         // codex: spawn `opencode run '<prompt>'` into a pane, then assert
         // liveness through the substrate-agnostic `LiveProbe` contract.
-        "opencode" => {
-            spawn_opencode_and_prompt(backend, wid, session_name, worktree_path, prompt, mol)
-                .map(|()| SpawnOutcome::default())
-        }
+        "opencode" => spawn_opencode_and_prompt(
+            backend,
+            wid,
+            session_name,
+            worktree_path,
+            prompt,
+            mol,
+            preferred_model,
+        )
+        .map(|()| SpawnOutcome::default()),
         "openai" => spawn_openai_session(
             wid,
             session_name,
@@ -6146,6 +6152,33 @@ fn spawn_codex_and_prompt(
     Ok(())
 }
 
+/// The session config the opencode arm spawns with.
+///
+/// Pure so the dispatch arm's carriage of the resolved model is testable
+/// without tmux: issue #72 was an arm that recorded `ModelSelected` and then
+/// built a config with no model. opencode is resolved by bare name; the tmux
+/// pane's shell resolves it on PATH at exec time, the same contract
+/// `preflight::adapter_binary` already checks. An absent binary surfaces as
+/// an `[exited]` pane and is caught by the readiness probe.
+fn opencode_session_config(
+    socket: &str,
+    session_name: &str,
+    worktree_path: &std::path::Path,
+    prompt: &str,
+    preferred_model: Option<&str>,
+) -> cosmon_transport::opencode::OpencodeSessionConfig {
+    cosmon_transport::opencode::OpencodeSessionConfig {
+        socket: socket.to_owned(),
+        session_name: session_name.to_owned(),
+        work_dir: worktree_path.to_string_lossy().into_owned(),
+        binary: std::path::PathBuf::from("opencode"),
+        prompt: Some(prompt.to_owned()),
+        model: preferred_model.map(str::to_owned),
+        telemetry: None,
+        pre_existing_worker: None,
+    }
+}
+
 /// opencode branch of [`spawn_and_prompt`].
 ///
 /// opencode (sst/opencode) is the external-CLI sibling of codex — a
@@ -6175,23 +6208,18 @@ fn spawn_opencode_and_prompt(
     worktree_path: &std::path::Path,
     prompt: &str,
     _mol: &MoleculeData,
+    preferred_model: Option<&str>,
 ) -> anyhow::Result<()> {
     use cosmon_transport::opencode;
     use cosmon_transport::readiness::LiveProbe as _;
 
-    // opencode is resolved by bare name; the tmux pane's shell resolves it on
-    // PATH at exec time, the same contract `preflight::adapter_binary`
-    // already checks ("opencode" present on PATH). An absent binary surfaces
-    // here as an `[exited]` pane and is caught by the readiness probe below.
-    let config = opencode::OpencodeSessionConfig {
-        socket: backend.socket().to_owned(),
-        session_name: session_name.to_owned(),
-        work_dir: worktree_path.to_string_lossy().into_owned(),
-        binary: std::path::PathBuf::from("opencode"),
-        prompt: Some(prompt.to_owned()),
-        telemetry: None,
-        pre_existing_worker: None,
-    };
+    let config = opencode_session_config(
+        backend.socket(),
+        session_name,
+        worktree_path,
+        prompt,
+        preferred_model,
+    );
 
     opencode::spawn_opencode_session(&config)
         .map_err(|e| anyhow::anyhow!("cs tackle: opencode spawn failed: {e}"))?;
@@ -13004,6 +13032,41 @@ mod tests {
     /// point of the chip, so the terminal-REPL aider co-pilot can be aimed
     /// at Mistral (or any model) without recompiling. Config wins over both
     /// the env tier and the compile-time `kimi-k2.6`.
+    /// Issue #72 falsifier 1: the opencode dispatch arm's config carries the
+    /// resolved pin, and the command it realizes contains `--model <pin>`.
+    /// Asserted on the argv, not on `ModelSelected` — that event was emitted
+    /// before the fix too.
+    #[test]
+    fn opencode_arm_realizes_the_model_pin_on_the_command_line() {
+        let config = opencode_session_config(
+            "cosmon",
+            "polecat-opencode",
+            std::path::Path::new("/tmp/wt"),
+            "go",
+            Some("openai/gpt-5.2"),
+        );
+        let cmd = cosmon_transport::opencode::build_opencode_command(&config);
+        assert!(
+            cmd.contains(" --model openai/gpt-5.2 "),
+            "the pin must reach opencode's argv: {cmd}"
+        );
+    }
+
+    /// Issue #72 falsifier 2: no pin, no model flag — cosmon mints nothing.
+    #[test]
+    fn opencode_arm_without_a_pin_emits_no_model_flag() {
+        let config = opencode_session_config(
+            "cosmon",
+            "polecat-opencode",
+            std::path::Path::new("/tmp/wt"),
+            "go",
+            None,
+        );
+        let cmd = cosmon_transport::opencode::build_opencode_command(&config);
+        assert!(!cmd.contains("--model"), "no pin must add no flag: {cmd}");
+        assert!(!cmd.contains(" -m "), "no pin must add no flag: {cmd}");
+    }
+
     #[test]
     fn aider_model_prefers_config_default_model() {
         let entry = AdapterEntry {

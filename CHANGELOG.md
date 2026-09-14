@@ -121,6 +121,16 @@ defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
 
+- **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
+  issue #72). The pin was resolved and recorded as `ModelSelected`, then
+  `opencode run` was spawned with no model, so the audit trail claimed a pin
+  the process never received. The opencode arm now emits `--model <pin>`
+  verbatim (opencode expects `provider/model`; cosmon adds no prefix), and
+  no pin still emits no flag. The in-process executor behind the RPP tackle
+  route has no channel for the flag, so a pinned opencode dispatch there is
+  refused before any effect (`501 tackle_unsupported_model`) instead of
+  spawned with the pin dropped.
+
 - **A harvest that no operator grant covers is refused by name.** The ADR-172
   effect boundary answered an anonymous error for every outcome, so an armed
   galaxy with no grant yet — the state every galaxy passes through the moment
