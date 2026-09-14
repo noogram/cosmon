@@ -56,7 +56,8 @@ pub const DEFAULT_BASE_BRANCH: &str = "main";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BaseSource {
     /// The molecule's own persisted `base_branch`, stamped by
-    /// `cs tackle --base`.
+    /// `cs nucleate --base`, `cs tackle --base`, or a `cs run --base`
+    /// directive applied to a pin-less molecule.
     Persisted,
     /// The [`BASE_BRANCH_ENV`] environment variable.
     Environment,
@@ -74,7 +75,9 @@ impl BaseSource {
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::Persisted => "the molecule's own base, stamped by `cs tackle --base`",
+            Self::Persisted => {
+                "the molecule's own base, stamped by `cs nucleate --base` or `cs tackle --base`"
+            }
             Self::Environment => "the COSMON_BASE_BRANCH environment variable",
             Self::ConfiguredTrunk => "`[project] trunk_branch` in .cosmon/config.toml",
             Self::OriginHead => "origin/HEAD, the default branch the remote advertises",
@@ -193,6 +196,105 @@ fn resolve_ambient_with_source(repo_root: &Path, configured_trunk: Option<&str>)
     }
 }
 
+/// Answers one question about the repository: does a local branch exist?
+///
+/// # Why this is a port
+///
+/// Every writer of a molecule's `base_branch` — `cs nucleate --base`,
+/// `cs tackle --base`, `cs run --base` — must refuse a branch that does not
+/// exist, because a dangling base is not discovered until `cs done` tries to
+/// check it out, hours later and in a worker's hands. The refusal *policy*
+/// ([`validate_requested_base`]) is pure; only the probe touches git. Keeping
+/// the probe behind this trait lets the policy be tested without a repository
+/// and keeps the three writers on one rule instead of three copies of it.
+pub trait LocalBranchProbe {
+    /// True iff `refs/heads/<branch>` exists.
+    fn local_branch_exists(&self, branch: &str) -> bool;
+}
+
+/// The production [`LocalBranchProbe`]: `git show-ref --verify` in a
+/// repository root.
+#[derive(Debug, Clone, Copy)]
+pub struct GitBranchProbe<'a> {
+    repo_root: &'a Path,
+}
+
+impl<'a> GitBranchProbe<'a> {
+    /// Probe the repository rooted at `repo_root`. A linked worktree shares
+    /// its branches with the main checkout, so either root answers the same.
+    #[must_use]
+    pub const fn new(repo_root: &'a Path) -> Self {
+        Self { repo_root }
+    }
+
+    /// The repository root this probe asks, for refusal messages.
+    #[must_use]
+    pub const fn repo_root(&self) -> &'a Path {
+        self.repo_root
+    }
+}
+
+impl LocalBranchProbe for GitBranchProbe<'_> {
+    fn local_branch_exists(&self, branch: &str) -> bool {
+        Command::new("git")
+            .args([
+                "-C",
+                &self.repo_root.to_string_lossy(),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                &format!("refs/heads/{branch}"),
+            ])
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+}
+
+/// Why a requested base branch was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum BaseValidationError {
+    /// The flag or declaration field was present but blank.
+    #[error("--base was given an empty branch name; pass a local branch such as `--base main`")]
+    Empty,
+    /// No local branch carries that name.
+    #[error(
+        "--base {branch}: no local branch by that name.\n\
+         The base must be a branch `cs done` can check out and merge into — \
+         create or fetch it first (e.g. `git branch {branch} origin/{branch}`)."
+    )]
+    NoSuchBranch {
+        /// The branch that was asked for, trimmed.
+        branch: String,
+    },
+}
+
+/// Validate a requested integration base before it is persisted anywhere.
+///
+/// Returns the trimmed branch name when `probe` confirms a local branch by
+/// that name, and refuses otherwise with the branch named. Shared by every
+/// writer of [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch)
+/// so that "born with a base" and "tackled with a base" obey one rule.
+///
+/// # Errors
+///
+/// [`BaseValidationError::Empty`] for a blank name,
+/// [`BaseValidationError::NoSuchBranch`] when the probe finds no such branch.
+pub fn validate_requested_base(
+    requested: &str,
+    probe: &dyn LocalBranchProbe,
+) -> Result<String, BaseValidationError> {
+    let requested = requested.trim();
+    if requested.is_empty() {
+        return Err(BaseValidationError::Empty);
+    }
+    if !probe.local_branch_exists(requested) {
+        return Err(BaseValidationError::NoSuchBranch {
+            branch: requested.to_owned(),
+        });
+    }
+    Ok(requested.to_owned())
+}
+
 /// The galaxy's **reference trunk** — the branch it treats as its principal
 /// line of integration.
 ///
@@ -270,6 +372,50 @@ fn origin_head(repo_root: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A probe that knows a fixed set of branches, standing in for git.
+    struct KnownBranches(&'static [&'static str]);
+
+    impl LocalBranchProbe for KnownBranches {
+        fn local_branch_exists(&self, branch: &str) -> bool {
+            self.0.contains(&branch)
+        }
+    }
+
+    /// An existing branch is accepted and returned trimmed.
+    #[test]
+    fn an_existing_base_is_accepted_trimmed() {
+        let probe = KnownBranches(&["feat/x"]);
+        assert_eq!(
+            validate_requested_base("  feat/x ", &probe),
+            Ok("feat/x".to_owned())
+        );
+    }
+
+    /// A branch the repository does not have is refused, and the refusal
+    /// names it — the operator must see which base was wrong.
+    #[test]
+    fn a_dangling_base_is_refused_by_name() {
+        let probe = KnownBranches(&["main"]);
+        let err = validate_requested_base("does-not-exist", &probe).unwrap_err();
+        assert_eq!(
+            err,
+            BaseValidationError::NoSuchBranch {
+                branch: "does-not-exist".to_owned()
+            }
+        );
+        assert!(err.to_string().contains("does-not-exist"));
+    }
+
+    /// A blank base is not a branch: refused before the probe is asked.
+    #[test]
+    fn a_blank_base_is_refused() {
+        let probe = KnownBranches(&[""]);
+        assert_eq!(
+            validate_requested_base("   ", &probe),
+            Err(BaseValidationError::Empty)
+        );
+    }
 
     /// A molecule that carries its own base wins over everything ambient —
     /// this is the whole point of the field. Deliberately env-agnostic: the

@@ -225,6 +225,22 @@ pub struct Args {
     /// adapter-chain docs for the single canonical resolution order.
     #[arg(long, value_name = "NAME")]
     pub adapter: Option<String>,
+
+    /// **Opt-in run-wide integration base** (resident mode only).
+    ///
+    /// The base twin of `--adapter`, with the same two-rung precedence: every
+    /// **pin-less** molecule this run dispatches — one with no persisted base —
+    /// is tackled with `--base <BRANCH>`, which persists the base on the
+    /// molecule so its `cs done` merges into `<BRANCH>` rather than the ambient
+    /// HEAD. A molecule that already carries a base (`cs nucleate --base`, an
+    /// earlier `cs tackle --base`) keeps it: the per-molecule base wins.
+    ///
+    /// This is how a germinated polymer (`cs spore run`, `cs nucleate --from`)
+    /// is aimed at an integration branch without tackling each node by hand.
+    /// The branch must exist locally; a dangling base is refused before the
+    /// loop starts.
+    #[arg(long, value_name = "BRANCH", requires = "resident")]
+    pub base: Option<String>,
 }
 
 /// Execute the `run` command.
@@ -840,8 +856,19 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Delegating keeps the single canonical resolver as the one source of truth
     // for every dispatch path, resident included.
     let run_adapter = resolve_run_adapter(args.adapter.as_deref());
-    let scheduler: Box<dyn ResidentScheduler> =
-        Box::new(ReadyFrontierScheduler::new().with_run_adapter(run_adapter));
+    // Opt-in run-wide base (issue #69): validated once, here, against the
+    // repository the loop dispatches into — a dangling base refused before the
+    // first tick instead of by every `cs tackle` the loop would shell out.
+    let run_base = args
+        .base
+        .as_deref()
+        .map(|b| super::tackle::validate_base_flag(&cwd, b))
+        .transpose()?;
+    let scheduler: Box<dyn ResidentScheduler> = Box::new(
+        ReadyFrontierScheduler::new()
+            .with_run_adapter(run_adapter)
+            .with_run_base(run_base),
+    );
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();
 

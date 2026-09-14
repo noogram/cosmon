@@ -508,6 +508,11 @@ pub struct TeardownPlan {
     pub worktree_dirty_error: Option<String>,
     /// Whether the worker's branch exists locally.
     pub branch_exists: bool,
+    /// The branch the merge would land on — the molecule's own persisted base
+    /// when it has one, else the ambient chain ([`crate::base_branch::resolve`]).
+    /// Reported so a dry run answers "where would this work go?" before the
+    /// harvest refuses on the wrong checkout.
+    pub merge_target: String,
     /// Whether the branch is already merged into the current HEAD.
     ///
     /// Topology test only: true iff every commit reachable from the
@@ -626,7 +631,7 @@ fn compute_teardown_plan(
         ));
     }
     if !args.no_merge && merge_needed {
-        planned_actions.push(format!("merge branch {branch_name} into HEAD"));
+        planned_actions.push(format!("merge branch {branch_name} into {base}"));
     }
     if !args.no_merge && branch_merged {
         if branch_is_empty {
@@ -657,6 +662,7 @@ fn compute_teardown_plan(
         worktree_dirty_files,
         worktree_dirty_error,
         branch_exists: branch_present,
+        merge_target: base,
         branch_already_merged: branch_merged,
         branch_is_empty,
         merge_needed,
@@ -3647,6 +3653,7 @@ fn report_plan(ctx: &Context, plan: &TeardownPlan) {
             println!("{line}");
         }
         println!("  branch exists:    {}", plan.branch_exists);
+        println!("  merge target:     {}", plan.merge_target);
         println!("  already merged:   {}", plan.branch_already_merged);
         println!("  empty branch:     {}", plan.branch_is_empty);
         println!("  merge needed:     {}", plan.merge_needed);
@@ -13314,6 +13321,7 @@ forbidden_substrings = ["Tenant-Demo Research", "Tenant-Demo"]
             worktree_dirty_files: files,
             worktree_dirty_error: Some(error),
             branch_exists: false,
+            merge_target: "main".to_owned(),
             branch_already_merged: false,
             branch_is_empty: false,
             merge_needed: false,

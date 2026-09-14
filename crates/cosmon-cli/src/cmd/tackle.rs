@@ -3602,36 +3602,27 @@ fn resolve_tackle_base(
     let Some(requested) = requested else {
         return Ok(persisted);
     };
-    let requested = requested.trim();
-    if requested.is_empty() {
-        return Err(anyhow::anyhow!(
-            "--base was given an empty branch name; pass a local branch such as `--base main`"
-        ));
-    }
-    if !local_branch_exists(repo_root, requested) {
-        return Err(anyhow::anyhow!(
-            "--base {requested}: no local branch by that name in {}.\n\
-             The base must be a branch `cs done` can check out and merge into — \
-             create or fetch it first (e.g. `git branch {requested} origin/{requested}`).",
-            repo_root.display()
-        ));
-    }
-    Ok(Some(requested.to_owned()))
+    validate_base_flag(repo_root, requested).map(Some)
 }
 
-/// True iff `refs/heads/<branch>` exists in `repo_root`.
-fn local_branch_exists(repo_root: &std::path::Path, branch: &str) -> bool {
-    std::process::Command::new("git")
-        .args([
-            "-C",
-            &repo_root.to_string_lossy(),
-            "show-ref",
-            "--verify",
-            "--quiet",
-            &format!("refs/heads/{branch}"),
-        ])
-        .status()
-        .is_ok_and(|s| s.success())
+/// Validate a `--base <BRANCH>` value against the repository at `repo_root`.
+///
+/// The one refusal every writer of a molecule's `base_branch` shares —
+/// `cs tackle --base`, `cs nucleate --base` (and its `--from` declarations),
+/// and `cs run --base`. The policy lives in
+/// [`cosmon_cli::base_branch::validate_requested_base`]; this wrapper supplies
+/// the git probe and names the repository in the refusal.
+///
+/// # Errors
+///
+/// Returns an error naming the branch when it is blank or not a local branch.
+pub(crate) fn validate_base_flag(
+    repo_root: &std::path::Path,
+    requested: &str,
+) -> anyhow::Result<String> {
+    use cosmon_cli::base_branch::{validate_requested_base, GitBranchProbe};
+    validate_requested_base(requested, &GitBranchProbe::new(repo_root))
+        .map_err(|e| anyhow::anyhow!("{e}\n(repository: {})", repo_root.display()))
 }
 
 fn resolve_branch_start_point(repo_root: &std::path::Path, mol: &MoleculeData) -> Option<String> {

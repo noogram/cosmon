@@ -325,6 +325,7 @@ fn library_executor_honours_the_dispatch_pin() {
     let pin = DispatchPin {
         adapter: Some("claude".to_owned()),
         model: None,
+        base_branch: None,
     };
     executor
         .dispatch_with_pin(&mol.id, &pin)

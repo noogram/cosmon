@@ -59,7 +59,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["formula", "vars", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes"],
+        conflicts_with_all = ["formula", "vars", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes", "base"],
     )]
     pub(crate) from: Option<PathBuf>,
 
@@ -282,6 +282,24 @@ pub struct Args {
     /// its adapter through the canonical `cs tackle` chain at dispatch.
     #[arg(long, value_name = "NAME")]
     pub(crate) adapter: Option<String>,
+
+    /// Durable integration base — the branch this molecule's `feat/<id>`
+    /// branch is cut from and `cs done` merges back into.
+    ///
+    /// Persisted to
+    /// [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch)
+    /// at birth, beside the adapter pin, so the base is a property of the
+    /// molecule rather than of whichever session later dispatches it: a bare
+    /// `cs tackle <id>` resolves to it, and a `cs run --resident --base <X>`
+    /// directive does not overwrite it (the per-molecule base wins, as the
+    /// adapter pin does). `cs tackle <id> --base <Y>` still overrides it.
+    ///
+    /// The branch must exist locally: a base naming no branch is refused here,
+    /// with the branch named, and no molecule is created — otherwise the
+    /// mistake would surface only at `cs done`, hours later. `None` (the
+    /// default) stamps nothing and leaves the ambient resolution unchanged.
+    #[arg(long, value_name = "BRANCH")]
+    pub(crate) base: Option<String>,
 }
 
 impl Args {
@@ -316,6 +334,7 @@ impl Args {
             energy_budget: None,
             require_galaxy: false,
             adapter: None,
+            base: None,
         }
     }
 }
@@ -404,6 +423,15 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Resolve the per-molecule step budget: CLI override beats project
     // default. `0` (either source) disables the breaker for this molecule.
     let energy_budget_cap = args.energy_budget.unwrap_or(energy_default);
+
+    // Validate `--base` before anything is written: a dangling base refused at
+    // birth costs the operator one retyped command; the same base accepted
+    // costs a worker's whole run, refused at `cs done`.
+    let base_branch = args
+        .base
+        .as_deref()
+        .map(validate_base_at_birth)
+        .transpose()?;
 
     if let Some(ref from_path) = args.from {
         run_from_declarations(
@@ -524,8 +552,24 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             expiry_policy,
             energy_budget_cap,
             args.adapter.as_deref(),
+            base_branch,
         )
     }
+}
+
+/// Validate a base branch named at nucleation (`--base`, or a declaration's
+/// `base_branch`) against the target repository.
+///
+/// Shares its refusal with `cs tackle --base` so a molecule cannot be *born*
+/// with a base it could never be *tackled* with.
+fn validate_base_at_birth(requested: &str) -> anyhow::Result<String> {
+    let repo_root = cosmon_cli::target_repo::resolve().map_err(|e| {
+        anyhow::anyhow!(
+            "--base {}: cannot locate the repository to check it: {e}",
+            requested.trim()
+        )
+    })?;
+    super::tackle::validate_base_flag(&repo_root, requested)
 }
 
 /// Resolve the effective `--refines` target list.
@@ -895,6 +939,7 @@ fn run_single(
     expiry_policy: Option<ExpiryPolicy>,
     energy_budget_cap: u32,
     adapter: Option<&str>,
+    base_branch: Option<String>,
 ) -> anyhow::Result<()> {
     let formula = load_formula(formulas_dir, formula_name)?;
     let (result, _path) = nucleate_and_persist(
@@ -920,6 +965,7 @@ fn run_single(
         expiry_policy,
         energy_budget_cap,
         adapter,
+        base_branch,
     )?;
     emit_output(ctx, std::slice::from_ref(&result));
     Ok(())
@@ -948,13 +994,26 @@ fn run_from_declarations(
         ));
     }
 
-    let mut results = Vec::with_capacity(decl_paths.len());
+    // Parse every declaration and validate every declared base BEFORE the
+    // first molecule is created, so a dangling base in the fifth file does
+    // not leave four molecules born behind the refusal.
+    let mut declarations = Vec::with_capacity(decl_paths.len());
     for decl_path in &decl_paths {
         let content = std::fs::read_to_string(decl_path)
             .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", decl_path.display()))?;
         let declaration = MoleculeDeclaration::parse(&content)
             .map_err(|e| anyhow::anyhow!("failed to parse {}: {e}", decl_path.display()))?;
+        let base_branch = declaration
+            .base_branch
+            .as_deref()
+            .map(validate_base_at_birth)
+            .transpose()
+            .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
+        declarations.push((decl_path, declaration, base_branch));
+    }
 
+    let mut results = Vec::with_capacity(declarations.len());
+    for (decl_path, declaration, base_branch) in declarations {
         let mut formula = load_formula(formulas_dir, &declaration.formula)
             .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
 
@@ -992,6 +1051,7 @@ fn run_from_declarations(
             energy_budget_cap,
             // Declarations don't carry a per-molecule adapter pin today.
             None,
+            base_branch,
         )
         .map_err(|e| anyhow::anyhow!("{}: {e}", decl_path.display()))?;
 
@@ -1123,6 +1183,10 @@ pub(crate) fn nucleate_for_spore(req: SporeNucleation<'_>) -> anyhow::Result<Nuc
         req.energy_budget_cap,
         // Spore nodes carry no per-molecule adapter pin today.
         None,
+        // Nor a base: a base in the spore format is a sealed-format change
+        // (ADR-140) left to its own decision. A germinated polymer is aimed
+        // at an integration branch by `cs run --resident --base` instead.
+        None,
     )?;
     Ok(result)
 }
@@ -1190,6 +1254,7 @@ fn nucleate_and_persist(
     expiry_policy: Option<ExpiryPolicy>,
     energy_budget_cap: u32,
     adapter: Option<&str>,
+    base_branch: Option<String>,
 ) -> anyhow::Result<(NucleateResult, PathBuf)> {
     // Validate the durable adapter pin's *grammar* up front so a malformed
     // family name fails the nucleation rather than being persisted as an
@@ -1302,7 +1367,8 @@ fn nucleate_and_persist(
         expires_at,
         expiry_policy,
         originating_branch: None,
-        base_branch: None,
+        // Already validated by the caller (`validate_base_at_birth`).
+        base_branch,
         pending_step: None,
         merged_at: None,
         harvest_reason: None,
@@ -1895,6 +1961,7 @@ mod tests {
             energy_budget: None,
             require_galaxy: false,
             adapter: None,
+            base: None,
         }
     }
 

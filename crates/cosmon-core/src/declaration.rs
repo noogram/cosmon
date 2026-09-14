@@ -56,6 +56,13 @@ pub struct MoleculeDeclaration {
     /// Worker to assign (optional — omit for pending).
     #[serde(default)]
     pub assign: Option<String>,
+    /// Integration base the molecule is born with — the declaration-file
+    /// spelling of `cs nucleate --base`, so a directory of declarations can
+    /// aim a whole set of molecules at one integration branch. Validated
+    /// exactly as the flag is (the branch must exist locally) before any
+    /// molecule in the directory is created.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_branch: Option<String>,
 }
 
 /// Errors from parsing molecule declarations.
@@ -145,6 +152,7 @@ mod tests {
             links: vec!["link-1".to_string()],
             kind: Some("task".to_string()),
             assign: Some("worker-1".to_string()),
+            base_branch: Some("feat/issue-69".to_string()),
         };
 
         let toml_str = decl.to_toml();
@@ -152,5 +160,19 @@ mod tests {
         assert_eq!(reparsed.id_prefix, "test");
         assert_eq!(reparsed.formula, "test-formula");
         assert_eq!(reparsed.assign.as_deref(), Some("worker-1"));
+        assert_eq!(reparsed.base_branch.as_deref(), Some("feat/issue-69"));
+    }
+
+    /// A declaration that names no base yields `None` — no default is minted.
+    #[test]
+    fn a_declaration_without_base_has_none() {
+        let decl = MoleculeDeclaration::parse(
+            r#"
+id_prefix = "task"
+formula = "task-work"
+"#,
+        )
+        .unwrap();
+        assert_eq!(decl.base_branch, None);
     }
 }

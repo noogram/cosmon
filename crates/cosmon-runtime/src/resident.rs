@@ -188,6 +188,13 @@ pub struct EnsembleMolecule {
     /// policy. The runtime carries it through to `cs tackle` unchanged.
     #[serde(default)]
     pub adapter: Option<String>,
+    /// The molecule's persisted integration base (`cs nucleate --base`,
+    /// `cs tackle --base`), projected by `cs ensemble --json`. Its presence is
+    /// the per-molecule base pin: a `cs run --base` directive fills in only
+    /// where this is `None`, exactly as [`Self::adapter`] outranks the run-wide
+    /// adapter directive.
+    #[serde(default)]
+    pub base_branch: Option<String>,
 }
 
 /// Snapshot of the fleet handed to a [`ResidentScheduler`].
@@ -287,6 +294,12 @@ impl EnsembleSnapshot {
                 .get("adapter")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+            let base_branch = entry
+                .get("base_branch")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|b| !b.is_empty())
+                .map(str::to_owned);
             if id.is_empty() {
                 continue;
             }
@@ -299,6 +312,7 @@ impl EnsembleSnapshot {
                 merged_at,
                 stuck_at,
                 adapter,
+                base_branch,
             });
         }
         Ok(Self { molecules })
@@ -399,6 +413,10 @@ pub enum Decision {
         molecule_id: String,
         /// Adapter selected by directional routing, if any.
         adapter: Option<String>,
+        /// Integration base to hand `cs tackle --base`: the molecule's own
+        /// persisted base, else the run-wide `cs run --base` directive, else
+        /// `None` (no flag — `cs tackle` resolves the ambient chain).
+        base: Option<String>,
     },
     /// Shell out `cs done <id>` to merge a completed molecule's branch.
     Done(String),
@@ -421,6 +439,13 @@ impl Decision {
     fn adapter(&self) -> Option<&str> {
         match self {
             Self::Tackle { adapter, .. } => adapter.as_deref(),
+            Self::Done(_) => None,
+        }
+    }
+
+    fn base(&self) -> Option<&str> {
+        match self {
+            Self::Tackle { base, .. } => base.as_deref(),
             Self::Done(_) => None,
         }
     }
@@ -500,6 +525,15 @@ pub struct ReadyFrontierScheduler {
     /// `$COSMON_DEFAULT_ADAPTER` → config → the `local` floor), so the operator's
     /// live env/config intent is honoured rather than masked (COSMON-DEV #21).
     run_adapter: Option<String>,
+    /// Explicit, opt-in run-wide integration base (`cs run --base <BRANCH>`).
+    ///
+    /// The base twin of [`Self::run_adapter`], with the same precedence: a
+    /// **pin-less** molecule (no persisted
+    /// [`EnsembleMolecule::base_branch`]) is dispatched with
+    /// `cs tackle --base <BRANCH>`, which persists it on the molecule so the
+    /// eventual `cs done` merges there; a molecule that already carries a base
+    /// keeps it. `None` (the default) stamps nothing.
+    run_base: Option<String>,
 }
 
 impl ReadyFrontierScheduler {
@@ -523,6 +557,20 @@ impl ReadyFrontierScheduler {
     #[must_use]
     pub fn with_run_adapter(mut self, run_adapter: Option<String>) -> Self {
         self.run_adapter = run_adapter;
+        self
+    }
+
+    /// Set the explicit, opt-in run-wide integration base.
+    ///
+    /// `Some(branch)` (from `cs run --base <branch>`) aims every pin-less
+    /// molecule dispatched this run — static frontier nodes and children
+    /// nucleated mid-run alike — at `branch`. A molecule's own persisted base
+    /// still overrides the directive, as a per-molecule adapter pin overrides
+    /// [`Self::with_run_adapter`]. Validation that the branch exists is the
+    /// caller's job, done once before the loop starts.
+    #[must_use]
+    pub fn with_run_base(mut self, run_base: Option<String>) -> Self {
+        self.run_base = run_base;
         self
     }
 }
@@ -637,6 +685,10 @@ impl ResidentScheduler for ReadyFrontierScheduler {
                     // (`BUILTIN_FLOOR_ADAPTER`), reached by the child iff no
                     // higher rung speaks.
                     adapter: m.adapter.clone().or_else(|| self.run_adapter.clone()),
+                    // Same two rungs for the integration base: the molecule's
+                    // own persisted base wins, the run directive fills in only
+                    // where there is none (issue #69).
+                    base: m.base_branch.clone().or_else(|| self.run_base.clone()),
                 });
                 self.tackled.insert(m.id.clone());
             }
@@ -1187,9 +1239,15 @@ impl RuntimeLoop {
                         Decision::Tackle {
                             molecule_id,
                             adapter,
+                            base,
                         },
                         Some(executor),
-                    ) => dispatch_via_executor(executor, molecule_id, adapter.as_deref()),
+                    ) => dispatch_via_executor(
+                        executor,
+                        molecule_id,
+                        adapter.as_deref(),
+                        base.as_deref(),
+                    ),
                     _ => shell_out(&self.config, &d),
                 };
                 let hash_after = state_hash(&self.config.cwd);
@@ -1674,6 +1732,7 @@ fn dispatch_via_executor(
     executor: &(dyn crate::Executor + Send),
     molecule_id: &str,
     adapter: Option<&str>,
+    base: Option<&str>,
 ) -> Result<(), ResidentError> {
     let id =
         cosmon_core::id::MoleculeId::new(molecule_id).map_err(|e| ResidentError::CsInvocation {
@@ -1684,6 +1743,7 @@ fn dispatch_via_executor(
     let pin = crate::DispatchPin {
         adapter: adapter.map(str::to_owned),
         model: None,
+        base_branch: base.map(str::to_owned),
     };
     executor
         .dispatch_with_pin(&id, &pin)
@@ -1786,6 +1846,9 @@ fn shell_out_args(d: &Decision, runtime_pid: u32) -> Vec<String> {
     }
     if let Some(adapter) = d.adapter() {
         args.extend(["--adapter".to_owned(), adapter.to_owned()]);
+    }
+    if let Some(base) = d.base() {
+        args.extend(["--base".to_owned(), base.to_owned()]);
     }
     args
 }
@@ -2152,6 +2215,7 @@ mod tests {
             merged_at: None,
             stuck_at: None,
             adapter: None,
+            base_branch: None,
         }
     }
 
@@ -2212,6 +2276,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
+                base: None,
             }]
         );
         assert_eq!(
@@ -2225,6 +2290,67 @@ mod tests {
                 "codex",
             ]
         );
+    }
+
+    /// Issue #69, the polymer case: three base-less molecules (as a spore
+    /// germinates them) are each dispatched with the run-wide base, and the
+    /// base reaches the shelled `cs tackle` as `--base`.
+    #[test]
+    fn run_base_directive_aims_every_pinless_molecule() {
+        let snapshot = EnsembleSnapshot::from_json(
+            r#"{"molecule_states":[
+                {"id":"n1","status":"pending"},
+                {"id":"n2","status":"pending"},
+                {"id":"n3","status":"pending"}]}"#,
+        )
+        .expect("snapshot parses");
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_base(Some("feat/x".into()));
+
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(decisions.len(), 3);
+        for d in &decisions {
+            assert_eq!(d.base(), Some("feat/x"), "{d:?}");
+            let args = shell_out_args(d, 7);
+            let at = args
+                .iter()
+                .position(|a| a == "--base")
+                .expect("--base rendered");
+            assert_eq!(args[at + 1], "feat/x");
+        }
+    }
+
+    /// The per-molecule base wins over the run directive, exactly as the
+    /// per-molecule adapter pin wins over `cs run --adapter`.
+    #[test]
+    fn molecule_base_beats_run_base_directive() {
+        let snapshot = EnsembleSnapshot::from_json(
+            r#"{"molecule_states":[{"id":"pinned","status":"pending","base_branch":"feat/x"}]}"#,
+        )
+        .expect("snapshot parses");
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_base(Some("feat/z".into()));
+
+        assert_eq!(
+            scheduler.next_decisions(&snapshot),
+            vec![Decision::Tackle {
+                molecule_id: "pinned".into(),
+                adapter: None,
+                base: Some("feat/x".into()),
+            }],
+            "a molecule's own base must not be overwritten by the run directive"
+        );
+    }
+
+    /// No pin and no directive: no `--base` on the child, so `cs tackle`
+    /// resolves the ambient chain unchanged.
+    #[test]
+    fn no_base_and_no_directive_renders_no_base_flag() {
+        let snapshot =
+            EnsembleSnapshot::from_json(r#"{"molecule_states":[{"id":"a","status":"pending"}]}"#)
+                .expect("snapshot parses");
+        let mut scheduler = ReadyFrontierScheduler::new();
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(decisions[0].base(), None);
+        assert!(!shell_out_args(&decisions[0], 7).contains(&"--base".to_owned()));
     }
 
     #[test]
@@ -2245,6 +2371,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "task-pinless".into(),
                 adapter: Some("claude".into()),
+                base: None,
             }],
             "an explicit run directive must replace the local floor for a pin-less molecule"
         );
@@ -2269,6 +2396,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "task-pinless".into(),
                 adapter: None,
+                base: None,
             }],
             "no pin + no run directive must emit no adapter flag (delegate the full chain to cs tackle)"
         );
@@ -2296,6 +2424,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
+                base: None,
             }],
             "a per-molecule pin must beat the run-wide directive"
         );
@@ -2326,6 +2455,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "child".into(),
                 adapter: Some("claude".into()),
+                base: None,
             }],
             "a dynamically-nucleated pin-less child must inherit the run directive"
         );
@@ -2357,6 +2487,7 @@ mod tests {
                 // No pin, no run directive → no flag stamp; the child resolves
                 // the full canonical chain (COSMON-DEV #21).
                 adapter: None,
+                base: None,
             }]
         );
         // Same snapshot → no re-tackle.
@@ -2395,6 +2526,7 @@ mod tests {
                 molecule_id: "decision".into(),
                 // Pin-less, directive-less → no flag; child runs the full chain.
                 adapter: None,
+                base: None,
             }]
         );
     }
@@ -2491,6 +2623,7 @@ mod tests {
             vec![Decision::Tackle {
                 molecule_id: "routed".into(),
                 adapter: Some("anthropic".into()),
+                base: None,
             }],
             "a snapshot adapter pin must reach the tackle decision unchanged"
         );
@@ -2520,6 +2653,7 @@ mod tests {
                     molecule_id: "b".into(),
                     // Pin-less, directive-less → no flag; child runs the chain.
                     adapter: None,
+                    base: None,
                 },
             ]
         );
@@ -2571,6 +2705,7 @@ mod tests {
                 molecule_id: "redteam".into(),
                 // Pin-less, directive-less → no flag; child runs the chain.
                 adapter: None,
+                base: None,
             }),
             "fan-in must chain when one blocker is torn down and the other \
              completed, got {decisions:?}"
@@ -2597,6 +2732,7 @@ mod tests {
                 molecule_id: "architect".into(),
                 // Pin-less, directive-less → no flag; child runs the chain.
                 adapter: None,
+                base: None,
             }],
             "child must tackle behind a delivered (stuck_at=None) frozen \
              mission, got {decisions:?}"
