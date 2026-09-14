@@ -844,6 +844,38 @@ fn branch_is_empty_relative_to(repo_root: &Path, branch: &str, base: &str) -> bo
     }
 }
 
+/// `true` iff `branch`'s tip is on `base` but **not** on `base`'s first-parent
+/// chain — it arrived through the side parent of a merge commit.
+///
+/// Why: [`branch_is_empty_relative_to`] cannot tell a worker branch that never
+/// committed from one an operator merged by hand with `git merge --no-ff`
+/// (the landing path issue #74 prints when a merge changes the trusted shell
+/// surface). Both are zero commits ahead of base. Only the hand-merged tip is
+/// off the first-parent chain, so this is what keeps `cs done` from calling
+/// landed work an `empty_branch`. A fast-forwarded branch stays on the chain
+/// and keeps its previous label. Any git failure answers `false`, the previous
+/// behaviour.
+fn branch_landed_by_merge_commit(repo_root: &Path, branch: &str, base: &str) -> bool {
+    let git_out = |args: &[&str]| {
+        Command::new("git")
+            .arg("-C")
+            .arg(repo_root)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+    };
+    let Some(tip) = git_out(&["rev-parse", "--verify", &format!("{branch}^{{commit}}")]) else {
+        return false;
+    };
+    let Some(chain) = git_out(&["rev-list", "--first-parent", base]) else {
+        return false;
+    };
+    let tip = tip.trim();
+    !chain.lines().any(|line| line == tip)
+}
+
 /// Structural post-condition for the final `cs done` guard: `true` iff
 /// `branch` still exists locally **and** carries commit(s) not reachable
 /// from `base`.
@@ -2375,6 +2407,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     } else {
         Some(git_head(&repo_root)?)
     };
+    // Issue #74: read the B5 trust status and the shell-surface paths of the
+    // PRE-merge tree now, while it is still on disk. A post-merge gate refusal
+    // for trust staleness is only *caused by the merge* when this tree was
+    // trusted; that is the one refusal whose remedy is not `cs trust`.
+    let pre_merge_trust = pre_merge_head.as_ref().map(|_| PreMergeTrust {
+        status: crate::trust::status(&repo_root),
+        surface: crate::trust::surface_paths(&repo_root),
+    });
 
     // Emit EventV2::MergeDispatched before the merge attempt.
     //
@@ -2552,9 +2592,14 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 // appropriate action label so the operator can verify
                 // the worker's deliverable landed where it was
                 // supposed to. See `classify_already_merged_label`.
+                // A branch merged by hand (issue #74's manual landing) is
+                // also zero commits ahead of base; its tip reached base
+                // through a merge commit's side parent, which an empty
+                // branch's tip never does.
                 let label = classify_already_merged_label(
                     mol.merged_at.is_some(),
-                    branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch),
+                    branch_is_empty_relative_to(&repo_root, &branch_name, &base_branch)
+                        && !branch_landed_by_merge_commit(&repo_root, &branch_name, &base_branch),
                 );
                 actions.push(label.to_owned());
                 merge_succeeded = true;
@@ -2748,6 +2793,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         merge_dispatch_seq,
                         &actions,
                         &e.to_string(),
+                        None,
                     ));
                 }
             },
@@ -2762,6 +2808,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     merge_dispatch_seq,
                     &actions,
                     "post-merge gate refused DONE but no pre-merge revision was captured",
+                    None,
                 ));
             }
         };
@@ -2786,6 +2833,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 reason,
                 command,
                 expected,
+                trust_refusal,
             } => {
                 let hint = command
                     .as_ref()
@@ -2817,6 +2865,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                     };
                     let cause =
                         format!("post-merge integrity UNVERIFIED ({expectation}) — {reason}{hint}");
+                    // Issue #74: only when THIS merge turned a trusted surface
+                    // stale does the operator get the manual landing sequence.
+                    // Computed before the rollback, while the merged surface
+                    // is still on disk.
+                    let remedy = pre_merge_trust
+                        .as_ref()
+                        .filter(|pre| merge_invalidated_trust(&pre.status, trust_refusal.as_ref()))
+                        .map(|pre| {
+                            let changed = pre_merge_head
+                                .as_deref()
+                                .and_then(|pmh| post_merge_changed_files(&repo_root, pmh).ok())
+                                .unwrap_or_default();
+                            let merged_surface = crate::trust::surface_paths(&repo_root);
+                            let paths =
+                                shell_surface_changes(&changed, &pre.surface, &merged_surface);
+                            trust_surface_remedy(
+                                &repo_root,
+                                &base_branch,
+                                &mol_id,
+                                &branch_name,
+                                &paths,
+                                command.as_deref(),
+                            )
+                        });
                     return Err(refuse_post_merge_and_rollback(
                         ctx,
                         &events_path,
@@ -2827,6 +2899,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                         merge_dispatch_seq,
                         &actions,
                         &cause,
+                        remedy.as_deref(),
                     ));
                 }
                 // Reached only for `expected: false` without the promoting flag —
@@ -5197,6 +5270,12 @@ enum GateOutcome {
         reason: String,
         command: Option<String>,
         expected: bool,
+        /// `Some(status)` when the gate was not run because the B5 trust gate
+        /// refused the repo-supplied command, carrying the status it read on
+        /// the **merged** tree; `None` for every other cause. Typed rather than
+        /// sniffed from `reason` so `cs done` can tell a merge that invalidated
+        /// trust (issue #74) from a repository that was never trusted.
+        trust_refusal: Option<crate::trust::TrustStatus>,
     },
 }
 
@@ -5282,6 +5361,141 @@ struct CargoDependency {
     path: Option<PathBuf>,
 }
 
+/// The B5 trust facts of the **pre-merge** tree, captured by `cs done` before
+/// it merges, so a post-merge trust refusal can be attributed (issue #74).
+struct PreMergeTrust {
+    /// Trust status of the repository before the merge touched it.
+    status: crate::trust::TrustStatus,
+    /// Repo-relative shell-surface paths before the merge; a branch that
+    /// *deletes* one of them changes the surface as surely as one that adds.
+    surface: Vec<String>,
+}
+
+/// Did the merge itself invalidate a trust grant? True only when the pre-merge
+/// tree was [`TrustStatus::Trusted`](crate::trust::TrustStatus::Trusted) and the
+/// post-merge gate was refused because the merged tree reads
+/// [`TrustStatus::Stale`](crate::trust::TrustStatus::Stale).
+///
+/// Why a predicate of its own: the remedy for this class — land by hand, then
+/// re-grant over the merged surface — is wrong for every neighbour. A repository
+/// that was never trusted needs `cs trust`; a grant that was already stale before
+/// the merge needs a review of what drifted on the base branch; a compile
+/// failure needs a fix. Keeping the classes apart is issue #74's contract.
+fn merge_invalidated_trust(
+    pre_merge: &crate::trust::TrustStatus,
+    trust_refusal: Option<&crate::trust::TrustStatus>,
+) -> bool {
+    use crate::trust::TrustStatus;
+    *pre_merge == TrustStatus::Trusted && trust_refusal == Some(&TrustStatus::Stale)
+}
+
+/// The shell-surface paths a merge changes: every changed file that belongs to
+/// the surface before **or** after the merge, sorted and deduplicated. The
+/// union matters — a branch can add a delegated script (only in the merged
+/// surface) or delete one (only in the pre-merge surface). A primary surface
+/// file such as `.cosmon/config.toml` is in both.
+fn shell_surface_changes(changed: &[PathBuf], pre: &[String], post: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = changed
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .filter(|p| pre.contains(p) || post.contains(p))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Quote `s` for a POSIX shell only when it needs it, so the common path
+/// (`scripts/gate.sh`) prints as typed and a path with a space still pastes.
+fn sh_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '+' | '@' | ':')
+        });
+    if safe {
+        s.to_owned()
+    } else {
+        format!("'{}'", s.replace('\'', r"'\''"))
+    }
+}
+
+/// Operator guidance for a post-merge refusal caused by the merge invalidating
+/// trust (issue #74): why `cs trust` alone loops, which shell-surface paths to
+/// review, and the manual sequence that lands the branch.
+///
+/// # Why this text exists
+///
+/// The generic stale-trust message says "re-grant: `cs trust`". After a merge
+/// changed the surface that instruction cannot work — the grant hashes the
+/// pre-merge surface left on disk by the rollback, and each retry re-merges and
+/// changes it again. Twice observed on 2026-09-14. The sequence printed here is
+/// the one that worked: review, merge by hand under the provenance subject,
+/// verify, `cs trust` over the merged surface, then `cs done`, which finds the
+/// branch `already merged` and only tears down.
+///
+/// Every command line starts with `$ ` so an operator (or a test) can lift the
+/// sequence verbatim. `verify` is the gate command that was refused; without
+/// one it falls back to `cargo check --workspace --all-targets`.
+fn trust_surface_remedy(
+    repo_root: &Path,
+    base_branch: &str,
+    mol_id: &MoleculeId,
+    branch: &str,
+    paths: &[String],
+    verify: Option<&str>,
+) -> String {
+    let root = sh_quote(&repo_root.to_string_lossy());
+    let quoted_branch = sh_quote(branch);
+    let mut out = String::new();
+    out.push_str(
+        "this merge changes the repository's trusted shell surface: the pre-merge \
+         surface is trusted, the merged one is not.\n",
+    );
+    out.push_str(
+        "`cs trust` before retrying cannot fix it — the grant would hash the pre-merge \
+         surface, and the retry re-merges and changes it again.\n",
+    );
+    if paths.is_empty() {
+        out.push_str(
+            "shell-surface paths changed by the branch: none could be listed — review the \
+             full diff below.\n",
+        );
+    } else {
+        out.push_str(&format!(
+            "shell-surface paths changed by {branch} — review these before merging:\n"
+        ));
+        for path in paths {
+            out.push_str(&format!("    • {path}\n"));
+        }
+    }
+    out.push_str(&format!(
+        "land it by hand on {base_branch}, then let `cs done` tear down:\n"
+    ));
+    out.push_str(&format!("    $ cd {root}\n"));
+    let pathspec = if paths.is_empty() {
+        String::new()
+    } else {
+        let quoted: Vec<String> = paths.iter().map(|p| sh_quote(p)).collect();
+        format!(" -- {}", quoted.join(" "))
+    };
+    out.push_str(&format!(
+        "    $ git diff HEAD...{quoted_branch}{pathspec}\n"
+    ));
+    out.push_str(&format!(
+        "    $ printf \"Merge branch '%s'\\n\" {quoted_branch} | git merge --no-ff -S -F /dev/stdin {quoted_branch}\n"
+    ));
+    out.push_str(&format!(
+        "    $ {}\n",
+        verify.unwrap_or("cargo check --workspace --all-targets")
+    ));
+    out.push_str("    $ cs trust\n");
+    out.push_str(&format!("    $ cs done {mol_id}\n"));
+    out.push_str(
+        "`cs done` then reports the branch already merged, skips the merge and only tears down.",
+    );
+    out
+}
+
 /// Roll main back to its pre-merge revision and emit the loud failure report +
 /// durable `Error` witness for a post-merge gate refusal, returning the `Err`
 /// the caller must propagate (so `cs done` exits non-zero, the merge is
@@ -5306,6 +5520,7 @@ fn refuse_post_merge_and_rollback(
     merge_dispatch_seq: Option<cosmon_core::event_v2::Seq>,
     actions: &[String],
     cause: &str,
+    remedy: Option<&str>,
 ) -> anyhow::Error {
     let rollback = pre_merge_head.ok_or_else(|| {
         anyhow::anyhow!("post-merge gate refused DONE but no pre-merge revision was captured")
@@ -5324,13 +5539,19 @@ fn refuse_post_merge_and_rollback(
         },
         merge_dispatch_seq,
     );
+    // The remedy is operator guidance, not a merge result: it reaches the
+    // report, never the durable `MergeResult::Error` witness above.
+    let recovery = match remedy {
+        Some(remedy) => format!("{reason}\n{remedy}"),
+        None => reason.clone(),
+    };
     report_merge_failure(
         ctx,
         mol_id,
         "post_merge_compile_gate_refused",
         "POST-MERGE COMPILE GATE REFUSED — merge rolled back, branch preserved",
         &[],
-        &reason,
+        &recovery,
         actions,
     );
     anyhow::anyhow!(reason)
@@ -5427,6 +5648,7 @@ fn run_post_merge_gate(
             .to_owned(),
         command: None,
         expected: false,
+        trust_refusal: None,
     })
 }
 
@@ -5458,6 +5680,7 @@ fn run_delegated_command(
             ),
             command: Some(command.to_owned()),
             expected: true,
+            trust_refusal: Some(crate::trust::status(repo_root)),
         });
     }
     // Defect 1 (codex-sol, task-20260715-ff5b): route the repo-supplied command
@@ -5564,6 +5787,7 @@ fn run_cargo_autodetect(
                 reason,
                 command: None,
                 expected: true,
+                trust_refusal: None,
             }));
         }
         CheckDecision::Check {
@@ -7999,6 +8223,7 @@ mod tests {
             reason: "repo root is not a Cargo workspace".to_owned(),
             command: None,
             expected: false,
+            trust_refusal: None,
         };
         let result = post_gate_merge_result(&gate, Some(0));
         assert_eq!(
@@ -8034,6 +8259,7 @@ mod tests {
             reason: "second workspace crate".to_owned(),
             command: Some("cargo check -p sublib".to_owned()),
             expected: true,
+            trust_refusal: None,
         };
         assert_eq!(
             post_gate_merge_result(&gate, Some(3)),
@@ -8912,6 +9138,109 @@ mod tests {
             .status
             .success());
         assert!(branch_is_empty_relative_to(repo, "feat/has-work", "main"));
+        assert!(
+            !branch_landed_by_merge_commit(repo, "feat/has-work", "main"),
+            "a fast-forwarded tip is on the first-parent chain"
+        );
+        assert!(!branch_landed_by_merge_commit(repo, "feat/empty", "main"));
+    }
+
+    /// Issue #74 classification: the manual landing sequence is owed only when
+    /// a trusted pre-merge tree went stale through the merge. A never-trusted
+    /// repo, a grant already stale before the merge, and a non-trust refusal
+    /// each keep their own message.
+    #[test]
+    fn only_a_trusted_to_stale_merge_owes_the_landing_sequence() {
+        use crate::trust::TrustStatus::{Stale, Trusted, Untrusted};
+        assert!(merge_invalidated_trust(&Trusted, Some(&Stale)));
+        assert!(!merge_invalidated_trust(&Untrusted, Some(&Untrusted)));
+        assert!(!merge_invalidated_trust(&Stale, Some(&Stale)));
+        assert!(!merge_invalidated_trust(&Trusted, None));
+        assert!(!merge_invalidated_trust(&Trusted, Some(&Untrusted)));
+    }
+
+    /// A surface path the branch adds (only after) or deletes (only before)
+    /// is reported; an ordinary changed file is not.
+    #[test]
+    fn shell_surface_changes_takes_both_sides_of_the_merge() {
+        let changed = vec![
+            PathBuf::from("scripts/new.sh"),
+            PathBuf::from("scripts/old.sh"),
+            PathBuf::from("src/lib.rs"),
+        ];
+        let pre = vec![
+            ".cosmon/config.toml".to_owned(),
+            "scripts/old.sh".to_owned(),
+        ];
+        let post = vec![
+            ".cosmon/config.toml".to_owned(),
+            "scripts/new.sh".to_owned(),
+        ];
+        assert_eq!(
+            shell_surface_changes(&changed, &pre, &post),
+            vec!["scripts/new.sh".to_owned(), "scripts/old.sh".to_owned()]
+        );
+    }
+
+    /// The remedy names the paths and prints the working sequence with the
+    /// molecule id and branch substituted, every command behind `$ `.
+    #[test]
+    fn trust_surface_remedy_prints_the_landing_sequence() {
+        let mol = MoleculeId::new("task-20260914-abcd").unwrap();
+        let text = trust_surface_remedy(
+            Path::new("/repo root"),
+            "main",
+            &mol,
+            "feat/task-20260914-abcd",
+            &["scripts/gate.sh".to_owned()],
+            None,
+        );
+        let commands: Vec<&str> = text
+            .lines()
+            .filter_map(|l| l.trim_start().strip_prefix("$ "))
+            .collect();
+        assert_eq!(
+            commands,
+            vec![
+                "cd '/repo root'",
+                "git diff HEAD...feat/task-20260914-abcd -- scripts/gate.sh",
+                "printf \"Merge branch '%s'\\n\" feat/task-20260914-abcd | git merge --no-ff -S -F /dev/stdin feat/task-20260914-abcd",
+                "cargo check --workspace --all-targets",
+                "cs trust",
+                "cs done task-20260914-abcd",
+            ]
+        );
+        assert!(text.contains("    • scripts/gate.sh"), "{text}");
+    }
+
+    /// Issue #74: a branch merged by hand with `--no-ff` is zero commits ahead
+    /// of base, like an empty branch, but its tip is off base's first-parent
+    /// chain — so `cs done` labels it landed work, not `empty_branch`.
+    #[test]
+    fn hand_merged_branch_is_not_an_empty_branch() {
+        let tmp = TempDir::new().unwrap();
+        let repo = tmp.path();
+        init_repo(repo);
+        assert!(git(repo, &["checkout", "-q", "-b", "feat/hand"])
+            .status
+            .success());
+        commit_file(repo, "hand.txt", "hand\n", "feat: hand work");
+        assert!(git(repo, &["checkout", "-q", "main"]).status.success());
+        assert!(git(
+            repo,
+            &[
+                "merge",
+                "-q",
+                "--no-ff",
+                "-m",
+                "Merge branch 'feat/hand'",
+                "feat/hand"
+            ]
+        )
+        .status
+        .success());
+        assert!(branch_is_empty_relative_to(repo, "feat/hand", "main"));
+        assert!(branch_landed_by_merge_commit(repo, "feat/hand", "main"));
     }
 
     #[test]
