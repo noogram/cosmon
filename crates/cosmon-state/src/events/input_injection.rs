@@ -25,7 +25,9 @@ use std::path::Path;
 
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
-use cosmon_core::injection::{injection_digest, InjectionOrigin};
+use cosmon_core::injection::{
+    injection_digest, BriefingDeliveryOutcome, InjectionOrigin, InjectionProvenance,
+};
 
 use super::worker_spawn::write_event;
 
@@ -92,6 +94,60 @@ pub fn emit_input_injected(
         // reader, because that inference is exactly what a later refactor
         // silently gets wrong.
         bare_submit: input.is_empty(),
+    };
+    write_event(state_dir, event);
+}
+
+/// Emit an [`EventV2::BriefingDelivery`] — the observed outcome of a briefing
+/// injection (issue #40).
+///
+/// Called once the delivery postcondition has looked at the pane, so the
+/// ledger carries both halves: [`emit_input_injected`] for *who wrote*, this
+/// for *whether it was submitted*. Same writer and same best-effort discipline
+/// as the provenance row, for the reason given in the module header.
+///
+/// # Examples
+///
+/// ```
+/// use cosmon_core::id::{MoleculeId, WorkerId};
+/// use cosmon_core::injection::{BriefingDeliveryOutcome, InjectionProvenance, InjectionOrigin};
+/// use cosmon_state::events::input_injection::emit_briefing_delivery;
+///
+/// let dir = tempfile::tempdir().unwrap();
+/// emit_briefing_delivery(
+///     dir.path(),
+///     Some(&MoleculeId::new("task-20260914-a8b3").unwrap()),
+///     &WorkerId::new("polecat-1234").unwrap(),
+///     "codex",
+///     &InjectionProvenance::new(InjectionOrigin::TackleBriefing, "briefing"),
+///     BriefingDeliveryOutcome::Undelivered,
+///     4,
+///     8_000,
+/// );
+///
+/// let log = std::fs::read_to_string(dir.path().join("events.jsonl")).unwrap();
+/// assert!(log.contains("\"outcome\":\"undelivered\""));
+/// ```
+#[allow(clippy::too_many_arguments)]
+pub fn emit_briefing_delivery(
+    state_dir: &Path,
+    mol_id: Option<&MoleculeId>,
+    worker_id: &WorkerId,
+    adapter: &str,
+    writer: &InjectionProvenance,
+    outcome: BriefingDeliveryOutcome,
+    resubmits: u32,
+    elapsed_ms: u64,
+) {
+    let event = EventV2::BriefingDelivery {
+        mol_id: mol_id.cloned(),
+        worker_id: worker_id.clone(),
+        adapter: adapter.to_owned(),
+        origin: writer.origin,
+        purpose: writer.purpose.clone(),
+        outcome,
+        resubmits,
+        elapsed_ms,
     };
     write_event(state_dir, event);
 }

@@ -5271,12 +5271,27 @@ fn spawn_claude_and_prompt(
     // therefore not this dispatcher's cost. See
     // [`BriefingSubmitDisposition::ProceedStillPending`].
     let confirm_t0 = std::time::Instant::now();
+    let mut confirm_nudges: u32 = 0;
     let outcome = confirm_briefing_submitted(
         backend,
         wid,
         prompt,
         BRIEFING_SUBMIT_INBAND_CAP,
         &cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir),
+        &mut confirm_nudges,
+    );
+    // The same typed delivery row the codex arm records (issue #40), so a
+    // trace reader can tell a delivered briefing from a stranded one on every
+    // adapter. Claude's disposition below is unchanged.
+    cosmon_state::events::input_injection::emit_briefing_delivery(
+        mol_state_dir,
+        Some(&mol.id),
+        wid,
+        "claude",
+        &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+        cosmon_cli::briefing_delivery::delivery_outcome(outcome),
+        confirm_nudges,
+        u64::try_from(confirm_t0.elapsed().as_millis()).unwrap_or(u64::MAX),
     );
     // The outcome is named, not inferred from the elapsed time: a dispatch that
     // exits on a receipt and one that exits on the cap are indistinguishable by
@@ -5509,6 +5524,8 @@ fn confirm_briefing_submitted(
     prompt: &str,
     budget: std::time::Duration,
     provenance: &cosmon_core::injection::InjectionProvenance,
+    // Bare submits this confirmation issued, for the delivery row (#40).
+    nudges: &mut u32,
 ) -> BriefingSubmitOutcome {
     use cosmon_transport::tmux::ComposerState;
     let started = std::time::Instant::now();
@@ -5542,6 +5559,7 @@ fn confirm_briefing_submitted(
         // Empty input == a bare submit keystroke (see `send_input`), which is
         // exactly the manual recovery that unstalled these workers.
         &mut || {
+            *nudges = nudges.saturating_add(1);
             let _ = backend.send_input_observed(wid, "", provenance);
         },
         &mut || started.elapsed(),
@@ -6141,16 +6159,63 @@ fn spawn_codex_and_prompt(
     // Interactive mode: inject the prompt into the TUI composer, exactly as
     // the claude branch does. `codex exec` already baked the prompt into the
     // command line, so nothing is injected there.
+    //
+    // Then hold the injection to its delivery postcondition (issue #40). A
+    // written briefing is not a submitted one: measured on codex 0.154.0, a
+    // submit sent while codex still reads `model: loading` — which is after
+    // the banner the readiness probe accepts — is dropped and the paste stays
+    // as `[Pasted Content N chars]`. Observe the composer, re-issue the
+    // submit while it holds the briefing, record the outcome, and fail the
+    // spawn rather than report a worker that will never start.
     if mode == codex::CodexMode::Interactive {
-        backend.send_input_observed(
+        use cosmon_cli::briefing_delivery::{deliver_briefing, require_delivered};
+        let writer = cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir);
+        let submit =
+            cosmon_cli::injection_provenance::tackle_briefing_submit(&mol.id, mol_state_dir);
+        let started = std::time::Instant::now();
+        let report = deliver_briefing(
+            backend,
             wid,
             prompt,
-            &cosmon_cli::injection_provenance::tackle_briefing(&mol.id, mol_state_dir),
+            CODEX_BRIEFING_DELIVERY_BUDGET,
+            &writer,
+            &submit,
+            &mut || started.elapsed(),
+            &mut || std::thread::sleep(BRIEFING_SUBMIT_POLL),
         )?;
+        cosmon_state::events::input_injection::emit_briefing_delivery(
+            mol_state_dir,
+            Some(&mol.id),
+            wid,
+            "codex",
+            &writer,
+            report.outcome,
+            report.resubmits,
+            u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
+        );
+        if let Err(undelivered) = require_delivered(wid, report) {
+            let _ = backend.terminate(wid);
+            return Err(anyhow::anyhow!(
+                "cs tackle: {undelivered}. Treating as a failed spawn; tearing \
+                 down session {session_name} (issue #40)."
+            ));
+        }
     }
 
     Ok(())
 }
+
+/// How long `cs tackle` observes a codex worker's composer for a submitted
+/// briefing before failing the spawn (issue #40).
+///
+/// Longer than the claude in-band window ([`BRIEFING_SUBMIT_INBAND_CAP`])
+/// because the consequence differs: past this, a codex spawn is torn down, not
+/// handed to a backstop. Measured on codex 0.154.0, a submit dropped during
+/// startup was accepted when re-sent 3 s after the banner; the tmux seam's own
+/// retry loop has usually cleared it before this window opens. The receipt
+/// needs two clear readings one poll apart, so a delivered briefing costs
+/// about two seconds here.
+const CODEX_BRIEFING_DELIVERY_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The session config the opencode arm spawns with.
 ///

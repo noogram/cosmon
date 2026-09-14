@@ -2632,6 +2632,35 @@ pub enum EventV2 {
         /// effect is the submit keystroke.
         bare_submit: bool,
     },
+
+    /// A briefing's delivery postcondition was evaluated (issue #40).
+    ///
+    /// Sibling of [`Self::InputInjected`], emitted *after* it for the same
+    /// briefing. `InputInjected` says who wrote and is recorded before the
+    /// bytes leave; it was byte-for-byte the same shape for a codex briefing
+    /// that started work and for one stranded as `[Pasted Content N chars]`.
+    /// This event carries the observation taken afterwards, so the two finally
+    /// differ in the trace. Writer identity (`origin`, `purpose`) is repeated
+    /// so the row stands on its own in a `jq` filter.
+    BriefingDelivery {
+        /// The molecule whose worker was briefed, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        mol_id: Option<MoleculeId>,
+        /// The worker the briefing targeted.
+        worker_id: WorkerId,
+        /// The adapter whose composer was observed (`claude`, `codex`, …).
+        adapter: String,
+        /// Which caller wrote the briefing.
+        origin: InjectionOrigin,
+        /// Short free-form label for why, as on the `InputInjected` row.
+        purpose: String,
+        /// What the observation established.
+        outcome: crate::injection::BriefingDeliveryOutcome,
+        /// Submit keystrokes the postcondition re-issued after the first.
+        resubmits: u32,
+        /// Wall-clock the postcondition spent observing, in milliseconds.
+        elapsed_ms: u64,
+    },
 }
 
 /// Default value for the `adapter_name` field on Worker-Spawn Port
@@ -2755,9 +2784,9 @@ impl EventV2 {
             Self::WorkerSpawned { molecule, .. } => molecule.as_ref(),
             Self::InvocationCompleted { molecule_id, .. }
             | Self::ChronicleAdded { molecule_id, .. } => molecule_id.as_ref(),
-            Self::InputInjected { mol_id, .. } | Self::OperatorSigned { mol_id, .. } => {
-                mol_id.as_ref()
-            }
+            Self::InputInjected { mol_id, .. }
+            | Self::BriefingDelivery { mol_id, .. }
+            | Self::OperatorSigned { mol_id, .. } => mol_id.as_ref(),
             Self::OperatorSpark { mol_ref, .. } => mol_ref.as_ref(),
             Self::WorkerKilled { .. }
             | Self::WorkerHeartbeat { .. }
@@ -4489,6 +4518,16 @@ mod tests {
                 input_digest: "0123456789abcdef".to_owned(),
                 bare_submit: false,
             },
+            EventV2::BriefingDelivery {
+                mol_id: Some(mid("cs-20260411-aaaa")),
+                worker_id: wid("quartz"),
+                adapter: "codex".to_owned(),
+                origin: InjectionOrigin::TackleBriefing,
+                purpose: "briefing".to_owned(),
+                outcome: crate::injection::BriefingDeliveryOutcome::Undelivered,
+                resubmits: 3,
+                elapsed_ms: 8000,
+            },
         ];
 
         // Exhaustiveness guard (C10 test review, review-report.md F2).
@@ -4618,7 +4657,8 @@ mod tests {
             | EventV2::ChronicleAdded { .. }
             | EventV2::AdrInscribed { .. }
             | EventV2::ConfigDriftDetected { .. }
-            | EventV2::InputInjected { .. } => {}
+            | EventV2::InputInjected { .. }
+            | EventV2::BriefingDelivery { .. } => {}
         }
     }
 

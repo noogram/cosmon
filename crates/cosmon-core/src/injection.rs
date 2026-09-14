@@ -150,6 +150,61 @@ impl std::fmt::Display for InjectionOrigin {
     }
 }
 
+/// Whether an injected briefing was observed to be *submitted* — the
+/// postcondition [`InputInjected`](crate::event_v2::EventV2::InputInjected)
+/// cannot state (issue #40).
+///
+/// `InputInjected` records who wrote to a composer, and is emitted before a
+/// byte is sent. On codex it was identical for a briefing that started work
+/// and for one left as `[Pasted Content N chars]` forever. This is the reading
+/// taken afterwards, by looking at the pane, so the trace can tell the two
+/// apart.
+///
+/// Wire format is the `snake_case` variant name.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BriefingDeliveryOutcome {
+    /// The composer was read clear of the briefing on consecutive captures.
+    Delivered,
+    /// The composer still held the briefing when the bounded window closed,
+    /// after every re-issued submit.
+    Undelivered,
+    /// The pane could not be read well enough to say either way.
+    Unobservable,
+    /// The worker's session disappeared before delivery could be read.
+    SessionGone,
+}
+
+impl BriefingDeliveryOutcome {
+    /// Whether this outcome is positive evidence the briefing was submitted.
+    ///
+    /// Only [`Self::Delivered`] is: every other outcome is either a sighting
+    /// of the stuck paste or an absence of evidence, and a postcondition that
+    /// accepted an absence would be the unchecked write it replaces.
+    #[must_use]
+    pub fn is_delivered(self) -> bool {
+        self == Self::Delivered
+    }
+
+    /// The wire spelling, for log lines and error messages.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Delivered => "delivered",
+            Self::Undelivered => "undelivered",
+            Self::Unobservable => "unobservable",
+            Self::SessionGone => "session_gone",
+        }
+    }
+}
+
+impl std::fmt::Display for BriefingDeliveryOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Where the provenance event is to be written, when the caller knows.
 ///
 /// The send seam lives in `cosmon-transport` and holds a tmux socket, not a
