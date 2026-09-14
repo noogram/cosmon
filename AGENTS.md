@@ -23,6 +23,25 @@ injectable ports.
 - Update the CLI/UI parity audit when changing a user-facing command.
 - Use Conventional Commit prefixes such as `fix:`, `feat:`, and `docs:`.
 
+No agent-harness session identifier, thread identifier, or conversation
+deep-link may appear in any artefact this repository publishes — commit
+messages (trailers included), PR titles and bodies, issue titles and bodies,
+review comments, release notes, or any tracked file. Known shapes are examples
+of the class, not its definition: `Claude-Session:`, `claude.ai/code/session_…`,
+`chatgpt.com/codex/…`, `Codex-Thread:`, `Session-Id:`, and any
+`https://…/session[_/]<opaque-id>` deep link into a vendor console. Such an
+identifier names a private conversation the repository's readers cannot and
+must not open, and a public repository is permanent — so it is a durable
+pointer at something private, which is a leak even while the endpoint refuses
+anonymous readers. A harness may *instruct its agent* to append such a trailer
+by default (Claude Code does); this rule overrides that default here. Put
+provenance where it is public, stable and meaningful instead: the molecule id
+and the merge shape `Merge branch 'feat/<mol_id>'`, plus the durable molecule
+directory and the ledger (ADR-052 §I9). A vendor URL is not provenance; it is
+a bookmark in somebody's browser. Enforced by
+`scripts/check-no-session-ids.sh` (commit messages and PR body, over what a
+change adds) and `publish.sh --check` rule G (tracked files).
+
 ## Verification
 
 Two speeds, both in the `justfile`:
