@@ -456,7 +456,7 @@ fi
 # The 2026-09-10 finding, reproduced: a deep link into a private conversation,
 # in a file a public clone inherits. Synthetic id by construction.
 d="$(new_repo case-session-id)" || exit 2
-printf 'see https://claude.ai/code/session_0123456789abcdef for context\n' >"$d/NOTES.md"
+printf 'see https://claude.ai/code/session_0123456789abcdef for context\n' >"$d/NOTES.md"  # publish: allow — synthetic fixture id for case G
 expect_fail "G. a console deep link in a tracked file reddens the gate" "$d" "NOTES.md"
 
 # …and, as with B and F, the gate must not republish what it found. Printing
@@ -473,7 +473,7 @@ fi
 # session invents its own spelling. Each shape gets its own fixture so a
 # regression names the rule that died.
 d="$(new_repo case-session-codex)" || exit 2
-printf 'Codex-Thread: https://chatgpt.com/codex/threads/abc\n' >"$d/NOTES.md"
+printf 'Codex-Thread: https://chatgpt.com/codex/threads/abc\n' >"$d/NOTES.md"  # publish: allow — synthetic fixture id for case G′
 expect_fail "G′. a non-Claude vendor shape reddens the gate" "$d" "NOTES.md"
 
 d="$(new_repo case-session-bare)" || exit 2
@@ -493,8 +493,17 @@ else
   bad "G′′. waived line still red — the escape hatch does not work"
   sed 's/^/      /' "$WORK/out.txt" | head -20
 fi
-printf 'https://claude.ai/code/session_fedcba9876543210\n' >>"$d/NOTES.md"
+printf 'https://claude.ai/code/session_fedcba9876543210\n' >>"$d/NOTES.md"  # publish: allow — synthetic fixture id for case G′′ (unwaived inside the fixture)
 expect_fail "G′′. the waiver does NOT cover the next line" "$d" "NOTES.md"
+
+# ── G⁗. no path is excluded, the gate's own neighbours included ────────────
+# Rule G once excluded publish.sh, publish.test.sh and check-no-session-ids.sh
+# by pathspec — and the third held zero matching lines, so the exclusion
+# protected nothing and hid everything pasted there later. Every sample line is
+# now waived per line; a link in any of those files must red.
+d="$(new_repo case-session-no-exclusion)" || exit 2
+printf '#!/usr/bin/env bash\n# see https://claude.ai/code/session_deadbeef0000\n' >"$d/scripts/check-no-session-ids.sh"  # publish: allow — synthetic fixture id for case G⁗
+expect_fail "G⁗. a link in check-no-session-ids.sh reddens the gate (no pathspec blind spot)" "$d" "scripts/check-no-session-ids.sh"
 
 # ── G′′′. no false red ──────────────────────────────────────────────────────
 # A rule that fires on the WORD teaches its operator to ignore the gate. What
