@@ -337,6 +337,11 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
    The resident scheduler owns exactly one run-wide flag intent — this flag — and nothing below it (COSMON-DEV #21). Passing `--adapter <name>` is the operator's **explicit, conscious** choice to spend on that adapter for *this run*: it stamps every **pin-less** molecule dispatched — both static frontier nodes and children a worker nucleates dynamically mid-run (the converge/committee loop). A per-molecule pin still wins over it.
 
    When this flag is **absent**, the scheduler stamps nothing: the shelled `cs tackle` inherits the environment and runs the *full* canonical resolution chain itself (formula step → `$COSMON_DEFAULT_ADAPTER` → per-galaxy config → global config → the built-in `local` floor). So the operator's live env, session hammer, and committed config are all honoured under `--resident` exactly as they are under a bare `cs tackle` — the resident loop no longer masks them with a rung-1 `--adapter local` floor (the #21 defect). The `local` floor is still reached iff nothing higher speaks, so an *inadvertent* paid dispatch remains impossible: a paid adapter is chosen only by a conscious flag, formula step, env export, or committed config. See `docs/adr` (ADR-095) and the `cs tackle` adapter-chain docs for the single canonical resolution order.
+* `--base <BRANCH>` — **Opt-in run-wide integration base** (resident mode only).
+
+   The base twin of `--adapter`, with the same two-rung precedence: every **pin-less** molecule this run dispatches — one with no persisted base — is tackled with `--base <BRANCH>`, which persists the base on the molecule so its `cs done` merges into `<BRANCH>` rather than the ambient HEAD. A molecule that already carries a base (`cs nucleate --base`, an earlier `cs tackle --base`) keeps it: the per-molecule base wins.
+
+   This is how a germinated polymer (`cs spore run`, `cs nucleate --from`) is aimed at an integration branch without tackling each node by hand. The branch must exist locally; a dangling base is refused before the loop starts.
 
 
 

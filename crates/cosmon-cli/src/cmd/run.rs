@@ -798,6 +798,20 @@ fn resolve_run_adapter(flag: Option<&str>) -> Option<String> {
     flag.filter(|s| !s.is_empty()).map(str::to_owned)
 }
 
+/// Resolve the opt-in run-wide integration base for `cs run --resident`
+/// (issue #69).
+///
+/// Validated once, before the loop starts, against the repository the loop
+/// dispatches into: a dangling base is refused here rather than by every
+/// `cs tackle` the loop would shell out, tick after tick.
+fn resolve_run_base(
+    repo_root: &std::path::Path,
+    flag: Option<&str>,
+) -> anyhow::Result<Option<String>> {
+    flag.map(|b| super::tackle::validate_base_flag(repo_root, b))
+        .transpose()
+}
+
 /// **ADR-095** — Resident Runtime entry point.
 ///
 /// Distinct from the legacy [`run`] body: instantiates the
@@ -856,14 +870,7 @@ fn run_resident(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     // Delegating keeps the single canonical resolver as the one source of truth
     // for every dispatch path, resident included.
     let run_adapter = resolve_run_adapter(args.adapter.as_deref());
-    // Opt-in run-wide base (issue #69): validated once, here, against the
-    // repository the loop dispatches into — a dangling base refused before the
-    // first tick instead of by every `cs tackle` the loop would shell out.
-    let run_base = args
-        .base
-        .as_deref()
-        .map(|b| super::tackle::validate_base_flag(&cwd, b))
-        .transpose()?;
+    let run_base = resolve_run_base(&cwd, args.base.as_deref())?;
     let scheduler: Box<dyn ResidentScheduler> = Box::new(
         ReadyFrontierScheduler::new()
             .with_run_adapter(run_adapter)

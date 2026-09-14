@@ -140,6 +140,13 @@ Options:
           
           Values are validated against the adapter-name grammar (the same check `cs tackle --adapter` applies); an empty or malformed name aborts the nucleation. `None` (the default) stamps no pin — the molecule resolves its adapter through the canonical `cs tackle` chain at dispatch.
 
+      --base <BRANCH>
+          Durable integration base — the branch this molecule's `feat/<id>` branch is cut from and `cs done` merges back into.
+          
+          Persisted to [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch) at birth, beside the adapter pin, so the base is a property of the molecule rather than of whichever session later dispatches it: a bare `cs tackle <id>` resolves to it, and a `cs run --resident --base <X>` directive does not overwrite it (the per-molecule base wins, as the adapter pin does). `cs tackle <id> --base <Y>` still overrides it.
+          
+          The branch must exist locally: a base naming no branch is refused here, with the branch named, and no molecule is created — otherwise the mistake would surface only at `cs done`, hours later. `None` (the default) stamps nothing and leaves the ambient resolution unchanged.
+
   -h, --help
           Print help (see a summary with '-h')
 

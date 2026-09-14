@@ -595,6 +595,11 @@ reason = "durable adapter pin on the molecule — a local dispatch concern; the 
 
 [[flag_only_in_cs]]
 verb = "nucleate"
+flag = "--base"
+reason = "durable integration-base pin (issue #69) — names a local git branch `cs done` merges into, validated against the operator's checkout at birth; an RPP tenant sees no repository and does not harvest (ADR-080 §5.1: `done` is operator-only), so a tenant-chosen base would be a branch it can neither verify nor land on."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
 flag = "--assign"
 reason = "explicit worker assignment — local fleet concern."
 

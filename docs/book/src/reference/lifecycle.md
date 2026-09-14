@@ -281,6 +281,11 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
    Unlike the transient `cs tackle --adapter` flag (which routes a single dispatch), this pin is persisted to [`MoleculeData::adapter`](cosmon_state::MoleculeData::adapter) and **survives any later run directive**. A `cs run --resident --adapter <X>` owns a run-wide directive that stamps every *pin-less* molecule with `<X>`; a molecule nucleated with `--adapter <Y>` keeps `<Y>` because the per-molecule pin beats the run directive (`cosmon_runtime::resident`). This is what lets a cross-provider committee pin a seat's *distinct* family (e.g. `mistral`) so a resident loop driving the generator's family (e.g. `claude`) cannot auto-tackle the seat into a `FamilyCollision`.
 
    Values are validated against the adapter-name grammar (the same check `cs tackle --adapter` applies); an empty or malformed name aborts the nucleation. `None` (the default) stamps no pin — the molecule resolves its adapter through the canonical `cs tackle` chain at dispatch.
+* `--base <BRANCH>` — Durable integration base — the branch this molecule's `feat/<id>` branch is cut from and `cs done` merges back into.
+
+   Persisted to [`MoleculeData::base_branch`](cosmon_state::MoleculeData::base_branch) at birth, beside the adapter pin, so the base is a property of the molecule rather than of whichever session later dispatches it: a bare `cs tackle <id>` resolves to it, and a `cs run --resident --base <X>` directive does not overwrite it (the per-molecule base wins, as the adapter pin does). `cs tackle <id> --base <Y>` still overrides it.
+
+   The branch must exist locally: a base naming no branch is refused here, with the branch named, and no molecule is created — otherwise the mistake would surface only at `cs done`, hours later. `None` (the default) stamps nothing and leaves the ambient resolution unchanged.
 
 
 

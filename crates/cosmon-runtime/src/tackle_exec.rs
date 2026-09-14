@@ -762,18 +762,9 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         let mol_dir = store.molecule_dir(id);
         let briefing = std::fs::read_to_string(mol_dir.join("briefing.md")).ok();
         let repo_root = git_repo_root(&self.cwd)?;
-        // A run-wide base (`cs run --base`) is stamped only onto a molecule
-        // that carries none — the per-molecule base wins — and persisted, as
-        // `cs tackle --base` does, so the eventual `cs done` merges where the
-        // branch was cut. Done after every refusal above, so a dispatch that
-        // never happened does not retarget the molecule.
-        if mol.base_branch.is_none() {
-            if let Some(base) = pin.base_branch.as_deref() {
-                mol.base_branch = Some(base.to_owned());
-                mol.updated_at = chrono::Utc::now();
-                store.save_molecule(id, &mol)?;
-            }
-        }
+        // After every refusal above, so a dispatch that never happened does
+        // not retarget the molecule.
+        stamp_run_base(&store, &mut mol, pin)?;
         let plan = TacklePlan::from_parts(
             selection,
             &PromptRequest {
@@ -1101,6 +1092,29 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 },
             })
     }
+}
+
+/// Stamp a run-wide base (`cs run --base`, carried on the [`DispatchPin`])
+/// onto a molecule that carries none, and persist it.
+///
+/// The per-molecule base wins: a molecule that already has one is left
+/// untouched. Persisting mirrors `cs tackle --base`, so the eventual
+/// `cs done` merges into the branch the worktree was cut from (issue #69).
+fn stamp_run_base(
+    store: &FileStore,
+    mol: &mut MoleculeData,
+    pin: &DispatchPin,
+) -> Result<(), TackleExecError> {
+    if mol.base_branch.is_some() {
+        return Ok(());
+    }
+    let Some(base) = pin.base_branch.as_deref() else {
+        return Ok(());
+    };
+    mol.base_branch = Some(base.to_owned());
+    mol.updated_at = chrono::Utc::now();
+    store.save_molecule(&mol.id, mol)?;
+    Ok(())
 }
 
 /// Create the worker's isolation worktree and its `feat/<mol>` branch.
