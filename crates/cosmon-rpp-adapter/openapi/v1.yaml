@@ -753,6 +753,11 @@ paths:
             step is an execution kind the library executor does not
             cover (gate / native / query / llm). The body names the
             step kind; the refusal is typed, never a silent fallback.
+
+            `tackle_unsupported_model` — the dispatch resolved a model
+            pin the resolved adapter cannot receive through the library
+            executor (today: `opencode`). Refused before any effect
+            rather than spawned with the pin dropped (issue #72).
           content:
             application/json:
               schema:

@@ -1716,6 +1716,15 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
             label: "tackle_unsupported_harness",
             request_id: Some(request_id.to_owned()),
         },
+        // Issue #72: a model pin the resolved adapter cannot receive on the
+        // in-process seam. Its own label, for the same reason as the harness
+        // one: the remedy (drop the pin, change adapter, or use `cs tackle`)
+        // is not the remedy for either sibling.
+        TackleExecError::UnsupportedModelCarrier { .. } => ApiError {
+            status: StatusCode::NOT_IMPLEMENTED,
+            label: "tackle_unsupported_model",
+            request_id: Some(request_id.to_owned()),
+        },
         // The precondition refusals carry their own contract label
         // (issue #48): `worker_credential_missing` /
         // `adapter_backend_unreachable`. The detail and the remedy stay

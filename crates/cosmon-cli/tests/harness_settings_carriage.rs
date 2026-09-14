@@ -222,9 +222,8 @@ fn a_failed_launch_is_recorded_as_such_rather_than_as_silence() {
 /// naming the adapter — it is never silently dropped.
 ///
 /// opencode is the case that motivates the wording: it is explicitly out of
-/// #65's scope (it drops even the shipped `--model` pin, filed separately), so
-/// a harness map reaching it would be dropped twice over if this refused
-/// quietly.
+/// #65's scope (its `--model` pin was carried separately, issue #72), so a
+/// harness map reaching it would be dropped if this refused quietly.
 #[test]
 fn an_adapter_with_no_channel_refuses_and_names_itself() {
     let flag = parse_harness_flags(&["model_reasoning_effort=high"]).expect("well-formed pair");

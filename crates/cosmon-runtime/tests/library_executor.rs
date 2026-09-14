@@ -658,3 +658,71 @@ fn a_drain_stops_on_a_precondition_refusal_rather_than_retrying_it() {
          cause of at the first tick: {err:?}"
     );
 }
+
+/// Issue #72 falsifier 3: the in-process executor spawns through the
+/// agent-definition seam, which has no channel for a model flag. A pinned
+/// opencode dispatch must therefore refuse with a named error — before any
+/// effect and before `ModelSelected` claims the pin — rather than spawn
+/// `opencode` with the pin silently dropped.
+#[test]
+fn a_pinned_opencode_dispatch_refuses_rather_than_dropping_the_model() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260914-d84c");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("opencode".to_owned()),
+        model: Some("openai/gpt-5.2".to_owned()),
+        base_branch: None,
+    };
+    let err = executor
+        .tackle(&mol.id, &pin)
+        .expect_err("a pinned opencode dispatch must not spawn without its model");
+    assert!(
+        matches!(
+            err,
+            cosmon_runtime::tackle_exec::TackleExecError::UnsupportedModelCarrier { .. }
+        ),
+        "the refusal must be the named model-carrier error: {err}"
+    );
+    let text = err.to_string();
+    assert!(
+        text.contains("opencode") && text.contains("openai/gpt-5.2"),
+        "the refusal must name the adapter and the dropped pin: {text}"
+    );
+    assert!(
+        backend.calls().is_empty(),
+        "nothing may be spawned: {:?}",
+        backend.calls()
+    );
+    assert!(store
+        .load_molecule(&mol.id)
+        .expect("re-read")
+        .process
+        .is_none());
+    assert!(
+        !events_text(store.state_root()).contains("model_selected"),
+        "a refused dispatch must not record a ModelSelected claiming the pin"
+    );
+}
+
+/// The refusal is scoped to the pin: an unpinned opencode dispatch still
+/// goes through (opencode's own default applies, nothing is dropped).
+#[test]
+fn an_unpinned_opencode_dispatch_is_not_refused() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260914-d84d");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("opencode".to_owned()),
+        model: None,
+        base_branch: None,
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("an unpinned opencode dispatch carries nothing to drop");
+    assert!(!backend.calls().is_empty(), "the worker must be spawned");
+}
