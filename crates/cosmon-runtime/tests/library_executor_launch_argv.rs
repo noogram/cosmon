@@ -350,3 +350,63 @@ fn a_refused_root_spawn_creates_no_worker() {
         "the refusal must roll back this attempt's worktree"
     );
 }
+
+/// A `task-work` formula whose executing step pins one harness setting
+/// (ADR-177 / issue #65). `claude` carries such a pin as a `--<key> <value>`
+/// flag pair, so the pin is observable in the very argv this file measures.
+const HARNESS_PINNING_FORMULA: &str = r#"
+formula = "task-work"
+version = 1
+description = "a step pinning a harness setting"
+
+[[steps]]
+id = "implement"
+title = "Implement"
+description = "Needs a stated fallback."
+
+[steps.harness]
+fallback-model = "sonnet"
+"#;
+
+/// **C5 on the library path.** A `[steps.harness]` pin reaches the launched
+/// worker verbatim.
+///
+/// The tokens were rendered here before the fix and bound to `_harness_args` —
+/// accepted and silently dropped, which ADR-177 forbids precisely because it is
+/// the shape nobody can see: the spore reads as honoured, the event says it was
+/// selected, and the worker runs at the harness's own default. The other tests
+/// in this file would all stay green under that regression, because none of
+/// them pins a setting. This one is the falsifier for that one clause.
+#[test]
+fn library_dispatch_carries_a_pinned_harness_setting() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260917-c005");
+    std::fs::create_dir_all(project.join(".cosmon").join("formulas")).expect("formulas dir");
+    std::fs::write(
+        project
+            .join(".cosmon")
+            .join("formulas")
+            .join("task-work.formula.toml"),
+        HARNESS_PINNING_FORMULA,
+    )
+    .expect("seed formula");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+    executor
+        .dispatch_with_pin(&mol.id, &claude_pin())
+        .expect("the dispatch must reach the spawn");
+
+    let (_command, argv) = recorded_launch(&backend, &mol.id);
+    let pin = position(&argv, "--fallback-model");
+    assert_eq!(
+        argv.get(pin + 1).map(String::as_str),
+        Some("sonnet"),
+        "a pinned harness setting must reach the worker as its own flag \
+         pair, never be rendered and discarded: {argv:?}"
+    );
+    assert!(
+        pin < position(&argv, "--disallowedTools"),
+        "the pins are appended before the browser strip, as the shared \
+         builder renders them on both dispatch paths: {argv:?}"
+    );
+}
