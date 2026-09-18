@@ -45,11 +45,14 @@ Two new words here:
 nothing executes yet. The command prints the new molecule's id:
 
 ```
-Nucleated task-20260711-a1b2 (task-work): pending
+Nucleated molecule task-20260711-a1b2 from formula task-work
+  Steps: 2
 ```
 
-Copy that id; you will use it in the next three steps. (Your id will differ;
-substitute it everywhere you see `task-20260711-a1b2` below.)
+`Steps: 2` is the formula's shape — `task-work` has an implement step and a
+verify step — not progress; nothing has run yet. Copy the id; you will use it in
+the next three steps. (Your id will differ; substitute it everywhere you see
+`task-20260711-a1b2` below.)
 
 Confirm it exists and is `pending`:
 
