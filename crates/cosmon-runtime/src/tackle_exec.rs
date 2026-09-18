@@ -468,9 +468,12 @@ pub struct LaunchPosture {
     /// The root-spawn decision (contract-20A). `None` is read as
     /// [`RootSpawnDecision::SpawnAsIs`] — the entire non-root fleet path.
     ///
-    /// A [`RootSpawnDecision::Refuse`] must have been intercepted by the
-    /// embedder's [`SpawnPreflight`] before any live worker could exist; this
-    /// port is not that gate.
+    /// A [`RootSpawnDecision::Refuse`] belongs to the embedder's
+    /// [`SpawnPreflight`], which should intercept it before any effect. Stating
+    /// it here is nonetheless honoured: the executor answers it with
+    /// [`TackleExecError::RootSpawnRefused`] before the ledger commit, because
+    /// composing a `Refuse` like a `SpawnAsIs` is the forbidden third outcome —
+    /// a live worker running as uid 0, silently.
     pub root_spawn: Option<RootSpawnDecision>,
 }
 
