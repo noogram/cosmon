@@ -1,8 +1,13 @@
 # Install cosmon
 
-Cosmon ships as **one binary**, `cs`. There is no daemon to run, no service to
-register, no account to create: you put a single file on your `PATH` and you are
-done.
+Cosmon is **one command**, `cs`. There is no daemon to run, no service to
+register, no account to create: you put it on your `PATH` and you are done.
+
+Two files actually land, not one: every route installs `cs` *and* `cosmon-remote`,
+the connector for driving a remote cosmon service, side by side in the same
+directory. `cs` is the whole product; `cosmon-remote` is inert until you point it
+at a remote service, so you can ignore it. It is named here so the second file is
+not a surprise when you look at the install directory.
 
 Pick whichever of the three routes below fits how you already manage tools. The
 first two install the **same bytes** — the release pipeline builds the tarballs
@@ -20,16 +25,23 @@ Works on macOS and Linux, on arm64 and x86_64:
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
 ```
 
-Then confirm:
+The installer writes to `~/.local/bin`, which is **not** on the default `PATH` on
+a fresh macOS or Linux account. When it is not, the installer says so and prints
+the line to add. Add it before you check the version, and the check succeeds the
+first time:
 
 ```sh
+export PATH="$HOME/.local/bin:$PATH"   # skip if the installer did not ask for it
 cs --version
 cs --help
 ```
 
-You should see the command groups (lifecycle, fleet, execution, …). If the shell
-cannot find `cs`, the installer printed the `export PATH=…` line you need — add
-it to your shell profile and re-open the terminal.
+You should see the command groups (lifecycle, fleet, execution, …). That `export`
+only affects the current shell — put the same line in your shell profile
+(`~/.zshrc`, `~/.bashrc`) so the next terminal finds `cs` too.
+
+If you installed elsewhere (`--dir`, `COSMON_INSTALL_DIR`, or the
+`/usr/local/bin` fallback), export that directory instead.
 
 ### The same route, verifying the installer first
 
@@ -169,6 +181,24 @@ git tag it was built from. If cosmon ever appears on crates.io, npm, or PyPI,
 **those entries are name-holds, not the shipped binary** — they exist to hold the
 name and point back here. Do not expect `cargo install cosmon` /
 `npm install cosmon` / `pip install cosmon` to give you the released binary.
+
+## What is *not* installed
+
+A **manual page**. `man cs` reports *No manual entry for cs* after any of the
+three routes: the release tarball carries the binaries and nothing else, and the
+installer writes no `man1` page. The manual source is tracked in the repository
+at `crates/cosmon-cli/man/cs.1` if you want to install it by hand; otherwise the
+same reference is available from the tool itself, which is where it is kept
+current:
+
+```sh
+cs help            # the command groups
+cs help guide      # the handbook
+cs <command> --help
+```
+
+The generated CLI reference in this book — [CLI overview](../reference/overview.md)
+— is rendered from that same source.
 
 ## Next
 

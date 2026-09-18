@@ -2,10 +2,23 @@
 
 //! `cs opt-in-share` — first-run consent prompt for developer-share telemetry.
 //!
-//! operator-b (or any fresh user) should see, on her very first `cs` invocation,
-//! a small French prompt asking whether she agrees to share encrypted bundles
-//! with the cosmon developers. The answer — accept or decline — is persisted
-//! once to `~/.config/cosmon/consent.toml` and never asked again.
+//! A fresh user should see, on their very first `cs` invocation, a small
+//! prompt asking whether they agree to share encrypted bundles with the
+//! cosmon developers. The answer — accept or decline — is persisted once to
+//! `~/.config/cosmon/consent.toml` and never asked again.
+//!
+//! # Why the strings are English
+//!
+//! Every other string `cs` prints is English: `--help`, every error, every
+//! command's rendering. This path was the exception — the prompt and its
+//! three outcome lines were French, a leftover from the operator-b
+//! onboarding brief they were first written for. A newcomer walking the
+//! published install route on an English substrate met French for the first
+//! and only time here, at the one moment they are asked to make a decision
+//! about their own data (noogram/cosmon#76). A consent question the reader
+//! cannot read is not consent, so the consent path now speaks the language of
+//! the surface it lives on. [`parse_yes_no`] still accepts `o`/`oui`, because
+//! taking an answer someone already learned to give costs nothing.
 //!
 //! Design constraints (from the MVP operator-b brief, delib fe35 §c):
 //!
@@ -55,14 +68,14 @@ pub const CONSENT_FILE: &str = "cosmon/consent.toml";
 /// Relative path from the config base dir to the shipped age recipient.
 pub const RECIPIENT_FILE: &str = "cosmon/default-recipient.age";
 
-/// Prompt text shown on stdout at first run. Kept in French to match the
-/// operator-b onboarding surface. The wording is deliberate: it names the
-/// encryption, the sole recipient, and the no-trace-in-commits guarantee,
-/// then asks a single yes/no question with a deny-by-default marker.
-pub const PROMPT_FR: &str = "\
-Acceptez-vous de partager des informations avec les développeurs cosmon ?
-Les bundles seront chiffrés age, seul le mainteneur Noogram pourra les lire.
-Modifications à votre projet : aucune trace de cosmon dans vos commits. [o/N]";
+/// Prompt text shown on stdout at first run, in the CLI's own language. The
+/// wording is deliberate: it names the encryption, the sole recipient, and
+/// the no-trace-in-commits guarantee, then asks a single yes/no question with
+/// a deny-by-default marker (`[y/N]` — the capital is the default).
+pub const PROMPT: &str = "\
+Share diagnostic information with the cosmon developers?
+Bundles are age-encrypted; only the Noogram maintainer can read them.
+Changes to your project: no trace of cosmon in your commits. [y/N]";
 
 /// Arguments for the `opt-in-share` subcommand.
 #[derive(clap::Args, Default)]
@@ -199,9 +212,14 @@ pub fn read_recipient() -> String {
     fs::read_to_string(recipient_path()).map_or_else(|_| String::new(), |s| s.trim().to_owned())
 }
 
-/// Read a single y/n answer from stdin. Anything that isn't `o`/`oui`/`y`/
-/// `yes` (case-insensitive) is treated as a decline — the prompt is
+/// Read a single y/n answer from stdin. Anything that isn't `y`/`yes`/`o`/
+/// `oui` (case-insensitive) is treated as a decline — the prompt is
 /// deny-by-default, so ambiguous input falls through to the safer answer.
+///
+/// The French `o`/`oui` stay accepted although the prompt now asks `[y/N]`.
+/// They cost one match arm, and dropping them would silently turn a habit
+/// somebody formed against the old prompt into a decline they did not mean —
+/// the one direction of this change that could lose an answer.
 fn parse_yes_no(raw: &str) -> bool {
     matches!(
         raw.trim().to_ascii_lowercase().as_str(),
@@ -256,7 +274,7 @@ const fn answerable(stdin_is_terminal: bool, stdout_is_terminal: bool) -> bool {
 fn prompt_on_tty() -> anyhow::Result<bool> {
     let stdout = io::stdout();
     let mut handle = stdout.lock();
-    writeln!(handle, "{PROMPT_FR}")?;
+    writeln!(handle, "{PROMPT}")?;
     write!(handle, "> ")?;
     handle.flush()?;
     drop(handle);
@@ -450,16 +468,16 @@ fn render_decision(
     } else {
         match decision {
             Decision::Accepted => println!(
-                "opt-in-share: acceptation enregistrée ({} → {})",
+                "opt-in-share: acceptance recorded ({} → {})",
                 record.recipient_age_pubkey,
                 path.display()
             ),
             Decision::Declined => println!(
-                "opt-in-share: refus enregistré (aucun partage, {})",
+                "opt-in-share: decline recorded (nothing is shared, {})",
                 path.display()
             ),
             Decision::SkippedNoTty => println!(
-                "opt-in-share: {} — refus par défaut enregistré ({})",
+                "opt-in-share: {} — declined by default ({})",
                 skip_reason(),
                 path.display()
             ),
@@ -472,13 +490,21 @@ fn render_decision(
 
 /// Which half of the interactive pair was missing, in the operator's words.
 ///
-/// Only meaningful for [`Decision::SkippedNoTty`]. The `stdin non-tty` wording
-/// is the historical one and is preserved byte-for-byte, so the pre-existing
-/// unattended path reads exactly as it always did; the captured-stdout case is
-/// new and names itself, because "stdin non-tty" would be a lie there.
+/// Only meaningful for [`Decision::SkippedNoTty`]. `stdin non-tty` keeps its
+/// historical spelling: it is the fragment operators grep container logs for,
+/// it was already English, and it names a POSIX condition rather than reading
+/// as prose. `stdout captured` is the case ADR-163 added, and it names itself
+/// because `stdin non-tty` would be a lie there.
 fn skip_reason() -> &'static str {
-    if io::stdin().is_terminal() {
-        "sortie capturée"
+    skip_reason_for(io::stdin().is_terminal())
+}
+
+/// The rule behind [`skip_reason`], with the fd read lifted out so both
+/// branches are reachable from a test — the same seam as [`answerable`],
+/// for the same reason: a `cargo test` process cannot choose its own stdin.
+const fn skip_reason_for(stdin_is_terminal: bool) -> &'static str {
+    if stdin_is_terminal {
+        "stdout captured"
     } else {
         "stdin non-tty"
     }
@@ -497,8 +523,9 @@ pub fn warn_skipped_on_stderr(path: &std::path::Path) {
         return;
     }
     eprintln!(
-        "opt-in-share: {} — question non posable ici, refus par défaut enregistré ({}). \
-         Pour décider explicitement : `cs opt-in-share --accept` ou `--decline`.",
+        "opt-in-share: {} — the question cannot be answered here, so a decline \
+         was recorded by default ({}). To decide explicitly, run \
+         `cs opt-in-share --accept` or `cs opt-in-share --decline`.",
         skip_reason(),
         path.display()
     );
@@ -585,8 +612,12 @@ mod tests {
         assert_eq!(loaded, record);
     }
 
+    /// Both spellings, on purpose: `y`/`yes` is what the prompt now asks for,
+    /// and `o`/`oui` is what the French prompt asked for until
+    /// noogram/cosmon#76. Delete the French arm and an operator who learned
+    /// the old answer gets a silent decline instead of the accept they typed.
     #[test]
-    fn parse_yes_no_accepts_fr_and_en_variants() {
+    fn parse_yes_no_accepts_en_and_legacy_fr_variants() {
         assert!(parse_yes_no("o"));
         assert!(parse_yes_no("O\n"));
         assert!(parse_yes_no("oui"));
@@ -674,6 +705,79 @@ mod tests {
         assert!(record.declined_at.is_some());
         assert!(record.accepted_at.is_none());
         assert_eq!(record.version, CONSENT_VERSION);
+    }
+
+    /// The prompt's first clause is load-bearing outside this file.
+    ///
+    /// `tests/consent_non_blocking.rs` proves that the question is *not*
+    /// printed where it cannot be answered, and it can only do that by
+    /// grepping stdout for the question. `cmd` is a binary module, so that
+    /// test cannot import [`PROMPT`] and carries the substring as a literal.
+    /// Reword the first line here and that assertion silently stops looking
+    /// for anything — it would pass against a build that prints the question
+    /// into the captured stdout, which is the bug ADR-163 closed. This test
+    /// is the tripwire: it goes red first and names the file to update.
+    #[test]
+    fn prompt_opens_with_the_clause_the_pty_test_greps_for() {
+        assert!(
+            PROMPT.starts_with("Share diagnostic information"),
+            "tests/consent_non_blocking.rs greps stdout for this clause; \
+             update both together, got: {PROMPT}"
+        );
+    }
+
+    /// The two named consent strings speak the CLI's language
+    /// (noogram/cosmon#76).
+    ///
+    /// A newcomer on the published install route met French exactly once, at
+    /// the one prompt asking about their own data. What this guards is a
+    /// *re-introduction*: words that only the old French strings had.
+    /// Accented letters are not the test — `→` and `—` are legitimately
+    /// non-ASCII and the accepted-record line uses one.
+    ///
+    /// Scope, stated so the gap is visible: this covers [`PROMPT`] and both
+    /// branches of [`skip_reason_for`], the two strings that exist as named
+    /// items. The three outcome lines are `println!` format literals inside
+    /// [`render_decision`] and cannot be named from here; asserting a *copy*
+    /// of them would test the copy. They are covered by the `opt_in_share.rs`
+    /// integration tests, which read the binary's real stdout.
+    #[test]
+    fn named_consent_strings_do_not_revert_to_french() {
+        let surfaces = [PROMPT, skip_reason_for(true), skip_reason_for(false)];
+        for marker in [
+            "Acceptez",
+            "enregistr",
+            "refus",
+            "chiffr",
+            "aucune trace",
+            "posable",
+            "sortie captur",
+            "[o/N]",
+        ] {
+            for surface in surfaces {
+                assert!(
+                    !surface.contains(marker),
+                    "French wording {marker:?} is back on the consent surface: {surface}"
+                );
+            }
+        }
+    }
+
+    /// Both halves of the skip reason, named by the condition that produces
+    /// them. `stdin non-tty` is deliberately unchanged — it is the fragment
+    /// operators grep container logs for (ADR-163, the container guide).
+    #[test]
+    fn skip_reason_names_the_missing_half() {
+        assert_eq!(
+            skip_reason_for(true),
+            "stdout captured",
+            "a TTY on stdin means it was stdout that was captured"
+        );
+        assert_eq!(
+            skip_reason_for(false),
+            "stdin non-tty",
+            "historical spelling: operators grep logs for it"
+        );
     }
 
     #[test]

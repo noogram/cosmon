@@ -34,20 +34,26 @@ text as raw JSON, which lands in your output verbatim instead of creating
 a file. Other models, and how to switch, are in
 `docs/guides/local-model-selection.md`.
 
-Missing one? `brew install git tmux` / `apt install git tmux`, and see
-[Set up cosmon](../tutorials/setup.md) for the backend options (a local
-OpenAI-compatible endpoint by default, or `--adapter claude` / `aider` / `codex`
-to pilot a coding-agent CLI you already use).
+Missing one? None of the three is installed by cosmon, and on a machine with no
+package manager yet there is a step before the install step — see
+[Set up cosmon](../tutorials/setup.md), which spells out how to get `git`,
+`tmux` and Ollama from nothing on macOS and Linux, and covers the backend
+options (a local OpenAI-compatible endpoint by default, or `--adapter claude` /
+`aider` / `codex` to pilot a coding-agent CLI you already use).
 
 ## 1. Install `cs`
 
 ```sh
 curl -fsSL https://noogram.org/cosmon/install.sh | sh
+export PATH="$HOME/.local/bin:$PATH"   # skip if the installer did not ask for it
 cs --version
 ```
 
-Homebrew and from-source routes, plus what that script does line by line, are on
-[Install cosmon](./install.md).
+`~/.local/bin` is not on the default `PATH` on a fresh account; without the
+`export` line `cs --version` exits 127. Put it in your shell profile too.
+
+Homebrew and from-source routes, what that script does line by line, and why
+`man cs` is not installed are on [Install cosmon](./install.md).
 
 ## 2. Initialise a project
 
@@ -58,9 +64,14 @@ cd ~/path/to/your/project
 cs init
 ```
 
-That creates `.cosmon/`, the directory holding **all** of cosmon's state: your
-units of work, their event logs, and the canonical recipes. Later commands walk
-up to find it, the way `git` finds `.git/`. Running it twice is safe.
+That creates `.cosmon/`, the directory holding all of cosmon's **project** state:
+your units of work, their event logs, and the canonical recipes. Later commands
+walk up to find it, the way `git` finds `.git/`. Running it twice is safe.
+
+`cs init` also writes three files outside `.cosmon/` — a `.gitleaks.toml` at the
+repository root and two per-user files in your home directory. They are listed,
+with what removes them, in
+[Set up cosmon → what `cs init` writes](../tutorials/setup.md#what-cs-init-writes-and-where).
 
 ## 3. Create a unit of work
 
@@ -76,7 +87,8 @@ state, a current step, and a durable trace on disk.
 id:
 
 ```
-Nucleated task-20260711-a1b2 (task-work): pending
+Nucleated molecule task-20260711-a1b2 from formula task-work
+  Steps: 2
 ```
 
 Yours will differ; substitute it everywhere below.
