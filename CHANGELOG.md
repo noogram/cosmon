@@ -21,6 +21,26 @@ this stage.
 
 ### Changed
 
+- **The consent path speaks the same language as the rest of `cs`** (GitHub
+  issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
+  fires on a fresh machine — printed four French strings on an otherwise
+  entirely English CLI: the prompt itself, and the acceptance, decline and
+  auto-decline result lines. They were a leftover from the onboarding brief
+  they were first written for, and the published-install-route walk found them
+  the hard way: a newcomer on an English substrate met French exactly once, at
+  the one moment `cs` asks them to decide something about their own data. They
+  are now English. The prompt asks `[y/N]` rather than `[o/N]`, and `o`/`oui`
+  are still accepted, so an answer somebody learned against the old prompt is
+  not silently turned into a decline.
+
+  One string is deliberately unchanged: `stdin non-tty`, the half of the
+  auto-decline reason that names a POSIX condition rather than reading as
+  prose, and the fragment operators grep container logs for. Its sibling
+  `sortie capturée` — the case ADR-163 added — is now `stdout captured`. The
+  ADR keeps its 2026-07-27 transcripts verbatim, because those are a
+  measurement record and not current output, and carries a postscript saying
+  so.
+
 - **A default cosmon project keeps its archive, and the ignore rule that
   tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
   `true`: `cs done` tears the worktree down, and until now every artifact a
