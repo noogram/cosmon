@@ -1579,7 +1579,12 @@ pub async fn tackle_molecule(
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
         .with_tackled_by(cosmon_core::tackle::TackledBy::Human)
-        .with_preflight(preflight);
+        .with_preflight(preflight)
+        // COSMON-DEV #75: the environment-dependent half of the worker's
+        // launch posture. Without it the dispatch still carries its permission
+        // mode and its guards — what the policy adds is the briefing receipt
+        // and the contract-20A privilege drop.
+        .with_launch_policy(tenant_launch_policy());
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
     // holds; unboxed again at the match below.
@@ -1679,6 +1684,16 @@ fn tenant_preflight(
     ))
 }
 
+/// The worker launch policy both dispatch seams install (COSMON-DEV #75).
+///
+/// Resolved per route call rather than cached on [`AppState`]: it reads the
+/// process's own uid and `PATH`, which do not change, but it is also cheap,
+/// and a value on `AppState` would have to be built before the adapter knows
+/// whether it will ever dispatch.
+fn tenant_launch_policy() -> std::sync::Arc<crate::launch::RppWorkerLaunch> {
+    std::sync::Arc::new(crate::launch::RppWorkerLaunch::resolve())
+}
+
 /// Map a library-dispatch failure onto the wire.
 ///
 /// Every outcome is a stable label; no store/git/transport detail
@@ -1738,6 +1753,16 @@ fn tackle_exec_error_to_response(err: &TackleExecError, request_id: &str) -> Api
         TackleExecError::Spawn { .. } => ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             label: "subprocess_spawn_failed",
+            request_id: Some(request_id.to_owned()),
+        },
+        // contract-20A outcome 2: the dispatcher is root and cannot demote, so
+        // no worker was created. Its own label, because the remedy is an
+        // operator provisioning gesture on the host — not a retry, and not the
+        // credential fix `worker_credential_missing` asks for. The typed
+        // reason stays in the server log (turing G9).
+        TackleExecError::RootSpawnRefused { .. } => ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            label: "root_spawn_refused",
             request_id: Some(request_id.to_owned()),
         },
 
@@ -1943,7 +1968,12 @@ pub async fn run_molecule(
     // that store too.
     let executor = LibraryExecutor::new(&tenant_root, backend)
         .with_paths(cosmon_runtime::TenantPaths::rooted_at(&tenant_root))
-        .with_preflight(preflight);
+        .with_preflight(preflight)
+        // The same launch policy as the tackle route, for the same reason the
+        // preflight is installed on both: a posture installed on one seam and
+        // not the other reproduces the defect one layer down, in a DAG full of
+        // workers that each read as healthy.
+        .with_launch_policy(tenant_launch_policy());
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,

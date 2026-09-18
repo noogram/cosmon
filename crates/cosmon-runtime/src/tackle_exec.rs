@@ -62,6 +62,7 @@ use cosmon_core::error::CosmonError;
 use cosmon_core::harness_settings::UnsupportedHarnessCarrier;
 use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
 use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
+use cosmon_core::root_spawn_policy::RootSpawnDecision;
 use cosmon_core::spawn_seam::UnknownAdapter;
 use cosmon_core::tackle::TackledBy;
 use cosmon_core::tackle_plan::{
@@ -173,6 +174,27 @@ pub enum TackleExecError {
         id: Box<MoleculeId>,
         /// Which precondition failed, and its repair.
         refusal: PreflightRefusal,
+    },
+
+    /// The embedder's launch policy stated a root-spawn
+    /// [`RootSpawnDecision::Refuse`] — demotion is impossible in this
+    /// environment, so no live worker may be created at all (contract-20A
+    /// outcome 2).
+    ///
+    /// Refused here rather than composed as-is: composing a `Refuse` like a
+    /// `SpawnAsIs` is precisely the forbidden third outcome — a live worker
+    /// running as uid 0, with no error, no event and no log line. The reason
+    /// is typed so an audit tells a deliberate root refusal from a crash.
+    #[error("molecule {id}: refusing to create a worker as root [{token}] — {reason}")]
+    RootSpawnRefused {
+        /// The molecule whose dispatch was refused.
+        id: Box<MoleculeId>,
+        /// Why demotion was impossible, rendered for the server log.
+        reason: String,
+        /// The stable machine token of the refusal
+        /// ([`cosmon_core::root_spawn_policy::RootRefusalReason::as_token`]),
+        /// so an audit keys on the verdict rather than on prose.
+        token: &'static str,
     },
 
     /// A `git` invocation failed (worktree / branch creation, repo probe).
@@ -370,6 +392,116 @@ pub trait SpawnPreflight: std::fmt::Debug + Send + Sync {
     /// not hold. Implementations MUST be fail-closed: an
     /// *indeterminate* probe is a refusal, never an `Ok`.
     fn check(&self, ctx: &PreflightContext<'_>) -> Result<(), PreflightRefusal>;
+}
+
+/// Compose the executable and argv for one worker launch (COSMON-DEV #75).
+///
+/// The claude arm renders `cosmon_core::worker_argv::ClaudeLaunch` — the same
+/// builder `cs tackle`'s string path renders — and then composes the
+/// root-spawn decision at the binary token. Every other adapter carries its
+/// harness tokens and nothing else: their launch surfaces are their own
+/// (`build_codex_command` and friends), and inventing flags for them here
+/// would be the second builder this fix exists to remove.
+///
+/// The writable roots are resolved with the SAME
+/// [`cosmon_filestore::walk_up_find_cosmon_dir_from`] redirect the worker's
+/// own `cs evolve` uses, so the grant and the write agree by construction. No
+/// resolvable `.cosmon/` (a bare checkout) emits no grant.
+fn worker_launch_argv(
+    adapter: &str,
+    worktree: &Path,
+    harness_args: &[String],
+    posture: &LaunchPosture,
+) -> (String, Vec<String>) {
+    let args = if adapter == cosmon_core::worker_argv::CLAUDE_ADAPTER {
+        let writable_roots: Vec<PathBuf> = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree)
+            .into_iter()
+            .collect();
+        let permission_mode = posture
+            .permission_mode
+            .as_deref()
+            .unwrap_or(cosmon_core::worker_argv::DEFAULT_PERMISSION_MODE);
+        cosmon_core::worker_argv::ClaudeLaunch::new(permission_mode)
+            .with_writable_roots(&writable_roots)
+            .with_receipt_overlay(posture.receipt_overlay.as_deref())
+            .with_harness_args(harness_args)
+            .render()
+    } else {
+        harness_args.to_vec()
+    };
+    cosmon_core::worker_argv::compose_launch(
+        posture
+            .root_spawn
+            .as_ref()
+            .unwrap_or(&RootSpawnDecision::SpawnAsIs),
+        adapter,
+        args,
+    )
+}
+
+/// The environment-dependent half of a worker's launch posture, stated by
+/// the embedder (COSMON-DEV #75).
+///
+/// The argv the executor can derive on its own — permission mode, the
+/// out-of-worktree writable grant, the browser-MCP strip, the harness pins —
+/// it derives. These three cannot be derived here: the receipt overlay is a
+/// file `cosmon-transport` mints per worker, and the root-spawn decision reads
+/// the dispatcher's effective uid. `cosmon-runtime` is on the I/O-free side of
+/// that boundary, and a multi-tenant server must not let its own process
+/// environment silently decide a tenant's posture. So they arrive through a
+/// port, exactly like [`SpawnPreflight`].
+///
+/// The [`Default`] is the honest minimum: no overlay, no privilege drop, the
+/// fleet-default permission mode. It is what a hermetic test and a mock-backed
+/// embedder get, and it is still a *complete* launch — issue #75 was an
+/// **empty** one.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchPosture {
+    /// `--permission-mode` override. `None` →
+    /// [`cosmon_core::worker_argv::DEFAULT_PERMISSION_MODE`].
+    pub permission_mode: Option<String>,
+    /// The briefing-receipt `--settings` overlay minted for this worker, when
+    /// the embedder could mint one. `None` is not a failure: the receipt is an
+    /// extra signal on top of the composer read, and must never be able to
+    /// fail a spawn.
+    pub receipt_overlay: Option<PathBuf>,
+    /// The root-spawn decision (contract-20A). `None` is read as
+    /// [`RootSpawnDecision::SpawnAsIs`] — the entire non-root fleet path.
+    ///
+    /// A [`RootSpawnDecision::Refuse`] must have been intercepted by the
+    /// embedder's [`SpawnPreflight`] before any live worker could exist; this
+    /// port is not that gate.
+    pub root_spawn: Option<RootSpawnDecision>,
+}
+
+/// What a launch policy is asked about: one already-resolved dispatch, at the
+/// moment its worker identity and worktree exist and before the spawn.
+#[derive(Debug, Clone, Copy)]
+pub struct LaunchContext<'a> {
+    /// The molecule being dispatched.
+    pub molecule: &'a MoleculeId,
+    /// The adapter the selection chain resolved to (`claude`, `codex`, …).
+    pub adapter: &'a str,
+    /// The worker whose session is about to be created — the identity a
+    /// per-worker receipt station is keyed by.
+    pub worker: &'a WorkerId,
+    /// The worktree the worker will run in.
+    pub worktree: &'a Path,
+}
+
+/// The injectable port that states the environment-dependent launch posture.
+///
+/// `Debug` is a supertrait so [`LibraryExecutor`] keeps its derived `Debug`;
+/// `Send + Sync` because the executor crosses a `spawn_blocking` boundary in
+/// the adapter.
+pub trait WorkerLaunchPolicy: std::fmt::Debug + Send + Sync {
+    /// State the posture for one dispatch.
+    ///
+    /// Infallible by design: every field is optional and every absence has a
+    /// defined, working meaning. A policy that cannot mint an overlay returns
+    /// one without it rather than failing a dispatch over a signal that is
+    /// itself best-effort.
+    fn posture(&self, ctx: &LaunchContext<'_>) -> LaunchPosture;
 }
 
 /// Which of a dispatch's filesystem resources **this attempt actually
@@ -588,6 +720,13 @@ pub struct LibraryExecutor<B> {
     /// the default exists for the hermetic tests and for embedders whose
     /// backend is a mock.
     preflight: Option<std::sync::Arc<dyn SpawnPreflight>>,
+    /// The environment-dependent half of the worker's launch posture.
+    ///
+    /// `None` means [`LaunchPosture::default`]: the fleet-default permission
+    /// mode, no receipt overlay, no privilege drop. That is a complete launch,
+    /// unlike the empty argv issue #75 reported — see
+    /// [`Self::with_launch_policy`] for what an embedder adds on top.
+    launch: Option<std::sync::Arc<dyn WorkerLaunchPolicy>>,
 }
 
 impl<B: TransportBackend> LibraryExecutor<B> {
@@ -608,7 +747,23 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             },
             paths,
             preflight: None,
+            launch: None,
         }
+    }
+
+    /// Install the launch policy that states this embedder's
+    /// environment-dependent posture (receipt overlay, root-spawn decision,
+    /// permission-mode override).
+    ///
+    /// Omitting it is safe: the executor still emits the full derivable argv
+    /// (permission mode, writable grant, browser-MCP strip, harness pins).
+    /// What an embedder buys by installing one is the briefing receipt and the
+    /// contract-20A privilege drop — both of which depend on I/O this crate
+    /// deliberately cannot perform.
+    #[must_use]
+    pub fn with_launch_policy(mut self, launch: std::sync::Arc<dyn WorkerLaunchPolicy>) -> Self {
+        self.launch = Some(launch);
+        self
     }
 
     /// Install the dispatch preconditions this embedder can state.
@@ -914,17 +1069,25 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         plan: &TacklePlan,
         worktree_path: &Path,
     ) -> Result<TackleReceipt, TackleExecError> {
-        // Harness settings (ADR-177 / issue #65). This executor spawns through
-        // the agent-definition seam, which carries no per-adapter override
-        // channel, so a `[steps.harness]` pin that reached here has nowhere to
-        // go. Refuse before the ledger commit, naming the adapter — never drop
-        // it. An empty map (every dispatch that pins nothing) renders to an
-        // empty slice and this is a no-op.
-        let _harness_args = cosmon_core::harness_settings::render_harness_args(
+        // Harness settings (ADR-177 / issue #65), rendered onto the adapter's
+        // own override channel. An adapter with no channel is refused before
+        // the ledger commit, naming it — never dropped. An empty map (every
+        // dispatch that pins nothing) renders to an empty vec, and the launch
+        // below is byte-identical to one that pinned nothing.
+        //
+        // These tokens used to be rendered and then discarded here, on the
+        // reasoning that the agent-definition seam carried no argv. It does
+        // carry one ([`AgentDefinition::args`]); it was simply never filled,
+        // which is issue #75. A pin accepted and silently ignored is the worst
+        // of the three outcomes, so they are now carried.
+        let harness_args: Vec<String> = cosmon_core::harness_settings::render_harness_args(
             plan.adapter.as_str(),
             &plan.harness,
         )
-        .map_err(TackleExecError::UnsupportedHarnessCarrier)?;
+        .map_err(TackleExecError::UnsupportedHarnessCarrier)?
+        .iter()
+        .flat_map(|arg| arg.argv.iter().cloned())
+        .collect();
 
         let session_name =
             cosmon_core::slugify::session_name_for(mol.display_topic(), plan.molecule_id.as_str());
@@ -934,6 +1097,49 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // ledger entry (it used to sit between commit and spawn, where its
         // `?` skipped the rollback).
         let agent_id = AgentId::new(&session_name)?;
+
+        // The worker's launch posture (COSMON-DEV #75). Before this, the agent
+        // definition was built with `args: Vec::new()` and the dispatched
+        // `claude` started bare — no permission mode, so its first prompt hung
+        // in a detached pane; no browser-MCP strip, so one tool call could
+        // deadlock it; no writable grant, so its own `cs evolve` prompted; no
+        // receipt overlay and no privilege drop. `cs tackle` emitted all of it.
+        // Both paths now render the same tokens from
+        // `cosmon_core::worker_argv`.
+        //
+        // Resolved BEFORE the ledger commit for the same reason the identifier
+        // derivation is: a refusal that arrives after the commit strands a
+        // ledger entry for a worker that will never exist.
+        let posture = self
+            .launch
+            .as_ref()
+            .map_or_else(LaunchPosture::default, |p| {
+                p.posture(&LaunchContext {
+                    molecule: &plan.molecule_id,
+                    adapter: plan.adapter.as_str(),
+                    worker: &wid,
+                    worktree: worktree_path,
+                })
+            });
+        // contract-20A outcome 2. A `Refuse` composed like a `SpawnAsIs` is
+        // the forbidden third outcome — a live worker running as uid 0 with no
+        // error and no event — so it is refused here even though the port's
+        // contract says the embedder should already have intercepted it. The
+        // caller's rollback removes this attempt's worktree, so nothing but a
+        // typed error survives.
+        if let Some(RootSpawnDecision::Refuse { reason }) = posture.root_spawn.as_ref() {
+            return Err(TackleExecError::RootSpawnRefused {
+                id: Box::new(plan.molecule_id.clone()),
+                reason: reason.to_string(),
+                token: reason.as_token(),
+            });
+        }
+        let (command, args) = worker_launch_argv(
+            plan.adapter.as_str(),
+            worktree_path,
+            &harness_args,
+            &posture,
+        );
 
         // Ledger BEFORE spawn — the token is what authorises the spawn
         // below; see `crate::dispatch_ledger` for the six molecules lost to
@@ -960,8 +1166,8 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             role: mol
                 .assigned_role
                 .unwrap_or(cosmon_core::agent::AgentRole::Implementation),
-            command: plan.adapter.as_str().to_owned(),
-            args: Vec::new(),
+            command,
+            args,
             // ADR-079 §5 obligation 3: the worker runs *in* the molecule
             // worktree. Creating the worktree above is not enough — a backend
             // that spawns a bare session inherits this process's cwd (in the

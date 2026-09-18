@@ -76,8 +76,8 @@ pub use resident::{
     TEARDOWN_ATTEMPT_CEILING, TEARDOWN_BACKOFF_BASE, TEARDOWN_BACKOFF_CAP,
 };
 pub use tackle_exec::{
-    LibraryExecutor, PreflightContext, PreflightRefusal, SpawnPreflight, TackleExecError,
-    TackleReceipt, TenantPaths,
+    LaunchContext, LaunchPosture, LibraryExecutor, PreflightContext, PreflightRefusal,
+    SpawnPreflight, TackleExecError, TackleReceipt, TenantPaths, WorkerLaunchPolicy,
 };
 pub use witness::{
     canonical_attestation_record, compute_attestation_b3, refuse_if_same_session,

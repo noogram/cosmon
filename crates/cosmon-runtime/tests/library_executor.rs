@@ -284,7 +284,9 @@ fn runtime_loop_dispatches_through_the_library_executor_with_no_cs_on_path() {
     let spawn_cwd = calls
         .iter()
         .find_map(|c| match c {
-            MockCall::Spawn { agent_id, cwd } if agent_id == mol.id.as_str() => Some(cwd.clone()),
+            MockCall::Spawn { agent_id, cwd, .. } if agent_id == mol.id.as_str() => {
+                Some(cwd.clone())
+            }
             _ => None,
         })
         .expect("the spawn call must be recorded");
