@@ -141,6 +141,25 @@ defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
 
+- **Detached patrols survive the tick that dispatched them.** The
+  `com.cosmon.scheduler` LaunchAgent template did not declare
+  `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process
+  group the instant the job exits. Since `cosmon-scheduler tick` returns in
+  milliseconds, every patrol dispatched in `dispatch = "detached"` mode was
+  killed before producing anything — while the scheduler had already logged
+  `FIRE <patrol> (pid=… detached)`. Measured on one 60-second patrol over a
+  48-hour window: 7276 recorded fires, 114 starts reaching the patrol's own
+  log, a handful of complete runs; the index it feeds sat frozen ~18 h with
+  no log saying so. `nohup` and `trap '' HUP` do not help — the signal goes
+  to the group. The template now carries the key,
+  `scripts/install-scheduler.sh` refuses to install a rendered plist without
+  it and reports the drift on `status`, and
+  `scripts/check-abandon-process-group.sh` enumerates other one-shot agents
+  missing it. `com.cosmon.daemon-supervisor` is deliberately left without the
+  key: it is a long-running supervisor that owns its children by pid, so
+  group-kill is its correct teardown. Write-up in
+  `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
+
 - **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
   issue #72). The pin was resolved and recorded as `ModelSelected`, then
   `opencode run` was spawned with no model, so the audit trail claimed a pin
