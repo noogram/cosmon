@@ -166,11 +166,6 @@ but it is not a full uninstall. A full uninstall is that `rm -rf`, plus the thre
 rows above, plus deleting `cs` and `cosmon-remote` from wherever you installed
 them (`~/.local/bin` by default).
 
-One rough edge worth naming so it does not read as a fault: the first-run
-consent prompt and its stderr trace are currently written in **French**,
-whatever your locale. The wording is being translated; the behaviour — deny by
-default, nothing shared unless you say yes — does not depend on the language.
-
 Confirm the formulas landed:
 
 ```sh
