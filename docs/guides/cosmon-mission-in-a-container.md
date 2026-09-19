@@ -510,9 +510,9 @@ cosmon-worker:cosmon-worker /srv/mission/.cosmon
 `cs init` on a brand-new galaxy will print one line you did not ask for:
 
 ```text
-opt-in-share: stdin non-tty — question non posable ici, refus par défaut
-enregistré (/home/cosmon-worker/.config/cosmon/consent.toml). Pour décider explicitement :
-`cs opt-in-share --accept` ou `--decline`.
+opt-in-share: stdin non-tty — the question cannot be answered here, so a
+decline was recorded by default (/home/cosmon-worker/.config/cosmon/consent.toml).
+To decide explicitly, run `cs opt-in-share --accept` or `cs opt-in-share --decline`.
 ```
 
 That is cosmon noticing it wanted to ask you something and that there is no

@@ -21,6 +21,26 @@ this stage.
 
 ### Changed
 
+- **The consent path speaks the same language as the rest of `cs`** (GitHub
+  issue #76). `cs opt-in-share` — and the once-per-user question `cs init`
+  fires on a fresh machine — printed four French strings on an otherwise
+  entirely English CLI: the prompt itself, and the acceptance, decline and
+  auto-decline result lines. They were a leftover from the onboarding brief
+  they were first written for, and the published-install-route walk found them
+  the hard way: a newcomer on an English substrate met French exactly once, at
+  the one moment `cs` asks them to decide something about their own data. They
+  are now English. The prompt asks `[y/N]` rather than `[o/N]`, and `o`/`oui`
+  are still accepted, so an answer somebody learned against the old prompt is
+  not silently turned into a decline.
+
+  One string is deliberately unchanged: `stdin non-tty`, the half of the
+  auto-decline reason that names a POSIX condition rather than reading as
+  prose, and the fragment operators grep container logs for. Its sibling
+  `sortie capturée` — the case ADR-163 added — is now `stdout captured`. The
+  ADR keeps its 2026-07-27 transcripts verbatim, because those are a
+  measurement record and not current output, and carries a postscript saying
+  so.
+
 - **A default cosmon project keeps its archive, and the ignore rule that
   tracks it now works** (GitHub issue #60). `[archive] enabled` defaults to
   `true`: `cs done` tears the worktree down, and until now every artifact a
@@ -120,6 +140,25 @@ change that made a stranded merge visible instead of silent, and the actual
 defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
+
+- **Detached patrols survive the tick that dispatched them.** The
+  `com.cosmon.scheduler` LaunchAgent template did not declare
+  `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process
+  group the instant the job exits. Since `cosmon-scheduler tick` returns in
+  milliseconds, every patrol dispatched in `dispatch = "detached"` mode was
+  killed before producing anything — while the scheduler had already logged
+  `FIRE <patrol> (pid=… detached)`. Measured on one 60-second patrol over a
+  48-hour window: 7276 recorded fires, 114 starts reaching the patrol's own
+  log, a handful of complete runs; the index it feeds sat frozen ~18 h with
+  no log saying so. `nohup` and `trap '' HUP` do not help — the signal goes
+  to the group. The template now carries the key,
+  `scripts/install-scheduler.sh` refuses to install a rendered plist without
+  it and reports the drift on `status`, and
+  `scripts/check-abandon-process-group.sh` enumerates other one-shot agents
+  missing it. `com.cosmon.daemon-supervisor` is deliberately left without the
+  key: it is a long-running supervisor that owns its children by pid, so
+  group-kill is its correct teardown. Write-up in
+  `docs/diagnostic/2026-08-19-launchd-group-kill-silences-detached-patrols.md`.
 
 - **`cs tackle --model X --adapter opencode` now tells opencode** (GitHub
   issue #72). The pin was resolved and recorded as `ModelSelected`, then
