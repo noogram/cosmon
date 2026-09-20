@@ -1487,6 +1487,7 @@ dependencies = [
  "cosmon-process-witness",
  "cosmon-state",
  "cosmon-transport",
+ "nix 0.31.2",
  "notify",
  "proptest",
  "rand 0.8.5",

@@ -16,6 +16,7 @@ cosmon-graph.workspace = true
 cosmon-hash.workspace = true
 cosmon-process-witness.workspace = true
 cosmon-state.workspace = true
+nix.workspace = true
 notify.workspace = true
 rand.workspace = true
 serde = { workspace = true }

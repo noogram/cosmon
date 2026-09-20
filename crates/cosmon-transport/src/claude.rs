@@ -331,36 +331,51 @@ fn write_briefing_file(briefing: &str) -> Result<String, ClaudeError> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// Build the `--add-dir …/--allowedTools …` grant fragment that lets an
-/// unattended claude worker write the out-of-worktree cosmon state dir and
-/// run Bash without a permission prompt (COSMON-DEV #20 facet B).
+/// Build the flag fragment that follows the `claude` binary, rendered from
+/// the ONE launch builder every cosmon dispatch path shares.
 ///
-/// Returns a leading-space fragment
-/// `" --add-dir <r1> <r2>… --allowedTools Bash Edit Write"` for a non-empty
-/// `roots`, or the empty string for empty `roots` — so an absent grant leaves
-/// the command byte-identical to the pre-fix shape. Each root is
-/// [`shell_quote`]d; the tool names are literal (no user input, no quoting).
+/// # Why this delegates rather than writing flags itself (COSMON-DEV #75 R2)
 ///
-/// The two flags close the two prompt classes an interactive worker faces
+/// This used to emit only `--add-dir …/--allowedTools Bash Edit Write`
+/// (COSMON-DEV #20 facet B), hand-written here, while `--permission-mode` was
+/// interpolated by the caller and the **browser-MCP strip was absent
+/// entirely**. That made the tmux path a third argv builder disagreeing with
+/// the other two: `cs tackle` and
+/// `cosmon_runtime::LibraryExecutor` both
+/// render [`cosmon_core::worker_argv::ClaudeLaunch`], which disallows the
+/// operator-bound browser MCP servers. A worker spawned through this path kept
+/// them, so one tool call into `mcp__claude-in-chrome` blocked it forever
+/// waiting on a browser attached to a desktop it cannot see — the mute hang
+/// the strip exists to prevent, reachable through `cs thaw`, the patrol
+/// respawn backstop and every headless briefing delivery.
+///
+/// Rendering the shared builder is what makes the three paths agree **by
+/// construction**: a flag added to `ClaudeLaunch` lands here with no edit, and
+/// there is no longer a local list that can fall behind.
+///
+/// Returns a leading-space fragment, each token [`shell_quote`]d exactly once
+/// — a token is one argv entry, and the multi-server `--disallowedTools` value
+/// is a single argument that must survive the shell as one word. Empty
+/// `roots` emits no `--add-dir`/`--allowedTools` pair, as before.
+///
+/// Those two flags close the two prompt classes an interactive worker faces
 /// under `--permission-mode acceptEdits`: `--add-dir` makes writes to the
 /// declared out-of-worktree dir auto-accept (empirically the load-bearing
 /// fix — see [`ClaudeSessionConfig::writable_roots`]), and `--allowedTools`
 /// pre-grants the Bash/Edit/Write tools so the Bash prompt never stalls the
 /// worker either. Both are documented first-class flags on the installed
 /// `claude` 2.1.218.
-fn writable_grants_fragment(roots: &[PathBuf]) -> String {
-    if roots.is_empty() {
-        return String::new();
-    }
-    let mut frag = String::from(" --add-dir");
-    for root in roots {
-        frag.push(' ');
-        frag.push_str(&shell_quote(&root.to_string_lossy()));
-    }
-    // Literal tool names — the Bash/Edit/Write grant the cs pipeline needs so
-    // an unattended worker never faces the `acceptEdits` Bash prompt class.
-    frag.push_str(" --allowedTools Bash Edit Write");
-    frag
+fn claude_flags_fragment(permission_mode: PermissionMode, roots: &[PathBuf]) -> String {
+    let mode = permission_mode.to_string();
+    cosmon_core::worker_argv::ClaudeLaunch::new(&mode)
+        .with_writable_roots(roots)
+        .render()
+        .iter()
+        .fold(String::new(), |mut frag, token| {
+            frag.push(' ');
+            frag.push_str(&shell_quote(token));
+            frag
+        })
 }
 
 /// Build the shell command string for a headless claude spawn.
@@ -413,7 +428,7 @@ fn build_headless_command(
         RootSpawnDecision::Demote { to_uid } => demotion_command_prefix(*to_uid),
         RootSpawnDecision::SpawnAsIs | RootSpawnDecision::Refuse { .. } => String::new(),
     };
-    let grants = writable_grants_fragment(writable_roots);
+    let flags = claude_flags_fragment(permission_mode, writable_roots);
     match briefing_file {
         // issue #6.1 + #6.3 + security follow-up: `-p` with the briefing on
         // stdin from a file that is unlinked while still open. POSIX applies
@@ -423,13 +438,10 @@ fn build_headless_command(
         Some(path) => {
             let q = shell_quote(path);
             let mut cmd = String::new();
-            let _ = write!(
-                cmd,
-                "{{ rm -f {q}; {demote}claude --permission-mode {permission_mode}{grants} -p; }} < {q}"
-            );
+            let _ = write!(cmd, "{{ rm -f {q}; {demote}claude{flags} -p; }} < {q}");
             cmd
         }
-        None => format!("{demote}claude --permission-mode {permission_mode}{grants}"),
+        None => format!("{demote}claude{flags}"),
     }
 }
 
@@ -1328,7 +1340,8 @@ mod tests {
         assert_eq!(
             cmd,
             "{ rm -f /tmp/cosmon-briefing-polecat-42.txt; \
-             claude --permission-mode bypassPermissions -p; } \
+             claude --permission-mode bypassPermissions \
+             --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome' -p; } \
              < /tmp/cosmon-briefing-polecat-42.txt"
         );
         assert!(
@@ -1375,8 +1388,70 @@ mod tests {
             &RootSpawnDecision::SpawnAsIs,
             &[],
         );
-        assert_eq!(cmd, "claude --permission-mode acceptEdits");
+        assert_eq!(
+            cmd,
+            "claude --permission-mode acceptEdits --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome'"
+        );
         assert!(!cmd.contains(" -p"), "no briefing → no -p: {cmd}");
+    }
+
+    /// COSMON-DEV #75 residual R2: the tmux path carries the browser-MCP
+    /// strip, in **both** arms.
+    ///
+    /// Not a shape assertion for its own sake. `mcp__claude-in-chrome` and
+    /// `mcp__playwright-extension` drive a browser attached to the operator's
+    /// desktop; a detached worker that calls into either blocks forever on a
+    /// browser that will never answer, which is the mute hang the fleet cannot
+    /// tell from healthy work. `cs tackle` and the library executor both strip
+    /// them through `cosmon_core::worker_argv`; this path hand-wrote its flags
+    /// and stripped nothing, so `cs thaw`, the patrol respawn backstop (the
+    /// `None` arm) and every headless briefing delivery (the `Some` arm)
+    /// spawned workers holding the deadlock.
+    ///
+    /// Asserted against the shared constant rather than a literal, so a server
+    /// added to the list is covered here with no edit.
+    #[test]
+    fn both_headless_arms_strip_the_operator_bound_browser_mcps() {
+        for briefing in [None, Some("/tmp/cosmon-briefing-badger-7.txt")] {
+            let cmd = build_headless_command(
+                PermissionMode::BypassPermissions,
+                briefing,
+                &RootSpawnDecision::SpawnAsIs,
+                &[],
+            );
+            assert!(
+                cmd.contains("--disallowedTools"),
+                "the strip must be emitted (briefing: {briefing:?}): {cmd}"
+            );
+            for server in cosmon_core::worker_argv::OPERATOR_BOUND_BROWSER_MCPS {
+                assert!(
+                    cmd.contains(server),
+                    "{server} must be disallowed (briefing: {briefing:?}): {cmd}"
+                );
+            }
+        }
+    }
+
+    /// The strip is ONE argv token, so the shell must see one word.
+    ///
+    /// The value is space-joined (`mcp__a mcp__b`) because Claude Code matches
+    /// a bare `mcp__<server>` prefix against every tool that server exposes.
+    /// Spliced unquoted into the command string, the shell would split it and
+    /// `claude` would read the second server as a positional argument — the
+    /// strip half-applied, with no error to notice.
+    #[test]
+    fn the_browser_strip_survives_the_shell_as_one_word() {
+        let cmd = build_headless_command(
+            PermissionMode::BypassPermissions,
+            None,
+            &RootSpawnDecision::SpawnAsIs,
+            &[],
+        );
+        let joined = cosmon_core::worker_argv::OPERATOR_BOUND_BROWSER_MCPS.join(" ");
+        assert!(
+            cmd.contains(&format!("--disallowedTools '{joined}'")),
+            "a multi-server strip must be quoted as one argument: {cmd}"
+        );
     }
 
     // -- COSMON-DEV #20 facet B: out-of-worktree writable-dir grant --
@@ -1483,7 +1558,8 @@ mod tests {
 
     /// Empty `writable_roots` (the absence-default — a bare CI checkout with no
     /// `.cosmon/` ancestor) emits neither `--add-dir` nor `--allowedTools`, so
-    /// the command is byte-identical to the pre-fix shape.
+    /// the command is the bare posture: permission mode and the browser strip,
+    /// and nothing the grant would have added.
     #[test]
     fn empty_writable_roots_emit_no_grant() {
         let cmd = build_headless_command(
@@ -1492,7 +1568,10 @@ mod tests {
             &RootSpawnDecision::SpawnAsIs,
             &[],
         );
-        assert_eq!(cmd, "claude --permission-mode acceptEdits");
+        assert_eq!(
+            cmd,
+            "claude --permission-mode acceptEdits --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome'"
+        );
         assert!(!cmd.contains("--add-dir"));
         assert!(!cmd.contains("--allowedTools"));
     }
@@ -1512,7 +1591,8 @@ mod tests {
         assert_eq!(
             cmd,
             "setpriv --reuid 10001 --regid 10001 --clear-groups -- \
-             claude --permission-mode bypassPermissions",
+             claude --permission-mode bypassPermissions \
+             --disallowedTools 'mcp__playwright-extension mcp__claude-in-chrome'",
             "root must demote to a non-root uid: {cmd}"
         );
         assert!(

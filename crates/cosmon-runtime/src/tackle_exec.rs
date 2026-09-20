@@ -412,6 +412,7 @@ fn worker_launch_argv(
     worktree: &Path,
     harness_args: &[String],
     posture: &LaunchPosture,
+    root_spawn: &RootSpawnDecision,
 ) -> (String, Vec<String>) {
     let args = if adapter == cosmon_core::worker_argv::CLAUDE_ADAPTER {
         let writable_roots: Vec<PathBuf> = cosmon_filestore::walk_up_find_cosmon_dir_from(worktree)
@@ -429,14 +430,80 @@ fn worker_launch_argv(
     } else {
         harness_args.to_vec()
     };
-    cosmon_core::worker_argv::compose_launch(
-        posture
-            .root_spawn
-            .as_ref()
-            .unwrap_or(&RootSpawnDecision::SpawnAsIs),
-        adapter,
-        args,
-    )
+    cosmon_core::worker_argv::compose_launch(root_spawn, adapter, args)
+}
+
+/// Resolve this dispatch's root-spawn decision and answer contract-20A
+/// outcome 2 — before the ledger commit, and before anything is spawned.
+///
+/// Two failures are closed here. A stated [`RootSpawnDecision::Refuse`]
+/// composed like a `SpawnAsIs` is the forbidden third outcome: a live worker
+/// running as uid 0 with no error and no event. It is refused here even though
+/// the port's contract says the embedder's [`SpawnPreflight`] should already
+/// have intercepted it, because a second gate costs one `match` and the
+/// outcome it prevents is unrecoverable.
+///
+/// An **unstated** decision is resolved rather than assumed to be `SpawnAsIs`
+/// (see [`unstated_root_spawn`]): an embedder that installed no launch policy
+/// has told us nothing about its uid, and reading that silence as "not root"
+/// is the port failing open.
+///
+/// The caller's rollback removes this attempt's worktree, so nothing but a
+/// typed error survives a refusal.
+fn gate_root_spawn(
+    posture: &LaunchPosture,
+    id: &MoleculeId,
+) -> Result<RootSpawnDecision, TackleExecError> {
+    let decision = posture
+        .root_spawn
+        .clone()
+        .unwrap_or_else(unstated_root_spawn);
+    if let RootSpawnDecision::Refuse { reason } = &decision {
+        return Err(TackleExecError::RootSpawnRefused {
+            id: Box::new(id.clone()),
+            reason: reason.to_string(),
+            token: reason.as_token(),
+        });
+    }
+    Ok(decision)
+}
+
+/// The root-spawn decision that applies when the launch posture states none.
+///
+/// # Why this is not `SpawnAsIs`
+///
+/// It used to be: an absent [`LaunchPosture::root_spawn`] was read as "no
+/// root, nothing to decide". That is the port **failing open**. An embedder
+/// that installs no [`WorkerLaunchPolicy`] — or installs one that leaves this
+/// field `None` — is not asserting it runs as a non-root uid; it is asserting
+/// nothing. If that process happens to be root, the executor composed a launch
+/// exactly like a non-root one and produced contract-20A's forbidden third
+/// outcome: a live cognitive worker with uid 0's entire blast radius, with no
+/// error and no event. The only thing standing between a root embedder and a
+/// root worker was its own diligence in wiring an optional port.
+///
+/// So an unstated decision is now *resolved* rather than assumed: the
+/// executor reads the identity it is actually running under and asks the same
+/// pure [`decide_root_spawn`] the CLI and the adapter ask. A non-root process
+/// still gets [`RootSpawnDecision::SpawnAsIs`] and a byte-identical launch —
+/// this costs the entire non-root fleet nothing. A root process gets a typed
+/// refusal before any live worker exists.
+///
+/// The uid goes through
+/// [`effective_dispatch_uid`](cosmon_core::root_spawn_policy::effective_dispatch_uid)
+/// so the root branch is reachable from a test on a non-root box. That seam is
+/// monotone by construction — it can only substitute uid 0, which
+/// `decide_root_spawn` refuses unconditionally — so no value of it can permit
+/// a spawn the real uid would forbid.
+///
+/// [`decide_root_spawn`]: cosmon_core::root_spawn_policy::decide_root_spawn
+fn unstated_root_spawn() -> RootSpawnDecision {
+    use cosmon_core::root_spawn_policy::{
+        decide_root_spawn, effective_dispatch_uid, resolve_demote_target,
+    };
+    let env = |k: &str| std::env::var(k).ok();
+    let running_uid = effective_dispatch_uid(nix::unistd::Uid::effective().as_raw(), env);
+    decide_root_spawn(running_uid, resolve_demote_target(env))
 }
 
 /// The environment-dependent half of a worker's launch posture, stated by
@@ -465,8 +532,13 @@ pub struct LaunchPosture {
     /// extra signal on top of the composer read, and must never be able to
     /// fail a spawn.
     pub receipt_overlay: Option<PathBuf>,
-    /// The root-spawn decision (contract-20A). `None` is read as
-    /// [`RootSpawnDecision::SpawnAsIs`] — the entire non-root fleet path.
+    /// The root-spawn decision (contract-20A). `None` states **nothing**, and
+    /// is no longer read as [`RootSpawnDecision::SpawnAsIs`]: the executor
+    /// resolves it from the identity it is running under — the effective uid,
+    /// through the same pure `decide_root_spawn` the CLI asks — so a root
+    /// embedder that wired no policy is
+    /// refused instead of silently dispatching a uid-0 worker. A non-root
+    /// process resolves to `SpawnAsIs` and its launch is byte-identical.
     ///
     /// A [`RootSpawnDecision::Refuse`] belongs to the embedder's
     /// [`SpawnPreflight`], which should intercept it before any effect. Stating
@@ -1124,24 +1196,13 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                     worktree: worktree_path,
                 })
             });
-        // contract-20A outcome 2. A `Refuse` composed like a `SpawnAsIs` is
-        // the forbidden third outcome — a live worker running as uid 0 with no
-        // error and no event — so it is refused here even though the port's
-        // contract says the embedder should already have intercepted it. The
-        // caller's rollback removes this attempt's worktree, so nothing but a
-        // typed error survives.
-        if let Some(RootSpawnDecision::Refuse { reason }) = posture.root_spawn.as_ref() {
-            return Err(TackleExecError::RootSpawnRefused {
-                id: Box::new(plan.molecule_id.clone()),
-                reason: reason.to_string(),
-                token: reason.as_token(),
-            });
-        }
+        let root_spawn = gate_root_spawn(&posture, &plan.molecule_id)?;
         let (command, args) = worker_launch_argv(
             plan.adapter.as_str(),
             worktree_path,
             &harness_args,
             &posture,
+            &root_spawn,
         );
 
         // Ledger BEFORE spawn — the token is what authorises the spawn
