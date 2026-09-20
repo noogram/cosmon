@@ -38,54 +38,12 @@ use cosmon_core::root_spawn_policy::{demotion_command_prefix, RootSpawnDecision}
 /// desktop** and therefore can never respond inside a headless fleet
 /// worker.
 ///
-/// `playwright-extension` and `claude-in-chrome` both speak to the
-/// operator's logged-in Chrome through a browser extension. A `cs tackle`
-/// worker runs headless in a detached tmux session with no attached
-/// Chrome, so the *first* call into either server blocks waiting for a
-/// browser that will never answer — the worker freezes indefinitely
-/// (observed as a session stuck for hours on "Frosting…" /
-/// "Calling playwright-extension…") and never reaches `cs evolve`. That
-/// is a silent deadlock, the worst failure class in a fleet: the worker
-/// looks alive to the liveness probe but makes no progress.
-///
-/// We remove these servers from the worker's toolset at the spawn
-/// boundary via `claude --disallowedTools`, so a call **fails fast**
-/// (the model is told the tool is unavailable and picks another path)
-/// instead of hanging. The headless-safe `playwright-headless` MCP —
-/// which spawns its own isolated Chromium — is intentionally *not* in
-/// this list: it is the correct tool for a worker that must screenshot a
-/// live URL for the visual-QA gate.
-///
-/// See `docs/guides/visual-qa-gate.md` ("Headless only — never
-/// `playwright-extension`") and the fleet-headless bug `task-20260704-f153`.
-pub const OPERATOR_BOUND_BROWSER_MCPS: &[&str] =
-    &["mcp__playwright-extension", "mcp__claude-in-chrome"];
-
-/// Assemble the `--disallowedTools '<server> …'` fragment that strips
-/// operator-bound browser MCP servers (see [`OPERATOR_BOUND_BROWSER_MCPS`])
-/// from a headless worker's toolset.
-///
-/// Returns a fragment ending in a single trailing space so it slots
-/// cleanly between `--permission-mode <mode>` and the `2> …` stderr
-/// redirect in [`build_claude_command`]. Returns an empty string when
-/// the list is empty (defensive — the list is non-empty today), keeping
-/// the command byte-identical to the legacy shape in that degenerate
-/// case. Claude Code matches a bare `mcp__<server>` token against every
-/// tool that server exposes, so one token disables the whole server.
-fn disallowed_browser_tools_fragment() -> String {
-    // The list is a non-empty compile-time constant today, so clippy's
-    // `const_is_empty` (stabilised on a newer stable than this guard landed
-    // on) flags the check as always-false. Keep the guard: it is the
-    // documented byte-identical-when-empty defence, and it costs nothing.
-    #[allow(clippy::const_is_empty)]
-    if OPERATOR_BOUND_BROWSER_MCPS.is_empty() {
-        return String::new();
-    }
-    format!(
-        "--disallowedTools {} ",
-        shell_quote(&OPERATOR_BOUND_BROWSER_MCPS.join(" "))
-    )
-}
+/// Re-exported from [`cosmon_core::worker_argv::OPERATOR_BOUND_BROWSER_MCPS`],
+/// which is where the list lives now that both dispatch paths render the same
+/// launch posture (COSMON-DEV #75). The alias is kept because the constant is
+/// public API of this module and is asserted against by name in the tests that
+/// pinned the headless deadlock fix (`task-20260704-f153`).
+pub use cosmon_core::worker_argv::OPERATOR_BOUND_BROWSER_MCPS;
 
 /// Shell-quote a string for safe embedding in a `VAR=value cmd`
 /// expression. Mirrors `TmuxBackend::shell_quote` (which is module-
@@ -407,13 +365,23 @@ where
     // so the `❯`-prompt liveness check still sees it. `>` truncates per
     // spawn so the file is the post-mortem of *this* worker, not a pileup.
     let worker_stderr = shell_quote(&format!("{mol_dir_str}/worker.stderr"));
-    // Strip operator-bound browser MCP servers from the headless worker's
-    // toolset so a call fails fast instead of deadlocking (task-20260704-f153).
-    let disallowed = disallowed_browser_tools_fragment();
-    // Declare the out-of-worktree cosmon state dir writable + grant Bash so an
-    // unattended worker never trips a permission prompt (COSMON-DEV #20 facet
-    // B). Empty roots emit nothing → byte-identical to the pre-fix shape.
-    let grants = writable_grants_fragment(writable_roots);
+    // The worker's launch posture — permission mode, the out-of-worktree
+    // writable grant, the receipt overlay, the harness pins and the
+    // browser-MCP strip — comes from the ONE builder both dispatch paths
+    // render (COSMON-DEV #75). This path turns those tokens back into a shell
+    // string by quoting each one; the in-process path hands the same tokens to
+    // `execve`. Neither owns the list, so a flag added for one is carried by
+    // the other by construction.
+    let launch = cosmon_core::worker_argv::ClaudeLaunch::new(perm_mode)
+        .with_writable_roots(writable_roots)
+        .with_receipt_overlay(receipt_overlay)
+        .with_harness_args(harness_args);
+    let flags = launch
+        .render()
+        .iter()
+        .map(|token| shell_quote(token))
+        .collect::<Vec<_>>()
+        .join(" ");
     // Privilege-drop prefix, composed AT the binary token (never spliced into
     // an assembled string — see the doc comment). Empty for the non-root path
     // and, defensively, for a `Refuse` the caller must have intercepted.
@@ -448,36 +416,12 @@ where
     if cosmon_core::api_envelope::envelope_active(&env_lookup) {
         push_pilot_var(&mut prefix, PilotVar::ApiRequest, "");
     }
-    // Briefing-receipt overlay (`--settings`). Additive and file-scoped: the
-    // file is a new 0600 file cosmon owns, registering one `UserPromptSubmit`
-    // hook so the worker's Claude Code can *sign* a receipt for each briefing
-    // instead of cosmon inferring the submit from pixels. An operator hook
-    // already on the same event keeps working — the mechanism was measured
-    // against exactly that case. `None` (overlay could not be minted, or the
-    // caller does not want one) leaves the command byte-identical to the
-    // pre-receipt shape, which is what keeps a receipt from ever being able to
-    // stop a worker spawning.
-    let settings = receipt_overlay.map_or_else(String::new, |path| {
-        format!(" --settings {}", shell_quote(&path.to_string_lossy()))
-    });
-    // Harness settings (ADR-177 / issue #65), pre-rendered by
-    // `cosmon_core::harness_settings::render_harness_args` as `--<key> <value>`
-    // token pairs and appended **verbatim**, each shell-quoted. There is
-    // deliberately no allowlist: an unknown flag is rejected by Claude Code's
-    // own parser at launch, loudly, and cosmon names the adapter alongside it.
-    // A key cosmon recognised would be public API carried in spore files on
-    // other people's disks, with no way to announce its removal. Empty (the
-    // common case) contributes nothing and leaves the command byte-identical to
-    // the pre-#65 shape.
-    let mut harness = String::new();
-    for token in harness_args {
-        harness.push(' ');
-        harness.push_str(&shell_quote(token));
-    }
-    format!(
-        "{prefix}{demote}{claude_bin} --permission-mode {perm_mode}{grants}{settings}{harness} \
-         {disallowed}2> {worker_stderr}"
-    )
+    // Briefing-receipt overlay (`--settings`) and the harness settings
+    // (ADR-177 / issue #65) are rendered by the shared builder above — see
+    // `cosmon_core::worker_argv::ClaudeLaunch` for why each is additive and
+    // why an absent one leaves the command byte-identical to the shape that
+    // predates it.
+    format!("{prefix}{demote}{claude_bin} {flags} 2> {worker_stderr}")
 }
 
 /// Append one `NAME=value ` pair to the env prefix, taking the name from the
@@ -497,31 +441,55 @@ fn push_pilot_var(prefix: &mut String, var: PilotVar, value: &str) {
     prefix.push(' ');
 }
 
-/// Build the `--add-dir …/--allowedTools …` grant fragment for
-/// [`build_claude_command`] (COSMON-DEV #20 facet B).
-///
-/// Returns a leading-space fragment
-/// `" --add-dir <r1> <r2>… --allowedTools Bash Edit Write"` for a non-empty
-/// `roots`, or the empty string for empty `roots` — so an absent grant leaves
-/// the command byte-identical. Each root is [`shell_quote`]d; the tool names
-/// are literal. Mirrors `cosmon_transport::claude::writable_grants_fragment`
-/// and the codex adapter's `push_writable_roots`.
-fn writable_grants_fragment(roots: &[std::path::PathBuf]) -> String {
-    if roots.is_empty() {
-        return String::new();
-    }
-    let mut frag = String::from(" --add-dir");
-    for root in roots {
-        frag.push(' ');
-        frag.push_str(&shell_quote(&root.to_string_lossy()));
-    }
-    frag.push_str(" --allowedTools Bash Edit Write");
-    frag
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// COSMON-DEV #75 parity guard: everything between the binary token and
+    /// the stderr redirect is EXACTLY the shared builder's tokens, quoted.
+    ///
+    /// This is the clause the defect was an instance of. `cs tackle` and the
+    /// in-process library executor used to assemble their flags independently,
+    /// so the library one could be — and was — empty while this one was
+    /// complete. Re-hardcoding a flag here, or dropping one, breaks this
+    /// equality rather than silently re-opening the drift.
+    #[test]
+    fn the_shell_command_carries_exactly_the_shared_launch_tokens() {
+        let roots = vec![std::path::PathBuf::from("/repo/.cosmon")];
+        let overlay = std::path::PathBuf::from("/run/receipts/w/settings.json");
+        let harness = vec!["--fallback-model".to_owned(), "sonnet".to_owned()];
+        let cmd = build_claude_command(
+            "/tmp/state/mol-X",
+            "task-20260917-1b1a",
+            "claude",
+            "bypassPermissions",
+            &roots,
+            &RootSpawnDecision::SpawnAsIs,
+            Some(overlay.as_path()),
+            &harness,
+            cb_absent,
+            |_| None,
+        );
+        let expected = cosmon_core::worker_argv::ClaudeLaunch::new("bypassPermissions")
+            .with_writable_roots(&roots)
+            .with_receipt_overlay(Some(overlay.as_path()))
+            .with_harness_args(&harness)
+            .render()
+            .iter()
+            .map(|t| shell_quote(t))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let flags = cmd
+            .split_once("claude ")
+            .and_then(|(_, rest)| rest.split_once(" 2> "))
+            .map(|(flags, _)| flags.to_owned())
+            .unwrap_or_else(|| panic!("unrecognised command shape: {cmd}"));
+        assert_eq!(
+            flags, expected,
+            "the shell path must render the shared launch tokens and nothing \
+             else: {cmd}"
+        );
+    }
 
     /// Helper: a `cb_runner` that always fails (simulates cb absent).
     fn cb_absent() -> Option<String> {

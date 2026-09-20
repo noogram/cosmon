@@ -76,6 +76,7 @@ pub mod harvest_effect;
 pub mod image_init;
 pub mod jwks_fetch;
 pub mod jwt;
+pub mod launch;
 pub mod metrics;
 pub mod nucleon_map;
 pub mod oauth_discovery;
