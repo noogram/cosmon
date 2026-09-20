@@ -917,13 +917,18 @@ fn check_surfaces(state_dir: &std::path::Path) -> SurfaceStatus {
 
 /// The set of molecules carrying a pilot lease, read from the ledger dir.
 ///
+/// Built through `leases_at`, the one sanctioned constructor, even though
+/// this reader needs no trust root: the ledger is reached one way in shipped
+/// code, and a second route would be the drift the guard exists to prevent.
+///
 /// A failure to read is an empty set, never an error: `cs status` must not
 /// stop working because a sibling mechanism is missing, and treating an
 /// unreadable ledger as "no leases" only ever restores the old, slightly
 /// pessimistic count.
 fn lease_missions(state_dir: &std::path::Path) -> std::collections::BTreeSet<MoleculeId> {
-    cosmon_filestore::PilotLeaseStore::new(state_dir)
-        .missions()
+    cosmon_harvest::pilot_gesture::leases_at(state_dir)
+        .ok()
+        .and_then(|store| store.missions().ok())
         .unwrap_or_default()
 }
 

@@ -4633,7 +4633,16 @@ pub(crate) fn lease_missions_for(
     }
     roots
         .iter()
-        .filter_map(|root| cosmon_filestore::PilotLeaseStore::new(root).missions().ok())
+        .filter_map(|root| {
+            // `leases_at` is the one sanctioned way shipped code reaches the
+            // ledger. This reader wants only the filenames, but a second
+            // route to the ledger is exactly the drift that made an authority
+            // check vacuous once already.
+            cosmon_harvest::pilot_gesture::leases_at(root)
+                .ok()?
+                .missions()
+                .ok()
+        })
         .flatten()
         .map(|id| id.to_string())
         .collect()
