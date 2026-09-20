@@ -22,6 +22,8 @@ injectable ports.
 - Keep workspace dependencies centralized in the root `Cargo.toml`.
 - Update the CLI/UI parity audit when changing a user-facing command.
 - Use Conventional Commit prefixes such as `fix:`, `feat:`, and `docs:`.
+- An unmerged branch left by a collapsed molecule requires an audit verdict
+  before deletion, never a guess.
 
 No agent-harness session identifier, thread identifier, or conversation
 deep-link may appear in any artefact this repository publishes — commit

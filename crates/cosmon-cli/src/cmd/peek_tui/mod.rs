@@ -1204,6 +1204,14 @@ struct App {
     /// Per-molecule state dir, so detail artifacts can be resolved for the
     /// selected row whether we're in single-project or `--all` mode.
     row_state_dirs: std::collections::HashMap<String, std::path::PathBuf>,
+    /// Molecule ids carrying a pilot lease, refreshed on every reload.
+    ///
+    /// A lease mission is `pending` by construction and converges by design
+    /// never, so counting it in the vitals line's stale-backlog figure makes
+    /// that figure permanently wrong by one. Kept beside the rows rather than
+    /// on each row so the `RowView` shape is untouched — the bit is a
+    /// property of the ledger, not of the row.
+    lease_missions: std::collections::BTreeSet<String>,
     /// Molecule ids whose row is expanded (showing tree-view detail lines).
     /// Keyed by `mol_id` rather than row index so the expansion state
     /// survives `reload()` resorts and filter changes.
@@ -1348,6 +1356,7 @@ impl App {
             rows: Vec::new(),
             census: WorkerCensus::default(),
             row_state_dirs: std::collections::HashMap::new(),
+            lease_missions: std::collections::BTreeSet::new(),
             expanded: std::collections::HashSet::new(),
             table_state: TableState::default(),
             filter: String::new(),
@@ -1423,6 +1432,7 @@ impl App {
         census: WorkerCensus,
     ) {
         self.row_state_dirs = state_dirs;
+        self.lease_missions = lease_missions_for(&self.state_dir, &self.row_state_dirs);
         self.census = census;
         let selected_id = self
             .table_state
@@ -3118,7 +3128,6 @@ impl App {
     /// completed/collapsed ratio over the last 7 days.
     fn draw_vital_signs(&self, f: &mut Frame, area: Rect) {
         let now = Utc::now();
-        let threshold_48h = chrono::Duration::hours(48);
         let window_7d = chrono::Duration::days(7);
 
         if self.rows.is_empty() {
@@ -3130,16 +3139,22 @@ impl App {
             return;
         }
 
-        // Count pending molecules older than 48h.
-        let stale_pending: usize = self
-            .rows
-            .iter()
-            .filter(|r| {
-                r.status == "pending"
-                    && r.created_at_utc
-                        .is_some_and(|dt| now.signed_duration_since(dt) > threshold_48h)
-            })
-            .count();
+        // Count stale backlog through the shared predicate, so this figure and
+        // the one `cs status` prints cannot drift apart. The definition of
+        // "actionable" lives in `cosmon_core::staleness` and nowhere else.
+        let backlog = cosmon_core::staleness::backlog_age(
+            self.rows.iter().filter_map(|r| {
+                Some(cosmon_core::staleness::BacklogItem {
+                    id: cosmon_core::id::MoleculeId::new(&r.mol_id).ok()?,
+                    status: r.status.parse().ok()?,
+                    created_at: r.created_at_utc,
+                    is_lease: self.lease_missions.contains(&r.mol_id),
+                })
+            }),
+            now,
+        );
+        let stale_pending = backlog.stale;
+        let stale_threshold_hours = cosmon_core::staleness::stale_backlog_after().num_hours();
 
         // Temperature distribution from tags.
         let (mut hot, mut warm, mut cold, mut frozen) = (0usize, 0, 0, 0);
@@ -3188,7 +3203,7 @@ impl App {
             Style::default().fg(Color::DarkGray)
         };
         spans.push(Span::styled(
-            format!("{stale_pending} pending>48h"),
+            format!("{stale_pending} pending>{stale_threshold_hours}h"),
             stale_style,
         ));
 
@@ -4600,6 +4615,30 @@ pub(super) fn capture_pane(socket: &str, session: &str) -> anyhow::Result<String
 /// owning `.cosmon/` directory. Molecules from every discovered project are
 /// merged into the snapshot, so `cs peek --all` from any project shows a
 /// cross-project fleet view.
+/// The pilot-lease missions visible from this peek scope.
+///
+/// `cs peek --all` aggregates several projects, each with its own state dir
+/// and its own ledger, so the set is the union over every root the snapshot
+/// touched plus the current one. A read failure contributes nothing: the
+/// worst outcome is the old, slightly pessimistic count.
+pub(crate) fn lease_missions_for(
+    state_dir: &std::path::Path,
+    row_state_dirs: &std::collections::HashMap<String, std::path::PathBuf>,
+) -> std::collections::BTreeSet<String> {
+    let mut roots: std::collections::BTreeSet<std::path::PathBuf> =
+        std::collections::BTreeSet::new();
+    roots.insert(state_dir.to_path_buf());
+    for sd in row_state_dirs.values() {
+        roots.insert(sd.clone());
+    }
+    roots
+        .iter()
+        .filter_map(|root| cosmon_filestore::PilotLeaseStore::new(root).missions().ok())
+        .flatten()
+        .map(|id| id.to_string())
+        .collect()
+}
+
 pub(crate) fn build_snapshot(
     state_dir: &std::path::Path,
     socket: &str,
@@ -5034,6 +5073,7 @@ impl App {
             project_id: None,
             default_project_id: None,
             refresh: Duration::from_millis(250),
+            lease_missions: std::collections::BTreeSet::new(),
             rows,
             census: WorkerCensus::default(),
             row_state_dirs,

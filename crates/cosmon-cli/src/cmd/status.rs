@@ -9,6 +9,36 @@
 //! - **Verbose** (`--verbose`): full dashboard with molecules, sessions,
 //!   contributions, and surfaces
 //!
+//! # Staleness is the point
+//!
+//! A pulse made only of totals is a gauge nobody reads. Every number in the
+//! old line was true and none of them said what needed doing: a molecule sat
+//! `pending` for 39 days behind a bare `4 alive`, `surfaces ✅` printed beside
+//! a 19-day-old reconcile, and `28 🔀 to merge` had been `20` the same
+//! afternoon with nothing to say so. So the line now carries three
+//! derivatives as well as the levels:
+//!
+//! - **Age** — the oldest backlog molecule and how many are past the
+//!   threshold, from [`cosmon_core::staleness`], the same arithmetic
+//!   `cs peek` renders in its vitals line. One definition, two surfaces.
+//! - **Reconcile freshness** — its own signal, never folded into the surface
+//!   tick. The tick answers "do the projected files still match their
+//!   hashes"; it has never had anything to say about *when* they were
+//!   projected, and a reader must not be able to take it for that.
+//! - **Unmerged growth** — a delta against a sample kept in
+//!   `<state>/status-gauge.json`, refreshed at most hourly so the window
+//!   stays wide enough to mean something.
+//!
+//! # A lease is not backlog
+//!
+//! A molecule named by the pilot-lease ledger carries the cockpit between
+//! sessions and converges by design never. It is excluded from every
+//! rendered backlog counter and reported on its own (`+1 lease`), because a
+//! number that is permanently wrong by one teaches the reader to discount it.
+//! `--json` keeps `molecules.alive` meaning exactly what it always meant and
+//! gains `molecules.alive_excluding_leases`, `molecules.leases` and the
+//! `backlog` block: an existing key never changes under a caller.
+//!
 //! # `cs status <id>` — one molecule
 //!
 //! With a molecule id, `status` answers about *that* molecule instead of the
@@ -30,8 +60,10 @@
 use std::collections::{BTreeMap, HashMap};
 
 use colored::Colorize;
+use cosmon_core::id::MoleculeId;
 use cosmon_core::kind::MoleculeKind;
 use cosmon_core::molecule::MoleculeStatus;
+use cosmon_core::staleness::{self, BacklogAge, BacklogItem};
 use cosmon_core::transport::TransportBackend;
 use cosmon_state::MoleculeFilter;
 
@@ -54,7 +86,11 @@ struct StatusOutput {
     molecules: MoleculeCounts,
     sessions: SessionSummary,
     contributions: Vec<ContributionInfo>,
+    /// Level **and** derivative for the unmerged-branch count.
+    unmerged: UnmergedGauge,
     surfaces: SurfaceStatus,
+    /// Age of the backlog — the signal a session needs first.
+    backlog: BacklogInfo,
     attention: AttentionInfo,
     /// Four-family taxonomy snapshot.
     /// Keyed by kind token (`infra | project | social-hub | editorial
@@ -78,11 +114,59 @@ struct GalaxiesSummary {
 
 #[derive(serde::Serialize)]
 struct MoleculeCounts {
+    /// Every non-terminal molecule, leases included. Unchanged meaning —
+    /// a caller that has been reading this key keeps reading the same fact.
     alive: usize,
+    /// The same count with pilot-lease missions removed. This is the number
+    /// the rendered line shows, because a lease is not work waiting.
+    alive_excluding_leases: usize,
+    /// Non-terminal molecules named by the pilot-lease ledger.
+    leases: usize,
     completed: usize,
     collapsed: usize,
     by_kind: HashMap<String, usize>,
     by_status: HashMap<String, usize>,
+}
+
+/// Backlog age, as `cs status --json` emits it.
+///
+/// Projects [`cosmon_core::staleness::BacklogAge`] onto the wire. Seconds
+/// rather than a rendered `39d`, because a formatted duration is a fact about
+/// when it was formatted and a machine reader wants to compare.
+#[derive(serde::Serialize)]
+struct BacklogInfo {
+    /// `Pending` molecules that are not leases.
+    count: usize,
+    /// Of those, how many are older than `stale_after_hours`.
+    stale: usize,
+    /// The threshold, emitted so a dashboard does not hard-code 48.
+    stale_after_hours: i64,
+    /// Age of the oldest one, in seconds. `None` on an empty backlog.
+    oldest_age_seconds: Option<i64>,
+    /// Which molecule that age belongs to, so a reader can go look.
+    oldest_id: Option<String>,
+    /// Lease missions skipped by `count`.
+    leases_excluded: usize,
+}
+
+/// Unmerged-branch level and its movement since the last sample.
+///
+/// `delta` is what the old line could not say. The sample lives in
+/// `<state>/status-gauge.json` and is refreshed at most once an hour, so the
+/// comparison window stays wide enough that a growing count is visible
+/// instead of being flattened by the previous invocation a minute earlier.
+#[derive(serde::Serialize)]
+struct UnmergedGauge {
+    /// Branches not merged into the trunk and ahead of it.
+    branches: usize,
+    /// Total commits those branches carry ahead of the trunk.
+    commits: usize,
+    /// Branch count at the last sample, or `None` on the first run.
+    previous_branches: Option<usize>,
+    /// `branches - previous_branches`. `None` on the first run.
+    delta: Option<i64>,
+    /// Age of the sample `delta` is measured against, in seconds.
+    since_seconds: Option<i64>,
 }
 
 #[derive(serde::Serialize)]
@@ -106,9 +190,24 @@ struct ContributionInfo {
 
 #[derive(serde::Serialize)]
 struct SurfaceStatus {
+    /// Do the projected files on disk still match their recorded hashes?
+    ///
+    /// This and nothing else. It was never a statement about *when* the
+    /// projection happened, which is why `reconcile_stale` is a separate
+    /// field rather than folded in here: a caller reading `up_to_date` today
+    /// keeps getting the answer it has always got.
     up_to_date: bool,
     last_reconcile: Option<String>,
     stale_count: usize,
+    /// How long ago the most recent projection ran, in seconds. `None` when
+    /// nothing has ever been projected.
+    reconcile_age_seconds: Option<i64>,
+    /// True when that age is past [`cosmon_core::staleness::stale_reconcile_after`],
+    /// or when there is no projection at all. Absence is not freshness.
+    reconcile_stale: bool,
+    /// Whether any surface has ever been projected. Distinguishes "clean"
+    /// from "never ran", which the tick alone could not.
+    projected: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -135,8 +234,29 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     let fleet = store.load_fleet()?;
     let molecules = store.list_molecules(&MoleculeFilter::default())?;
 
+    // Which molecules carry a pilot lease. Read once, from the ledger
+    // directory, so no id is hard-coded anywhere: the live instance
+    // announces itself by having a ledger, and a future one will too.
+    let leases = lease_missions(&state_dir);
+
     // --- Molecule counts ---
     let alive = molecules.iter().filter(|m| m.status.is_alive()).count();
+    let lease_alive = molecules
+        .iter()
+        .filter(|m| m.status.is_alive() && leases.contains(&m.id))
+        .count();
+    let alive_excluding_leases = alive.saturating_sub(lease_alive);
+
+    // --- Backlog age (shared with `cs peek`) ---
+    let backlog = staleness::backlog_age(
+        molecules.iter().map(|m| BacklogItem {
+            id: m.id.clone(),
+            status: m.status,
+            created_at: Some(m.created_at),
+            is_lease: leases.contains(&m.id),
+        }),
+        chrono::Utc::now(),
+    );
     let completed = molecules
         .iter()
         .filter(|m| m.status == MoleculeStatus::Completed)
@@ -146,10 +266,13 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         .filter(|m| m.status == MoleculeStatus::Collapsed)
         .count();
 
+    // Leases are left out of the kind breakdown for the same reason they are
+    // left out of the alive count it sits beside: the two must add up, and a
+    // lease is not one of the things the reader is being asked to drain.
     let mut by_kind: HashMap<MoleculeKind, usize> = HashMap::new();
     for mol in &molecules {
         let kind = mol.kind.unwrap_or(MoleculeKind::Task);
-        if mol.status.is_alive() {
+        if mol.status.is_alive() && !leases.contains(&mol.id) {
             *by_kind.entry(kind).or_default() += 1;
         }
     }
@@ -203,6 +326,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
 
     // --- Contributions (git branches) ---
     let contributions = discover_contributions();
+    let unmerged = sample_unmerged_gauge(&state_dir, &contributions);
 
     // --- Surfaces ---
     let surface_status = check_surfaces(&state_dir);
@@ -234,6 +358,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         let output = StatusOutput {
             molecules: MoleculeCounts {
                 alive,
+                alive_excluding_leases,
+                leases: lease_alive,
                 completed,
                 collapsed,
                 by_kind: by_kind.iter().map(|(k, v)| (k.to_string(), *v)).collect(),
@@ -244,7 +370,16 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 zombies: zombie_sessions,
             },
             contributions,
+            unmerged,
             surfaces: surface_status,
+            backlog: BacklogInfo {
+                count: backlog.counted,
+                stale: backlog.stale,
+                stale_after_hours: staleness::stale_backlog_after().num_hours(),
+                oldest_age_seconds: backlog.oldest.map(|d| d.num_seconds()),
+                oldest_id: backlog.oldest_id.as_ref().map(ToString::to_string),
+                leases_excluded: backlog.leases_excluded,
+            },
             attention: AttentionInfo {
                 alive,
                 budget,
@@ -257,50 +392,129 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let pulse = Pulse {
+        alive: alive_excluding_leases,
+        lease_alive,
+        completed,
+        collapsed,
+        backlog: &backlog,
+        by_kind: &by_kind,
+        active_sessions: &active_sessions,
+        zombie_sessions: &zombie_sessions,
+        unmerged: &unmerged,
+        surfaces: &surface_status,
+        budget,
+        attention_percent,
+        galaxies: &galaxies,
+    };
+
     if ctx.verbose {
-        render_verbose(
-            alive,
-            completed,
-            collapsed,
-            &by_kind,
-            &active_sessions,
-            &zombie_sessions,
-            &contributions,
-            &surface_status,
-            budget,
-            attention_percent,
-            &galaxies,
-        );
+        render_verbose(&pulse);
     } else {
-        render_compact(
-            alive,
-            &by_kind,
-            &active_sessions,
-            &zombie_sessions,
-            &contributions,
-            &surface_status,
-            budget,
-            attention_percent,
-            &galaxies,
-        );
+        render_compact(&pulse);
     }
 
     Ok(())
 }
 
-/// Render compact one-line status.
-#[allow(clippy::too_many_arguments)]
-fn render_compact(
+/// Everything the two renderers read, gathered once.
+///
+/// A struct rather than a thirteenth positional argument: the renderers
+/// differ in layout, not in inputs, and a shared bundle is what keeps them
+/// from drifting into showing different facts.
+struct Pulse<'a> {
+    /// Alive molecules, leases already removed.
     alive: usize,
-    by_kind: &HashMap<MoleculeKind, usize>,
-    active_sessions: &[SessionInfo],
-    zombie_sessions: &[SessionInfo],
-    contributions: &[ContributionInfo],
-    surfaces: &SurfaceStatus,
+    /// Alive lease missions, reported separately.
+    lease_alive: usize,
+    completed: usize,
+    collapsed: usize,
+    backlog: &'a BacklogAge,
+    by_kind: &'a HashMap<MoleculeKind, usize>,
+    active_sessions: &'a [SessionInfo],
+    zombie_sessions: &'a [SessionInfo],
+    unmerged: &'a UnmergedGauge,
+    surfaces: &'a SurfaceStatus,
     budget: Option<usize>,
     attention_percent: Option<f64>,
-    galaxies: &GalaxiesSummary,
-) {
+    galaxies: &'a GalaxiesSummary,
+}
+
+/// The age token the compact and verbose lines both show, or `None` when
+/// there is no backlog to be old.
+///
+/// One function so the two renderers cannot disagree about what "oldest"
+/// means, in the same spirit as the shared predicate underneath it.
+fn render_backlog_age(backlog: &BacklogAge) -> Option<String> {
+    let oldest = backlog.oldest?;
+    let threshold = staleness::stale_backlog_after().num_hours();
+    let age = staleness::format_age(oldest);
+    let body = if backlog.stale > 0 {
+        format!("oldest {age} \u{b7} {} >{threshold}h", backlog.stale)
+    } else {
+        format!("oldest {age}")
+    };
+    Some(if backlog.stale > 0 {
+        body.yellow().to_string()
+    } else {
+        body
+    })
+}
+
+/// The surfaces token — a tick that asserts only what it checked.
+///
+/// The tick is about content hashes and has never said anything about
+/// reconcile age, so the age travels beside it rather than inside it. The
+/// three states a reader must be able to tell apart: projected and fresh,
+/// projected long ago, never projected at all. The old line rendered all
+/// three as `✅`.
+fn render_surfaces_token(surfaces: &SurfaceStatus) -> String {
+    if !surfaces.projected {
+        return "\u{2014} never reconciled".yellow().to_string();
+    }
+    if !surfaces.up_to_date {
+        return format!("\u{26A0}\u{FE0F} {} stale", surfaces.stale_count)
+            .yellow()
+            .to_string();
+    }
+    let age = surfaces
+        .reconcile_age_seconds
+        .map(|s| staleness::format_age(chrono::Duration::seconds(s)));
+    match age {
+        Some(age) if surfaces.reconcile_stale => format!("\u{26A0}\u{FE0F} reconciled {age} ago")
+            .yellow()
+            .to_string(),
+        Some(age) => format!("\u{2705} reconciled {age} ago"),
+        None => "\u{2705}".to_owned(),
+    }
+}
+
+/// The unmerged-branch token, level and movement.
+///
+/// Returns `None` when there is nothing unmerged — an empty gauge printed
+/// every run is how a real one stops being read.
+fn render_unmerged_token(unmerged: &UnmergedGauge) -> Option<String> {
+    if unmerged.branches == 0 {
+        return None;
+    }
+    let mut token = format!("{}\u{1F500} to merge", unmerged.branches);
+    if let (Some(delta), Some(since)) = (unmerged.delta, unmerged.since_seconds) {
+        if delta != 0 {
+            let window = staleness::format_age(chrono::Duration::seconds(since));
+            let sign = if delta > 0 { "+" } else { "" };
+            let movement = format!(" ({sign}{delta} in {window})");
+            token.push_str(&if delta > 0 {
+                movement.yellow().to_string()
+            } else {
+                movement
+            });
+        }
+    }
+    Some(token)
+}
+
+/// Render compact one-line status.
+fn render_compact(p: &Pulse) {
     // Line 1: molecule summary
     let mut parts: Vec<String> = Vec::new();
 
@@ -313,7 +527,7 @@ fn render_compact(
         MoleculeKind::Decision,
         MoleculeKind::Signal,
     ] {
-        if let Some(&count) = by_kind.get(kind) {
+        if let Some(&count) = p.by_kind.get(kind) {
             if count > 0 {
                 kind_parts.push(format!("{}{}", count, kind.emoji()));
             }
@@ -325,21 +539,31 @@ fn render_compact(
     } else {
         format!(": {}", kind_parts.join(" "))
     };
-    parts.push(format!("{alive} alive{kind_str}"));
+    let lease_str = if p.lease_alive > 0 {
+        format!(" (+{} lease)", p.lease_alive)
+    } else {
+        String::new()
+    };
+    parts.push(format!("{} alive{kind_str}{lease_str}", p.alive));
+
+    // Backlog age — the signal a session opening needs first.
+    if let Some(age) = render_backlog_age(p.backlog) {
+        parts.push(age);
+    }
 
     // Sessions
-    if !active_sessions.is_empty() {
+    if !p.active_sessions.is_empty() {
         parts.push(format!(
             "{}{}active",
-            active_sessions.len(),
+            p.active_sessions.len(),
             MoleculeStatus::Running.emoji()
         ));
     }
-    if !zombie_sessions.is_empty() {
+    if !p.zombie_sessions.is_empty() {
         parts.push(
             format!(
                 "{}{}zombie",
-                zombie_sessions.len(),
+                p.zombie_sessions.len(),
                 " \u{1F480} " // skull emoji
             )
             .red()
@@ -347,21 +571,13 @@ fn render_compact(
         );
     }
 
-    // Contributions
-    let unmerged: usize = contributions.len();
-    if unmerged > 0 {
-        parts.push(format!("{unmerged}\u{1F500} to merge"));
+    // Contributions, with their movement
+    if let Some(token) = render_unmerged_token(p.unmerged) {
+        parts.push(token);
     }
 
     // Surfaces
-    let surfaces_str = if surfaces.up_to_date {
-        "\u{2705}".to_owned() // checkmark
-    } else {
-        format!("\u{26A0}\u{FE0F} {} stale", surfaces.stale_count)
-            .yellow()
-            .to_string()
-    };
-    parts.push(format!("surfaces {surfaces_str}"));
+    parts.push(format!("surfaces {}", render_surfaces_token(p.surfaces)));
 
     println!(
         "{} {}",
@@ -370,11 +586,11 @@ fn render_compact(
     );
 
     // Attention bar
-    if let (Some(b), Some(pct)) = (budget, attention_percent) {
+    if let (Some(b), Some(pct)) = (p.budget, p.attention_percent) {
         println!(
             "  {}: {}/{} ({:.0}%) {}",
             "Attention".bold(),
-            alive,
+            p.alive,
             b,
             pct,
             render_bar(pct, 20)
@@ -386,30 +602,18 @@ fn render_compact(
     // has run discovery). When populated, the line is dense by design:
     // operators scan "10 galaxies: 1 infra, 7 project, 2 social-hub,
     // 1 editorial" in a single saccade.
-    if galaxies.total > 0 {
+    if p.galaxies.total > 0 {
         println!(
             "  {}: {}",
             "Galaxies".bold(),
-            render_galaxies_line(galaxies)
+            render_galaxies_line(p.galaxies)
         );
     }
 }
 
 /// Render verbose dashboard.
-#[allow(clippy::too_many_arguments)]
-fn render_verbose(
-    alive: usize,
-    completed: usize,
-    collapsed: usize,
-    by_kind: &HashMap<MoleculeKind, usize>,
-    active_sessions: &[SessionInfo],
-    zombie_sessions: &[SessionInfo],
-    contributions: &[ContributionInfo],
-    surfaces: &SurfaceStatus,
-    budget: Option<usize>,
-    attention_percent: Option<f64>,
-    galaxies: &GalaxiesSummary,
-) {
+#[allow(clippy::too_many_lines)]
+fn render_verbose(p: &Pulse) {
     println!("{}", "\u{1F9EA} cosmon status".bold());
     println!();
 
@@ -417,9 +621,9 @@ fn render_verbose(
     println!(
         "  {}: {} alive, {} completed, {} collapsed",
         "Molecules".bold(),
-        alive,
-        completed,
-        collapsed
+        p.alive,
+        p.completed,
+        p.collapsed
     );
 
     // Kind breakdown
@@ -430,18 +634,51 @@ fn render_verbose(
         MoleculeKind::Decision,
         MoleculeKind::Signal,
     ] {
-        if let Some(&count) = by_kind.get(kind) {
+        if let Some(&count) = p.by_kind.get(kind) {
             if count > 0 {
                 println!("    {} {} {}s", kind.emoji(), count, kind);
             }
         }
     }
+    if p.lease_alive > 0 {
+        println!(
+            "    \u{1F511} {} pilot lease(s) \u{2014} carried between sessions, not backlog",
+            p.lease_alive
+        );
+    }
+
+    // Backlog section — named, because "alive" is a level and this is the
+    // derivative that says whether the level is moving.
+    println!();
+    let threshold = staleness::stale_backlog_after().num_hours();
+    if let Some(oldest) = p.backlog.oldest {
+        let named = p
+            .backlog
+            .oldest_id
+            .as_ref()
+            .map_or_else(String::new, |id| format!(" ({id})"));
+        println!(
+            "  {}: {} pending, oldest {}{named}",
+            "Backlog".bold(),
+            p.backlog.counted,
+            staleness::format_age(oldest),
+        );
+        if p.backlog.stale > 0 {
+            println!(
+                "    {} {} past {threshold}h \u{2014} `cs ensemble --tag temp:hot` to triage",
+                "\u{26A0}\u{FE0F}".yellow(),
+                p.backlog.stale
+            );
+        }
+    } else {
+        println!("  {}: empty", "Backlog".bold());
+    }
 
     // Sessions section
-    if !active_sessions.is_empty() || !zombie_sessions.is_empty() {
+    if !p.active_sessions.is_empty() || !p.zombie_sessions.is_empty() {
         println!();
         println!("  {}:", "Sessions".bold());
-        for s in active_sessions {
+        for s in p.active_sessions {
             println!(
                 "    {} {} ({}) running",
                 "\u{25B6}\u{FE0F}".green(), // play button
@@ -449,9 +686,9 @@ fn render_verbose(
                 s.molecule
             );
         }
-        for s in zombie_sessions {
+        for s in p.zombie_sessions {
             println!(
-                "    \u{1F480} {} ({}) {} — kill it",
+                "    \u{1F480} {} ({}) {} \u{2014} kill it",
                 s.worker,
                 s.molecule,
                 "zombie".red().bold()
@@ -460,41 +697,43 @@ fn render_verbose(
     }
 
     // Contributions section
-    if !contributions.is_empty() {
+    if p.unmerged.branches > 0 {
         println!();
-        println!("  {}:", "Contributions".bold());
-        for c in contributions {
-            println!(
-                "    \u{1F500} {}  {} commits ahead of main",
-                c.branch, c.commits_ahead
-            );
+        println!(
+            "  {}: {} branches, {} commits ahead",
+            "Contributions".bold(),
+            p.unmerged.branches,
+            p.unmerged.commits
+        );
+        // A movement of zero is not news, and a gauge that prints an empty
+        // accusation every run is a gauge nobody reads.
+        if let (Some(delta), Some(since)) = (p.unmerged.delta, p.unmerged.since_seconds) {
+            if delta != 0 {
+                let window = staleness::format_age(chrono::Duration::seconds(since));
+                let sign = if delta > 0 { "+" } else { "" };
+                println!("    {sign}{delta} branches in the last {window}");
+            }
         }
     }
 
     // Surfaces section
     println!();
-    if surfaces.up_to_date {
-        let age = surfaces.last_reconcile.as_deref().unwrap_or("unknown");
-        println!(
-            "  {}: \u{2705} up to date (last reconcile: {age})",
-            "Surfaces".bold(),
-        );
-    } else {
-        println!(
-            "  {}: {} {} stale surfaces — run `cs reconcile`",
-            "Surfaces".bold(),
-            "\u{26A0}\u{FE0F}".yellow(),
-            surfaces.stale_count
-        );
+    println!(
+        "  {}: {}",
+        "Surfaces".bold(),
+        render_surfaces_token(p.surfaces)
+    );
+    if !p.surfaces.up_to_date || p.surfaces.reconcile_stale {
+        println!("    run `cs reconcile`");
     }
 
     // Attention bar
-    if let (Some(b), Some(pct)) = (budget, attention_percent) {
+    if let (Some(b), Some(pct)) = (p.budget, p.attention_percent) {
         println!();
         println!(
             "  {}: {}/{} ({:.0}%) {}",
             "Attention".bold(),
-            alive,
+            p.alive,
             b,
             pct,
             render_bar(pct, 20)
@@ -503,16 +742,16 @@ fn render_verbose(
 
     // Galaxies section — shown only when neurion has real data,
     // so an empty fleet stays silent.
-    if galaxies.total > 0 {
+    if p.galaxies.total > 0 {
         println!();
-        println!("  {}: {} total", "Galaxies".bold(), galaxies.total);
-        println!("    {}", render_galaxies_line(galaxies));
+        println!("  {}: {} total", "Galaxies".bold(), p.galaxies.total);
+        println!("    {}", render_galaxies_line(p.galaxies));
         println!(
             "    {} to classify (see `cs galaxies list`)",
-            if galaxies.nascent == 0 {
+            if p.galaxies.nascent == 0 {
                 "none".to_owned()
             } else {
-                galaxies.nascent.to_string()
+                p.galaxies.nascent.to_string()
             }
         );
     }
@@ -615,6 +854,11 @@ fn discover_contributions() -> Vec<ContributionInfo> {
 }
 
 /// Check surface freshness from the snapshot file.
+///
+/// Returns two independent facts, deliberately not merged: whether the
+/// projected files still hash to what was recorded, and how long ago the
+/// projection ran. They answer different questions and a single tick standing
+/// for both is how `surfaces ✅` came to sit beside a 19-day-old reconcile.
 fn check_surfaces(state_dir: &std::path::Path) -> SurfaceStatus {
     let snapshot = cosmon_surface::snapshot::load_snapshot(state_dir);
 
@@ -623,19 +867,22 @@ fn check_surfaces(state_dir: &std::path::Path) -> SurfaceStatus {
             up_to_date: true,
             last_reconcile: None,
             stale_count: 0,
+            reconcile_age_seconds: None,
+            // Nothing was ever projected, so nothing is known to be fresh.
+            // Absence is not freshness.
+            reconcile_stale: true,
+            projected: false,
         };
     }
 
     // Find the most recent projection timestamp
-    let last_reconcile = snapshot
+    let newest = snapshot
         .surfaces
         .values()
         .filter_map(|s| chrono::DateTime::parse_from_rfc3339(&s.projected_at).ok())
         .max()
-        .map(|ts| {
-            let age = chrono::Utc::now() - ts.with_timezone(&chrono::Utc);
-            format_duration(age)
-        });
+        .map(|ts| chrono::Utc::now() - ts.with_timezone(&chrono::Utc));
+    let last_reconcile = newest.map(format_duration);
 
     // Count stale surfaces by checking if files on disk still match snapshot hashes
     let mut stale_count = 0;
@@ -662,10 +909,117 @@ fn check_surfaces(state_dir: &std::path::Path) -> SurfaceStatus {
         up_to_date: stale_count == 0,
         last_reconcile,
         stale_count,
+        reconcile_age_seconds: newest.map(|d| d.num_seconds()),
+        reconcile_stale: newest.is_none_or(staleness::reconcile_is_stale),
+        projected: true,
     }
 }
 
-/// Compute SHA-256 hex digest of a string.
+/// The set of molecules carrying a pilot lease, read from the ledger dir.
+///
+/// A failure to read is an empty set, never an error: `cs status` must not
+/// stop working because a sibling mechanism is missing, and treating an
+/// unreadable ledger as "no leases" only ever restores the old, slightly
+/// pessimistic count.
+fn lease_missions(state_dir: &std::path::Path) -> std::collections::BTreeSet<MoleculeId> {
+    cosmon_filestore::PilotLeaseStore::new(state_dir)
+        .missions()
+        .unwrap_or_default()
+}
+
+/// Filename of the gauge sample, under the state dir.
+const GAUGE_FILE: &str = "status-gauge.json";
+
+/// How long a sample stands before it is replaced.
+///
+/// Without it, running `cs status` twice in a minute would overwrite the
+/// sample with the current value and report a delta of zero forever — the
+/// gauge would erase exactly the movement it exists to show.
+fn gauge_window() -> chrono::Duration {
+    chrono::Duration::hours(1)
+}
+
+/// The persisted unmerged-branch sample.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct GaugeSample {
+    /// Branch count at the time of the sample.
+    unmerged_branches: usize,
+    /// Commit total at the time of the sample.
+    unmerged_commits: usize,
+    /// When it was taken.
+    sampled_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Compare the current unmerged count against the last sample, and refresh
+/// the sample when it has aged past [`gauge_window`].
+///
+/// Every filesystem failure is swallowed into "no previous sample". A pulse
+/// command that errored because it could not write a convenience file would
+/// be trading the whole reading for one of its derivatives.
+fn sample_unmerged_gauge(
+    state_dir: &std::path::Path,
+    contributions: &[ContributionInfo],
+) -> UnmergedGauge {
+    let branches = contributions.len();
+    let commits: usize = contributions.iter().map(|c| c.commits_ahead).sum();
+    let now = chrono::Utc::now();
+    let path = state_dir.join(GAUGE_FILE);
+
+    let previous: Option<GaugeSample> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok());
+
+    let (previous_branches, delta, since_seconds) = match &previous {
+        Some(prev) => {
+            let since = now.signed_duration_since(prev.sampled_at).num_seconds();
+            let delta = i64::try_from(branches).unwrap_or(i64::MAX)
+                - i64::try_from(prev.unmerged_branches).unwrap_or(i64::MAX);
+            (Some(prev.unmerged_branches), Some(delta), Some(since))
+        }
+        None => (None, None, None),
+    };
+
+    let should_refresh = previous
+        .as_ref()
+        .is_none_or(|prev| now.signed_duration_since(prev.sampled_at) > gauge_window());
+    if should_refresh {
+        write_gauge_sample(
+            &path,
+            &GaugeSample {
+                unmerged_branches: branches,
+                unmerged_commits: commits,
+                sampled_at: now,
+            },
+        );
+    }
+
+    UnmergedGauge {
+        branches,
+        commits,
+        previous_branches,
+        delta,
+        since_seconds,
+    }
+}
+
+/// Write the sample through a temp file, so a crash mid-write leaves the
+/// previous sample intact rather than a truncated one that parses to nothing.
+fn write_gauge_sample(path: &std::path::Path, sample: &GaugeSample) {
+    let Ok(body) = serde_json::to_string_pretty(sample) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return;
+        }
+    }
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, body).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+/// Compute SHA-256 hex digest of a string./// Compute SHA-256 hex digest of a string.
 fn sha256_hex(content: &str) -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -1048,5 +1402,145 @@ mod tests {
         };
         let result = run(&ctx, &Args { molecule: None });
         assert!(result.is_ok());
+    }
+
+    fn surfaces(up_to_date: bool, stale_count: usize, age_days: Option<i64>) -> SurfaceStatus {
+        let age = age_days.map(chrono::Duration::days);
+        SurfaceStatus {
+            up_to_date,
+            last_reconcile: age.map(format_duration),
+            stale_count,
+            reconcile_age_seconds: age.map(|d| d.num_seconds()),
+            reconcile_stale: age.is_none_or(staleness::reconcile_is_stale),
+            projected: age.is_some(),
+        }
+    }
+
+    /// The tick must not stand for a fact it did not check. Three states, one
+    /// glyph each — the defect was that all three rendered as `✅`.
+    #[test]
+    fn the_surface_tick_asserts_only_what_it_checked() {
+        colored::control::set_override(false);
+
+        let fresh = render_surfaces_token(&surfaces(true, 0, Some(2)));
+        assert!(fresh.contains('\u{2705}'), "{fresh}");
+        assert!(
+            fresh.contains("2d ago"),
+            "a tick must carry its age: {fresh}"
+        );
+
+        let old = render_surfaces_token(&surfaces(true, 0, Some(19)));
+        assert!(
+            !old.contains('\u{2705}'),
+            "a 19-day-old reconcile must not read as a tick: {old}"
+        );
+        assert!(old.contains("19d ago"), "{old}");
+
+        let never = render_surfaces_token(&surfaces(true, 0, None));
+        assert!(
+            !never.contains('\u{2705}'),
+            "never reconciled is not clean: {never}"
+        );
+
+        let drifted = render_surfaces_token(&surfaces(false, 3, Some(1)));
+        assert!(drifted.contains("3 stale"), "{drifted}");
+
+        colored::control::unset_override();
+    }
+
+    /// The age token renders the oldest molecule and the count past the
+    /// threshold; an empty backlog renders nothing at all.
+    #[test]
+    fn the_age_token_names_the_threshold_it_crossed() {
+        colored::control::set_override(false);
+
+        assert!(render_backlog_age(&BacklogAge::default()).is_none());
+
+        let stale = BacklogAge {
+            counted: 4,
+            stale: 2,
+            oldest: Some(chrono::Duration::days(39)),
+            oldest_id: cosmon_core::id::MoleculeId::new("task-20260811-a7f0").ok(),
+            leases_excluded: 0,
+        };
+        let token = render_backlog_age(&stale).expect("a token");
+        assert!(token.contains("oldest 39d"), "{token}");
+        assert!(token.contains("2 >48h"), "{token}");
+
+        let fresh = BacklogAge {
+            counted: 1,
+            stale: 0,
+            oldest: Some(chrono::Duration::hours(3)),
+            oldest_id: cosmon_core::id::MoleculeId::new("task-20260811-a7f0").ok(),
+            leases_excluded: 0,
+        };
+        let token = render_backlog_age(&fresh).expect("a token");
+        assert_eq!(
+            token, "oldest 3h",
+            "nothing is past the threshold to report"
+        );
+
+        colored::control::unset_override();
+    }
+
+    /// The gauge keeps its sample rather than overwriting it on every run —
+    /// otherwise a second `cs status` a minute later erases exactly the
+    /// movement the gauge exists to show.
+    #[test]
+    fn the_gauge_holds_its_sample_for_a_window() {
+        let tmp = TempDir::new().unwrap();
+        let state_dir = tmp.path();
+        let three = vec![
+            ContributionInfo {
+                branch: "a".to_owned(),
+                commits_ahead: 2,
+            },
+            ContributionInfo {
+                branch: "b".to_owned(),
+                commits_ahead: 1,
+            },
+            ContributionInfo {
+                branch: "c".to_owned(),
+                commits_ahead: 5,
+            },
+        ];
+
+        let first = sample_unmerged_gauge(state_dir, &three);
+        assert_eq!(first.branches, 3);
+        assert_eq!(first.commits, 8);
+        assert!(
+            first.delta.is_none(),
+            "no baseline means no delta, not a delta of zero"
+        );
+
+        // A second run inside the window compares against the first sample
+        // instead of replacing it.
+        let second = sample_unmerged_gauge(state_dir, &three[..1]);
+        assert_eq!(second.previous_branches, Some(3));
+        assert_eq!(second.delta, Some(-2));
+
+        let third = sample_unmerged_gauge(state_dir, &three[..1]);
+        assert_eq!(
+            third.previous_branches,
+            Some(3),
+            "the sample must survive the second run, or the window is one invocation wide"
+        );
+    }
+
+    /// The whole point of the lease exclusion, at the seam that reads it: a
+    /// molecule is a lease because the ledger names it, never because of its
+    /// id.
+    #[test]
+    fn lease_missions_come_from_the_ledger() {
+        let tmp = TempDir::new().unwrap();
+        assert!(lease_missions(tmp.path()).is_empty());
+
+        let dir = tmp.path().join("pilot-lease");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("task-20260811-a7f0.grants.jsonl"), "").unwrap();
+
+        let found = lease_missions(tmp.path());
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&cosmon_core::id::MoleculeId::new("task-20260811-a7f0").unwrap()));
     }
 }

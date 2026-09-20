@@ -131,19 +131,36 @@ Project pulse — quick DAG overview like git status; with a molecule id, that o
 **Usage:** `cs status [MOLECULE]`
 
 EXAMPLES:
-  cs status                   # pulse: active / pending / blocked / completed
+  cs status                   # pulse + staleness: age, reconcile, unmerged growth
+  cs status --verbose         # the same, as a dashboard with a Backlog section
   cs status --fleet research
-  cs status --json            # includes `galaxies` block (by-kind + nascent)
+  cs status --json            # adds `backlog`, `unmerged`, `galaxies` blocks
   cs status task-20260907-b25f        # one molecule: status/phase/updated_at/terminal
   cs status task-20260907-b25f --json # same four fields, machine-readable
 
+STALENESS: the pulse carries derivatives, not only levels — `oldest 39d · 2 >48h`
+      is the age of the oldest waiting molecule and how many are past the
+      threshold, from the same arithmetic `cs peek` renders in its vitals
+      line. `surfaces ✅ reconciled 2h ago` tells hash-drift from
+      projection age: the tick is about the hashes and has never said
+      anything about when the projection ran. `28🔀 to merge (+8 in 3h)`
+      compares against a sample in `<state>/status-gauge.json`, refreshed at
+      most hourly so the window stays wide enough to show movement.
+
+LEASES: a molecule named by the pilot-lease ledger carries the cockpit
+      between sessions and converges by design never, so it is excluded from
+      every backlog counter and reported on its own (`+1 lease`). Discovered
+      from the ledger, never from an id. In `--json`, `molecules.alive` still
+      counts it; `molecules.alive_excluding_leases` and `backlog.count` do not.
+
 NOTE: with a molecule id the answer is the cheap read — no coupling report,
-      no token totals, no model attribution. `cs observe <id>` is the full
-      one. The id is exact, never a prefix.
+      no token totals, no model attribution, and none of the staleness work
+      above. `cs observe <id>` is the full one. The id is exact, never a prefix.
 
 SEE ALSO: cs observe (full molecule read), cs wait (block until it moves),
-          cs peek (fractal TUI), cs ensemble (full snapshot),
-          cs galaxies list (four-family taxonomy).
+          cs peek (fractal TUI — same staleness definition),
+          cs reconcile (what the freshness signal asks for),
+          cs ensemble (full snapshot), cs galaxies list (four-family taxonomy).
 
 ###### **Arguments:**
 
