@@ -73,23 +73,23 @@ advance → terminate → infrastructure → introspection.
 | `cs pilot` | NO | — | Interactive cognitive-pilot REPL over a client-side model (`task-20260531-c3f6`, ADR-115). `cs pilot --remote` (increment 2, `task-20260601-4997`) is a *second* `cosmon-ops-tools` backend over `cosmon-rpp-adapter`: it **reuses** the existing `GET /v1/molecules/:id` (observe), `GET /v1/molecules` (ensemble), `POST /v1/molecules` (nucleate), `POST /v1/molecules/:id/tackle` (tackle) §8p routes — **it adds no new route**, so the freeze test is unchanged. `peek` is absent remotely (no RPP route); `done`/`evolve`/`complete` are never on the wire (§5). The REPL itself is never an HTTP verb. |
 | `cs nucleate` | V0 | `POST /v1/molecules` | V1-mutation cut promoted into V0 (T-V1-MUTATIONS-NUCLEATE 2026-05-04 — tenant_auditor peut donner une mission). Read-write subset; `cs tackle` was promoted at V2 and `cs done` at V1 (issue #51, ADR-080 §5.4). The durable pins `--adapter` and `--base` (issue #69: the integration base stamped at birth, validated against the operator's local branches) are **not** on the wire — a tenant sees no repository and does not choose where work lands; both are allowlisted in `cosmon-thin-cli`'s flag parity with that reason. |
 | `cs observe` | V0 | `GET /v1/molecules/:id` | The first V0 route (ADR-080 §10.1, T-RPP-V0). Now joined by `POST /v1/molecules` for the V1-mutation cut. |
-| `cs ensemble` | V1 (TBD) | `GET /v1/molecules` | List view; lands in V1 alongside nucleate. `--cluster` additionally prints a **host reading** (memory, swap, the kernel's own pressure level, logical CPUs, load averages — with units) and the machine-wide totals summed over the galaxies scanned, including harvests holding a galaxy's `trunk.lock` (noogram/cosmon #58, stage 1). Read-only and threshold-free: it reports observations and refuses nothing. An unread counter renders `unavailable` / JSON `null`, never `0`; a probe that fails entirely leaves the galaxy view intact and explains itself on stderr. Host scope belongs to `--cluster` alone — `cs status` stays per-galaxy. The host half is **local-only** and is not part of any V1 route: a remote tenant reads molecules, not the operator's machine. |
+| `cs ensemble` | V1 | `GET /v1/molecules` | List view; **landed** in the V1-mutation cut (`task-20260504-af6b`, 2026-05-04) alongside nucleate. The row read `V1 (TBD)` for four months after the route went live — the drift the 2026-09-22 gate repair caught (`task-20260922-45cd`). `--cluster` additionally prints a **host reading** (memory, swap, the kernel's own pressure level, logical CPUs, load averages — with units) and the machine-wide totals summed over the galaxies scanned, including harvests holding a galaxy's `trunk.lock` (noogram/cosmon #58, stage 1). Read-only and threshold-free: it reports observations and refuses nothing. An unread counter renders `unavailable` / JSON `null`, never `0`; a probe that fails entirely leaves the galaxy view intact and explains itself on stderr. Host scope belongs to `--cluster` alone — `cs status` stays per-galaxy. The host half is **local-only** and is not part of any V1 route: a remote tenant reads molecules, not the operator's machine. |
 | `cs inbox` | NO (V1 TBD) | — | Subset of `cs ensemble --tag temp:hot`; re-evaluate V1 if tenant_auditor asks. |
 | `cs init` | NO | — | Bootstrap of a new galaxy; operator-only, hardware/filesystem-bound. |
 | `cs trust` | NO | — | Per-repo, human trust grant for repo-supplied shell (B5, RCE-by-clone). The `direnv allow` of cosmon; a local operator gesture recorded outside the repo. Never on the wire — a remote tenant granting trust would defeat the gate. |
-| `cs tackle` | V1 (TBD) | `POST /v1/molecules/:id/transitions` (`transition=tackle`) | Operator → propelled. V1 mutation. The `--harness <KEY>=<VALUE>` flag (ADR-177 / issue #65) has **no wire counterpart** and is not a gap: the RPP tackle route dispatches through the in-process executor, whose agent-definition seam carries no per-adapter override channel. A `[steps.harness]` pin that reaches it is **refused**, not dropped — `501 tackle_unsupported_harness`, a label distinct from `tackle_unsupported_step` because the remedy differs (drop the pin or change the adapter, versus wait for the U6 cut-over). Exposing the flag remotely would mean minting a wire vocabulary for a map cosmon deliberately does not interpret; that needs its own decision, not a pass-through. `--reclaim-derived` (the pre-spawn disk-pressure check, ADR-178 / issue #61) is likewise cs-only and allowlisted in `crates/cosmon-thin-cli/tests/cli-flag-allowlist.toml`: it reclaims bytes in a local `.worktrees/` tree a remote tenant does not have. |
+| `cs tackle` | V1 | `POST /v1/molecules/:id/tackle` | Operator → propelled, shipped 2026-05-12 (`task-20260512-c6de`); scopes `cosmon:molecule:write` **and** `cosmon:worker:spawn`, because it burns Anthropic credit. The row read `V1 (TBD)` at `POST /v1/molecules/:id/transitions` — a generic transition endpoint that was never built — for four months after the real route went live; corrected 2026-09-22 (`task-20260922-45cd`). The `--harness <KEY>=<VALUE>` flag (ADR-177 / issue #65) has **no wire counterpart** and is not a gap: the RPP tackle route dispatches through the in-process executor, whose agent-definition seam carries no per-adapter override channel. A `[steps.harness]` pin that reaches it is **refused**, not dropped — `501 tackle_unsupported_harness`, a label distinct from `tackle_unsupported_step` because the remedy differs (drop the pin or change the adapter, versus wait for the U6 cut-over). Exposing the flag remotely would mean minting a wire vocabulary for a map cosmon deliberately does not interpret; that needs its own decision, not a pass-through. `--reclaim-derived` (the pre-spawn disk-pressure check, ADR-178 / issue #61) is likewise cs-only and allowlisted in `crates/cosmon-thin-cli/tests/cli-flag-allowlist.toml`: it reclaims bytes in a local `.worktrees/` tree a remote tenant does not have. |
 | `cs evolve` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
 | `cs complete` | NO | — | Worker-internal (CLAUDE.md *Command perimeters*; ADR-080 §5.1). NEVER exposed. |
-| `cs collapse` | V2 (TBD) | `POST /v1/molecules/:id/transitions` (`transition=collapse`) | Re-evaluate at V2; currently no tenant_auditor use case. |
+| `cs collapse` | V1 | `POST /v1/molecules/:id/collapse` | Terminal transition, shipped in the T-CST-EXPAND cut (`task-20260504-af6b`, 2026-05-04). The row named `POST /v1/molecules/:id/transitions` (`transition=collapse`) — a *design* for a generic transition endpoint that was never built; each transition got its own path instead. Corrected 2026-09-22 (`task-20260922-45cd`) when the drift gate started reading the real route set. |
 | `cs decay` | NO (V2 TBD) | — | Decomposition (1 → N); re-evaluate when DAG ops needed remotely. |
 | `cs merge` | NO (V2 TBD) | — | Synthesis (N → 1); same as decay. |
 | `cs transform` | NO (V2 TBD) | — | Kind change (idea → task); operator-driven. |
 | `cs done` | V1 | `POST /v1/molecules/:id/done` | **The harvest door** — the answer to issue #51 ([ADR-176](../adr/176-remote-harvest-authority-is-a-sealed-capability.md), D4 reversed; [ADR-080](../adr/080-remote-pilot-port-https-oidc.md) §5.4). One verb, two authorities: closure of the molecule's own lifecycle, and integration into the resolved base every future molecule inherits. It left the operator-only list on 2026-09-07 because the classification was wrong: closing a molecule is **lifecycle, not administration**, and whoever may nucleate it, build its worker and run it may legitimately close it. The route carries the **full parameter set** of `cs done` — `--strategy`, `--force`, the hook waivers, the teardown opt-outs — because on the single-tenant deployment that exists the requester **is** the operator, and a derogation withheld from the person merging into their own trunk protects nobody. Two departures, both stated: `--dry-run` has no wire counterpart (the door's own decision half is the wire's preview; locally its plan now names the `merge_target`, issue #69), and `--reason` is **mandatory** here (optional at the CLI) and never fabricated — `missing_reason`, exit code 77. Auto-propel stays disarmed by default and arming it additionally requires `cosmon:worker:spawn` (D6 does not travel with D4). **Two proofs, two keys**: the JWT authenticates the requester, an operator-sealed `HarvestGrant` authorises the effect — refused `not_authorized` in any galaxy that has not armed `[harvest_authority] required` (D1, untouched). Synchronous by decision: a 202 on a transaction that may integrate nothing is the defect #51 reports. **Four successes, not two**: `landed`, `already_landed`, and — since the PR #62 review — `closed_without_merge`, for a closure the requester asked to leave off the trunk (`no_merge`) or a molecule that never had a branch, and `no_op`, for `if_completed` sent against work that has not finished. All three were previously reported as refusals nobody had performed — `pre_done_refused` for the first two, `not_completed` for the third; the door now interprets both its own decision and the trunk-side record **relative to the requested options**. Every success carries `merged` and, when it is `false`, the kebab-case `non_integration` tag the result route already publishes. Seven named refusals mirrored to stable exit codes 70–76, plus `missing_reason` at 77. The decision half runs in-process via `cosmon_filestore::harvest_door`; the effect half is a port whose **default is now the library** — the sealed transaction moved out of the `cs` binary into the `cosmon-harvest` crate, which the adapter links, so an armed galaxy merges on a stock deployment with no configuration line (ADR-176 §12, third postscript). One implementation, two callers: `cs done` and the route build the same `Args` and call the same `cosmon_harvest::run`. `harvest_cs_binary` in `rpp.toml` survives for one release as the operator's escape hatch — run the harvest as a *specific* build of `cs` — and `501 harvest_effect_unavailable` is now only reachable by a port with no implementation at all. The ADR-172 effect-boundary refusal (armed galaxy, no operator seal) gained its own name in the same unit: `not_authorized`, exit code 71, where it was previously an anonymous exit 1 / `500 harvest_failed`. **Restricting *which* molecules a requester may close remains the multi-tenant question and is deliberately unanswered** — ADR-176 D5 still refuses an `owner` field. |
 | `cs stitch` | **NO (NEVER)** | — | Operator-only (ADR-110 single-writer-trunk). Merges a mission's DAG closure onto `main` in topological order under the trunk lock — the canonical trunk writer. A trunk-writing gesture over a *mission's whole DAG closure*, which is what keeps it operator-only where `cs done` — a single molecule's own last lifecycle step — is not (ADR-080 §5.4, 2026-09-07). ADR-080 §5.1. |
-| `cs stuck` | NO (V2 TBD) | — | Records a blocker; could be exposed when V1 mutations stabilise. |
+| `cs stuck` | V1 | `POST /v1/molecules/:id/stuck` | Records a blocker on a molecule the tenant owns — shipped in the T-CST-EXPAND cut (`task-20260504-af6b`, 2026-05-04), i.e. the V1 mutations the row was waiting to see stabilise. Corrected 2026-09-22 (`task-20260922-45cd`). |
 | `cs await-operator` | NO | — | Worker-internal block-on-operator (ADR-123). Emitted by a live worker inside its worktree at an irreversibility boundary; same NEVER-on-the-wire class as `cs evolve` / `cs complete`. No remote use case. |
-| `cs freeze` | NO | — | Worker-suspension (preemption). Infrastructure operation, not a remote act. ADR-080 §5.1. |
-| `cs thaw` | NO | — | Worker-resume. Same as freeze. |
+| `cs freeze` | V1 | `POST /v1/molecules/:id/freeze` | Suspend or resume one molecule — the **fusion route** (`task-20260522-b538`, 2026-05-22): the `state` field in the body dispatches between `ops::freeze` (`"frozen"`) and `ops::thaw` (`"active"`), which is why `cs thaw` below names the same path. The row read `NO — infrastructure operation, ADR-080 §5.1` for four months after the route shipped; §5.1 governs the *worker process* gestures (`cs kill`, `cs resurrect`, `cs teardown`), not pausing a molecule's own lifecycle, which is the tenant's to pause. Corrected 2026-09-22 (`task-20260922-45cd`). |
+| `cs thaw` | V1 | `POST /v1/molecules/:id/freeze` (`state=active`) | Resume a frozen molecule. Same route as `cs freeze` by construction — the standalone `POST /v1/molecules/:id/thaw` was **removed** in v1.0.0-rc and answers `410 Gone` with a pointer to the fused form (`thaw_gone_handler`). Two client verbs, one wire operation, one body field; the surface canon carries one line. Corrected 2026-09-22 (`task-20260922-45cd`). |
 | `cs resume` | NO | — | Resume an Inert worker (alias of `cs tackle --resume`); operator-driven. |
 | `cs claim` | NO | — | Pilot claims a molecule; the runtime defers to the human until it is released. Operator/pilot coordination gesture, not a remote act. |
 | `cs release` | NO | — | Releases a pilot claim, returning the molecule to the runtime frontier. Mirror of `cs claim`; operator/pilot-driven. |
@@ -110,7 +110,7 @@ advance → terminate → infrastructure → introspection.
 | `cs release-audit` | NO | — | Local release-tooling drift detector (dry-run analogue of `reconcile --check`). **Legacy** live-tree analogue of the retired `release-resync` chain (idea-20260531-dc7c); under the one-repo model (ADR-133) the membrane referee is the exogenous `scripts/artifact-map-audit.py` + `scripts/release-checklist.sh`, not this command. No remote act. |
 | `cs status` | PARTIAL | `GET /v1/molecules/:id/status` | The DAG-wide pulse stays local — it is a view over the operator's whole galaxy, not one tenant's molecules. The **one-molecule** form `cs status <id>` (issue #51 follow-up, task-20260907-b25f) *is* exposed: status, phase, `updated_at`, terminal, from `state.json` alone, with a weak `ETag` and a bodiless `304`. It exists so a client can implement `wait` by polling something cheap; both sides project `cosmon_state::ops::molecule_status`, so the local and remote answers cannot diverge. |
 | `cs tag` | V1 | `POST /v1/molecules/:id/tags` | V1-mutation cut promoted in T-CST-V0 (`task-20260504-f0f4`, 2026-05-04). Required scope: `cosmon:molecule:write`. Wired into the `cs-thin` mechanical client alongside `observe` and `nucleate`. |
-| `cs tail` | NO | — | Local log tail; SSE alternative is V2 (`GET /events?stream`, ADR-080 §10.3 / Q3). |
+| `cs tail` | NO | — | Local log tail. Its remote analogue **exists** and is not this row: `GET /v1/molecules/{id}/logs` (`task-20260523-ad25`, 2026-05-23) SSE-tails the worker's live tmux pane under `cosmon:logs:subscribe`, and `GET /v1/molecules/{id}/session` reads the same thread after the worker exits. Both are *adapter-only* — they have no `cs` verb and participate in no §8p bijection — so `cs tail` itself stays local. The row previously said the SSE alternative was "V2", eight months after it shipped; corrected 2026-09-22 (`task-20260922-45cd`). |
 | `cs tokens` | NO | — | Read-only IFBDD aggregator over the local `tokens.jsonl` sink (T-V1-IFBDD-METER). The HTTP-side analogue is the unauthenticated diagnostic `GET /health/backends` plus the `InvocationCompleted` events.jsonl trail; no per-tenant token surface is needed remotely. Re-evaluate at V2 if tenant_auditor asks. |
 | `cs note` | NO (V1 TBD) | — | Append-only molecule note; re-evaluate at V1 if tenant_auditor asks. |
 | `cs deps` | NO | — | Read-only DAG visualisation; covered by `GET /v1/molecules/:id` payload. |
@@ -160,7 +160,7 @@ advance → terminate → infrastructure → introspection.
 | `cs patrol` | NO | — | Patrol sweep dispatch; scheduler-only (cron-driven). |
 | `cs health` | NO | — | Read-only molecule-health Witness (ADR-137 P1): the anomaly catalog over local `.cosmon/` state, federation-wide. Local operator/CI snapshot; mutates nothing. The remote health surface, if ever needed, rides the ADR-068 pilot-app health panel over the existing `peek` raster, not a new route. |
 | `cs pulse` | NO | — | Runtime-vitality reading (ADR-138 P1): RPM tachometer + six-voyant strip. Zero-mutation local observer over `events.jsonl` + state store. The pilot-app surface (P2 peek `v`-key tab) reads the same `Pulse` struct over the existing wheat-paste raster (ADR-066) — no new remote endpoint. |
-| `cs events` | NO (V2 TBD) | (TBD) `GET /v1/molecules/:id/events` | Read-only event stream; lands when SSE is approved (ADR-080 Q3). |
+| `cs events` | NO | — | Read-only local event stream. SSE **was** approved and landed as `GET /v1/events` (`task-20260522-c46a`, 2026-05-22) under `cosmon:events:subscribe` — a noyau-wide lifecycle stream, *adapter-only*, with no `cs` verb and no row of its own. The per-molecule `GET /v1/molecules/:id/events` this row promised at V2 was never built and is not planned: a subscriber filters the one stream. The row still read `NO (V2 TBD) — lands when SSE is approved` four months later; corrected 2026-09-22 (`task-20260922-45cd`). |
 | `cs errors` | NO | — | Read-only IFBDD aggregator over local `events.jsonl` for `MoleculeCollapsed`. Tenant-scoped views ride the same path as `cs tokens` — re-evaluate at V2 if tenant_auditor asks. |
 | `cs quench` | NO | — | Energy-budget injection; operator-only. |
 | `cs help` | NO | — | Documentation, not a remote act. The RPP serves a hand-written OpenAPI document under `openapi/v1.yaml` instead. (`man cs` is the same row, different surface.) |
@@ -216,49 +216,68 @@ explicitly. The mechanism:
 ## Drift test (CI gate)
 
 A test in `crates/cosmon-cli/tests/api_cli_coverage.rs` enforces the
-following invariants on every CI run:
+following invariants on every CI run. It compares this table against
+the **live route set**, folded from
+`crates/cosmon-rpp-adapter/data/surface_events.txt` — the same
+append-only canon `cosmon-rpp-adapter/build.rs` folds into
+`frozen_api_surface()` and builds the router from. Withdrawn routes are
+subtracted, so a route taken back (issue #51 retired
+`POST /v1/molecules/{id}/land`) is absent from the comparison exactly
+as it is absent from the server.
 
-1. **Every user-facing CLI verb has a row in this table.** If a new
-   `cs <verb>` lands without an `api-cli-coverage.md` row, the test
-   fails with:
+1. **Every user-facing CLI verb has a row in this table**
+   (`every_cli_verb_has_a_registry_row`), and every row names a verb the
+   CLI still has (`registry_does_not_invent_unknown_verbs`).
 
-   ```
-   cs <verb> is not in docs/guides/api-cli-coverage.md — add a row
-   (mark `Exposed via API? = NO` if no remote use case exists yet)
-   ```
+2. **Every row that claims a *shipped* exposure names a live route**
+   (`every_shipped_row_names_a_live_route`). "Shipped" means `V0`, `V1`,
+   `V2` or `PARTIAL` with no `TBD` qualifier: a `TBD` marks a plan, and
+   everything else is a claim about today that the adapter must back.
+   The row must name at least one path, and every path it names must be
+   on the canon.
 
-2. **Every `Exposed = V0` row has a corresponding axum route.** If
-   the registry promises a V0 route that the adapter does not
-   implement, the test fails with:
+3. **Every live route in the `cs` alphabet is declared shipped**
+   (`every_cs_alphabet_route_is_declared_shipped`). A route that lands
+   without a promoted row fails here.
 
-   ```
-   V0 route `<path>` for `cs <verb>` is promised in
-   docs/guides/api-cli-coverage.md but not implemented in
-   cosmon-rpp-adapter::routes
-   ```
+4. **No row whose verdict begins with `NO` names a live route**
+   (`no_refused_row_names_a_live_route`) — the §8p breach this registry
+   exists to catch. File a bead; do not patch the row to make it pass.
 
-3. **Every axum route has a registry row marked at or before the
-   current version.** If a route is added without updating this
-   table, the test fails with:
+### What rule 3 does not cover, and why
 
-   ```
-   Route `<METHOD> <path>` is exposed by cosmon-rpp-adapter but not
-   declared in docs/guides/api-cli-coverage.md
-   ```
+Rule 3 runs over the routes the canon classes `tenant-verb`. Two kinds
+of live route are outside it, both deliberately:
 
-The test is intentionally **defensive** rather than prescriptive: it
-catches the *silent* drift that turns §8p (subset strict) into an
-accidental §8l (parity). It does not prevent legitimate evolution —
-every PR that legitimately changes the surface updates the table
-and the test passes.
+- **`adapter-only` routes** — artifact I/O, the Claude PKCE flow, the
+  SSE streams, noyau/worker discovery, the operator admin plane. They
+  have no `cs` verb by construction, so a `cs`-verb registry carries no
+  row for them. Requiring one would mean inventing verbs.
+- **The six D-AVATAR canal routes** (`POST /v1/avatar/converse` and
+  the five `/v1/avatar/{instance_id}/…` lifecycle routes). They are
+  tenant verbs of the *thin* client — `cosmon-remote` carries them and
+  `cosmon-thin-cli::verbs` declares their `#[verb]` stubs — but `cs` has
+  no `avatar` subcommand and will not grow one. They are enumerated one
+  by one in `TENANT_VERB_ROUTES_OUTSIDE_THE_CS_ALPHABET`, not skipped by
+  a `/v1/avatar/` prefix rule, and a companion test fails if an entry
+  stops describing a live tenant-verb route. A blind spot somebody had
+  to write down is one a reviewer can see.
 
-While `cosmon-rpp-adapter` does not yet exist on the branch (V0
-lands week 5–9 May 2026 per ADR-080 §10.1), the test asserts the
-empty-route side of the invariant: every CLI verb has a row, and
-the registry's promised `V0` rows are visible. The route-side checks
-become active when the adapter crate lands; the same test grows the
-import without changing structure (`crates/cosmon-rpp-adapter/src/
-routes.rs::list_routes()`).
+### The repair of 2026-09-22
+
+Until `task-20260922-45cd` the gate was green over eight wrong rows.
+`list_axum_routes()` was a **hand-written array of three entries**
+standing for a surface of forty-two, and the reverse check fired only
+for rows marked exactly `V0` — a condition written when V0 was the only
+shipped version and never revisited through the V1 cut. So the
+instrument compared three routes against the subset of rows that named
+the version it had stopped being, and reported no drift while
+`cs tackle` and `cs collapse` pointed at
+`POST /v1/molecules/{id}/transitions` — a generic endpoint nobody ever
+built — and `cs freeze`, `cs thaw`, `cs stuck`, `cs ensemble`,
+`cs events` and `cs tail` denied or deferred routes that had been live
+for months. An instrument that compares 3/42 of a surface reads present
+and is not.
 
 ---
 
