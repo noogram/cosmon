@@ -163,4 +163,5 @@
 | 176-remote-harvest-authority-is-a-sealed-capability | [176-remote-harvest-authority-is-a-sealed-capability.md](176-remote-harvest-authority-is-a-sealed-capability.md) |
 | 177-harness-settings-are-carried-verbatim-and-dispatch-is-not-execution | [177-harness-settings-are-carried-verbatim-and-dispatch-is-not-execution.md](177-harness-settings-are-carried-verbatim-and-dispatch-is-not-execution.md) |
 | 178-no-automatic-path-removes-a-worktree | [178-no-automatic-path-removes-a-worktree.md](178-no-automatic-path-removes-a-worktree.md) |
+| 179-a-terminal-molecules-session-is-derived-state | [179-a-terminal-molecules-session-is-derived-state.md](179-a-terminal-molecules-session-is-derived-state.md) |
 
