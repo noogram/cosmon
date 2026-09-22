@@ -96,6 +96,7 @@ pub mod run;
 pub mod scheduler;
 pub mod security;
 pub mod sensorium;
+pub mod session_reclaim;
 pub mod sessions;
 pub mod sessions_hook;
 pub mod spark;

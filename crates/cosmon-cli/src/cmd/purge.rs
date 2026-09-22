@@ -498,6 +498,24 @@ pub struct Args {
     #[arg(long)]
     pub worktrees: bool,
 
+    /// Also run the tmux session reclamation pass (ADR-179).
+    ///
+    /// Enumerates the galaxy's tmux socket — `list-panes -a`, not the worker
+    /// roster. The roster is precisely what cannot see this population: the
+    /// sweep above removes a terminal molecule's worker entry and the session
+    /// it named lives on, unattributable, holding an agent process and its
+    /// whole heap for as long as the machine is up. Each session is attributed
+    /// by computing every known molecule's session name *forward* and
+    /// matching, never by parsing a molecule id back out of a session name.
+    ///
+    /// Reclamation is opt-in exactly as `--worktrees` is: on its own this flag
+    /// kills nothing, and `--allow-unharvested` — the same gesture, not a
+    /// second one — executes it. A session is reclaimed only when its molecule
+    /// is terminal, no client is attached, and its scrollback has been
+    /// captured to that molecule's directory first.
+    #[arg(long)]
+    pub sessions: bool,
+
     /// Report what would change and change nothing.
     ///
     /// Applies to the whole command: no fleet entry is removed, no molecule
@@ -530,7 +548,32 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
     if args.worktrees {
         run_worktree_pass(ctx, store.as_ref(), args)?;
     }
+    if args.sessions {
+        run_session_pass(ctx, store.as_ref(), args);
+    }
     Ok(())
+}
+
+/// The tmux reclamation pass behind `--sessions` (ADR-179).
+///
+/// Separated from the worker sweep for the same reason the worktree pass is:
+/// the sweep is keyed by *worker*, and the sessions this pass finds are
+/// precisely the ones no worker entry points at any more. It shares the verb
+/// and the opt-in gesture deliberately — a second verb would be a second copy
+/// of the same safety question.
+///
+/// Infallible by construction: every failure it can meet is a reported
+/// observation, and a socket cosmon cannot read must not fail the purge that
+/// swept the roster successfully.
+fn run_session_pass(ctx: &Context, store: &dyn StateStore, args: &Args) {
+    let socket = super::tmux_socket_name(ctx);
+    let execute = args.allow_unharvested && !args.dry_run;
+    let pass = super::session_reclaim::run_pass(&socket, store, execute);
+    if ctx.json {
+        println!("{}", super::session_reclaim::to_json(&pass));
+    } else {
+        super::session_reclaim::report(&pass);
+    }
 }
 
 /// The `.worktrees/` reclamation pass behind `--worktrees` (issue 61).
@@ -1253,6 +1296,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1290,6 +1334,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1334,6 +1379,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1365,6 +1411,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1411,6 +1458,7 @@ mod tests {
             role: Some(WorkerRole::Cognition),
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1441,6 +1489,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run(&ctx, &args).unwrap();
@@ -1463,6 +1512,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
 
@@ -1491,6 +1541,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1577,6 +1628,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &ErrBackend, &NoWork, &args).unwrap();
@@ -1635,6 +1687,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1680,6 +1733,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1714,6 +1768,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1753,6 +1808,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1799,6 +1855,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1856,6 +1913,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(&ctx, &store, tmp.path(), &backend, &NoWork, &args).unwrap();
@@ -1893,6 +1951,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run(&ctx, &args).unwrap();
@@ -1933,6 +1992,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run(&ctx, &args).unwrap();
@@ -1983,6 +2043,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &backend, &commits_ahead(1), &args)
@@ -2045,6 +2106,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         let err = run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args)
@@ -2077,6 +2139,7 @@ mod tests {
             role: None,
             allow_unharvested: true,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(
@@ -2119,6 +2182,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         let _ = run_sweep(
@@ -2163,6 +2227,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         let err = run_targeted(&ctx, &store, tmp.path(), "target", &args, &commits_ahead(2))
@@ -2198,6 +2263,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_targeted(&ctx, &store, tmp.path(), "clean", &args, &NoWork).unwrap();
@@ -2232,6 +2298,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         run_sweep(
@@ -2270,6 +2337,7 @@ mod tests {
             role: None,
             allow_unharvested: false,
             worktrees: false,
+            sessions: false,
             dry_run: false,
         };
         assert!(run_sweep(&ctx, &store, tmp.path(), &MockBackend::new(), &probe, &args).is_err());
