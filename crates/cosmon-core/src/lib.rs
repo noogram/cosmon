@@ -275,6 +275,7 @@ pub mod sor;
 pub mod spawn_seam;
 #[doc(hidden)]
 pub mod spec;
+pub mod staleness;
 #[doc(hidden)]
 pub mod tackle;
 #[doc(hidden)]

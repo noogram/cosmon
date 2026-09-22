@@ -47,6 +47,7 @@
 //! does not check is skipped exactly like a torn one: **a grant that did not
 //! happen**. See [`crate::operator_trust`] for where the key is pinned.
 
+use std::collections::BTreeSet;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
@@ -171,6 +172,56 @@ impl PilotLeaseStore {
     pub fn grants_path(&self, mission: &MoleculeId) -> PathBuf {
         self.state_root
             .join(CosmonPath::PilotLeaseGrants { mission }.rel())
+    }
+
+    /// Every mission this ledger directory knows about — the set of molecules
+    /// that are carrying, or have been asked to carry, a pilot lease.
+    ///
+    /// Derived from the filenames alone, because that is what the question
+    /// needs and nothing more. A caller asking "is this molecule a lease?"
+    /// (`cs status`, `cs peek`) must not be made to verify signatures: an
+    /// unsigned or expired grant still means somebody is running this
+    /// molecule as a cockpit mission rather than as work to converge, and
+    /// that is the fact that decides whether it is backlog. Authority is a
+    /// different question with a different reader — [`Self::authorize`].
+    ///
+    /// The requests side counts too. A mission whose first pilot asked but
+    /// was never granted has a `.requests.jsonl` and no `.grants.jsonl`, and
+    /// it is no more a piece of backlog than a granted one.
+    ///
+    /// A missing directory is an empty set, not an error: most projects never
+    /// take a lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CosmonError::StateStore`] if the directory exists but cannot
+    /// be listed.
+    pub fn missions(&self) -> Result<BTreeSet<MoleculeId>, CosmonError> {
+        let dir = self.state_root.join("pilot-lease");
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+            Err(e) => {
+                return Err(CosmonError::StateStore {
+                    reason: format!("cannot list {}: {e}", dir.display()),
+                })
+            }
+        };
+
+        let mut out = BTreeSet::new();
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else { continue };
+            let stem = name
+                .strip_suffix(".grants.jsonl")
+                .or_else(|| name.strip_suffix(".requests.jsonl"));
+            if let Some(stem) = stem {
+                if let Ok(id) = MoleculeId::new(stem) {
+                    out.insert(id);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Every **attested** grant recorded for `mission`, in file order.
@@ -896,5 +947,35 @@ mod tests {
             s.current(&mission()).unwrap().unwrap().holder_session_id,
             sid("claude")
         );
+    }
+
+    /// A mission is a lease mission because the ledger names it, not because
+    /// somebody signed one. `cs status` asks this to decide whether a
+    /// molecule is backlog, and an unsigned or expired grant does not turn a
+    /// cockpit mission back into work waiting to be drained.
+    #[test]
+    fn missions_are_discovered_from_the_ledger_filenames() {
+        let dir = tempdir().unwrap();
+        let s = PilotLeaseStore::new(dir.path());
+
+        assert!(
+            s.missions().unwrap().is_empty(),
+            "a project with no lease dir has no lease missions"
+        );
+
+        let lease_dir = dir.path().join("pilot-lease");
+        fs::create_dir_all(&lease_dir).unwrap();
+        fs::write(lease_dir.join("task-20260811-a7f0.grants.jsonl"), "").unwrap();
+        // Asked for but never granted — still a cockpit mission, still not
+        // backlog.
+        fs::write(lease_dir.join("task-20260811-b1c2.requests.jsonl"), "").unwrap();
+        // Neighbours that name no mission must not become one.
+        fs::write(lease_dir.join("README.md"), "notes").unwrap();
+        fs::write(lease_dir.join("not-an-id.grants.jsonl"), "").unwrap();
+
+        let found = s.missions().unwrap();
+        assert_eq!(found.len(), 2, "found: {found:?}");
+        assert!(found.contains(&MoleculeId::new("task-20260811-a7f0").unwrap()));
+        assert!(found.contains(&MoleculeId::new("task-20260811-b1c2").unwrap()));
     }
 }
