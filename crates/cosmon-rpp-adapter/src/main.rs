@@ -10,7 +10,10 @@ use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use cosmon_rpp_adapter::{
-    auth_claude::{AuthClaudeConfig, AuthClaudeState, FilesystemSessionStore},
+    auth_claude::{
+        credentials::{classify_credentials_file, CredentialsVerdict},
+        AuthClaudeConfig, AuthClaudeState, FilesystemSessionStore,
+    },
     deny_list::DenyList,
     jwt::JwksStore,
     nucleon_map::{render_oidc_identity_toml, HabilitationBindingSpec},
@@ -359,50 +362,30 @@ async fn main() -> anyhow::Result<()> {
 
     // Step 3c — resolve the Anthropic key from the ladder once at boot,
     // for injection into every worker-spawn env (see `AppState`).
-    let anthropic_api_key = if let Some((key, backend)) =
-        cosmon_rpp_adapter::image_init::resolve_anthropic_key()
-    {
-        tracing::info!(
-            event = "boot.anthropic_auth",
-            backend = backend.as_str(),
-            key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(&key),
-            "anthropic key resolved for worker spawn env",
-        );
-        Some(key)
-    } else {
-        // The ladder is API-key-only (docker-secret / operator-file /
-        // env), so an instance authenticated by OAuth login legitimately
-        // has nothing there — `tackle` on such an instance dispatches
-        // through the OAuth credentials file `RppSpawnPreflight` and
-        // `GET /v1/auth/me` both already classify
-        // (`auth_claude::credentials::classify_credentials_file`).
-        // Warning unconditionally here previously told an OAuth-only
-        // operator that every dispatch would fail when it would not.
-        let oauth_credentials_path =
-            cosmon_rpp_adapter::auth_claude::AuthClaudeConfig::defaults_with_home(&claude_home)
-                .credentials_path;
-        let oauth_usable = cosmon_rpp_adapter::auth_claude::credentials::classify_credentials_file(
-            &oauth_credentials_path,
-        )
-        .is_usable();
-        if oauth_usable {
+    let anthropic_api_key =
+        if let Some((key, backend)) = cosmon_rpp_adapter::image_init::resolve_anthropic_key() {
             tracing::info!(
                 event = "boot.anthropic_auth",
-                credentials_path = %oauth_credentials_path.display(),
-                "no anthropic key on the docker-secret / operator-file / env ladder, but a \
-                 usable OAuth credentials file was found — cs tackle will use it",
+                backend = backend.as_str(),
+                key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(&key),
+                "anthropic key resolved for worker spawn env",
             );
+            Some(key)
         } else {
-            tracing::warn!(
-                event = "boot.anthropic_auth",
-                credentials_path = %oauth_credentials_path.display(),
-                "no anthropic key (docker-secret / operator-file / env all empty) and no \
-                 usable OAuth credentials file — cs tackle will fail with \
-                 'ANTHROPIC_API_KEY not set'",
-            );
-        }
-        None
-    };
+            // The ladder is API-key-only (docker-secret / operator-file /
+            // env), so an instance authenticated by OAuth login legitimately
+            // has nothing there — `tackle` on such an instance dispatches
+            // through the OAuth credentials file `RppSpawnPreflight` and
+            // `GET /v1/auth/me` both already classify
+            // (`auth_claude::credentials::classify_credentials_file`).
+            // Warning unconditionally here previously told an OAuth-only
+            // operator that every dispatch would fail when it would not.
+            let oauth_credentials_path =
+                AuthClaudeConfig::defaults_with_home(&claude_home).credentials_path;
+            let verdict = classify_credentials_file(&oauth_credentials_path);
+            log_oauth_fallback(&oauth_credentials_path, verdict);
+            None
+        };
 
     let rate_limiter = Arc::new(IngressRateLimiter::default_in(
         state_dir.join("security/oidc-rate-limit"),
@@ -425,7 +408,7 @@ async fn main() -> anyhow::Result<()> {
     // Failure to initialise leaves the optional surface as `None`;
     // the routes will return 503 service_unavailable but the rest of
     // the adapter still boots.
-    let auth_claude = build_auth_claude_state(&state_dir).map(Arc::new);
+    let auth_claude = build_auth_claude_state(&state_dir, &claude_home).map(Arc::new);
     if auth_claude.is_some() {
         tracing::info!(
             event = "boot.auth_claude_api",
@@ -571,11 +554,17 @@ fn expand_tilde(p: &std::path::Path) -> PathBuf {
 }
 
 /// Construct the auth-claude state, or return `None` if the session
-/// store cannot be initialised. The credentials path lives under the
-/// current user's `$HOME` so a container running as `cosmon` writes
+/// store cannot be initialised. `claude_home` is the same `$HOME`
+/// resolved once at boot and threaded through to the anthropic-auth
+/// probe above, so a container running as `cosmon` writes
 /// `/cosmon/.claude/.credentials.json` (the image sets `HOME=/cosmon`
-/// and `useradd --home-dir /cosmon` keeps `/etc/passwd` in agreement).
-fn build_auth_claude_state(state_dir: &std::path::Path) -> Option<AuthClaudeState> {
+/// and `useradd --home-dir /cosmon` keeps `/etc/passwd` in agreement)
+/// and both call sites agree on the same path without resolving `HOME`
+/// twice.
+fn build_auth_claude_state(
+    state_dir: &std::path::Path,
+    claude_home: &std::path::Path,
+) -> Option<AuthClaudeState> {
     let store = match FilesystemSessionStore::new(state_dir) {
         Ok(s) => Arc::new(s) as Arc<dyn cosmon_rpp_adapter::auth_claude::SessionStore>,
         Err(e) => {
@@ -586,7 +575,84 @@ fn build_auth_claude_state(state_dir: &std::path::Path) -> Option<AuthClaudeStat
             return None;
         }
     };
-    let home = std::env::var_os("HOME").map_or_else(|| PathBuf::from("/root"), PathBuf::from);
-    let config = AuthClaudeConfig::defaults_with_home(&home);
+    let config = AuthClaudeConfig::defaults_with_home(claude_home);
     Some(AuthClaudeState::new(config, store))
+}
+
+/// Log the boot-time consequence of an empty API-key ladder
+/// (docker-secret / operator-file / env), given the local OAuth
+/// credentials verdict. Split out from `main` so the verdict → log
+/// mapping is unit-testable without touching the filesystem or `$HOME`.
+///
+/// Before this, every non-`Usable` verdict — an instance that never
+/// ran `claude login`, one whose credentials file is corrupt, and one
+/// whose token expired with no refresh token — logged the identical
+/// "no usable OAuth credentials file" warning, leaving an operator to
+/// guess which of three unrelated problems they actually have.
+fn log_oauth_fallback(path: &std::path::Path, verdict: CredentialsVerdict) {
+    if verdict.is_usable() {
+        tracing::info!(
+            event = "boot.anthropic_auth",
+            credentials_path = %path.display(),
+            credentials_status = verdict.as_wire(),
+            "no anthropic key on the docker-secret / operator-file / env ladder, but a \
+             usable OAuth credentials file was found — cs tackle will use it",
+        );
+        return;
+    }
+    let cause = match verdict {
+        CredentialsVerdict::Absent => {
+            "no OAuth credentials file either — nobody has run 'claude login' on this instance"
+        }
+        CredentialsVerdict::Unreadable => {
+            "an OAuth credentials file exists but could not be read (permissions or I/O error)"
+        }
+        CredentialsVerdict::Malformed => {
+            "an OAuth credentials file exists but is malformed (no usable accessToken)"
+        }
+        CredentialsVerdict::Expired => {
+            "an OAuth credentials file exists but its access token is expired with no refresh \
+             token"
+        }
+        CredentialsVerdict::Refreshable | CredentialsVerdict::Usable => {
+            unreachable!("is_usable() above already handled these two variants")
+        }
+    };
+    tracing::warn!(
+        event = "boot.anthropic_auth",
+        credentials_path = %path.display(),
+        credentials_status = verdict.as_wire(),
+        "no anthropic key (docker-secret / operator-file / env all empty) and {cause} — cs \
+         tackle will fail with 'ANTHROPIC_API_KEY not set'",
+    );
+}
+
+#[cfg(test)]
+mod anthropic_auth_boot_tests {
+    use std::path::Path;
+
+    use cosmon_rpp_adapter::auth_claude::credentials::CredentialsVerdict;
+
+    use super::log_oauth_fallback;
+
+    // `log_oauth_fallback` only branches on the verdict and formats a
+    // message; there is nothing to assert on `tracing` output without
+    // installing a subscriber, so these tests exist to pin that every
+    // variant is reachable and none of them panics — in particular the
+    // `unreachable!()` guard for the two usable variants, which a
+    // careless refactor of the `is_usable()` check above could trip.
+    #[test]
+    fn every_verdict_logs_without_panicking() {
+        let path = Path::new("/cosmon/.claude/.credentials.json");
+        for verdict in [
+            CredentialsVerdict::Absent,
+            CredentialsVerdict::Unreadable,
+            CredentialsVerdict::Malformed,
+            CredentialsVerdict::Expired,
+            CredentialsVerdict::Refreshable,
+            CredentialsVerdict::Usable,
+        ] {
+            log_oauth_fallback(path, verdict);
+        }
+    }
 }
