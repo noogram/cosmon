@@ -328,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
     let image_init = cosmon_rpp_adapter::image_init::ImageInit {
         inbox_root: inbox_root.clone(),
         galaxies_root: galaxies_root.clone(),
-        claude_home,
+        claude_home: claude_home.clone(),
         formulas_seed_dir,
     };
     let noyaux = nucleon_map.load().noyaux();
@@ -359,23 +359,50 @@ async fn main() -> anyhow::Result<()> {
 
     // Step 3c — resolve the Anthropic key from the ladder once at boot,
     // for injection into every worker-spawn env (see `AppState`).
-    let anthropic_api_key =
-        if let Some((key, backend)) = cosmon_rpp_adapter::image_init::resolve_anthropic_key() {
+    let anthropic_api_key = if let Some((key, backend)) =
+        cosmon_rpp_adapter::image_init::resolve_anthropic_key()
+    {
+        tracing::info!(
+            event = "boot.anthropic_auth",
+            backend = backend.as_str(),
+            key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(&key),
+            "anthropic key resolved for worker spawn env",
+        );
+        Some(key)
+    } else {
+        // The ladder is API-key-only (docker-secret / operator-file /
+        // env), so an instance authenticated by OAuth login legitimately
+        // has nothing there — `tackle` on such an instance dispatches
+        // through the OAuth credentials file `RppSpawnPreflight` and
+        // `GET /v1/auth/me` both already classify
+        // (`auth_claude::credentials::classify_credentials_file`).
+        // Warning unconditionally here previously told an OAuth-only
+        // operator that every dispatch would fail when it would not.
+        let oauth_credentials_path =
+            cosmon_rpp_adapter::auth_claude::AuthClaudeConfig::defaults_with_home(&claude_home)
+                .credentials_path;
+        let oauth_usable = cosmon_rpp_adapter::auth_claude::credentials::classify_credentials_file(
+            &oauth_credentials_path,
+        )
+        .is_usable();
+        if oauth_usable {
             tracing::info!(
                 event = "boot.anthropic_auth",
-                backend = backend.as_str(),
-                key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(&key),
-                "anthropic key resolved for worker spawn env",
+                credentials_path = %oauth_credentials_path.display(),
+                "no anthropic key on the docker-secret / operator-file / env ladder, but a \
+                 usable OAuth credentials file was found — cs tackle will use it",
             );
-            Some(key)
         } else {
             tracing::warn!(
                 event = "boot.anthropic_auth",
-                "no anthropic key (docker-secret / operator-file / env all empty) — \
-             cs tackle will fail with 'ANTHROPIC_API_KEY not set'",
+                credentials_path = %oauth_credentials_path.display(),
+                "no anthropic key (docker-secret / operator-file / env all empty) and no \
+                 usable OAuth credentials file — cs tackle will fail with \
+                 'ANTHROPIC_API_KEY not set'",
             );
-            None
-        };
+        }
+        None
+    };
 
     let rate_limiter = Arc::new(IngressRateLimiter::default_in(
         state_dir.join("security/oidc-rate-limit"),
