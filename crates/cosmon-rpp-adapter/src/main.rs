@@ -15,6 +15,7 @@ use cosmon_rpp_adapter::{
         AuthClaudeConfig, AuthClaudeState, FilesystemSessionStore,
     },
     deny_list::DenyList,
+    image_init::AnthropicKeyBackend,
     jwt::JwksStore,
     nucleon_map::{render_oidc_identity_toml, HabilitationBindingSpec},
     router, AppState, BackendHealthRegistry, HabilitationMap, IngressRateLimiter, Posture,
@@ -362,30 +363,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Step 3c — resolve the Anthropic key from the ladder once at boot,
     // for injection into every worker-spawn env (see `AppState`).
-    let anthropic_api_key =
-        if let Some((key, backend)) = cosmon_rpp_adapter::image_init::resolve_anthropic_key() {
-            tracing::info!(
-                event = "boot.anthropic_auth",
-                backend = backend.as_str(),
-                key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(&key),
-                "anthropic key resolved for worker spawn env",
-            );
-            Some(key)
-        } else {
-            // The ladder is API-key-only (docker-secret / operator-file /
-            // env), so an instance authenticated by OAuth login legitimately
-            // has nothing there — `tackle` on such an instance dispatches
-            // through the OAuth credentials file `RppSpawnPreflight` and
-            // `GET /v1/auth/me` both already classify
-            // (`auth_claude::credentials::classify_credentials_file`).
-            // Warning unconditionally here previously told an OAuth-only
-            // operator that every dispatch would fail when it would not.
-            let oauth_credentials_path =
-                AuthClaudeConfig::defaults_with_home(&claude_home).credentials_path;
-            let verdict = classify_credentials_file(&oauth_credentials_path);
-            log_oauth_fallback(&oauth_credentials_path, verdict);
-            None
-        };
+    let resolved_key = cosmon_rpp_adapter::image_init::resolve_anthropic_key();
+    let oauth_credentials_path =
+        AuthClaudeConfig::defaults_with_home(&claude_home).credentials_path;
+    report_anthropic_auth(
+        resolved_key
+            .as_ref()
+            .map(|(key, backend)| (key.as_str(), *backend)),
+        &oauth_credentials_path,
+        || classify_credentials_file(&oauth_credentials_path),
+    );
+    let anthropic_api_key = resolved_key.map(|(key, _)| key);
 
     let rate_limiter = Arc::new(IngressRateLimiter::default_in(
         state_dir.join("security/oidc-rate-limit"),
@@ -579,28 +567,48 @@ fn build_auth_claude_state(
     Some(AuthClaudeState::new(config, store))
 }
 
-/// Log the boot-time consequence of an empty API-key ladder
-/// (docker-secret / operator-file / env), given the local OAuth
-/// credentials verdict. Split out from `main` so the verdict → log
-/// mapping is unit-testable without touching the filesystem or `$HOME`.
+/// Log whether `cs tackle` on this instance has a credential to
+/// authenticate with, and predict its failure when it has none.
 ///
-/// Before this, every non-`Usable` verdict — an instance that never
-/// ran `claude login`, one whose credentials file is corrupt, and one
-/// whose token expired with no refresh token — logged the identical
-/// "no usable OAuth credentials file" warning, leaving an operator to
-/// guess which of three unrelated problems they actually have.
-fn log_oauth_fallback(path: &std::path::Path, verdict: CredentialsVerdict) {
-    if verdict.is_usable() {
+/// Two sources can authenticate a worker: an API key from the
+/// docker-secret / operator-file / env ladder (`api_key`), and the OAuth
+/// credentials file written by `claude login` (`oauth_verdict`, consulted
+/// only when the ladder is empty so a keyed instance never reads it).
+/// The warning that tackle will fail is emitted exactly when neither is
+/// usable. The ladder is API-key-only, so an instance authenticated by
+/// OAuth login legitimately has nothing there; warning on the ladder
+/// alone previously told an OAuth-only operator that every dispatch
+/// would fail when it would not.
+///
+/// Each non-usable verdict names its own cause, so an operator sees
+/// which of four unrelated problems they have instead of one generic
+/// "no usable OAuth credentials file".
+fn report_anthropic_auth(
+    api_key: Option<(&str, AnthropicKeyBackend)>,
+    oauth_path: &std::path::Path,
+    oauth_verdict: impl FnOnce() -> CredentialsVerdict,
+) {
+    if let Some((key, backend)) = api_key {
         tracing::info!(
             event = "boot.anthropic_auth",
-            credentials_path = %path.display(),
-            credentials_status = verdict.as_wire(),
-            "no anthropic key on the docker-secret / operator-file / env ladder, but a \
-             usable OAuth credentials file was found — cs tackle will use it",
+            backend = backend.as_str(),
+            key_fp = %cosmon_rpp_adapter::image_init::key_fingerprint(key),
+            "anthropic key resolved for worker spawn env",
         );
         return;
     }
+    let verdict = oauth_verdict();
     let cause = match verdict {
+        CredentialsVerdict::Refreshable | CredentialsVerdict::Usable => {
+            tracing::info!(
+                event = "boot.anthropic_auth",
+                credentials_path = %oauth_path.display(),
+                credentials_status = verdict.as_wire(),
+                "no anthropic key on the docker-secret / operator-file / env ladder, but a \
+                 usable OAuth credentials file was found — cs tackle will use it",
+            );
+            return;
+        }
         CredentialsVerdict::Absent => {
             "no OAuth credentials file either — nobody has run 'claude login' on this instance"
         }
@@ -614,13 +622,10 @@ fn log_oauth_fallback(path: &std::path::Path, verdict: CredentialsVerdict) {
             "an OAuth credentials file exists but its access token is expired with no refresh \
              token"
         }
-        CredentialsVerdict::Refreshable | CredentialsVerdict::Usable => {
-            unreachable!("is_usable() above already handled these two variants")
-        }
     };
     tracing::warn!(
         event = "boot.anthropic_auth",
-        credentials_path = %path.display(),
+        credentials_path = %oauth_path.display(),
         credentials_status = verdict.as_wire(),
         "no anthropic key (docker-secret / operator-file / env all empty) and {cause} — cs \
          tackle will fail with 'ANTHROPIC_API_KEY not set'",
@@ -630,29 +635,82 @@ fn log_oauth_fallback(path: &std::path::Path, verdict: CredentialsVerdict) {
 #[cfg(test)]
 mod anthropic_auth_boot_tests {
     use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     use cosmon_rpp_adapter::auth_claude::credentials::CredentialsVerdict;
+    use cosmon_rpp_adapter::image_init::AnthropicKeyBackend;
+    use tracing::field::{Field, Visit};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+    use tracing_subscriber::Layer;
 
-    use super::log_oauth_fallback;
+    use super::report_anthropic_auth;
 
-    // `log_oauth_fallback` only branches on the verdict and formats a
-    // message; there is nothing to assert on `tracing` output without
-    // installing a subscriber, so these tests exist to pin that every
-    // variant is reachable and none of them panics — in particular the
-    // `unreachable!()` guard for the two usable variants, which a
-    // careless refactor of the `is_usable()` check above could trip.
+    const ALL_VERDICTS: [CredentialsVerdict; 6] = [
+        CredentialsVerdict::Absent,
+        CredentialsVerdict::Unreadable,
+        CredentialsVerdict::Malformed,
+        CredentialsVerdict::Expired,
+        CredentialsVerdict::Refreshable,
+        CredentialsVerdict::Usable,
+    ];
+
+    /// Records `(level, message)` for every event, so a test can read
+    /// what the probe actually told the operator.
+    #[derive(Clone, Default)]
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct MessageVisitor(String);
+
+    impl Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            if let Ok(mut events) = self.0.lock() {
+                events.push((*event.metadata().level(), visitor.0));
+            }
+        }
+    }
+
+    /// Run the probe under a capturing subscriber and report whether it
+    /// predicted that tackle will fail.
+    fn predicts_tackle_failure(api_key: Option<&str>, verdict: CredentialsVerdict) -> bool {
+        let capture = Capture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+        tracing::subscriber::with_default(subscriber, || {
+            report_anthropic_auth(
+                api_key.map(|key| (key, AnthropicKeyBackend::OperatorFile)),
+                Path::new("/cosmon/.claude/.credentials.json"),
+                || verdict,
+            );
+        });
+        let events = capture.0.lock().map(|e| e.clone()).unwrap_or_default();
+        assert_eq!(events.len(), 1, "one boot.anthropic_auth event per probe");
+        events.iter().any(|(level, message)| {
+            *level == tracing::Level::WARN && message.contains("cs tackle will fail")
+        })
+    }
+
     #[test]
-    fn every_verdict_logs_without_panicking() {
-        let path = Path::new("/cosmon/.claude/.credentials.json");
-        for verdict in [
-            CredentialsVerdict::Absent,
-            CredentialsVerdict::Unreadable,
-            CredentialsVerdict::Malformed,
-            CredentialsVerdict::Expired,
-            CredentialsVerdict::Refreshable,
-            CredentialsVerdict::Usable,
-        ] {
-            log_oauth_fallback(path, verdict);
+    fn tackle_failure_is_predicted_iff_neither_credential_source_is_usable() {
+        for api_key in [None, Some("sk-ant-test")] {
+            for verdict in ALL_VERDICTS {
+                let neither_usable = api_key.is_none() && !verdict.is_usable();
+                assert_eq!(
+                    predicts_tackle_failure(api_key, verdict),
+                    neither_usable,
+                    "api_key present = {}, oauth verdict = {}",
+                    api_key.is_some(),
+                    verdict.as_wire(),
+                );
+            }
         }
     }
 }
