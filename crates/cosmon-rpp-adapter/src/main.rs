@@ -544,11 +544,10 @@ fn expand_tilde(p: &std::path::Path) -> PathBuf {
 /// Construct the auth-claude state, or return `None` if the session
 /// store cannot be initialised. `claude_home` is the same `$HOME`
 /// resolved once at boot and threaded through to the anthropic-auth
-/// probe above, so a container running as `cosmon` writes
-/// `/cosmon/.claude/.credentials.json` (the image sets `HOME=/cosmon`
-/// and `useradd --home-dir /cosmon` keeps `/etc/passwd` in agreement)
-/// and both call sites agree on the same path without resolving `HOME`
-/// twice.
+/// probe above, so both call sites read `$HOME/.claude/.credentials.json`
+/// without resolving `HOME` twice. Never hard-code the home: the published
+/// server image (v3.11) runs `cosmon` with `HOME=/home/cosmon`, and
+/// `/cosmon` is the handoff mount point, not a home.
 fn build_auth_claude_state(
     state_dir: &std::path::Path,
     claude_home: &std::path::Path,
@@ -687,7 +686,7 @@ mod anthropic_auth_boot_tests {
         tracing::subscriber::with_default(subscriber, || {
             report_anthropic_auth(
                 api_key.map(|key| (key, AnthropicKeyBackend::OperatorFile)),
-                Path::new("/cosmon/.claude/.credentials.json"),
+                Path::new("/home/cosmon/.claude/.credentials.json"),
                 || verdict,
             );
         });
