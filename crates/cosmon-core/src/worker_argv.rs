@@ -289,7 +289,12 @@ mod tests {
             .render();
         assert_eq!(
             &argv[..4],
-            &["--permission-mode", "bypassPermissions", "--model", "claude-sonnet-5"],
+            &[
+                "--permission-mode",
+                "bypassPermissions",
+                "--model",
+                "claude-sonnet-5"
+            ],
         );
         for absent in [None, Some(""), Some("  ")] {
             let argv = ClaudeLaunch::new(DEFAULT_PERMISSION_MODE)
