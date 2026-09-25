@@ -260,6 +260,7 @@ fn print_grouped_reference() {
     let version = env!("CARGO_PKG_VERSION");
     println!("cs {version} — Cosmon agent orchestrator\n");
     println!("Usage: cs [OPTIONS] <COMMAND>\n");
+    println!("{}", crate::root_help::START_HERE);
 
     let root = Cli::command();
     for group in command_group_layout() {
