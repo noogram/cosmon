@@ -105,8 +105,9 @@ base_url = "http://localhost:8080"
 default_model = "qwen2.5-7b-instruct-q4_k_m"   # copy this from /v1/models
 ```
 
-llama-server has no API-key flag by default; leave `api_key_env` unset —
-the sentinel credential is sent and ignored.
+llama-server checks no key unless started with `--api-key <key>`. Without it,
+leave `api_key_env` unset — the sentinel credential is sent and ignored.
+With it, export the same key and set `api_key_env` to that variable's name.
 
 ## A remote host: reachable, but still `StrictLocal`
 
