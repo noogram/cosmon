@@ -3520,6 +3520,46 @@ components:
           description: |
             Lifecycle status — `pending`, `active`, `running`,
             `completed`, `collapsed`, `frozen`, etc.
+        api_tokens:
+          type: object
+          description: |
+            Harvest-time lower-bound token snapshot observed in the worker's
+            provider transcript. Declarative telemetry only: the worker shares
+            the adapter uid, so this is not billing or quota evidence. Absent
+            before harvest and whenever no attributable transcript was found;
+            absence is never represented as a zero total.
+          required: [tokens_in, tokens_out, invocations]
+          properties:
+            tokens_in:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Fresh input tokens, excluding cache reads and creation.
+            cache_read_tokens:
+              type: integer
+              format: int64
+              minimum: 0
+            cache_creation_tokens:
+              type: integer
+              format: int64
+              minimum: 0
+            tokens_out:
+              type: integer
+              format: int64
+              minimum: 0
+            invocations:
+              type: integer
+              format: int64
+              minimum: 1
+              description: Distinct recorded assistant turns.
+            source:
+              type: string
+              enum: [claude_transcript, codex_rollout]
+            cost_micros_estimated:
+              type: integer
+              format: int64
+              minimum: 0
+              description: Optional legacy estimate; harvest snapshots omit it.
         last_5_events:
           type: array
           maxItems: 5

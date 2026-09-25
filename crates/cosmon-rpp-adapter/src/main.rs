@@ -125,6 +125,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    refuse_token_sink_override()?;
+
     let cli = Cli::parse();
 
     // Operator subcommand path — render-and-exit, never serves.
@@ -497,6 +499,16 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A server partitions token sinks by tenant directory; a process-wide
+/// override would collapse that boundary and is therefore invalid at boot.
+fn refuse_token_sink_override() -> anyhow::Result<()> {
+    anyhow::ensure!(
+        std::env::var_os("COSMON_TOKEN_INSTRUMENTATION_PATH").is_none(),
+        "COSMON_TOKEN_INSTRUMENTATION_PATH is test-only and must not be set for cosmon-rpp-adapter"
+    );
+    Ok(())
+}
+
 /// Execute an operator `nucleon …` verb and exit. Pure with respect to
 /// server state — `render` only validates the four-tuple and prints the
 /// `oidc-identity.toml` body to stdout.
@@ -642,7 +654,7 @@ mod anthropic_auth_boot_tests {
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::Layer;
 
-    use super::report_anthropic_auth;
+    use super::{refuse_token_sink_override, report_anthropic_auth};
 
     const ALL_VERDICTS: [CredentialsVerdict; 6] = [
         CredentialsVerdict::Absent,
@@ -652,6 +664,17 @@ mod anthropic_auth_boot_tests {
         CredentialsVerdict::Refreshable,
         CredentialsVerdict::Usable,
     ];
+
+    #[test]
+    fn token_sink_override_is_rejected_at_boot() {
+        std::env::set_var(
+            "COSMON_TOKEN_INSTRUMENTATION_PATH",
+            "/tmp/cross-tenant.jsonl",
+        );
+        let result = refuse_token_sink_override();
+        std::env::remove_var("COSMON_TOKEN_INSTRUMENTATION_PATH");
+        assert!(result.is_err());
+    }
 
     /// Records `(level, message)` for every event, so a test can read
     /// what the probe actually told the operator.

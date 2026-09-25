@@ -2282,6 +2282,7 @@ pub async fn done_molecule(
     let (outcome, non_integration) = run_harvest_effect(
         &state,
         &tenant_root,
+        &spark.noyau,
         &molecule_id,
         &options,
         &spark.request_id,
@@ -2341,6 +2342,7 @@ fn harvest_success_body(
 async fn run_harvest_effect(
     state: &Arc<AppState>,
     tenant_root: &std::path::Path,
+    tenant: &crate::nucleon_map::Noyau,
     molecule_id: &MoleculeId,
     options: &HarvestOptions,
     request_id: &str,
@@ -2348,6 +2350,7 @@ async fn run_harvest_effect(
     let effect = Arc::clone(&state.harvest_effect);
     let root = tenant_root.to_path_buf();
     let id = molecule_id.clone();
+    let tenant = tenant.clone();
     let opts = options.clone();
     let state_dir = tenant_root.join(".cosmon").join("state");
     let config_path = tenant_root.join(".cosmon").join("config.toml");
@@ -2363,6 +2366,24 @@ async fn run_harvest_effect(
     };
 
     let joined = tokio::task::spawn_blocking(move || {
+        match crate::harvest_effect::snapshot_api_tokens(&root, &tenant, &id) {
+            Ok(crate::harvest_effect::TokenSnapshotOutcome::CwdOutsideTenant) => {
+                tracing::warn!(
+                    molecule_id = %id,
+                    tenant = %tenant,
+                    "recorded worker cwd escaped the tenant root; token snapshot rejected"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    molecule_id = %id,
+                    tenant = %tenant,
+                    error = %error,
+                    "token snapshot unavailable; continuing harvest without api_tokens"
+                );
+            }
+            Ok(_) => {}
+        }
         let store = FileStore::new(&state_dir);
         let cfg = cosmon_filestore::load_project_config(&config_path)
             .unwrap_or_else(|_| cosmon_core::config::ProjectConfig::default());
