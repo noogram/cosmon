@@ -61,14 +61,14 @@ use cosmon_core::config::AdaptersConfig;
 use cosmon_core::error::CosmonError;
 use cosmon_core::harness_settings::UnsupportedHarnessCarrier;
 use cosmon_core::id::{AgentId, MoleculeId, WorkerId};
-use cosmon_core::injection::{InjectionOrigin, InjectionProvenance};
+use cosmon_core::injection::{BriefingDeliveryOutcome, InjectionOrigin, InjectionProvenance};
 use cosmon_core::root_spawn_policy::RootSpawnDecision;
 use cosmon_core::spawn_seam::UnknownAdapter;
 use cosmon_core::tackle::TackledBy;
 use cosmon_core::tackle_plan::{
     resolve_selection, MoleculeBrief, PromptRequest, SelectionRequest, TacklePlan,
 };
-use cosmon_core::transport::{AgentDefinition, RuntimeConfig, TransportBackend};
+use cosmon_core::transport::{AgentDefinition, RuntimeConfig, TransportBackend, TransportError};
 use cosmon_filestore::FileStore;
 use cosmon_state::events::worker_spawn::{
     emit_adapter_selected, emit_model_selected, emit_worker_spawn_rolled_back,
@@ -579,6 +579,69 @@ pub trait WorkerLaunchPolicy: std::fmt::Debug + Send + Sync {
     fn posture(&self, ctx: &LaunchContext<'_>) -> LaunchPosture;
 }
 
+/// What a [`BriefingDelivery`] port is handed for one freshly spawned worker.
+#[derive(Debug, Clone, Copy)]
+pub struct BriefingDeliveryContext<'a> {
+    /// The molecule the worker was dispatched for.
+    pub molecule: &'a MoleculeId,
+    /// The adapter the worker runs (`claude`, `codex`, …) — what tells the
+    /// port which readiness screen to wait for.
+    pub adapter: &'a str,
+    /// The worker the briefing is addressed to.
+    pub worker: &'a WorkerId,
+    /// The briefing text itself.
+    pub briefing: &'a str,
+    /// Provenance stamped on the briefing paste.
+    pub writer: &'a InjectionProvenance,
+    /// Provenance stamped on every re-issued submit keystroke.
+    pub submit: &'a InjectionProvenance,
+}
+
+/// What a [`BriefingDelivery`] port observed after writing a briefing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BriefingDeliveryReport {
+    /// The typed outcome, recorded as an `EventV2::BriefingDelivery` row.
+    pub outcome: BriefingDeliveryOutcome,
+    /// Submit keystrokes the port issued after the injection's own.
+    pub resubmits: u32,
+    /// Time spent observing the composer.
+    pub elapsed: std::time::Duration,
+}
+
+/// The injectable port that delivers a briefing into a freshly spawned
+/// worker and reports whether it was submitted (issue #81).
+///
+/// # Why a port
+///
+/// Without one the executor writes the briefing the instant the session
+/// exists and never looks again. A Claude worker that is still drawing its
+/// startup screen keeps the paste and drops the submit keystroke, and the
+/// worker then waits at its prompt until someone presses Enter — issue #81
+/// point 1, the API-path recurrence of issue #40. Waiting for the TUI and
+/// reading its composer are adapter-specific I/O (`cosmon-transport`'s
+/// readiness probes and composer classifier), which this crate does not
+/// depend on; the embedder that owns the real transport supplies them.
+///
+/// `Debug` is a supertrait so [`LibraryExecutor`] keeps its derived `Debug`;
+/// `Send + Sync` because the executor crosses a `spawn_blocking` boundary in
+/// the adapter.
+pub trait BriefingDelivery: std::fmt::Debug + Send + Sync {
+    /// Wait for the worker to accept input, write the briefing, and observe
+    /// whether it left the composer.
+    ///
+    /// # Errors
+    ///
+    /// A [`TransportError`] when the worker never became ready or the
+    /// injection itself failed. A briefing that was written but not seen to
+    /// be submitted is a [`BriefingDeliveryReport`], not an error: the
+    /// executor records it and decides what it costs.
+    fn deliver(
+        &self,
+        backend: &dyn TransportBackend,
+        ctx: &BriefingDeliveryContext<'_>,
+    ) -> Result<BriefingDeliveryReport, TransportError>;
+}
+
 /// Which of a dispatch's filesystem resources **this attempt actually
 /// created** — the receipt [`create_worktree`] hands back so rollback can
 /// tell its own allocations from someone else's.
@@ -802,6 +865,12 @@ pub struct LibraryExecutor<B> {
     /// unlike the empty argv issue #75 reported — see
     /// [`Self::with_launch_policy`] for what an embedder adds on top.
     launch: Option<std::sync::Arc<dyn WorkerLaunchPolicy>>,
+    /// How the briefing reaches the spawned worker.
+    ///
+    /// `None` writes it once through the backend and does not look again —
+    /// enough for a mock backend, not for a real TUI. See
+    /// [`Self::with_briefing_delivery`].
+    delivery: Option<std::sync::Arc<dyn BriefingDelivery>>,
 }
 
 impl<B: TransportBackend> LibraryExecutor<B> {
@@ -823,6 +892,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             paths,
             preflight: None,
             launch: None,
+            delivery: None,
         }
     }
 
@@ -838,6 +908,21 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     #[must_use]
     pub fn with_launch_policy(mut self, launch: std::sync::Arc<dyn WorkerLaunchPolicy>) -> Self {
         self.launch = Some(launch);
+        self
+    }
+
+    /// Install the port that waits for the worker, writes its briefing, and
+    /// confirms the submit (issue #81).
+    ///
+    /// An embedder spawning real TUI workers must install one. Omitting it
+    /// keeps the fire-and-forget write, which leaves a briefing pasted but
+    /// unsubmitted whenever the worker was not yet ready for it.
+    #[must_use]
+    pub fn with_briefing_delivery(
+        mut self,
+        delivery: std::sync::Arc<dyn BriefingDelivery>,
+    ) -> Self {
+        self.delivery = Some(delivery);
         self
     }
 
@@ -1244,7 +1329,13 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // contract, kept — UNLESS the attempt may have left a live session
         // behind, in which case both are retained (§8ab, see
         // `SpawnAttemptFailure`).
-        match self.spawn_recorded(store, &agent, &recorded, &plan.prompt) {
+        match self.spawn_recorded(
+            store,
+            &agent,
+            &recorded,
+            plan.adapter.as_str(),
+            &plan.prompt,
+        ) {
             Ok(()) => {}
             Err(SpawnAttemptFailure::Rolled(reason)) => {
                 dispatch_ledger::rollback_dispatch(store, &pre_dispatch_snapshot, &wid);
@@ -1309,6 +1400,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         store: &FileStore,
         agent: &AgentDefinition,
         recorded: &dispatch_ledger::DispatchRecorded,
+        adapter: &str,
         prompt: &str,
     ) -> Result<(), SpawnAttemptFailure> {
         let handle = self
@@ -1324,14 +1416,11 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // would leave it running while the caller erased its registration
         // and its working directory. Terminate it first; only a CONFIRMED
         // teardown licenses the ordinary rollback.
-        if let Err(delivery) =
-            self.backend
-                .send_input_observed(recorded.worker(), prompt, &provenance)
-        {
+        if let Err(reason) = self.deliver_briefing(store, recorded, adapter, prompt, &provenance) {
             return Err(match self.backend.terminate(recorded.worker()) {
-                Ok(()) => SpawnAttemptFailure::Rolled(delivery.to_string()),
+                Ok(()) => SpawnAttemptFailure::Rolled(reason),
                 Err(termination) => SpawnAttemptFailure::Unterminated {
-                    reason: delivery.to_string(),
+                    reason,
                     termination: termination.to_string(),
                 },
             });
@@ -1347,6 +1436,70 @@ impl<B: TransportBackend> LibraryExecutor<B> {
                     recorded.molecule()
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Deliver the briefing through the installed [`BriefingDelivery`] port,
+    /// or write it once when none is installed.
+    ///
+    /// The port's report is recorded as an `EventV2::BriefingDelivery` row in
+    /// the molecule's directory — the same row `cs tackle` writes — so a
+    /// reader can tell a delivered briefing from a stranded one on this path
+    /// too. Only [`BriefingDeliveryOutcome::Undelivered`] fails the spawn:
+    /// the composer was seen still holding the briefing for the port's whole
+    /// budget, so the worker would otherwise wait for a keystroke nobody is
+    /// there to send. `Unobservable` and `SessionGone` proceed, as they do in
+    /// `cs tackle`'s claude arm.
+    fn deliver_briefing(
+        &self,
+        store: &FileStore,
+        recorded: &dispatch_ledger::DispatchRecorded,
+        adapter: &str,
+        prompt: &str,
+        writer: &InjectionProvenance,
+    ) -> Result<(), String> {
+        let Some(delivery) = &self.delivery else {
+            return self
+                .backend
+                .send_input_observed(recorded.worker(), prompt, writer)
+                .map_err(|e| e.to_string());
+        };
+        let submit = InjectionProvenance::new(
+            InjectionOrigin::TackleBriefing,
+            "library-executor briefing submit",
+        );
+        let report = delivery
+            .deliver(
+                &self.backend,
+                &BriefingDeliveryContext {
+                    molecule: recorded.molecule(),
+                    adapter,
+                    worker: recorded.worker(),
+                    briefing: prompt,
+                    writer,
+                    submit: &submit,
+                },
+            )
+            .map_err(|e| e.to_string())?;
+        cosmon_state::events::input_injection::emit_briefing_delivery(
+            &store.molecule_dir(recorded.molecule()),
+            Some(recorded.molecule()),
+            recorded.worker(),
+            adapter,
+            writer,
+            report.outcome,
+            report.resubmits,
+            u64::try_from(report.elapsed.as_millis()).unwrap_or(u64::MAX),
+        );
+        if report.outcome == BriefingDeliveryOutcome::Undelivered {
+            return Err(format!(
+                "briefing not delivered to worker {}: the composer still held it \
+                 after {} re-issued submit(s) in {:?} (issue #81)",
+                recorded.worker().name(),
+                report.resubmits,
+                report.elapsed
+            ));
         }
         Ok(())
     }

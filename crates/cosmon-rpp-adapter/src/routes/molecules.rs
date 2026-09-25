@@ -1584,7 +1584,10 @@ pub async fn tackle_molecule(
         // launch posture. Without it the dispatch still carries its permission
         // mode and its guards — what the policy adds is the briefing receipt
         // and the contract-20A privilege drop.
-        .with_launch_policy(tenant_launch_policy());
+        .with_launch_policy(tenant_launch_policy())
+        // Issue #81: wait for the worker's composer before pasting, and
+        // re-press submit until the briefing leaves it.
+        .with_briefing_delivery(tenant_briefing_delivery());
     let dispatch_id = molecule_id.clone();
     // `Box` the typed error across the join so clippy's large-Err bound
     // holds; unboxed again at the match below.
@@ -1692,6 +1695,11 @@ fn tenant_preflight(
 /// whether it will ever dispatch.
 fn tenant_launch_policy() -> std::sync::Arc<crate::launch::RppWorkerLaunch> {
     std::sync::Arc::new(crate::launch::RppWorkerLaunch::resolve())
+}
+
+/// The briefing delivery both dispatch routes install (issue #81).
+fn tenant_briefing_delivery() -> std::sync::Arc<crate::delivery::RppBriefingDelivery> {
+    std::sync::Arc::new(crate::delivery::RppBriefingDelivery::default())
 }
 
 /// Map a library-dispatch failure onto the wire.
@@ -1973,7 +1981,10 @@ pub async fn run_molecule(
         // preflight is installed on both: a posture installed on one seam and
         // not the other reproduces the defect one layer down, in a DAG full of
         // workers that each read as healthy.
-        .with_launch_policy(tenant_launch_policy());
+        .with_launch_policy(tenant_launch_policy())
+        // Issue #81: wait for the worker's composer before pasting, and
+        // re-press submit until the briefing leaves it.
+        .with_briefing_delivery(tenant_briefing_delivery());
     spawn_resident_drain(
         Arc::clone(&state),
         tenant_root,
