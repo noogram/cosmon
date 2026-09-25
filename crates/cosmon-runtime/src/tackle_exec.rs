@@ -1255,6 +1255,21 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         }
     }
 
+    /// Ask the launch policy, when one is installed, to pre-grant the worker's
+    /// startup consent (issue #81 point 4), typing a failure as a refusal.
+    fn pregrant_startup_consent(&self, ctx: &LaunchContext<'_>) -> Result<(), TackleExecError> {
+        let Some(policy) = self.launch.as_ref() else {
+            return Ok(());
+        };
+        policy.pregrant_startup_consent(ctx).map_err(|detail| {
+            TackleExecError::StartupConsentRefused {
+                id: Box::new(ctx.molecule.clone()),
+                adapter: ctx.adapter.to_owned(),
+                detail,
+            }
+        })
+    }
+
     /// Ledger → spawn inside an already-created worktree.
     ///
     /// Split from [`Self::execute`] so the caller owns the worktree cleanup
@@ -1330,15 +1345,7 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // nobody attached. After the root gate, so a refused root dispatch
         // writes nothing into a Claude config; before the ledger commit, so a
         // refusal strands no dispatch record.
-        if let Some(policy) = self.launch.as_ref() {
-            policy
-                .pregrant_startup_consent(&launch_ctx)
-                .map_err(|detail| TackleExecError::StartupConsentRefused {
-                    id: Box::new(plan.molecule_id.clone()),
-                    adapter: plan.adapter.as_str().to_owned(),
-                    detail,
-                })?;
-        }
+        self.pregrant_startup_consent(&launch_ctx)?;
         let (command, args) = worker_launch_argv(
             plan.adapter.as_str(),
             worktree_path,
