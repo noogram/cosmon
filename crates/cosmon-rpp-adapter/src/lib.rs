@@ -422,6 +422,7 @@ pub fn router(state: AppState) -> Router {
     let shared = Arc::new(state);
     Router::new()
         .route("/v1/molecules", get(routes::molecules::list_molecules))
+        .route("/v1/vitals", get(routes::vitals::get_vitals))
         .route("/v1/molecules/{id}", get(routes::molecules::get_molecule))
         .route("/v1/molecules", post(routes::molecules::post_molecule))
         .route(

@@ -250,7 +250,11 @@ Rule 3 runs over the routes the canon classes `tenant-verb`. Two kinds
 of live route are outside it, both deliberately:
 
 - **`adapter-only` routes** — artifact I/O, the Claude PKCE flow, the
-  SSE streams, noyau/worker discovery, the operator admin plane. They
+  SSE streams, noyau/worker discovery, the operator admin plane, and
+  `GET /v1/vitals`. Vitals is the per-tenant molecule-keyed fleet view
+  from issue #78 / ADR-180: stored lifecycle status stays separate from
+  observed worker health, and no operator-wide `cs peek` sensorium crosses
+  the tenant boundary. These routes
   have no `cs` verb by construction, so a `cs`-verb registry carries no
   row for them. Requiring one would mean inventing verbs.
 - **The six D-AVATAR canal routes** (`POST /v1/avatar/converse` and
