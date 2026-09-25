@@ -440,12 +440,12 @@ fn generate_cosmon_section(_project_root: &Path) -> String {
 ///
 /// Same [`COSMON_ORCHESTRATION_BODY`] as `generate_cosmon_section`
 /// (private to this module), wrapped in skill frontmatter instead of
-/// `CLAUDE.md` markers. Shipped
-/// at `skills/cosmon/SKILL.md` in this repository (regenerate with
-/// `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`); a user
-/// installs it by symlinking that directory into `~/.claude/skills/`
-/// (loads in every repository, no `cs init` required) or into a single
-/// project's `.claude/skills/` (project-scoped). See
+/// `CLAUDE.md` markers. Shipped at `tools/cosmon-skill/SKILL.md` in this
+/// repository — same layout as the existing `tools/cmb-skill/` (regenerate
+/// with `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`); a user
+/// installs it with `tools/cosmon-skill/install.sh`, which copies it into
+/// `~/.claude/skills/cosmon/` (user-level — loads in every repository, no
+/// `cs init` required). See
 /// `docs/book/src/how-to/pilot-in-natural-language.md`.
 #[must_use]
 pub fn generate_cosmon_skill_md() -> String {
@@ -456,6 +456,9 @@ pub fn generate_cosmon_skill_md() -> String {
          correct, and merge a unit of work. Use when the user wants to delegate a task to an AI \
          agent through cosmon, or mentions `cs`, nucleate, tackle, molecule, whisper, or a cosmon \
          project.\n\
+         user_invocable: true\n\
+         allowed_tools:\n\
+         \x20\x20- Bash\n\
          ---\n\
          \n\
          # Cosmon\n\
@@ -1189,12 +1192,12 @@ mod orchestration_source_tests {
     }
 
     fn skill_md_path() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../skills/cosmon/SKILL.md")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tools/cosmon-skill/SKILL.md")
     }
 
-    /// Golden test for the committed `skills/cosmon/SKILL.md`, mirroring
-    /// the `man/cs.1` / `docs/book/src/reference/*` pattern: the file is
-    /// generated, never hand-edited. Regenerate with
+    /// Golden test for the committed `tools/cosmon-skill/SKILL.md`,
+    /// mirroring the `man/cs.1` / `docs/book/src/reference/*` pattern: the
+    /// file is generated, never hand-edited. Regenerate with
     /// `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`.
     #[test]
     fn skill_md_matches_generated_source() {
@@ -1202,14 +1205,14 @@ mod orchestration_source_tests {
         let path = skill_md_path();
 
         if std::env::var("SKILL_UPDATE").is_ok() {
-            std::fs::write(&path, &generated).expect("write skills/cosmon/SKILL.md");
+            std::fs::write(&path, &generated).expect("write tools/cosmon-skill/SKILL.md");
             return;
         }
 
-        let committed = std::fs::read_to_string(&path).expect("read skills/cosmon/SKILL.md");
+        let committed = std::fs::read_to_string(&path).expect("read tools/cosmon-skill/SKILL.md");
         assert_eq!(
             generated, committed,
-            "skills/cosmon/SKILL.md is stale — regenerate with \
+            "tools/cosmon-skill/SKILL.md is stale — regenerate with \
              `SKILL_UPDATE=1 cargo test -p cosmon-filestore skill_md`"
         );
     }

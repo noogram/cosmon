@@ -150,7 +150,7 @@ not something cosmon maintains per tool.
 
 Claude Code users have a second option that needs no `cs init` in the target
 repository first: the same Orchestration text above also ships as a Claude Code
-skill, `skills/cosmon/SKILL.md` in this repository. One source text, two
+skill, `tools/cosmon-skill/SKILL.md` in this repository. One source text, two
 renderings — the `## Cosmon — Orchestration` block `cs init --upgrade` writes
 into `CLAUDE.md`/`AGENTS.md`, and this skill file — generated from the same
 constant (`cosmon_filestore::project_upgrade::generate_cosmon_skill_md`), so a
@@ -160,15 +160,16 @@ Install it once, at the user level, and it loads on demand in every
 repository — including one that has never run `cs init`:
 
 ```sh
-mkdir -p ~/.claude/skills
-ln -s /path/to/cosmon/skills/cosmon ~/.claude/skills/cosmon
+./tools/cosmon-skill/install.sh
 ```
 
-Or, to scope it to a single project instead, symlink into that project's
-`.claude/skills/` directory. Either way, the skill costs nothing when unused —
-Claude Code only loads it when you ask it to pilot cosmon — and it carries the
-same content as the CLAUDE.md/AGENTS.md pointer, so a repository with `cs
-init` already run and a repository without it read the same instructions.
+That copies `SKILL.md` into `~/.claude/skills/cosmon/` (idempotent — safe to
+re-run after an update). To scope it to a single project instead, copy or
+symlink `SKILL.md` into that project's `.claude/skills/cosmon/` directory.
+Either way, the skill costs nothing when unused — Claude Code only loads it
+when you ask it to pilot cosmon — and it carries the same content as the
+CLAUDE.md/AGENTS.md pointer, so a repository with `cs init` already run and a
+repository without it read the same instructions.
 
 ## Related
 

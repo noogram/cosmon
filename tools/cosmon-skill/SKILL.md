@@ -1,6 +1,9 @@
 ---
 name: cosmon
 description: Pilot cosmon (the `cs` CLI) by natural language — nucleate, tackle, watch, correct, and merge a unit of work. Use when the user wants to delegate a task to an AI agent through cosmon, or mentions `cs`, nucleate, tackle, molecule, whisper, or a cosmon project.
+user_invocable: true
+allowed_tools:
+  - Bash
 ---
 
 # Cosmon
