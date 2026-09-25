@@ -1445,6 +1445,7 @@ dependencies = [
  "cosmon-process-witness",
  "cosmon-remote",
  "cosmon-runtime",
+ "cosmon-session-probe",
  "cosmon-state",
  "cosmon-surface-canon",
  "cosmon-thin-cli",

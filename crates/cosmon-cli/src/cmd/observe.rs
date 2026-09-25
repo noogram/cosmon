@@ -359,18 +359,24 @@ fn run_detail(
     // canonical token-meter sink keyed by `molecule_id`; silent when no
     // LLM call was recorded for the molecule (omit-if-none).
     if let Some(tokens) = &view.api_tokens {
-        #[allow(clippy::cast_precision_loss)]
-        let cost_usd = tokens.cost_micros_estimated as f64 / 1_000_000.0;
         println!();
         println!("  {}", "API tokens:".bold());
         println!(
-            "    {} in / {} out ({} total) — {} call{} — ${:.4} est.",
+            "    {} fresh in / {} cache read / {} cache create / {} out ({} total) — {} turn{}{}",
             tokens.tokens_in,
+            tokens.cache_read_tokens.unwrap_or(0),
+            tokens.cache_creation_tokens.unwrap_or(0),
             tokens.tokens_out,
             tokens.total_tokens(),
             tokens.invocations,
             if tokens.invocations == 1 { "" } else { "s" },
-            cost_usd,
+            tokens
+                .cost_micros_estimated
+                .map_or_else(String::new, |cost| {
+                    #[allow(clippy::cast_precision_loss)]
+                    let usd = cost as f64 / 1_000_000.0;
+                    format!(" — ${usd:.4} est.")
+                }),
         );
     }
 

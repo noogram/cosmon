@@ -57,6 +57,7 @@ cosmon-process-witness = { workspace = true }
 # executor + DAG drain loop, and the tmux transport port their spawns
 # go through — the replacement of the retired `cs` subprocess envelope.
 cosmon-runtime = { workspace = true }
+cosmon-session-probe = { workspace = true }
 cosmon-state = { path = "../cosmon-state" }
 cosmon-transport = { workspace = true }
 # Deterministic CBOR canon for the ScopeBadge (ADR-0023 MVP-B, offline-first).
