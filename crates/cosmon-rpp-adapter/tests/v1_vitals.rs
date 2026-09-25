@@ -24,17 +24,35 @@ fn make_state(
     security_dir: &std::path::Path,
     backend: cosmon_transport::MockBackend,
 ) -> AppState {
+    make_state_with_nucleons(
+        oidc,
+        tenants,
+        security_dir,
+        backend,
+        vec![("sub-a", "nuc-a", "a", "cosmon-rpp-a")],
+    )
+}
+
+fn make_state_with_nucleons(
+    oidc: &OidcMock,
+    tenants: &TenantWorkspaces,
+    security_dir: &std::path::Path,
+    backend: cosmon_transport::MockBackend,
+    nucleons: Vec<(&str, &str, &str, &str)>,
+) -> AppState {
     let _ = oidc.write_jwks_file(security_dir).unwrap();
     let jwks = JwksStore::load(security_dir).unwrap();
-    let bindings = HabilitationMap::builder()
-        .insert(
+    let mut builder = HabilitationMap::builder();
+    for (sub, nucleon, noyau, audience) in nucleons {
+        builder = builder.insert(
             oidc.issuer(),
-            "sub-a",
-            HabilitationId::new("nuc-a"),
-            Noyau::new("a"),
-            "cosmon-rpp-a",
-        )
-        .build();
+            sub,
+            HabilitationId::new(nucleon),
+            Noyau::new(noyau),
+            audience,
+        );
+    }
+    let bindings = builder.build();
     let rate_limiter = IngressRateLimiter::new(security_dir.join("oidc-rate-limit"), 64.0, 0.0);
 
     AppState {
@@ -160,4 +178,96 @@ async fn route_distinguishes_live_worker_orphan_and_unassigned_molecule() {
     assert_eq!(health("task-20260925-bbbb"), Some("orphaned"));
     assert_eq!(health("task-20260925-cccc"), Some("unassigned"));
     assert!(rows.iter().all(|row| row["id"] != "task-20260925-dddd"));
+}
+
+#[tokio::test]
+async fn cross_tenant_isolation_a_cannot_see_b_vitals() {
+    let mut tenants = TenantWorkspaces::new();
+    let _ = tenants.add("a");
+    let tenant_b = tenants.add("b");
+    tenant_b
+        .insert_molecule("task-20260925-eeee", &process("b-worker"))
+        .unwrap();
+
+    let backend = cosmon_transport::MockBackend::new();
+    backend
+        .spawn(
+            &AgentDefinition {
+                id: AgentId::new("b-worker").unwrap(),
+                role: AgentRole::Implementation,
+                command: "worker".to_owned(),
+                args: vec![],
+                cwd: None,
+            },
+            &RuntimeConfig::default(),
+        )
+        .unwrap();
+
+    let oidc = OidcMock::start_with(OidcMockConfig {
+        audiences: vec!["cosmon-rpp-a".to_owned(), "cosmon-rpp-b".to_owned()],
+        ..OidcMockConfig::default()
+    })
+    .await;
+    let security_dir = tempfile::tempdir().unwrap();
+    let state = make_state_with_nucleons(
+        &oidc,
+        &tenants,
+        security_dir.path(),
+        backend,
+        vec![
+            ("sub-a", "nuc-a", "a", "cosmon-rpp-a"),
+            ("sub-b", "nuc-b", "b", "cosmon-rpp-b"),
+        ],
+    );
+    let app = router(state);
+
+    // sub-a → noyau "a" → MUST not see "b"'s molecule.
+    let jwt_a = oidc.issue(&IssueJwt {
+        subject: "sub-a",
+        audience: Some("cosmon-rpp-a"),
+        scopes: &["cosmon:molecule:read"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-vitals-cross-a"),
+    });
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/v1/vitals")
+                .header("Authorization", format!("Bearer {jwt_a}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 32_768).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["vitals"]["counts"]["molecules"], 0);
+    assert_eq!(body["vitals"]["molecules"], Value::Array(vec![]));
+
+    // Sanity: sub-b → noyau "b" → DOES see its own molecule.
+    let jwt_b = oidc.issue(&IssueJwt {
+        subject: "sub-b",
+        audience: Some("cosmon-rpp-b"),
+        scopes: &["cosmon:molecule:read"],
+        lifetime_secs: Some(60),
+        jti: Some("jti-vitals-cross-b"),
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/v1/vitals")
+                .header("Authorization", format!("Bearer {jwt_b}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 32_768).await.unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["vitals"]["counts"]["molecules"], 1);
+    let rows = body["vitals"]["molecules"].as_array().unwrap();
+    assert_eq!(rows[0]["id"], "task-20260925-eeee");
 }
