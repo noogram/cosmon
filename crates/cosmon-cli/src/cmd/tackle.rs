@@ -154,16 +154,16 @@ pub struct Args {
     ///
     /// Resolution order (highest priority first): this flag → formula-step
     /// `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var →
-    /// per-galaxy `.cosmon/config.toml::[adapters.default]` → global
-    /// `~/.config/cosmon/config.toml::[adapters.default]` → built-in
+    /// per-galaxy `.cosmon/config.toml::[adapters] default = "…"` → global
+    /// `~/.config/cosmon/config.toml::[adapters] default = "…"` → built-in
     /// `"local"` (the Ollama-backed in-process loop).
     /// Values are looked up against the registered Adapter table (`claude`,
     /// `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown
     /// name aborts the dispatch with a typed `AdapterNotFound` carrying the
     /// list of available names — no silent fallback. To restore the legacy
     /// Claude-Code default pass `--adapter claude`, `export
-    /// COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] =
-    /// "claude"` in either config file.
+    /// COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters]` then
+    /// `default = "claude"` in either config file.
     ///
     /// # Capability gate (noogram/cosmon #4)
     ///
@@ -1115,6 +1115,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .as_ref()
             .and_then(|cfg| cfg.entry(adapter.as_str()));
         let base_url = resolve_local_base_url(adapter_entry);
+        let api_key = local_api_key(adapter_entry);
         let (effective_model, origin) =
             resolve_local_model_with_origin(preferred_model.as_deref(), adapter_entry);
 
@@ -1131,6 +1132,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             if let Err(e) = preflight_local_adapter_model(
                 &base_url,
                 &effective_model,
+                &api_key,
                 std::time::Duration::from_secs(PREFLIGHT_TIMEOUT_SECS),
             ) {
                 return Err(anyhow::anyhow!(
@@ -4516,8 +4518,9 @@ fn spawn_llama_session(
     Err(anyhow::anyhow!(
         "cs tackle: the in-process `--adapter llama-cpp` loop was removed in \
          the cosmon scope trim (ADR-126); no local llama.cpp adapter ships in \
-         this build. Use `--adapter ollama` for a local OpenAI-compatible \
-         endpoint, or another configured adapter."
+         this build. Run a llama-server as an OpenAI-compatible endpoint and \
+         point `--adapter local` at it with [adapters.local].base_url, or use \
+         another configured adapter."
     ))
 }
 
@@ -6546,7 +6549,7 @@ const DEFAULT_LOCAL_MODEL: &str = "qwen3:8b";
 /// would be worse than no preflight at all: it would certify a host the
 /// work never touches.
 fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
-    adapter_entry
+    let raw = adapter_entry
         .and_then(|e| e.base_url.clone())
         .or_else(|| {
             std::env::var("COSMON_LOCAL_BASE_URL")
@@ -6572,7 +6575,21 @@ fn resolve_local_base_url(adapter_entry: Option<&AdapterEntry>) -> String {
                 .ok()
                 .filter(|s| !s.is_empty())
         })
-        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned())
+        .unwrap_or_else(|| DEFAULT_LOCAL_BASE_URL.to_owned());
+    normalize_local_base_url(&raw)
+}
+
+/// Normalize the local adapter's host root once, before either the preflight
+/// or the detached worker consumes it.
+///
+/// OpenAI-compatible server documentation commonly presents `…/v1`, while
+/// both local paths append their own versioned route. Keeping the normalized
+/// root at this shared seam prevents the preflight and worker from diverging.
+fn normalize_local_base_url(raw: &str) -> String {
+    raw.trim_end_matches('/')
+        .strip_suffix("/v1")
+        .unwrap_or(raw.trim_end_matches('/'))
+        .to_owned()
 }
 
 /// Normalize an `OLLAMA_HOST` value into a full base URL the HTTP client can
@@ -6747,6 +6764,12 @@ const PREFLIGHT_TIMEOUT_SECS: u64 = 3;
 enum LocalPreflightError {
     /// The backend did not answer. The work never had a chance to run.
     Unreachable { base_url: String, detail: String },
+    /// The server answered but rejected the configured credential. This is
+    /// distinct from connectivity: changing the endpoint cannot repair it.
+    Unauthorized {
+        base_url: String,
+        status: reqwest::StatusCode,
+    },
     /// The backend answered, but does not serve the resolved model.
     /// `available` is what it *does* serve — empty means a bare daemon
     /// with nothing pulled, which is its own distinct diagnosis.
@@ -6760,12 +6783,27 @@ enum LocalPreflightError {
 impl std::fmt::Display for LocalPreflightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unreachable { base_url, detail } => write!(
+            Self::Unreachable { base_url, detail } => {
+                let start = if is_ollama_base_url(base_url) {
+                    "Start it (`ollama serve`)"
+                } else {
+                    "Check that the server is running"
+                };
+                let claude = claude_fallback_hint();
+                write!(
+                    f,
+                    "refusing to dispatch: the local adapter's backend at {base_url} \
+                     is not reachable ({detail}). {start} or point the adapter elsewhere \
+                     with [adapters.local].base_url / COSMON_LOCAL_BASE_URL.{claude} \
+                     The molecule is untouched and still tacklable — nothing was spawned \
+                     and nothing collapsed."
+                )
+            }
+            Self::Unauthorized { base_url, status } => write!(
                 f,
-                "refusing to dispatch: the local adapter's backend at {base_url} \
-                 is not reachable ({detail}). Start it (`ollama serve`) or point \
-                 the adapter elsewhere with [adapters.local].base_url / \
-                 COSMON_LOCAL_BASE_URL. The molecule is untouched and still \
+                "refusing to dispatch: the local adapter's backend at {base_url} rejected \
+                 its credential (HTTP {status}). Check [adapters.local].api_key_env and \
+                 the named environment variable. The molecule is untouched and still \
                  tacklable — nothing was spawned and nothing collapsed."
             ),
             Self::ModelNotServed {
@@ -6774,22 +6812,78 @@ impl std::fmt::Display for LocalPreflightError {
                 available,
             } => {
                 let served = if available.is_empty() {
-                    "it serves no models at all — none have been pulled".to_owned()
+                    "it serves no models at all".to_owned()
                 } else {
                     format!("it serves: {}", available.join(", "))
+                };
+                let repair = if is_ollama_base_url(base_url) {
+                    format!("Pull it (`ollama pull {model})")
+                } else if available.is_empty() {
+                    "Check the server's configured model inventory".to_owned()
+                } else {
+                    format!(
+                        "Set COSMON_LOCAL_MODEL={} (one of the served ids: {})",
+                        available[0],
+                        available.join(", ")
+                    )
                 };
                 write!(
                     f,
                     "refusing to dispatch: the local adapter resolved to model \
                      '{model}', but the backend at {base_url} cannot serve it — \
-                     {served}. Pull it (`ollama pull {model}`) or pin one that \
-                     exists via --model / [adapters.local].default_model / \
-                     COSMON_LOCAL_MODEL. The molecule is untouched and still \
+                     {served}. {repair} or pin one that exists via --model / \
+                     [adapters.local].default_model / COSMON_LOCAL_MODEL. \
+                     The molecule is untouched and still \
                      tacklable — nothing was spawned and nothing collapsed."
                 )
             }
         }
     }
+}
+
+/// Whether the endpoint is recognisably the conventional Ollama deployment.
+///
+/// The `local` adapter deliberately supports arbitrary OpenAI-compatible
+/// servers, so Ollama-specific repairs are reserved for its conventional port
+/// or an endpoint whose hostname identifies it.
+fn is_ollama_base_url(base_url: &str) -> bool {
+    let normalized = base_url.to_ascii_lowercase();
+    normalized.contains("ollama")
+        || normalized.contains("localhost:11434")
+        || normalized.contains("127.0.0.1:11434")
+        || normalized.contains("[::1]:11434")
+}
+
+/// Optional recovery hint for installations that already have Claude Code.
+fn claude_fallback_hint() -> &'static str {
+    let available = std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("claude").is_file()));
+    if available {
+        " Or dispatch with `--adapter claude`."
+    } else {
+        ""
+    }
+}
+
+/// Resolve the configured credential for an OpenAI-compatible local server.
+/// Ollama ignores the sentinel; servers that require authentication receive
+/// the value declared by their adapter row.
+fn local_api_key(adapter_entry: Option<&AdapterEntry>) -> String {
+    local_api_key_from(adapter_entry, |name| std::env::var(name).ok())
+}
+
+/// Apply the local credential policy to a supplied environment lookup.
+/// Keeping the lookup injectable makes the configured binding testable without
+/// mutating the process environment shared by parallel tests.
+fn local_api_key_from<F>(adapter_entry: Option<&AdapterEntry>, lookup: F) -> String
+where
+    F: FnOnce(&str) -> Option<String>,
+{
+    adapter_entry
+        .and_then(|entry| entry.api_key_env.as_deref())
+        .and_then(lookup)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "ollama".to_owned())
 }
 
 /// Ollama's OpenAI-compat `/v1/models` envelope.
@@ -6829,6 +6923,7 @@ struct PreflightModelEntry {
 fn preflight_local_adapter_model(
     base_url: &str,
     model: &str,
+    api_key: &str,
     timeout: std::time::Duration,
 ) -> Result<(), LocalPreflightError> {
     let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
@@ -6845,13 +6940,22 @@ fn preflight_local_adapter_model(
         }
     };
 
-    let resp = client
-        .get(&url)
-        .send()
-        .map_err(|e| LocalPreflightError::Unreachable {
+    let resp = client.get(&url).bearer_auth(api_key).send().map_err(|e| {
+        LocalPreflightError::Unreachable {
             base_url: base_url.to_owned(),
             detail: format!("{e}"),
-        })?;
+        }
+    })?;
+
+    if matches!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN
+    ) {
+        return Err(LocalPreflightError::Unauthorized {
+            base_url: base_url.to_owned(),
+            status: resp.status(),
+        });
+    }
 
     if !resp.status().is_success() {
         return Err(LocalPreflightError::Unreachable {
@@ -8086,9 +8190,12 @@ fn run_local_agent_loop(
     // Sentinel API key — Ollama's OpenAI-compat endpoint ignores the
     // bearer token. The provider redacts it on every Debug/Display
     // site (it is a `Secret`), so the sentinel never leaks to a log.
-    let provider =
-        cosmon_provider::OpenAIProvider::with_base_url("ollama", model.clone(), base_url.clone())
-            .with_timeout(std::time::Duration::from_secs(timeout_secs));
+    let provider = cosmon_provider::OpenAIProvider::with_base_url(
+        local_api_key(adapter_entry),
+        model.clone(),
+        base_url.clone(),
+    )
+    .with_timeout(std::time::Duration::from_secs(timeout_secs));
 
     let invocation_uuid = format!(
         "local-{}",
@@ -11351,7 +11458,7 @@ mod tests {
         // `ModelNotServed` (pull a model) — not `Unreachable` (start the
         // daemon), which would send the operator to the wrong repair.
         let base = one_shot_http(r#"{"object":"list","data":null}"#, "200 OK");
-        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout())
             .expect_err("an Ollama serving no models must refuse the dispatch");
         match err {
             LocalPreflightError::ModelNotServed {
@@ -11366,6 +11473,9 @@ mod tests {
             unreachable @ LocalPreflightError::Unreachable { .. } => {
                 panic!("expected ModelNotServed, got {unreachable:?}")
             }
+            unauthorized @ LocalPreflightError::Unauthorized { .. } => {
+                panic!("expected ModelNotServed, got {unauthorized:?}")
+            }
         }
     }
 
@@ -11377,7 +11487,9 @@ mod tests {
             r#"{"object":"list","data":[{"id":"qwen3:8b"},{"id":"llama3:8b"}]}"#,
             "200 OK",
         );
-        assert!(preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout()).is_ok());
+        assert!(
+            preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout()).is_ok()
+        );
     }
 
     #[test]
@@ -11387,7 +11499,7 @@ mod tests {
         // wave this through — and the worker would die exactly as the two
         // collapsed molecules did. The served-model check catches it.
         let base = one_shot_http(r#"{"object":"list","data":[{"id":"llama3:8b"}]}"#, "200 OK");
-        let err = preflight_local_adapter_model(&base, "qwen3:8b", preflight_timeout())
+        let err = preflight_local_adapter_model(&base, "qwen3:8b", "ollama", preflight_timeout())
             .expect_err("a pinned-but-unpulled model must refuse");
         match err {
             LocalPreflightError::ModelNotServed { available, .. } => {
@@ -11395,6 +11507,9 @@ mod tests {
             }
             unreachable @ LocalPreflightError::Unreachable { .. } => {
                 panic!("expected ModelNotServed, got {unreachable:?}")
+            }
+            unauthorized @ LocalPreflightError::Unauthorized { .. } => {
+                panic!("expected ModelNotServed, got {unauthorized:?}")
             }
         }
     }
@@ -11409,12 +11524,43 @@ mod tests {
         let err = preflight_local_adapter_model(
             &format!("http://{addr}"),
             "qwen3:8b",
+            "ollama",
             std::time::Duration::from_millis(500),
         )
         .expect_err("a dead backend must refuse the dispatch");
         assert!(
             matches!(err, LocalPreflightError::Unreachable { .. }),
             "a dead backend is Unreachable (start it), not ModelNotServed (pull a model); got {err:?}"
+        );
+    }
+
+    /// An OpenAI-compatible server commonly publishes its endpoint as
+    /// `…/v1`.  The local resolver owns stripping that suffix, so both the
+    /// preflight and the worker use the same host root rather than producing
+    /// a `…/v1/v1/models` probe.
+    #[test]
+    fn local_base_url_normalizes_a_trailing_v1_before_any_probe() {
+        let entry = AdapterEntry {
+            base_url: Some("http://inference-box:8000/v1/".to_owned()),
+            ..AdapterEntry::default()
+        };
+        assert_eq!(
+            resolve_local_base_url(Some(&entry)),
+            "http://inference-box:8000"
+        );
+    }
+
+    /// Authentication failures are actionable configuration errors, not an
+    /// indication that the configured server cannot be reached.
+    #[test]
+    fn preflight_classifies_unauthorized_responses_separately() {
+        let base = one_shot_http(r#"{"error":"missing bearer token"}"#, "401 Unauthorized");
+        let err =
+            preflight_local_adapter_model(&base, "model", "configured-key", preflight_timeout())
+                .expect_err("an authenticated endpoint must reject an absent key");
+        assert!(
+            matches!(err, LocalPreflightError::Unauthorized { .. }),
+            "401 must be Unauthorized, got {err:?}"
         );
     }
 
@@ -11440,6 +11586,37 @@ mod tests {
         .to_string();
         assert!(dead.contains("ollama serve"), "{dead}");
         assert!(dead.contains("still tacklable"), "{dead}");
+
+        let custom = LocalPreflightError::ModelNotServed {
+            base_url: "http://inference-box:8000".to_owned(),
+            model: "served-elsewhere".to_owned(),
+            available: vec!["served-here".to_owned()],
+        }
+        .to_string();
+        assert!(
+            custom.contains("COSMON_LOCAL_MODEL=served-here"),
+            "{custom}"
+        );
+        assert!(!custom.contains("ollama"), "{custom}");
+    }
+
+    #[test]
+    fn local_api_key_keeps_the_ollama_sentinel_without_a_configured_binding() {
+        assert_eq!(local_api_key(None), "ollama");
+    }
+
+    #[test]
+    fn local_api_key_reads_the_configured_binding() {
+        let entry = AdapterEntry {
+            api_key_env: Some("LOCAL_INFERENCE_TOKEN".to_owned()),
+            ..AdapterEntry::default()
+        };
+        assert_eq!(
+            local_api_key_from(Some(&entry), |name| {
+                (name == "LOCAL_INFERENCE_TOKEN").then(|| "test-token".to_owned())
+            }),
+            "test-token"
+        );
     }
 
     #[test]
