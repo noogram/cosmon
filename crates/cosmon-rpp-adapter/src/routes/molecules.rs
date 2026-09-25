@@ -695,7 +695,7 @@ fn ops_error_label<E: OpsError>(_err: &E) -> &'static str {
 /// — but only when `sub` is empty (which the JWT validator already
 /// rejects). The fallback exists so the path is total without raising
 /// a panic.
-fn subject_for_jwt(jwt: &ValidatedJwt) -> Subject {
+pub(crate) fn subject_for_jwt(jwt: &ValidatedJwt) -> Subject {
     let claims = JwtClaims {
         sub: jwt.sub.clone(),
         scopes: jwt.scopes.clone(),
