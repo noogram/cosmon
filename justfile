@@ -205,17 +205,16 @@ quick:
 # dies early has not told you the suite is broken in one place, only that it is
 # broken in at least one.
 #
-# The `cargo build --bin cs` below makes a prerequisite explicit. Tests that
-# exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke suite)
-# resolve it explicitly and fail with a named missing-prerequisite error
+# Tests that exec the real binary (cs ↔ cs-thin parity, the cosmon-api smoke
+# suite) resolve it explicitly and fail with a named missing-prerequisite error
 # rather than building it themselves: a nested `cargo build` inside a test
 # races the parallel runner and can block on cargo's own build lock.
 #
-# Measured 2026-08-03: `cargo test --workspace` builds sibling bin and example
-# targets on its own, so this step is not load-bearing for the workspace run —
-# it is here because it is the same step `ci.yml` runs, and because a
-# prerequisite that holds by accident of cargo's default target selection is
-# one nobody notices losing.
+# `cargo test --workspace` builds `cs` before it executes those tests because
+# cosmon-cli's integration tests use `CARGO_BIN_EXE_cs`. A separate
+# `cargo build --bin cs` is therefore not a prerequisite: measured on a fresh
+# target it compiled a second feature world, cost 53 s / 2.6 GB, and its binary
+# was replaced by the test build before any test executed it.
 #
 # The full contract from CLAUDE.md — the fast loop plus the slow half. ~8 min.
 # `RUSTFLAGS=-Dwarnings` mirrors the CI workflow's job-level env. Without it
@@ -226,7 +225,6 @@ quick:
 # `clippy` above already carries `-D warnings` as an argument; this covers the
 # rustc pass that `cargo test` performs.
 gates: quick
-    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo build --bin cs -p cosmon-cli --locked
     ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
     ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
