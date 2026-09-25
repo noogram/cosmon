@@ -61,6 +61,10 @@ const KNOWN_POISONS: &[(&str, &str)] = &[
     ("ANTHROPIC_MODEL", "claude-opus-5"),
 ];
 
+/// Runtime controls that are not pilot variables but must not leak into a
+/// verification gate from an operator shell or tmux server.
+const GATE_ONLY_POISONS: &[(&str, &str)] = &[("COSMON_SPAWN_POSTCONDITION_SECS", "90")];
+
 /// The shell projection is exactly the Rust manifest, in order.
 ///
 /// This is what stops the list rotting. `cs tackle` cannot inject a variable
@@ -114,7 +118,7 @@ fn boundary_strips_the_poisons_and_the_control_proves_it_measures_that() {
     let mut through = Command::new(boundary_script());
     through.arg("/usr/bin/env");
     let mut without = Command::new("/usr/bin/env");
-    for (var, value) in KNOWN_POISONS {
+    for (var, value) in KNOWN_POISONS.iter().chain(GATE_ONLY_POISONS) {
         through.env(var, value);
         without.env(var, value);
     }
@@ -130,7 +134,7 @@ fn boundary_strips_the_poisons_and_the_control_proves_it_measures_that() {
         String::from_utf8_lossy(&without.output().expect("/usr/bin/env must run").stdout)
             .into_owned();
 
-    for (var, value) in KNOWN_POISONS {
+    for (var, value) in KNOWN_POISONS.iter().chain(GATE_ONLY_POISONS) {
         let assignment = format!("{var}={value}");
         assert!(
             inherited.lines().any(|l| l == assignment),
