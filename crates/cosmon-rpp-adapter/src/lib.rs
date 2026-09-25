@@ -68,6 +68,7 @@ pub mod auth;
 pub mod auth_claude;
 pub mod backend_health;
 pub mod config;
+pub mod delivery;
 pub mod deny_list;
 pub mod drain;
 pub mod error;

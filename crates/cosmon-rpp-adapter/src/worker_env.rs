@@ -58,6 +58,12 @@
 //!   carried; set explicitly so the worker `claude` inherits it.
 //! - `ANTHROPIC_MODEL` — the avatar-surface D1 model pin, when the
 //!   instance config carries one.
+//! - `DISABLE_AUTOUPDATER=1` — always. Claude Code otherwise updates
+//!   itself on its first start inside the worker, which moved a server
+//!   image pinned to 2.1.281 to 2.1.282 during a dispatch and drew an
+//!   update banner over the startup screen the briefing was pasted into
+//!   (issue #81 point 3). Set rather than inherited, so the pin holds
+//!   whether or not the server's own environment carries it.
 //!
 //! `COSMON_API_REQUEST` / `COSMON_API_REQUEST_ID` are deliberately
 //! **absent**: the worker is not the network request (ADR-080 §3.5's
@@ -83,6 +89,10 @@ pub mod env {
     /// ([`crate::config::RppConfig::resolved_claude_model`]) — this
     /// crate never holds a model-id literal outside that config module.
     pub const ANTHROPIC_MODEL: &str = "ANTHROPIC_MODEL";
+    /// Claude Code's switch for its self-updater, set to `1` on every
+    /// worker so the binary the image pins is the binary that runs
+    /// (issue #81 point 3).
+    pub const DISABLE_AUTOUPDATER: &str = "DISABLE_AUTOUPDATER";
 }
 
 /// Allow-list half of the worker envelope — the **only** variables of
@@ -279,6 +289,8 @@ impl WorkerEnvelope {
         if let Some(model) = &self.claude_model {
             set(env::ANTHROPIC_MODEL, model.clone());
         }
+        // Issue #81 point 3: no worker updates the image's Claude Code.
+        set(env::DISABLE_AUTOUPDATER, "1".to_owned());
         out
     }
 }
@@ -698,6 +710,22 @@ mod tests {
         assert_eq!(
             value(&env, "COSMON_STATE_DIR"),
             Some("/galaxies/a/.cosmon/state")
+        );
+    }
+
+    /// Issue #81 point 3: the server's `DISABLE_AUTOUPDATER=1` never reached
+    /// the worker, and Claude Code updated itself during a dispatch. The
+    /// envelope now sets it whatever the parent environment says.
+    #[test]
+    fn the_claude_autoupdater_is_disabled_on_every_worker() {
+        assert_eq!(value(&build(&[]), "DISABLE_AUTOUPDATER"), Some("1"));
+        assert_eq!(
+            value(
+                &build(&[("DISABLE_AUTOUPDATER", "0")]),
+                "DISABLE_AUTOUPDATER"
+            ),
+            Some("1"),
+            "an inherited value must not re-enable the updater"
         );
     }
 
