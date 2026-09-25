@@ -385,10 +385,30 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             "  3. Nucleate work:  `cs nucleate task-work --var topic=\"...\"`  then  `cs tackle <id>`."
         );
         println!("  4. Orient yourself:  `cs help` (commands) · `cs help guide` (handbook).");
-        println!("  5. (optional) Drop a CLAUDE.md for your agent:  `cs init --soft`.");
+        println!(
+            "  5. Let your agent pilot cosmon:  `cs init --upgrade` writes/updates the \
+             `## Cosmon` pointer in CLAUDE.md/AGENTS.md (marker-bounded, never overwrites the \
+             rest of the file)."
+        );
+        if claude_on_path() {
+            println!(
+                "     `claude` is on your PATH — add to a `[adapters]` table in \
+                 `.cosmon/config.toml`:  `default = \"claude\"`  (not written for you)."
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Whether a `claude` binary is reachable on `$PATH`.
+///
+/// Used only to decide whether to print the `[adapters] default =
+/// "claude"` config hint at the end of `cs init` — never to write that
+/// config, which stays the operator's decision.
+fn claude_on_path() -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join("claude").is_file()))
 }
 
 /// Walk upward from `path.parent()` looking for an ancestor cosmon

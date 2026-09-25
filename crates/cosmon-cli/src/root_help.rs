@@ -10,11 +10,42 @@
 //! `cs --help`, `cs help`, and the generated man page all read from
 //! one source.
 
+/// "Start here" — the first thing printed by `cs -h`, `cs --help`, and
+/// `cs help` (see `crate::cmd::help::print_grouped_reference`, private
+/// to that module), ahead of the grouped command list. Before this, the
+/// first command name a
+/// reader hit was `spark` (alphabetically-adjacent-to-first in the
+/// "Molecule lifecycle" group), a niche inbox gesture, not the ordinary
+/// entry point — the wrong anchor for a first read. One source, three
+/// renderings, so the pointer cannot say one thing in the terminal and
+/// another in the man page.
+pub const START_HERE: &str = "START HERE — nucleate → tackle → peek → whisper/done:\n  \
+             cs nucleate task-work --var-file topic=<file>   # long statement, from a file\n  \
+             cs tackle <id> --adapter claude                 # spawn a worker\n  \
+             cs peek                                         # watch it (or: cs wait <id> &)\n  \
+             cs whisper <id> --file fix.md                   # correct it while still open\n  \
+             cs done <id>                                    # merge + teardown (required)\n";
+
+/// Short about, rendered by `cs -h`.
+#[must_use]
+pub fn about() -> String {
+    format!(
+        "Cosmon — compose, pilot and audit long-haul AI missions where the trace matters.\n\n\
+         {START_HERE}"
+    )
+}
+
+/// Long about, rendered by `cs --help` (long form) and by
+/// [`clap_mangen::Man`] for the `DESCRIPTION` section of the man page.
+#[must_use]
+pub fn long_about() -> String {
+    format!("{START_HERE}\n{LONG_ABOUT}")
+}
+
 /// Long about attached to the root `cs` command.
 ///
-/// Rendered verbatim by clap for `cs --help` (long form) and by
-/// [`clap_mangen::Man`] for the `DESCRIPTION` section of the man page.
-pub const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run several on one \
+/// The narrative body — [`long_about`] prepends [`START_HERE`] to it.
+const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run several on one \
              codebase and a session will crash, or fill its context window and forget what it \
              was doing, and you lose track of which agent was on what — cosmon gives each a \
              durable identity and writes every step to disk, so a dead session resumes where it \

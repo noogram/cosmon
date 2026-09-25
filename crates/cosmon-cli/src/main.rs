@@ -37,8 +37,8 @@ use cosmon_cli::sensorium;
     // `~/.local/bin`; the SHA/dirty/date stamp makes `--version` enough
     // to tell them apart without the hidden `__build-sha` plumbing.
     version = cosmon_cli::long_version(),
-    about = "Cosmon — compose, pilot and audit long-haul AI missions where the trace matters.",
-    long_about = root_help::LONG_ABOUT,
+    about = root_help::about(),
+    long_about = root_help::long_about(),
     after_long_help = root_help::AFTER_LONG_HELP,
     disable_help_subcommand = true
 )]

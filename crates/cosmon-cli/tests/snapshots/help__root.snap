@@ -2,6 +2,13 @@
 source: crates/cosmon-cli/tests/help_goldens.rs
 expression: stdout
 ---
+START HERE — nucleate → tackle → peek → whisper/done:
+  cs nucleate task-work --var-file topic=<file>   # long statement, from a file
+  cs tackle <id> --adapter claude                 # spawn a worker
+  cs peek                                         # watch it (or: cs wait <id> &)
+  cs whisper <id> --file fix.md                   # correct it while still open
+  cs done <id>                                    # merge + teardown (required)
+
 Cosmon keeps a fleet of AI agents on track. Run several on one codebase and a session will crash, or fill its context window and forget what it was doing, and you lose track of which agent was on what — cosmon gives each a durable identity and writes every step to disk, so a dead session resumes where it stopped and you can always see who is doing what. More generally it runs missions you delegate to AI: it breaks a hard problem into typed, ordered steps, executes them, and records every step so the finished work carries an auditable trace — the reasoning matters as much as the result. Nothing in it is code-specific; it aims just as well at research-grade missions, where a technical lock demands long, decomposed, checkable work. It is model-agnostic, sitting above any model, so your context and data stay with you and a mission can run entirely on local models. Cosmon is the kernel of noogram — the open-source substrate for composing, piloting and auditing missions entrusted to AI systems.
 
 PILOT WORKFLOW — the full cycle is nucleate → tackle → wait → done:
