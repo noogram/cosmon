@@ -141,6 +141,18 @@ defect issue #51 first reported — is independent of all this and is unchanged.
 
 ### Fixed
 
+- **API-dispatched Claude workers no longer stop on the folder-trust dialog**
+  (GitHub issue #81, point 4). `cs tackle`, `cs thaw` and the patrol respawn
+  pre-grant Claude Code's onboarding, folder trust and bypass disclaimer before
+  every spawn; the in-process executor behind `POST /v1/molecules/{id}/tackle`
+  and the drain did not, so the first worker on a fresh deployment waited on
+  *"Is this a project you created or one you trust?"* with nobody attached.
+  All paths now call one routine, `claude_trust::pregrant_worker_consent`, and
+  the API path resolves the config files from the worker's enveloped
+  environment rather than the server's. A config that cannot be written
+  refuses the dispatch with `503 startup_consent_refused` before anything is
+  recorded or spawned.
+
 - **Detached patrols survive the tick that dispatched them.** The
   `com.cosmon.scheduler` LaunchAgent template did not declare
   `AbandonProcessGroup`, and launchd SIGKILLs a one-shot job's whole process

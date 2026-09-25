@@ -197,6 +197,23 @@ pub enum TackleExecError {
         token: &'static str,
     },
 
+    /// The embedder's launch policy could not pre-grant the worker's startup
+    /// consent for its worktree (issue #81 point 4).
+    ///
+    /// Refused before the ledger commit, and the worktree this attempt created
+    /// is removed. The alternative is a worker stopped on Claude Code's
+    /// folder-trust dialog in a detached pane, which holds the molecule
+    /// `running` and reads as healthy to every liveness probe.
+    #[error("molecule {id}: cannot pre-grant the {adapter} worker's startup consent — {detail}")]
+    StartupConsentRefused {
+        /// The molecule whose dispatch was refused.
+        id: Box<MoleculeId>,
+        /// The adapter whose worker would have been spawned.
+        adapter: String,
+        /// Why the pre-grant failed, for the server log.
+        detail: String,
+    },
+
     /// A `git` invocation failed (worktree / branch creation, repo probe).
     #[error("git error: {0}")]
     Git(String),
@@ -577,6 +594,30 @@ pub trait WorkerLaunchPolicy: std::fmt::Debug + Send + Sync {
     /// one without it rather than failing a dispatch over a signal that is
     /// itself best-effort.
     fn posture(&self, ctx: &LaunchContext<'_>) -> LaunchPosture;
+
+    /// Pre-grant whatever consent the worker's harness would otherwise ask
+    /// for at startup in `ctx.worktree` — for Claude Code, onboarding, folder
+    /// trust and the bypass-permissions disclaimer (issue #81 point 4).
+    ///
+    /// Called after the worktree exists and before the ledger commit. Unlike
+    /// [`Self::posture`] this is fallible: a startup dialog nobody can answer
+    /// is a hung worker, not a lost signal. Writing the harness config is I/O
+    /// on files only the embedder can name (the worker's environment decides
+    /// which config the worker reads), which is why it is a port method here
+    /// rather than a call.
+    ///
+    /// The default grants nothing, which is right for a mock-backed embedder
+    /// and for adapters with no startup consent.
+    ///
+    /// # Errors
+    ///
+    /// A detail string for the server log when the consent could not be
+    /// granted; the executor refuses the dispatch with
+    /// [`TackleExecError::StartupConsentRefused`].
+    fn pregrant_startup_consent(&self, ctx: &LaunchContext<'_>) -> Result<(), String> {
+        let _ = ctx;
+        Ok(())
+    }
 }
 
 /// What a [`BriefingDelivery`] port is handed for one freshly spawned worker.
@@ -1270,18 +1311,34 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // Resolved BEFORE the ledger commit for the same reason the identifier
         // derivation is: a refusal that arrives after the commit strands a
         // ledger entry for a worker that will never exist.
+        let launch_ctx = LaunchContext {
+            molecule: &plan.molecule_id,
+            adapter: plan.adapter.as_str(),
+            worker: &wid,
+            worktree: worktree_path,
+        };
         let posture = self
             .launch
             .as_ref()
-            .map_or_else(LaunchPosture::default, |p| {
-                p.posture(&LaunchContext {
-                    molecule: &plan.molecule_id,
-                    adapter: plan.adapter.as_str(),
-                    worker: &wid,
-                    worktree: worktree_path,
-                })
-            });
+            .map_or_else(LaunchPosture::default, |p| p.posture(&launch_ctx));
         let root_spawn = gate_root_spawn(&posture, &plan.molecule_id)?;
+
+        // Startup consent (issue #81 point 4). `cs tackle`, `cs thaw` and the
+        // patrol respawn pre-grant Claude Code's folder trust before every
+        // spawn; this path did not, so on a fresh deployment the first worker
+        // stopped on "Is this a project you created or one you trust?" with
+        // nobody attached. After the root gate, so a refused root dispatch
+        // writes nothing into a Claude config; before the ledger commit, so a
+        // refusal strands no dispatch record.
+        if let Some(policy) = self.launch.as_ref() {
+            policy
+                .pregrant_startup_consent(&launch_ctx)
+                .map_err(|detail| TackleExecError::StartupConsentRefused {
+                    id: Box::new(plan.molecule_id.clone()),
+                    adapter: plan.adapter.as_str().to_owned(),
+                    detail,
+                })?;
+        }
         let (command, args) = worker_launch_argv(
             plan.adapter.as_str(),
             worktree_path,
@@ -1530,9 +1587,12 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 // poll interval is precisely how a stated cause becomes an
                 // unexplained `timeout`. Stopping with the cause named
                 // lets the operator fix it and re-run; spinning does not.
+                // An unwritable Claude config (issue #81 point 4) is the same
+                // shape: an operator repair, never a self-healing condition.
                 refusal @ (TackleExecError::UnsupportedStep { .. }
                 | TackleExecError::UnsupportedModelCarrier { .. }
-                | TackleExecError::Preflight { .. }) => RuntimeError::DispatchRefused {
+                | TackleExecError::Preflight { .. }
+                | TackleExecError::StartupConsentRefused { .. }) => RuntimeError::DispatchRefused {
                     id: id.clone(),
                     reason: refusal.to_string(),
                 },
