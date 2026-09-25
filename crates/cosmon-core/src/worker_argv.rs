@@ -113,6 +113,20 @@ pub struct ClaudeLaunch<'a> {
     /// rejected by Claude Code's own parser at launch, loudly. Empty (the
     /// common case) contributes nothing.
     pub harness_args: &'a [String],
+    /// The model the dispatch's selection chain resolved, emitted as
+    /// `--model <id>` (issue #81 point 2).
+    ///
+    /// The argv is the one channel both dispatch paths share. The in-process
+    /// path has no other: its spawn port carries an argv and a cwd, and the
+    /// environment the worker sees is whatever its embedder clamps on. When
+    /// the model rode only on `ANTHROPIC_MODEL`, the selection was recorded
+    /// and then replaced at the spawn by the embedder's own default. Claude
+    /// Code ranks `--model` above `ANTHROPIC_MODEL`, so a model carried here
+    /// is the model the worker runs, whatever the environment says.
+    ///
+    /// `None` (or a blank id) emits nothing: no pin, and the deployment's own
+    /// default applies.
+    pub model: Option<&'a str>,
 }
 
 impl<'a> ClaudeLaunch<'a> {
@@ -124,7 +138,15 @@ impl<'a> ClaudeLaunch<'a> {
             writable_roots: &[],
             receipt_overlay: None,
             harness_args: &[],
+            model: None,
         }
+    }
+
+    /// Launch the worker on the model the selection chain resolved.
+    #[must_use]
+    pub const fn with_model(mut self, model: Option<&'a str>) -> Self {
+        self.model = model;
+        self
     }
 
     /// Declare directories writable beyond the worktree cwd.
@@ -150,9 +172,8 @@ impl<'a> ClaudeLaunch<'a> {
 
     /// Render the argv tokens that follow the `claude` binary.
     ///
-    /// The order is fixed and is the order `cs tackle` has always emitted:
-    /// permission mode, writable grants, receipt overlay, harness pins, then
-    /// the browser-MCP strip. Nothing here is shell-quoted — a token is one
+    /// The order is fixed: permission mode, model, writable grants, receipt
+    /// overlay, harness pins, then the browser-MCP strip. Nothing here is shell-quoted — a token is one
     /// `argv` entry, and a caller assembling a shell string quotes each one
     /// as it splices it.
     #[must_use]
@@ -161,6 +182,10 @@ impl<'a> ClaudeLaunch<'a> {
             "--permission-mode".to_owned(),
             self.permission_mode.to_owned(),
         ];
+        if let Some(model) = self.model.map(str::trim).filter(|m| !m.is_empty()) {
+            argv.push("--model".to_owned());
+            argv.push(model.to_owned());
+        }
         if !self.writable_roots.is_empty() {
             argv.push("--add-dir".to_owned());
             for root in self.writable_roots {
@@ -252,6 +277,29 @@ mod tests {
                 "mcp__playwright-extension mcp__claude-in-chrome",
             ],
         );
+    }
+
+    /// The resolved model rides the argv as `--model <id>`, right after the
+    /// permission mode; a blank or absent model emits nothing (issue #81
+    /// point 2).
+    #[test]
+    fn a_resolved_model_is_carried_as_the_model_flag() {
+        let argv = ClaudeLaunch::new(DEFAULT_PERMISSION_MODE)
+            .with_model(Some("claude-sonnet-5"))
+            .render();
+        assert_eq!(
+            &argv[..4],
+            &["--permission-mode", "bypassPermissions", "--model", "claude-sonnet-5"],
+        );
+        for absent in [None, Some(""), Some("  ")] {
+            let argv = ClaudeLaunch::new(DEFAULT_PERMISSION_MODE)
+                .with_model(absent)
+                .render();
+            assert!(
+                !argv.iter().any(|t| t == "--model"),
+                "{absent:?} must emit no model flag: {argv:?}"
+            );
+        }
     }
 
     /// A writable root declares the directory AND grants the tool classes —

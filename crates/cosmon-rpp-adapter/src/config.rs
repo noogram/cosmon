@@ -167,10 +167,13 @@ pub struct RppConfig {
 /// deployment, of the `claude_model` key in `rpp.toml`, which wins over
 /// this default and is hoisted to the head of the chain.
 ///
-/// The pin is no longer a hard floor: when
-/// the preferred model is unreachable the `cs tackle` spawn path probes
-/// the rest of the chain (`claude-opus-4-8` → `claude-sonnet-4-6`)
-/// rather than spawning a worker that would freeze on `model_not_found`.
+/// The pin is the deployment's default, not the dispatch's decision
+/// (issue #81 point 2). It reaches the worker as `ANTHROPIC_MODEL` through
+/// the worker envelope; a model the dispatch's own selection chain resolves
+/// (the `--model` rung, a formula-step pin, the tenant galaxy's
+/// `[adapters.claude].default_model`) rides the worker's argv as `--model`,
+/// which Claude Code ranks above that variable. So this value applies only
+/// when the tenant pinned nothing.
 pub const DEFAULT_CLAUDE_MODEL: &str = cosmon_core::model_chain::PREFERRED_MODEL;
 
 /// Default `oidc_url` when the operator leaves it unset

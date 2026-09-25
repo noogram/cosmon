@@ -57,7 +57,10 @@
 //!   operator-file ladder), which the adapter env may never have
 //!   carried; set explicitly so the worker `claude` inherits it.
 //! - `ANTHROPIC_MODEL` — the avatar-surface D1 model pin, when the
-//!   instance config carries one.
+//!   instance config carries one. It is the deployment's default only: a
+//!   model the dispatch's selection chain resolved rides the worker's argv
+//!   as `--model`, which Claude Code ranks above this variable (issue #81
+//!   point 2).
 //! - `DISABLE_AUTOUPDATER=1` — always. Claude Code otherwise updates
 //!   itself on its first start inside the worker, which moved a server
 //!   image pinned to 2.1.281 to 2.1.282 during a dispatch and drew an
