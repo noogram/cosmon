@@ -78,6 +78,11 @@ Options:
       --var <KEY=VALUE>
           Set a variable (repeatable: --var key=value)
 
+      --var-file <KEY=PATH>
+          Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
+          
+          The file contents are passed verbatim, including trailing newlines. Explicit `--var` bindings override a same-named `--var-file` binding.
+
       --formulas-dir <DIR>
           Path to the formulas directory (default: ./formulas)
 

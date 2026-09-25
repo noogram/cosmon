@@ -59,7 +59,7 @@ pub struct Args {
     #[arg(
         long,
         value_name = "PATH",
-        conflicts_with_all = ["formula", "vars", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes", "base"],
+        conflicts_with_all = ["formula", "vars", "var_files", "assign", "kind", "blocks", "blocked_by", "decayed_from", "no_parent", "refines", "refutes", "base"],
     )]
     pub(crate) from: Option<PathBuf>,
 
@@ -165,6 +165,13 @@ pub struct Args {
     /// Set a variable (repeatable: --var key=value)
     #[arg(long = "var", value_name = "KEY=VALUE")]
     pub(crate) vars: Vec<String>,
+
+    /// Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
+    ///
+    /// The file contents are passed verbatim, including trailing newlines.
+    /// Explicit `--var` bindings override a same-named `--var-file` binding.
+    #[arg(long = "var-file", value_name = "KEY=PATH")]
+    pub(crate) var_files: Vec<String>,
 
     /// Path to the formulas directory (default: ./formulas)
     #[arg(long, value_name = "DIR")]
@@ -322,6 +329,7 @@ impl Args {
             class: None,
             assign: None,
             vars: Vec::new(),
+            var_files: Vec::new(),
             formulas_dir: None,
             role: None,
             store_dir: None,
@@ -450,7 +458,8 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("formula name is required (or use --from <PATH>)"))?;
         let (blocks, cross_blocks) = parse_link_refs(&args.blocks, "--blocks")?;
         let (blocked_by, cross_blocked_by) = parse_link_refs(&args.blocked_by, "--blocked-by")?;
-        let vars_parsed = parse_vars(&args.vars)?;
+        let mut vars_parsed = parse_var_files(&args.var_files)?;
+        vars_parsed.extend(parse_vars(&args.vars)?);
         let class = args
             .class
             .as_deref()
@@ -1732,6 +1741,24 @@ fn parse_vars(vars: &[String]) -> anyhow::Result<HashMap<String, String>> {
     Ok(map)
 }
 
+/// Parse `--var-file key=path` flags and read each value as UTF-8.
+///
+/// Reading happens before formula expansion or persistence, so an unreadable
+/// file cannot leave behind a partially nucleated molecule.
+fn parse_var_files(var_files: &[String]) -> anyhow::Result<HashMap<String, String>> {
+    let mut map = HashMap::new();
+    for assignment in var_files {
+        let (key, path) = assignment.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid variable file format (expected key=path): {assignment}")
+        })?;
+        let value = fs::read_to_string(path).map_err(|error| {
+            anyhow::anyhow!("failed to read variable file for key `{key}` at `{path}`: {error}")
+        })?;
+        map.insert(key.to_owned(), value);
+    }
+    Ok(map)
+}
+
 /// Write `briefing.md` into the molecule directory with step descriptions.
 fn write_briefing(
     mol_dir: &std::path::Path,
@@ -1932,6 +1959,30 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_var_file_preserves_contents_and_explicit_vars_win() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("brief.txt");
+        fs::write(&path, "Énoncé de mission\n").unwrap();
+
+        let from_file = parse_var_files(&[format!("brief={}", path.display())]).unwrap();
+        assert_eq!(from_file["brief"], "Énoncé de mission\n");
+
+        let mut merged = from_file;
+        merged.extend(parse_vars(&["brief=override".to_owned()]).unwrap());
+        assert_eq!(merged["brief"], "override");
+    }
+
+    #[test]
+    fn parse_var_file_reports_invalid_assignment_and_missing_file() {
+        let invalid = parse_var_files(&["brief".to_owned()]).unwrap_err();
+        assert!(invalid.to_string().contains("expected key=path"));
+
+        let missing =
+            parse_var_files(&["brief=/definitely/missing/brief.txt".to_owned()]).unwrap_err();
+        assert!(missing.to_string().contains("failed to read variable file"));
+    }
+
     /// Minimal `Args` builder for the resolver tests — every field is a
     /// CLI flag, but the resolver only inspects a small subset.
     fn empty_args() -> Args {
@@ -1949,6 +2000,7 @@ mod tests {
             class: None,
             assign: None,
             vars: Vec::new(),
+            var_files: Vec::new(),
             formulas_dir: None,
             role: None,
             store_dir: None,
