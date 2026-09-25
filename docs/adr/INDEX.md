@@ -165,3 +165,4 @@
 | 178-no-automatic-path-removes-a-worktree | [178-no-automatic-path-removes-a-worktree.md](178-no-automatic-path-removes-a-worktree.md) |
 | 179-a-terminal-molecules-session-is-derived-state | [179-a-terminal-molecules-session-is-derived-state.md](179-a-terminal-molecules-session-is-derived-state.md) |
 | 180-tenant-vitals-are-molecule-keyed-observations | [180-tenant-vitals-are-molecule-keyed-observations.md](180-tenant-vitals-are-molecule-keyed-observations.md) |
+
