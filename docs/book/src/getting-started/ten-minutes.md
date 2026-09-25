@@ -117,6 +117,9 @@ Yours will differ; substitute it everywhere below.
 cs tackle task-20260711-a1b2
 ```
 
+If you picked "You have Claude Code" in step 0, add `--adapter claude` (or skip
+the flag if you already set `default = "claude"` in `.cosmon/config.toml`).
+
 **Tackle** creates a git worktree and branch for this molecule, opens a tmux
 session, and launches your agent inside it with the briefing injected. It returns
 immediately — the worker runs in the background while your shell stays free.
