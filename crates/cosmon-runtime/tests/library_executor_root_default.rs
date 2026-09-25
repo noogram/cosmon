@@ -15,15 +15,34 @@
 //! This binary is its own integration target on purpose: it mutates
 //! `COSMON_SIMULATE_ROOT_DISPATCH` in the process environment, which is the
 //! only way to reach the root branch on a non-root box, and a test binary is
-//! the smallest unit with an environment of its own.
+//! the smallest unit with an environment of its own. Every test in it sets
+//! the variable to the same value and none removes it, so the tests can run
+//! in parallel without one clearing the seam under another.
+//!
+//! # The refusal must also come first (review of c62835da, F1 and F2)
+//!
+//! The first repair refused only after `git worktree add` — and, on an unborn
+//! repository, after a seed `git commit` that ran the repository's hooks under
+//! the dispatcher's uid. No worker existed, but git had already acted as root.
+//! And the refusal was classed as retryable, so the runtime provisioned and
+//! rolled back a worktree on every tick until its deadline. The tests below
+//! pin both: nothing on disk changes and no hook runs, and a drain stops on
+//! the first attempt with a typed refusal.
 
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 
 use cosmon_core::id::MoleculeId;
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::root_spawn_policy::SIMULATE_ROOT_DISPATCH_ENV;
 use cosmon_filestore::FileStore;
-use cosmon_runtime::{DispatchPin, Executor, LibraryExecutor};
+use cosmon_runtime::{
+    compile_plan, DagPolicy, DispatchPin, Executor, LaunchContext, LaunchPosture, LibraryExecutor,
+    Runtime, RuntimeConfig, RuntimeError, ShutdownReason, WorkerLaunchPolicy,
+};
 use cosmon_state::{MoleculeData, StateStore};
 use cosmon_transport::mock::MockBackend;
 
@@ -122,7 +141,6 @@ fn claude_pin() -> DispatchPin {
 /// that arrives after the spawn is not a refusal.
 #[test]
 fn an_unstated_root_spawn_is_refused_rather_than_assumed_safe() {
-    // Removed at the end of the test; this binary runs nothing else.
     std::env::set_var(SIMULATE_ROOT_DISPATCH_ENV, "1");
     let (_dir, project, mol) = fixture("task-20260920-r001");
     let backend = MockBackend::new();
@@ -143,5 +161,168 @@ fn an_unstated_root_spawn_is_refused_rather_than_assumed_safe() {
         "nothing may reach the transport: {:?}",
         backend.calls()
     );
-    std::env::remove_var(SIMULATE_ROOT_DISPATCH_ENV);
+}
+
+/// A policy that states a posture but leaves the root-spawn decision unstated
+/// — the second absence case, next to installing no policy at all.
+#[derive(Debug)]
+struct SilentPolicy;
+
+impl WorkerLaunchPolicy for SilentPolicy {
+    fn posture(&self, _ctx: &LaunchContext<'_>) -> LaunchPosture {
+        LaunchPosture::default()
+    }
+}
+
+/// Every path under `root` with its contents (`None` for a directory), so two
+/// snapshots differ when anything was created, removed or rewritten.
+fn tree_snapshot(root: &Path) -> BTreeMap<PathBuf, Option<Vec<u8>>> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<PathBuf, Option<Vec<u8>>>) {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)
+            .expect("read_dir")
+            .map(|e| e.expect("dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            let rel = path.strip_prefix(root).expect("under root").to_path_buf();
+            if path.is_dir() {
+                out.insert(rel, None);
+                walk(root, &path, out);
+            } else {
+                out.insert(rel, Some(std::fs::read(&path).expect("read file")));
+            }
+        }
+    }
+    let mut out = BTreeMap::new();
+    walk(root, root, &mut out);
+    out
+}
+
+/// F1: a root refusal happens before git runs at all. The fixture repository
+/// is unborn, which is the case where the old order made a seed commit, and it
+/// carries an executable pre-commit hook that leaves a marker if git ever
+/// invokes it. For both absence cases the whole project tree — `.git`
+/// included — must be byte-identical after the refusal.
+#[test]
+fn a_root_refusal_precedes_every_git_operation() {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::set_var(SIMULATE_ROOT_DISPATCH_ENV, "1");
+    for install_silent_policy in [false, true] {
+        let (dir, project, mol) = fixture("task-20260925-r002");
+        let marker = dir.path().join("hook-ran");
+        let hook = project.join(".git").join("hooks").join("pre-commit");
+        std::fs::create_dir_all(hook.parent().expect("hooks dir")).expect("hooks dir");
+        std::fs::write(
+            &hook,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.to_string_lossy()),
+        )
+        .expect("hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let before = tree_snapshot(&project);
+
+        let backend = MockBackend::new();
+        let mut executor = LibraryExecutor::new(&project, backend.clone());
+        if install_silent_policy {
+            executor = executor.with_launch_policy(Arc::new(SilentPolicy));
+        }
+        let err = executor
+            .dispatch_with_pin(&mol.id, &claude_pin())
+            .expect_err("a root dispatcher must not dispatch");
+
+        assert!(
+            err.to_string().contains("root-spawn-refused"),
+            "silent_policy={install_silent_policy}: the refusal carries its token: {err}"
+        );
+        assert!(
+            backend.calls().is_empty(),
+            "silent_policy={install_silent_policy}: nothing may reach the transport"
+        );
+        assert!(
+            !marker.exists(),
+            "silent_policy={install_silent_policy}: a repository hook ran before the refusal"
+        );
+        let after = tree_snapshot(&project);
+        let changed: Vec<_> = before
+            .keys()
+            .chain(after.keys())
+            .filter(|k| before.get(*k) != after.get(*k))
+            .collect();
+        assert!(
+            changed.is_empty(),
+            "silent_policy={install_silent_policy}: the refusal left residue: {changed:?}"
+        );
+    }
+}
+
+/// Counts dispatch attempts, so the drain test can tell one refusal from a
+/// refusal retried every tick.
+struct CountingExecutor {
+    inner: LibraryExecutor<MockBackend>,
+    attempts: Arc<AtomicUsize>,
+}
+
+impl Executor for CountingExecutor {
+    fn dispatch(&self, id: &MoleculeId) -> Result<(), RuntimeError> {
+        self.dispatch_with_pin(id, &DispatchPin::default())
+    }
+
+    fn dispatch_with_pin(&self, id: &MoleculeId, pin: &DispatchPin) -> Result<(), RuntimeError> {
+        self.attempts.fetch_add(1, Ordering::SeqCst);
+        self.inner.dispatch_with_pin(id, pin)
+    }
+}
+
+/// F2: a root refusal is terminal. The dispatcher's uid does not change
+/// between ticks, so the drain must stop after ONE attempt with
+/// [`ShutdownReason::DispatchRefused`] and the original reason — not retry
+/// the refusal every poll interval and report the deadline.
+#[test]
+fn a_root_refusal_stops_the_drain_after_one_attempt() {
+    std::env::set_var(SIMULATE_ROOT_DISPATCH_ENV, "1");
+    let (_dir, project, mol) = fixture("task-20260925-r003");
+    let state_dir = project.join(".cosmon").join("state");
+    let store = FileStore::new(&state_dir);
+    let (plan, edges) = compile_plan(&store, std::slice::from_ref(&mol.id)).expect("compile plan");
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let executor = CountingExecutor {
+        inner: LibraryExecutor::new(&project, MockBackend::new()),
+        attempts: Arc::clone(&attempts),
+    };
+    let config = RuntimeConfig {
+        poll_interval: Duration::from_millis(50),
+        // Long enough for many retries: reaching it at all is the defect.
+        max_runtime: Some(Duration::from_secs(10)),
+        ..RuntimeConfig::default()
+    };
+    let mut runtime = Runtime::new(
+        Box::new(FileStore::new(&state_dir)),
+        Box::new(DagPolicy::new(plan, edges)),
+        Box::new(executor),
+        config,
+    );
+
+    let report = runtime.run().expect("the loop must reach a named exit");
+
+    assert_eq!(
+        report.reason,
+        ShutdownReason::DispatchRefused,
+        "a root refusal must end the drain, not be retried: {report:?}"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        1,
+        "exactly one dispatch attempt"
+    );
+    let refusal = report
+        .refusal
+        .as_ref()
+        .expect("the report names the refusal");
+    assert_eq!(refusal.molecule, mol.id);
+    assert!(
+        refusal.reason.contains("root-spawn-refused"),
+        "the original reason is kept: {}",
+        refusal.reason
+    );
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert_eq!(observed.status, MoleculeStatus::Pending);
 }
