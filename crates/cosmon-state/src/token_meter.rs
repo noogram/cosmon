@@ -71,9 +71,9 @@ use cosmon_core::kind::MoleculeKind;
 ///   (`"anthropic"`, `"openai"`, `"ollama"`, `"mlx"`, …). Stringly-typed
 ///   on purpose: the IFBDD goal is to learn which backend strings show
 ///   up in practice before crystallising a typed enum.
-/// - `tokens_in` / `tokens_out` — input / output token counts as
-///   reported by the backend. `0` is a legitimate value (e.g. cached
-///   responses).
+/// - `tokens_in` — fresh input only; cache traffic is kept in its separate
+///   optional counters so the split is never irreversibly fused.
+/// - `tokens_out` — output token count reported by the backend.
 /// - `cost_micros_estimated` — a *measurement*, computed from
 ///   `pricing_table_version`. **Not a billing fact** (see module docs).
 /// - `pricing_table_version` — opaque tag identifying the pricing
@@ -93,21 +93,60 @@ pub struct TokenUsage {
     pub kind: Option<MoleculeKind>,
     /// Backend identifier — stringly-typed by design (see field docs).
     pub backend: String,
-    /// Input token count reported by the backend.
+    /// Fresh input tokens, excluding cache reads and cache creation.
     pub tokens_in: u64,
+    /// Input tokens served from a provider cache, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Input tokens written into a provider cache, when reported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
     /// Output token count reported by the backend.
     pub tokens_out: u64,
     /// **Measurement, not billing.** Estimated cost in micro-units of
-    /// the smallest accounting currency (typically USD micros). Zero
-    /// when the caller has no pricing table for this backend.
-    pub cost_micros_estimated: u64,
+    /// the smallest accounting currency (typically USD micros). Absent
+    /// when no pricing table was applied.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros_estimated: Option<u64>,
     /// Opaque version tag for the pricing table that computed
     /// `cost_micros_estimated`. Future audits use it to recompute
     /// costs at an alternate table without re-running calls.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pricing_table_version: Option<String>,
+    /// Measurement source. Absent on legacy call-boundary events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TokenUsageSource>,
+    /// Assistant turns represented by this row. Legacy rows represent one call.
+    #[serde(default = "one_invocation")]
+    pub invocations: u64,
     /// UTC timestamp when the event was emitted.
     pub timestamp: DateTime<Utc>,
+}
+
+const fn one_invocation() -> u64 {
+    1
+}
+
+/// Provider artefact from which a retrospective usage row was measured.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum TokenUsageSource {
+    /// Claude Code transcript JSONL.
+    ClaudeTranscript,
+    /// Codex rollout JSONL.
+    CodexRollout,
+}
+
+/// Outcome of an idempotent transcript-snapshot append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EmitSnapshotResult {
+    /// This call appended the snapshot.
+    Written,
+    /// A row for the molecule already existed.
+    AlreadyPresent,
+    /// Serialization, locking, or sink I/O prevented the append.
+    Unavailable,
 }
 
 /// Relative NDJSON path under the cosmon state directory.
@@ -138,12 +177,10 @@ static FILE_LOCK: Mutex<()> = Mutex::new(());
 ///
 /// # Wire integration
 ///
-/// Today the helper is exposed but **not yet** invoked from
-/// `LlmBackend::complete`. T-V1-API-SHAPE will introduce
-/// `ResponseMetrics.cost_micros`; once that lands, the backend wrapper
-/// calls this helper at end-of-call. Until then the helper is the
-/// stable shape future callers depend on (instrumentation pattern
-/// already proven by [`crate::instrumentation::emit_authz_decision`]).
+/// This call-boundary helper remains available for backends that know a cost.
+/// The RPP harvest path uses [`emit_transcript_token_usage_if_absent`] instead,
+/// because one transcript snapshot can represent several assistant turns and
+/// deliberately carries no estimated cost.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_token_usage(
     state_dir: &Path,
@@ -162,26 +199,188 @@ pub fn emit_token_usage(
         kind,
         backend: backend.to_owned(),
         tokens_in,
+        cache_read_tokens: None,
+        cache_creation_tokens: None,
         tokens_out,
-        cost_micros_estimated,
+        cost_micros_estimated: Some(cost_micros_estimated),
         pricing_table_version: pricing_table_version.map(str::to_owned),
+        source: None,
+        invocations: 1,
         timestamp: Utc::now(),
     };
 
-    let path = resolve_token_path(state_dir);
+    append_token_usage(&resolve_token_path(state_dir), &event);
+}
+
+/// Emit one harvest-time transcript snapshot to the canonical tenant sink.
+///
+/// The row may represent several assistant turns; `invocations` therefore
+/// travels explicitly instead of being inferred from the number of NDJSON
+/// lines. Cost is absent because transcript replay is observational and is
+/// never a billing fact.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_transcript_token_usage(
+    state_dir: &Path,
+    tenant: &NucleonId,
+    molecule_id: &MoleculeId,
+    kind: Option<MoleculeKind>,
+    backend: &str,
+    tokens_in: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: Option<u64>,
+    tokens_out: u64,
+    source: TokenUsageSource,
+    invocations: u64,
+) {
+    emit_transcript_token_usage_to_path(
+        &resolve_token_path(state_dir),
+        tenant,
+        molecule_id,
+        kind,
+        backend,
+        tokens_in,
+        cache_read_tokens,
+        cache_creation_tokens,
+        tokens_out,
+        source,
+        invocations,
+    );
+}
+
+/// Emit a transcript snapshot to an explicit sink path.
+///
+/// The RPP adapter uses this variant so an ambient instrumentation override
+/// can never redirect one tenant's measurement into another tenant's sink.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_transcript_token_usage_to_path(
+    path: &Path,
+    tenant: &NucleonId,
+    molecule_id: &MoleculeId,
+    kind: Option<MoleculeKind>,
+    backend: &str,
+    tokens_in: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: Option<u64>,
+    tokens_out: u64,
+    source: TokenUsageSource,
+    invocations: u64,
+) {
+    let event = transcript_event(
+        tenant,
+        molecule_id,
+        kind,
+        backend,
+        tokens_in,
+        cache_read_tokens,
+        cache_creation_tokens,
+        tokens_out,
+        source,
+        invocations,
+    );
+
+    append_token_usage(path, &event);
+}
+
+/// Atomically emit a transcript snapshot unless the molecule already has a row.
+///
+/// The check and append share the process-wide sink lock, so concurrent
+/// harvest retries cannot duplicate a snapshot. The typed result distinguishes
+/// a new write, an idempotent replay, and an unavailable sink.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_transcript_token_usage_if_absent(
+    path: &Path,
+    tenant: &NucleonId,
+    molecule_id: &MoleculeId,
+    kind: Option<MoleculeKind>,
+    backend: &str,
+    tokens_in: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: Option<u64>,
+    tokens_out: u64,
+    source: TokenUsageSource,
+    invocations: u64,
+) -> EmitSnapshotResult {
+    let event = transcript_event(
+        tenant,
+        molecule_id,
+        kind,
+        backend,
+        tokens_in,
+        cache_read_tokens,
+        cache_creation_tokens,
+        tokens_out,
+        source,
+        invocations,
+    );
     let Ok(line) = serde_json::to_string(&event) else {
+        return EmitSnapshotResult::Unavailable;
+    };
+    let Ok(_guard) = FILE_LOCK.lock() else {
+        return EmitSnapshotResult::Unavailable;
+    };
+    if read_token_ndjson(path)
+        .unwrap_or_default()
+        .iter()
+        .any(|existing| existing.molecule_id == *molecule_id)
+    {
+        return EmitSnapshotResult::AlreadyPresent;
+    }
+    if append_serialized(path, &line) {
+        EmitSnapshotResult::Written
+    } else {
+        EmitSnapshotResult::Unavailable
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn transcript_event(
+    tenant: &NucleonId,
+    molecule_id: &MoleculeId,
+    kind: Option<MoleculeKind>,
+    backend: &str,
+    tokens_in: u64,
+    cache_read_tokens: u64,
+    cache_creation_tokens: Option<u64>,
+    tokens_out: u64,
+    source: TokenUsageSource,
+    invocations: u64,
+) -> TokenUsage {
+    TokenUsage {
+        tenant: tenant.clone(),
+        molecule_id: molecule_id.clone(),
+        kind,
+        backend: backend.to_owned(),
+        tokens_in,
+        cache_read_tokens: Some(cache_read_tokens),
+        cache_creation_tokens,
+        tokens_out,
+        cost_micros_estimated: None,
+        pricing_table_version: None,
+        source: Some(source),
+        invocations,
+        timestamp: Utc::now(),
+    }
+}
+
+fn append_token_usage(path: &Path, event: &TokenUsage) {
+    let Ok(line) = serde_json::to_string(event) else {
         return;
     };
 
     let _guard = FILE_LOCK.lock().ok();
+    let _ = append_serialized(path, &line);
+}
+
+fn append_serialized(path: &Path, line: &str) -> bool {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::OpenOptions::new()
+    std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-        .and_then(|mut f| writeln!(f, "{line}"));
+        .open(path)
+        .and_then(|mut f| writeln!(f, "{line}"))
+        .is_ok()
 }
 
 /// Read every event from an NDJSON file. Used by `cs tokens` and by
@@ -236,35 +435,69 @@ pub fn read_token_ndjson(path: &Path) -> std::io::Result<Vec<TokenUsage>> {
 /// the molecule projection. New fields must stay additive (the
 /// omit-if-none discipline used across the observe envelope).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct MoleculeTokenTotals {
-    /// Sum of `tokens_in` across every recorded call for the molecule.
+    /// Sum of fresh `tokens_in` across every recorded turn for the molecule.
     pub tokens_in: u64,
+    /// Sum of cache-read input tokens. Absent when no row reported the counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<u64>,
+    /// Sum of cache-creation input tokens. Absent when no row reported the counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
     /// Sum of `tokens_out` across every recorded call for the molecule.
     pub tokens_out: u64,
     /// Sum of the per-call estimated cost, in USD micros. **Measurement,
     /// not billing** (see [`TokenUsage::cost_micros_estimated`]).
-    pub cost_micros_estimated: u64,
-    /// How many LLM calls were recorded against the molecule. A `0` total
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_micros_estimated: Option<u64>,
+    /// How many assistant turns were recorded against the molecule. A `0` total
     /// is never produced — the aggregator omits molecules with no events.
     pub invocations: u64,
+    /// Provider artefact supplying the measurement. Absent for legacy or mixed rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<TokenUsageSource>,
 }
 
 impl MoleculeTokenTotals {
-    /// Total tokens billed across the molecule's lifetime (`in + out`).
+    /// Total observed tokens across fresh input, cache traffic, and output.
     /// Saturates rather than overflowing on a pathological log.
     #[must_use]
     pub fn total_tokens(&self) -> u64 {
-        self.tokens_in.saturating_add(self.tokens_out)
+        self.tokens_in
+            .saturating_add(self.cache_read_tokens.unwrap_or(0))
+            .saturating_add(self.cache_creation_tokens.unwrap_or(0))
+            .saturating_add(self.tokens_out)
     }
 
     /// Fold one more [`TokenUsage`] event into the running total.
     fn add(&mut self, ev: &TokenUsage) {
         self.tokens_in = self.tokens_in.saturating_add(ev.tokens_in);
+        if let Some(value) = ev.cache_read_tokens {
+            self.cache_read_tokens =
+                Some(self.cache_read_tokens.unwrap_or(0).saturating_add(value));
+        }
+        if let Some(value) = ev.cache_creation_tokens {
+            self.cache_creation_tokens = Some(
+                self.cache_creation_tokens
+                    .unwrap_or(0)
+                    .saturating_add(value),
+            );
+        }
         self.tokens_out = self.tokens_out.saturating_add(ev.tokens_out);
-        self.cost_micros_estimated = self
-            .cost_micros_estimated
-            .saturating_add(ev.cost_micros_estimated);
-        self.invocations = self.invocations.saturating_add(1);
+        if let Some(value) = ev.cost_micros_estimated {
+            self.cost_micros_estimated = Some(
+                self.cost_micros_estimated
+                    .unwrap_or(0)
+                    .saturating_add(value),
+            );
+        }
+        self.invocations = self.invocations.saturating_add(ev.invocations);
+        self.source = match (self.source, ev.source) {
+            (None, source) if self.invocations == ev.invocations => source,
+            (Some(left), Some(right)) if left == right => Some(left),
+            _ => None,
+        };
     }
 }
 
@@ -299,7 +532,19 @@ pub fn molecule_token_totals(
     molecule_id: &MoleculeId,
 ) -> Option<MoleculeTokenTotals> {
     let path = resolve_token_path(state_dir);
-    let events = read_token_ndjson(&path).ok()?;
+    molecule_token_totals_from_path(&path, molecule_id)
+}
+
+/// Sum one molecule from an explicit sink path.
+///
+/// This bypasses the process-wide test override and is therefore the safe
+/// reader for a multi-tenant server that already resolved its tenant store.
+#[must_use]
+pub fn molecule_token_totals_from_path(
+    path: &Path,
+    molecule_id: &MoleculeId,
+) -> Option<MoleculeTokenTotals> {
+    let events = read_token_ndjson(path).ok()?;
     let mut totals = MoleculeTokenTotals::default();
     let mut matched = false;
     for ev in &events {
@@ -356,7 +601,7 @@ mod tests {
         assert_eq!(ev.backend, "anthropic");
         assert_eq!(ev.tokens_in, 1024);
         assert_eq!(ev.tokens_out, 512);
-        assert_eq!(ev.cost_micros_estimated, 900);
+        assert_eq!(ev.cost_micros_estimated, Some(900));
         assert_eq!(
             ev.pricing_table_version.as_deref(),
             Some("anthropic-2026-04")
@@ -407,9 +652,13 @@ mod tests {
             kind: None,
             backend: "anthropic".into(),
             tokens_in: 0,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
             tokens_out: 0,
-            cost_micros_estimated: 0,
+            cost_micros_estimated: None,
             pricing_table_version: None,
+            source: None,
+            invocations: 1,
             timestamp: Utc::now(),
         };
         let s = serde_json::to_string(&event).unwrap();
@@ -450,9 +699,13 @@ mod tests {
             kind: Some(MoleculeKind::Task),
             backend: "anthropic".into(),
             tokens_in: tin,
+            cache_read_tokens: None,
+            cache_creation_tokens: None,
             tokens_out: tout,
-            cost_micros_estimated: cost,
+            cost_micros_estimated: Some(cost),
             pricing_table_version: None,
+            source: None,
+            invocations: 1,
             timestamp: Utc::now(),
         }
     }
@@ -470,7 +723,7 @@ mod tests {
         let a = by_mol.get(&mol("task-20260625-aaaa")).unwrap();
         assert_eq!(a.tokens_in, 300);
         assert_eq!(a.tokens_out, 130);
-        assert_eq!(a.cost_micros_estimated, 30);
+        assert_eq!(a.cost_micros_estimated, Some(30));
         assert_eq!(a.invocations, 2);
         assert_eq!(a.total_tokens(), 430);
 
@@ -524,7 +777,7 @@ mod tests {
         let totals = molecule_token_totals(tmp.path(), &mol("task-20260625-aaaa")).unwrap();
         assert_eq!(totals.tokens_in, 1500);
         assert_eq!(totals.tokens_out, 500);
-        assert_eq!(totals.cost_micros_estimated, 1200);
+        assert_eq!(totals.cost_micros_estimated, Some(1200));
         assert_eq!(totals.invocations, 2);
         assert_eq!(totals.total_tokens(), 2000);
     }

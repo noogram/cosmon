@@ -70,7 +70,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use cosmon_core::harvest_door::{DoorRefusal, HarvestOptions};
-use cosmon_core::id::MoleculeId;
+use cosmon_core::id::{MoleculeId, NucleonId};
+use cosmon_state::StateStore as _;
 
 /// The one effect-error vocabulary, shared with the door's own seam.
 ///
@@ -83,6 +84,121 @@ use cosmon_core::id::MoleculeId;
 /// reached the wire as an anonymous failure. That was the PR #62 review's
 /// third finding, and the repair is that there is now nothing to flatten.
 pub use cosmon_core::harvest_door::EffectFailure;
+
+/// Result of the best-effort token snapshot taken before harvest teardown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenSnapshotOutcome {
+    /// A transcript snapshot was written to the tenant's canonical sink.
+    Written,
+    /// This molecule was already snapshotted; replay changed nothing.
+    AlreadyPresent,
+    /// No attributable provider usage was present, so no zero row was written.
+    SourceSilent,
+    /// The recorded cwd escaped the tenant root and was rejected.
+    CwdOutsideTenant,
+}
+
+/// Snapshot provider transcript usage into the tenant token sink before harvest.
+///
+/// Attribution comes from the server-selected tenant and durable session
+/// locator. The cwd must canonicalise below `tenant_root`, and each accepted
+/// transcript independently carries that same cwd. The operation is
+/// idempotent per molecule.
+///
+/// # Errors
+///
+/// Returns a description when `HOME`, the locator, or a transcript read is
+/// unavailable. Callers report this as observability degradation and continue
+/// the harvest; a silent source never becomes a fabricated zero measurement.
+pub fn snapshot_api_tokens(
+    tenant_root: &Path,
+    tenant: &crate::nucleon_map::Noyau,
+    molecule: &MoleculeId,
+) -> Result<TokenSnapshotOutcome, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or_else(|| "HOME is unset".to_owned())?);
+    snapshot_api_tokens_from_roots(
+        tenant_root,
+        &NucleonId::new(tenant.as_str()).map_err(|error| error.to_string())?,
+        molecule,
+        &home.join(".claude").join("projects"),
+        &home.join(".codex").join("sessions"),
+    )
+}
+
+fn snapshot_api_tokens_from_roots(
+    tenant_root: &Path,
+    tenant: &NucleonId,
+    molecule: &MoleculeId,
+    claude_projects: &Path,
+    codex_sessions: &Path,
+) -> Result<TokenSnapshotOutcome, String> {
+    let state_dir = tenant_root.join(".cosmon").join("state");
+    let sink = state_dir.join(cosmon_state::token_meter::TOKEN_NDJSON_RELATIVE_PATH);
+    if cosmon_state::token_meter::molecule_token_totals_from_path(&sink, molecule).is_some() {
+        return Ok(TokenSnapshotOutcome::AlreadyPresent);
+    }
+
+    let store = cosmon_filestore::FileStore::new(&state_dir);
+    let locator = store
+        .load_session_locator(molecule)
+        .ok_or_else(|| "session locator is unavailable".to_owned())?;
+    let tenant_root = std::fs::canonicalize(tenant_root)
+        .map_err(|error| format!("cannot canonicalise tenant root: {error}"))?;
+    let cwd = std::fs::canonicalize(&locator.cwd)
+        .map_err(|error| format!("cannot canonicalise recorded cwd: {error}"))?;
+    if !cwd.starts_with(&tenant_root) {
+        return Ok(TokenSnapshotOutcome::CwdOutsideTenant);
+    }
+
+    let claude_project = claude_projects.join(cosmon_core::session_thread::sanitise_agent_path(
+        &cwd.to_string_lossy(),
+    ));
+    let Some(snapshot) = cosmon_session_probe::snapshot_usage_for_cwd(
+        &claude_project,
+        codex_sessions,
+        &cwd,
+        locator.adapter.as_deref(),
+    )
+    .map_err(|error| error.to_string())?
+    else {
+        return Ok(TokenSnapshotOutcome::SourceSilent);
+    };
+    let source = match snapshot.source {
+        cosmon_session_probe::TranscriptTokenSource::ClaudeTranscript => {
+            cosmon_state::token_meter::TokenUsageSource::ClaudeTranscript
+        }
+        cosmon_session_probe::TranscriptTokenSource::CodexRollout => {
+            cosmon_state::token_meter::TokenUsageSource::CodexRollout
+        }
+        _ => return Ok(TokenSnapshotOutcome::SourceSilent),
+    };
+    let kind = store
+        .load_molecule(molecule)
+        .ok()
+        .and_then(|data| data.kind);
+    let emitted = cosmon_state::token_meter::emit_transcript_token_usage_if_absent(
+        &sink,
+        tenant,
+        molecule,
+        kind,
+        locator.adapter.as_deref().unwrap_or("unknown"),
+        snapshot.tokens_in,
+        snapshot.cache_read_tokens,
+        snapshot.cache_creation_tokens,
+        snapshot.tokens_out,
+        source,
+        snapshot.invocations,
+    );
+    match emitted {
+        cosmon_state::token_meter::EmitSnapshotResult::Written => Ok(TokenSnapshotOutcome::Written),
+        cosmon_state::token_meter::EmitSnapshotResult::AlreadyPresent => {
+            Ok(TokenSnapshotOutcome::AlreadyPresent)
+        }
+        cosmon_state::token_meter::EmitSnapshotResult::Unavailable => {
+            Err("token snapshot sink is unavailable".to_owned())
+        }
+    }
+}
 
 /// The environment a harvest child is given, beyond what this module sets
 /// explicitly.
@@ -386,6 +502,162 @@ pub fn from_config(harvest_cs_binary: Option<PathBuf>) -> std::sync::Arc<dyn Har
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn save_locator(root: &Path, molecule: &MoleculeId, cwd: &Path, adapter: &str) {
+        let store = cosmon_filestore::FileStore::new(root.join(".cosmon/state"));
+        store
+            .save_session_locator(
+                molecule,
+                &cosmon_core::session_thread::SessionLocator::new(
+                    cwd.to_string_lossy(),
+                    Some(adapter.to_owned()),
+                ),
+            )
+            .unwrap();
+    }
+
+    fn claude_row(cwd: &Path) -> String {
+        serde_json::json!({
+            "type": "assistant",
+            "cwd": cwd,
+            "message": {
+                "id": "msg-1",
+                "usage": {
+                    "input_tokens": 10,
+                    "cache_creation_input_tokens": 100,
+                    "cache_read_input_tokens": 1000,
+                    "output_tokens": 7
+                }
+            }
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn transcript_snapshot_is_exact_and_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant_root = tmp.path().join("tenant-a");
+        let cwd = tenant_root.join(".worktrees/task-1");
+        let projects = tmp.path().join("home/.claude/projects");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let canonical_cwd = std::fs::canonicalize(&cwd).unwrap();
+        let project = projects.join(cosmon_core::session_thread::sanitise_agent_path(
+            &canonical_cwd.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("session.jsonl"), claude_row(&canonical_cwd)).unwrap();
+        let molecule = MoleculeId::new("task-20260925-aaaa").unwrap();
+        save_locator(&tenant_root, &molecule, &cwd, "claude");
+        let tenant = NucleonId::new("tenant-a").unwrap();
+
+        assert_eq!(
+            snapshot_api_tokens_from_roots(
+                &tenant_root,
+                &tenant,
+                &molecule,
+                &projects,
+                Path::new("unused"),
+            )
+            .unwrap(),
+            TokenSnapshotOutcome::Written
+        );
+        assert_eq!(
+            snapshot_api_tokens_from_roots(
+                &tenant_root,
+                &tenant,
+                &molecule,
+                &projects,
+                Path::new("unused"),
+            )
+            .unwrap(),
+            TokenSnapshotOutcome::AlreadyPresent
+        );
+
+        let sink = tenant_root
+            .join(".cosmon/state")
+            .join(cosmon_state::token_meter::TOKEN_NDJSON_RELATIVE_PATH);
+        let events = cosmon_state::token_meter::read_token_ndjson(&sink).unwrap();
+        assert_eq!(events.len(), 1);
+        let totals =
+            cosmon_state::token_meter::molecule_token_totals_from_path(&sink, &molecule).unwrap();
+        assert_eq!(totals.tokens_in, 10);
+        assert_eq!(totals.cache_creation_tokens, Some(100));
+        assert_eq!(totals.cache_read_tokens, Some(1000));
+        assert_eq!(totals.tokens_out, 7);
+        assert_eq!(totals.invocations, 1);
+        assert_eq!(
+            totals.source,
+            Some(cosmon_state::token_meter::TokenUsageSource::ClaudeTranscript)
+        );
+        assert_eq!(totals.cost_micros_estimated, None);
+    }
+
+    #[test]
+    fn same_molecule_id_does_not_cross_tenant_cwd_attribution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant_a = tmp.path().join("tenant-a");
+        let tenant_b = tmp.path().join("tenant-b");
+        let cwd_a = tenant_a.join(".worktrees/task-1");
+        let cwd_b = tenant_b.join(".worktrees/task-1");
+        std::fs::create_dir_all(&cwd_a).unwrap();
+        std::fs::create_dir_all(&cwd_b).unwrap();
+        let canonical_cwd_b = std::fs::canonicalize(&cwd_b).unwrap();
+        let projects = tmp.path().join("home/.claude/projects");
+        let project_b = projects.join(cosmon_core::session_thread::sanitise_agent_path(
+            &canonical_cwd_b.to_string_lossy(),
+        ));
+        std::fs::create_dir_all(&project_b).unwrap();
+        std::fs::write(
+            project_b.join("session.jsonl"),
+            claude_row(&canonical_cwd_b),
+        )
+        .unwrap();
+        let molecule = MoleculeId::new("task-20260925-bbbb").unwrap();
+        save_locator(&tenant_a, &molecule, &cwd_a, "claude");
+        save_locator(&tenant_b, &molecule, &cwd_b, "claude");
+
+        let a = snapshot_api_tokens_from_roots(
+            &tenant_a,
+            &NucleonId::new("tenant-a").unwrap(),
+            &molecule,
+            &projects,
+            Path::new("unused"),
+        )
+        .unwrap();
+        let b = snapshot_api_tokens_from_roots(
+            &tenant_b,
+            &NucleonId::new("tenant-b").unwrap(),
+            &molecule,
+            &projects,
+            Path::new("unused"),
+        )
+        .unwrap();
+        assert_eq!(a, TokenSnapshotOutcome::SourceSilent);
+        assert_eq!(b, TokenSnapshotOutcome::Written);
+        assert!(!tenant_a
+            .join(".cosmon/state/instrumentation/tokens.jsonl")
+            .exists());
+    }
+
+    #[test]
+    fn cwd_outside_tenant_is_rejected_before_transcript_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tenant_root = tmp.path().join("tenant-a");
+        let outside = tmp.path().join("tenant-b/.worktrees/task-1");
+        std::fs::create_dir_all(&tenant_root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let molecule = MoleculeId::new("task-20260925-cccc").unwrap();
+        save_locator(&tenant_root, &molecule, &outside, "claude");
+        let outcome = snapshot_api_tokens_from_roots(
+            &tenant_root,
+            &NucleonId::new("tenant-a").unwrap(),
+            &molecule,
+            Path::new("unused"),
+            Path::new("unused"),
+        )
+        .unwrap();
+        assert_eq!(outcome, TokenSnapshotOutcome::CwdOutsideTenant);
+    }
 
     #[test]
     fn the_default_effect_refuses_instead_of_pretending() {
