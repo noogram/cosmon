@@ -781,7 +781,10 @@ pub const WHISPER: &str = "EXAMPLES:
 
 Experimental v0. Perturbation port, not a control-plane event.
 Refuses unless the target pane's foreground command is in
-`[whisper] allowed_commands` (default: [\"claude\"]).";
+`[whisper] allowed_commands` (default: [\"claude\"]).
+
+To wait for the worker's answer, follow with `cs wait <mol>`: even on
+a completed molecule it returns only after a new commit on feat/<mol>.";
 
 pub const DONE: &str = "EXAMPLES:
   cs done task-example-0001                      # merge + teardown
@@ -929,11 +932,17 @@ briefing/log/events/synthesis/responses/notes/git tabs.";
 pub const WAIT: &str = "EXAMPLES:
   cs wait <mol>                           # block until terminal
   cs wait <mol> --timeout 600             # 10-minute cap
-  cs wait <mol> --status Completed        # custom target set
+  cs wait <mol> --for completed           # custom target set
   cs wait <mol> &                         # background wait, notified on exit
+  cs whisper <mol> -f fix.md; cs wait <mol>   # wait for the correction
 
 This is kubectl-wait, not kubectl-watch. One molecule, bounded poll,
 exits on target. Never poll `cs observe` in a shell loop.
+
+After a whisper to a molecule already in the target status, the wait
+also covers the worker's answer: it returns once feat/<mol> has moved
+past the HEAD the whisper recorded and the pane is no longer working.
+A whisper answered without a commit ends on --timeout (exit 124).
 
 SEE ALSO: cs observe (snapshot), cs peek (live fleet view).";
 

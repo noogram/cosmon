@@ -1073,6 +1073,9 @@ Experimental v0. Perturbation port, not a control-plane event.
 Refuses unless the target pane's foreground command is in
 `[whisper] allowed_commands` (default: ["claude"]).
 
+To wait for the worker's answer, follow with `cs wait <mol>`: even on
+a completed molecule it returns only after a new commit on feat/<mol>.
+
 ###### **Arguments:**
 
 * `<MOLECULE_ID>` — Molecule whose worker pane will receive the whisper.

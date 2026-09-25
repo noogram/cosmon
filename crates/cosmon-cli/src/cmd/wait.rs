@@ -24,6 +24,27 @@
 //!
 //! Three verbs, three patterns: **snapshot**, **live view**, **bounded wait**.
 //!
+//! # After a whisper
+//!
+//! `cs whisper <mol> …; cs wait <mol>` waits for the worker to answer the
+//! whisper, even when the molecule is already `completed`. A whisper is a
+//! speech act, not a state transition (ADR-038): it leaves `state.json`
+//! untouched, so the status alone would satisfy the wait in zero seconds while
+//! the worker is still acting on the correction. When the most recent whisper
+//! found the molecule in the very status this wait just reached, the wait
+//! continues until the worker's branch `feat/<id>` has moved past the HEAD the
+//! whisper recorded **and** the worker pane is no longer working — the
+//! correction commit is the observable end of the turn. It stops early if the
+//! branch disappears (`cs done` ran) and fails if the pane dies with the
+//! branch unmoved. A whisper answered without any commit is not observable;
+//! such a wait ends on `--timeout` (exit 124), naming the whisper.
+//!
+//! No new status is needed. Reopening the molecule on a whisper would make a
+//! perturbation drive the lifecycle, which ADR-038 rules out; a `Revising`
+//! state would also have to be closed by the worker, and a worker that commits
+//! and stops without a second `cs complete` would hold it open forever. The
+//! branch is what `cs done` merges, so it is the fact worth waiting on.
+//!
 //! # Metrics for the feedback loop
 //!
 //! `cs wait --json` enriches its response with quantitative metrics so both
@@ -45,11 +66,12 @@
 use std::time::Duration;
 
 use colored::Colorize;
-use cosmon_core::id::MoleculeId;
+use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::molecule::MoleculeStatus;
 use cosmon_filestore::FileStore;
 use cosmon_state::wait::{wait_for_status_with_metrics_probed, WaitError};
 
+use super::whisper::WhisperRecord;
 use super::Context;
 
 /// Exit code for a timeout — matches `timeout(1)` on GNU coreutils and
@@ -147,15 +169,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         poll_interval,
         on_poll,
     ) {
-        Ok(outcome) => {
-            if ctx.json {
-                let json = render_outcome_json(&outcome)?;
-                println!("{}", serde_json::to_string_pretty(&json)?);
-            } else {
-                render_outcome_human(&outcome);
-            }
-            Ok(())
-        }
+        Ok(outcome) => finish(ctx, &store, &mol_id, outcome, args),
         Err(WaitError::Timeout {
             elapsed,
             last_status,
@@ -181,6 +195,211 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
         Err(WaitError::MoleculeNotFound(id)) => Err(anyhow::anyhow!("molecule not found: {id}")),
         Err(WaitError::Store(msg)) => Err(anyhow::anyhow!("state store error: {msg}")),
+    }
+}
+
+/// Report a reached status, after holding for an unanswered whisper if one
+/// applies (see [`await_whisper_answer`]). Exits [`EXIT_TIMEOUT`] when the
+/// whisper phase runs out of budget.
+fn finish(
+    ctx: &Context,
+    store: &FileStore,
+    mol_id: &MoleculeId,
+    mut outcome: cosmon_state::wait::WaitOutcome,
+    args: &Args,
+) -> anyhow::Result<()> {
+    let whisper = match await_whisper_answer(ctx, store, mol_id, &mut outcome, args) {
+        Ok(answered) => answered,
+        Err(WhisperWaitError::Timeout(rec)) => {
+            let elapsed = outcome.elapsed.as_secs_f64();
+            if ctx.json {
+                let json = serde_json::json!({
+                    "error": "timeout",
+                    "molecule": mol_id.as_str(),
+                    "last_status": outcome.reached.to_string(),
+                    "elapsed_seconds": elapsed,
+                    "timeout_seconds": args.timeout,
+                    "unanswered_whisper": rec.ts.to_rfc3339(),
+                });
+                eprintln!("{}", serde_json::to_string(&json).unwrap_or_default());
+            } else {
+                eprintln!(
+                    "cs: wait timed out after {elapsed:.1}s — {mol_id} is {}, but \
+                     feat/{mol_id} has not moved since the whisper of {}",
+                    outcome.reached,
+                    rec.ts.to_rfc3339(),
+                );
+            }
+            std::process::exit(EXIT_TIMEOUT);
+        }
+        Err(WhisperWaitError::WorkerGone(rec)) => {
+            return Err(anyhow::anyhow!(
+                "the worker pane of {mol_id} is gone and feat/{mol_id} has not moved \
+                 since the whisper of {} — the whisper was never answered",
+                rec.ts.to_rfc3339()
+            ));
+        }
+    };
+    if ctx.json {
+        let mut json = render_outcome_json(&outcome)?;
+        if let Some(answer) = &whisper {
+            json["whisper_answered"] = serde_json::json!({
+                "whispered_at": answer.record.ts.to_rfc3339(),
+                "branch_head": answer.head,
+            });
+        }
+        println!("{}", serde_json::to_string_pretty(&json)?);
+    } else {
+        render_outcome_human(&outcome);
+        if let Some(answer) = &whisper {
+            println!(
+                "  {} of {} answered: {}",
+                "whisper".dimmed(),
+                answer.record.ts.to_rfc3339(),
+                answer.head.as_deref().map_or_else(
+                    || format!("feat/{mol_id} is gone (merged or deleted)"),
+                    |h| format!("feat/{mol_id} now at {}", &h[..h.len().min(8)]),
+                ),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Activity of the worker pane, as far as the whisper gate needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneActivity {
+    /// The pane shows the worker mid-turn (tool calls, streaming, loading).
+    Working,
+    /// The pane is alive and not visibly working.
+    Idle,
+    /// The pane no longer exists.
+    Gone,
+}
+
+/// Verdict of one whisper-gate poll. Pure: see [`whisper_turn`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WhisperTurn {
+    /// The worker has answered; carries the branch HEAD (`None` = branch gone).
+    Answered(Option<String>),
+    /// Keep waiting.
+    Pending,
+    /// The pane died with the branch unmoved — no answer can arrive.
+    WorkerGone,
+}
+
+/// A whisper the wait saw answered.
+struct WhisperAnswer {
+    record: WhisperRecord,
+    head: Option<String>,
+}
+
+/// Why the whisper phase of a wait ended without an answer.
+enum WhisperWaitError {
+    Timeout(WhisperRecord),
+    WorkerGone(WhisperRecord),
+}
+
+/// The whisper that still holds this wait, if any.
+///
+/// Only a whisper that found the molecule in the status the wait just reached
+/// holds it: reaching that status again proves nothing about the whisper. A
+/// whisper sent to a running worker is answered by the transition itself, so
+/// the canonical `cs tackle M && cs wait M` is unaffected. A whisper whose
+/// branch did not exist at delivery has no commit to wait for and holds
+/// nothing.
+fn holding_whisper(
+    record: Option<WhisperRecord>,
+    reached: MoleculeStatus,
+) -> Option<WhisperRecord> {
+    record.filter(|r| r.molecule_status == Some(reached) && r.branch_head.is_some())
+}
+
+/// Decide whether the worker has answered `record`, given the branch HEAD and
+/// pane activity observed now.
+///
+/// The commit alone would return while the worker is still running its gates
+/// after committing; the idle pane alone would return before the pasted
+/// whisper is even picked up. Both together mark the end of the turn.
+fn whisper_turn(record: &WhisperRecord, head_now: Option<&str>, pane: PaneActivity) -> WhisperTurn {
+    let Some(head_now) = head_now else {
+        return WhisperTurn::Answered(None);
+    };
+    let moved = record.branch_head.as_deref() != Some(head_now);
+    match (moved, pane) {
+        (true, PaneActivity::Working) | (false, PaneActivity::Working | PaneActivity::Idle) => {
+            WhisperTurn::Pending
+        }
+        (true, _) => WhisperTurn::Answered(Some(head_now.to_owned())),
+        (false, PaneActivity::Gone) => WhisperTurn::WorkerGone,
+    }
+}
+
+/// Observe the worker pane running in tmux session `session`.
+fn pane_activity(ctx: &Context, session: &str) -> PaneActivity {
+    use cosmon_transport::readiness::{detect_status, SessionStatus};
+    let Ok(worker) = WorkerId::new(session) else {
+        return PaneActivity::Gone;
+    };
+    let backend = cosmon_transport::TmuxBackend::new(super::tmux_socket_name(ctx));
+    match detect_status(&backend, &worker) {
+        Ok(SessionStatus::Dead) => PaneActivity::Gone,
+        Ok(SessionStatus::Working | SessionStatus::Loading) => PaneActivity::Working,
+        // An unreadable pane is not evidence of work; the branch still has
+        // to move before the wait returns.
+        Ok(_) | Err(_) => PaneActivity::Idle,
+    }
+}
+
+/// Second phase of `cs wait`: when a whisper holds the wait (see
+/// [`holding_whisper`]), poll until the worker has answered it, within what
+/// is left of `--timeout`. Updates `outcome`'s elapsed time and poll count.
+fn await_whisper_answer(
+    ctx: &Context,
+    store: &FileStore,
+    mol_id: &MoleculeId,
+    outcome: &mut cosmon_state::wait::WaitOutcome,
+    args: &Args,
+) -> Result<Option<WhisperAnswer>, WhisperWaitError> {
+    let record =
+        super::whisper::last_whisper_record(&store.molecule_dir(mol_id).join("whispers.jsonl"));
+    let Some(record) = holding_whisper(record, outcome.reached) else {
+        return Ok(None);
+    };
+    if !args.quiet && !ctx.json {
+        println!(
+            "{} whisper of {} — waiting for the worker's answer on feat/{mol_id}",
+            "Holding for".dimmed(),
+            record.ts.to_rfc3339(),
+        );
+    }
+    let timeout = Duration::from_secs(args.timeout);
+    let poll_interval = Duration::from_secs(args.poll_interval.max(1));
+    // Same resolution as `cs whisper`: the pane the whisper was pasted into.
+    let session = outcome
+        .molecule
+        .session_name
+        .clone()
+        .unwrap_or_else(|| mol_id.to_string());
+    let started = std::time::Instant::now();
+    let already = outcome.elapsed;
+    loop {
+        let head = super::whisper::worker_branch_head(mol_id);
+        let verdict = whisper_turn(&record, head.as_deref(), pane_activity(ctx, &session));
+        outcome.metrics.poll_count += 1;
+        outcome.elapsed = already + started.elapsed();
+        match verdict {
+            WhisperTurn::Answered(head) => return Ok(Some(WhisperAnswer { record, head })),
+            WhisperTurn::WorkerGone => return Err(WhisperWaitError::WorkerGone(record)),
+            WhisperTurn::Pending => {}
+        }
+        let Some(remaining) = timeout
+            .checked_sub(outcome.elapsed)
+            .filter(|d| !d.is_zero())
+        else {
+            return Err(WhisperWaitError::Timeout(record));
+        };
+        std::thread::sleep(poll_interval.min(remaining));
     }
 }
 
@@ -350,5 +569,97 @@ mod tests {
         // Empty string survives `value_delimiter` on a whitespace-only --for.
         let parsed = parse_statuses(&[String::new(), "completed".to_owned()]).unwrap();
         assert_eq!(parsed, vec![MoleculeStatus::Completed]);
+    }
+
+    fn record(status: Option<MoleculeStatus>, head: Option<&str>) -> WhisperRecord {
+        WhisperRecord {
+            ts: chrono::Utc::now(),
+            molecule_status: status,
+            branch_head: head.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn a_whisper_to_a_completed_molecule_holds_a_wait_that_reaches_completed() {
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            holding_whisper(Some(rec.clone()), MoleculeStatus::Completed),
+            Some(rec)
+        );
+    }
+
+    #[test]
+    fn a_whisper_to_a_running_worker_does_not_hold_the_trinity() {
+        // `cs tackle M && cs wait M && cs done M` with a mid-flight whisper:
+        // the transition to completed is itself the answer.
+        let rec = record(Some(MoleculeStatus::Running), Some("aaa"));
+        assert_eq!(holding_whisper(Some(rec), MoleculeStatus::Completed), None);
+        assert_eq!(holding_whisper(None, MoleculeStatus::Completed), None);
+    }
+
+    #[test]
+    fn a_whisper_without_a_recorded_branch_or_status_holds_nothing() {
+        let no_head = record(Some(MoleculeStatus::Completed), None);
+        assert_eq!(
+            holding_whisper(Some(no_head), MoleculeStatus::Completed),
+            None
+        );
+        let legacy = record(None, Some("aaa"));
+        assert_eq!(
+            holding_whisper(Some(legacy), MoleculeStatus::Completed),
+            None
+        );
+    }
+
+    #[test]
+    fn the_turn_ends_on_a_new_commit_with_the_pane_idle() {
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            whisper_turn(&rec, Some("bbb"), PaneActivity::Idle),
+            WhisperTurn::Answered(Some("bbb".to_owned()))
+        );
+        assert_eq!(
+            whisper_turn(&rec, Some("bbb"), PaneActivity::Gone),
+            WhisperTurn::Answered(Some("bbb".to_owned()))
+        );
+    }
+
+    #[test]
+    fn an_idle_pane_without_a_commit_is_not_an_answer() {
+        // Right after the paste the pane may still look idle: returning then
+        // is the zero-second wait this gate exists to prevent.
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            whisper_turn(&rec, Some("aaa"), PaneActivity::Idle),
+            WhisperTurn::Pending
+        );
+    }
+
+    #[test]
+    fn a_commit_while_the_worker_is_still_working_is_not_the_end_of_the_turn() {
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            whisper_turn(&rec, Some("bbb"), PaneActivity::Working),
+            WhisperTurn::Pending
+        );
+    }
+
+    #[test]
+    fn a_dead_pane_with_an_unmoved_branch_can_never_answer() {
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            whisper_turn(&rec, Some("aaa"), PaneActivity::Gone),
+            WhisperTurn::WorkerGone
+        );
+    }
+
+    #[test]
+    fn a_deleted_branch_ends_the_wait() {
+        // `cs done` merged and deleted feat/<id>: nothing left to wait on.
+        let rec = record(Some(MoleculeStatus::Completed), Some("aaa"));
+        assert_eq!(
+            whisper_turn(&rec, None, PaneActivity::Gone),
+            WhisperTurn::Answered(None)
+        );
     }
 }
