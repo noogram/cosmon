@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use chrono::{DateTime, Utc};
 use cosmon_core::event_v2::PerturbationChannel;
 use cosmon_core::id::{MoleculeId, WorkerId};
+use cosmon_core::molecule::MoleculeStatus;
 use cosmon_core::transport::TransportBackend;
 use cosmon_filestore::FileStore;
 use cosmon_state::events::worker_spawn::emit_adapter_pane_signature_checked;
@@ -272,6 +273,10 @@ fn run_to_molecule(
     let ts_str = ts.format("%Y%m%dT%H%M%S%.3fZ").to_string();
     let size_bytes = payload.len();
     let pilot = detect_pilot();
+    // What `cs wait` needs to tell "the worker answered" from "the molecule
+    // was already there": the status the whisper found, and where the
+    // worker's branch stood. See `cmd::wait` for the reader.
+    let branch_head = worker_branch_head(&mol_id);
 
     if !dry_run {
         // Persist the payload (content-addressed), then append the reflog
@@ -294,6 +299,8 @@ fn run_to_molecule(
                 target_session: &session_name,
                 sha256: &sha256,
                 size_bytes,
+                molecule_status: Some(mol.status),
+                branch_head: branch_head.as_deref(),
             },
         )?;
 
@@ -487,6 +494,10 @@ struct ReflogEntry<'a> {
     target_session: &'a str,
     sha256: &'a str,
     size_bytes: usize,
+    /// Status of the molecule when the whisper was delivered.
+    molecule_status: Option<MoleculeStatus>,
+    /// `feat/<id>` HEAD when the whisper was delivered, if the branch exists.
+    branch_head: Option<&'a str>,
 }
 
 /// Append one JSON line to `whispers.jsonl`, creating parent dirs as needed.
@@ -495,14 +506,20 @@ fn append_reflog(path: &Path, entry: &ReflogEntry<'_>) -> anyhow::Result<()> {
         fs::create_dir_all(parent)
             .map_err(|e| anyhow::anyhow!("failed to create whispers parent dir: {e}"))?;
     }
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "ts": entry.ts.to_rfc3339(),
         "pilot": entry.pilot,
         "target_session": entry.target_session,
         "sha256": entry.sha256,
         "size_bytes": entry.size_bytes,
-    })
-    .to_string();
+    });
+    if let Some(status) = entry.molecule_status {
+        line["molecule_status"] = serde_json::json!(status.to_string());
+    }
+    if let Some(head) = entry.branch_head {
+        line["branch_head"] = serde_json::json!(head);
+    }
+    let line = line.to_string();
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -525,6 +542,74 @@ pub fn last_whisper_ts(path: &Path) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(ts)
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
+}
+
+/// The most recent whisper to a molecule, as `cs wait` reads it back.
+///
+/// A whisper is a speech act, not a state transition (ADR-038): it never
+/// changes `state.json`. So when a pilot whispers to a molecule that is
+/// already `completed`, the status `cs wait` polls cannot move and says
+/// nothing about whether the worker has acted. This record carries the two
+/// facts that let `cs wait` see the answer anyway: the status the whisper
+/// found, and the worker branch HEAD at that moment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhisperRecord {
+    /// When the whisper was delivered.
+    pub ts: DateTime<Utc>,
+    /// Molecule status at delivery. `None` on lines written before the
+    /// field existed — such whispers never hold a wait.
+    pub molecule_status: Option<MoleculeStatus>,
+    /// `feat/<id>` HEAD at delivery. `None` when the branch did not exist
+    /// or the line predates the field.
+    pub branch_head: Option<String>,
+}
+
+/// Read the most recent entry of `whispers.jsonl` as a [`WhisperRecord`].
+///
+/// Returns `None` when the file is missing, empty, or its last line does not
+/// parse — the same best-effort contract as [`last_whisper_ts`].
+pub fn last_whisper_record(path: &Path) -> Option<WhisperRecord> {
+    let content = fs::read_to_string(path).ok()?;
+    let last = content.lines().rev().find(|l| !l.trim().is_empty())?;
+    let v: serde_json::Value = serde_json::from_str(last).ok()?;
+    let ts = DateTime::parse_from_rfc3339(v.get("ts")?.as_str()?)
+        .ok()?
+        .with_timezone(&Utc);
+    let molecule_status = v
+        .get("molecule_status")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|s| s.parse().ok());
+    let branch_head = v
+        .get("branch_head")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned);
+    Some(WhisperRecord {
+        ts,
+        molecule_status,
+        branch_head,
+    })
+}
+
+/// Current HEAD of the molecule's worker branch (`feat/<id>`), if it exists.
+///
+/// Resolved in the galaxy's target repository, which shares its refs with
+/// every worktree `cs tackle` creates. `None` when the repository cannot be
+/// found or the branch does not exist (never tackled, or deleted by
+/// `cs done`).
+pub fn worker_branch_head(mol_id: &MoleculeId) -> Option<String> {
+    let repo = cosmon_cli::target_repo::resolve().ok()?;
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["rev-parse", "--verify", "--quiet"])
+        .arg(format!("refs/heads/feat/{}", mol_id.as_str()))
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let head = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    (!head.is_empty()).then_some(head)
 }
 
 /// Hex-encoded SHA-256 of `payload`.
@@ -706,6 +791,8 @@ mod tests {
                 target_session: "s",
                 sha256: "a",
                 size_bytes: 1,
+                molecule_status: None,
+                branch_head: None,
             },
         )
         .unwrap();
@@ -717,12 +804,52 @@ mod tests {
                 target_session: "s",
                 sha256: "b",
                 size_bytes: 1,
+                molecule_status: Some(MoleculeStatus::Completed),
+                branch_head: Some("abc123"),
             },
         )
         .unwrap();
         let last = last_whisper_ts(&path).unwrap();
         // Should match ts2 to the second.
         assert_eq!(last.timestamp(), ts2.timestamp());
+    }
+
+    #[test]
+    fn last_whisper_record_round_trips_status_and_head() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("whispers.jsonl");
+        let ts = Utc::now();
+        append_reflog(
+            &path,
+            &ReflogEntry {
+                ts,
+                pilot: "tester",
+                target_session: "s",
+                sha256: "a",
+                size_bytes: 1,
+                molecule_status: Some(MoleculeStatus::Completed),
+                branch_head: Some("abc123"),
+            },
+        )
+        .unwrap();
+        let rec = last_whisper_record(&path).unwrap();
+        assert_eq!(rec.ts.timestamp(), ts.timestamp());
+        assert_eq!(rec.molecule_status, Some(MoleculeStatus::Completed));
+        assert_eq!(rec.branch_head.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn last_whisper_record_reads_lines_that_predate_the_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("whispers.jsonl");
+        fs::write(
+            &path,
+            "{\"ts\":\"2026-04-14T10:00:00+00:00\",\"pilot\":\"p\",\"sha256\":\"a\"}\n",
+        )
+        .unwrap();
+        let rec = last_whisper_record(&path).unwrap();
+        assert_eq!(rec.molecule_status, None);
+        assert_eq!(rec.branch_head, None);
     }
 
     #[test]

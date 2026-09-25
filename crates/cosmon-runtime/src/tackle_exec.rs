@@ -280,6 +280,27 @@ pub enum TackleExecError {
     },
 }
 
+impl TackleExecError {
+    /// Whether an identical retry on the next tick would reproduce this error.
+    ///
+    /// The runtime stops on these ([`RuntimeError::DispatchRefused`]) instead
+    /// of retrying them to its deadline, where a cause known on the first
+    /// tick would be reported as a timeout.
+    fn is_permanent_refusal(&self) -> bool {
+        match self {
+            Self::UnsupportedStep { .. }
+            | Self::UnsupportedModelCarrier { .. }
+            | Self::Preflight { .. }
+            | Self::RootSpawnRefused { .. }
+            // An unwritable Claude config (issue #81 point 4) is an operator
+            // repair, never a self-healing condition.
+            | Self::StartupConsentRefused { .. } => true,
+            Self::RolledBackPreserving { source, .. } => source.is_permanent_refusal(),
+            _ => false,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Spawn preflight — the dispatch preconditions (issue #48, restored on the
 // library seam by task-20260911-be1e)
@@ -467,8 +488,14 @@ fn worker_launch_argv(
 /// has told us nothing about its uid, and reading that silence as "not root"
 /// is the port failing open.
 ///
-/// The caller's rollback removes this attempt's worktree, so nothing but a
-/// typed error survives a refusal.
+/// This is the **second** root gate, kept as defence in depth. It runs after
+/// the worktree exists, because the policy it consults is asked about that
+/// worktree ([`LaunchContext::worktree`]), so by the time it refuses, git has
+/// already run under the dispatcher's identity. The caller's rollback removes
+/// the attempt's worktree and branch but cannot undo what a repository hook
+/// did. The identity-derived refusal therefore happens first, in
+/// [`refuse_root_identity`], before any git operation; this gate answers only
+/// a `Refuse` an embedder's policy states for a non-root process.
 fn gate_root_spawn(
     posture: &LaunchPosture,
     id: &MoleculeId,
@@ -485,6 +512,35 @@ fn gate_root_spawn(
         });
     }
     Ok(decision)
+}
+
+/// Refuse the dispatch when the executor itself runs as root — before any
+/// attribution event, state write or git operation (ADR-166).
+///
+/// # Why this cannot wait for the launch policy
+///
+/// The launch policy is asked about a worktree, so it can only be consulted
+/// after `git worktree add` — and on an unborn repository after the seed
+/// `git commit`, which runs the repository's hooks under the dispatcher's
+/// uid. A refusal issued there arrives after the privileged effect it exists
+/// to prevent (review of c62835da, F1). The identity, unlike the policy, is
+/// known from the start, so it is checked from the start.
+///
+/// It is unconditional on the port: the pure [`decide_root_spawn`] refuses
+/// uid 0 with or without a demote target, so no policy an embedder installs
+/// could turn a root dispatcher into a permitted one here. A non-root process
+/// resolves to `SpawnAsIs` and passes through untouched.
+///
+/// [`decide_root_spawn`]: cosmon_core::root_spawn_policy::decide_root_spawn
+fn refuse_root_identity(id: &MoleculeId) -> Result<(), TackleExecError> {
+    match unstated_root_spawn() {
+        RootSpawnDecision::Refuse { reason } => Err(TackleExecError::RootSpawnRefused {
+            id: Box::new(id.clone()),
+            reason: reason.to_string(),
+            token: reason.as_token(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// The root-spawn decision that applies when the launch posture states none.
@@ -1177,16 +1233,20 @@ impl<B: TransportBackend> LibraryExecutor<B> {
     ///
     /// # Errors
     ///
-    /// [`TackleExecError::Preflight`] carrying the typed refusal, or
+    /// [`TackleExecError::RootSpawnRefused`] when the executor runs as root
+    /// (see [`refuse_root_identity`]), [`TackleExecError::Preflight`]
+    /// carrying the typed refusal, or
     /// [`TackleExecError::UnsupportedModelCarrier`] when the resolved model
-    /// pin cannot reach the resolved adapter on this seam (issue #72) — a
-    /// check this executor makes whether or not an embedder stated a port.
+    /// pin cannot reach the resolved adapter on this seam (issue #72). The
+    /// first and last are checks this executor makes whether or not an
+    /// embedder stated a port.
     fn run_preflight(
         &self,
         id: &MoleculeId,
         adapter: &str,
         model: Option<&str>,
     ) -> Result<(), TackleExecError> {
+        refuse_root_identity(id)?;
         refuse_uncarried_model(id, adapter, model)?;
         let Some(preflight) = self.preflight.as_ref() else {
             return Ok(());
@@ -1600,14 +1660,17 @@ impl<B: TransportBackend> Executor for LibraryExecutor<B> {
                 // poll interval is precisely how a stated cause becomes an
                 // unexplained `timeout`. Stopping with the cause named
                 // lets the operator fix it and re-run; spinning does not.
-                // An unwritable Claude config (issue #81 point 4) is the same
-                // shape: an operator repair, never a self-healing condition.
-                refusal @ (TackleExecError::UnsupportedStep { .. }
-                | TackleExecError::UnsupportedModelCarrier { .. }
-                | TackleExecError::Preflight { .. }
-                | TackleExecError::StartupConsentRefused { .. }) => RuntimeError::DispatchRefused {
+                //
+                // A ROOT refusal is permanent in the formula's sense: the
+                // dispatcher's uid does not change between ticks, and every
+                // retry would provision and roll back a worktree for a
+                // dispatch that can never happen. A policy-stated refusal
+                // arrives after the worktree, so it may come wrapped in
+                // `RolledBackPreserving`; the wrapper does not change the
+                // class of what it wraps.
+                e if e.is_permanent_refusal() => RuntimeError::DispatchRefused {
                     id: id.clone(),
-                    reason: refusal.to_string(),
+                    reason: e.to_string(),
                 },
                 other => RuntimeError::Dispatch {
                     id: id.clone(),

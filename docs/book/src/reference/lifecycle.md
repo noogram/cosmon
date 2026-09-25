@@ -243,6 +243,9 @@ SEE ALSO: cs tackle (launch a worker on the molecule you just nucleated).
    `stress-test` opts the molecule into the two-layer pre-commitment seal at dispatch (Layer 1 runtime precondition + Layer 2 witness-quorum, ADR-085 §2-§3) and out of autopilot drain. The remaining classes are gate-equivalent to the legacy default; this flag is a marker, not a runtime mode.
 * `--assign <ASSIGN>` — Assign a worker to the new molecule
 * `--var <KEY=VALUE>` — Set a variable (repeatable: --var key=value)
+* `--var-file <KEY=PATH>` — Read a variable value from a UTF-8 file (repeatable: --var-file key=path).
+
+   The file contents are passed verbatim, including trailing newlines. Explicit `--var` bindings override a same-named `--var-file` binding.
 * `--formulas-dir <DIR>` — Path to the formulas directory (default: ./formulas)
 * `--role <ROLE>` — Agent role for the worker that will tackle this molecule.
 

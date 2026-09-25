@@ -59,7 +59,7 @@ Options:
       --adapter <NAME>
           Worker-Spawn Port Adapter to dispatch (ADR-097 / C6; ADR-108 Q5a chain).
           
-          Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters.default]` → global `~/.config/cosmon/config.toml::[adapters.default]` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters.default] = "claude"` in either config file.
+          Resolution order (highest priority first): this flag → formula-step `adapter = "<name>"` pin → `$COSMON_DEFAULT_ADAPTER` env var → per-galaxy `.cosmon/config.toml::[adapters] default = "…"` → global `~/.config/cosmon/config.toml::[adapters] default = "…"` → built-in `"local"` (the Ollama-backed in-process loop). Values are looked up against the registered Adapter table (`claude`, `aider`, `openai`, `anthropic`, `llama-cpp`, `local`, …). An unknown name aborts the dispatch with a typed `AdapterNotFound` carrying the list of available names — no silent fallback. To restore the legacy Claude-Code default pass `--adapter claude`, `export COSMON_DEFAULT_ADAPTER=claude`, or set `[adapters]` then `default = "claude"` in either config file.
           
           # Capability gate (noogram/cosmon #4)
           

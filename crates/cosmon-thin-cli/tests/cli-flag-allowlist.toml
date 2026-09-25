@@ -605,6 +605,11 @@ reason = "explicit worker assignment — local fleet concern."
 
 [[flag_only_in_cs]]
 verb = "nucleate"
+flag = "--var-file"
+reason = "client-side sugar for `--var KEY=<file contents>`: it reads a file on the caller's machine before nucleation, so nothing reaches the POST body that `--var` does not already carry; cs-thin can grow the same sugar without a server change."
+
+[[flag_only_in_cs]]
+verb = "nucleate"
 flag = "--blocked-by"
 reason = "DAG-edge syntax not yet exposed on /v1/molecules POST body."
 
