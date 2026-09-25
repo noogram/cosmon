@@ -4890,27 +4890,23 @@ fn spawn_claude_and_prompt(
     // refuse the dispatch loudly instead of spawning a worker that will stop on
     // a question nobody can answer. A mute hang is worse than a stated refusal
     // — it holds the molecule `running` and reads as healthy.
-    let consent_paths = cosmon_transport::claude_trust::consent_paths(config_dir.as_deref(), |k| {
-        std::env::var(k).ok()
-    })
+    //
+    // The routine is shared with the in-process dispatch path (the RPP API),
+    // which omitted it until issue #81 point 4.
+    let (consent_paths, _) = cosmon_transport::claude_trust::pregrant_worker_consent(
+        config_dir.as_deref(),
+        |k| std::env::var(k).ok(),
+        worktree_path,
+    )
     .map_err(|e| {
         anyhow::anyhow!(
-            "cs tackle: refusing to spawn a claude worker for molecule {}: {e}. \
-             Without this, the worker stops on Claude Code's folder-trust dialog \
-             with nobody to answer it.",
-            mol.id.as_str(),
-        )
-    })?;
-    cosmon_transport::claude_trust::pregrant_startup_consent(&consent_paths, worktree_path)
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "cs tackle: refusing to spawn a claude worker for molecule {}: \
+            "cs tackle: refusing to spawn a claude worker for molecule {}: \
                  cannot pre-grant Claude Code's startup consent: {e}. \
                  Without this, the worker stops on Claude Code's folder-trust dialog \
                  with nobody to answer it.",
-                mol.id.as_str(),
-            )
-        })?;
+            mol.id.as_str(),
+        )
+    })?;
 
     // Model fallback chain (task-20260614-3116). The preferred model
     // (`ANTHROPIC_MODEL`, exported by the rpp-adapter from the `rpp.toml`

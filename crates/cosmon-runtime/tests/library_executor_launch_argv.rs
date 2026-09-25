@@ -410,3 +410,118 @@ fn library_dispatch_carries_a_pinned_harness_setting() {
          builder renders them on both dispatch paths: {argv:?}"
     );
 }
+
+/// A policy that records which worktree it was asked to pre-grant consent for,
+/// and whether the spawn had already happened at that moment.
+#[derive(Debug)]
+struct ConsentRecordingPolicy {
+    backend: MockBackend,
+    granted: std::sync::Mutex<Vec<(PathBuf, usize)>>,
+}
+
+impl WorkerLaunchPolicy for ConsentRecordingPolicy {
+    fn posture(&self, _ctx: &LaunchContext<'_>) -> LaunchPosture {
+        LaunchPosture::default()
+    }
+
+    fn pregrant_startup_consent(&self, ctx: &LaunchContext<'_>) -> Result<(), String> {
+        self.granted
+            .lock()
+            .expect("lock")
+            .push((ctx.worktree.to_path_buf(), self.backend.calls().len()));
+        Ok(())
+    }
+}
+
+/// Issue #81 point 4: the in-process dispatch asks its launch policy to
+/// pre-grant startup consent for the worker's own worktree, once, before the
+/// worker is spawned. Before the fix nothing on this path wrote Claude Code's
+/// folder trust, and a fresh deployment's first worker stopped on the dialog.
+#[test]
+fn library_dispatch_pregrants_consent_for_the_worktree_before_the_spawn() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-c006");
+    let backend = MockBackend::new();
+    let policy = std::sync::Arc::new(ConsentRecordingPolicy {
+        backend: backend.clone(),
+        granted: std::sync::Mutex::new(Vec::new()),
+    });
+    let executor =
+        LibraryExecutor::new(&project, backend.clone()).with_launch_policy(policy.clone());
+    executor
+        .dispatch_with_pin(&mol.id, &claude_pin())
+        .expect("the dispatch must reach the spawn");
+
+    let canonical = |p: &Path| std::fs::canonicalize(p).expect("canonicalize");
+    let granted: Vec<(PathBuf, usize)> = policy
+        .granted
+        .lock()
+        .expect("lock")
+        .iter()
+        .map(|(path, calls)| (canonical(path), *calls))
+        .collect();
+    assert_eq!(
+        granted,
+        vec![(
+            canonical(&project.join(".worktrees").join(mol.id.as_str())),
+            0
+        )],
+        "consent must be pre-granted once, for the worker's worktree, while \
+         nothing had reached the transport yet"
+    );
+    assert!(
+        !backend.calls().is_empty(),
+        "the worker is spawned after the grant"
+    );
+}
+
+/// A policy whose consent pre-grant cannot succeed — an unwritable config.
+#[derive(Debug)]
+struct ConsentFailingPolicy;
+
+impl WorkerLaunchPolicy for ConsentFailingPolicy {
+    fn posture(&self, _ctx: &LaunchContext<'_>) -> LaunchPosture {
+        LaunchPosture::default()
+    }
+
+    fn pregrant_startup_consent(&self, _ctx: &LaunchContext<'_>) -> Result<(), String> {
+        Err("cannot write Claude Code config /nowhere/.claude.json".to_owned())
+    }
+}
+
+/// A consent that cannot be pre-granted refuses the dispatch: no worker, no
+/// ledger record, no leftover worktree. Spawning anyway would leave a worker
+/// stopped on the trust dialog, reading as healthy while doing nothing.
+#[test]
+fn a_failed_consent_pregrant_creates_no_worker() {
+    shadow_env();
+    let (_dir, project, store, mol) = fixture("task-20260925-c007");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone())
+        .with_launch_policy(std::sync::Arc::new(ConsentFailingPolicy));
+
+    let err = executor
+        .tackle(&mol.id, &claude_pin())
+        .expect_err("a failed pre-grant must not dispatch");
+    assert!(
+        matches!(
+            err,
+            cosmon_runtime::TackleExecError::StartupConsentRefused { .. }
+        ),
+        "the refusal must be typed: {err:?}"
+    );
+    assert!(
+        backend.calls().is_empty(),
+        "nothing may reach the transport: {:?}",
+        backend.calls()
+    );
+    let observed = store.load_molecule(&mol.id).expect("re-read");
+    assert!(
+        observed.process.is_none(),
+        "no dispatch ledger record may survive a refusal"
+    );
+    assert!(
+        !project.join(".worktrees").join(mol.id.as_str()).exists(),
+        "the refusal must roll back this attempt's worktree"
+    );
+}

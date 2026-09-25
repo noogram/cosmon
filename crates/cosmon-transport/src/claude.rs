@@ -610,14 +610,13 @@ where
 fn pregrant_consent_for_config(
     config: &ClaudeSessionConfig,
 ) -> Result<crate::claude_trust::ConsentPaths, ClaudeError> {
-    let paths = crate::claude_trust::consent_paths(
+    crate::claude_trust::pregrant_worker_consent(
         std::env::var("CLAUDE_CONFIG_DIR").ok().as_deref(),
         |k| std::env::var(k).ok(),
+        std::path::Path::new(&config.work_dir),
     )
-    .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
-    crate::claude_trust::pregrant_startup_consent(&paths, std::path::Path::new(&config.work_dir))
-        .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))?;
-    Ok(paths)
+    .map(|(paths, _)| paths)
+    .map_err(|e| ClaudeError::StartupConsentRefused(e.to_string()))
 }
 
 /// [`spawn_claude_session`] with the dispatcher's uid injected.
