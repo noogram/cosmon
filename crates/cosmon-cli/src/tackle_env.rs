@@ -227,6 +227,11 @@ where
 /// `cs tackle`. Absent or empty → no prefix; the claude CLI resolves
 /// its own default.
 ///
+/// The same value is also rendered as `--model <id>` by the shared launch
+/// builder (issue #81 point 2), which is the channel the in-process
+/// dispatch path carries it on. Both carriers name the one model the
+/// caller decided; `--model` is the one Claude Code ranks first.
+///
 /// `env_lookup` is a pure function so the helper can be unit-tested
 /// without manipulating the process environment (which would race
 /// other tests). Production callers pass `|k| std::env::var(k).ok()`.
@@ -328,8 +333,9 @@ where
     }
     // Model pin pass-through (avatar-surface D1) — value-agnostic
     // re-emission across the tmux boundary; see the doc comment.
-    if let Some(model) = env_lookup(PilotVar::AnthropicModel.name()).filter(|v| !v.is_empty()) {
-        push_pilot_var(&mut prefix, PilotVar::AnthropicModel, &model);
+    let model = env_lookup(PilotVar::AnthropicModel.name()).filter(|v| !v.is_empty());
+    if let Some(model) = &model {
+        push_pilot_var(&mut prefix, PilotVar::AnthropicModel, model);
     }
     // Root-under-bypassPermissions escape valve (task-20260720-18bb / BUG #6).
     // Claude Code v2.x refuses `--permission-mode bypassPermissions` (and
@@ -372,7 +378,11 @@ where
     // string by quoting each one; the in-process path hands the same tokens to
     // `execve`. Neither owns the list, so a flag added for one is carried by
     // the other by construction.
+    // The model rides the argv as well as the env (issue #81 point 2): the
+    // in-process path has no env channel, so the shared builder carries it,
+    // and `--model` outranks any `ANTHROPIC_MODEL` the worker might inherit.
     let launch = cosmon_core::worker_argv::ClaudeLaunch::new(perm_mode)
+        .with_model(model.as_deref())
         .with_writable_roots(writable_roots)
         .with_receipt_overlay(receipt_overlay)
         .with_harness_args(harness_args);
@@ -1104,6 +1114,10 @@ mod tests {
             cmd.contains("ANTHROPIC_MODEL=pinned-model-id "),
             "got: {cmd}"
         );
+        assert!(
+            cmd.contains(" --model pinned-model-id "),
+            "the model must also ride the argv (issue #81 point 2): {cmd}"
+        );
     }
 
     #[test]
@@ -1123,6 +1137,7 @@ mod tests {
             |_| None,
         );
         assert!(!cmd.contains("ANTHROPIC_MODEL"), "got: {cmd}");
+        assert!(!cmd.contains("--model"), "got: {cmd}");
     }
 
     #[test]

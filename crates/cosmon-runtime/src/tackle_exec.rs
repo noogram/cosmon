@@ -426,6 +426,7 @@ pub trait SpawnPreflight: std::fmt::Debug + Send + Sync {
 /// resolvable `.cosmon/` (a bare checkout) emits no grant.
 fn worker_launch_argv(
     adapter: &str,
+    model: Option<&str>,
     worktree: &Path,
     harness_args: &[String],
     posture: &LaunchPosture,
@@ -440,6 +441,7 @@ fn worker_launch_argv(
             .as_deref()
             .unwrap_or(cosmon_core::worker_argv::DEFAULT_PERMISSION_MODE);
         cosmon_core::worker_argv::ClaudeLaunch::new(permission_mode)
+            .with_model(model)
             .with_writable_roots(&writable_roots)
             .with_receipt_overlay(posture.receipt_overlay.as_deref())
             .with_harness_args(harness_args)
@@ -1346,8 +1348,12 @@ impl<B: TransportBackend> LibraryExecutor<B> {
         // writes nothing into a Claude config; before the ledger commit, so a
         // refusal strands no dispatch record.
         self.pregrant_startup_consent(&launch_ctx)?;
+        // The selected model rides the argv (issue #81 point 2): the spawn
+        // port has no other channel, and an embedder's environment default
+        // must not replace the model this dispatch resolved.
         let (command, args) = worker_launch_argv(
             plan.adapter.as_str(),
+            plan.preferred_model.as_deref(),
             worktree_path,
             &harness_args,
             &posture,
