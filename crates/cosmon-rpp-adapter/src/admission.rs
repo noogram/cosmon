@@ -83,6 +83,10 @@ pub enum Verb {
     /// `GET /v1/molecules` → `cs ensemble --json` filtered listing
     /// (T-CST-EXPAND).
     EnsembleMolecule,
+    /// `GET /v1/vitals` — molecule-keyed fleet health for one tenant.
+    /// Adapter-only: it joins durable molecule state with the tenant's
+    /// transport backend and therefore has no local CLI twin.
+    Vitals,
     /// `POST /v1/molecules/{id}/collapse` (T-CST-EXPAND).
     CollapseMolecule,
     /// `POST /v1/molecules/{id}/freeze` (T-CST-EXPAND).
@@ -190,6 +194,7 @@ impl Verb {
             Self::NucleateMolecule => "nucleate",
             Self::TagMolecule => "tag",
             Self::EnsembleMolecule => "ensemble",
+            Self::Vitals => "vitals",
             Self::CollapseMolecule => "collapse",
             Self::FreezeMolecule => "freeze",
             Self::ThawMolecule => "thaw",

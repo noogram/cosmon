@@ -32,6 +32,7 @@ pub mod quota;
 pub mod result;
 pub mod session;
 pub mod status;
+pub mod vitals;
 pub mod workers;
 
 pub use observability::{diagnostics_handler, metrics_handler};

@@ -13,7 +13,7 @@
 //! | `nucleate`, `tag`, `freeze`, `collapse`, `stuck` | [`MOLECULE_WRITE`]                            | gratuit        | **existe**          |
 //! | `tackle`                                      | [`MOLECULE_WRITE`] **+** [`WORKER_SPAWN`] (AND) | $$$ Anthropic | **nouveau v1.0.0-rc** |
 //! | `cancel` / `kill` (futur)                     | [`WORKER_TERMINATE`]                            | irréversible   | **réservé** (additif v2) |
-//! | `observe`, `ensemble`                         | [`MOLECULE_READ`] (ou `:write` qui implique)    | gratuit        | **existe**          |
+//! | `observe`, `ensemble`, `vitals`               | [`MOLECULE_READ`] (ou `:write` qui implique)    | gratuit        | **existe**          |
 //!
 //! # Invariant
 //!
