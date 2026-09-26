@@ -91,11 +91,9 @@ pub struct Args {
     #[arg(long)]
     pub permission_mode: Option<String>,
 
-    /// Reclaim the molecule's tmux session and respawn (instead of
-    /// reporting the running one). Also thaws a frozen molecule: the
-    /// respawned worker is live, so the molecule reads `running` again.
-    /// A session left behind by a dead worker is reclaimed without this
-    /// flag — there is nothing there to protect.
+    /// Boolean flag: reclaim the molecule's live tmux session and respawn
+    /// the worker. Also thaws a frozen molecule, returning it to `running`.
+    /// A session left behind by a dead worker is reclaimed without this flag.
     #[arg(long)]
     pub force: bool,
 

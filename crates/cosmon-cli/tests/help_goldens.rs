@@ -123,6 +123,18 @@ fn cs_help_grouped_reference_snapshot() {
     insta::assert_snapshot!("cs_help_grouped_reference", stdout);
 }
 
+/// `--force` is a boolean reclaim-and-respawn switch, not the actor-class
+/// value accepted by `--by`. Keep that distinction explicit in the live help
+/// as well as in the full help snapshot.
+#[test]
+fn tackle_force_help_is_boolean() {
+    let (stdout, code) = run_cs(&["tackle", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("\n      --force\n"));
+    assert!(!stdout.contains("--force <"));
+    assert!(stdout.contains("Boolean flag: reclaim"));
+}
+
 /// The committed `man/cs.1` must match the man page rendered from the
 /// live clap tree. Any attribute change in `src/main.rs` or
 /// `root_help.rs` flows through this golden.
