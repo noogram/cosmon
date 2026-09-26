@@ -37,6 +37,10 @@ use cosmon_rpp_adapter::{
 use serde_json::Value;
 use tower::ServiceExt;
 
+/// A fixed instant keeps byte-size assertions about status representations
+/// independent of Chrono's optional fractional-second rendering.
+const FIXTURE_TIMESTAMP: &str = "2026-09-07T12:00:00Z";
+
 struct Fixture {
     oidc: OidcMock,
     tenant: TenantPath,
@@ -179,6 +183,8 @@ fn seed(tenant: &TenantPath, id: &str, status: &str) {
                 "status": status,
                 "assigned_worker": "ruby",
                 "adapter": "claude",
+                "created_at": FIXTURE_TIMESTAMP,
+                "updated_at": FIXTURE_TIMESTAMP,
             }),
         )
         .unwrap();
@@ -209,6 +215,8 @@ async fn the_status_read_is_strictly_cheaper_than_the_full_molecule_read() {
                 "status": "running",
                 "assigned_worker": "ruby",
                 "adapter": "claude",
+                "created_at": FIXTURE_TIMESTAMP,
+                "updated_at": FIXTURE_TIMESTAMP,
                 "variables": {
                     "topic": "a molecule with something to say about itself",
                     "formula": "task-work",
