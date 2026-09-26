@@ -495,12 +495,35 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         // edge as "operator already wired the lineage".
         let any_explicit_blocks = !blocks.is_empty() || !cross_blocks.is_empty();
         let any_explicit_blocked_by = !blocked_by.is_empty() || !cross_blocked_by.is_empty();
+        let auto_parent_requested =
+            auto_parent_requested(args, any_explicit_blocks, any_explicit_blocked_by);
         let decayed_from = resolve_decayed_from_explicit(
             args,
             any_explicit_blocks,
             any_explicit_blocked_by,
             &read_parent_env,
         )?;
+        // The inherited parent belongs to the worker's source galaxy. It is
+        // not a valid implicit local edge when this invocation targets a
+        // different galaxy; explicit edge flags remain strictly validated.
+        let decayed_from = if auto_parent_requested
+            && decayed_from
+                .as_ref()
+                .is_some_and(|parent| FileStore::new(&store_dir).load_molecule(parent).is_err())
+        {
+            eprintln!("auto-parent not found in this galaxy; skipping implicit DecayProduct link");
+            None
+        } else {
+            if auto_parent_requested {
+                if let Some(parent) = &decayed_from {
+                    eprintln!(
+                        "auto-linked to parent {parent} via DecayProduct \
+                         (pass --no-parent to disable)"
+                    );
+                }
+            }
+            decayed_from
+        };
         // b22c guard: when a worker nucleates from inside a formula step
         // that declares `requires_parent_link = true`, require that the
         // child carry an explicit `--blocks` or `--blocked-by` edge. The
@@ -624,6 +647,20 @@ fn read_parent_env() -> Option<String> {
     std::env::var("COSMON_PARENT_MOL_ID").ok()
 }
 
+/// Whether the environment is the source of a prospective parent link.
+/// Explicit edge flags deliberately bypass this path and retain strict
+/// unknown-target validation.
+fn auto_parent_requested(
+    args: &Args,
+    any_explicit_blocks: bool,
+    any_explicit_blocked_by: bool,
+) -> bool {
+    !args.no_parent
+        && args.decayed_from.is_none()
+        && !any_explicit_blocks
+        && !any_explicit_blocked_by
+}
+
 /// Resolve the effective `--decayed-from` target for a single-formula
 /// nucleation, applying the auto-parent contract (ADR-037 lineage
 /// conservation). Precedence:
@@ -633,8 +670,8 @@ fn read_parent_env() -> Option<String> {
 /// 3. Any explicit `--blocks` / `--blocked-by` → `None` (the operator
 ///    already declared an edge; the env layer stays silent so we do
 ///    not silently add a second edge on top of an explicit contract).
-/// 4. `COSMON_PARENT_MOL_ID` env var set → parse and return it, and
-///    emit a stderr hint so the operator can see the implicit edge.
+/// 4. `COSMON_PARENT_MOL_ID` env var set → parse and return it. The caller
+///    confirms that it exists in the target galaxy before creating the link.
 /// 5. Otherwise → `None`.
 ///
 /// The parser is passed in so unit tests can stub it; the production
@@ -681,10 +718,6 @@ fn resolve_decayed_from_explicit(
              (pass --no-parent to disable the auto-parent contract)"
         )
     })?;
-    eprintln!(
-        "auto-linked to parent {id} via DecayProduct \
-         (pass --no-parent to disable)"
-    );
     Ok(Some(id))
 }
 

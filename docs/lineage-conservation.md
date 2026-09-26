@@ -46,7 +46,8 @@ variables into the worker's shell:
 `cs nucleate`, on every invocation, consults `COSMON_PARENT_MOL_ID`. If
 the variable is set **and** the operator did not pass an explicit
 edge-declaring flag (`--blocks`, `--blocked-by`, `--decayed-from`) or
-the opt-out `--no-parent`, nucleate auto-synthesizes a
+the opt-out `--no-parent`, and the parent exists in the target galaxy's
+state, nucleate auto-synthesizes a
 `DecayedFrom { id: parent }` edge on the new molecule and the symmetric
 `DecayProduct { id: new }` edge on the parent. A stderr hint records
 the synthesis so operators can see it in the worker's log:
@@ -65,9 +66,11 @@ resolver applies the following rules in order:
 3. Any explicit `--blocks` or `--blocked-by` → no auto-link (the
    operator already declared an edge; the env layer stays silent so
    we never stack a second edge on top of an explicit one).
-4. `COSMON_PARENT_MOL_ID` set → synthesize
-   `DecayedFrom { id: <parent> }`.
-5. Otherwise → nothing.
+4. `COSMON_PARENT_MOL_ID` set and the parent exists in the target galaxy →
+   synthesize `DecayedFrom { id: <parent> }`.
+5. `COSMON_PARENT_MOL_ID` set but absent from the target galaxy → print a
+   one-line notice and continue without an implicit link.
+6. Otherwise → nothing.
 
 This is deliberately **opt-out**: the default under a tackled worker
 is always to attach. Legitimate orphan nucleations (e.g. a worker that
@@ -100,6 +103,10 @@ because the operator explicitly promotes the edge to a blocking one.
   is still written, but the runtime ignores the child once it sees
   `Collapsed` in the parent (terminal state). Non-blocking; the child
   is a valid historical record.
+- **Worker nucleates in another galaxy.** The inherited parent is absent
+  there, so `cs nucleate` prints a one-line notice and creates the child
+  without an implicit link. Explicit `--blocked-by` and `--decayed-from`
+  references remain strict and still refuse unknown local molecules.
 - **Worker nucleates in a loop.** Every child gains the edge. This is
   not a bug but a load concern — `temp-review` and attention-budget
   warnings remain the throttle.
