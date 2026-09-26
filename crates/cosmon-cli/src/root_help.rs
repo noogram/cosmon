@@ -479,8 +479,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              prints a non-blocking advisory, but cosmon still dispatches: a \
              custom Adapter endpoint may legitimately serve another family's \
              model, so the Adapter remains authoritative. \
-             The claude adapter carries the pin through the ANTHROPIC_MODEL \
-             per-session closure-shadow at spawn (no shared-state mutation); \
+             The claude adapter carries the pin on its launch argv as \
+             '--model <ID>', which Claude Code ranks above any inherited \
+             ANTHROPIC_MODEL, on both 'cs tackle' and the API dispatch path, \
+             and also through the ANTHROPIC_MODEL per-session closure-shadow \
+             at spawn (no shared-state mutation); \
              the Direct-API adapters take it above their config default_model.\n\n\
              HARNESS SETTINGS (per-step, how the model runs — ADR-177). \
              The model axis pins WHICH model runs; this pins HOW it runs, by \

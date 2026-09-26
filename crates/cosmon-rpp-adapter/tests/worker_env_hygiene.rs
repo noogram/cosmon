@@ -46,6 +46,8 @@ const ENVELOPE_SET_VARS: &[&str] = &[
     "COSMON_EGRESS_EXPOSED",
     "COSMON_STATE_DIR",
     "COSMON_ARTIFACT_DIR",
+    // Issue #81 point 3: set to `1` on every worker.
+    "DISABLE_AUTOUPDATER",
 ];
 
 /// Adapter-side variables that must never be inherited. A sample, not

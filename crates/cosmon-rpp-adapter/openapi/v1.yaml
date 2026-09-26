@@ -825,7 +825,7 @@ paths:
                 $ref: "#/components/schemas/ApiError"
         "503":
           description: |
-            One of four stable labels. The first two are
+            One of the stable labels below. The first two are
             **preconditions**: refused before any effect, so the
             molecule is untouched and still tacklable.
 
@@ -841,6 +841,12 @@ paths:
 
             `subprocess_spawn_failed` — the worker process could not be
             started. The dispatch ledger has been rolled back.
+
+            `startup_consent_refused` — the worker's Claude Code config
+            could not be written to pre-grant folder trust for its
+            worktree, so the worker would have stopped on the trust
+            dialog. Nothing was recorded and the worktree was removed.
+            Repair: make the worker's `HOME` (or config dir) writable.
 
             `tackle_unavailable` — stable generic fallback for any
             other dispatch failure (store fault, git fault, unknown

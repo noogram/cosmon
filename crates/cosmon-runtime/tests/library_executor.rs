@@ -728,3 +728,106 @@ fn an_unpinned_opencode_dispatch_is_not_refused() {
         .expect("an unpinned opencode dispatch carries nothing to drop");
     assert!(!backend.calls().is_empty(), "the worker must be spawned");
 }
+
+/// The `(flag, value)` pairs of a recorded spawn's argv, for asserting that a
+/// flag carries a given value regardless of where the builder placed it.
+fn spawned_args(backend: &MockBackend) -> Vec<String> {
+    backend
+        .calls()
+        .into_iter()
+        .find_map(|call| match call {
+            MockCall::Spawn { args, .. } => Some(args),
+            _ => None,
+        })
+        .expect("the worker must be spawned")
+}
+
+/// Whether `args` carries `--model <model>` as two adjacent tokens.
+fn carries_model(args: &[String], model: &str) -> bool {
+    args.windows(2)
+        .any(|pair| pair[0] == "--model" && pair[1] == model)
+}
+
+/// Issue #81 point 2: the model the selection chain resolved is the model the
+/// worker is launched with.
+///
+/// Measured on the bench: `ModelSelected` reported `claude-sonnet-5` from the
+/// tenant galaxy's `[adapters.claude] default_model`, while the worker's argv
+/// carried no `--model` and it ran on whatever `ANTHROPIC_MODEL` the envelope
+/// happened to set. The selection was recorded and then dropped at the spawn.
+#[test]
+fn the_configured_default_model_reaches_the_worker_argv() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-a468");
+    std::fs::write(
+        project.join(".cosmon").join("config.toml"),
+        "[adapters]\ndefault = \"claude\"\n\n[adapters.claude]\ndefault_model = \"claude-sonnet-5\"\n",
+    )
+    .expect("galaxy config");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    executor
+        .tackle(&mol.id, &DispatchPin::default())
+        .expect("the dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        carries_model(&args, "claude-sonnet-5"),
+        "the selected model must reach the worker argv as `--model \
+         claude-sonnet-5`; argv was {args:?}"
+    );
+}
+
+/// The per-dispatch pin — the flag rung — reaches the argv the same way.
+#[test]
+fn a_pinned_claude_model_reaches_the_worker_argv() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-b468");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("claude".to_owned()),
+        model: Some("claude-opus-5-5".to_owned()),
+        base_branch: None,
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("the pinned dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        carries_model(&args, "claude-opus-5-5"),
+        "the pinned model must reach the worker argv; argv was {args:?}"
+    );
+}
+
+/// No pin, no config: the worker launches with no `--model`, so the
+/// deployment's own default applies — cosmon adds no model of its own.
+#[test]
+fn an_unpinned_claude_dispatch_carries_no_model_flag() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260925-c468");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+
+    let pin = DispatchPin {
+        adapter: Some("claude".to_owned()),
+        model: None,
+        base_branch: None,
+    };
+    executor
+        .tackle(&mol.id, &pin)
+        .expect("the dispatch must succeed");
+
+    let args = spawned_args(&backend);
+    assert!(
+        args.iter().any(|a| a == "--permission-mode"),
+        "the spawn must be the claude launch; argv was {args:?}"
+    );
+    assert!(
+        !args.iter().any(|a| a == "--model"),
+        "an unpinned dispatch must not invent a model; argv was {args:?}"
+    );
+}
