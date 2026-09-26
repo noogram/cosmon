@@ -229,6 +229,49 @@ quick:
     # came from. Judges what this branch adds (main..HEAD locally), so a clean
     # trunk stays clean and history is never rewritten to satisfy it.
     ./scripts/no-pilot-env.sh ./scripts/check-no-session-ids.sh
+    # The rest of this recipe closes the `just gates`/CI gap found on
+    # 2026-09-26: main went red in CI on `check-docs-one-gate.sh` — a
+    # `/<tool>/install.sh` path in docs/book/src — while `just gates` was
+    # green locally, because that script (like ~20 others below) ran only
+    # from .github/workflows/*.yml. Every check added here is pure
+    # bash/python over the tracked tree: no network, no container, no
+    # secret, no PR-event context, each measured well under a second on
+    # this machine. See AGENTS.md §Verification for the full CI-vs-local
+    # inventory and the reasons the remaining ~20 checks stay CI-only.
+    ./scripts/no-pilot-env.sh ./scripts/sovereignty-gate.sh
+    ./scripts/no-pilot-env.sh ./scripts/confidentiality-banlist.sh
+    ./scripts/no-pilot-env.sh ./scripts/confidentiality-banlist.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-workflow-yaml.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-workflow-yaml.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-docs-one-gate.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-book-links.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-book-links.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/source-provenance.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/install-hooks.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.sh
+    ./scripts/no-pilot-env.sh ./scripts/check-fixture-independence.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/license-table.sh --check
+    ./scripts/no-pilot-env.sh python3 scripts/artifact-map-audit.py
+    # `main HEAD` pins the fast local scope (what this branch adds). The
+    # script's own no-args fallback walks every merge since 2026-04-19 on
+    # the *real* history — 40 s+ and climbing — which belongs to CI's
+    # PR-scoped invocation, not this loop.
+    ./scripts/no-pilot-env.sh ./scripts/check-provenance.sh main HEAD
+    ./scripts/no-pilot-env.sh ./tests/harness/provenance-gate-test.sh
+    ./scripts/no-pilot-env.sh ./tests/harness/provenance-residence-test.sh
+    ./scripts/no-pilot-env.sh ./tests/harness/session-id-gate-test.sh
+    # install-lint.yml's `installer` job self-test — no extra binary beyond
+    # `sh` (its `shellcheck` step stays CI-only: this repo assumes only the
+    # Rust toolchain + python3 locally, and shellcheck is not one of them).
+    ./scripts/no-pilot-env.sh sh -n infra/install/install.sh
+    ./scripts/no-pilot-env.sh sh infra/install/install.sh --self-test
+    # install-lint.yml's `triples` job self-tests (offline red-path proofs;
+    # the job's own cross-surface diff needs no separate script here).
+    ./scripts/no-pilot-env.sh ./scripts/release/render-brew-formula.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/render-tap-from-artifacts.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/check-install-drift.test.sh
+    ./scripts/no-pilot-env.sh ./scripts/release/docs-deploy.test.sh
 
 # `--no-fail-fast` is deliberate: cargo stops at the first red target by
 # default, which hides every later failure at identical wall-clock. A run that
