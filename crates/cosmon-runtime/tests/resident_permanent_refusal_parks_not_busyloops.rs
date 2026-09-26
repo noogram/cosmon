@@ -252,8 +252,12 @@ fn refused_tackle_is_parked_not_busylooped(refusal_code: i32) {
     // machine happens to be right now.
     let watcher_state_path = state_path.clone();
     let watcher_shutdown = Arc::clone(&shutdown);
+    // Bounded by the same hard cap: if `b` never drains (a real regression),
+    // the watcher gives up so `join` below cannot hang the test, and the
+    // drain assertion reports the failure.
+    let watcher_cap = std::time::Instant::now() + Duration::from_secs(60);
     let watcher = std::thread::spawn(move || {
-        while state_has(&watcher_state_path, "b") {
+        while state_has(&watcher_state_path, "b") && std::time::Instant::now() < watcher_cap {
             std::thread::sleep(Duration::from_millis(20));
         }
         std::thread::sleep(Duration::from_millis(500));
