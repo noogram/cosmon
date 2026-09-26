@@ -174,9 +174,32 @@ install-mac-pilot:
 # the total — so pulling it out is what makes an edit-and-verify loop possible
 # at all. Run this after every edit; run `just gates` once before merging.
 #
-# `doc` is here and is not redundant: check compiles code without ever
+# `doc` is here and is not redundant: clippy compiles code without ever
 # resolving a doc link, and clippy is not rustdoc. A broken intra-doc link
 # passes every other gate and fails only in CI on the trunk.
+#
+# There is no standalone `cargo check --workspace` step: on the default
+# target set both it and clippy compile, and clippy's `-D warnings` is
+# strictly the stronger gate (rustc's own errors plus every clippy lint).
+# Measured (task-20260925-fd07 §2, B→C): dropping it costs no coverage and
+# saves ~27 s cold. Verified again here (task-20260926-70fa) with two
+# deliberate compile errors: one in a test-only target
+# (`crates/cosmon-hash/tests/*.rs`, scratch), one behind the non-default
+# `neurion-fallback` feature (`cosmon-registry/src/neurion_backend.rs`,
+# scratch) — `cargo check -p <crate> --locked` and this recipe's
+# `cargo clippy -p <crate> --locked -- -D warnings` both missed both errors
+# identically (default targets, default features, before and after this
+# change), so there is nothing here that check alone was catching. Both
+# gaps are pre-existing and orthogonal to this change: the test-only error
+# is caught downstream by `cargo test --workspace` in `gates`; the
+# non-default-feature error is not built by any gate today (no gate passes
+# `--features neurion-fallback`) and stays that way — widening clippy to
+# `--all-targets` would catch the first case, but it also turns on
+# clippy's `test`-cfg lint pass over every existing test file, and one such
+# file already fails it (`clippy::doc_markdown` in
+# `crates/cosmon-daemon-supervisor/tests/signal_cascade.rs`, pre-existing,
+# unrelated to this change) — fixing workspace-wide test-lint debt is a
+# separate, unbounded change and is deliberately not folded in here.
 #
 # Every gate EXCEPT the test suite. ~90 s.
 #
@@ -187,11 +210,18 @@ install-mac-pilot:
 # verdicts and killed one healthy molecule (task-20260804-2bbb, 2026-08-06).
 # The list is a projection of cosmon_core::pilot_env::PilotVar and the parity
 # is pinned by a test — see the script's header.
+#
+# `CARGO_INCREMENTAL=0` on the compile steps only (not `fmt`, not the
+# non-cargo scripts): a one-shot gate run never revisits its own artifacts,
+# so the incremental cache is pure write-and-discard cost. Measured
+# (task-20260925-fd07 §2, D→E): −9.6 GB per worktree, wall time unchanged.
+# Scoped to this recipe's own `env` invocations so a developer's normal
+# edit-and-rerun `cargo check`/`cargo test` loop outside `just` keeps its
+# incremental cache.
 quick:
     ./scripts/no-pilot-env.sh cargo fmt --all -- --check
-    ./scripts/no-pilot-env.sh cargo check --workspace --locked
-    ./scripts/no-pilot-env.sh cargo clippy --workspace --locked -- -D warnings
-    ./scripts/no-pilot-env.sh env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 cargo clippy --workspace --locked -- -D warnings
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
     ./scripts/no-pilot-env.sh python3 scripts/spdx-headers.py --check
     ./scripts/no-pilot-env.sh ./scripts/publish.sh --check
     # Tracked files are publish.sh's surface; commit messages are not in any
@@ -225,7 +255,7 @@ quick:
 # `clippy` above already carries `-D warnings` as an argument; this covers the
 # rustc pass that `cargo test` performs.
 gates: quick
-    ./scripts/no-pilot-env.sh env RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
+    ./scripts/no-pilot-env.sh env CARGO_INCREMENTAL=0 RUSTFLAGS=-Dwarnings cargo test --workspace --locked --no-fail-fast
     ./scripts/no-pilot-env.sh ./scripts/release/crossing.test.sh
 
 # It used to run four of the seven gates and was named as if it ran them all —

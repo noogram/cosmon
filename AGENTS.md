@@ -49,8 +49,8 @@ change adds) and `publish.sh --check` rule G (tracked files).
 Two speeds, both in the `justfile`:
 
 ```text
-just quick    # every gate except the test suite — ~90 s, run after each edit
-just gates    # the whole contract below — ~8 min, run once before merging
+just quick    # every gate except the test suite — ~90 s warm, run after each edit
+just gates    # the whole contract below — ~7 min warm, ~15 min cold, run once before merging
 ```
 
 The split is not cosmetic. Measured on 2026-07-30, the test suite is about
@@ -58,19 +58,51 @@ nine tenths of the wall-clock of a full run, so lifting it out is what makes an
 edit-and-verify loop usable at all. `just check` is an alias of `gates`; it
 previously ran four of the seven gates while being named as if it ran them all.
 
+Warm vs. cold matters here, and the two figures above are not interchangeable.
+A **warm** run reuses an already-populated `target/` — a developer's own
+checkout after the first build. A **cold** run starts from an empty
+`target/` — every `cs tackle` worker's worktree, every time. Measured on this
+machine (`task-20260925-fd07`, cold, ambient fleet load 12–250 on 16 cores):
+`just gates` cold is **≈15.4 min**; the same steps warm are **≈7 min**, almost
+all of it the test run itself (compile steps drop to seconds warm). Quote
+whichever figure matches the situation you're describing.
+
 The individual commands, which is what those two recipes run:
 
 ```text
-cargo check --workspace
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
 ```
 
-The doc gate is not redundant with the others: `cargo check` compiles code
-without resolving a doc link, and clippy is not rustdoc. A broken intra-doc
-link passes every other gate and fails only in CI on the trunk.
+There is no standalone `cargo check --workspace` step. On the target set both
+would compile (default: lib + bins, no `--all-targets`), clippy's `-D
+warnings` is the strictly stronger gate — every `rustc` error `check` would
+raise, plus every clippy lint. Measured twice: `task-20260925-fd07` §2 (B→C,
+−27 s cold, no lost coverage) and re-verified in `task-20260926-70fa` with two
+deliberate compile errors — one in a test-only target, one behind a
+non-default feature — that `cargo check -p <crate>` and this recipe's `cargo
+clippy -p <crate> -- -D warnings` missed identically, before and after.
+Neither gap is new: a test-only compile error is still caught downstream by
+`cargo test --workspace` in `gates`; a non-default-feature compile error is
+not built by any gate today (nothing passes `--features <name>`) and this
+change does not touch that. Widening clippy to `--all-targets` would close
+the first gap, but it also turns on clippy's lint pass over every existing
+test file, and at least one already fails it on an unrelated, pre-existing
+lint — so that widening is deliberately not folded into this change.
+
+The doc gate is not redundant with the others: clippy compiles code without
+resolving a doc link, and clippy is not rustdoc. A broken intra-doc link
+passes every other gate and fails only in CI on the trunk.
+
+Both recipes run their `cargo` steps with `CARGO_INCREMENTAL=0` — a one-shot
+gate run never revisits its own artifacts, so the incremental cache is pure
+disk cost with no time benefit (measured: −9.6 GB per worktree, wall time
+unchanged). It is scoped to the `env` invocation inside `quick`/`gates`
+themselves, not exported globally, so a plain `cargo check` or `cargo test`
+run outside `just` keeps incremental compilation for its own edit-and-rerun
+loop.
 
 Run them through `just`, not by hand. Both recipes wrap every step in
 `scripts/no-pilot-env.sh`, the boundary between a worker's *pilotage*
@@ -91,7 +123,7 @@ only — it must never appear on a runtime path, where stripping
 `COSMON_EGRESS_POLICY` would weaken a real jail.
 
 `cargo` is not the whole contract. Two more gates run in CI and are not
-subsumed by the five above:
+subsumed by the four above:
 
 ```text
 python3 scripts/spdx-headers.py --check
