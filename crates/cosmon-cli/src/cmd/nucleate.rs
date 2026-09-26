@@ -517,7 +517,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
             if auto_parent_requested {
                 if let Some(parent) = &decayed_from {
                     eprintln!(
-                        "auto-linked to parent {parent} via DecayProduct \\
+                        "auto-linked to parent {parent} via DecayProduct \
                          (pass --no-parent to disable)"
                     );
                 }
