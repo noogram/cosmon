@@ -230,19 +230,42 @@ fn refused_tackle_is_parked_not_busylooped(refusal_code: i32) {
     let mut config = RuntimeLoopConfig::new(&root);
     config.cs_binary = stub_path;
     config.poll_interval = Duration::from_millis(20);
-    // `a` never drains, so the loop runs to this deadline. WITHOUT the fix it
-    // spends that whole window busy-looping `cs tackle a` (dozens of attempts
-    // at a 20 ms poll); WITH the fix it attempts `a` exactly once and idles.
-    // A short-but-generous 3 s window makes the busy-loop signal (attempt
-    // count) unmistakable while keeping the test fast even under load.
-    config.max_runtime = Some(Duration::from_secs(3));
+    // A single `max_runtime` used to do two unrelated jobs: bound the window
+    // a busy-loop gets to rack up attempts in, AND give `b` its only chance
+    // to drain through the fake `cs` subprocesses. Under load the second job
+    // could blow past a short deadline before the first job's window closed,
+    // failing the drain assertion on a machine, not a regression. The
+    // watcher thread below now owns "when to stop"; `max_runtime` is only a
+    // long hard cap in case the watcher itself never fires.
+    config.max_runtime = Some(Duration::from_secs(60));
 
     let scheduler: Box<dyn ResidentScheduler> = Box::new(ReadyFrontierScheduler::new());
     let mut runtime = RuntimeLoop::new(config, scheduler);
     let trace_path = runtime.trace_path().to_path_buf();
     let shutdown = Arc::new(AtomicBool::new(false));
 
+    // Stop the loop once `b` has drained plus a fixed observation window —
+    // long enough at the 20 ms poll interval for a busy-loop on `a` to show
+    // several attempts — rather than relying on `max_runtime` to also bound
+    // that window. This is what makes the attempt-count assertion below
+    // measure the runtime's classification of the refusal, not how fast this
+    // machine happens to be right now.
+    let watcher_state_path = state_path.clone();
+    let watcher_shutdown = Arc::clone(&shutdown);
+    // Bounded by the same hard cap: if `b` never drains (a real regression),
+    // the watcher gives up so `join` below cannot hang the test, and the
+    // drain assertion reports the failure.
+    let watcher_cap = std::time::Instant::now() + Duration::from_secs(60);
+    let watcher = std::thread::spawn(move || {
+        while state_has(&watcher_state_path, "b") && std::time::Instant::now() < watcher_cap {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(500));
+        watcher_shutdown.store(true, std::sync::atomic::Ordering::SeqCst);
+    });
+
     let summary = runtime.run(&shutdown).expect("resident loop runs");
+    watcher.join().expect("observation-window watcher joins");
 
     let attempts = read_count(&tackle_a_path);
     if attempts != 1 || summary.permanently_parked != 1 {
@@ -275,15 +298,17 @@ fn refused_tackle_is_parked_not_busylooped(refusal_code: i32) {
         "expected exactly one `done` (for the well-formed `b`); got {summary:?}",
     );
 
-    // `a` never completes, so the loop cannot drain — it runs to the deadline.
-    // This is the honest outcome: a permanently-refused molecule genuinely blocks
-    // progress until an operator restores its brief, picks a capable adapter,
-    // or collapses it.
+    // `a` never completes, so the loop cannot drain on its own; the watcher
+    // thread ends it once `b` has drained and the observation window has
+    // elapsed. This is the honest outcome: a permanently-refused molecule
+    // genuinely blocks progress until an operator restores its brief, picks
+    // a capable adapter, or collapses it.
     assert_eq!(
         summary.exit,
-        ExitReason::Deadline,
-        "with `a` parked-but-pending the loop should reach its deadline, not \
-         drain; got {:?}",
+        ExitReason::Shutdown,
+        "with `a` parked-but-pending and `b` drained, the observation-window \
+         watcher should end the loop via shutdown rather than the loop \
+         draining or hitting the hard-cap deadline; got {:?}",
         summary.exit,
     );
     assert!(
