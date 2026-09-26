@@ -159,3 +159,73 @@ denylist is operator-private by construction, so both honestly report PEND
 without them. `publish.sh` covers only the structural subset — decidable from a
 fresh clone with git and python3 and nothing else — which is what lets it fail
 the build.
+
+### CI checks that also run locally, and the ones that stay CI-only
+
+On 2026-09-26 main went red in CI on `check-docs-one-gate.sh` — a
+`/<tool>/install.sh` reference in `docs/book/src`, one of the ~25 checks the
+workflows run in `.github/workflows/*.yml` — while `just gates` was green
+locally. `just quick` now also runs every check that is offline (no network,
+no container, no secret, no GitHub PR-event context) and fast (well under a
+second each on this machine, measured with `./scripts/no-pilot-env.sh` around
+every step, same wrapper as the rest of `quick`):
+
+```text
+scripts/sovereignty-gate.sh
+scripts/confidentiality-banlist.sh                 + .test.sh
+scripts/check-workflow-yaml.sh                     + .test.sh
+scripts/check-docs-one-gate.sh                     + .test.sh   # the 2026-09-26 gap
+scripts/check-book-links.sh                        + .test.sh
+scripts/source-provenance.test.sh
+scripts/install-hooks.test.sh
+scripts/check-fixture-independence.sh              + .test.sh
+scripts/license-table.sh --check
+scripts/artifact-map-audit.py
+scripts/check-provenance.sh main HEAD                        # scoped; see below
+tests/harness/provenance-gate-test.sh
+tests/harness/provenance-residence-test.sh
+tests/harness/session-id-gate-test.sh
+infra/install/install.sh -n / --self-test
+scripts/release/render-brew-formula.test.sh
+scripts/release/render-tap-from-artifacts.test.sh
+scripts/release/check-install-drift.test.sh
+scripts/release/docs-deploy.test.sh
+```
+
+`check-provenance.sh` needs explicit `main HEAD` args locally: its own
+no-args fallback walks every merge since 2026-04-19 on the real repo
+history, which took over 40 s (still climbing when killed) on this
+machine — that scope belongs to CI's PR-scoped invocation, not the
+edit-and-verify loop. Two of its self-tests are excluded for the same
+reason: `tests/harness/provenance-base-sync-test.sh` and
+`provenance-integration-branch-test.sh` each contain a scenario that
+replays the *real* repository history since 2020 through the gate script
+and did not finish within 40 s.
+
+The remainder of the ~25-check inventory stays CI-only, each for a
+specific, checked reason:
+
+| Check | Reason it stays CI-only |
+|---|---|
+| `assert-guard`, `dco.yml`, `session-id-gate` PR steps, `provenance-gate` main check | Need `GITHUB_BASE_REF`/`GITHUB_SHA`/PR title+body — meaningless outside a real PR event; the gate scripts themselves (`check-no-session-ids.sh`, `check-provenance.sh main HEAD`) already run locally in scoped form |
+| `deny.yml` (cargo-deny / cargo-audit / cargo-vet), `license-gate`'s deny/vet steps | Install extra cargo subcommands and fetch advisory/license databases over the network |
+| `front-door.yml` | `cargo install --git https://github.com/noogram/cosmon.git` — network install against a repo that must actually be public |
+| `install-lint.yml` `live` / `served-drift` / `endpoint` | Fetch a live GitHub release or the hosted `noogram.org` endpoint |
+| `install-lint.yml` `installer`'s shellcheck step | Needs `shellcheck` installed; this repo assumes only the Rust toolchain + python3 locally, so a new hard binary dependency is not added silently (the `sh -n` + `--self-test` steps from the same job *are* local) |
+| `install-lint.yml` `fixture` job | Its all-triple build+install is inline shell inside the workflow YAML, not a tracked script — extracting one is future work, not folded into this change |
+| `mutation-falsifier`, `spec-conformance-deep`, `typed-links-conformance-deep`, `spawn-matrix`, `cross-adapter-smoke`, `smoke-lifecycle`, `rpp-remote-e2e` | Nightly-only (`if: github.event_name == 'schedule'`), non-blocking canaries, or hours-long — need real binaries, containers, or cargo-mutants |
+| `spec-conformance`, `typed-links-conformance` (PR lane) | The proptest run itself is ~0.02 s, but it forces a fresh `--release` compile of `cosmon-core` (measured 46 s cold) — a second compile profile on top of the `dev` profile `gates` already pays for, for a property already covered nightly at 50k cases |
+| `cosmon-without-neurion` (`just test-without-neurion`), `restart-fidelity-without-neurion` | PATH-stripping invalidates the incremental cache and forces a ~100 s full recompile (measured) even warm; the underlying `restart_fidelity_no_neurion` test already runs, PATH intact, inside `cargo test --workspace` |
+| `readme-quickstart.yml` | Its `block-gate` job runs `cargo install --path crates/cosmon-cli --locked --debug` first, which overwrites whatever `cs` a contributor already has on PATH — too invasive for an edit-and-verify gate; its `end-to-end` job spawns real tmux workers |
+| `archive-verify.yml`, `artifact-map.yml` (schedule leg) | `artifact-map-audit.py` itself is local now; `archive-verify` depends on which archive entries exist in the last 7 days — state, not a property of the tree |
+| `release.yml` (all jobs) | Tag-triggered, signs with cosign/OIDC, needs secrets and a real release environment |
+| `tla-verify.yml` | Needs a JVM + the vendored `tla2tools.jar`; not assumed to be on every contributor's machine |
+
+Measured on this machine, warm, sequential, same steps before and after:
+`just quick`'s original six steps took **42.3 s**; the full recipe with
+every check above added took **58.6 s** (+16.3 s). `just gates` — which is
+`quick` plus the test suite and `crossing.test.sh` — took **691 s** (~11.5
+min) warm in this run; ambient fleet load varies run to run (see the timing
+note above), so treat the quick-recipe delta (+16.3 s, isolated by running
+the six original steps back-to-back with the eighteen new ones on the same
+warm cache) as the reliable number, not a second full `gates` comparison.
