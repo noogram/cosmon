@@ -157,10 +157,11 @@ constant (`cosmon_filestore::project_upgrade::generate_cosmon_skill_md`), so a
 test fails if the two ever say something different.
 
 Install it once, at the user level, and it loads on demand in every
-repository — including one that has never run `cs init`:
+repository — including one that has never run `cs init`. From a clone of
+the cosmon repository:
 
 ```sh
-./tools/cosmon-skill/install.sh
+cd tools/cosmon-skill && ./install.sh
 ```
 
 That copies `SKILL.md` into `~/.claude/skills/cosmon/` (idempotent — safe to
