@@ -125,6 +125,53 @@ impl DialogueClass {
     }
 }
 
+/// A specific codex dialog recognised inside a [`DialogueScan`], carried
+/// alongside `class` so a report can say *why* the worker is blocked, not
+/// only how severe the block is (issue #85: `cs ensemble` / `cs peek` said
+/// a worker was blocked on a dialog but never which one).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexDialogKind {
+    /// "Update available! 0.154.0 → 0.157.0" at first launch after a release.
+    UpdateAvailable,
+    /// "Select Reasoning Level for `<model>`" shortly after launch.
+    ReasoningPicker,
+    /// "Approaching rate limits. Switch to `<cheaper model>` for lower credit
+    /// usage?" — a numbered menu that can silently switch the worker's model.
+    RateLimitSwitch,
+}
+
+impl CodexDialogKind {
+    /// Stable lowercase token for JSON output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UpdateAvailable => "update_available",
+            Self::ReasoningPicker => "reasoning_picker",
+            Self::RateLimitSwitch => "rate_limit_switch",
+        }
+    }
+}
+
+/// Recognise one of the three codex interactive dialogs named in issue #85,
+/// if the captured pane text matches. Pure and independent of
+/// [`classify_pane`]'s `class` decision — a report layer can attach this
+/// alongside the class for a human-readable "why".
+#[must_use]
+pub fn classify_codex_dialog(text: &str) -> Option<CodexDialogKind> {
+    let lower = text.to_lowercase();
+    if lower.contains("update available") {
+        return Some(CodexDialogKind::UpdateAvailable);
+    }
+    if lower.contains("select reasoning level") || lower.contains("select a reasoning level") {
+        return Some(CodexDialogKind::ReasoningPicker);
+    }
+    if lower.contains("rate limit") || lower.contains("lower credit usage") {
+        return Some(CodexDialogKind::RateLimitSwitch);
+    }
+    None
+}
+
 /// The verdict of [`classify_pane`]: the [`DialogueClass`] plus the pane line
 /// that triggered it, kept as evidence for the audit event and the operator
 /// alert. `evidence` is `None` exactly when `class == DialogueClass::None`.
@@ -165,6 +212,12 @@ const MONEY_MARKERS: &[&str] = &[
     "buy more",
     "cost limit",
     "budget",
+    // codex rate-limit prompt (issue #85): "Approaching rate limits. Switch
+    // to <cheaper model> for lower credit usage?" — a numbered menu that
+    // silently switches the worker's model, and picking a cheaper model to
+    // save credit is itself a spend decision. Never auto-confirmable.
+    "rate limit",
+    "lower credit usage",
 ];
 
 /// Destructive / irreversible markers — if present, a prompt that would
@@ -226,6 +279,15 @@ const BLOCKING_MARKERS: &[&str] = &[
     "› 1.",
     "1. yes",
     "waiting for",
+    // codex update prompt (issue #85): "Update available! 0.154.0 →
+    // 0.157.0" — blocks an unattended worker at first launch after a
+    // release, and neither `cs ensemble` nor `cs peek` said why.
+    "update available",
+    // codex reasoning-level picker (issue #85): "Select Reasoning Level for
+    // <model>" — opens shortly after launch even when the dispatch already
+    // pinned a level via `--harness model_reasoning_effort=…`.
+    "select reasoning level",
+    "select a reasoning level",
 ];
 
 /// Return the first marker from `markers` found (case-insensitively) in the
@@ -469,5 +531,72 @@ mod tests {
     fn case_insensitive_matching() {
         let pane = "APPROACHING SPEND LIMIT";
         assert_eq!(classify_pane(pane).class, DialogueClass::MoneyStake);
+    }
+
+    // -- issue #85: codex interactive dialogs block an unattended worker
+    //    undetected. Each of these three panes reproduced `class == None`
+    //    (silently missed) before the markers above were added. --
+
+    #[test]
+    fn codex_update_prompt_is_detected_as_blocking() {
+        // Literal codex text (issue #85 "Observed" #1) — no extra prompt
+        // wording that would accidentally trip an existing generic marker.
+        let pane = "Update available! 0.154.0 → 0.157.0";
+        let scan = classify_pane(pane);
+        assert_ne!(
+            scan.class,
+            DialogueClass::None,
+            "update prompt went undetected"
+        );
+        assert!(!scan.class.auto_confirmable());
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::UpdateAvailable)
+        );
+    }
+
+    #[test]
+    fn codex_reasoning_picker_is_detected_as_blocking() {
+        // Literal codex text (issue #85 "Observed" #2).
+        let pane = "Select Reasoning Level for gpt-6-astra";
+        let scan = classify_pane(pane);
+        assert_ne!(
+            scan.class,
+            DialogueClass::None,
+            "reasoning picker went undetected"
+        );
+        assert!(!scan.class.auto_confirmable());
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::ReasoningPicker)
+        );
+    }
+
+    #[test]
+    fn codex_rate_limit_switch_is_money_stake_never_confirmable() {
+        // Literal codex text (issue #85 "Observed" #3), numbered menu using
+        // "1)" rather than the Claude-Code-shaped "❯ 1." / "1. yes" markers
+        // so this reproduces the codex-specific gap, not a pre-existing one.
+        let pane = "Approaching rate limits. Switch to gpt-5.6-luna for \
+                    lower credit usage?\n  1) Switch model\n  2) Keep current model";
+        let scan = classify_pane(pane);
+        assert_eq!(
+            scan.class,
+            DialogueClass::MoneyStake,
+            "rate-limit switch must be a money stake, got {:?}",
+            scan.class
+        );
+        assert!(!scan.class.auto_confirmable());
+        assert!(scan.class.requires_alert());
+        assert_eq!(
+            classify_codex_dialog(pane),
+            Some(CodexDialogKind::RateLimitSwitch)
+        );
+    }
+
+    #[test]
+    fn classify_codex_dialog_is_none_for_ordinary_output() {
+        let pane = "Running cargo test --workspace\ntest result: ok. 412 passed";
+        assert_eq!(classify_codex_dialog(pane), None);
     }
 }
