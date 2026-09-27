@@ -39,6 +39,13 @@ same legend is mirrored in `man cs` and in the
 [handbook](https://github.com/noogram/cosmon/blob/main/docs/handbook.md#peek-glyph-legend)
 for reading away from the terminal.
 
+The energy cell reports `IN/CACHED/OUT/RSN`: total input, its cached subset,
+total output, and its reasoning subset. Its cost is never an unlabelled zero.
+Codex sessions that report a ChatGPT plan show `subscription N%`, meaning the
+share of the reported usage-limit window consumed. Other priced sessions show
+`ref $N.NN`, a list-price reference estimate rather than a billing claim; an
+unpriced or unread cost is `—`.
+
 Press `p` to drop into any worker's output, `q` to come back up. That descend-
 and-return is the whole model: you keep the fleet view while you inspect one
 worker.

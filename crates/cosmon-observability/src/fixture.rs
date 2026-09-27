@@ -75,8 +75,10 @@ pub fn canonical_snapshot() -> FleetSnapshot {
         session: "cosmon-alpha".into(),
         energy: EnergyBudget {
             input_tokens: 1_000,
+            cached_input_tokens: 800,
             output_tokens: 500,
-            cost_usd: 0.0,
+            reasoning_output_tokens: 100,
+            cost: crate::worker::EnergyCost::Unknown,
             context_window: Some(1_000_000),
         },
         live: "working".into(),

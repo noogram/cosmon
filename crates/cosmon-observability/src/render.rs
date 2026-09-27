@@ -457,27 +457,40 @@ fn molecule_row(m: &Molecule, snap: &FleetSnapshot) -> String {
     )
 }
 
-/// WORKERS column layout. 24 + 1 + 24 + 1 + 20 + 1 + 12 + 1 + 12 + 1 + 18 = 115.
+/// WORKERS column layout. 20 + 1 + 20 + 1 + 18 + 1 + 12 + 1 + 24 + 1 + 18 = 117.
 /// With the 2-space indent + trailing pad, it fits `CANONICAL_WIDTH`.
 fn workers_header() -> String {
     format!(
-        "  {:<24} {:<24} {:<20} {:<12} {:<12} {:<18}",
-        "WORKER", "MOLECULE", "SESSION", "LIVE", "TOKENS", "COST",
+        "  {:<20} {:<20} {:<18} {:<12} {:<24} {:<18}",
+        "WORKER", "MOLECULE", "SESSION", "LIVE", "IN/CACHED/OUT/RSN", "COST",
     )
 }
 
 fn worker_row(w: &Worker) -> String {
+    use crate::worker::EnergyCost;
+
     let mol = w.molecule_id.as_deref().unwrap_or("-");
-    // cost_usd is a float — to keep the output bit-stable we use fixed
-    // precision and the classic point-is-dot locale of Rust's `{:.}`.
-    let cost = format!("${:.4}", w.energy.cost_usd);
+    let tokens = format!(
+        "{}/{}/{}/{}",
+        humanize_tokens(w.energy.input_tokens),
+        humanize_tokens(w.energy.cached_input_tokens),
+        humanize_tokens(w.energy.output_tokens),
+        humanize_tokens(w.energy.reasoning_output_tokens),
+    );
+    let cost = match &w.energy.cost {
+        EnergyCost::Unknown => "-".to_owned(),
+        EnergyCost::ReferenceUsd { usd } => format!("ref ${usd:.4}"),
+        EnergyCost::Subscription { used_percent, .. } => {
+            format!("subscription {used_percent:.0}%")
+        }
+    };
     format!(
-        "  {:<24} {:<24} {:<20} {:<12} {:<12} {:<18}",
-        trunc(&w.id.0, 24),
-        trunc(mol, 24),
-        trunc(&w.session, 20),
+        "  {:<20} {:<20} {:<18} {:<12} {:<24} {:<18}",
+        trunc(&w.id.0, 20),
+        trunc(mol, 20),
+        trunc(&w.session, 18),
         trunc(&w.live, 12),
-        humanize_tokens(w.energy.total()),
+        trunc(&tokens, 24),
         trunc(&cost, 18),
     )
 }

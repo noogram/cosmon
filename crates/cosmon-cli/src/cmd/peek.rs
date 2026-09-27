@@ -1077,7 +1077,8 @@ fn emit_energy_ticks(
 
     clear_line(stdout, tty).ok();
     for (wid, e) in &energy {
-        let (input, output, cost) = e.as_tuple();
+        let (input, _cached, output, _reasoning) = e.token_tuple();
+        let cost = e.cost.reference_usd().unwrap_or(0.0);
         let wid_s = wid.as_str().to_owned();
         let prev = last_energy.get(&wid_s).copied().unwrap_or((0, 0, 0.0));
         let delta_tokens = (input + output).saturating_sub(prev.0 + prev.1);

@@ -15,18 +15,19 @@
 //! [`resolve_codex_session_by_cwd`] (the `session_meta.payload.cwd` join)
 //! → [`cosmon_core::codex_energy`] token parser + price table →
 //! [`WorkerEnergy`]. Cost is attributed to the last realized model of the
-//! session's `turn_context` trajectory; an unpriced model keeps the real
-//! token counts and leaves cost at `0.0`, which the UI renders as `—`
-//! (honest floor — never fabricate a rate).
+//! session's `turn_context` trajectory. A `ChatGPT` plan is shown as a
+//! subscription-limit share; otherwise a priced model is shown as a labelled
+//! reference estimate, and an unpriced model keeps the real token counts with
+//! an explicitly unknown cost (honest floor — never fabricate a rate).
 //!
 //! Used by `cs ensemble` and `cs peek` to display the real energy spent by
 //! every active worker, whichever subprocess adapter hosts it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use cosmon_core::codex_energy::{codex_price_for, codex_token_usage_from_session};
-use cosmon_core::energy::{TokenCost, TokenCount};
+use cosmon_core::codex_energy::{codex_energy_from_session, codex_price_for};
+use cosmon_core::energy::TokenCount;
 use cosmon_core::event_v2::EventV2;
 use cosmon_core::id::{MoleculeId, WorkerId};
 use cosmon_core::model_realization::{
@@ -34,21 +35,32 @@ use cosmon_core::model_realization::{
 };
 
 /// Per-worker aggregated energy values.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct WorkerEnergy {
-    /// Fresh input + cache-creation + cache-read tokens.
+    /// Total input tokens, including the cached subset.
     pub input: TokenCount,
-    /// Output tokens.
+    /// Cached-input subset of [`Self::input`].
+    pub cached_input: TokenCount,
+    /// Total output tokens, including the reasoning subset.
     pub output: TokenCount,
-    /// Total cost in USD.
-    pub cost: TokenCost,
+    /// Reasoning-output subset of [`Self::output`].
+    pub reasoning_output: TokenCount,
+    /// Cost or subscription interpretation of the usage.
+    pub cost: cosmon_observability::EnergyCost,
+    /// Model context-window capacity, when the adapter reports it.
+    pub context_window: Option<u64>,
 }
 
 impl WorkerEnergy {
-    /// Return `(input_tokens, output_tokens, cost_usd)`.
+    /// Return the four non-overlapping display counters.
     #[must_use]
-    pub fn as_tuple(&self) -> (u64, u64, f64) {
-        (self.input.get(), self.output.get(), self.cost.get())
+    pub fn token_tuple(&self) -> (u64, u64, u64, u64) {
+        (
+            self.input.get(),
+            self.cached_input.get(),
+            self.output.get(),
+            self.reasoning_output.get(),
+        )
     }
 }
 
@@ -104,15 +116,46 @@ pub fn load_worker_energy(
     // `docs/design/peek-fold-cost.md`.
     let adapters = fold_last_adapters(state_dir);
 
+    // Resolve every live Codex cwd first, then join all of them to the
+    // session history in one newest-first pass. Rebuilding and sorting the
+    // complete ~/.codex session inventory once per Codex worker made a peek
+    // refresh O(W × H), even after rollout bodies stopped being read.
+    let codex_cwds: HashMap<WorkerId, PathBuf> = fleet
+        .workers
+        .iter()
+        .filter(|(_, data)| {
+            data.current_molecule
+                .as_ref()
+                .and_then(|molecule| adapters.get(molecule))
+                .is_some_and(|adapter| adapter == "codex")
+        })
+        .filter_map(|(worker_id, _)| {
+            resolve_tmux_pane_cwd(backends, worker_id)
+                .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))
+                .map(|cwd| (worker_id.clone(), cwd))
+        })
+        .collect();
+    let codex_targets: HashSet<String> = codex_cwds
+        .values()
+        .map(|cwd| cwd.to_string_lossy().into_owned())
+        .collect();
+    let codex_sessions = resolve_codex_sessions_by_cwd_under(&codex_sessions_dir(), &codex_targets);
+
     for (worker_id, data) in &fleet.workers {
         let adapter = data
             .current_molecule
             .as_ref()
             .and_then(|m| adapters.get(m))
             .map(String::as_str);
-        let Some(energy) =
+        let energy = if adapter == Some("codex") {
+            codex_cwds
+                .get(worker_id)
+                .and_then(|cwd| codex_sessions.get(cwd.to_string_lossy().as_ref()))
+                .and_then(|session| read_codex_worker_energy(session))
+        } else {
             probe_worker_energy_with_adapter(state_dir, backends, worker_id, adapter, &pricing)
-        else {
+        };
+        let Some(energy) = energy else {
             continue;
         };
         map.insert(worker_id.clone(), energy);
@@ -191,8 +234,13 @@ pub fn probe_worker_energy_with_adapter(
     let input_total = metrics.total_input + metrics.total_cache_creation + metrics.total_cache_read;
     Some(WorkerEnergy {
         input: TokenCount::new(input_total.get()),
+        cached_input: TokenCount::new(metrics.total_cache_read.get()),
         output: TokenCount::new(metrics.total_output.get()),
-        cost: TokenCost::new(metrics.total_cost.get()),
+        reasoning_output: TokenCount::new(0),
+        cost: cosmon_observability::EnergyCost::ReferenceUsd {
+            usd: metrics.total_cost.get(),
+        },
+        context_window: None,
     })
 }
 
@@ -202,14 +250,16 @@ pub fn probe_worker_energy_with_adapter(
 /// worktree `cs tackle` recorded on the fleet when no pane answers (dead
 /// pane — same post-mortem fallback as the realized-model capture) →
 /// [`resolve_codex_session_by_cwd`] → last cumulative `token_count` line
-/// ([`codex_token_usage_from_session`]) → cost priced against the **last**
+/// ([`codex_energy_from_session`]) → cost priced against the **last**
 /// realized model of the `turn_context` trajectory
 /// ([`cosmon_core::codex_energy::codex_price_for`]).
 ///
-/// Honest floor: a model absent from the price table yields real token
-/// counts with `cost = 0.0`, which the ensemble/peek COST column renders
-/// as `—`. Input tokens include the cached portion — the same class of
-/// total the claude chain reports (fresh + cache creation + cache read).
+/// A rollout-reported `ChatGPT` plan takes precedence over the reference-price
+/// estimate and is rendered as its usage-limit share. Honest floor: a model
+/// absent from the price table yields real token counts with unknown cost,
+/// which the ensemble/peek COST column renders as `—`. Input tokens include
+/// the cached portion — the same class of total the claude chain reports
+/// (fresh + cache creation + cache read).
 fn probe_codex_worker_energy(
     state_dir: &Path,
     backends: &[cosmon_transport::TmuxBackend],
@@ -218,17 +268,67 @@ fn probe_codex_worker_energy(
     let cwd = resolve_tmux_pane_cwd(backends, worker_id)
         .or_else(|| resolve_recorded_worker_cwd(state_dir, worker_id))?;
     let session_path = resolve_codex_session_by_cwd(&cwd)?;
-    let content = std::fs::read_to_string(session_path).ok()?;
-    let usage = codex_token_usage_from_session(&content)?;
-    let cost = realized_models_from_codex_session(&content)
-        .last()
-        .and_then(|model| codex_price_for(model.as_str()))
-        .map_or(0.0, |price| usage.cost_usd(&price));
+    read_codex_worker_energy(&session_path)
+}
+
+/// Project one already-resolved Codex rollout into worker energy.
+fn read_codex_worker_energy(session_path: &Path) -> Option<WorkerEnergy> {
+    let (snapshot, realized_model) = read_codex_rollout_energy(session_path)?;
+    let usage = snapshot.usage;
+    let reference_cost = realized_model
+        .as_deref()
+        .and_then(codex_price_for)
+        .map(|price| usage.cost_usd(&price));
+    let cost = snapshot.subscription.map_or_else(
+        || {
+            reference_cost.map_or(cosmon_observability::EnergyCost::Unknown, |usd| {
+                cosmon_observability::EnergyCost::ReferenceUsd { usd }
+            })
+        },
+        |subscription| cosmon_observability::EnergyCost::Subscription {
+            plan_type: subscription.plan_type,
+            used_percent: subscription.used_percent,
+            window_minutes: subscription.window_minutes,
+        },
+    );
     Some(WorkerEnergy {
         input: TokenCount::new(usage.input_tokens),
+        cached_input: TokenCount::new(usage.cached_input_tokens),
         output: TokenCount::new(usage.output_tokens),
-        cost: TokenCost::new(cost),
+        reasoning_output: TokenCount::new(usage.reasoning_output_tokens),
+        cost,
+        context_window: snapshot.model_context_window,
     })
+}
+
+/// Stream one resolved Codex rollout into its latest energy + model reading.
+///
+/// The file is read once and retains only its compact `token_count` events;
+/// this lets a rate-limit-only tail update the subscription share without
+/// allocating the complete rollout. Session discovery has already selected
+/// the one rollout whose header matches the worker cwd, so this is
+/// O(active session), not O(all historical sessions).
+fn read_codex_rollout_energy(
+    path: &Path,
+) -> Option<(
+    cosmon_core::codex_energy::CodexEnergySnapshot,
+    Option<String>,
+)> {
+    use std::io::BufRead as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut energy_events = String::new();
+    let mut latest_model = None;
+    for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+        if line.contains("\"type\":\"token_count\"") {
+            energy_events.push_str(&line);
+            energy_events.push('\n');
+        }
+        if let Some(model) = realized_models_from_codex_session(&line).into_iter().last() {
+            latest_model = Some(model.to_string());
+        }
+    }
+    Some((codex_energy_from_session(&energy_events)?, latest_model))
 }
 
 /// **Always-on realized-model capture** at the completion seam
@@ -547,28 +647,53 @@ fn resolve_claude_session_by_cwd_under(projects_root: &Path, cwd: &Path) -> Opti
 /// energy shown is that of the *current* attempt, matching what the claude
 /// chain reports through its pid sidecar.
 fn resolve_codex_session_by_cwd(cwd: &Path) -> Option<PathBuf> {
-    let target = cwd.to_string_lossy();
-    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
-    for path in codex_session_files() {
-        let Ok(content) = std::fs::read_to_string(&path) else {
+    resolve_codex_session_by_cwd_under(&codex_sessions_dir(), cwd)
+}
+
+/// Resolve a Codex rollout under an explicitly named session root.
+///
+/// Candidates are ordered by mtime before their small JSONL header is read,
+/// so the live rollout normally resolves after one file open.  The previous
+/// implementation read every complete rollout in the user's history on every
+/// refresh; on the issue #87 reproducer that meant 1,751 files / 4.8 GB for a
+/// single energy cell.
+fn resolve_codex_session_by_cwd_under(root: &Path, cwd: &Path) -> Option<PathBuf> {
+    let target = cwd.to_string_lossy().into_owned();
+    resolve_codex_sessions_by_cwd_under(root, &HashSet::from([target.clone()])).remove(&target)
+}
+
+/// Resolve the newest rollout for every requested cwd in one history pass.
+///
+/// Files are inspected newest first, so the first header for a cwd wins and
+/// scanning stops once every target has a match. This is the batched form used
+/// by a fleet refresh: one session inventory and one small-header read per
+/// candidate, rather than one complete inventory per Codex worker.
+fn resolve_codex_sessions_by_cwd_under(
+    root: &Path,
+    targets: &HashSet<String>,
+) -> HashMap<String, PathBuf> {
+    if targets.is_empty() {
+        return HashMap::new();
+    }
+    let mut remaining = targets.clone();
+    let mut resolved = HashMap::new();
+    for path in codex_session_files_under(root) {
+        if remaining.is_empty() {
+            break;
+        }
+        let Some(cwd) = codex_session_cwd(&path) else {
             continue;
         };
-        if !codex_session_matches_cwd(&content, &target) {
-            continue;
-        }
-        let mtime = path
-            .metadata()
-            .and_then(|m| m.modified())
-            .unwrap_or(std::time::UNIX_EPOCH);
-        if best.as_ref().is_none_or(|(t, _)| mtime >= *t) {
-            best = Some((mtime, path));
+        if remaining.remove(&cwd) {
+            resolved.insert(cwd, path);
         }
     }
-    best.map(|(_, p)| p)
+    resolved
 }
 
 /// Whether a codex session log's `session_meta` line names `cwd` as its
 /// working directory (`payload.cwd`, with a top-level `cwd` fallback).
+#[cfg(test)]
 fn codex_session_matches_cwd(content: &str, cwd: &str) -> bool {
     for line in content.lines().take(8) {
         let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -587,9 +712,30 @@ fn codex_session_matches_cwd(content: &str, cwd: &str) -> bool {
     false
 }
 
-/// All codex session `*.jsonl` files under `~/.codex/sessions/**` (date-bucketed
-/// `YYYY/MM/DD/rollout-*.jsonl`). Best-effort — an unreadable tree yields none.
-fn codex_session_files() -> Vec<PathBuf> {
+/// Read the cwd from a rollout's small `session_meta` header only.
+fn codex_session_cwd(path: &Path) -> Option<String> {
+    use std::io::BufRead as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    for line in std::io::BufReader::new(file).lines().take(8).flatten() {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+            continue;
+        };
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {
+            continue;
+        }
+        return value
+            .get("payload")
+            .and_then(|payload| payload.get("cwd"))
+            .or_else(|| value.get("cwd"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+    }
+    None
+}
+
+/// All Codex rollout files beneath `root`, newest first.
+fn codex_session_files_under(root: &Path) -> Vec<PathBuf> {
     fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return;
@@ -604,8 +750,21 @@ fn codex_session_files() -> Vec<PathBuf> {
         }
     }
     let mut out = Vec::new();
-    walk(&codex_sessions_dir(), &mut out);
-    out
+    walk(root, &mut out);
+    // Decorate once before sorting. Calling `metadata` from `sort_by_key`
+    // recomputes the key throughout the sort; one stat per file is enough.
+    let mut dated: Vec<_> = out
+        .into_iter()
+        .map(|path| {
+            let modified = path
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            (modified, path)
+        })
+        .collect();
+    dated.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    dated.into_iter().map(|(_, path)| path).collect()
 }
 
 /// The most-recently-modified `*.jsonl` directly inside `dir`, or `None` when
@@ -903,7 +1062,7 @@ pub(crate) mod test_support {
         let fleet = store.load_fleet().unwrap();
         super::load_worker_energy(state_dir, &[], &fleet)
             .get(&WorkerId::new(worker).unwrap())
-            .copied()
+            .cloned()
     }
 
     /// Register `worker` on the fleet with its working directory recorded
@@ -1086,17 +1245,74 @@ mod tests {
         assert!(!codex_session_matches_cwd(content, "/work/tree"));
     }
 
+    /// The cwd join reads the small session header, not the rollout body.
+    /// Invalid UTF-8 after the header is an independent oracle: the former
+    /// whole-file `read_to_string` implementation could not resolve this
+    /// fixture, while the header reader can do so without touching the tail.
+    #[test]
+    fn codex_session_resolution_does_not_read_the_rollout_tail() {
+        use std::io::Write as _;
+
+        let root = tempfile::TempDir::new().unwrap();
+        let day = root.path().join("2026/09/27");
+        std::fs::create_dir_all(&day).unwrap();
+        let rollout = day.join("rollout-current.jsonl");
+        let mut file = std::fs::File::create(&rollout).unwrap();
+        file.write_all(
+            br#"{"type":"session_meta","payload":{"cwd":"/work/tree","session_id":"s"}}
+"#,
+        )
+        .unwrap();
+        file.write_all(&[0xff, 0xfe, 0xfd]).unwrap();
+
+        assert_eq!(
+            resolve_codex_session_by_cwd_under(root.path(), Path::new("/work/tree")),
+            Some(rollout)
+        );
+    }
+
+    #[test]
+    fn codex_rollout_reader_keeps_usage_when_subscription_tail_has_no_counters() {
+        let root = tempfile::TempDir::new().unwrap();
+        let rollout = root.path().join("rollout.jsonl");
+        std::fs::write(
+            &rollout,
+            concat!(
+                r#"{"type":"turn_context","payload":{"model":"gpt-5.6-terra"}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":3663232,"cached_input_tokens":3515520,"output_tokens":9813,"reasoning_output_tokens":1903,"total_tokens":3673045}}}}"#,
+                "\n",
+                r#"{"type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":7.0,"window_minutes":10080},"plan_type":"pro"}}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let (snapshot, model) = read_codex_rollout_energy(&rollout).unwrap();
+        assert_eq!(snapshot.usage.input_tokens, 3_663_232);
+        assert_eq!(snapshot.usage.cached_input_tokens, 3_515_520);
+        assert_eq!(snapshot.usage.output_tokens, 9_813);
+        assert_eq!(snapshot.usage.reasoning_output_tokens, 1_903);
+        assert_eq!(snapshot.subscription.unwrap().used_percent, 7.0);
+        assert_eq!(model.as_deref(), Some("gpt-5.6-terra"));
+    }
+
     #[test]
     fn worker_energy_tuple_roundtrip() {
         let e = WorkerEnergy {
             input: TokenCount::new(100),
+            cached_input: TokenCount::new(40),
             output: TokenCount::new(50),
-            cost: TokenCost::new(0.25),
+            reasoning_output: TokenCount::new(20),
+            cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.25 },
+            context_window: Some(1_000),
         };
-        let (i, o, c) = e.as_tuple();
+        let (i, cached, o, reasoning) = e.token_tuple();
         assert_eq!(i, 100);
+        assert_eq!(cached, 40);
         assert_eq!(o, 50);
-        assert!((c - 0.25).abs() < f64::EPSILON);
+        assert_eq!(reasoning, 20);
+        assert_eq!(e.cost.reference_usd(), Some(0.25));
     }
 
     // ---- task-20260727-3f46: the session-log root actually used ----------
@@ -1403,11 +1619,13 @@ mod tests {
 
         let energy = probe_one_worker_energy(&state_dir, "worker-1")
             .expect("codex energy must resolve through the recorded worktree");
-        let (input, output, cost) = energy.as_tuple();
+        let (input, cached, output, reasoning) = energy.token_tuple();
         assert_eq!(input, 2_000_000, "input includes the cached portion");
+        assert_eq!(cached, 1_000_000);
         assert_eq!(output, 100_000);
+        assert_eq!(reasoning, 40_000);
         // 1M fresh × $2.50 + 1M cached × $0.25 + 100k out × $15 = $4.25.
-        assert!((cost - 4.25).abs() < 1e-9);
+        assert_eq!(energy.cost.reference_usd(), Some(4.25));
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),
@@ -1416,9 +1634,9 @@ mod tests {
     }
 
     /// Honest floor: an unpriced model keeps the real token counts and
-    /// reports `cost = 0.0`, which the COST column renders as `—`.
+    /// carries an explicit unknown cost, never the numeric value zero.
     #[test]
-    fn codex_worker_energy_unpriced_model_keeps_tokens_zero_cost() {
+    fn codex_worker_energy_unpriced_model_keeps_tokens_unknown_cost() {
         let _guard = test_support::home_guard();
         let home = tempfile::TempDir::new().unwrap();
         let root = tempfile::TempDir::new().unwrap();
@@ -1442,10 +1660,12 @@ mod tests {
 
         let energy = probe_one_worker_energy(&state_dir, "worker-1")
             .expect("tokens stay computable for an unpriced model");
-        let (input, output, cost) = energy.as_tuple();
+        let (input, cached, output, reasoning) = energy.token_tuple();
         assert_eq!(input, 2_000_000);
+        assert_eq!(cached, 1_000_000);
         assert_eq!(output, 100_000);
-        assert!(cost.abs() < f64::EPSILON, "no fabricated rate — cost is 0");
+        assert_eq!(reasoning, 40_000);
+        assert_eq!(energy.cost, cosmon_observability::EnergyCost::Unknown);
 
         match prev_home {
             Some(h) => std::env::set_var("HOME", h),

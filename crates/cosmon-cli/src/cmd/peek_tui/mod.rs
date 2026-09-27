@@ -260,8 +260,10 @@ pub(crate) struct RowView {
     /// timestamp to report and inventing one would be a fabricated fact.
     pub(crate) updated_at: Option<DateTime<Utc>>,
     pub(crate) energy_in: u64,
+    pub(crate) energy_cached: u64,
     pub(crate) energy_out: u64,
-    pub(crate) cost_usd: f64,
+    pub(crate) energy_reasoning: u64,
+    pub(crate) energy_cost: cosmon_observability::EnergyCost,
     pub(crate) context_window: Option<u64>,
     pub(crate) session: Option<String>,
     pub(crate) socket: String,
@@ -3299,7 +3301,7 @@ impl App {
             Cell::from("● STEP"),
             Cell::from("TRUST"),
             Cell::from("AGE"),
-            Cell::from("ENERGY"),
+            Cell::from("IN/CACHED/OUT/RSN · COST"),
             Cell::from("ADAPTER"),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD));
@@ -3331,7 +3333,14 @@ impl App {
                 let health_style = molecule_health_style(health);
                 let (temp_glyph_s, temp_style) = temp_token(&r.tags);
                 let (whisper_glyph_s, whisper_style) = whisper_token(r.whisper_fresh);
-                let energy = format_energy(r.energy_in, r.energy_out, r.cost_usd, r.context_window);
+                let energy = format_energy(
+                    r.energy_in,
+                    r.energy_cached,
+                    r.energy_out,
+                    r.energy_reasoning,
+                    r.context_window,
+                    &r.energy_cost,
+                );
                 let is_expanded = self.expanded.contains(&r.mol_id);
                 // Tree-view indicator: ▾ when expanded, ▸ when collapsed.
                 // Matches htop / lazygit affordance so the arrow actually
@@ -3447,7 +3456,7 @@ impl App {
                 Constraint::Length(8),
                 Constraint::Length(7),
                 Constraint::Length(7),
-                Constraint::Length(22),
+                Constraint::Length(49),
                 Constraint::Length(18),
             ]
         } else {
@@ -3461,7 +3470,7 @@ impl App {
                 Constraint::Min(10),
                 Constraint::Length(7),
                 Constraint::Length(8),
-                Constraint::Length(22),
+                Constraint::Length(49),
                 Constraint::Length(20),
             ]
         };
@@ -4116,41 +4125,48 @@ fn trust_badge(score: Option<u8>) -> (String, Style) {
     }
 }
 
-fn format_energy(input: u64, output: u64, cost_usd: f64, cw: Option<u64>) -> String {
-    // Three right-aligned fields with fixed *visible* widths so the column
-    // reads like a ledger: `<bar 6w> <tokens 6w> <cost 7w>`.
-    //
-    // - bar  : "█  72%" or lone "·" when no context window was reported
-    // - tokens: humanised total ("-", "123", "1.2K", "1.2M"), right-justified
-    // - cost : "$0.12" / "$12.34" / "$123.45"
-    //
-    // Rust's `{:>N}` counts *scalar chars*, which misaligns the moment a
-    // value contains a wide char (e.g. an emoji fallback from the theme,
-    // combining marks, or a terminal that upgrades block glyphs to full
-    // width). `pad_to_visible_width` uses `unicode-width` to measure the
-    // rendered column count and pads with ASCII spaces, so the `$` sits at
-    // the same x coordinate regardless of magnitude or font metrics
-    // (delib-b8c6 P1/C3).
+fn format_energy(
+    input: u64,
+    cached: u64,
+    output: u64,
+    reasoning: u64,
+    context_window: Option<u64>,
+    cost: &cosmon_observability::EnergyCost,
+) -> String {
+    use cosmon_observability::EnergyCost;
+
     let total = input.saturating_add(output);
-    let bar = match cw {
-        Some(c) if c > 0 => {
-            let pct = (total as f64 / c as f64 * 100.0).clamp(0.0, 999.0);
-            let glyph = if pct < 25.0 {
+    let bar = match context_window {
+        Some(capacity) if capacity > 0 => {
+            let percent = (total as f64 / capacity as f64 * 100.0).clamp(0.0, 999.0);
+            let glyph = if percent < 25.0 {
                 '▂'
-            } else if pct < 50.0 {
+            } else if percent < 50.0 {
                 '▄'
-            } else if pct < 75.0 {
+            } else if percent < 75.0 {
                 '▆'
             } else {
                 '█'
             };
-            pad_to_visible_width(&format!("{glyph} {pct:>3.0}%"), 6)
+            pad_to_visible_width(&format!("{glyph} {percent:>3.0}%"), 6)
         }
         _ => "     ·".to_owned(),
     };
-    let tokens = pad_to_visible_width(&humanize_tokens(total), 6);
-    let cost = pad_to_visible_width(&format!("${:.2}", cost_usd.max(0.0)), 7);
-    format!("{bar} {tokens} {cost}")
+    let counters = format!(
+        "{}/{}/{}/{}",
+        humanize_tokens(input),
+        humanize_tokens(cached),
+        humanize_tokens(output),
+        humanize_tokens(reasoning),
+    );
+    let charge = match cost {
+        EnergyCost::Unknown => "—".to_owned(),
+        EnergyCost::ReferenceUsd { usd } => format!("ref ${usd:.2}"),
+        EnergyCost::Subscription { used_percent, .. } => {
+            format!("subscription {used_percent:.0}%")
+        }
+    };
+    pad_to_visible_width(&format!("{bar} {counters} {charge}"), 49)
 }
 
 /// Right-pad `s` with ASCII spaces so its **visual** column width matches
@@ -4290,8 +4306,10 @@ pub(crate) fn snapshot_to_rows(snap: &FleetSnapshot) -> Vec<RowView> {
                 step: "-".into(),
                 updated_at: Some(m.updated_at),
                 energy_in: 0,
+                energy_cached: 0,
                 energy_out: 0,
-                cost_usd: 0.0,
+                energy_reasoning: 0,
+                energy_cost: cosmon_observability::EnergyCost::Unknown,
                 context_window: None,
                 session: None,
                 socket: String::new(),
@@ -4344,8 +4362,12 @@ fn merge_row(
     use cosmon_observability::worker::WorkerRole as OR;
     // Energy totals merge across every worker bound to the same mol.
     existing.energy_in = existing.energy_in.saturating_add(fresh.energy_in);
+    existing.energy_cached = existing.energy_cached.saturating_add(fresh.energy_cached);
     existing.energy_out = existing.energy_out.saturating_add(fresh.energy_out);
-    existing.cost_usd += fresh.cost_usd;
+    existing.energy_reasoning = existing
+        .energy_reasoning
+        .saturating_add(fresh.energy_reasoning);
+    merge_energy_cost(&mut existing.energy_cost, fresh.energy_cost);
     if existing.context_window.is_none() {
         existing.context_window = fresh.context_window;
     }
@@ -4415,7 +4437,9 @@ fn row_view_from(
             )
         });
     let role = worker.map_or_else(|| "-".into(), |_w| "worker".into());
-    let energy = worker.map(|w| w.energy).unwrap_or(EnergyBudget::default());
+    let energy = worker
+        .map(|w| w.energy.clone())
+        .unwrap_or(EnergyBudget::default());
     // Heartbeat freshness — pick the MAX of both signals.
     //
     // tmux `#{session_activity}` is attach-bumped: opening the session with
@@ -4456,8 +4480,10 @@ fn row_view_from(
         step: "-".into(),
         updated_at,
         energy_in: energy.input_tokens,
+        energy_cached: energy.cached_input_tokens,
         energy_out: energy.output_tokens,
-        cost_usd: energy.cost_usd,
+        energy_reasoning: energy.reasoning_output_tokens,
+        energy_cost: energy.cost,
         context_window: energy.context_window,
         session: Some(s.name.clone()),
         socket: s.socket.clone(),
@@ -4481,6 +4507,29 @@ fn row_view_from(
         trust_score: None,
         energy_budget: None,
         adapter: cosmon_core::adapter_attribution::AdapterAttribution::default(),
+    }
+}
+
+/// Merge two independently observed worker charges without turning absence
+/// into zero.  Reference estimates add; subscription allowance remains a
+/// percentage observation and therefore must never be summed.
+fn merge_energy_cost(
+    existing: &mut cosmon_observability::EnergyCost,
+    fresh: cosmon_observability::EnergyCost,
+) {
+    use cosmon_observability::EnergyCost;
+    match (&mut *existing, fresh) {
+        (EnergyCost::ReferenceUsd { usd }, EnergyCost::ReferenceUsd { usd: fresh }) => {
+            *usd += fresh;
+        }
+        (EnergyCost::Unknown, value) => *existing = value,
+        // A subscription observation is the truthful billing basis for the
+        // Codex worker, so it wins over a reference estimate.
+        (_, subscription @ EnergyCost::Subscription { .. }) => *existing = subscription,
+        // Mixed reference/subscription workers on one molecule cannot be
+        // represented as one scalar. Preserve the subscription observation;
+        // the token counters still sum exactly.
+        _ => {}
     }
 }
 
@@ -4870,12 +4919,14 @@ fn populate_snapshot(
         let energy = energy_by_worker
             .get(&w.id)
             .map(|e| {
-                let (i, o, c) = e.as_tuple();
+                let (i, cached, o, reasoning) = e.token_tuple();
                 EnergyBudget {
                     input_tokens: i,
+                    cached_input_tokens: cached,
                     output_tokens: o,
-                    cost_usd: c,
-                    context_window: None,
+                    reasoning_output_tokens: reasoning,
+                    cost: e.cost.clone(),
+                    context_window: e.context_window,
                 }
             })
             .unwrap_or_default();
@@ -5282,9 +5333,51 @@ mod tests {
     }
 
     #[test]
-    fn format_energy_renders_badge() {
-        let s = format_energy(50_000, 50_000, 1.23, Some(1_000_000));
-        assert!(s.contains('%'));
+    fn format_energy_renders_all_token_classes_and_reference_label() {
+        let s = format_energy(
+            50_000,
+            40_000,
+            10_000,
+            2_000,
+            Some(1_000_000),
+            &cosmon_observability::EnergyCost::ReferenceUsd { usd: 1.23 },
+        );
+        assert!(s.contains("50.0K/40.0K/10.0K/2.0K"), "{s}");
+        assert!(s.contains("ref $1.23"), "{s}");
+    }
+
+    /// Regression for issue #87: an absent Codex price is not evidence that
+    /// the work was free.  Zero is a real ledger value and must never be used
+    /// as the sentinel for an unknown/subscription-backed charge.
+    #[test]
+    fn format_energy_does_not_render_unknown_cost_as_free() {
+        let s = format_energy(
+            3_663_232,
+            3_515_520,
+            9_813,
+            1_903,
+            None,
+            &cosmon_observability::EnergyCost::Unknown,
+        );
+        assert!(!s.contains("$0.00"), "unknown cost rendered as free: {s}");
+        assert!(s.contains('—'), "unknown cost must be explicit: {s}");
+    }
+
+    #[test]
+    fn format_energy_renders_subscription_share() {
+        let s = format_energy(
+            3_663_232,
+            3_515_520,
+            9_813,
+            1_903,
+            None,
+            &cosmon_observability::EnergyCost::Subscription {
+                plan_type: Some("pro".to_owned()),
+                used_percent: 7.0,
+                window_minutes: Some(10_080),
+            },
+        );
+        assert!(s.contains("subscription 7%"), "{s}");
     }
 
     #[test]
@@ -5375,9 +5468,30 @@ mod tests {
     #[test]
     fn format_energy_alignment_is_column_stable() {
         use unicode_width::UnicodeWidthStr;
-        let small = format_energy(0, 0, 0.0, Some(200_000));
-        let big = format_energy(500_000, 500_000, 12.34, Some(200_000));
-        let nocw = format_energy(1_234, 0, 0.01, None);
+        let small = format_energy(
+            0,
+            0,
+            0,
+            0,
+            Some(200_000),
+            &cosmon_observability::EnergyCost::Unknown,
+        );
+        let big = format_energy(
+            500_000,
+            400_000,
+            500_000,
+            100_000,
+            Some(200_000),
+            &cosmon_observability::EnergyCost::ReferenceUsd { usd: 12.34 },
+        );
+        let nocw = format_energy(
+            1_234,
+            1_000,
+            10,
+            5,
+            None,
+            &cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.01 },
+        );
         let w_small = UnicodeWidthStr::width(small.as_str());
         let w_big = UnicodeWidthStr::width(big.as_str());
         let w_nocw = UnicodeWidthStr::width(nocw.as_str());
@@ -5611,8 +5725,10 @@ mod tests {
             step: String::new(),
             updated_at: None,
             energy_in: 0,
+            energy_cached: 0,
             energy_out: 0,
-            cost_usd: 0.0,
+            energy_reasoning: 0,
+            energy_cost: cosmon_observability::EnergyCost::Unknown,
             context_window: None,
             session: None,
             socket: String::new(),
@@ -6184,8 +6300,10 @@ mod tests {
             session: session.into(),
             energy: EnergyBudget {
                 input_tokens: 0,
+                cached_input_tokens: 0,
                 output_tokens: 0,
-                cost_usd: 0.0,
+                reasoning_output_tokens: 0,
+                cost: cosmon_observability::EnergyCost::Unknown,
                 context_window: None,
             },
             live: "working".into(),
@@ -6317,8 +6435,10 @@ mod tests {
                 session: format!("{mol_id}-rt"),
                 energy: EnergyBudget {
                     input_tokens: 10,
+                    cached_input_tokens: 4,
                     output_tokens: 5,
-                    cost_usd: 0.1,
+                    reasoning_output_tokens: 2,
+                    cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 0.1 },
                     context_window: Some(1_000_000),
                 },
                 live: "working".into(),
@@ -6330,8 +6450,10 @@ mod tests {
                 session: format!("{mol_id}-cog"),
                 energy: EnergyBudget {
                     input_tokens: 100,
+                    cached_input_tokens: 40,
                     output_tokens: 50,
-                    cost_usd: 1.0,
+                    reasoning_output_tokens: 20,
+                    cost: cosmon_observability::EnergyCost::ReferenceUsd { usd: 1.0 },
                     context_window: Some(1_000_000),
                 },
                 live: "working".into(),
