@@ -257,6 +257,7 @@ pub mod query;
 pub mod reconcile;
 #[doc(hidden)]
 pub mod reproducibility;
+pub mod retackle_lease;
 #[doc(hidden)]
 pub mod rig;
 pub mod root_spawn_policy;

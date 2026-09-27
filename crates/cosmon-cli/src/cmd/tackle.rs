@@ -1531,6 +1531,21 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         );
         return Ok(());
     }
+    // COSMON #90 — a forced re-tackle is about to kill a *live* pane, and
+    // the respawn below (worktree setup, dispatch commit, spawn, liveness
+    // re-check) takes real time. In that window the molecule reads exactly
+    // like a genuinely orphaned one to `cs patrol`'s orphan sweep: `Running`,
+    // assigned worker, dead session. Hold a lease across the whole window so
+    // the sweep does not freeze/collapse the molecule and release its
+    // dependents out from under this retackle. Held only for the live-pane
+    // case — reclaiming a carcass the molecule was never protected by
+    // anything, so it needs no new protection here.
+    let _retackle_lease = if already_running {
+        Some(RetackleLease::acquire(&store.molecule_dir(&mol_id))?)
+    } else {
+        None
+    };
+
     if session_present {
         // Reclaim the seat. A live session is only torn down under `--force`
         // (the branch above returned otherwise); a carcass is torn down
@@ -4039,6 +4054,53 @@ fn install_session_hook(worktree_path: &Path, mol_id: &str) {
 /// `kill-session` returns. Teardown is asynchronous on the server side; a
 /// respawn issued the same millisecond can still collide.
 const SESSION_RECLAIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// A retackle-in-progress marker held across a forced respawn (COSMON #90).
+///
+/// Acquired right before a live pane is torn down (see `run`, step 8) and
+/// released — the marker file removed — when this guard drops, which
+/// `cs tackle`'s `run` reaches shortly after the new session is confirmed
+/// alive, on every return path including an early error return. The marker
+/// also self-expires ([`cosmon_core::retackle_lease::LEASE_TTL`]) so a
+/// `cs tackle` process that is `kill -9`'d mid-retackle — the one path this
+/// `Drop` cannot run on — does not wedge the molecule out of patrol's reach
+/// forever.
+struct RetackleLease {
+    path: PathBuf,
+}
+
+impl RetackleLease {
+    /// Write the marker into `mol_dir`. Refuses (rather than silently
+    /// proceeding unprotected) when the write fails — the same posture as
+    /// every other pre-flight check in this dispatch: a lease that cannot be
+    /// proven written must not be assumed held.
+    fn acquire(mol_dir: &std::path::Path) -> anyhow::Result<Self> {
+        std::fs::create_dir_all(mol_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "cs tackle: could not create molecule directory `{}` for the \
+                 retackle lease: {e}",
+                mol_dir.display()
+            )
+        })?;
+        let path = cosmon_core::retackle_lease::lease_path(mol_dir);
+        std::fs::write(&path, Utc::now().to_rfc3339()).map_err(|e| {
+            anyhow::anyhow!(
+                "cs tackle: could not write the retackle lease at `{}`: {e}. \
+                 Refusing to tear down the live session unprotected — patrol's \
+                 orphan sweep could freeze or collapse {} mid-retackle.",
+                path.display(),
+                mol_dir.display()
+            )
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for RetackleLease {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 /// Tear down the tmux session occupying `session_name` and wait until the
 /// name is genuinely free.
@@ -9362,6 +9424,39 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    /// COSMON #90 — the writer half of the retackle lease. `acquire` must
+    /// write a marker `cosmon_core::retackle_lease` reads back as fresh, and
+    /// dropping the guard must remove it — the RAII half that releases the
+    /// lease on every `run` return path, success or error, without each
+    /// return site having to remember to clean up.
+    #[test]
+    fn retackle_lease_writes_a_fresh_marker_and_drop_removes_it() {
+        let tmp = TempDir::new().unwrap();
+        let mol_dir = tmp.path().join("molecules").join("cs-20260927-lea3");
+        let lease_path = cosmon_core::retackle_lease::lease_path(&mol_dir);
+        assert!(!lease_path.exists());
+
+        let before = Utc::now();
+        let lease = RetackleLease::acquire(&mol_dir).unwrap();
+        assert!(lease_path.exists());
+
+        let written_at = std::fs::read_to_string(&lease_path).unwrap();
+        let written_at = chrono::DateTime::parse_from_rfc3339(written_at.trim())
+            .unwrap()
+            .with_timezone(&Utc);
+        assert!(written_at >= before);
+        assert!(cosmon_core::retackle_lease::is_fresh(
+            written_at,
+            Utc::now()
+        ));
+
+        drop(lease);
+        assert!(
+            !lease_path.exists(),
+            "dropping the lease guard must remove the marker file"
+        );
+    }
 
     // ── COSMON-DEV #20 defect A2: no live cognition before the refuse ──
     //

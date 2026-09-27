@@ -1355,6 +1355,22 @@ pub(crate) struct RespawnOutcome<'a> {
 /// not release the seat has not finished freezing; `backend` is what lets it.
 /// `None` (patrol run with `--no-tmux`) simply skips the teardown — the
 /// molecule transition is still the point.
+/// Whether `mol_dir` holds a fresh retackle-lease marker (COSMON #90).
+///
+/// Best-effort by construction: a missing, unreadable, or malformed marker
+/// reads as "no lease" — the orphan sweep degrades to its pre-#90 behaviour
+/// rather than fail closed on a marker it cannot parse. `cs tackle` is the
+/// only writer and always writes an RFC 3339 timestamp (see
+/// [`cosmon_core::retackle_lease`]).
+fn retackle_lease_active(mol_dir: &std::path::Path, now: chrono::DateTime<Utc>) -> bool {
+    std::fs::read_to_string(cosmon_core::retackle_lease::lease_path(mol_dir))
+        .ok()
+        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s.trim()).ok())
+        .is_some_and(|written_at| {
+            cosmon_core::retackle_lease::is_fresh(written_at.with_timezone(&Utc), now)
+        })
+}
+
 pub(crate) fn auto_freeze_orphans(
     store: &dyn StateStore,
     state_dir: &std::path::Path,
@@ -1379,6 +1395,7 @@ pub(crate) fn auto_freeze_orphans(
         "worker dead, auto-frozen by patrol"
     };
 
+    let now = Utc::now();
     let stranded: Vec<MoleculeId> = molecules
         .iter()
         .filter(|m| matches!(m.status, MoleculeStatus::Running | MoleculeStatus::Queued))
@@ -1389,11 +1406,20 @@ pub(crate) fn auto_freeze_orphans(
                 .get(wid)
                 .is_none_or(|w| w.desired == DesiredState::Stopped);
             let respawn_failed = needs_respawn.contains(wid) && !respawned.contains(wid);
-            if worker_dead || respawn_failed {
-                Some(m.id.clone())
-            } else {
-                None
+            if !(worker_dead || respawn_failed) {
+                return None;
             }
+            // COSMON #90 — `cs tackle --force` kills the old pane before the
+            // new one is up, so the molecule reads exactly like an orphan for
+            // the width of that window. A fresh retackle-lease marker in the
+            // molecule directory says a forced respawn is already in flight;
+            // treat it as still alive rather than freeze/collapse it and
+            // release its dependents out from under the retackle. An expired
+            // lease (the retackle itself died) reverts to a plain orphan.
+            if retackle_lease_active(&store.molecule_dir(&m.id), now) {
+                return None;
+            }
+            Some(m.id.clone())
         })
         .collect();
 
@@ -5255,6 +5281,112 @@ mod tests {
         assert_eq!(transitioned.len(), 1);
         let stored = store.load_molecule(&mol.id).unwrap();
         assert_eq!(stored.status, MoleculeStatus::Frozen);
+    }
+
+    /// COSMON #90 — a forced re-tackle kills the old pane before the new one
+    /// is up. In that window the molecule reads exactly like an orphan
+    /// (`Running`, dead session, respawn not yet caught up), but a fresh
+    /// retackle-lease marker in the molecule directory says a human-invoked
+    /// respawn is already in flight — patrol must not freeze/collapse it and
+    /// release its dependents out from under the retackle.
+    #[test]
+    fn auto_freeze_orphans_respects_an_active_retackle_lease() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("retackled-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule(
+            "cs-20260927-lea1",
+            MoleculeStatus::Running,
+            Some("retackled-w"),
+        );
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        // `cs tackle --force` wrote this immediately before tearing the old
+        // session down.
+        let mol_dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&mol_dir).unwrap();
+        std::fs::write(
+            cosmon_core::retackle_lease::lease_path(&mol_dir),
+            Utc::now().to_rfc3339(),
+        )
+        .unwrap();
+
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            RespawnOutcome {
+                needs_respawn: std::slice::from_ref(&wid),
+                respawned: &[], // the old worker is dead — respawn hasn't landed yet
+            },
+            true, // even under --auto-collapse, the lease must hold
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            transitioned.is_empty(),
+            "an active retackle lease must block the orphan sweep"
+        );
+        let stored = store.load_molecule(&mol.id).unwrap();
+        assert_eq!(
+            stored.status,
+            MoleculeStatus::Running,
+            "the molecule must stay Running while its retackle lease is fresh"
+        );
+    }
+
+    /// The mirror case: once the lease has expired (TTL elapsed — the
+    /// retackle itself is stuck or its process died without clearing the
+    /// marker), the molecule reverts to a plain orphan and patrol may act.
+    #[test]
+    fn auto_freeze_orphans_ignores_an_expired_retackle_lease() {
+        let (tmp, store) = make_store();
+        let mut fleet = Fleet::default();
+        let (wid, w) = make_worker("stuck-retackle-w", DesiredState::Running);
+        fleet.workers.insert(wid.clone(), w);
+        store.save_fleet(&fleet).unwrap();
+
+        let mol = make_molecule(
+            "cs-20260927-lea2",
+            MoleculeStatus::Running,
+            Some("stuck-retackle-w"),
+        );
+        store.save_molecule(&mol.id, &mol).unwrap();
+
+        let mol_dir = store.molecule_dir(&mol.id);
+        std::fs::create_dir_all(&mol_dir).unwrap();
+        let stale =
+            Utc::now() - cosmon_core::retackle_lease::LEASE_TTL - chrono::Duration::minutes(1);
+        std::fs::write(
+            cosmon_core::retackle_lease::lease_path(&mol_dir),
+            stale.to_rfc3339(),
+        )
+        .unwrap();
+
+        let transitioned = auto_freeze_orphans(
+            &store,
+            tmp.path(),
+            &fleet,
+            std::slice::from_ref(&mol),
+            RespawnOutcome {
+                needs_respawn: std::slice::from_ref(&wid),
+                respawned: &[],
+            },
+            false,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(transitioned.len(), 1);
+        assert_eq!(
+            store.load_molecule(&mol.id).unwrap().status,
+            MoleculeStatus::Frozen
+        );
     }
 
     #[test]
