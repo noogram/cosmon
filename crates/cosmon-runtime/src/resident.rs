@@ -417,6 +417,20 @@ pub enum Decision {
         /// persisted base, else the run-wide `cs run --base` directive, else
         /// `None` (no flag — `cs tackle` resolves the ambient chain).
         base: Option<String>,
+        /// Run-wide harness-settings directive (`cs run --harness k=v`,
+        /// ADR-177 / issue #86), rendered as one `--harness k=v` on the
+        /// shelled `cs tackle` per key.
+        ///
+        /// Unlike [`Self::Tackle::adapter`] and [`Self::Tackle::base`] there
+        /// is no per-molecule pin to check: `[steps.harness]` lives on the
+        /// *formula step*, not the molecule, and is resolved by the shelled
+        /// `cs tackle` itself (rung 2). This directive occupies rung 1 (the
+        /// operator's `--harness` flag) and is therefore applied to **every**
+        /// dispatch this run makes, unconditionally — the same rung-1 role
+        /// `cs tackle --harness` plays for a single manual dispatch. An empty
+        /// map (no `cs run --harness` given) renders no `--harness` flag at
+        /// all.
+        harness: cosmon_core::harness_settings::HarnessMap,
     },
     /// Shell out `cs done <id>` to merge a completed molecule's branch.
     Done(String),
@@ -447,6 +461,15 @@ impl Decision {
         match self {
             Self::Tackle { base, .. } => base.as_deref(),
             Self::Done(_) => None,
+        }
+    }
+
+    fn harness(&self) -> &cosmon_core::harness_settings::HarnessMap {
+        static EMPTY: std::sync::OnceLock<cosmon_core::harness_settings::HarnessMap> =
+            std::sync::OnceLock::new();
+        match self {
+            Self::Tackle { harness, .. } => harness,
+            Self::Done(_) => EMPTY.get_or_init(cosmon_core::harness_settings::HarnessMap::new),
         }
     }
 }
@@ -534,6 +557,17 @@ pub struct ReadyFrontierScheduler {
     /// eventual `cs done` merges there; a molecule that already carries a base
     /// keeps it. `None` (the default) stamps nothing.
     run_base: Option<String>,
+    /// Explicit, opt-in run-wide harness-settings directive
+    /// (`cs run --harness key=value`, repeatable — ADR-177 / issue #86).
+    ///
+    /// Unlike [`Self::run_adapter`] and [`Self::run_base`] this is rung 1 of
+    /// a per-key merge, not a fallback for a pin-less molecule: there is no
+    /// per-molecule harness pin to check against (`[steps.harness]` lives on
+    /// the formula step and is resolved by the shelled `cs tackle` itself,
+    /// rung 2), so a non-empty directive is rendered onto **every** dispatch
+    /// this run makes. An empty map (the default) renders no `--harness`
+    /// flag at all.
+    run_harness: cosmon_core::harness_settings::HarnessMap,
 }
 
 impl ReadyFrontierScheduler {
@@ -571,6 +605,18 @@ impl ReadyFrontierScheduler {
     #[must_use]
     pub fn with_run_base(mut self, run_base: Option<String>) -> Self {
         self.run_base = run_base;
+        self
+    }
+
+    /// Set the run-wide harness-settings directive (`cs run --harness
+    /// key=value`, ADR-177 / issue #86). An empty map is the default and
+    /// renders no `--harness` flag on any dispatch.
+    #[must_use]
+    pub fn with_run_harness(
+        mut self,
+        run_harness: cosmon_core::harness_settings::HarnessMap,
+    ) -> Self {
+        self.run_harness = run_harness;
         self
     }
 }
@@ -689,6 +735,9 @@ impl ResidentScheduler for ReadyFrontierScheduler {
                     // own persisted base wins, the run directive fills in only
                     // where there is none (issue #69).
                     base: m.base_branch.clone().or_else(|| self.run_base.clone()),
+                    // Rung-1 harness directive, unconditional (no per-molecule
+                    // pin to check — see the field doc on `run_harness`).
+                    harness: self.run_harness.clone(),
                 });
                 self.tackled.insert(m.id.clone());
             }
@@ -1240,6 +1289,7 @@ impl RuntimeLoop {
                             molecule_id,
                             adapter,
                             base,
+                            harness,
                         },
                         Some(executor),
                     ) => dispatch_via_executor(
@@ -1247,6 +1297,7 @@ impl RuntimeLoop {
                         molecule_id,
                         adapter.as_deref(),
                         base.as_deref(),
+                        harness,
                     ),
                     _ => shell_out(&self.config, &d),
                 };
@@ -1733,6 +1784,7 @@ fn dispatch_via_executor(
     molecule_id: &str,
     adapter: Option<&str>,
     base: Option<&str>,
+    harness: &cosmon_core::harness_settings::HarnessMap,
 ) -> Result<(), ResidentError> {
     let id =
         cosmon_core::id::MoleculeId::new(molecule_id).map_err(|e| ResidentError::CsInvocation {
@@ -1744,6 +1796,7 @@ fn dispatch_via_executor(
         adapter: adapter.map(str::to_owned),
         model: None,
         base_branch: base.map(str::to_owned),
+        harness: harness.clone(),
     };
     executor
         .dispatch_with_pin(&id, &pin)
@@ -1849,6 +1902,9 @@ fn shell_out_args(d: &Decision, runtime_pid: u32) -> Vec<String> {
     }
     if let Some(base) = d.base() {
         args.extend(["--base".to_owned(), base.to_owned()]);
+    }
+    for (key, value) in d.harness() {
+        args.extend(["--harness".to_owned(), format!("{key}={value}")]);
     }
     args
 }
@@ -2277,6 +2333,7 @@ mod tests {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
         assert_eq!(
@@ -2335,6 +2392,7 @@ mod tests {
                 molecule_id: "pinned".into(),
                 adapter: None,
                 base: Some("feat/x".into()),
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a molecule's own base must not be overwritten by the run directive"
         );
@@ -2351,6 +2409,94 @@ mod tests {
         let decisions = scheduler.next_decisions(&snapshot);
         assert_eq!(decisions[0].base(), None);
         assert!(!shell_out_args(&decisions[0], 7).contains(&"--base".to_owned()));
+    }
+
+    /// ADR-177 / issue #86: `cs run --harness key=value` is a rung-1 flag
+    /// intent with no per-molecule pin to defer to, so it must reach
+    /// **every** dispatch — unlike `--adapter`/`--base`, which apply only to
+    /// a pin-less molecule.
+    #[test]
+    fn run_harness_directive_applies_to_every_dispatch() {
+        let snapshot = EnsembleSnapshot {
+            molecules: vec![mol("n1", "pending", &[]), mol("n2", "pending", &[])],
+        };
+        let mut harness = cosmon_core::harness_settings::HarnessMap::new();
+        harness.insert("model_reasoning_effort".to_owned(), "high".to_owned());
+        let mut scheduler = ReadyFrontierScheduler::new().with_run_harness(harness);
+
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert_eq!(decisions.len(), 2);
+        for d in &decisions {
+            let args = shell_out_args(d, 7);
+            let at = args
+                .iter()
+                .position(|a| a == "--harness")
+                .expect("--harness rendered");
+            assert_eq!(args[at + 1], "model_reasoning_effort=high", "{d:?}");
+        }
+    }
+
+    /// No `cs run --harness` directive: no `--harness` flag on the shelled
+    /// `cs tackle`, so a step's own `[steps.harness]` pin resolves unmasked.
+    #[test]
+    fn no_harness_directive_renders_no_harness_flag() {
+        let snapshot =
+            EnsembleSnapshot::from_json(r#"{"molecule_states":[{"id":"a","status":"pending"}]}"#)
+                .expect("snapshot parses");
+        let mut scheduler = ReadyFrontierScheduler::new();
+        let decisions = scheduler.next_decisions(&snapshot);
+        assert!(!shell_out_args(&decisions[0], 7).contains(&"--harness".to_owned()));
+    }
+
+    /// A no-op [`crate::Executor`] that only records the [`crate::DispatchPin`]
+    /// it was handed, for asserting what [`dispatch_via_executor`] builds.
+    #[derive(Default)]
+    struct CapturingExecutor {
+        captured: std::sync::Mutex<Option<crate::DispatchPin>>,
+    }
+
+    impl crate::Executor for CapturingExecutor {
+        fn dispatch(&self, id: &cosmon_core::id::MoleculeId) -> Result<(), crate::RuntimeError> {
+            self.dispatch_with_pin(id, &crate::DispatchPin::default())
+        }
+
+        fn dispatch_with_pin(
+            &self,
+            _id: &cosmon_core::id::MoleculeId,
+            pin: &crate::DispatchPin,
+        ) -> Result<(), crate::RuntimeError> {
+            *self.captured.lock().expect("lock") = Some(pin.clone());
+            Ok(())
+        }
+    }
+
+    /// ADR-177 / issue #86, the in-process (`with_tackle_executor`) twin of
+    /// [`run_harness_directive_applies_to_every_dispatch`]: the run-wide
+    /// harness directive must reach the [`crate::DispatchPin`] the injected
+    /// executor sees, not just the shelled-`cs`-argv path.
+    #[test]
+    fn dispatch_via_executor_carries_the_run_wide_harness_directive() {
+        let mut harness = cosmon_core::harness_settings::HarnessMap::new();
+        harness.insert("model_reasoning_effort".to_owned(), "high".to_owned());
+        let executor = CapturingExecutor::default();
+
+        dispatch_via_executor(
+            &executor,
+            "task-20260927-c005",
+            Some("claude"),
+            None,
+            &harness,
+        )
+        .expect("dispatch");
+
+        let captured = executor
+            .captured
+            .lock()
+            .expect("lock")
+            .clone()
+            .expect("dispatch_with_pin was called");
+        assert_eq!(captured.harness, harness);
+        assert_eq!(captured.adapter.as_deref(), Some("claude"));
     }
 
     #[test]
@@ -2372,6 +2518,7 @@ mod tests {
                 molecule_id: "task-pinless".into(),
                 adapter: Some("claude".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "an explicit run directive must replace the local floor for a pin-less molecule"
         );
@@ -2397,6 +2544,7 @@ mod tests {
                 molecule_id: "task-pinless".into(),
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "no pin + no run directive must emit no adapter flag (delegate the full chain to cs tackle)"
         );
@@ -2425,6 +2573,7 @@ mod tests {
                 molecule_id: "task-codex".into(),
                 adapter: Some("codex".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a per-molecule pin must beat the run-wide directive"
         );
@@ -2456,6 +2605,7 @@ mod tests {
                 molecule_id: "child".into(),
                 adapter: Some("claude".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a dynamically-nucleated pin-less child must inherit the run directive"
         );
@@ -2488,6 +2638,7 @@ mod tests {
                 // the full canonical chain (COSMON-DEV #21).
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
         // Same snapshot → no re-tackle.
@@ -2527,6 +2678,7 @@ mod tests {
                 // Pin-less, directive-less → no flag; child runs the full chain.
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }]
         );
     }
@@ -2624,6 +2776,7 @@ mod tests {
                 molecule_id: "routed".into(),
                 adapter: Some("anthropic".into()),
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "a snapshot adapter pin must reach the tackle decision unchanged"
         );
@@ -2654,6 +2807,7 @@ mod tests {
                     // Pin-less, directive-less → no flag; child runs the chain.
                     adapter: None,
                     base: None,
+                    harness: cosmon_core::harness_settings::HarnessMap::new(),
                 },
             ]
         );
@@ -2706,6 +2860,7 @@ mod tests {
                 // Pin-less, directive-less → no flag; child runs the chain.
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }),
             "fan-in must chain when one blocker is torn down and the other \
              completed, got {decisions:?}"
@@ -2733,6 +2888,7 @@ mod tests {
                 // Pin-less, directive-less → no flag; child runs the chain.
                 adapter: None,
                 base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
             }],
             "child must tackle behind a delivered (stuck_at=None) frozen \
              mission, got {decisions:?}"

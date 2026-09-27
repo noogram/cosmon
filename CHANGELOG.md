@@ -19,6 +19,20 @@ this stage.
 
 ## [Unreleased]
 
+### Added
+
+- **`cs run --resident --harness <KEY>=<VALUE>`** (GitHub issue #86, repeatable).
+  A run-wide harness-settings directive, the harness twin of `--adapter` and
+  `--base`: it is stamped onto every dispatch the run makes — static frontier
+  nodes and dynamically-nucleated children alike — and merged **per key** with
+  each executing step's own `[steps.harness]` pin (ADR-177 Decision 2), the
+  flag winning. Before this, `cs run --resident` had no way to carry an
+  operator's in-the-moment harness override to a shelled `cs tackle`; only the
+  formula step's own pin reached the dispatch. The in-process executor
+  (`cosmon_runtime::tackle_exec::LibraryExecutor`, used by the RPP tenant
+  route) grew the matching `DispatchPin::harness` field for embedders that
+  hold a run-wide directive of their own.
+
 ### Changed
 
 - **The consent path speaks the same language as the rest of `cs`** (GitHub

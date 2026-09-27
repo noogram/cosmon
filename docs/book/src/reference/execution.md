@@ -342,6 +342,9 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
    The base twin of `--adapter`, with the same two-rung precedence: every **pin-less** molecule this run dispatches — one with no persisted base — is tackled with `--base <BRANCH>`, which persists the base on the molecule so its `cs done` merges into `<BRANCH>` rather than the ambient HEAD. A molecule that already carries a base (`cs nucleate --base`, an earlier `cs tackle --base`) keeps it: the per-molecule base wins.
 
    This is how a germinated polymer (`cs spore run`, `cs nucleate --from`) is aimed at an integration branch without tackling each node by hand. The branch must exist locally; a dangling base is refused before the loop starts.
+* `--harness <KEY=VALUE>` — **Opt-in run-wide harness-settings directive** (resident mode only, repeatable — ADR-177 / issue #86).
+
+   The harness twin of `--adapter`, but occupying rung 1 of the *harness* chain rather than the adapter chain: `cs tackle --harness k=v`'s rung, applied run-wide. Unlike `--adapter` and `--base` there is no per-molecule pin to defer to — `[steps.harness]` lives on the executing formula step, not the molecule — so this directive is stamped onto **every** dispatch the run makes (static frontier nodes and dynamically-nucleated children alike) as one `--harness k=v` per key, and merged **per key** with the step's own `[steps.harness]` table by the shelled `cs tackle`, the operator's flag winning (ADR-177 Decision 2). Grammar and semantics are exactly `cs tackle --harness`'s: `key=value`, cosmon recognises no keys and carries the pair verbatim to the adapter's native override channel. Absent (the default), no `--harness` flag reaches any dispatch and each step's own `[steps.harness]` pin, if any, is unmasked.
 
 
 
