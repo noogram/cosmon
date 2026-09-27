@@ -24,4 +24,6 @@ Use `cs tackle`, not `cs run`, when you intend to read the result before merging
 
 Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason "…"` (drop it). `cs status` lists what is still waiting on one of the two.
 
+Finishing a mission means `cs status` reads clean afterward — no zombie session, no un-harvested `Completed` molecule, no molecule branch without a harvest or an audit verdict. `cs status` says `clean` or names what still needs `cs done`/`cs collapse`.
+
 Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and accept or drop each result; the pilot drives the cycle above; workers do the work. Full breakdown: https://docs.noogram.org/explanation/pilot-and-workers.html

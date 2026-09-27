@@ -99,6 +99,37 @@ struct StatusOutput {
     /// Keyed by kind token (`infra | project | social-hub | editorial
     /// | nascent`) to totals, plus a flat `total` and `nascent`.
     galaxies: GalaxiesSummary,
+    /// Issue #97 — whether finishing a mission left residue behind: a
+    /// zombie session, an un-harvested `Completed` molecule, or a molecule
+    /// branch still unmerged. `clean` is `true` only when all three are
+    /// zero; a script can poll this one field instead of re-deriving it
+    /// from the three counts.
+    hygiene: HygieneInfo,
+}
+
+/// Whether `cs status` is clean, as defined by issue #97: no zombie
+/// session, no un-harvested `Completed` molecule, no un-merged molecule
+/// branch. A lease, a pending backlog molecule, or an active session are
+/// not residue and do not count against this.
+#[derive(serde::Serialize)]
+struct HygieneInfo {
+    clean: bool,
+    zombie_sessions: usize,
+    harvestable: usize,
+    unmerged_branches: usize,
+}
+
+impl HygieneInfo {
+    /// The one predicate everything else in this struct is derived from:
+    /// clean means none of the three residue counts are non-zero.
+    fn new(zombie_sessions: usize, harvestable: usize, unmerged_branches: usize) -> Self {
+        Self {
+            clean: zombie_sessions == 0 && harvestable == 0 && unmerged_branches == 0,
+            zombie_sessions,
+            harvestable,
+            unmerged_branches,
+        }
+    }
 }
 
 /// Per-kind galaxy totals as emitted inside `cs status --json`.
@@ -174,7 +205,10 @@ struct HarvestableInfo {
 /// instead of being flattened by the previous invocation a minute earlier.
 #[derive(serde::Serialize)]
 struct UnmergedGauge {
-    /// Branches not merged into the trunk and ahead of it.
+    /// Molecule branches (`feat/<id>`) not merged into the trunk and ahead
+    /// of it. Operator refs such as `backup/*` or `spore/*` are excluded —
+    /// see [`is_molecule_branch`] — because they are never harvested by
+    /// `cs done` and would keep this count from ever reaching zero.
     branches: usize,
     /// Total commits those branches carry ahead of the trunk.
     commits: usize,
@@ -201,6 +235,7 @@ struct SessionInfo {
 
 #[derive(serde::Serialize)]
 struct ContributionInfo {
+    /// Always a molecule branch (`feat/<id>`) — see [`is_molecule_branch`].
     branch: String,
     commits_ahead: usize,
 }
@@ -382,6 +417,9 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         }
     });
 
+    // --- Hygiene (issue #97) — whether finishing left residue behind.
+    let hygiene = HygieneInfo::new(zombie_sessions.len(), harvestable.count, unmerged.branches);
+
     // --- Output ---
     if ctx.json {
         let output = StatusOutput {
@@ -416,6 +454,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
                 percent: attention_percent,
             },
             galaxies,
+            hygiene,
         };
         let json = serde_json::to_string_pretty(&output)?;
         println!("{json}");
@@ -437,6 +476,7 @@ pub fn run(ctx: &Context, args: &Args) -> anyhow::Result<()> {
         budget,
         attention_percent,
         galaxies: &galaxies,
+        hygiene: &hygiene,
     };
 
     if ctx.verbose {
@@ -470,6 +510,7 @@ struct Pulse<'a> {
     budget: Option<usize>,
     attention_percent: Option<f64>,
     galaxies: &'a GalaxiesSummary,
+    hygiene: &'a HygieneInfo,
 }
 
 /// The age token the compact and verbose lines both show, or `None` when
@@ -646,6 +687,14 @@ fn render_compact(p: &Pulse) {
     // Surfaces
     parts.push(format!("surfaces {}", render_surfaces_token(p.surfaces)));
 
+    // Hygiene (issue #97) — an explicit "clean" so a reader does not have
+    // to infer it from the absence of the zombie/harvest/to-merge tokens
+    // above; when dirty, those tokens already name what needs `cs done` or
+    // `cs collapse`, so nothing more is added here.
+    if p.hygiene.clean {
+        parts.push("clean".green().to_string());
+    }
+
     println!(
         "{} {}",
         "\u{1F9EA} cosmon status".bold(), // test tube emoji
@@ -806,6 +855,21 @@ fn render_verbose(p: &Pulse) {
         println!("    run `cs reconcile`");
     }
 
+    // Hygiene (issue #97) — an explicit verdict, not left to be inferred
+    // from the sections above being empty.
+    println!();
+    if p.hygiene.clean {
+        println!("  {}: {}", "Hygiene".bold(), "clean".green());
+    } else {
+        println!(
+            "  {}: {} zombie session(s), {} un-harvested, {} branch(es) to merge",
+            "Hygiene".bold(),
+            p.hygiene.zombie_sessions,
+            p.hygiene.harvestable,
+            p.hygiene.unmerged_branches
+        );
+    }
+
     // Attention bar
     if let (Some(b), Some(pct)) = (p.budget, p.attention_percent) {
         println!();
@@ -882,7 +946,27 @@ fn discover_live_sessions(backends: &[cosmon_transport::TmuxBackend]) -> Vec<(St
     sessions
 }
 
+/// True when `branch` is a molecule branch (`feat/<id>`) rather than an
+/// operator ref such as `backup/*`, a release bake branch, or `spore/*`.
+///
+/// Issue #97: the "to merge" count previously included every local branch
+/// `git branch --no-merged main` returned, so it could never reach zero by
+/// harvesting alone — an operator ref is never harvested by `cs done`. A
+/// molecule branch is always named `feat/<id>` (`cs done`, `cs collapse`,
+/// `cs stitch` all agree on the shape), so a valid [`MoleculeId`] after the
+/// `feat/` prefix is what distinguishes molecule work from everything else.
+fn is_molecule_branch(branch: &str) -> bool {
+    branch
+        .strip_prefix("feat/")
+        .is_some_and(|id| MoleculeId::new(id).is_ok())
+}
+
 /// Discover git branches not merged to main (contributions).
+///
+/// Scoped to molecule branches (`feat/<id>`) only — see
+/// [`is_molecule_branch`]. Other unmerged refs (`backup/*`, `spore/*`,
+/// release bake branches) are operator state, not molecule work, and are
+/// reported nowhere by `cs status` rather than inflated into this count.
 fn discover_contributions() -> Vec<ContributionInfo> {
     let output = std::process::Command::new("git")
         .args(["branch", "--no-merged", "main", "--format=%(refname:short)"])
@@ -900,7 +984,7 @@ fn discover_contributions() -> Vec<ContributionInfo> {
 
     for branch in stdout.lines() {
         let branch = branch.trim();
-        if branch.is_empty() {
+        if branch.is_empty() || !is_molecule_branch(branch) {
             continue;
         }
 
@@ -1150,8 +1234,23 @@ fn render_galaxies_line(galaxies: &GalaxiesSummary) -> String {
 /// Read-only; a missing DB is modeled as an empty summary rather than
 /// an error so `cs status` works in environments where neurion has
 /// never booted.
+///
+/// Issue #97: `repos` accumulates one row per directory ever registered,
+/// including throwaway test fixtures under a tempdir (`/private/var/
+/// folders/**/T/...`) whose `git init` got picked up somewhere and never
+/// cleaned up — measured on one live instance, 34656 of 35061 rows were
+/// such fixtures, almost all already deleted from disk, printing an
+/// implausible "34899 nascent". A row whose `local_path` no longer names a
+/// directory on disk is not a galaxy, nascent or otherwise; it is dead
+/// registry state, and this query does not count it.
 fn load_galaxies_summary() -> anyhow::Result<GalaxiesSummary> {
-    let db = neurion_db_path()?;
+    load_galaxies_summary_at(&neurion_db_path()?)
+}
+
+/// [`load_galaxies_summary`], parameterized on the DB path so a test can
+/// point it at a throwaway `SQLite` file instead of the real neurion
+/// registry.
+fn load_galaxies_summary_at(db: &std::path::Path) -> anyhow::Result<GalaxiesSummary> {
     if !db.exists() {
         return Ok(GalaxiesSummary {
             by_kind: BTreeMap::new(),
@@ -1160,11 +1259,11 @@ fn load_galaxies_summary() -> anyhow::Result<GalaxiesSummary> {
         });
     }
 
-    let conn = rusqlite::Connection::open(&db)?;
-    // If the column is absent (pre-migration DB) we fall through to an
+    let conn = rusqlite::Connection::open(db)?;
+    // If a column is absent (pre-migration DB) we fall through to an
     // empty summary. Pragmatic: the single row-reading error path also
     // catches "no such column" without a second probe.
-    let sql = "SELECT galaxy_kind FROM repos";
+    let sql = "SELECT galaxy_kind, local_path FROM repos";
     let Ok(mut stmt) = conn.prepare(sql) else {
         return Ok(GalaxiesSummary {
             by_kind: BTreeMap::new(),
@@ -1176,9 +1275,18 @@ fn load_galaxies_summary() -> anyhow::Result<GalaxiesSummary> {
     let mut total = 0usize;
     let mut nascent = 0usize;
 
-    let rows = stmt.query_map([], |row| row.get::<_, Option<String>>(0))?;
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+        ))
+    })?;
     for row in rows {
-        let kind_opt = row?;
+        let (kind_opt, local_path) = row?;
+        let is_live = local_path.is_some_and(|p| std::path::Path::new(&p).is_dir());
+        if !is_live {
+            continue;
+        }
         total += 1;
         let key = match kind_opt {
             Some(ref s) if !s.is_empty() && neurion_core::GalaxyKind::from_str(s).is_some() => {
@@ -1627,5 +1735,73 @@ mod tests {
         let found = lease_missions(tmp.path());
         assert_eq!(found.len(), 1);
         assert!(found.contains(&cosmon_core::id::MoleculeId::new("task-20260811-a7f0").unwrap()));
+    }
+
+    /// Only `feat/<valid-molecule-id>` is molecule work; every operator
+    /// namespace observed in the wild (`backup/*`, `spore/*`, a bare
+    /// release-bake name) is not.
+    #[test]
+    fn only_feat_prefixed_valid_ids_are_molecule_branches() {
+        assert!(is_molecule_branch("feat/task-20260101-aaaa"));
+        assert!(!is_molecule_branch("backup/before-migration"));
+        assert!(!is_molecule_branch("spore/math-attack"));
+        assert!(!is_molecule_branch("release-2026.09"));
+        assert!(!is_molecule_branch("feat/not-a-molecule-id"));
+    }
+
+    /// Issue #97: a `repos` row whose `local_path` no longer names a
+    /// directory on disk is dead registry state, not a galaxy — it must be
+    /// excluded from both `total` and `nascent` rather than inflating the
+    /// nascent count the way 34656 stale tempdir fixtures did on a live
+    /// instance.
+    #[test]
+    fn dead_repo_rows_do_not_inflate_the_galaxy_count() {
+        let tmp = TempDir::new().unwrap();
+        let live_dir = tmp.path().join("live-galaxy");
+        std::fs::create_dir_all(&live_dir).unwrap();
+        let dead_dir = tmp.path().join("this-was-deleted");
+
+        let db = tmp.path().join("neurion.db");
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE repos (name TEXT PRIMARY KEY, local_path TEXT, galaxy_kind TEXT);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repos (name, local_path, galaxy_kind) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["live", live_dir.to_str().unwrap(), "infra"],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO repos (name, local_path, galaxy_kind) VALUES (?1, ?2, NULL)",
+            rusqlite::params!["dead", dead_dir.to_str().unwrap()],
+        )
+        .unwrap();
+        drop(conn);
+
+        let summary = load_galaxies_summary_at(&db).unwrap();
+        assert_eq!(summary.total, 1, "the deleted-fixture row must not count");
+        assert_eq!(summary.nascent, 0);
+        assert_eq!(summary.by_kind.get("infra"), Some(&1));
+    }
+
+    /// `clean` is `true` only when there is nothing for the pilot to have
+    /// left behind — a zombie, an un-harvested molecule, or an unmerged
+    /// branch each independently make it `false` (issue #97).
+    #[test]
+    fn hygiene_is_clean_only_with_no_residue() {
+        assert!(HygieneInfo::new(0, 0, 0).clean);
+        assert!(
+            !HygieneInfo::new(1, 0, 0).clean,
+            "a zombie session is residue"
+        );
+        assert!(
+            !HygieneInfo::new(0, 1, 0).clean,
+            "an un-harvested molecule is residue"
+        );
+        assert!(
+            !HygieneInfo::new(0, 0, 1).clean,
+            "an unmerged molecule branch is residue"
+        );
     }
 }
