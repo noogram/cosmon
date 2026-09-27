@@ -160,9 +160,10 @@ pub struct DagPolicy {
     /// Every molecule id the policy has committed to scheduling. Includes
     /// both compile-time nodes and decay products added mid-run.
     known_molecules: HashSet<MoleculeId>,
-    /// Molecules observed in a **terminal** state — `Completed`, `Frozen`,
-    /// or `Collapsed`. Acts as the skip-set for rebuilt plans so terminal
-    /// predecessors automatically satisfy their dependents.
+    /// Molecules whose dependency work is finished: `Completed`, `Collapsed`,
+    /// or an explicit `freeze_on_last_step` delivered park. Acts as the
+    /// skip-set for rebuilt plans so finished predecessors automatically
+    /// satisfy their dependents. An ordinary frozen pause never enters it.
     ///
     /// A `Collapsed` molecule is deliberately treated the same as a clean
     /// completion here: `blocked-by` releases on **done, not on verdict**
@@ -389,7 +390,7 @@ impl DagPolicy {
     ///
     /// This is the explicit-operator-override entry point used by
     /// `cs run <terminal-root>`: when an operator types `cs run` on a
-    /// molecule that is already `Collapsed` / `Completed` / `Frozen`,
+    /// molecule that is already `Collapsed` / `Completed`,
     /// they are explicitly asking the runtime to *continue past it*.
     /// It pre-seeds the named root into the skip-set before the first
     /// tick so its descendants are eligible immediately, rather than
@@ -446,14 +447,14 @@ impl DagPolicy {
         &self.edges
     }
 
-    /// Absorb one newly-**terminal** molecule: mark it done in the plan,
-    /// record it in `completed`, and splice its `DecayProduct` and `Blocks`
-    /// children into the edge list. Returns `true` if the edge list was
-    /// mutated (triggering a plan rebuild after the whole batch is
-    /// processed).
+    /// Absorb one newly finished molecule (terminal, or an explicit delivered
+    /// park): mark it done in the plan, record it in `completed`, and splice
+    /// its `DecayProduct` and `Blocks` children into the edge list. Returns
+    /// `true` if the edge list was mutated (triggering a plan rebuild after
+    /// the whole batch is processed).
     ///
-    /// **`Completed`, `Frozen`, and `Collapsed` are handled identically.**
-    /// This is the load-bearing decision of task-20260706-4d1e:
+    /// **`Completed` and `Collapsed` are handled identically.** This is the
+    /// load-bearing decision of task-20260706-4d1e:
     /// **`blocked-by` releases on *done*, not on *verdict*.** A `reproduce`
     /// molecule that concludes "refuted" (bug not reproducible → collapse)
     /// still releases the `fix` molecule that was `blocked-by` it — the
@@ -462,12 +463,14 @@ impl DagPolicy {
     /// content on the data plane, never a second bit on the control plane.
     ///
     /// This aligns the policy with
-    /// [`cosmon_state::frontier::compute_from_molecules`], which already
-    /// clears `Collapsed | Frozen` predecessors. Before this change the two
-    /// readiness surfaces disagreed: the frontier reducer surfaced the fix
-    /// as ready while the DAG plan held it blocked, and since dispatch is
-    /// their intersection the fix never ran. (Supersedes the forward-`Blocks`
-    /// half of "option B", `DIAGNOSIS-mission-collapse.md`; the lateral
+    /// [`cosmon_state::frontier::compute_from_molecules`], which clears a
+    /// `Collapsed` predecessor. An ordinary `Frozen` observation is
+    /// deliberately excluded: it is a pause, not a terminal verdict, so its
+    /// edges remain blocking until a later `Completed` or `Collapsed`
+    /// observation. The explicit `freeze_on_last_step` delivered-park case is
+    /// still absorbed because it records completed decomposition work rather
+    /// than an operator pause. (Supersedes the forward-`Blocks` half of
+    /// "option B", `DIAGNOSIS-mission-collapse.md`; the lateral
     /// `DecayProduct` drain it introduced is preserved verbatim.)
     fn absorb_terminal(&mut self, mol_id: &MoleculeId, typed_links: &[MoleculeLink]) -> bool {
         self.completed.insert(mol_id.clone());
@@ -584,13 +587,16 @@ impl Policy for DagPolicy {
         }
 
         // 2. Identify newly-terminal tracked molecules (stable order so
-        //    splicing is deterministic across runs). `Completed`, `Frozen`,
-        //    and `Collapsed` are all absorption events and are handled
-        //    identically: each splices both its `Blocks` and `DecayProduct`
-        //    children and enters the skip-set. `blocked-by` releases on
-        //    *done*, not on *verdict* (task-20260706-4d1e) — so a collapsed
-        //    blocker unblocks its forward dependents just like a clean
-        //    completion, and the lateral `DecayProduct` axis drains too
+        //    splicing is deterministic across runs). `Completed` and
+        //    `Collapsed` are absorption events: each splices both its
+        //    `Blocks` and `DecayProduct` children and enters the skip-set.
+        //    An ordinary `Frozen` observation is not terminal and must leave
+        //    every dependency edge blocking. The one explicit exception is a
+        //    `freeze_on_last_step` delivered park: that molecule completed its
+        //    decomposition work before the runtime parked it. `blocked-by`
+        //    releases on *done*, not on *verdict* (task-20260706-4d1e) — so a
+        //    collapsed blocker unblocks its forward dependents just like a
+        //    clean completion, and the lateral `DecayProduct` axis drains too
         //    (the surviving half of `DIAGNOSIS-mission-collapse.md`).
         let mut newly_terminal: Vec<(&MoleculeId, &[MoleculeLink])> = Vec::new();
         let mut seen: Vec<&MoleculeId> = self.known_molecules.iter().collect();
@@ -603,7 +609,10 @@ impl Policy for DagPolicy {
                 continue;
             };
             match mol.status {
-                MoleculeStatus::Completed | MoleculeStatus::Frozen | MoleculeStatus::Collapsed => {
+                MoleculeStatus::Completed | MoleculeStatus::Collapsed => {
+                    newly_terminal.push((&mol.id, mol.typed_links.as_slice()));
+                }
+                MoleculeStatus::Frozen if mol.freeze_on_last_step && mol.stuck_at.is_none() => {
                     newly_terminal.push((&mol.id, mol.typed_links.as_slice()));
                 }
                 _ => {}
@@ -1876,6 +1885,69 @@ description = "write"
             policy.completed().contains(&m),
             "collapsed M must enter the skip-set so its forward Blocks dependents release"
         );
+    }
+
+    /// Freezing a running blocker is a pause, not a terminal event. Its
+    /// dependent must remain blocked across resident-runtime ticks until the
+    /// blocker is thawed and reaches a genuinely terminal state.
+    #[test]
+    fn test_dag_policy_frozen_blocker_keeps_dependent_blocked() {
+        let blocker = mol_id("task-20260927-block");
+        let dependent = mol_id("task-20260927-depd");
+        let edges = vec![(blocker.clone(), dependent.clone())];
+        let plan = Plan::new(edges.clone(), HashSet::new()).expect("plan");
+        let mut policy = DagPolicy::new(plan, edges);
+
+        let dependent_pending = || {
+            make_mol(
+                &dependent,
+                MoleculeStatus::Pending,
+                vec![MoleculeLink::BlockedBy {
+                    source: blocker.clone(),
+                }],
+            )
+        };
+
+        // The resident dispatches B first; A is still blocked by it.
+        let actions = policy.next_actions(&snapshot(vec![
+            make_mol(&blocker, MoleculeStatus::Pending, Vec::new()),
+            dependent_pending(),
+        ]));
+        assert_eq!(evolve_ids(&actions), vec![blocker.clone()]);
+
+        // `cs freeze B` changes only B's lifecycle state. Repeated ticks must
+        // not reinterpret that pause as completion and release A.
+        for tick in 1..=2 {
+            let actions = policy.next_actions(&snapshot(vec![
+                make_mol(&blocker, MoleculeStatus::Frozen, Vec::new()),
+                dependent_pending(),
+            ]));
+            assert!(
+                evolve_ids(&actions).is_empty(),
+                "tick {tick}: frozen blocker must keep its dependent undispatched, got {actions:?}"
+            );
+        }
+
+        assert!(
+            !policy.completed().contains(&blocker),
+            "a frozen blocker must not enter the policy's completed skip-set"
+        );
+
+        // Thawing resumes B but does not itself release A.
+        let actions = policy.next_actions(&snapshot(vec![
+            make_mol(&blocker, MoleculeStatus::Running, Vec::new()),
+            dependent_pending(),
+        ]));
+        assert!(
+            evolve_ids(&actions).is_empty(),
+            "a thawed blocker must complete before its dependent dispatches"
+        );
+
+        // Once B completes and its branch is merged, A may run.
+        let mut completed_blocker = make_mol(&blocker, MoleculeStatus::Completed, Vec::new());
+        completed_blocker.merged_at = Some(Utc::now());
+        let actions = policy.next_actions(&snapshot(vec![completed_blocker, dependent_pending()]));
+        assert_eq!(evolve_ids(&actions), vec![dependent]);
     }
 
     // -- ADR-038 Limit 1: refresh_scope absorbs dynamic descendants --

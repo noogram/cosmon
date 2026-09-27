@@ -176,14 +176,18 @@ pub struct EnsembleMolecule {
     /// robust to any timestamp shape the CLI emits.
     #[serde(default)]
     pub merged_at: Option<String>,
-    /// Stuck stamp when `status == "frozen"` — the load-bearing discriminant
-    /// between the two Frozen species (convoy-cascade fix). A `cs stuck` freeze
-    /// carries `Some(_)` and MUST hold its dependents; a *delivered* freeze
-    /// (`freeze_on_last_step`) carries `None` and releases them. Mirrors
-    /// `cosmon_state::frontier` (frontier.rs:210). `None` when not stuck (or
-    /// absent from the JSON). See [`Self::merged_at`] for why it is a string.
+    /// Stuck stamp when `status == "frozen"`. Retained in the projection so
+    /// resident observations preserve the distinction between `cs stuck` and
+    /// `cs freeze`. `None` when not stuck (or absent from the JSON). See
+    /// [`Self::merged_at`] for why it is a string.
     #[serde(default)]
     pub stuck_at: Option<String>,
+    /// Whether the formula deliberately parks this molecule after its last
+    /// step. A frozen molecule clears dependencies only when this is `true`
+    /// and [`Self::stuck_at`] is absent; an ordinary `cs freeze` remains a
+    /// pause. Defaults to `false` for older ensemble projections.
+    #[serde(default)]
+    pub freeze_on_last_step: bool,
     /// Adapter chosen before this runtime tick by a directional routing
     /// policy. The runtime carries it through to `cs tackle` unchanged.
     #[serde(default)]
@@ -279,9 +283,9 @@ impl EnsembleSnapshot {
                         .collect()
                 })
                 .unwrap_or_default();
-            // Presence-only reads: the scheduler discriminates the two
-            // terminal-but-gating species (completed→merged_at,
-            // frozen→stuck_at) exactly as `cosmon_state::frontier` does.
+            // Presence-only reads: `merged_at` is the completed-predecessor
+            // gate; `stuck_at` preserves which operator gesture produced a
+            // frozen observation.
             let merged_at = entry
                 .get("merged_at")
                 .and_then(serde_json::Value::as_str)
@@ -290,6 +294,10 @@ impl EnsembleSnapshot {
                 .get("stuck_at")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned);
+            let freeze_on_last_step = entry
+                .get("freeze_on_last_step")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
             let adapter = entry
                 .get("adapter")
                 .and_then(serde_json::Value::as_str)
@@ -311,6 +319,7 @@ impl EnsembleSnapshot {
                 blocked_by,
                 merged_at,
                 stuck_at,
+                freeze_on_last_step,
                 adapter,
                 base_branch,
             });
@@ -625,21 +634,18 @@ impl ResidentScheduler for ReadyFrontierScheduler {
     fn next_decisions(&mut self, snapshot: &EnsembleSnapshot) -> Vec<Decision> {
         // A blocker is *cleared* (no longer gating its dependents) once it
         // reaches a terminal state whose semantics say "successors may run".
-        // This MUST mirror `cosmon_state::frontier::compute_from_molecules`
-        // (frontier.rs:181-220) exactly — the DEFAULT `cs run` path already
-        // routes through that reducer (dag_policy.rs:664), and a coarse
-        // status-string match here is precisely the divergence that
-        // regressed the convoy-cascade fix (F-C11-1): a `cs stuck`'d blocker
-        // ("NE PAS EXÉCUTER") was read as delivered and its successors were
-        // flung at the runtime under `--resident`.
+        // This mirrors the effective DEFAULT `cs run` gate: DagPolicy's plan
+        // and `cosmon_state::frontier::compute_from_molecules` are intersected,
+        // so the plan keeps an ordinary non-terminal `Frozen` predecessor
+        // blocking even if the frontier reducer independently surfaces its
+        // dependent. The explicit `freeze_on_last_step` delivered park is the
+        // sole exception in both paths.
         //
         // - `collapsed` — releases successors unconditionally (the collapse
         //   cascade frees the lateral axis).
-        // - `frozen` — TWO disjoint species that gate oppositely; the
-        //   discriminant is `stuck_at` (frontier.rs:210). A *delivered* freeze
-        //   (`stuck_at == None`, e.g. a mission-plan mission that decomposed)
-        //   releases; a *stuck* freeze (`cs stuck` → `stuck_at.is_some()`,
-        //   "do not execute — hold dependents") stays blocking.
+        // - `frozen` — cleared only for an explicit `freeze_on_last_step`
+        //   delivered park with no `stuck_at` marker. Ordinary `cs freeze` and
+        //   `cs stuck` observations remain blocking pauses.
         // - `completed` — cleared only when its branch is merged
         //   (`merged_at.is_some()`, merge-before-dispatch, frontier.rs:214) so
         //   the dependent's worktree carries the committed output. In the
@@ -652,7 +658,7 @@ impl ResidentScheduler for ReadyFrontierScheduler {
             .iter()
             .filter(|m| match m.status.as_str() {
                 "collapsed" => true,
-                "frozen" => m.stuck_at.is_none(),
+                "frozen" => m.freeze_on_last_step && m.stuck_at.is_none(),
                 "completed" => m.merged_at.is_some(),
                 _ => false,
             })
@@ -2258,9 +2264,8 @@ mod tests {
         assert_eq!(teardown_backoff(base, 3), Duration::from_millis(40));
     }
 
-    /// Terse `EnsembleMolecule` for tests: no merge / stuck stamp. The
-    /// discriminant-bearing tests set `merged_at` / `stuck_at` explicitly on
-    /// the returned value.
+    /// Terse `EnsembleMolecule` for tests: no merge / stuck stamp. Tests that
+    /// exercise those projected observations set them explicitly.
     fn mol(id: &str, status: &str, blocked_by: &[&str]) -> EnsembleMolecule {
         EnsembleMolecule {
             id: id.into(),
@@ -2270,6 +2275,7 @@ mod tests {
             blocked_by: blocked_by.iter().map(|s| (*s).into()).collect(),
             merged_at: None,
             stuck_at: None,
+            freeze_on_last_step: false,
             adapter: None,
             base_branch: None,
         }
@@ -2291,9 +2297,9 @@ mod tests {
 
     #[test]
     fn snapshot_parses_merged_and_stuck_stamps() {
-        // The two discriminants must survive the JSON round-trip: a completed
-        // molecule carries `merged_at`, a `cs stuck` frozen one carries
-        // `stuck_at`. The scheduler reads only their presence.
+        // Both observations survive the JSON round-trip: a completed molecule
+        // carries `merged_at`, while a `cs stuck` frozen one carries
+        // `stuck_at` for diagnostics.
         let json = r#"{"molecule_states":[
             {"id":"a","status":"completed","blocked_by":[],"merged_at":"2026-07-12T10:00:00Z"},
             {"id":"b","status":"frozen","blocked_by":[],"stuck_at":"2026-07-12T11:00:00Z"}
@@ -2868,43 +2874,31 @@ mod tests {
     }
 
     #[test]
-    fn ready_frontier_chains_past_frozen_blocker() {
-        // BUG 1 (task-20260604-6056): a *delivered* frozen mission
-        // (`stuck_at == None`, the `freeze_on_last_step` species) must release
-        // its children even though it is neither "completed" nor torn down.
+    fn ready_frontier_holds_dependent_of_frozen_blocker() {
+        // A freeze is a pause, not a terminal transition. The resident must
+        // keep the dependency edge closed across ticks even though an ordinary
+        // `cs freeze` carries no `stuck_at` stamp.
         let mut sched = ReadyFrontierScheduler::new();
         let snap = EnsembleSnapshot {
-            // Default `mol` leaves `stuck_at = None` → delivered freeze.
             molecules: vec![
-                mol("mission", "frozen", &[]),
-                mol("architect", "pending", &["mission"]),
+                mol("blocker", "frozen", &[]),
+                mol("dependent", "pending", &["blocker"]),
             ],
         };
-        let decisions = sched.next_decisions(&snap);
-        assert_eq!(
-            decisions,
-            vec![Decision::Tackle {
-                molecule_id: "architect".into(),
-                // Pin-less, directive-less → no flag; child runs the chain.
-                adapter: None,
-                base: None,
-                harness: cosmon_core::harness_settings::HarnessMap::new(),
-            }],
-            "child must tackle behind a delivered (stuck_at=None) frozen \
-             mission, got {decisions:?}"
-        );
+        for tick in 1..=2 {
+            let decisions = sched.next_decisions(&snap);
+            assert!(
+                decisions.is_empty(),
+                "tick {tick}: dependent of a frozen blocker must not dispatch, got {decisions:?}"
+            );
+        }
     }
 
     #[test]
     fn ready_frontier_holds_dependent_of_stuck_frozen_blocker() {
-        // F-C11-1 — the convoy-cascade regression this molecule fixes. A
-        // blocker frozen via `cs stuck` ("[IDÉE — NE PAS EXÉCUTER TEL QUEL]")
-        // carries `stuck_at = Some(_)` and has NOT delivered its work. The
-        // resident scheduler used a coarse status-string match that read it as
-        // delivered and flung its successors at the fleet under `--resident` —
-        // the exact class `cosmon_state::frontier` (frontier.rs:210) closed in
-        // the DEFAULT `cs run` path. A blocker that says "do not execute" must
-        // HOLD its dependents. The discriminant is `stuck_at`.
+        // The explicit `cs stuck` species remains covered separately: its
+        // diagnostic stamp cannot make it any less blocking than an ordinary
+        // `cs freeze` pause.
         let mut sched = ReadyFrontierScheduler::new();
         let mut blocker = mol("task-20260710-6174", "frozen", &[]);
         blocker.stuck_at = Some("2026-07-12T10:00:00Z".into());
@@ -2917,8 +2911,29 @@ mod tests {
         let decisions = sched.next_decisions(&snap);
         assert!(
             decisions.is_empty(),
-            "successor of a `cs stuck` (stuck_at=Some) blocker must NOT \
+            "successor of a `cs stuck` (stuck_at=Some) blocker must not \
              dispatch under --resident, got {decisions:?}"
+        );
+    }
+
+    #[test]
+    fn ready_frontier_releases_explicit_delivered_park() {
+        let mut sched = ReadyFrontierScheduler::new();
+        let mut blocker = mol("mission", "frozen", &[]);
+        blocker.freeze_on_last_step = true;
+        let snap = EnsembleSnapshot {
+            molecules: vec![blocker, mol("architect", "pending", &["mission"])],
+        };
+        let decisions = sched.next_decisions(&snap);
+        assert_eq!(
+            decisions,
+            vec![Decision::Tackle {
+                molecule_id: "architect".into(),
+                adapter: None,
+                base: None,
+                harness: cosmon_core::harness_settings::HarnessMap::new(),
+            }],
+            "freeze_on_last_step is a delivered park, not an operator pause"
         );
     }
 
