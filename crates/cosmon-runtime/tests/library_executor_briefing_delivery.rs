@@ -86,6 +86,7 @@ fn pending_molecule(id: &str) -> MoleculeData {
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         non_integration: None,
@@ -136,6 +137,7 @@ fn claude_pin() -> DispatchPin {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     }
 }
 

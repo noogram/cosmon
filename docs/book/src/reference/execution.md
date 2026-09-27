@@ -98,7 +98,7 @@ SEE ALSO: cs run (DAG walk), cs done (teardown), cs wait (block on completion).
 
    `--model` pins *which model* runs; this pins *how it runs*, by handing the pair to the adapter's own override channel:
 
-   - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
+   - `codex` → one `-c key=value` per entry, e.g. `--harness model_reasoning_effort=high`. To pin the service tier for this dispatch, use `--harness service_tier=default` for Standard processing (**Fast off**), or `--harness service_tier=priority` for Fast processing. `fast` is also accepted as the Fast spelling; Fast availability depends on the selected model and account; - `claude` → `--<key> <value>` per entry, e.g. `--harness effort=xhigh`; - any other adapter → the dispatch **fails at launch, naming the adapter**. A setting is never silently dropped.
 
    # cosmon recognises no keys
 
@@ -207,6 +207,9 @@ SEE ALSO: cs complete (state transition only), cs tackle (counterpart).
    By default the `post_merge` hook is **bounded to the trunk**: it fires only when the resolved integration base is the galaxy's reference trunk (`origin/HEAD`, or `main` as a last resort). The hook *deploys* — the canonical `just install` refreshes the on-disk `cs` binary — so running it after a merge into an *older* parked branch would silently rejuvenate the operator's tool, dropping whatever the parked branch predates (task-20260725-b64f). When the merge targets a parked branch the hook is skipped with a warning naming the reason.
 
    This flag is the operator's explicit escape hatch for the rare-but- legitimate case of deploying from a parked branch on purpose. No effect when no `post_merge` hook is configured or when the merge already targets the trunk.
+* `--allow-protected-change` — Merge even though the worker branch changed a path the molecule declared protected (`cs nucleate --protect`, issue #94).
+
+   Without it, `cs done` refuses such a branch (`protected_path_modified`, exit 78) and names each protected path it changed. Protected paths are reference inputs; a branch that rewrites them can make any result "match". Pass this flag only when you, the operator, have read the change and it is intended — for example a reference dataset that was itself wrong. No effect on a molecule that declared no protected path.
 
 
 
@@ -342,6 +345,9 @@ SEE ALSO: cs tackle (single node, no runtime), docs/handbook.md#one-primitive.
    The base twin of `--adapter`, with the same two-rung precedence: every **pin-less** molecule this run dispatches — one with no persisted base — is tackled with `--base <BRANCH>`, which persists the base on the molecule so its `cs done` merges into `<BRANCH>` rather than the ambient HEAD. A molecule that already carries a base (`cs nucleate --base`, an earlier `cs tackle --base`) keeps it: the per-molecule base wins.
 
    This is how a germinated polymer (`cs spore run`, `cs nucleate --from`) is aimed at an integration branch without tackling each node by hand. The branch must exist locally; a dangling base is refused before the loop starts.
+* `--harness <KEY=VALUE>` — **Opt-in run-wide harness-settings directive** (resident mode only, repeatable — ADR-177 / issue #86).
+
+   The harness twin of `--adapter`, but occupying rung 1 of the *harness* chain rather than the adapter chain: `cs tackle --harness k=v`'s rung, applied run-wide. Unlike `--adapter` and `--base` there is no per-molecule pin to defer to — `[steps.harness]` lives on the executing formula step, not the molecule — so this directive is stamped onto **every** dispatch the run makes (static frontier nodes and dynamically-nucleated children alike) as one `--harness k=v` per key, and merged **per key** with the step's own `[steps.harness]` table by the shelled `cs tackle`, the operator's flag winning (ADR-177 Decision 2). Grammar and semantics are exactly `cs tackle --harness`'s: `key=value`, cosmon recognises no keys and carries the pair verbatim to the adapter's native override channel. Absent (the default), no `--harness` flag reaches any dispatch and each step's own `[steps.harness]` pin, if any, is unmasked.
 
 
 

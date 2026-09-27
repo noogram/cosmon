@@ -504,8 +504,12 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              emitting NO key; it is silence, not a cosmon surface.\n\n\
              Merged PER KEY, never wholesale: overriding one key leaves every \
              sibling the step pinned exactly where it was. Carriers: codex \
-             takes one '-c key=value' per entry, claude takes '--<key> \
-             <value>'; any other adapter REFUSES a non-empty map at launch, \
+             takes one '-c key=value' per entry (including \
+             'service_tier=default' for Standard / Fast off, and \
+             'service_tier=priority' or 'service_tier=fast' for Fast; Fast \
+             availability depends on the selected model and account); claude \
+             takes '--<key> <value>'; any other adapter REFUSES a non-empty \
+             map at launch, \
              naming itself — a setting is never silently dropped. The \
              '[adapters.<name>.harness]' config level is deferred (it would \
              sit beside the wholesale-replace 'extra_args' on the same node).\n\n\

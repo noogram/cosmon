@@ -64,6 +64,7 @@ fn sediment_mol(id: &str, age_hours: i64, tags: &[&str]) -> MoleculeData {
         expiry_policy: None,
         originating_branch: None,
         base_branch: None,
+        protected_paths: Vec::new(),
         pending_step: None,
         merged_at: None,
         non_integration: None,

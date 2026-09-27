@@ -425,7 +425,11 @@ cs whisper <id> --file correction.md            # send a correction while the wo
 cs done <id>                                    # merge to the base branch + teardown (required)\n\
 ```\n\
 Use `cs tackle`, not `cs run`, when you intend to read the result before merging: `cs run` \
-walks a whole DAG and calls `cs done` on completion itself, closing the review window.\n";
+walks a whole DAG and calls `cs done` on completion itself, closing the review window.\n\
+\n\
+Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` \
+until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason \"…\"` \
+(drop it). `cs status` lists what is still waiting on one of the two.\n";
 
 /// Generate the cosmon section content for `CLAUDE.md` / `AGENTS.md`.
 ///
@@ -1188,6 +1192,34 @@ mod orchestration_source_tests {
         assert!(
             skill.contains(COSMON_ORCHESTRATION_BODY),
             "SKILL.md must contain the canonical orchestration body"
+        );
+    }
+
+    /// Issue #95 — the first-contact text must tell an agent (and the
+    /// human reading `CLAUDE.md`/`AGENTS.md`) that a mission is not over
+    /// until `cs done` or `cs collapse` has run, so a mid-mission stop
+    /// never leaves work silently stranded on a branch. Before this,
+    /// [`COSMON_ORCHESTRATION_BODY`] named `cs done` only as the normal
+    /// end of a healthy cycle and never mentioned `cs collapse` at all —
+    /// an agent told to give up had no gesture named for it here.
+    #[test]
+    fn orchestration_body_covers_stopping_early() {
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs collapse"),
+            "must name the drop-it verb for a mission stopped early"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs done"),
+            "must name the keep-it verb for a mission stopped early"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY
+                .to_lowercase()
+                .contains("stopping early")
+                || COSMON_ORCHESTRATION_BODY
+                    .to_lowercase()
+                    .contains("stop early"),
+            "must address stopping a mission early explicitly, not just the happy path"
         );
     }
 

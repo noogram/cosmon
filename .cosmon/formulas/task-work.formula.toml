@@ -67,7 +67,10 @@ acceptance = "Implementation complete, compiles clean"
 id = "verify"
 title = "Verify and validate"
 description = """
-Run all gates: build, test, lint, format, doc. Fix any issues.
+Run all gates: build, test, lint, format, doc. Fix any issues at their \
+cause. Never edit expected outputs, golden files, snapshots or reference \
+data so that a result matches them: when a result disagrees with its \
+reference, the disagreement is a finding to report, not a file to change.
 
 The doc gate is the one no other gate subsumes: `cargo check` compiles \
 code without resolving a single doc link, and clippy is not rustdoc. A \

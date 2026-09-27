@@ -92,6 +92,11 @@ Options:
           
           This flag is the operator's explicit escape hatch for the rare-but- legitimate case of deploying from a parked branch on purpose. No effect when no `post_merge` hook is configured or when the merge already targets the trunk.
 
+      --allow-protected-change
+          Merge even though the worker branch changed a path the molecule declared protected (`cs nucleate --protect`, issue #94).
+          
+          Without it, `cs done` refuses such a branch (`protected_path_modified`, exit 78) and names each protected path it changed. Protected paths are reference inputs; a branch that rewrites them can make any result "match". Pass this flag only when you, the operator, have read the change and it is intended — for example a reference dataset that was itself wrong. No effect on a molecule that declared no protected path.
+
   -h, --help
           Print help (see a summary with '-h')
 

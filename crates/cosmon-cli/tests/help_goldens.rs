@@ -135,6 +135,18 @@ fn tackle_force_help_is_boolean() {
     assert!(stdout.contains("Boolean flag: reclaim"));
 }
 
+/// The Codex service tier is a dispatch-scoped harness override.  Keep the
+/// Standard spelling visible so an operator can override a machine-wide Fast
+/// default without attaching to the worker pane.
+#[test]
+fn tackle_help_documents_codex_service_tier() {
+    let (stdout, code) = run_cs(&["tackle", "--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("service_tier=default"));
+    assert!(stdout.contains("Fast off"));
+    assert!(stdout.contains("service_tier=priority"));
+}
+
 /// The committed `man/cs.1` must match the man page rendered from the
 /// live clap tree. Any attribute change in `src/main.rs` or
 /// `root_help.rs` flows through this golden.
