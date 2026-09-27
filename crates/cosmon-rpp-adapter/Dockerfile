@@ -183,6 +183,11 @@ RUN install -d -o cosmon -g cosmon -m 0755 \
         /cosmon/.claude \
  && install -o cosmon -g cosmon -m 0644 /dev/null /cosmon/.claude.json
 
+# Ship the zero-edit server configuration in the image itself. Compose may
+# replace this file with a read-only mount, but a plain image boot still reads
+# `/cosmon/handoff` through `[trust_bootstrap]`.
+COPY --chown=cosmon:cosmon crates/cosmon-rpp-adapter/deploy/rpp.toml /cosmon/.config/cosmon/rpp.toml
+
 # tmux must be told which shell to run a pane's command with.
 #
 # It uses the account's login shell, and this account's is
