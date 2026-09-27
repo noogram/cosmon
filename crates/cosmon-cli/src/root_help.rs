@@ -405,7 +405,11 @@ const LONG_ABOUT: &str = "Cosmon keeps a fleet of AI agents on track. Run severa
              in a tmux pane — vendor cloud. Interactive steerable TUI by \
              default (whisperable, parity with claude); \
              [adapters.codex].mode = \"exec\" for the legacy fire-and-forget \
-             'codex exec' batch path.\n  \
+             'codex exec' batch path. Strips OPENAI_API_KEY/CODEX_API_KEY \
+             from the worker by default (a codex login/ChatGPT worker must \
+             not be diverted onto a stale key frozen into the tmux server's \
+             env); [adapters.codex].pass_api_key = true opts back into \
+             pass-through for an installation that bills codex by API key.\n  \
              opencode      (TmuxPane,  External, Vendor)    opencode \
              (sst/opencode) CLI in a tmux pane — vendor cloud.\n  \
              openai        (InProcess, Cosmon,   Vendor)    OpenAI chat-\

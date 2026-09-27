@@ -184,6 +184,61 @@ work-losing Blocage 2; the `notify` payload above is the stable contract.
 
 ---
 
+## Blocage 4 (fixed) — `OPENAI_API_KEY` frozen in the tmux server env silently diverts a ChatGPT-login worker
+
+### Symptom
+
+Observed 2026-09-26: `cs tackle --adapter codex` workers got `401 Incorrect
+API key provided: sk-svcac…` from the ChatGPT backend. `codex login status`
+reported "Logged in using ChatGPT" — the operator's real, current auth. An
+`OPENAI_API_KEY` the operator had exported at some point (a stale
+service-account key) was not present in the operator's *current* shell, but
+was frozen into the tmux server's environment: `cs tackle` spawns codex via
+`tmux new-session`, and the tmux **server** captures its environment once, at
+first spawn, on the socket cosmon reuses across dispatches — every later
+`new-session` inherits that frozen snapshot, not the client shell's current
+env (the same freeze mechanics `cosmon_cli::tackle_env` documents for
+`CLAUDE_CONFIG_DIR`).
+
+### Morphology
+
+codex treats both `OPENAI_API_KEY` and `CODEX_API_KEY` as ambient API-key
+credentials (confirmed by extracting the string table from the shipped
+`codex-cli 0.157.1` binary: `"API key login is required, CODEX_API_KEY
+OPENAI_API_KEY"`, and the onboarding screen's `"Detected OPENAI_API_KEY
+environment variable."`). A worker that authenticated via `codex login`
+(ChatGPT) has no say over whether one of these is present in its own process
+environment — it is handed to it by whatever spawned the pane.
+
+### Fix
+
+[`cosmon_transport::codex::build_codex_command`] prepends `env -u
+OPENAI_API_KEY -u CODEX_API_KEY` to every assembled command by default — both
+launch modes, composing with the git-identity prefix and the
+`RUST_LOG=`/`codex exec` shape rather than replacing them. `env -u NAME`
+unsets `NAME` for the process it execs, which is the point: unsetting in the
+*launched* command is what reaches the frozen tmux server snapshot; exporting
+or unsetting the variable in the operator's shell before `cs tackle` does
+nothing to it.
+
+The escape hatch is `[adapters.codex].pass_api_key = true`
+(`cosmon_core::config::AdapterEntry::pass_api_key`) for an installation that
+intentionally bills codex by API key. `cs tackle` warns once per present var,
+by name only, when the default strip actually removes something
+(`crates/cosmon-cli/src/cmd/tackle.rs::resolve_codex_pass_api_key`) — so an
+API-key operator who did not opt in sees why codex asks for login instead of
+chasing a silent 401.
+
+The `claude` and `aider` adapters are untouched: neither
+`build_claude_command` nor the aider builder reads or emits `OPENAI_API_KEY` /
+`CODEX_API_KEY` at all, so there was nothing to strip on those paths. The RPP
+adapter's in-process dispatch (`cosmon_rpp_adapter::worker_env`) was already
+safe by construction — its worker envelope is an *allow-list*
+(`PASSTHROUGH_VARS`) and neither name is on it, so no adapter env ever
+inherits either var through that path regardless of this fix.
+
+---
+
 ## Version caveat
 
 Read against `openai/codex@HEAD`; local binary is `codex-cli 0.144.6`. The model
