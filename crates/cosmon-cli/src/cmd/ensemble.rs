@@ -123,15 +123,16 @@ pub(crate) struct MoleculeStateEntry {
     /// Absent (skipped) when the molecule has not merged.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) merged_at: Option<chrono::DateTime<chrono::Utc>>,
-    /// Stuck stamp for a `Frozen` predecessor — the load-bearing discriminant
-    /// between the two Frozen species (convoy-cascade fix, task-20260710-6174).
-    /// A `cs stuck` freeze carries `stuck_at = Some(_)` ("do not execute — hold
-    /// dependents"); a *delivered* freeze (`freeze_on_last_step`) carries
-    /// `None` ("decomposed, release children"). The resident scheduler reads
-    /// this to gate the two oppositely, mirroring `cosmon_state::frontier`
-    /// (frontier.rs:210). Absent (skipped) when the molecule is not stuck.
+    /// Stuck stamp for a `Frozen` predecessor. A `cs stuck` freeze carries
+    /// `Some(_)` ("do not execute — hold dependents"). Absent (skipped) when
+    /// the molecule is not stuck.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) stuck_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Formula-level delivered-park marker. The resident scheduler uses this
+    /// with `stuck_at` to distinguish an automatic post-completion park from
+    /// an ordinary operator freeze, which must keep dependents blocked.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) freeze_on_last_step: bool,
     /// Adapter pinned on the persisted process record. The resident preserves
     /// this directional routing choice rather than substituting its local floor.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -169,6 +170,7 @@ pub(crate) fn build_molecule_states(
                 blocked_by,
                 merged_at: m.merged_at,
                 stuck_at: m.stuck_at,
+                freeze_on_last_step: m.freeze_on_last_step,
                 // Prefer the durable per-molecule pin
                 // ([`MoleculeData::adapter`], stamped by `cs nucleate
                 // --adapter`) over the process-stamped adapter. A committee
@@ -1898,6 +1900,7 @@ mod tests {
         // Two molecules in a chain: `dddd` is blocked by `cccc`.
         let mut upstream = make_molecule("cccc", MoleculeStatus::Pending);
         upstream.kind = Some(MoleculeKind::Task);
+        upstream.freeze_on_last_step = true;
         upstream.process = Some(
             MoleculeProcess::new(WorkerId::new("router").unwrap(), "router-session")
                 .with_adapter_name("anthropic"),
@@ -1962,6 +1965,10 @@ mod tests {
         let up = by_id.remove("cs-20260401-cccc").expect("upstream present");
         assert_eq!(up.status, "pending");
         assert_eq!(up.kind.as_deref(), Some("task"));
+        assert!(
+            up.freeze_on_last_step,
+            "delivered-park intent must survive the CLI-to-runtime projection"
+        );
         assert!(up.tags.is_empty());
         assert_eq!(
             up.adapter.as_deref(),
