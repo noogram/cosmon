@@ -61,10 +61,13 @@ pub fn for_api_error(status: u16, label: &str) -> Option<&'static str> {
              is untouched and still tacklable.\n  verify: cosmon-remote doctor",
         ),
         (503, "adapter_backend_unreachable") => Some(
-            "the local adapter's backend (e.g. Ollama) is not reachable or cannot \
-             serve the resolved model. Start it with `ollama serve`, pull the model \
-             with `ollama pull <model>`, or update [adapters.local].base_url / \
-             COSMON_LOCAL_BASE_URL. The molecule is untouched and still tacklable.",
+            "the local adapter's backend is not reachable or cannot serve the resolved \
+             model. If an OpenAI-compatible server is already running (for example \
+             llama-server or vLLM), configure [adapters.local].base_url / \
+             COSMON_LOCAL_BASE_URL, model, and api_key_env to use it; see \
+             docs/guides/local-model-selection.md; ask the user before starting a server \
+             or downloading a model: either action can load another copy of the weights. \
+             The molecule is untouched and still tacklable.",
         ),
         (503, "tenant_unavailable") => Some(
             "your space is not yet provisioned on this instance — that is an operator \
@@ -255,13 +258,23 @@ mod tests {
         );
     }
 
-    /// `adapter_backend_unreachable` names `ollama serve`, `ollama pull`,
-    /// and states the molecule is untouched.
+    /// `adapter_backend_unreachable` leads with an existing OpenAI-compatible
+    /// server and makes server/model creation an explicit user decision.
     #[test]
-    fn adapter_backend_unreachable_names_repair_and_states_recoverability() {
+    fn adapter_backend_unreachable_avoids_steering_destructive_repairs() {
         let hint = for_api_error(503, "adapter_backend_unreachable").unwrap();
-        assert!(hint.contains("ollama serve"), "must name start command");
-        assert!(hint.contains("ollama pull"), "must name pull command");
+        assert!(
+            hint.contains("[adapters.local].base_url"),
+            "must name the non-destructive configuration repair"
+        );
+        assert!(
+            hint.contains("ask the user before starting a server or downloading a model"),
+            "must reserve server/model creation for the user"
+        );
+        assert!(
+            hint.contains("docs/guides/local-model-selection.md"),
+            "must link the configuration guide"
+        );
         assert!(
             hint.contains("untouched"),
             "must state molecule is untouched"

@@ -6810,17 +6810,17 @@ impl std::fmt::Display for LocalPreflightError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Unreachable { base_url, detail } => {
-                let start = if is_ollama_base_url(base_url) {
-                    "Start it (`ollama serve`)"
-                } else {
-                    "Check that the server is running"
-                };
                 let claude = claude_fallback_hint();
                 write!(
                     f,
                     "refusing to dispatch: the local adapter's backend at {base_url} \
-                     is not reachable ({detail}). {start} or point the adapter elsewhere \
-                     with [adapters.local].base_url / COSMON_LOCAL_BASE_URL.{claude} \
+                     is not reachable ({detail}). If an OpenAI-compatible server is already \
+                     running (for example llama-server or vLLM), point the adapter to it \
+                     with [adapters.local].base_url / COSMON_LOCAL_BASE_URL and configure \
+                     its model and api_key_env as needed; see \
+                     docs/guides/local-model-selection.md; ask the user before starting a \
+                     server or downloading a model: either action can load another copy of \
+                     the weights.{claude} \
                      The molecule is untouched and still tacklable — nothing was spawned \
                      and nothing collapsed."
                 )
@@ -6843,7 +6843,11 @@ impl std::fmt::Display for LocalPreflightError {
                     format!("it serves: {}", available.join(", "))
                 };
                 let repair = if is_ollama_base_url(base_url) {
-                    format!("Pull it (`ollama pull {model})")
+                    format!(
+                        "If you choose to use Ollama, ask the user before starting a server \
+                         or downloading a model (`ollama pull {model}`): downloading can load \
+                         another copy of the weights"
+                    )
                 } else if available.is_empty() {
                     "Check the server's configured model inventory".to_owned()
                 } else {
@@ -6857,7 +6861,11 @@ impl std::fmt::Display for LocalPreflightError {
                     f,
                     "refusing to dispatch: the local adapter resolved to model \
                      '{model}', but the backend at {base_url} cannot serve it — \
-                     {served}. {repair} or pin one that exists via --model / \
+                     {served}. First, if an OpenAI-compatible server is already running \
+                     (for example llama-server or vLLM), point the adapter to it with \
+                     [adapters.local].base_url / COSMON_LOCAL_BASE_URL and configure its \
+                     model and api_key_env as needed; see docs/guides/local-model-selection.md. \
+                     {repair} or pin one that exists via --model / \
                      [adapters.local].default_model / COSMON_LOCAL_MODEL. \
                      The molecule is untouched and still \
                      tacklable — nothing was spawned and nothing collapsed."
@@ -11591,7 +11599,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_diagnostics_name_the_repair_and_promise_recoverability() {
+    fn preflight_diagnostics_put_existing_servers_before_destructive_repairs() {
         // The refusal text is the whole operator-facing payload: it must
         // name the fix and state that the molecule survived, because the
         // failure mode being replaced is a SILENT terminal collapse.
@@ -11601,7 +11609,15 @@ mod tests {
             available: Vec::new(),
         }
         .to_string();
-        assert!(empty.contains("ollama pull qwen3:8b"), "{empty}");
+        assert!(
+            empty.contains("ask the user before starting a server or downloading a model"),
+            "{empty}"
+        );
+        assert!(
+            empty.contains("docs/guides/local-model-selection.md"),
+            "{empty}"
+        );
+        assert!(empty.contains("ollama pull qwen3:8b`"), "{empty}");
         assert!(empty.contains("no models at all"), "{empty}");
         assert!(empty.contains("still tacklable"), "{empty}");
 
@@ -11610,7 +11626,15 @@ mod tests {
             detail: "connection refused".to_owned(),
         }
         .to_string();
-        assert!(dead.contains("ollama serve"), "{dead}");
+        assert!(
+            dead.contains("ask the user before starting a server or downloading a model"),
+            "{dead}"
+        );
+        assert!(dead.contains("[adapters.local].base_url"), "{dead}");
+        assert!(
+            dead.contains("docs/guides/local-model-selection.md"),
+            "{dead}"
+        );
         assert!(dead.contains("still tacklable"), "{dead}");
 
         let custom = LocalPreflightError::ModelNotServed {
