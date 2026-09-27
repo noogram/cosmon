@@ -1160,11 +1160,13 @@ impl<B: TransportBackend> LibraryExecutor<B> {
             global_adapters: global_adapters.as_ref(),
             global_config_path: &global_cfg_path,
             formula_absence: None,
-            // No `--harness` rung on this path: the in-process executor has no
-            // CLI flag. A `[steps.harness]` pin still resolves below and is
-            // refused at the spawn seam rather than dropped (ADR-177: a setting
-            // is never silently dropped).
-            harness_flag: &cosmon_core::harness_settings::HarnessMap::new(),
+            // Rung 1 for this path is the caller's `DispatchPin::harness`
+            // (the resident loop's `cs run --harness` directive, threaded
+            // through `dispatch_via_executor`) rather than a CLI flag — there
+            // is no `cs tackle` process here to parse one. It merges per key
+            // over the executing step's `[steps.harness]` pin (rung 2)
+            // exactly as `cs tackle --harness` does (ADR-177 / issue #86).
+            harness_flag: &pin.harness,
         })?;
 
         self.run_preflight(

@@ -136,6 +136,7 @@ fn claude_pin() -> DispatchPin {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     }
 }
 

@@ -140,6 +140,7 @@ fn claude_pin() -> DispatchPin {
         adapter: Some("claude".to_owned()),
         model: None,
         base_branch: None,
+        harness: cosmon_core::harness_settings::HarnessMap::new(),
     }
 }
 
@@ -408,6 +409,104 @@ fn library_dispatch_carries_a_pinned_harness_setting() {
         pin < position(&argv, "--disallowedTools"),
         "the pins are appended before the browser strip, as the shared \
          builder renders them on both dispatch paths: {argv:?}"
+    );
+}
+
+/// [`claude_pin`] plus a run-wide harness-settings directive
+/// (`DispatchPin::harness`, ADR-177 / issue #86) — the resident loop's
+/// `cs run --harness` rung on this seam, rather than a `[steps.harness]`
+/// step pin.
+fn claude_pin_with_harness(pairs: &[(&str, &str)]) -> DispatchPin {
+    DispatchPin {
+        harness: pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect(),
+        ..claude_pin()
+    }
+}
+
+/// **ADR-177 / issue #86, end-to-end.** A run-wide harness directive
+/// (`DispatchPin::harness`, the in-process twin of `cs run --harness`)
+/// reaches the launched worker's own argv, not just the `DispatchPin` the
+/// executor was handed.
+///
+/// This is the falsifier `dispatch_via_executor_carries_the_run_wide_harness_directive`
+/// (`crates/cosmon-runtime/src/resident.rs`) does not cover: that test stops
+/// at the `DispatchPin` a mock `Executor` captures, so it stays green even if
+/// `LibraryExecutor::tackle` never reads `pin.harness` at all — the exact
+/// mutation a pilot review applied (`harness_flag: &HarnessMap::new()`) to
+/// confirm this gap. Only a test that inspects the worker's own launch argv,
+/// as this file already does for the `[steps.harness]` step pin above, closes
+/// it.
+#[test]
+fn library_dispatch_carries_a_run_wide_harness_directive() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260927-c005");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+    executor
+        .dispatch_with_pin(
+            &mol.id,
+            &claude_pin_with_harness(&[("model_reasoning_effort", "high")]),
+        )
+        .expect("the dispatch must reach the spawn");
+
+    let (_command, argv) = recorded_launch(&backend, &mol.id);
+    let pin = position(&argv, "--model_reasoning_effort");
+    assert_eq!(
+        argv.get(pin + 1).map(String::as_str),
+        Some("high"),
+        "a run-wide DispatchPin::harness setting must reach the worker as \
+         its own flag pair: {argv:?}"
+    );
+}
+
+/// **ADR-177 Decision 2, end-to-end.** When the run-wide directive
+/// (`DispatchPin::harness`, rung 1) and the executing step's own
+/// `[steps.harness]` pin (rung 2) name the **same key**, the run-wide value
+/// wins in the launched argv — merged per key, not replaced wholesale, and
+/// not left ambiguous between the two sources.
+#[test]
+fn library_dispatch_run_wide_harness_directive_wins_over_step_pin() {
+    shadow_env();
+    let (_dir, project, _store, mol) = fixture("task-20260927-c006");
+    std::fs::create_dir_all(project.join(".cosmon").join("formulas")).expect("formulas dir");
+    std::fs::write(
+        project
+            .join(".cosmon")
+            .join("formulas")
+            .join("task-work.formula.toml"),
+        HARNESS_PINNING_FORMULA,
+    )
+    .expect("seed formula");
+    let backend = MockBackend::new();
+    let executor = LibraryExecutor::new(&project, backend.clone());
+    executor
+        .dispatch_with_pin(
+            &mol.id,
+            &claude_pin_with_harness(&[("fallback-model", "opus")]),
+        )
+        .expect("the dispatch must reach the spawn");
+
+    let (_command, argv) = recorded_launch(&backend, &mol.id);
+    let occurrences: Vec<usize> = argv
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.as_str() == "--fallback-model")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        occurrences.len(),
+        1,
+        "the two sources must merge into one resolved value per key, never \
+         both reach the launch: {argv:?}"
+    );
+    assert_eq!(
+        argv.get(occurrences[0] + 1).map(String::as_str),
+        Some("opus"),
+        "the run-wide directive (rung 1) must win over the formula step's \
+         [steps.harness] pin (rung 2, \"sonnet\"): {argv:?}"
     );
 }
 
