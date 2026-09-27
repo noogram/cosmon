@@ -2066,6 +2066,33 @@ pub struct AdapterEntry {
     /// not the other way around.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
+
+    /// Opt-in to let a `codex` worker inherit `OPENAI_API_KEY` /
+    /// `CODEX_API_KEY` from the dispatching process.
+    ///
+    /// `cs tackle --adapter codex` spawns its worker inside a tmux pane; the
+    /// tmux **server** freezes its environment once, at first spawn, so an
+    /// operator's shell-exported `OPENAI_API_KEY` reaches every codex worker
+    /// pane from then on (same freeze mechanics as `CLAUDE_CONFIG_DIR`, see
+    /// `cosmon_cli::tackle_env`). codex treats that variable as ambient
+    /// API-key credentials and can pick it over an existing `codex login`
+    /// (`ChatGPT`) session — observed 2026-09-26: a stale service-account key
+    /// left in the operator's tmux server env made every codex worker fail
+    /// its `ChatGPT`-authenticated calls with a 401 from the API-key backend.
+    ///
+    /// The default (`false`, i.e. absent) strips `OPENAI_API_KEY` and
+    /// `CODEX_API_KEY` from the worker's environment
+    /// (`cosmon_transport::codex::build_codex_command`), so a `ChatGPT`-login
+    /// codex worker is never diverted onto a key it did not ask for. An
+    /// installation that intentionally runs codex on API-key billing sets
+    /// `pass_api_key = true` to restore pass-through.
+    ///
+    /// ```toml
+    /// [adapters.codex]
+    /// pass_api_key = true   # keep OPENAI_API_KEY / CODEX_API_KEY for this worker
+    /// ```
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pass_api_key: Option<bool>,
 }
 
 impl AdaptersConfig {
@@ -3235,6 +3262,36 @@ mod tests {
         assert!(claude.extra_args.is_empty());
         // Sorted lexicographically — useful for AdapterNotFound's diagnostic.
         assert_eq!(adapters.available_names(), vec!["aider", "claude"]);
+    }
+
+    /// `[adapters.codex].pass_api_key` (observed 2026-09-26): absent by
+    /// default, explicit `true` opts back into API-key pass-through.
+    #[test]
+    fn adapters_codex_pass_api_key_defaults_to_absent() {
+        let config = ProjectConfig::parse(
+            r#"
+            [adapters.codex]
+            mode = "exec"
+            "#,
+        )
+        .unwrap();
+        let adapters = config.adapters.expect("adapters section present");
+        let codex = adapters.entry("codex").expect("codex entry");
+        assert_eq!(codex.pass_api_key, None);
+    }
+
+    #[test]
+    fn adapters_codex_pass_api_key_opts_in() {
+        let config = ProjectConfig::parse(
+            r#"
+            [adapters.codex]
+            pass_api_key = true
+            "#,
+        )
+        .unwrap();
+        let adapters = config.adapters.expect("adapters section present");
+        let codex = adapters.entry("codex").expect("codex entry");
+        assert_eq!(codex.pass_api_key, Some(true));
     }
 
     #[test]

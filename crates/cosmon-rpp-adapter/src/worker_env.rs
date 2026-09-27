@@ -681,6 +681,23 @@ mod tests {
         }
     }
 
+    /// Codex's ambient API-key credentials must never cross the adapter
+    /// perimeter through plain inheritance (observed 2026-09-26, the
+    /// `cs tackle --adapter codex` sibling defect: a stale
+    /// `OPENAI_API_KEY` frozen into the adapter's own environment must not
+    /// silently divert a `codex login` (`ChatGPT`) worker onto API-key
+    /// billing). Unlike `cs tackle`'s tmux path
+    /// (`cosmon_transport::codex::build_codex_command`), this adapter has no
+    /// opt-in flag: the allow-list is the only door, and neither name is on
+    /// it.
+    #[test]
+    fn codex_api_key_vars_never_cross_the_perimeter() {
+        assert!(!is_passthrough("OPENAI_API_KEY"));
+        assert!(!is_passthrough("CODEX_API_KEY"));
+        let env = build(&[("OPENAI_API_KEY", "sk-svcacct-leaked"), ("PATH", "/bin")]);
+        assert!(value(&env, "OPENAI_API_KEY").is_none());
+    }
+
     #[test]
     fn allow_list_has_no_duplicate_names() {
         let mut seen = PASSTHROUGH_VARS.to_vec();

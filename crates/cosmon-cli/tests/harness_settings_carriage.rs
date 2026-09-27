@@ -63,6 +63,7 @@ fn codex_config(harness_args: Vec<String>) -> CodexSessionConfig {
         git_identity: None,
         writable_roots: vec![],
         harness_args,
+        pass_api_key: false,
     }
 }
 

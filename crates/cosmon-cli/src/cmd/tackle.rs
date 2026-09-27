@@ -6001,6 +6001,33 @@ fn spawn_aider_and_prompt(
     }
 }
 
+/// Resolve `[adapters.codex].pass_api_key` (default `false`) and invoke
+/// `warn` once per API-key var that is present in the dispatch env and about
+/// to be stripped — an operator on API-key billing who did not opt in sees
+/// why codex asks for login instead of debugging a silent 401.
+///
+/// `warn` is injected so the decision is testable without capturing stderr;
+/// production callers pass [`warn_codex_api_key_stripped`].
+fn resolve_codex_pass_api_key(adapter_entry: Option<&AdapterEntry>, warn: impl Fn(&str)) -> bool {
+    let pass_api_key = adapter_entry.and_then(|e| e.pass_api_key).unwrap_or(false);
+    if !pass_api_key {
+        for var in ["OPENAI_API_KEY", "CODEX_API_KEY"] {
+            if std::env::var_os(var).is_some_and(|v| !v.is_empty()) {
+                warn(var);
+            }
+        }
+    }
+    pass_api_key
+}
+
+/// Production `warn` callback for [`resolve_codex_pass_api_key`].
+fn warn_codex_api_key_stripped(var: &str) {
+    eprintln!(
+        "cs tackle: {var} present in dispatch env, stripped for codex worker \
+         (opt in via [adapters.codex].pass_api_key = true)"
+    );
+}
+
 /// Codex branch of [`spawn_and_prompt`].
 ///
 /// codex is `OpenAI`'s external CLI — a Node.js wrapper around a native
@@ -6100,6 +6127,10 @@ fn spawn_codex_and_prompt(
         .into_iter()
         .collect::<Vec<_>>();
 
+    // Codex-worker API-key posture (observed 2026-09-26): `false` unless the
+    // operator opted in via `[adapters.codex].pass_api_key = true`.
+    let pass_api_key = resolve_codex_pass_api_key(adapter_entry, warn_codex_api_key_stripped);
+
     let config = codex::CodexSessionConfig {
         socket: backend.socket().to_owned(),
         session_name: session_name.to_owned(),
@@ -6114,6 +6145,7 @@ fn spawn_codex_and_prompt(
         git_identity,
         writable_roots,
         harness_args: harness_args.to_vec(),
+        pass_api_key,
     };
 
     codex::spawn_codex_session(&config)
@@ -14189,5 +14221,65 @@ prompt = "Custom fleet prompt."
                 "the stage must be named like every other dispatch phase.\ntrace:\n{trace}"
             );
         }
+    }
+
+    // -- Codex-worker API-key strip (observed 2026-09-26) --
+
+    /// Guards the three tests below, which mutate the same two process-wide
+    /// env vars: `cargo test` runs them concurrently in this binary, and an
+    /// unguarded race would let one test's `set_var` leak into another's
+    /// assertion. Mirrors `codex::tests::_path_lock`.
+    fn api_key_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// No `[adapters.codex]` row and no API-key var in the dispatch env: the
+    /// default posture is `false` (strip) and nothing is warned about.
+    #[test]
+    fn pass_api_key_defaults_to_false_and_warns_only_when_a_key_is_present() {
+        let _guard = api_key_env_lock();
+        std::env::remove_var("OPENAI_API_KEY");
+        std::env::remove_var("CODEX_API_KEY");
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(None, |var| warned.borrow_mut().push(var.to_owned()));
+        assert!(!pass);
+        assert!(warned.borrow().is_empty());
+    }
+
+    /// A present `OPENAI_API_KEY` is stripped (default posture) and warned
+    /// about by name.
+    #[test]
+    fn pass_api_key_false_warns_when_openai_api_key_is_present() {
+        let _guard = api_key_env_lock();
+        std::env::set_var("OPENAI_API_KEY", "sk-svcacct-test");
+        std::env::remove_var("CODEX_API_KEY");
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(None, |var| warned.borrow_mut().push(var.to_owned()));
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(!pass);
+        assert_eq!(warned.into_inner(), vec!["OPENAI_API_KEY".to_owned()]);
+    }
+
+    /// `[adapters.codex].pass_api_key = true` opts back into pass-through
+    /// and suppresses the warning even when a key is present.
+    #[test]
+    fn pass_api_key_true_opts_in_and_suppresses_the_warning() {
+        let _guard = api_key_env_lock();
+        std::env::set_var("OPENAI_API_KEY", "sk-svcacct-test");
+        let entry = AdapterEntry {
+            pass_api_key: Some(true),
+            ..Default::default()
+        };
+        let warned = std::cell::RefCell::new(Vec::<String>::new());
+        let pass = resolve_codex_pass_api_key(Some(&entry), |var| {
+            warned.borrow_mut().push(var.to_owned())
+        });
+        std::env::remove_var("OPENAI_API_KEY");
+        assert!(pass);
+        assert!(warned.borrow().is_empty());
     }
 }

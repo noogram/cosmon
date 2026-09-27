@@ -48,6 +48,7 @@ fn config(mode: CodexMode, prompt: Option<&str>, extra_args: Vec<String>) -> Cod
         git_identity: None,
         writable_roots: vec![],
         harness_args: vec![],
+        pass_api_key: false,
     }
 }
 
@@ -64,15 +65,17 @@ fn interactive_default_is_quiet_steerable_and_promptless() {
     ));
     assert_eq!(
         cmd,
-        "RUST_LOG=error codex -c check_for_update_on_startup=false \
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
+         -c check_for_update_on_startup=false \
          --dangerously-bypass-approvals-and-sandbox --no-alt-screen"
     );
     // The prompt must never leak onto the interactive command line.
     assert!(!cmd.contains("write the failing test first"), "got {cmd:?}");
     // No `exec` subcommand — this is the interactive TUI, not batch.
     assert!(!cmd.contains(" exec"), "got {cmd:?}");
-    // The quiet prefix keeps the `cs peek` pane free of OTEL INFO noise.
-    assert!(cmd.starts_with(&format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} ")));
+    // The quiet prefix keeps the `cs peek` pane free of OTEL INFO noise, after
+    // the default API-key strip (observed 2026-09-26).
+    assert!(cmd.contains(&format!("RUST_LOG={INTERACTIVE_LOG_LEVEL} ")));
     // Each documented default flag is present.
     for flag in DEFAULT_INTERACTIVE_ARGS {
         assert!(
@@ -97,7 +100,8 @@ fn exec_mode_is_byte_identical_legacy_shape() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("run the batch job"), vec![]));
     assert_eq!(
         cmd,
-        "codex exec -c check_for_update_on_startup=false 'run the batch job'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+         -c check_for_update_on_startup=false 'run the batch job'"
     );
 }
 
@@ -108,7 +112,8 @@ fn exec_mode_escapes_prompt_apostrophe() {
     let cmd = build_codex_command(&config(CodexMode::Exec, Some("it's a batch"), vec![]));
     assert_eq!(
         cmd,
-        "codex exec -c check_for_update_on_startup=false 'it'\\''s a batch'"
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY codex exec \
+         -c check_for_update_on_startup=false 'it'\\''s a batch'"
     );
 }
 
@@ -151,7 +156,8 @@ fn interactive_extra_args_override_replaces_defaults() {
     ));
     assert_eq!(
         cmd,
-        "RUST_LOG=error codex -c check_for_update_on_startup=false \
+        "env -u OPENAI_API_KEY -u CODEX_API_KEY RUST_LOG=error codex \
+         -c check_for_update_on_startup=false \
          --sandbox workspace-write -m gpt-5-codex"
     );
     // Overriding drops the nuclear default flag.
