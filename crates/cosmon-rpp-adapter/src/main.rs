@@ -211,9 +211,13 @@ async fn main() -> anyhow::Result<()> {
     // declaration, parse-back failure, handoff wait expired) aborts the
     // boot — under `restart: unless-stopped` this is a self-healing
     // crash-loop, never a silent deny-all with a healthy-looking server.
-    cosmon_rpp_adapter::trust_bootstrap::converge(&state_dir, &cfg.trust_bootstrap)
-        .map_err(|e| anyhow::anyhow!("trust bootstrap failed (fail-closed): {e}"))?
-        .log();
+    let trust_report =
+        cosmon_rpp_adapter::trust_bootstrap::converge(&state_dir, &cfg.trust_bootstrap)
+            .map_err(|e| anyhow::anyhow!("trust bootstrap failed (fail-closed): {e}"))?;
+    trust_report.log();
+    let install_templating = cfg
+        .install_templating
+        .resolved_from_binding(trust_report.primary_binding.as_ref());
 
     // The JWKS store (authn door) is held behind an `arc-swap` handle so
     // its keys can be refreshed without a reboot. Keys reach it by one of
@@ -479,7 +483,7 @@ async fn main() -> anyhow::Result<()> {
         dist: std::sync::Arc::new(cosmon_rpp_adapter::routes::dist::DistState::new(
             cfg.resolved_dist_root(),
         )),
-        install_templating: std::sync::Arc::new(cfg.install_templating.clone()),
+        install_templating: std::sync::Arc::new(install_templating),
         events: std::sync::Arc::new(cosmon_rpp_adapter::EventBus::with_default_capacity()),
         metrics: std::sync::Arc::new(cosmon_rpp_adapter::MetricsRegistry::new()),
         drains: std::sync::Arc::new(cosmon_rpp_adapter::DrainRegistry::default()),
