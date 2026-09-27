@@ -410,6 +410,14 @@ pub fn infer_project_name(project_root: &Path) -> String {
 /// adapter, watch or block, whisper a correction, done to merge — and
 /// defers everything else to `cs help`, so it cannot drift when the
 /// CLI surface grows.
+///
+/// Issue #96 — the body closes with a one-line division of labor (who
+/// decides the mission vs. who drives the cycle) plus a link to the
+/// full breakdown at
+/// `docs/book/src/explanation/pilot-and-workers.md`, so a first-time
+/// reader of `CLAUDE.md`/`AGENTS.md` finds the answer to "what am I
+/// supposed to do, and what is the agent doing without me" without
+/// leaving the pointer block.
 pub const COSMON_ORCHESTRATION_BODY: &str = "\
 Run `cs help` for the full command reference, `cs help guide` for the operator handbook, \
 and `man cs` for the manual page.\n\
@@ -429,7 +437,11 @@ walks a whole DAG and calls `cs done` on completion itself, closing the review w
 \n\
 Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>` \
 until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason \"…\"` \
-(drop it). `cs status` lists what is still waiting on one of the two.\n";
+(drop it). `cs status` lists what is still waiting on one of the two.\n\
+\n\
+Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and \
+accept or drop each result; the pilot drives the cycle above; workers do the work. Full \
+breakdown: https://docs.noogram.org/explanation/pilot-and-workers.html\n";
 
 /// Generate the cosmon section content for `CLAUDE.md` / `AGENTS.md`.
 ///
@@ -1220,6 +1232,24 @@ mod orchestration_source_tests {
                     .to_lowercase()
                     .contains("stop early"),
             "must address stopping a mission early explicitly, not just the happy path"
+        );
+    }
+
+    /// Issue #96 — a new user finished a mission and still could not say
+    /// "what is the agent supposed to do, and what must I do myself, and
+    /// when". [`COSMON_ORCHESTRATION_BODY`] described commands, not the
+    /// division of labor. The fix names the divide inline (one line) and
+    /// points at the book page that answers it in full, from the exact
+    /// pointer block every project's `CLAUDE.md`/`AGENTS.md` carries.
+    #[test]
+    fn orchestration_body_links_pilot_and_workers_page() {
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("cs nucleate --protect"),
+            "must name the human-only protected-inputs decision inline"
+        );
+        assert!(
+            COSMON_ORCHESTRATION_BODY.contains("pilot-and-workers.html"),
+            "must link to the full who-does-what breakdown in the book"
         );
     }
 

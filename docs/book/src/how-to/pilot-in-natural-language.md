@@ -80,6 +80,10 @@ walks a whole DAG and calls `cs done` on completion itself, closing the review w
 Stopping early is not the end of a mission: the work sits on `feat/<id>` in `.worktrees/<id>`
 until you run `cs done <id>` (keep the partial work) or `cs collapse <id> --reason "…"`
 (drop it). `cs status` lists what is still waiting on one of the two.
+
+Who does what — you decide the mission and protected inputs (`cs nucleate --protect`) and
+accept or drop each result; the pilot drives the cycle above; workers do the work. Full
+breakdown: https://docs.noogram.org/explanation/pilot-and-workers.html
 ````
 
 That is the whole transport (`cs init --upgrade` writes and maintains it for you,
